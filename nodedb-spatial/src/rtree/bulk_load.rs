@@ -4,10 +4,10 @@
 
 use nodedb_mem::ScopedMemory;
 use nodedb_types::BboxSpace;
-use nodedb_types::geometry::Srid;
 
 use super::node::{ChildRef, INTERNAL_CAPACITY, LEAF_CAPACITY, Node, NodeKind, RTreeEntry};
 use super::tree::RTree;
+use super::tree_srid::TreeSrid;
 
 impl RTree {
     /// Bulk load entries in `srid` using Sort-Tile-Recursive packing, tracked
@@ -15,11 +15,11 @@ impl RTree {
     ///
     /// More efficient than repeated single inserts for large datasets.
     /// Produces better packing (less overlap between nodes).
-    pub fn bulk_load(entries: Vec<RTreeEntry>, memory: ScopedMemory, srid: Srid) -> Self {
+    pub fn bulk_load(entries: Vec<RTreeEntry>, memory: ScopedMemory, srid: TreeSrid) -> Self {
         if entries.is_empty() {
             return Self::new(memory, srid);
         }
-        let space = srid.bbox_space();
+        let space = srid.space;
         let len = entries.len();
 
         // Reserve budget for nodes vec (approximately len / LEAF_CAPACITY nodes,
@@ -34,7 +34,7 @@ impl RTree {
             nodes: Vec::new(),
             root: 0,
             len,
-            srid,
+            srid: srid.srid,
             space,
             memory,
         };
@@ -133,7 +133,7 @@ fn pack_internal(nodes: &mut Vec<Node>, child_indices: Vec<usize>, space: BboxSp
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::test_memory;
+    use crate::test_support::{planar_srid, test_memory, utm48n};
     use nodedb_types::BoundingBox;
 
     fn make_entry(id: u64, lng: f64, lat: f64) -> RTreeEntry {
@@ -148,7 +148,7 @@ mod tests {
         let entries: Vec<RTreeEntry> = (0..500)
             .map(|i| make_entry(i, (i as f64) * 0.1 - 25.0, (i as f64) * 0.06 - 15.0))
             .collect();
-        let tree = RTree::bulk_load(entries, test_memory(), Srid::Wgs84);
+        let tree = RTree::bulk_load(entries, test_memory(), TreeSrid::WGS84);
         assert_eq!(tree.len(), 500);
 
         let all = tree.search(&BoundingBox::new(-180.0, -90.0, 180.0, 90.0));
@@ -161,22 +161,22 @@ mod tests {
     #[test]
     fn bulk_load_small() {
         let entries = vec![make_entry(1, 0.0, 0.0), make_entry(2, 1.0, 1.0)];
-        let tree = RTree::bulk_load(entries, test_memory(), Srid::Wgs84);
+        let tree = RTree::bulk_load(entries, test_memory(), TreeSrid::WGS84);
         assert_eq!(tree.len(), 2);
     }
 
     #[test]
     fn bulk_load_empty() {
-        let tree = RTree::bulk_load(Vec::new(), test_memory(), Srid::Utm47N);
+        let tree = RTree::bulk_load(Vec::new(), test_memory(), planar_srid(32647));
         assert!(tree.is_empty());
-        assert_eq!(tree.srid(), Srid::Utm47N);
+        assert_eq!(tree.tree_srid(), planar_srid(32647));
     }
 
     #[test]
     fn bulk_load_keeps_srid_and_planar_space() {
         let entries = vec![make_entry(1, 1e5, 0.0), make_entry(2, 8e5, 0.0)];
-        let tree = RTree::bulk_load(entries, test_memory(), Srid::Utm48N);
-        assert_eq!(tree.srid(), Srid::Utm48N);
+        let tree = RTree::bulk_load(entries, test_memory(), utm48n());
+        assert_eq!(tree.tree_srid(), utm48n());
         assert_eq!(tree.search(&BoundingBox::new(7e5, -1.0, 9e5, 1.0)).len(), 1);
     }
 }

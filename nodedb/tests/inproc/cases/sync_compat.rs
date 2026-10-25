@@ -26,7 +26,7 @@ fn lite_handshake_frame_roundtrips() {
         client_version: "0.1.0-lite".into(),
         lite_id: String::new(),
         epoch: 0,
-        wire_version: 1,
+        wire_version: SYNC_WIRE_VERSION,
     };
 
     let frame = SyncFrame::new_msgpack(SyncMessageType::Handshake, &msg).unwrap();
@@ -56,6 +56,7 @@ fn lite_delta_push_frame_roundtrips() {
         seq: 0,
         device_id: 0,
         delta_signature: [0; 32],
+        collection_incarnation: nodedb_types::Hlc::new(1_700_000_000_000, 3),
     };
 
     let frame = SyncFrame::new_msgpack(SyncMessageType::DeltaPush, &msg).unwrap();
@@ -68,6 +69,10 @@ fn lite_delta_push_frame_roundtrips() {
     assert_eq!(parsed.delta, vec![0xDE, 0xAD, 0xBE, 0xEF]);
     assert_eq!(parsed.peer_id, 12345);
     assert_eq!(parsed.mutation_id, 7);
+    assert_eq!(
+        parsed.collection_incarnation,
+        nodedb_types::Hlc::new(1_700_000_000_000, 3)
+    );
 }
 
 #[test]

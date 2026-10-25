@@ -11,6 +11,10 @@
 //! single handler covers all three columnar profiles — Plain, Timeseries, and
 //! Spatial — because they share the same `MutationEngine` storage layer.
 //!
+//! A bitemporal collection emits, per primary key, the version a read at the
+//! cut answers: the newest at or below it, and nothing for a key a delete
+//! closed by then.
+//!
 //! ## Response payload (msgpack)
 //! ```text
 //! [ next_cursor: bin,
@@ -21,7 +25,6 @@
 //! round-trips. `segment_id == 0` means the row came from the active memtable.
 //! Empty cursor = scan complete.
 
-use nodedb_types::columnar::schema::TS_SYSTEM;
 use nodedb_types::value::Value;
 
 use crate::bridge::envelope::Response;
@@ -71,7 +74,14 @@ impl CoreLoop {
         };
 
         let schema = engine.schema().clone();
-        let ts_system_idx = schema.columns.iter().position(|c| c.name == TS_SYSTEM);
+        let ts_system_idx = schema.ts_system_idx();
+        // `_ts_system` stores a system-time ordinal: the millisecond cutoff
+        // reads at the last ordinal of its millisecond.
+        let system_as_of = system_as_of_ms.map(nodedb_types::ms_to_ordinal_upper);
+        let version_gate = match self.columnar_version_gate(&columnar_key, system_as_of, false) {
+            Ok(gate) => gate,
+            Err(e) => return self.response_error(task, e),
+        };
 
         // Cursor encodes (segment_id: u32 BE, row_index: u32 BE).
         // segment_id == 0 means "memtable" (position within memtable rows).
@@ -147,7 +157,7 @@ impl CoreLoop {
                 }
 
                 // Bitemporal system-time filter.
-                if let (Some(ts_idx), Some(cutoff)) = (ts_system_idx, system_as_of_ms) {
+                if let (Some(ts_idx), Some(cutoff)) = (ts_system_idx, system_as_of) {
                     let ts_val =
                         match segment.cell(ts_idx, row_idx, &schema.columns[ts_idx].column_type) {
                             Ok(v) => v,
@@ -165,6 +175,9 @@ impl CoreLoop {
                     Ok(row) => row,
                     Err(e) => return self.response_error(task, e),
                 };
+                if version_gate.as_ref().is_some_and(|gate| !gate.admits(&row)) {
+                    continue;
+                }
                 let map: std::collections::HashMap<String, Value> = schema
                     .columns
                     .iter()
@@ -228,10 +241,13 @@ impl CoreLoop {
 
             for (mt_idx, (row_surrogate, row)) in rows_with_surrogates.iter().enumerate() {
                 // Bitemporal system-time filter.
-                if let (Some(ts_idx), Some(cutoff)) = (ts_system_idx, system_as_of_ms)
+                if let (Some(ts_idx), Some(cutoff)) = (ts_system_idx, system_as_of)
                     && let Some(Value::Integer(ts)) = row.get(ts_idx)
                     && *ts > cutoff
                 {
+                    continue;
+                }
+                if version_gate.as_ref().is_some_and(|gate| !gate.admits(row)) {
                     continue;
                 }
 

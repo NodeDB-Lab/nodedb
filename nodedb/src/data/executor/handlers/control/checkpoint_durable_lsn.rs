@@ -810,7 +810,7 @@ mod tests {
             nodedb_mem::EngineId::Spatial,
         );
         let mut rtree =
-            crate::engine::spatial::RTree::new(memory, nodedb_types::geometry::Srid::Wgs84);
+            crate::engine::spatial::RTree::new(memory, crate::engine::spatial::TreeSrid::WGS84);
         rtree.insert(crate::engine::spatial::RTreeEntry {
             id: 1,
             bbox: nodedb_types::BoundingBox::new(0.0, 0.0, 1.0, 1.0),

@@ -34,7 +34,6 @@ ignore = [
     # arrive transitively. Each will be revisited as upstreams move off
     # them; none has a known security impact.
     "RUSTSEC-2023-0089", # atomic-polyfill; review-by: 2027-01-31
-    "RUSTSEC-2021-0153", # encoding; review-by: 2027-01-31
     "RUSTSEC-2024-0436", # paste; review-by: 2027-01-31
     # loro-internal pulls im and its two support crates transitively. All
     # three were archived upstream on 2026-05-03, so no fixed version exists

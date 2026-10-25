@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 
+use nodedb_crs::CrsContext;
 use nodedb_types::Value;
 
 use crate::expr::types::SqlExpr;
@@ -25,6 +26,7 @@ pub(super) fn build_partitions(
     rows: &[(String, Value)],
     partition_by: &[SqlExpr],
     order_by: &[(SqlExpr, bool)],
+    crs: &CrsContext<'_>,
 ) -> Result<Vec<Vec<usize>>, crate::expr::EvalError> {
     let mut partitions = if partition_by.is_empty() {
         vec![(0..rows.len()).collect::<Vec<usize>>()]
@@ -35,7 +37,7 @@ pub(super) fn build_partitions(
         for (i, (_id, doc)) in rows.iter().enumerate() {
             let key: String = partition_by
                 .iter()
-                .map(|expr| expr.eval(doc).map(|v| partition_key_part(&v)))
+                .map(|expr| expr.eval(doc, crs).map(|v| partition_key_part(&v)))
                 .collect::<Result<Vec<_>, _>>()?
                 .join("\x00");
             let entry = groups.entry(key.clone()).or_default();
@@ -54,7 +56,7 @@ pub(super) fn build_partitions(
             keys.push(
                 order_by
                     .iter()
-                    .map(|(expr, _)| expr.eval(doc))
+                    .map(|(expr, _)| expr.eval(doc, crs))
                     .collect::<Result<Vec<_>, _>>()?,
             );
         }
@@ -145,10 +147,11 @@ pub(super) fn order_keys_equal(
     a: usize,
     b: usize,
     order_by: &[(SqlExpr, bool)],
+    crs: &CrsContext<'_>,
 ) -> Result<bool, crate::expr::EvalError> {
     for (expr, _) in order_by {
-        let va = expr.eval(&rows[a].1)?;
-        let vb = expr.eval(&rows[b].1)?;
+        let va = expr.eval(&rows[a].1, crs)?;
+        let vb = expr.eval(&rows[b].1, crs)?;
         if !sort_peers(&va, &vb) {
             return Ok(false);
         }

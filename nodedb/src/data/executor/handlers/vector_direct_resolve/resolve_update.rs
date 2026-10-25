@@ -114,7 +114,7 @@ impl CoreLoop {
                     identity: &identity_column,
                     vector: field,
                 };
-                vector_stored_rows_payload(spec, rls_filters, columns, &stored)
+                vector_stored_rows_payload(spec, rls_filters, columns, &stored, &self.crs_context())
                     .map_err(ErrorCode::from)?
             }
             None => response_codec::encode_affected(planned.len() as u64),

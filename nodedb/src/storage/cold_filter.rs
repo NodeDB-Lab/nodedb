@@ -41,6 +41,7 @@ pub fn read_parquet_filtered(
     parquet_bytes: &[u8],
     filters: &[ScanFilter],
     projection: &[String],
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<Vec<RecordBatch>> {
     let reader_builder = ParquetRecordBatchReaderBuilder::try_new(Bytes::copy_from_slice(
         parquet_bytes,
@@ -111,16 +112,20 @@ pub fn read_parquet_filtered(
         let filter_schema = schema.clone();
         let filters_owned: Vec<ScanFilter> = filters.to_vec();
         let predicate_err = predicate_err.clone();
+        // The predicate closure is `'static`, so it owns a copy of the
+        // user-defined CRS set and resolves through a context per batch.
+        let custom_crs = crs.custom_set().clone();
 
         let predicate = ArrowPredicateFn::new(ProjectionMask::all(), move |batch: RecordBatch| {
             let num_rows = batch.num_rows();
+            let crs = nodedb_crs::CrsContext::new(&custom_crs);
             let mask: Vec<bool> = (0..num_rows)
                 .map(|row_idx| {
                     let doc = record_batch_row_to_json(&batch, row_idx, &filter_schema);
                     let msgpack = nodedb_types::json_msgpack::json_to_msgpack_or_empty(&doc);
                     let mut row_matches = true;
                     for f in &filters_owned {
-                        match f.matches_binary(&msgpack) {
+                        match f.matches_binary(&msgpack, &crs) {
                             Ok(true) => {}
                             Ok(false) => {
                                 row_matches = false;
@@ -487,7 +492,9 @@ mod tests {
     #[test]
     fn no_filters_returns_all_rows() {
         let parquet = make_test_parquet(&[("d1", 25, "alice"), ("d2", 30, "bob")]);
-        let batches = read_parquet_filtered(&parquet, &[], &[]).unwrap();
+        let batches =
+            read_parquet_filtered(&parquet, &[], &[], &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, 2);
     }
@@ -508,7 +515,13 @@ mod tests {
             expr: None,
         }];
 
-        let batches = read_parquet_filtered(&parquet, &filters, &[]).unwrap();
+        let batches = read_parquet_filtered(
+            &parquet,
+            &filters,
+            &[],
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .unwrap();
         let rows = batches_to_document_rows(&batches);
 
         // Only bob (age=30) should match age > 25.
@@ -540,7 +553,13 @@ mod tests {
             }),
         }];
 
-        let err = read_parquet_filtered(&parquet, &filters, &[]).unwrap_err();
+        let err = read_parquet_filtered(
+            &parquet,
+            &filters,
+            &[],
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .unwrap_err();
         assert!(
             matches!(err, crate::Error::DivisionByZero),
             "expected crate::Error::DivisionByZero, got: {err:?}"
@@ -573,7 +592,13 @@ mod tests {
             }),
         }];
 
-        let batches = read_parquet_filtered(&parquet, &filters, &[]).unwrap();
+        let batches = read_parquet_filtered(
+            &parquet,
+            &filters,
+            &[],
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .unwrap();
         let rows = batches_to_document_rows(&batches);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].0, "d1");
@@ -582,7 +607,13 @@ mod tests {
     #[test]
     fn projection_limits_columns() {
         let parquet = make_test_parquet(&[("d1", 25, "alice")]);
-        let batches = read_parquet_filtered(&parquet, &[], &["name".into()]).unwrap();
+        let batches = read_parquet_filtered(
+            &parquet,
+            &[],
+            &["name".into()],
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .unwrap();
         assert!(!batches.is_empty());
         assert_eq!(batches[0].num_columns(), 1);
     }
@@ -590,7 +621,9 @@ mod tests {
     #[test]
     fn batches_to_rows_conversion() {
         let parquet = make_test_parquet(&[("d1", 25, "alice"), ("d2", 30, "bob")]);
-        let batches = read_parquet_filtered(&parquet, &[], &[]).unwrap();
+        let batches =
+            read_parquet_filtered(&parquet, &[], &[], &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
         let rows = batches_to_document_rows(&batches);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].0, "d1");

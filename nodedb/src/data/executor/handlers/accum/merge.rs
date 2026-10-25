@@ -39,29 +39,8 @@ pub(super) fn merge_accum(dst: &mut AggAccum, other: AggAccum) {
         (AggAccum::CountDistinct { seen: a }, AggAccum::CountDistinct { seen: b }) => {
             a.extend(b);
         }
-        (
-            AggAccum::Welford {
-                n: na,
-                mean: ma,
-                m2: m2a,
-            },
-            AggAccum::Welford {
-                n: nb,
-                mean: mb,
-                m2: m2b,
-            },
-        ) => {
-            // Parallel Welford merge formula.
-            let n_new = *na + nb;
-            if n_new == 0 {
-                return;
-            }
-            let delta = mb - *ma;
-            let mean_new = *ma + delta * (nb as f64 / n_new as f64);
-            let m2_new = *m2a + m2b + delta * delta * (*na as f64) * (nb as f64) / n_new as f64;
-            *na = n_new;
-            *ma = mean_new;
-            *m2a = m2_new;
+        (AggAccum::Welford { moments: a }, AggAccum::Welford { moments: b }) => {
+            *a = a.merge(b);
         }
         (AggAccum::Hll { hll: a }, AggAccum::Hll { hll: b }) => {
             a.merge(&b);
@@ -205,7 +184,9 @@ mod tests {
                 } else {
                     make_doc_i64("x", i)
                 };
-                accum.feed(&spec, &doc).expect("feed");
+                accum
+                    .feed(&spec, &doc, &nodedb_crs::CrsContext::builtin_only())
+                    .expect("feed");
             }
             let count = match &accum {
                 AggAccum::ArrayAgg { values } => values.len(),
@@ -225,11 +206,21 @@ mod tests {
         let spec = make_spec("array_agg_distinct", "x");
         let mut a = AggAccum::new(&spec).unwrap();
         for v in [1, 2, 3] {
-            a.feed(&spec, &make_doc_i64("x", v)).expect("feed a");
+            a.feed(
+                &spec,
+                &make_doc_i64("x", v),
+                &nodedb_crs::CrsContext::builtin_only(),
+            )
+            .expect("feed a");
         }
         let mut b = AggAccum::new(&spec).unwrap();
         for v in [3, 4, 5, 6, 7, 8] {
-            b.feed(&spec, &make_doc_i64("x", v)).expect("feed b");
+            b.feed(
+                &spec,
+                &make_doc_i64("x", v),
+                &nodedb_crs::CrsContext::builtin_only(),
+            )
+            .expect("feed b");
         }
         a.merge_from(b);
         let Value::Array(mut values) = a.finalize(&spec).expect("finalize") else {
@@ -250,19 +241,25 @@ mod tests {
 
         let mut combined = AggAccum::new(&spec).unwrap();
         for d in &docs_a {
-            combined.feed(&spec, d).unwrap();
+            combined
+                .feed(&spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
         }
         for d in &docs_b {
-            combined.feed(&spec, d).unwrap();
+            combined
+                .feed(&spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
         }
 
         let mut a = AggAccum::new(&spec).unwrap();
         for d in &docs_a {
-            a.feed(&spec, d).unwrap();
+            a.feed(&spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
         }
         let mut b = AggAccum::new(&spec).unwrap();
         for d in &docs_b {
-            b.feed(&spec, d).unwrap();
+            b.feed(&spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
         }
         a.merge_from(b);
 
@@ -288,22 +285,34 @@ mod tests {
         let mut combined_sum = AggAccum::new(&sum_spec).unwrap();
         let mut combined_avg = AggAccum::new(&avg_spec).unwrap();
         for d in docs_a.iter().chain(docs_b.iter()) {
-            combined_sum.feed(&sum_spec, d).unwrap();
-            combined_avg.feed(&avg_spec, d).unwrap();
+            combined_sum
+                .feed(&sum_spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
+            combined_avg
+                .feed(&avg_spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
         }
 
         // Merge path.
         let mut a_sum = AggAccum::new(&sum_spec).unwrap();
         let mut a_avg = AggAccum::new(&avg_spec).unwrap();
         for d in &docs_a {
-            a_sum.feed(&sum_spec, d).unwrap();
-            a_avg.feed(&avg_spec, d).unwrap();
+            a_sum
+                .feed(&sum_spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
+            a_avg
+                .feed(&avg_spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
         }
         let mut b_sum = AggAccum::new(&sum_spec).unwrap();
         let mut b_avg = AggAccum::new(&avg_spec).unwrap();
         for d in &docs_b {
-            b_sum.feed(&sum_spec, d).unwrap();
-            b_avg.feed(&avg_spec, d).unwrap();
+            b_sum
+                .feed(&sum_spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
+            b_avg
+                .feed(&avg_spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
         }
         a_sum.merge_from(b_sum);
         a_avg.merge_from(b_avg);
@@ -344,22 +353,34 @@ mod tests {
         let mut combined_sum = AggAccum::new(&sum_spec).unwrap();
         let mut combined_avg = AggAccum::new(&avg_spec).unwrap();
         for d in docs_a.iter().chain(docs_b.iter()) {
-            combined_sum.feed(&sum_spec, d).unwrap();
-            combined_avg.feed(&avg_spec, d).unwrap();
+            combined_sum
+                .feed(&sum_spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
+            combined_avg
+                .feed(&avg_spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
         }
 
         // Spilled-run merge path.
         let mut a_sum = AggAccum::new(&sum_spec).unwrap();
         let mut a_avg = AggAccum::new(&avg_spec).unwrap();
         for d in &docs_a {
-            a_sum.feed(&sum_spec, d).unwrap();
-            a_avg.feed(&avg_spec, d).unwrap();
+            a_sum
+                .feed(&sum_spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
+            a_avg
+                .feed(&avg_spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
         }
         let mut b_sum = AggAccum::new(&sum_spec).unwrap();
         let mut b_avg = AggAccum::new(&avg_spec).unwrap();
         for d in &docs_b {
-            b_sum.feed(&sum_spec, d).unwrap();
-            b_avg.feed(&avg_spec, d).unwrap();
+            b_sum
+                .feed(&sum_spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
+            b_avg
+                .feed(&avg_spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
         }
         a_sum.merge_from(b_sum);
         a_avg.merge_from(b_avg);
@@ -387,15 +408,19 @@ mod tests {
     ) -> [Value; 2] {
         let mut combined = AggAccum::new(spec).unwrap();
         for d in docs_a.iter().chain(docs_b) {
-            combined.feed(spec, d).unwrap();
+            combined
+                .feed(spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
         }
         let mut a = AggAccum::new(spec).unwrap();
         for d in docs_a {
-            a.feed(spec, d).unwrap();
+            a.feed(spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
         }
         let mut b = AggAccum::new(spec).unwrap();
         for d in docs_b {
-            b.feed(spec, d).unwrap();
+            b.feed(spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
         }
         a.merge_from(b);
         [combined.finalize(spec).unwrap(), a.finalize(spec).unwrap()]
@@ -511,21 +536,33 @@ mod tests {
         let mut combined_min = AggAccum::new(&min_spec).unwrap();
         let mut combined_max = AggAccum::new(&max_spec).unwrap();
         for d in docs_a.iter().chain(docs_b.iter()) {
-            combined_min.feed(&min_spec, d).unwrap();
-            combined_max.feed(&max_spec, d).unwrap();
+            combined_min
+                .feed(&min_spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
+            combined_max
+                .feed(&max_spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
         }
 
         let mut a_min = AggAccum::new(&min_spec).unwrap();
         let mut a_max = AggAccum::new(&max_spec).unwrap();
         for d in &docs_a {
-            a_min.feed(&min_spec, d).unwrap();
-            a_max.feed(&max_spec, d).unwrap();
+            a_min
+                .feed(&min_spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
+            a_max
+                .feed(&max_spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
         }
         let mut b_min = AggAccum::new(&min_spec).unwrap();
         let mut b_max = AggAccum::new(&max_spec).unwrap();
         for d in &docs_b {
-            b_min.feed(&min_spec, d).unwrap();
-            b_max.feed(&max_spec, d).unwrap();
+            b_min
+                .feed(&min_spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
+            b_max
+                .feed(&max_spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
         }
         a_min.merge_from(b_min);
         a_max.merge_from(b_max);
@@ -553,16 +590,20 @@ mod tests {
 
         let mut combined = AggAccum::new(&spec).unwrap();
         for d in docs_a.iter().chain(docs_b.iter()) {
-            combined.feed(&spec, d).unwrap();
+            combined
+                .feed(&spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
         }
 
         let mut a = AggAccum::new(&spec).unwrap();
         for d in &docs_a {
-            a.feed(&spec, d).unwrap();
+            a.feed(&spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
         }
         let mut b = AggAccum::new(&spec).unwrap();
         for d in &docs_b {
-            b.feed(&spec, d).unwrap();
+            b.feed(&spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
         }
         a.merge_from(b);
 
@@ -594,15 +635,19 @@ mod tests {
 
         let mut combined = AggAccum::new(&spec).unwrap();
         for d in docs_a.iter().chain(docs_b.iter()) {
-            combined.feed(&spec, d).unwrap();
+            combined
+                .feed(&spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
         }
         let mut a = AggAccum::new(&spec).unwrap();
         for d in &docs_a {
-            a.feed(&spec, d).unwrap();
+            a.feed(&spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
         }
         let mut b = AggAccum::new(&spec).unwrap();
         for d in &docs_b {
-            b.feed(&spec, d).unwrap();
+            b.feed(&spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
         }
         a.merge_from(b);
 
@@ -624,16 +669,20 @@ mod tests {
 
         let mut combined = AggAccum::new(&spec).unwrap();
         for d in docs_a.iter().chain(docs_b.iter()) {
-            combined.feed(&spec, d).unwrap();
+            combined
+                .feed(&spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
         }
 
         let mut a = AggAccum::new(&spec).unwrap();
         for d in &docs_a {
-            a.feed(&spec, d).unwrap();
+            a.feed(&spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
         }
         let mut b = AggAccum::new(&spec).unwrap();
         for d in &docs_b {
-            b.feed(&spec, d).unwrap();
+            b.feed(&spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
         }
         a.merge_from(b);
 
@@ -657,11 +706,13 @@ mod tests {
 
         let mut a = AggAccum::new(&spec).unwrap();
         for d in &docs_a {
-            a.feed(&spec, d).unwrap();
+            a.feed(&spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
         }
         let mut b = AggAccum::new(&spec).unwrap();
         for d in &docs_b {
-            b.feed(&spec, d).unwrap();
+            b.feed(&spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
         }
         a.merge_from(b);
 
@@ -681,11 +732,13 @@ mod tests {
 
         let mut a = AggAccum::new(&spec).unwrap();
         for d in &docs_a {
-            a.feed(&spec, d).unwrap();
+            a.feed(&spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
         }
         let mut b = AggAccum::new(&spec).unwrap();
         for d in &docs_b {
-            b.feed(&spec, d).unwrap();
+            b.feed(&spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
         }
         a.merge_from(b);
 
@@ -704,16 +757,20 @@ mod tests {
 
         let mut combined = AggAccum::new(&spec).unwrap();
         for d in docs_a.iter().chain(docs_b.iter()) {
-            combined.feed(&spec, d).unwrap();
+            combined
+                .feed(&spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
         }
 
         let mut a = AggAccum::new(&spec).unwrap();
         for d in &docs_a {
-            a.feed(&spec, d).unwrap();
+            a.feed(&spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
         }
         let mut b = AggAccum::new(&spec).unwrap();
         for d in &docs_b {
-            b.feed(&spec, d).unwrap();
+            b.feed(&spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
         }
         a.merge_from(b);
 
@@ -735,16 +792,20 @@ mod tests {
 
         let mut combined = AggAccum::new(&spec).unwrap();
         for d in docs_a.iter().chain(docs_b.iter()) {
-            combined.feed(&spec, d).unwrap();
+            combined
+                .feed(&spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
         }
 
         let mut a = AggAccum::new(&spec).unwrap();
         for d in &docs_a {
-            a.feed(&spec, d).unwrap();
+            a.feed(&spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
         }
         let mut b = AggAccum::new(&spec).unwrap();
         for d in &docs_b {
-            b.feed(&spec, d).unwrap();
+            b.feed(&spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
         }
         a.merge_from(b);
 
@@ -766,16 +827,20 @@ mod tests {
 
         let mut combined = AggAccum::new(&spec).unwrap();
         for d in docs_a.iter().chain(docs_b.iter()) {
-            combined.feed(&spec, d).unwrap();
+            combined
+                .feed(&spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
         }
 
         let mut a = AggAccum::new(&spec).unwrap();
         for d in &docs_a {
-            a.feed(&spec, d).unwrap();
+            a.feed(&spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
         }
         let mut b = AggAccum::new(&spec).unwrap();
         for d in &docs_b {
-            b.feed(&spec, d).unwrap();
+            b.feed(&spec, d, &nodedb_crs::CrsContext::builtin_only())
+                .unwrap();
         }
         a.merge_from(b);
 

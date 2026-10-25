@@ -3,6 +3,7 @@
 //! Ranking and distribution window functions: row_number, rank, dense_rank,
 //! ntile, percent_rank, cume_dist.
 
+use nodedb_crs::CrsContext;
 use nodedb_types::Value;
 
 use crate::expr::SqlExpr;
@@ -26,6 +27,7 @@ pub(super) fn apply_rank(
     indices: &[usize],
     alias: &str,
     order_by: &[(SqlExpr, bool)],
+    crs: &CrsContext<'_>,
 ) -> Result<(), crate::expr::EvalError> {
     if indices.is_empty() {
         return Ok(());
@@ -34,7 +36,7 @@ pub(super) fn apply_rank(
     set_window_col(&mut rows[indices[0]].1, alias, count_value(1));
 
     for pos in 1..indices.len() {
-        if !order_keys_equal(rows, indices[pos - 1], indices[pos], order_by)? {
+        if !order_keys_equal(rows, indices[pos - 1], indices[pos], order_by, crs)? {
             current_rank = pos + 1;
         }
         set_window_col(&mut rows[indices[pos]].1, alias, count_value(current_rank));
@@ -47,6 +49,7 @@ pub(super) fn apply_dense_rank(
     indices: &[usize],
     alias: &str,
     order_by: &[(SqlExpr, bool)],
+    crs: &CrsContext<'_>,
 ) -> Result<(), crate::expr::EvalError> {
     if indices.is_empty() {
         return Ok(());
@@ -55,7 +58,7 @@ pub(super) fn apply_dense_rank(
     set_window_col(&mut rows[indices[0]].1, alias, count_value(1));
 
     for pos in 1..indices.len() {
-        if !order_keys_equal(rows, indices[pos - 1], indices[pos], order_by)? {
+        if !order_keys_equal(rows, indices[pos - 1], indices[pos], order_by, crs)? {
             current_rank += 1;
         }
         set_window_col(&mut rows[indices[pos]].1, alias, count_value(current_rank));
@@ -94,6 +97,7 @@ pub(super) fn apply_percent_rank(
     indices: &[usize],
     alias: &str,
     order_by: &[(SqlExpr, bool)],
+    crs: &CrsContext<'_>,
 ) -> Result<(), crate::expr::EvalError> {
     let total = indices.len();
     if total == 0 {
@@ -108,7 +112,7 @@ pub(super) fn apply_percent_rank(
     set_window_col(&mut rows[indices[0]].1, alias, Value::Float(0.0));
 
     for pos in 1..total {
-        if !order_keys_equal(rows, indices[pos - 1], indices[pos], order_by)? {
+        if !order_keys_equal(rows, indices[pos - 1], indices[pos], order_by, crs)? {
             current_rank = pos + 1;
         }
         let pr = (current_rank - 1) as f64 / denom;
@@ -125,6 +129,7 @@ pub(super) fn apply_cume_dist(
     indices: &[usize],
     alias: &str,
     order_by: &[(SqlExpr, bool)],
+    crs: &CrsContext<'_>,
 ) -> Result<(), crate::expr::EvalError> {
     let total = indices.len();
     if total == 0 {
@@ -136,7 +141,13 @@ pub(super) fn apply_cume_dist(
     while group_start < total {
         let mut group_end = group_start + 1;
         while group_end < total
-            && order_keys_equal(rows, indices[group_start], indices[group_end], order_by)?
+            && order_keys_equal(
+                rows,
+                indices[group_start],
+                indices[group_end],
+                order_by,
+                crs,
+            )?
         {
             group_end += 1;
         }

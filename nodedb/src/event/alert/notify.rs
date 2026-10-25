@@ -12,6 +12,7 @@ use tracing::{info, warn};
 
 use crate::control::planner::procedural::executor::bindings::RowBindings;
 use crate::control::planner::procedural::executor::core::{AtomicBody, StatementExecutor};
+use crate::control::security::egress::{EgressError, EgressFault, EgressPolicy, classify};
 use crate::control::security::identity::{AuthenticatedIdentity, Role};
 use crate::control::state::SharedState;
 use crate::types::TenantId;
@@ -64,7 +65,14 @@ pub async fn dispatch_notifications(
             }
             NotifyTarget::Webhook { url } => {
                 let timeout = Duration::from_secs(state.tuning.scheduler.webhook_timeout_secs);
-                notify_webhook_with_client(state.http_client(), url, &event, timeout).await;
+                notify_webhook_with_client(
+                    state.http_client(),
+                    state.remote_sources.egress(),
+                    url,
+                    &event,
+                    timeout,
+                )
+                .await;
             }
             NotifyTarget::InsertInto { table, columns } => {
                 notify_insert(
@@ -127,7 +135,25 @@ async fn notify_topic(
     }
 }
 
+/// What one alert webhook delivery came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WebhookOutcome {
+    /// The endpoint accepted the event.
+    Delivered,
+    /// The `[egress]` policy refused the URL or an address it resolved to.
+    /// Nothing was sent, and no retry runs.
+    Refused(EgressError),
+    /// The endpoint answered a permanent client error with this status.
+    Rejected(u16),
+    /// Every attempt failed, or the event did not serialize.
+    Failed,
+}
+
 /// HTTP POST alert event to a webhook URL using a shared `reqwest::Client`.
+///
+/// The URL is user-supplied: it passes `policy` before any request, and
+/// `client` is the egress client built on `policy`, so every resolved
+/// address is checked at connect time.
 ///
 /// Retries with exponential backoff (3 attempts, 100ms base). Reusing the
 /// client avoids re-building the connection pool / TLS session cache per
@@ -135,15 +161,25 @@ async fn notify_topic(
 /// cause a SYN flood and TLS-handshake-dominated CPU.
 pub async fn notify_webhook_with_client(
     client: &reqwest::Client,
+    policy: &EgressPolicy,
     url: &str,
     event: &AlertEvent,
     per_request_timeout: Duration,
-) {
+) -> WebhookOutcome {
+    // An IP-literal host is never resolved, so only this check refuses it.
+    if let Err(refused) = policy.check_url(url) {
+        warn!(
+            alert = event.alert_name,
+            error = %refused,
+            "alert webhook URL fails the [egress] policy, not sending"
+        );
+        return WebhookOutcome::Refused(refused);
+    }
     let body = match sonic_rs::to_string(event) {
         Ok(b) => b,
         Err(e) => {
             warn!(alert = event.alert_name, error = %e, "failed to serialize alert event");
-            return;
+            return WebhookOutcome::Failed;
         }
     };
 
@@ -164,7 +200,7 @@ pub async fn notify_webhook_with_client(
                     status = event.status,
                     "alert webhook delivered"
                 );
-                return;
+                return WebhookOutcome::Delivered;
             }
             Ok(resp) if resp.status().is_client_error() && resp.status().as_u16() != 429 => {
                 // 4xx (except 429) is permanent failure.
@@ -174,7 +210,7 @@ pub async fn notify_webhook_with_client(
                     status_code = resp.status().as_u16(),
                     "alert webhook permanently rejected"
                 );
-                return;
+                return WebhookOutcome::Rejected(resp.status().as_u16());
             }
             Ok(resp) => {
                 warn!(
@@ -186,11 +222,19 @@ pub async fn notify_webhook_with_client(
                 );
             }
             Err(e) => {
+                if let EgressFault::Refused(refused) = classify(&e) {
+                    warn!(
+                        alert = event.alert_name,
+                        error = %refused,
+                        "alert webhook refused by the egress policy, not retrying"
+                    );
+                    return WebhookOutcome::Refused(refused);
+                }
                 warn!(
                     alert = event.alert_name,
                     url,
                     attempt,
-                    error = %e,
+                    error = %e.without_url(),
                     "alert webhook delivery error, retrying"
                 );
             }
@@ -205,6 +249,7 @@ pub async fn notify_webhook_with_client(
         alert = event.alert_name,
         url, "alert webhook delivery failed after all retries"
     );
+    WebhookOutcome::Failed
 }
 
 fn build_alert_insert_sql(table: &str, columns: &[String], event: &AlertEvent) -> Option<String> {
@@ -351,5 +396,49 @@ mod tests {
         assert!(sql.contains("'cpu''; DROP TABLE users; --'"));
         assert!(sql.contains("(\"a\", \"b\", \"c\", \"d\", \"e\", \"f\", \"g\")"));
         assert!(build_alert_insert_sql("history", &columns[..6], &event).is_none());
+    }
+
+    /// An alert webhook URL is user-supplied. One the egress policy refuses
+    /// is never contacted, and no retry runs.
+    #[tokio::test]
+    async fn a_webhook_the_egress_policy_refuses_is_never_contacted() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let policy = Arc::new(EgressPolicy::strict());
+        let client =
+            crate::control::security::egress::outbound_client(Arc::clone(&policy)).expect("client");
+        let event = AlertEvent {
+            alert_name: "cpu".into(),
+            group_key: "group".into(),
+            severity: "high".into(),
+            status: "ACTIVE".into(),
+            value: 1.5,
+            threshold: 1.0,
+            timestamp_ms: 42,
+            collection: "metrics".into(),
+        };
+        for (url, expected) in [
+            (
+                format!("http://localhost:{port}/hook"),
+                EgressError::NonHttps,
+            ),
+            (
+                format!("https://127.0.0.1:{port}/hook"),
+                EgressError::IpLiteral,
+            ),
+            (
+                format!("https://localhost:{port}/hook"),
+                EgressError::PrivateAddress,
+            ),
+        ] {
+            let outcome =
+                notify_webhook_with_client(&client, &policy, &url, &event, Duration::from_secs(2))
+                    .await;
+            assert_eq!(outcome, WebhookOutcome::Refused(expected), "{url}");
+        }
+        let accepted = tokio::time::timeout(Duration::from_millis(200), listener.accept()).await;
+        assert!(accepted.is_err(), "a refused webhook reached the listener");
     }
 }

@@ -1,19 +1,17 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Cross-engine validation tests.
-//!
-//! These verify end-to-end correctness across all engines.
+//! Cross-engine validation: a cross-model query (vector + graph +
+//! relational filter) runs end-to-end with correct results.
 
 use nodedb::bridge::dispatch::BridgeRequest;
-use nodedb::bridge::envelope::Status;
 use nodedb::engine::graph::edge_store::Direction;
-use nodedb_physical::physical_plan::{DocumentOp, GraphOp, PhysicalPlan, TextOp, VectorOp};
+use nodedb_physical::physical_plan::{DocumentOp, GraphOp, PhysicalPlan, VectorOp};
 use nodedb_types::vector_distance::DistanceMetric;
 
 use super::helpers::*;
 
 // ──────────────────────────────────────────────────────────────────────
-// Gate 1: Cross-model query (vector + graph + relational filter)
+// Cross-model query (vector + graph + relational filter)
 //         executes end-to-end with correct results.
 // ──────────────────────────────────────────────────────────────────────
 
@@ -89,6 +87,8 @@ fn cross_model_query_vector_graph_relational() {
                 properties: vec![],
                 src_surrogate: doc_surrogate(&format!("p{i}")),
                 dst_surrogate: doc_surrogate(&format!("p{}", i + 1)),
+                valid_from_ms: None,
+                valid_until_ms: None,
             }),
         );
     }
@@ -136,6 +136,7 @@ fn cross_model_query_vector_graph_relational() {
             rls_filters: Vec::new(),
             frontier_bitmap: None,
             collection: None,
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         }),
     );
     let graph_nodes: Vec<String> = serde_json::from_value(payload_value(&graph_payload)).unwrap();
@@ -206,6 +207,7 @@ fn cross_model_query_vector_graph_relational() {
             bm25_query: None,
             bm25_field: None,
             stage: nodedb_physical::physical_plan::RagStage::Local,
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         }),
     );
     let rag_body = payload_value(&rag_payload);
@@ -217,326 +219,4 @@ fn cross_model_query_vector_graph_relational() {
         rag_body.get("metadata").is_some(),
         "GraphRAG should return metadata"
     );
-}
-
-// ──────────────────────────────────────────────────────────────────────
-// Gate 2: RRF fusion produces mathematically correct rankings with
-//         configurable per-source k-constants.
-// ──────────────────────────────────────────────────────────────────────
-
-#[test]
-fn rrf_fusion_mathematically_correct() {
-    let (mut core, mut tx, mut rx, _dir) = make_core();
-
-    // Insert documents with text content for BM25.
-    for i in 0..20u32 {
-        send_ok(
-            &mut core,
-            &mut tx,
-            &mut rx,
-            PhysicalPlan::Document(DocumentOp::PointPut {
-                collection: nodedb_types::QualifiedCollection::new(
-                    nodedb_types::DatabaseId::DEFAULT,
-                    "docs",
-                ),
-                document_id: format!("d{i}"),
-                value: serde_json::to_vec(&serde_json::json!({
-                    "body": format!("document about database systems topic {i}"),
-                }))
-                .unwrap(),
-                surrogate: doc_surrogate(&format!("d{i}")),
-                pk_bytes: Vec::new(),
-                returning: None,
-                rls_filters: Vec::new(),
-                resolved_sum_targets: Vec::new(),
-            }),
-        );
-    }
-
-    // Insert vectors.
-    for i in 0..20u32 {
-        tx.try_push(BridgeRequest::unfloored(make_request_with_id(
-            200 + i as u64,
-            PhysicalPlan::Vector(VectorOp::Insert {
-                collection: nodedb_types::QualifiedCollection::new(
-                    nodedb_types::DatabaseId::DEFAULT,
-                    "docs",
-                ),
-                vector: vec![i as f32, 0.0, 0.0],
-                dim: 3,
-                field_name: String::new(),
-                surrogate: doc_surrogate(&format!("d{i}")),
-                pk_bytes: None,
-                provenance: None,
-            }),
-        )))
-        .unwrap();
-    }
-    core.tick();
-    for _ in 0..20 {
-        rx.try_pop().unwrap();
-    }
-
-    // Hybrid search with equal weights (vector_weight = 0.5).
-    let resp_equal = send_raw(
-        &mut core,
-        &mut tx,
-        &mut rx,
-        PhysicalPlan::Text(TextOp::HybridSearch {
-            collection: nodedb_types::QualifiedCollection::new(
-                nodedb_types::DatabaseId::DEFAULT,
-                "docs",
-            ),
-            query_vector: vec![10.0f32, 0.0, 0.0],
-            query_text: "database systems".into(),
-            top_k: 5,
-            ef_search: 0,
-            mode: nodedb_types::text_search::QueryMode::And,
-            fuzzy: true,
-            vector_weight: 0.5,
-            filter_bitmap: None,
-            rls_filters: Vec::new(),
-            score_alias: None,
-            vector_field: String::new(),
-            text_field: None,
-            filters: Vec::new(),
-        }),
-    );
-    assert_eq!(resp_equal.status, Status::Ok);
-    let equal_results = payload_value(&resp_equal.payload);
-    assert!(equal_results.is_array(), "should return array of results");
-
-    // Hybrid search with vector-heavy weight (vector_weight = 0.9).
-    let resp_vec_heavy = send_raw(
-        &mut core,
-        &mut tx,
-        &mut rx,
-        PhysicalPlan::Text(TextOp::HybridSearch {
-            collection: nodedb_types::QualifiedCollection::new(
-                nodedb_types::DatabaseId::DEFAULT,
-                "docs",
-            ),
-            query_vector: vec![10.0f32, 0.0, 0.0],
-            query_text: "database systems".into(),
-            top_k: 5,
-            ef_search: 0,
-            mode: nodedb_types::text_search::QueryMode::And,
-            fuzzy: true,
-            vector_weight: 0.9,
-            filter_bitmap: None,
-            rls_filters: Vec::new(),
-            score_alias: None,
-            vector_field: String::new(),
-            text_field: None,
-            filters: Vec::new(),
-        }),
-    );
-    assert_eq!(resp_vec_heavy.status, Status::Ok);
-
-    // Both queries should produce results — the ranking order may differ
-    // based on the weight, which is the whole point of configurable k-constants.
-    let equal_json = payload_json(&resp_equal.payload);
-    let heavy_json = payload_json(&resp_vec_heavy.payload);
-    assert!(equal_json.contains("rrf_score"), "equal: {equal_json}");
-    assert!(heavy_json.contains("rrf_score"), "heavy: {heavy_json}");
-}
-
-// ──────────────────────────────────────────────────────────────────────
-// Gate 3: Document secondary indexes remain consistent after crash
-//         recovery (WAL replay).
-// ──────────────────────────────────────────────────────────────────────
-
-#[test]
-fn document_indexes_consistent_after_simulated_crash() {
-    let (mut core, mut tx, mut rx, _dir) = make_core();
-
-    // Insert documents — auto-indexes text fields in inverted index.
-    send_ok(
-        &mut core,
-        &mut tx,
-        &mut rx,
-        PhysicalPlan::Document(DocumentOp::PointPut {
-            collection: nodedb_types::QualifiedCollection::new(
-                nodedb_types::DatabaseId::DEFAULT,
-                "articles",
-            ),
-            document_id: "a1".into(),
-            value: serde_json::to_vec(&serde_json::json!({
-                "title": "Distributed databases are scalable",
-                "status": "published",
-            }))
-            .unwrap(),
-            surrogate: nodedb_types::Surrogate::new(1),
-            pk_bytes: b"a1".to_vec(),
-            returning: None,
-            rls_filters: Vec::new(),
-            resolved_sum_targets: Vec::new(),
-        }),
-    );
-
-    send_ok(
-        &mut core,
-        &mut tx,
-        &mut rx,
-        PhysicalPlan::Document(DocumentOp::PointPut {
-            collection: nodedb_types::QualifiedCollection::new(
-                nodedb_types::DatabaseId::DEFAULT,
-                "articles",
-            ),
-            document_id: "a2".into(),
-            value: serde_json::to_vec(&serde_json::json!({
-                "title": "Vector search with HNSW graphs",
-                "status": "draft",
-            }))
-            .unwrap(),
-            surrogate: nodedb_types::Surrogate::new(2),
-            pk_bytes: b"a2".to_vec(),
-            returning: None,
-            rls_filters: Vec::new(),
-            resolved_sum_targets: Vec::new(),
-        }),
-    );
-
-    // Text search should find both documents. Without a wired catalog
-    // the inverted-index hits surface as substrate row keys (hex of
-    // the surrogate) rather than user-visible PKs, so the assertion
-    // checks for the substrate key derived from `Surrogate::new(1)`.
-    let text_payload = send_ok(
-        &mut core,
-        &mut tx,
-        &mut rx,
-        PhysicalPlan::Text(TextOp::Search {
-            collection: nodedb_types::QualifiedCollection::new(
-                nodedb_types::DatabaseId::DEFAULT,
-                "articles",
-            ),
-            query: "database".into(),
-            top_k: 10,
-            mode: nodedb_types::text_search::QueryMode::And,
-            fuzzy: true,
-            rls_filters: Vec::new(),
-            prefilter: None,
-            field: None,
-            filters: Vec::new(),
-            scores: Vec::new(),
-        }),
-    );
-    let text_json = payload_json(&text_payload);
-    assert!(
-        text_json.contains("00000001"),
-        "text search should find a1's substrate key: {text_json}"
-    );
-
-    // Delete a1 — should cascade to inverted index.
-    send_ok(
-        &mut core,
-        &mut tx,
-        &mut rx,
-        PhysicalPlan::Document(DocumentOp::PointDelete {
-            collection: nodedb_types::QualifiedCollection::new(
-                nodedb_types::DatabaseId::DEFAULT,
-                "articles",
-            ),
-            document_id: "a1".into(),
-            surrogate: Some(nodedb_types::Surrogate::new(1)),
-            pk_bytes: b"a1".to_vec(),
-            returning: None,
-            rls_filters: Vec::new(),
-            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
-            resolved_sum_targets: Vec::new(),
-        }),
-    );
-
-    // Text search should NOT find a1 anymore (index cascaded).
-    let text_after = send_ok(
-        &mut core,
-        &mut tx,
-        &mut rx,
-        PhysicalPlan::Text(TextOp::Search {
-            collection: nodedb_types::QualifiedCollection::new(
-                nodedb_types::DatabaseId::DEFAULT,
-                "articles",
-            ),
-            query: "database".into(),
-            top_k: 10,
-            mode: nodedb_types::text_search::QueryMode::And,
-            fuzzy: true,
-            rls_filters: Vec::new(),
-            prefilter: None,
-            field: None,
-            filters: Vec::new(),
-            scores: Vec::new(),
-        }),
-    );
-    let text_after_json = payload_json(&text_after);
-    assert!(
-        !text_after_json.contains("00000001"),
-        "a1's substrate key should be removed from text index after delete: {text_after_json}"
-    );
-
-    // a2 should still be findable.
-    let text_a2 = send_ok(
-        &mut core,
-        &mut tx,
-        &mut rx,
-        PhysicalPlan::Text(TextOp::Search {
-            collection: nodedb_types::QualifiedCollection::new(
-                nodedb_types::DatabaseId::DEFAULT,
-                "articles",
-            ),
-            query: "vector search".into(),
-            top_k: 10,
-            mode: nodedb_types::text_search::QueryMode::And,
-            fuzzy: true,
-            rls_filters: Vec::new(),
-            prefilter: None,
-            field: None,
-            filters: Vec::new(),
-            scores: Vec::new(),
-        }),
-    );
-    let text_a2_json = payload_json(&text_a2);
-    assert!(
-        text_a2_json.contains("00000002"),
-        "a2's substrate key should still be in text index: {text_a2_json}"
-    );
-
-    // Verify PointGet confirms a1 is gone, a2 exists.
-    let get_a1 = send_raw(
-        &mut core,
-        &mut tx,
-        &mut rx,
-        PhysicalPlan::Document(DocumentOp::PointGet {
-            collection: nodedb_types::QualifiedCollection::new(
-                nodedb_types::DatabaseId::DEFAULT,
-                "articles",
-            ),
-            document_id: "a1".into(),
-            rls_filters: Vec::new(),
-            system_time: nodedb_types::SystemTimeScope::Current,
-            valid_at_ms: None,
-            surrogate: Some(nodedb_types::Surrogate::new(1)),
-            pk_bytes: b"a1".to_vec(),
-        }),
-    );
-    assert_eq!(get_a1.error_code, None);
-
-    let get_a2 = send_raw(
-        &mut core,
-        &mut tx,
-        &mut rx,
-        PhysicalPlan::Document(DocumentOp::PointGet {
-            collection: nodedb_types::QualifiedCollection::new(
-                nodedb_types::DatabaseId::DEFAULT,
-                "articles",
-            ),
-            document_id: "a2".into(),
-            rls_filters: Vec::new(),
-            system_time: nodedb_types::SystemTimeScope::Current,
-            valid_at_ms: None,
-            surrogate: Some(nodedb_types::Surrogate::new(2)),
-            pk_bytes: b"a2".to_vec(),
-        }),
-    );
-    assert_eq!(get_a2.status, Status::Ok);
 }

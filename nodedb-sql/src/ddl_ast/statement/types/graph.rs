@@ -3,6 +3,7 @@
 //! Graph DDL/DML statements.
 
 use crate::ddl_ast::graph_types::{GraphDirection, GraphProperties};
+use crate::temporal::TemporalScope;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum GraphStmt {
@@ -13,6 +14,12 @@ pub enum GraphStmt {
         dst: String,
         label: String,
         properties: GraphProperties,
+        /// `VALID_TIME <from>`: start of the edge's valid time, ms since
+        /// epoch. `None` takes the write's wall time.
+        valid_from_ms: Option<i64>,
+        /// `UNTIL <until>`: exclusive end of the edge's valid time. `None`
+        /// leaves it open.
+        valid_until_ms: Option<i64>,
     },
     GraphDeleteEdge {
         collection: String,
@@ -37,6 +44,8 @@ pub enum GraphStmt {
         direction: GraphDirection,
         /// `EDGE WHERE` filters, AND-ed. Empty admits every edge.
         edge_predicate: Vec<nodedb_types::filter::MetadataFilter>,
+        /// `AS OF SYSTEM TIME` / `AS OF VALID TIME` of the read.
+        temporal: TemporalScope,
     },
     GraphNeighbors {
         /// Collection whose edges the traversal is scoped to. Required: a
@@ -47,6 +56,8 @@ pub enum GraphStmt {
         /// Empty keeps every edge. Otherwise an edge with any listed label.
         edge_labels: Vec<String>,
         direction: GraphDirection,
+        /// `AS OF SYSTEM TIME` / `AS OF VALID TIME` of the read.
+        temporal: TemporalScope,
     },
     GraphPath {
         /// Collection whose edges the traversal is scoped to. Required: a
@@ -60,6 +71,8 @@ pub enum GraphStmt {
         edge_labels: Vec<String>,
         /// `EDGE WHERE` filters, AND-ed. Empty admits every edge.
         edge_predicate: Vec<nodedb_types::filter::MetadataFilter>,
+        /// `AS OF SYSTEM TIME` / `AS OF VALID TIME` of the read.
+        temporal: TemporalScope,
     },
     GraphAlgo {
         algorithm: String,
@@ -77,13 +90,22 @@ pub enum GraphStmt {
         /// e.g. `PERSONALIZATION {"alice": 1.0, "bob": 0.5}`. Parsed into a
         /// `node_id → weight` map by the handler. `None` = standard PageRank.
         personalization: Option<String>,
+        /// `AS OF SYSTEM TIME` / `AS OF VALID TIME` of the read.
+        temporal: TemporalScope,
     },
-    /// `MATCH (x)-[:l]->(y) RETURN x, y` — body forwarded verbatim to the graph pattern compiler.
-    MatchQuery { body: String },
+    /// `MATCH (x)-[:l]->(y) RETURN x, y`. `body` is the statement with its
+    /// temporal clauses removed, for the graph pattern compiler.
+    MatchQuery {
+        body: String,
+        /// `AS OF SYSTEM TIME` / `AS OF VALID TIME` of the match.
+        temporal: TemporalScope,
+    },
     /// `GRAPH RAG FUSION ON <collection> QUERY ARRAY[…] [options…]`
     GraphRagFusion {
         collection: String,
         params: crate::ddl_ast::graph_parse::FusionParams,
+        /// `AS OF SYSTEM TIME` / `AS OF VALID TIME` of the read.
+        temporal: TemporalScope,
     },
     /// `SHOW GRAPH STATS ['<collection>'] [VERBOSE] [AS OF SYSTEM TIME <ms>]`
     ///

@@ -51,12 +51,18 @@ impl TenantCrdtEngine {
     /// The bytes are a snapshot this node or its backup exported, so they
     /// import without the peer byte and operation ceilings
     /// ([`super::ApplyTarget::Collection`]).
-    pub fn import_snapshot_bytes(&mut self, collection: &str, bytes: &[u8]) -> crate::Result<()> {
+    pub fn import_snapshot_bytes(
+        &mut self,
+        collection: &str,
+        bytes: &[u8],
+        crs: &nodedb_crs::CrsContext<'_>,
+    ) -> crate::Result<()> {
         match self.apply_committed_delta_validated(
             collection,
             bytes,
             super::ApplyTarget::Collection,
             0,
+            crs,
         ) {
             super::ValidatedApplyOutcome::Clean { .. } => Ok(()),
             super::ValidatedApplyOutcome::Rejected(reason) => Err(crate::Error::Crdt(
@@ -137,10 +143,13 @@ mod tests {
         let mut engine = TenantCrdtEngine::new(TenantId::new(1), 0, ConstraintSet::new()).unwrap();
         let (first, later) = interleaved_collection_deltas(32, "users", "signals");
 
-        engine.import_snapshot_bytes("users", &first).unwrap();
+        engine
+            .import_snapshot_bytes("users", &first, &nodedb_crs::CrsContext::builtin_only())
+            .unwrap();
         assert!(engine.row_exists("users", "first"));
 
-        let result = engine.import_snapshot_bytes("users", &later);
+        let result =
+            engine.import_snapshot_bytes("users", &later, &nodedb_crs::CrsContext::builtin_only());
 
         assert!(
             result.is_err() || engine.row_exists("users", "later"),
@@ -170,7 +179,9 @@ mod tests {
         let snapshot = doc.export(loro::ExportMode::Snapshot).unwrap();
 
         let mut engine = TenantCrdtEngine::new(TenantId::new(1), 0, ConstraintSet::new()).unwrap();
-        engine.import_snapshot_bytes("docs", &snapshot).unwrap();
+        engine
+            .import_snapshot_bytes("docs", &snapshot, &nodedb_crs::CrsContext::builtin_only())
+            .unwrap();
         assert!(engine.row_exists("docs", "r"));
     }
 

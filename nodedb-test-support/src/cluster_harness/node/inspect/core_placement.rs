@@ -59,6 +59,26 @@ impl TestClusterNode {
         core_id: usize,
         tenant: TenantId,
     ) -> TenantDataSnapshot {
+        self.snapshot_on_core(core_id, tenant, false).await
+    }
+
+    /// The tenant snapshot of `tenant` that each core of this node holds,
+    /// array cells included, in core order. The reads never leave this node,
+    /// so they show this replica's own stored data in every engine.
+    pub async fn stored_tenant_snapshots(&self, tenant: TenantId) -> Vec<TenantDataSnapshot> {
+        let mut snapshots = Vec::with_capacity(self.num_cores());
+        for core_id in 0..self.num_cores() {
+            snapshots.push(self.snapshot_on_core(core_id, tenant, true).await);
+        }
+        snapshots
+    }
+
+    async fn snapshot_on_core(
+        &self,
+        core_id: usize,
+        tenant: TenantId,
+        arrays: bool,
+    ) -> TenantDataSnapshot {
         let request_id = RequestId::new(PLACEMENT_REQUEST_ID.fetch_add(1, Ordering::Relaxed));
         let request = Request {
             request_id,
@@ -69,7 +89,7 @@ impl TestClusterNode {
                 tenant_id: tenant.as_u64(),
                 cut_watermark: None,
                 cut_capture: None,
-                arrays: false,
+                arrays,
             }),
             deadline: std::time::Instant::now() + std::time::Duration::from_secs(10),
             priority: Priority::Normal,

@@ -52,10 +52,16 @@ pub(crate) async fn read_query_rows(
         });
     };
     let shaper = RowShaper::decode(&source.column_map)?;
+    let crs = crate::control::crs_context::crs_context_for(ctx.state);
     shaped
         .rows
         .into_iter()
-        .map(|row| shaper.shape_value(&nodedb_types::Value::Object(row.into_iter().collect())))
+        .map(|row| {
+            shaper.shape_value(
+                &nodedb_types::Value::Object(row.into_iter().collect()),
+                &crs,
+            )
+        })
         .collect()
 }
 

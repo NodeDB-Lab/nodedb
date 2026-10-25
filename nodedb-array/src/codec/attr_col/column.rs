@@ -35,6 +35,7 @@ fn tag_of(dtype: AttrType) -> u8 {
         AttrType::Int32 => 8,
         AttrType::UInt32 => 9,
         AttrType::Float32 => 10,
+        AttrType::Int8 => 11,
     }
 }
 
@@ -51,6 +52,7 @@ fn type_of(tag: u8) -> ArrayResult<Option<AttrType>> {
         8 => AttrType::Int32,
         9 => AttrType::UInt32,
         10 => AttrType::Float32,
+        11 => AttrType::Int8,
         other => {
             return Err(ArrayError::SegmentCorruption {
                 detail: format!("attr col: unknown tag {other:#04x}"),
@@ -93,6 +95,7 @@ pub fn encode_attr_col(values: &[CellValue]) -> ArrayResult<Vec<u8>> {
     let present: Vec<&CellValue> = values.iter().filter(|v| !v.is_null()).collect();
     let payload = match dtype {
         AttrType::Int64
+        | AttrType::Int8
         | AttrType::UInt8
         | AttrType::Int16
         | AttrType::UInt16
@@ -145,6 +148,7 @@ pub fn decode_attr_col(data: &[u8], rows: usize) -> ArrayResult<Vec<CellValue>> 
     let body = &data[pos..];
     let values = match dtype {
         AttrType::Int64
+        | AttrType::Int8
         | AttrType::UInt8
         | AttrType::Int16
         | AttrType::UInt16
@@ -198,6 +202,7 @@ mod tests {
                 .map(|i| CellValue::Bytes(vec![i as u8; 3]))
                 .collect(),
             (0..40).map(|i| CellValue::UInt8(i as u8 * 6)).collect(),
+            (0..40).map(|i| CellValue::Int8(i as i8 * -3)).collect(),
             (0..40).map(|i| CellValue::Int16(i as i16 * -800)).collect(),
             (0..40)
                 .map(|i| CellValue::UInt16(i as u16 * 1600))
@@ -292,6 +297,31 @@ mod tests {
         data.extend_from_slice(&1u32.to_le_bytes());
         data.push(0);
         data.extend_from_slice(&nodedb_codec::fastlanes::encode(&[300]).unwrap());
+        assert!(matches!(
+            decode_attr_col(&data, 1),
+            Err(ArrayError::SegmentCorruption { .. })
+        ));
+    }
+
+    /// INT8 keeps its full signed range through the codec, and a stored
+    /// value past it is corruption.
+    #[test]
+    fn int8_round_trips_its_full_range() {
+        let col = vec![
+            CellValue::Int8(i8::MIN),
+            CellValue::Null,
+            CellValue::Int8(-1),
+            CellValue::Int8(0),
+            CellValue::Int8(i8::MAX),
+        ];
+        let encoded = encode_attr_col(&col).unwrap();
+        assert_eq!(encoded[0], tag_of(AttrType::Int8));
+        assert_eq!(round_trip(&col), col);
+
+        let mut data = vec![tag_of(AttrType::Int8)];
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.push(0);
+        data.extend_from_slice(&nodedb_codec::fastlanes::encode(&[-129]).unwrap());
         assert!(matches!(
             decode_attr_col(&data, 1),
             Err(ArrayError::SegmentCorruption { .. })

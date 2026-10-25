@@ -63,7 +63,6 @@ pub(super) fn resolver_for_graph_op(op: &GraphOp) -> Option<Box<dyn EngineWriteR
         | GraphOp::MatchVarLenResume { .. }
         | GraphOp::RagFusion { .. }
         | GraphOp::TemporalNeighbors { .. }
-        | GraphOp::TemporalAlgorithm { .. }
         | GraphOp::Stats { .. }
         | GraphOp::BspSuperstep(_)
         | GraphOp::WccSuperstep(_)

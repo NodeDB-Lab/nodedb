@@ -43,9 +43,13 @@ pub fn binding_join_value(
 pub fn binding_amount(
     binding: &MaterializedSumBinding,
     doc: &serde_json::Value,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<Decimal> {
     let row = nodedb_types::Value::from(doc.clone());
-    let evaluated = binding.value_expr.eval(&row).map_err(crate::Error::from)?;
+    let evaluated = binding
+        .value_expr
+        .eval(&row, crs)
+        .map_err(crate::Error::from)?;
     Ok(json_to_decimal(&serde_json::Value::from(evaluated)).unwrap_or(Decimal::ZERO))
 }
 
@@ -78,13 +82,14 @@ pub fn json_to_decimal(v: &serde_json::Value) -> Option<Decimal> {
 pub fn binding_insert_deltas(
     binding: &MaterializedSumBinding,
     docs: &[serde_json::Value],
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<Vec<(String, Decimal)>> {
     let mut totals: Vec<(String, Decimal)> = Vec::new();
     for doc in docs {
         let Some(join_value) = binding_join_value(binding, doc) else {
             continue;
         };
-        let amount = binding_amount(binding, doc)?;
+        let amount = binding_amount(binding, doc, crs)?;
         match totals.iter().position(|(value, _)| *value == join_value) {
             Some(index) => totals[index].1 += amount,
             None => totals.push((join_value, amount)),
@@ -116,8 +121,12 @@ mod tests {
     /// is read and written once, whichever plane performs the write.
     #[test]
     fn rows_against_one_target_coalesce() {
-        let deltas = binding_insert_deltas(&binding(), &[row("a1", 25), row("a1", 75)])
-            .expect("fold succeeds");
+        let deltas = binding_insert_deltas(
+            &binding(),
+            &[row("a1", 25), row("a1", 75)],
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("fold succeeds");
         assert_eq!(
             deltas,
             vec![("a1".to_string(), Decimal::from_str("100").expect("decimal"))]
@@ -128,8 +137,12 @@ mod tests {
     /// target anything — the same conclusion the Data-Plane fold reaches.
     #[test]
     fn a_row_without_the_join_column_owes_nothing() {
-        let deltas = binding_insert_deltas(&binding(), &[serde_json::json!({"amount": 25})])
-            .expect("fold succeeds");
+        let deltas = binding_insert_deltas(
+            &binding(),
+            &[serde_json::json!({"amount": 25})],
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("fold succeeds");
         assert!(deltas.is_empty());
     }
 
@@ -137,7 +150,8 @@ mod tests {
     fn a_string_amount_parses_exactly() {
         let doc = serde_json::json!({"account_id": "a1", "amount": "1500.75"});
         assert_eq!(
-            binding_amount(&binding(), &doc).expect("evaluate"),
+            binding_amount(&binding(), &doc, &nodedb_crs::CrsContext::builtin_only())
+                .expect("evaluate"),
             Decimal::from_str("1500.75").expect("decimal")
         );
     }

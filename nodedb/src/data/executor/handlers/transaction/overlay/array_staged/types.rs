@@ -69,7 +69,7 @@ fn coord_size(coord: &[CoordValue]) -> usize {
 fn cell_value_size(v: &CellValue) -> usize {
     match v {
         CellValue::Int64(_) | CellValue::Float64(_) => std::mem::size_of::<i64>(),
-        CellValue::UInt8(_) => std::mem::size_of::<u8>(),
+        CellValue::UInt8(_) | CellValue::Int8(_) => std::mem::size_of::<u8>(),
         CellValue::Int16(_) | CellValue::UInt16(_) => std::mem::size_of::<u16>(),
         CellValue::Int32(_) | CellValue::UInt32(_) | CellValue::Float32(_) => {
             std::mem::size_of::<u32>()

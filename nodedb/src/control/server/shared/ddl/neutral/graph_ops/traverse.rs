@@ -3,6 +3,7 @@
 //! Read handlers: GRAPH TRAVERSE, GRAPH NEIGHBORS, GRAPH PATH.
 
 use nodedb_sql::ddl_ast::GraphDirection;
+use nodedb_sql::temporal::TemporalScope;
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::control::security::identity::AuthenticatedIdentity;
@@ -123,13 +124,25 @@ pub struct TraverseRequest {
     pub txn_id: Option<crate::types::TxnId>,
     /// The session reads linearizably.
     pub linearizable: bool,
+    /// `AS OF SYSTEM TIME` / `AS OF VALID TIME`.
+    pub temporal: TemporalScope,
+}
+
+/// The bitemporal cut of a graph read statement, as a `DdlError`.
+async fn read_scope(
+    state: &SharedState,
+    temporal: &TemporalScope,
+) -> Result<nodedb_physical::physical_plan::GraphReadScope, DdlError> {
+    crate::control::server::graph_dispatch::graph_read_scope(state, temporal)
+        .await
+        .map_err(|e| DdlError::from_error(&e))
 }
 
 /// `GRAPH TRAVERSE IN '<collection>' FROM '<node_id>' [DEPTH <n>]
 /// [LABEL '<label>'[, '<label>' ...]] [DIRECTION in|out|both]
-/// [EDGE WHERE <predicate>]`
+/// [EDGE WHERE <predicate>] [AS OF SYSTEM TIME <t>] [AS OF VALID TIME <t>]`
 ///
-/// Each result edge carries its current property object.
+/// Each result edge carries its property object at the read's cut.
 ///
 /// `txn_id` reaches every hop of the walk (`cross_core_traverse_subgraph`).
 /// The walk, its `EDGE WHERE` predicate and the returned properties see the
@@ -149,6 +162,7 @@ pub async fn traverse(
         edge_predicate,
         txn_id,
         linearizable,
+        temporal,
     } = req;
     if start.is_empty() {
         return Err(ddl_err("42601", "missing FROM '<node_id>'"));
@@ -158,6 +172,7 @@ pub async fn traverse(
     let tenant_id = identity.tenant_id;
     check_tenant_graph_depth(state, tenant_id, depth, "DEPTH")?;
     let dir = to_engine_direction(direction);
+    let read_scope = read_scope(state, &temporal).await?;
 
     // Subgraph-shaped dispatcher: emits the `{nodes,edges}` JSON both clients
     // decode. Tree DDL aggregates that only need a flat reachable set call
@@ -182,6 +197,7 @@ pub async fn traverse(
             edge_predicate: &edge_predicate,
             with_properties: true,
             txn_id,
+            read_scope,
         },
     )
     .await
@@ -202,10 +218,13 @@ pub struct NeighborsRequest {
     pub txn_id: Option<crate::types::TxnId>,
     /// The session reads linearizably.
     pub linearizable: bool,
+    /// `AS OF SYSTEM TIME` / `AS OF VALID TIME`.
+    pub temporal: TemporalScope,
 }
 
 /// `GRAPH NEIGHBORS IN '<collection>' OF '<node_id>'
-/// [LABEL '<label>'[, '<label>' ...]] [DIRECTION in|out|both]`
+/// [LABEL '<label>'[, '<label>' ...]] [DIRECTION in|out|both]
+/// [AS OF SYSTEM TIME <t>] [AS OF VALID TIME <t>]`
 ///
 /// `txn_id` (the caller's active session transaction, if any) is stamped
 /// onto the request so this read observes the transaction's own staged
@@ -223,6 +242,7 @@ pub async fn neighbors(
         direction,
         txn_id,
         linearizable,
+        temporal,
     } = req;
     if node.is_empty() {
         return Err(ddl_err("42601", "missing OF '<node_id>'"));
@@ -230,6 +250,7 @@ pub async fn neighbors(
     authorize_traversal(state, identity, database_id, &collection)?;
     let dir = to_engine_direction(direction);
     let tenant_id = identity.tenant_id;
+    let scope = read_scope(state, &temporal).await?;
 
     let node_key = node.clone();
     let plan = PhysicalPlan::Graph(GraphOp::Neighbors {
@@ -241,6 +262,7 @@ pub async fn neighbors(
         edge_labels,
         direction: dir,
         rls_filters: Vec::new(),
+        scope,
     });
 
     // The node's edges live on its key vShard: the read runs on that vShard's
@@ -275,10 +297,13 @@ pub struct ShortestPathRequest {
     pub txn_id: Option<crate::types::TxnId>,
     /// The session reads linearizably.
     pub linearizable: bool,
+    /// `AS OF SYSTEM TIME` / `AS OF VALID TIME`.
+    pub temporal: TemporalScope,
 }
 
 /// `GRAPH PATH IN '<collection>' FROM '<src>' TO '<dst>' [MAX_DEPTH <n>]
-/// [LABEL '<label>'[, '<label>' ...]] [EDGE WHERE <predicate>]`
+/// [LABEL '<label>'[, '<label>' ...]] [EDGE WHERE <predicate>]
+/// [AS OF SYSTEM TIME <t>] [AS OF VALID TIME <t>]`
 ///
 /// Returns the actual shortest path `[src, hop_1, ..., dst]`. An
 /// unreachable destination yields an empty array. Orchestrated by
@@ -301,6 +326,7 @@ pub async fn shortest_path(
         edge_predicate,
         txn_id,
         linearizable,
+        temporal,
     } = req;
     if src.is_empty() || dst.is_empty() {
         return Err(ddl_err(
@@ -312,6 +338,7 @@ pub async fn shortest_path(
     let max_depth = clamp_depth(max_depth, "MAX_DEPTH")?;
     let tenant_id = identity.tenant_id;
     check_tenant_graph_depth(state, tenant_id, max_depth, "MAX_DEPTH")?;
+    let read_scope = read_scope(state, &temporal).await?;
     match crate::control::server::graph_dispatch::cross_core_shortest_path(
         state,
         crate::control::server::graph_dispatch::CrossCoreShortestPathParams {
@@ -331,6 +358,7 @@ pub async fn shortest_path(
             linearizable,
             edge_predicate,
             txn_id,
+            read_scope,
         },
     )
     .await

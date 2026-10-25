@@ -23,7 +23,6 @@ pub(super) fn describe_graph(op: &GraphOp) -> PlanKind {
         | GraphOp::BspSuperstep(_)
         | GraphOp::WccSuperstep(_)
         | GraphOp::TemporalNeighbors { .. }
-        | GraphOp::TemporalAlgorithm { .. }
         | GraphOp::Stats { .. }
         | GraphOp::NodePresenceRead { .. } => PlanKind::MultiRow,
 

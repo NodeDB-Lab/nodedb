@@ -56,6 +56,13 @@ pub struct DeltaPushMsg {
     /// All zeros denotes an unsigned legacy delta.
     #[serde(default)]
     pub delta_signature: [u8; 32],
+    /// The incarnation of the collection the client built this delta
+    /// against: the `creation_hlc` Origin announced with the collection's
+    /// descriptor. Origin refuses a delta for an incarnation the collection
+    /// no longer holds, because a drop and a same-name create replaced it.
+    /// Every client the handshake admits states one: Origin refuses
+    /// `Hlc::ZERO` the same way.
+    pub collection_incarnation: crate::hlc::Hlc,
 }
 
 /// Delta acknowledgment (server → client, 0x11).

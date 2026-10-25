@@ -34,7 +34,7 @@ impl fmt::Display for Restored {
 
 /// Plan a restore, and execute it unless `args.dry_run`.
 pub async fn restore(args: &RestoreArgs) -> Result<Restored, RestoreError> {
-    let env = RestoreEnv::from_config_file(&args.config, kept_entries(&args.scope))?;
+    let env = RestoreEnv::from_config_file(&args.config, kept_entries(&args.scope)).await?;
     restore_in(&env, &args.scope, args.incarnation.as_deref(), args.dry_run).await
 }
 
@@ -45,7 +45,7 @@ pub async fn restore_with_config(
     incarnation: Option<&str>,
     dry_run: bool,
 ) -> Result<Restored, RestoreError> {
-    let env = RestoreEnv::from_config(config, kept_entries(scope))?;
+    let env = RestoreEnv::from_config(config, kept_entries(scope)).await?;
     restore_in(&env, scope, incarnation, dry_run).await
 }
 

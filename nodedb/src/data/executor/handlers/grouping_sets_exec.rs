@@ -48,14 +48,18 @@ pub(super) struct GroupingSetsParams<'a> {
 /// Execute a multi-set aggregate (ROLLUP / CUBE / GROUPING SETS).
 pub(super) fn execute_grouping_sets(core: &CoreLoop, params: GroupingSetsParams<'_>) -> Response {
     let task = params.task;
-    match grouping_set_rows(params) {
+    let crs = core.crs_context();
+    match grouping_set_rows(params, &crs) {
         Ok(payload) => core.response_with_payload(task, payload),
         Err(e) => core.response_error(task, ErrorCode::from(e)),
     }
 }
 
 /// Aggregate every grouping set and encode the union as a MessagePack array.
-fn grouping_set_rows(params: GroupingSetsParams<'_>) -> crate::Result<Vec<u8>> {
+fn grouping_set_rows(
+    params: GroupingSetsParams<'_>,
+    crs: &nodedb_crs::CrsContext<'_>,
+) -> crate::Result<Vec<u8>> {
     let GroupingSetsParams {
         task: _,
         docs,
@@ -82,7 +86,7 @@ fn grouping_set_rows(params: GroupingSetsParams<'_>) -> crate::Result<Vec<u8>> {
         .map(|agg| grouping_column(agg, group_by.len()))
         .collect::<crate::Result<Vec<u32>>>()?;
 
-    let rows = matching_rows(&docs, &filter_predicates)?;
+    let rows = matching_rows(&docs, &filter_predicates, crs)?;
 
     let mut all_rows: Vec<Value> = Vec::new();
     for set in grouping_sets {
@@ -96,14 +100,14 @@ fn grouping_set_rows(params: GroupingSetsParams<'_>) -> crate::Result<Vec<u8>> {
 
         let mut groups: HashMap<String, GroupState> = HashMap::new();
         for raw in &rows {
-            let key = msgpack_scan::build_group_key(raw, &active_specs)?;
+            let key = msgpack_scan::build_group_key(raw, &active_specs, crs)?;
             let state = match groups.entry(key) {
                 std::collections::hash_map::Entry::Occupied(slot) => slot.into_mut(),
                 std::collections::hash_map::Entry::Vacant(slot) => {
                     slot.insert(GroupState::new(&real_aggs)?)
                 }
             };
-            state.feed(&real_aggs, raw)?;
+            state.feed(&real_aggs, raw, crs)?;
         }
         // The grand-total set yields one row even over zero input rows.
         if active.is_empty() && groups.is_empty() {
@@ -133,10 +137,10 @@ fn grouping_set_rows(params: GroupingSetsParams<'_>) -> crate::Result<Vec<u8>> {
     }
 
     // HAVING is WHERE-shaped: an evaluation error fails the statement.
-    retain_having(&mut all_rows, &having_predicates)?;
+    retain_having(&mut all_rows, &having_predicates, crs)?;
     // GROUPING() outputs already carry their user aliases.
     apply_user_aliases_to_rows(&mut all_rows, &real_aggs);
-    sort_aggregated_rows(&mut all_rows, sort_keys)?;
+    sort_aggregated_rows(&mut all_rows, sort_keys, crs)?;
     all_rows.truncate(limit);
 
     super::super::response_codec::encode_value_vec(&all_rows)
@@ -146,10 +150,11 @@ fn grouping_set_rows(params: GroupingSetsParams<'_>) -> crate::Result<Vec<u8>> {
 fn matching_rows<'d>(
     docs: &'d [(String, Vec<u8>)],
     filters: &[ScanFilter],
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<Vec<&'d [u8]>> {
     let mut rows = Vec::with_capacity(docs.len());
     for (_, raw) in docs {
-        if ScanFilter::all_match_binary(filters, raw)? {
+        if ScanFilter::all_match_binary(filters, raw, crs)? {
             rows.push(raw.as_slice());
         }
     }

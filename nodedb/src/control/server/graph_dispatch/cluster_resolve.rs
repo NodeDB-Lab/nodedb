@@ -69,6 +69,15 @@ pub(in crate::control::server::graph_dispatch) async fn dispatch_superstep_to_no
         if linearizable {
             super::read_groups::confirm_graph_read(shared_arc, database_id, &plan).await?;
         }
+        // A historical read runs only once this node installed its cut.
+        crate::control::read_cut::await_read_cut(
+            shared_arc,
+            &plan,
+            crate::control::server::shared::session::StatementDeadline::after(
+                std::time::Duration::from_millis(deadline_ms),
+            ),
+        )
+        .await?;
         let node_result = execute_plan_all_local_cores(
             shared_arc.as_ref(),
             tenant_id,

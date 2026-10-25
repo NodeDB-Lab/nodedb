@@ -9,22 +9,15 @@
 //! metres, nothing wraps, and `min_lng <= max_lng` always holds for a
 //! non-empty box.
 
-use crate::geometry::Geometry;
+use crate::geometry::{Geometry, Srid};
+use nodedb_srid::{CrsKind, SridResolver, UnknownSrid};
 use serde::{Deserialize, Serialize};
 use zerompk::{FromMessagePack, ToMessagePack};
 
-/// Metres per degree of latitude, the WGS 84 meridian average used by the
-/// equirectangular expansion.
-const METRES_PER_DEGREE_LAT: f64 = 110_540.0;
-
-/// Metres per degree of longitude at the equator (WGS 84 semi-major axis
-/// times π / 180, rounded).
-const METRES_PER_DEGREE_LNG_EQUATOR: f64 = 111_320.0;
-
 /// The coordinate space a bounding box lives in.
 ///
-/// Derived from the SRID of the geometries it bounds
-/// (`Srid::bbox_space`). Union and enlargement depend on it: only
+/// Derived from the kind of the SRID of the geometries it bounds
+/// ([`BboxSpace::of`]). Union and enlargement depend on it: only
 /// geographic longitude wraps at ±180°.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum BboxSpace {
@@ -33,6 +26,22 @@ pub enum BboxSpace {
     Geographic,
     /// Projected metres. No axis wraps.
     Planar,
+}
+
+impl From<CrsKind> for BboxSpace {
+    fn from(kind: CrsKind) -> Self {
+        match kind {
+            CrsKind::Geographic => BboxSpace::Geographic,
+            CrsKind::Projected => BboxSpace::Planar,
+        }
+    }
+}
+
+impl BboxSpace {
+    /// The space of `srid`, from its kind in `ctx`.
+    pub fn of(ctx: &dyn SridResolver, srid: Srid) -> Result<BboxSpace, UnknownSrid> {
+        ctx.kind(srid).map(BboxSpace::from)
+    }
 }
 
 /// An axis-aligned bounding box. The `lng` fields hold x and the `lat` fields
@@ -191,36 +200,6 @@ impl BoundingBox {
         } else {
             self.min_lng = self.min_lng.min(lng);
             self.max_lng = self.max_lng.max(lng);
-        }
-    }
-
-    /// Expand by meters in geographic space. Same as
-    /// `expand_meters_in(meters, BboxSpace::Geographic)`.
-    pub fn expand_meters(&self, meters: f64) -> BoundingBox {
-        self.expand_meters_in(meters, BboxSpace::Geographic)
-    }
-
-    /// Expand by `meters` on every side, in `space`.
-    ///
-    /// Geographic space converts metres to degrees with an equirectangular
-    /// approximation (<0.5% error within ±70° latitude). Planar space adds
-    /// the metres directly.
-    pub fn expand_meters_in(&self, meters: f64, space: BboxSpace) -> BoundingBox {
-        let (dlng, dlat) = match space {
-            BboxSpace::Geographic => {
-                let center_lat = (self.min_lat + self.max_lat) / 2.0;
-                (
-                    meters / (METRES_PER_DEGREE_LNG_EQUATOR * center_lat.to_radians().cos()),
-                    meters / METRES_PER_DEGREE_LAT,
-                )
-            }
-            BboxSpace::Planar => (meters, meters),
-        };
-        BoundingBox {
-            min_lng: self.min_lng - dlng,
-            min_lat: self.min_lat - dlat,
-            max_lng: self.max_lng + dlng,
-            max_lat: self.max_lat + dlat,
         }
     }
 
@@ -456,25 +435,10 @@ mod tests {
     }
 
     #[test]
-    fn planar_expand_adds_metres_directly() {
-        let bb = BoundingBox::from_point(500_000.0, 100.0);
-        let e = bb.expand_meters_in(250.0, BboxSpace::Planar);
-        assert_eq!((e.min_lng, e.max_lng), (499_750.0, 500_250.0));
-        assert_eq!((e.min_lat, e.max_lat), (-150.0, 350.0));
-    }
-
-    #[test]
     fn overlap_area_partial() {
         let a = BoundingBox::new(0.0, 0.0, 10.0, 10.0);
         let b = BoundingBox::new(5.0, 5.0, 15.0, 15.0);
         assert!((a.overlap_area(&b) - 25.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn expand_meters_basic() {
-        let bb = BoundingBox::from_point(0.0, 0.0);
-        let expanded = bb.expand_meters(1000.0);
-        assert!((expanded.min_lat - (-0.00905)).abs() < 0.001);
     }
 
     #[test]

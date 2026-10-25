@@ -10,7 +10,7 @@ use nodedb_types::columnar::StrictSchema;
 
 use crate::bridge::envelope::{ErrorCode, Response, WriteSetEntry};
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::core_loop::redo_image::StoredRow;
+use crate::data::executor::core_loop::redo_image::WriteSetRow;
 use crate::data::executor::enforcement::unique::PostImage;
 use crate::data::executor::enforcement::write_hook;
 use crate::data::executor::handlers::partial_refusal::{
@@ -51,7 +51,7 @@ pub(in crate::data::executor) struct WriteResolvedRowsCtx<'a> {
     pub want_returning: bool,
     /// The system time every new version lands at on a bitemporal target,
     /// `None` on any other. The collect pass encoded the post-images at it.
-    pub bitemporal_sys_from_ms: Option<i64>,
+    pub bitemporal_sys_from: Option<i64>,
 }
 
 impl CoreLoop {
@@ -73,7 +73,7 @@ impl CoreLoop {
             strict_schema,
             declared_primary_key,
             want_returning,
-            bitemporal_sys_from_ms,
+            bitemporal_sys_from,
         } = ctx;
         let is_strict = strict_schema.is_some();
         let database_id = task.request.database_id.as_u64();
@@ -177,7 +177,7 @@ impl CoreLoop {
                         storage_key: &storage_key,
                         current_bytes: &old_body,
                         updated_bytes: &updated_bytes,
-                        bitemporal_sys_from_ms,
+                        bitemporal_sys_from,
                     },
                 )
                 .and_then(|touched| {
@@ -266,7 +266,7 @@ impl CoreLoop {
                 // carries no pre-dispatch record of it. Then one entry per
                 // moved target row, naming the TARGET collection.
                 let image = self.stored_row_image(
-                    StoredRow {
+                    WriteSetRow {
                         database_id,
                         tid,
                         collection: target_collection,
@@ -275,7 +275,7 @@ impl CoreLoop {
                     },
                     &updated_bytes,
                     // A versioned row landed at the statement's system time.
-                    bitemporal_sys_from_ms,
+                    bitemporal_sys_from,
                 );
                 match image {
                     Ok(image) => write_set.push(image),
@@ -429,7 +429,7 @@ mod tests {
                 strict_schema: None,
                 declared_primary_key: None,
                 want_returning: false,
-                bitemporal_sys_from_ms: None,
+                bitemporal_sys_from: None,
             },
             vec![resolved_row(1, old)],
         );
@@ -481,7 +481,7 @@ mod tests {
                 tenant: TID,
                 coll: COLLECTION,
                 doc_id: &row,
-                sys_from_ms: SEED_MS,
+                sys_from: SEED_MS,
                 valid_from_ms: i64::MIN,
                 valid_until_ms: i64::MAX,
                 body: &doc_format::encode_to_msgpack(&old),
@@ -495,7 +495,7 @@ mod tests {
                 field: "note",
                 value: "old",
                 doc_id: &row,
-                sys_from_ms: SEED_MS,
+                sys_from: SEED_MS,
             })
             .expect("seed index");
 
@@ -529,7 +529,7 @@ mod tests {
                     strict_schema: None,
                     config_key: &config_key,
                     declared_primary_key: None,
-                    bitemporal_sys_from_ms: Some(STATEMENT_MS),
+                    bitemporal_sys_from: Some(STATEMENT_MS),
                 },
             )
             .expect("collect");
@@ -545,7 +545,7 @@ mod tests {
                 strict_schema: None,
                 declared_primary_key: None,
                 want_returning: false,
-                bitemporal_sys_from_ms: Some(STATEMENT_MS),
+                bitemporal_sys_from: Some(STATEMENT_MS),
             },
             rows,
         );
@@ -593,7 +593,7 @@ mod tests {
         assert!(
             matches!(
                 &outcome.write_set[0].effect,
-                RowEffect::Put { version: Some(version), .. } if version.sys_from_ms == STATEMENT_MS
+                RowEffect::Put { version: Some(version), .. } if version.sys_from == STATEMENT_MS
             ),
             "the write set carries the new version: {:?}",
             outcome.write_set
@@ -657,7 +657,7 @@ mod tests {
                 strict_schema: None,
                 declared_primary_key: None,
                 want_returning: false,
-                bitemporal_sys_from_ms: None,
+                bitemporal_sys_from: None,
             },
             rows,
         );

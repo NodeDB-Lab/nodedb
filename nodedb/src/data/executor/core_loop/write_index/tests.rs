@@ -111,7 +111,7 @@ pub(crate) fn wal_task(lsn: u64) -> ExecutionTask {
 pub(crate) fn entry_task(lsn: u64, entry: WriteVersion) -> ExecutionTask {
     ExecutionTask::with_wal_lsn(
         Request {
-            entry_version: Some(entry),
+            entry_version: Some(crate::bridge::envelope::AppliedEntry::unstamped(entry)),
             ..make_request(point_get())
         },
         Some(Lsn::new(lsn)),

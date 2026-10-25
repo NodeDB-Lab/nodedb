@@ -506,8 +506,14 @@ mod tests {
             tid(),
             nodedb_mem::EngineId::Spatial,
         );
-        let mut rtree =
-            crate::engine::spatial::RTree::new(memory, nodedb_types::geometry::Srid::Utm47N);
+        let utm47n = nodedb_types::geometry::Srid::new(32647).expect("srid");
+        let mut rtree = crate::engine::spatial::RTree::new(
+            memory,
+            crate::engine::spatial::TreeSrid {
+                srid: utm47n,
+                space: nodedb_types::BboxSpace::Planar,
+            },
+        );
         rtree.insert(crate::engine::spatial::RTreeEntry {
             id: 1,
             bbox: nodedb_types::BoundingBox::new(0.0, 0.0, 1.0, 1.0),
@@ -518,8 +524,11 @@ mod tests {
         let (_dir, restored) = restore_and_boot(&capture(core));
         assert_eq!(restored.spatial_indexes.get(&key).map(|t| t.len()), Some(1));
         assert_eq!(
-            restored.spatial_indexes.get(&key).map(|t| t.srid()),
-            Some(nodedb_types::geometry::Srid::Utm47N),
+            restored.spatial_indexes.get(&key).map(|t| t.tree_srid()),
+            Some(crate::engine::spatial::TreeSrid {
+                srid: utm47n,
+                space: nodedb_types::BboxSpace::Planar,
+            }),
             "the SRID survives the snapshot"
         );
     }

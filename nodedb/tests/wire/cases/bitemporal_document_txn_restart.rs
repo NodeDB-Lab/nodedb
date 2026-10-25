@@ -24,7 +24,7 @@
 //! A `document_strict` bitemporal collection resolves through the SAME
 //! `serialize_document_collection` / `apply_point_put` path: the resolver
 //! decodes the strict Binary Tuple back to MessagePack and carries the identical
-//! three stamp fields (`sys_from_ms`, `valid_from_ms`, `valid_until_ms`), and
+//! three stamp fields (`sys_from`, `valid_from_ms`, `valid_until_ms`), and
 //! the replay decoder / versioned install are storage-mode agnostic. The
 //! schemaless coverage below therefore exercises the exact stamp-carrying
 //! mechanism the strict path relies on; strict is intentionally NOT re-tested

@@ -55,7 +55,6 @@ pub(super) fn bind(binder: &IdentityBinder<'_>, op: &mut GraphOp) -> crate::Resu
         | GraphOp::BspSuperstep(_)
         | GraphOp::WccSuperstep(_)
         | GraphOp::TemporalNeighbors { .. }
-        | GraphOp::TemporalAlgorithm { .. }
         | GraphOp::Stats { .. } => Ok(()),
         // The guards compare edges and documents by name and bind nothing.
         // A TRUNCATE's share reads each edge's surrogates from the core's

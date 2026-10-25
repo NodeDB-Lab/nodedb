@@ -636,7 +636,7 @@ mod tests {
             0,
         )
         .expect("flush committed transaction rows");
-        let stamp = &core.ts_replay_stamps.get(&key).expect("stamp").rows;
+        let stamp = &core.ts_replay.stamps.get(&key).expect("stamp").rows;
         assert!(
             stamp.skips(lsn),
             "the partition's stamp names the transaction record: {stamp:?}"
@@ -731,6 +731,7 @@ mod tests {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "m"),
             filters: Vec::new(),
             updates,
+            system_from: None,
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         });
 
@@ -764,6 +765,7 @@ mod tests {
         let plan = PhysicalPlan::Columnar(ColumnarOp::Delete {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "m"),
             filters: Vec::new(),
+            system_from: None,
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         });
 

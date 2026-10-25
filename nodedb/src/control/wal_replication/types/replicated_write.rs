@@ -393,6 +393,13 @@ pub enum ReplicatedWrite {
         /// Leader-assigned global surrogate for the destination node (binding
         /// key = `dst_id.as_bytes()`).
         dst_surrogate: u32,
+        /// `VALID_TIME <from>` of the write, ms since epoch. `None` takes the
+        /// applying write's wall time.
+        #[serde(default)]
+        valid_from_ms: Option<i64>,
+        /// `UNTIL <until>` of the write. `None` leaves the valid time open.
+        #[serde(default)]
+        valid_until_ms: Option<i64>,
     },
     EdgeDelete {
         collection: String,
@@ -848,13 +855,18 @@ pub enum ReplicatedWrite {
     },
 
     /// Columnar or spatial `TRUNCATE`: every replica clears the collection's
-    /// mutation engine, flushed segments, and R-tree entries.
-    /// `restart_identity` is applied by the applying node's sequence store
-    /// after the clear.
+    /// mutation engine, flushed segments, and R-tree entries. A bitemporal
+    /// collection closes every current key with a tombstone at the ordinal
+    /// the entry's leader stamps (`ReplicatedEntry::system_ordinal`) instead,
+    /// unless `erase_history` is set. `restart_identity` is applied by the
+    /// applying node's sequence store after the clear.
     ColumnarTruncate {
         collection: String,
         #[serde(default)]
         restart_identity: bool,
+        /// See `ColumnarOp::Truncate::erase_history`.
+        #[serde(default)]
+        erase_history: bool,
     },
 
     /// Timeseries `TRUNCATE`: every replica clears the collection's memtable
@@ -1219,6 +1231,8 @@ mod tests {
                 properties: vec![],
                 src_surrogate: 10,
                 dst_surrogate: 20,
+                valid_from_ms: Some(5),
+                valid_until_ms: Some(9),
             },
             ReplicatedWrite::EdgeDelete {
                 collection: "col".into(),

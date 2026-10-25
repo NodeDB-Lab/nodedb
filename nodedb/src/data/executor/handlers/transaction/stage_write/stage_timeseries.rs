@@ -161,7 +161,7 @@ impl CoreLoop {
         // The default timestamp of every untimed row in this batch. The write
         // policy decides against it here, and COMMIT resolve stamps the rows
         // with it, so the stored image is the one decided.
-        let now_ms = self.ingest_now_ms();
+        let now_ms = self.ingest_stamp_ms();
 
         // Decide the whole batch before the first staged put, so a refusal
         // leaves the overlay untouched and reports no affected count.
@@ -175,19 +175,22 @@ impl CoreLoop {
         // byte-identical image and cannot disagree.
         if let Err(error) = crate::data::executor::handlers::timeseries::admit_msgpack_rows(
             rls_write_check,
-            payload,
-            collection
-                .split_once(':')
-                .map(|(_, name)| name)
-                .unwrap_or(collection),
-            self.declared_ts_time_key(
-                task.request.database_id,
-                crate::types::TenantId::new(tid),
-                collection,
-            ),
-            now_ms,
+            crate::data::executor::handlers::timeseries::MsgpackBatch {
+                payload,
+                measurement: collection
+                    .split_once(':')
+                    .map(|(_, name)| name)
+                    .unwrap_or(collection),
+                time_key: self.declared_ts_time_key(
+                    task.request.database_id,
+                    crate::types::TenantId::new(tid),
+                    collection,
+                ),
+                default_timestamp_ms: now_ms,
+            },
             tid,
             collection,
+            &self.crs_context(),
         ) {
             return self.response_error(task, error);
         }
@@ -333,7 +336,7 @@ impl CoreLoop {
                 },
             );
         }
-        let now_ms = self.ingest_now_ms();
+        let now_ms = self.ingest_stamp_ms();
         // The write policy decides the parsed lines, through the very same
         // helper the Data-Plane ingest gate uses, so the statement-time
         // decision and the COMMIT-time one are made on a byte-identical image.
@@ -350,6 +353,7 @@ impl CoreLoop {
             now_ms,
             tid,
             collection,
+            &self.crs_context(),
         ) {
             return self.response_error(task, error);
         }

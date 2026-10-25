@@ -59,6 +59,7 @@ impl CoreLoop {
                     &Value::Object(fields),
                     tid,
                     collection,
+                    &self.crs_context(),
                 )?;
                 rows.push((surrogate, bytes));
             }
@@ -95,7 +96,7 @@ impl CoreLoop {
                     identity: &identity_column,
                     vector: field,
                 };
-                vector_stored_rows_payload(spec, rls_filters, columns, &stored)
+                vector_stored_rows_payload(spec, rls_filters, columns, &stored, &self.crs_context())
                     .map_err(ErrorCode::from)?
             }
             None => response_codec::encode_affected(rows.len() as u64),

@@ -121,7 +121,14 @@ fn rls_policies_enforce_independently_per_tenant() {
     // Tenant A blocked on pending.
     assert!(
         store
-            .check_write_with_auth(TENANT_A, "orders", &pending, &make_auth(TENANT_A), NOOP)
+            .check_write_with_auth(
+                TENANT_A,
+                "orders",
+                &pending,
+                &make_auth(TENANT_A),
+                NOOP,
+                &nodedb_crs::CrsContext::builtin_only()
+            )
             .is_err(),
         "Tenant A's RLS must block pending write"
     );
@@ -129,7 +136,14 @@ fn rls_policies_enforce_independently_per_tenant() {
     // Tenant B has no policy yet — write allowed regardless of status.
     assert!(
         store
-            .check_write_with_auth(TENANT_B, "orders", &pending, &make_auth(TENANT_B), NOOP)
+            .check_write_with_auth(
+                TENANT_B,
+                "orders",
+                &pending,
+                &make_auth(TENANT_B),
+                NOOP,
+                &nodedb_crs::CrsContext::builtin_only()
+            )
             .is_ok(),
         "Tenant B must be unrestricted before its own policy is created"
     );
@@ -142,7 +156,14 @@ fn rls_policies_enforce_independently_per_tenant() {
     // Tenant B is now blocked on pending.
     assert!(
         store
-            .check_write_with_auth(TENANT_B, "orders", &pending, &make_auth(TENANT_B), NOOP)
+            .check_write_with_auth(
+                TENANT_B,
+                "orders",
+                &pending,
+                &make_auth(TENANT_B),
+                NOOP,
+                &nodedb_crs::CrsContext::builtin_only()
+            )
             .is_err(),
         "Tenant B's own RLS must block pending write after b_gate is created"
     );
@@ -150,7 +171,14 @@ fn rls_policies_enforce_independently_per_tenant() {
     // Tenant A is still blocked on pending (unchanged).
     assert!(
         store
-            .check_write_with_auth(TENANT_A, "orders", &pending, &make_auth(TENANT_A), NOOP)
+            .check_write_with_auth(
+                TENANT_A,
+                "orders",
+                &pending,
+                &make_auth(TENANT_A),
+                NOOP,
+                &nodedb_crs::CrsContext::builtin_only()
+            )
             .is_err(),
         "Tenant A's RLS must still block pending write"
     );
@@ -158,12 +186,26 @@ fn rls_policies_enforce_independently_per_tenant() {
     // Both tenants allow approved writes.
     assert!(
         store
-            .check_write_with_auth(TENANT_A, "orders", &approved, &make_auth(TENANT_A), NOOP)
+            .check_write_with_auth(
+                TENANT_A,
+                "orders",
+                &approved,
+                &make_auth(TENANT_A),
+                NOOP,
+                &nodedb_crs::CrsContext::builtin_only()
+            )
             .is_ok()
     );
     assert!(
         store
-            .check_write_with_auth(TENANT_B, "orders", &approved, &make_auth(TENANT_B), NOOP)
+            .check_write_with_auth(
+                TENANT_B,
+                "orders",
+                &approved,
+                &make_auth(TENANT_B),
+                NOOP,
+                &nodedb_crs::CrsContext::builtin_only()
+            )
             .is_ok()
     );
 }

@@ -27,6 +27,7 @@ pub fn stamp_rows(
     rows: &mut [ShapedRow],
     columns: &[CpComputedColumn],
     access: &dyn SequenceAccess,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<()> {
     if columns.is_empty() {
         return Ok(());
@@ -34,8 +35,8 @@ pub fn stamp_rows(
     for row in rows.iter_mut() {
         let mut doc = row_document(row);
         for column in columns {
-            let resolved = resolve_accessors(&column.expr, &doc, access)?;
-            let value = resolved.eval(&doc)?;
+            let resolved = resolve_accessors(&column.expr, &doc, access, crs)?;
+            let value = resolved.eval(&doc, crs)?;
             if let Some(map) = doc.as_object_mut() {
                 map.insert(column.alias.clone(), value.clone());
             }
@@ -126,7 +127,13 @@ mod tests {
     fn each_row_gets_its_own_nextval_in_row_order() {
         let access = FakeAccess::new();
         let mut rows = rows(3);
-        stamp_rows(&mut rows, &[column("n", accessor("nextval"))], &access).expect("stamp");
+        stamp_rows(
+            &mut rows,
+            &[column("n", accessor("nextval"))],
+            &access,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("stamp");
         let stamped: Vec<&Value> = rows.iter().map(|r| &r["n"]).collect();
         assert_eq!(
             stamped,
@@ -145,6 +152,7 @@ mod tests {
                 column("c", accessor("currval")),
             ],
             &access,
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .expect("stamp");
         assert_eq!(rows[0]["n"], rows[0]["c"]);
@@ -170,6 +178,7 @@ mod tests {
                 ),
             ],
             &access,
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .expect("stamp");
         assert_eq!(rows[0]["doubled"], Value::Integer(2));
@@ -190,6 +199,7 @@ mod tests {
                 },
             )],
             &access,
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .expect("stamp");
         assert_eq!(rows[0]["tagged"], Value::Integer(1));
@@ -200,8 +210,13 @@ mod tests {
     fn currval_before_nextval_fails_with_its_own_class() {
         let access = FakeAccess::new();
         let mut rows = rows(1);
-        let err = stamp_rows(&mut rows, &[column("c", accessor("currval"))], &access)
-            .expect_err("must fail");
+        let err = stamp_rows(
+            &mut rows,
+            &[column("c", accessor("currval"))],
+            &access,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect_err("must fail");
         assert!(matches!(
             err,
             crate::Error::ObjectNotInPrerequisiteState { .. }
@@ -223,6 +238,7 @@ mod tests {
                 },
             )],
             &access,
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .expect_err("must fail");
         assert!(matches!(err, crate::Error::DivisionByZero));
@@ -232,7 +248,13 @@ mod tests {
     fn no_columns_leaves_rows_untouched() {
         let access = FakeAccess::new();
         let mut rows = rows(2);
-        stamp_rows(&mut rows, &[], &access).expect("stamp");
+        stamp_rows(
+            &mut rows,
+            &[],
+            &access,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("stamp");
         assert!(rows.iter().all(|r| r.len() == 1));
     }
 }

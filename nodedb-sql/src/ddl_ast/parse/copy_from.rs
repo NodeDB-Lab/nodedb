@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Parse `COPY <collection> FROM '<path>' [WITH (...)]`.
+//! Parse `COPY <collection> FROM '<source>' [WITH (...)]` and the raster
+//! list form `COPY <array> FROM ('<source>', ...) WITH (FORMAT geotiff, ...)`.
 //!
-//! The server-side file-path form parses here. Its options parse in
+//! A source is a server path, an `http(s)://` URL or an `s3://bucket/key`
+//! object. Text formats read one server file. A raster reads one source per
+//! band group, and every remote source needs `FORMAT geotiff` or a `.tif`
+//! path. The file-path form parses here. Its options parse in
 //! `copy_options`. The STDIN streaming shape
 //! (`COPY <name> FROM STDIN`) parses in `copy_from_stdin`. The restore shape
 //! `COPY tenant_restore(<id>) FROM STDIN` returns `None`, so dispatch falls
@@ -14,7 +18,7 @@
 
 use super::clause::{ClauseCursor, Tok, Token, tokenize};
 use super::copy_options::{detect_format_from_path, parse_copy_options};
-use crate::ddl_ast::statement::{MiscStmt, NodedbStatement};
+use crate::ddl_ast::statement::{CopyFormat, CopySource, MiscStmt, NodedbStatement};
 use crate::error::SqlError;
 
 /// Which way a `COPY` statement moves rows.
@@ -103,29 +107,68 @@ pub(super) fn try_parse(
 }
 
 fn parse_copy_from(sql: &str) -> Result<NodedbStatement, SqlError> {
-    // Grammar: COPY <name> FROM '<path>' [WITH (...)]
+    // Grammar: COPY <name> FROM '<source>' | ('<source>', ...) [WITH (...)]
     let toks = tokenize(sql);
     let mut c = ClauseCursor::new(sql, &toks, "COPY");
     c.expect_keyword("COPY")?;
     let collection = copy_collection_name(&mut c)?;
     c.expect_keyword("FROM")?;
-    let path = c
-        .string("FROM")
-        .map_err(|_| c.error("expected single-quoted path after FROM"))?;
+    let listed = c.peek_punct('(');
+    let sources = if listed {
+        c.paren_list("FROM sources", copy_source)?
+    } else {
+        vec![copy_source(&mut c)?]
+    };
     let options = parse_copy_options(&mut c)?;
     let format = match options.format.clone() {
         Some(f) => Some(f),
-        None => detect_format_from_path(&path)?,
+        None => match sources.first() {
+            Some(first) => detect_format_from_path(first.format_hint())?,
+            None => None,
+        },
     };
     options.check_for(format.as_ref())?;
+    check_sources(&c, &sources, listed, format.as_ref())?;
     Ok(NodedbStatement::Misc(MiscStmt::CopyFromFile {
         collection,
-        path,
+        sources,
         format,
         delimiter: options.delimiter,
         header: options.header.unwrap_or(true),
         raster: options.raster,
     }))
+}
+
+/// One quoted source.
+fn copy_source(c: &mut ClauseCursor<'_, '_>) -> Result<CopySource, SqlError> {
+    let text = c
+        .string("FROM")
+        .map_err(|_| c.error("expected a single-quoted path or URL after FROM"))?;
+    CopySource::parse(&text).map_err(|e| c.error(format!("FROM: {e}")))
+}
+
+/// A text format reads one server file. A list of sources, and every
+/// remote source, need `FORMAT geotiff`.
+fn check_sources(
+    c: &ClauseCursor<'_, '_>,
+    sources: &[CopySource],
+    listed: bool,
+    format: Option<&CopyFormat>,
+) -> Result<(), SqlError> {
+    if format == Some(&CopyFormat::GeoTiff) {
+        return Ok(());
+    }
+    if listed {
+        return Err(
+            c.error("a list of sources loads one raster per band group and needs FORMAT geotiff")
+        );
+    }
+    match sources {
+        [CopySource::File(_)] => Ok(()),
+        _ => Err(
+            c.error("text formats read one server file; HTTP and S3 sources need FORMAT geotiff")
+        ),
+    }
 }
 
 /// The copied collection: one bare or quoted name, quotes removed and
@@ -143,7 +186,6 @@ pub(super) fn copy_collection_name(c: &mut ClauseCursor<'_, '_>) -> Result<Strin
 mod tests {
     use super::*;
     use crate::ddl_ast::parse::dispatch::parse;
-    use crate::ddl_ast::statement::CopyFormat;
 
     fn ok(sql: &str) -> NodedbStatement {
         parse(sql).expect("expected Some").expect("expected Ok")
@@ -160,10 +202,12 @@ mod tests {
         let stmt = ok("COPY usersßﬀİ FROM '/tmp/users.ndjson'");
         match stmt {
             NodedbStatement::Misc(MiscStmt::CopyFromFile {
-                collection, path, ..
+                collection,
+                sources,
+                ..
             }) => {
                 assert_eq!(collection, "usersßﬀi\u{307}");
-                assert_eq!(path, "/tmp/users.ndjson");
+                assert_eq!(sources, vec![CopySource::File("/tmp/users.ndjson".into())]);
             }
             other => panic!("unexpected: {other:?}"),
         }
@@ -175,14 +219,14 @@ mod tests {
         match stmt {
             NodedbStatement::Misc(MiscStmt::CopyFromFile {
                 collection,
-                path,
+                sources,
                 format,
                 delimiter,
                 header,
                 raster,
             }) => {
                 assert_eq!(collection, "users");
-                assert_eq!(path, "/tmp/users.ndjson");
+                assert_eq!(sources, vec![CopySource::File("/tmp/users.ndjson".into())]);
                 assert_eq!(format, Some(CopyFormat::Ndjson));
                 assert_eq!(delimiter, None);
                 assert!(header);
@@ -302,6 +346,55 @@ mod tests {
     fn copy_from_stdin_returns_none() {
         // Should return None so backup/restore handler catches it.
         assert!(parse("COPY tenant_restore(1) FROM STDIN").is_none());
+    }
+
+    #[test]
+    fn a_source_list_loads_one_raster_per_band_group() {
+        let stmt = ok("COPY scene FROM ('/B4.TIF', 'https://h.example/B5.TIF', \
+             's3://bucket/QA_PIXEL.TIF') WITH (FORMAT geotiff, BANDS (red, nir, qa))");
+        match stmt {
+            NodedbStatement::Misc(MiscStmt::CopyFromFile {
+                sources, format, ..
+            }) => {
+                assert_eq!(format, Some(CopyFormat::GeoTiff));
+                assert_eq!(
+                    sources,
+                    vec![
+                        CopySource::File("/B4.TIF".into()),
+                        CopySource::Http("https://h.example/B5.TIF".into()),
+                        CopySource::S3 {
+                            bucket: "bucket".into(),
+                            key: "QA_PIXEL.TIF".into()
+                        },
+                    ]
+                );
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remote_and_listed_sources_need_geotiff() {
+        let e = err("COPY users FROM 'https://h.example/u.csv'");
+        assert!(e.to_string().contains("FORMAT geotiff"), "{e}");
+        let e = err("COPY users FROM ('/a.csv', '/b.csv') WITH (FORMAT csv)");
+        assert!(e.to_string().contains("FORMAT geotiff"), "{e}");
+        let e = err("COPY scene FROM 'ftp://h/a.tif'");
+        assert!(e.to_string().contains("scheme"), "{e}");
+        let e = err("COPY scene FROM ()");
+        assert!(matches!(e, SqlError::Parse { .. }));
+    }
+
+    #[test]
+    fn an_s3_url_detects_geotiff_from_its_key() {
+        let stmt = ok("COPY scene FROM 's3://landsat/a/B4.TIF'");
+        assert!(matches!(
+            stmt,
+            NodedbStatement::Misc(MiscStmt::CopyFromFile {
+                format: Some(CopyFormat::GeoTiff),
+                ..
+            })
+        ));
     }
 
     #[test]

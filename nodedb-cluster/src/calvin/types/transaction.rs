@@ -157,6 +157,10 @@ pub struct TxClass {
     #[serde(skip)]
     #[msgpack(ignore)]
     participating_vshards: Vec<VShardId>,
+    /// Cached vShards the write set names. Re-derived on decode; not serialized.
+    #[serde(skip)]
+    #[msgpack(ignore)]
+    write_vshards: Vec<u32>,
 }
 
 impl TxClass {
@@ -305,6 +309,7 @@ impl TxClass {
             restore_id: 0,
             user_roles: Vec::new(),
             participating_vshards: Vec::new(),
+            write_vshards: Vec::new(),
         }
     }
 
@@ -327,6 +332,7 @@ impl TxClass {
             let vshard = write_vshards.first().map(|v| v.as_u32()).unwrap_or(0);
             return Err(CalvinError::SingleVshardTxn { vshard });
         }
+        self.write_vshards = ascending_vshards(&write_vshards);
         self.participating_vshards = self.union_participants(write_vshards)?;
         Ok(self)
     }
@@ -379,13 +385,10 @@ impl TxClass {
         )
     }
 
-    /// The vShards the write set names: the active participants of a
-    /// dependent-read transaction.
-    ///
-    /// Fails when a write-set collection name lacks the qualifier of the
-    /// class's database. Construction rejects such a class.
-    pub fn active_vshards(&self) -> Result<Vec<u32>, CalvinError> {
-        self.write_vshards()
+    /// The vShards the write set names, ascending: the active participants
+    /// of a dependent-read transaction.
+    pub fn active_vshards(&self) -> &[u32] {
+        &self.write_vshards
     }
 
     /// The vShards that must receive this transaction's slice.
@@ -402,92 +405,40 @@ impl TxClass {
     /// the wire or out of the Raft log. Fails when a key-set collection name
     /// lacks the qualifier of `database_id`. Construction rejects such a
     /// class, so a failure here means the decoded bytes are not a class any
-    /// constructor built.
+    /// constructor built. Fails too when `body_plans` is out of order or repeats.
     pub fn restore_derived(&mut self) -> Result<(), CalvinError> {
+        self.check_body_plans()?;
         let write_vshards = self
             .write_set
             .participating_vshards_in_database(self.database_id)?;
+        self.write_vshards = ascending_vshards(&write_vshards);
         self.participating_vshards = self.union_participants(write_vshards)?;
         Ok(())
-    }
-
-    /// Set the lock-table owner id propagated to `SequencedTxn.lock_owner`.
-    pub fn set_lock_owner(&mut self, owner: Option<TxnIdWire>) {
-        self.lock_owner = owner;
-    }
-
-    /// Set the WAL event-source code the transaction's writes carry.
-    pub fn set_event_source(&mut self, code: u8) {
-        self.event_source = code;
-    }
-
-    /// Set the roles of the identity whose writes the transaction commits.
-    pub fn set_user_roles(&mut self, user_roles: Vec<String>) {
-        self.user_roles = user_roles;
-    }
-
-    /// Mark the transaction as the re-issue of RESTORE `restore_id`.
-    pub fn set_restore_id(&mut self, restore_id: u64) {
-        self.restore_id = restore_id;
-    }
-
-    /// Set the indexes into `plans` of the plans a trigger body buffered.
-    pub fn set_body_plans(&mut self, body_plans: Vec<u32>) {
-        self.body_plans = body_plans;
-    }
-
-    /// Set the encoded messages the transaction's trigger bodies published.
-    pub fn set_publishes(&mut self, publishes: Vec<u8>) {
-        self.publishes = publishes;
     }
 
     /// The participant whose redo record carries the transaction's messages:
     /// the lowest vShard the transaction writes. Every write participant
     /// resolves a redo record, so this one always commits them. `None` when
     /// the write set names no vShard.
-    ///
-    /// Fails when a write-set collection name lacks the qualifier of the
-    /// class's database. Construction rejects such a class.
-    pub fn publish_vshard(&self) -> Result<Option<u32>, CalvinError> {
-        Ok(self.write_vshards()?.into_iter().min())
-    }
-
-    /// Set the encoded dedup key of the cross-shard request the transaction
-    /// applies, and the vShard the request addresses.
-    pub fn set_applied_key(&mut self, applied_key: Vec<u8>, vshard: u32) {
-        self.applied_key = applied_key;
-        self.applied_key_vshard = vshard;
+    pub fn publish_vshard(&self) -> Option<u32> {
+        self.write_vshards.first().copied()
     }
 
     /// The participant whose redo record carries the applied key: the vShard
     /// the request addresses when the transaction writes it, else the lowest
     /// vShard it writes. `None` for a transaction with no applied key.
-    ///
-    /// Fails as [`Self::publish_vshard`] does.
-    pub fn applied_key_home(&self) -> Result<Option<u32>, CalvinError> {
+    pub fn applied_key_home(&self) -> Option<u32> {
         if self.applied_key.is_empty() {
-            return Ok(None);
+            return None;
         }
-        let writes = self.write_vshards()?;
-        if writes.contains(&self.applied_key_vshard) {
-            return Ok(Some(self.applied_key_vshard));
+        if self
+            .write_vshards
+            .binary_search(&self.applied_key_vshard)
+            .is_ok()
+        {
+            return Some(self.applied_key_vshard);
         }
-        Ok(writes.into_iter().min())
-    }
-
-    /// Every vShard of the class's database the write set names.
-    fn write_vshards(&self) -> Result<Vec<u32>, CalvinError> {
-        Ok(self
-            .write_set
-            .participating_vshards_in_database(self.database_id)?
-            .into_iter()
-            .map(|vshard| vshard.as_u32())
-            .collect())
-    }
-
-    /// Set the collections the plans name, with their planned incarnations.
-    pub fn set_incarnations(&mut self, incarnations: Vec<CalvinIncarnation>) {
-        self.incarnations = incarnations;
+        self.publish_vshard()
     }
 }
 
@@ -510,11 +461,20 @@ pub struct CalvinIncarnation {
     pub incarnation: nodedb_types::Hlc,
 }
 
+/// `vshards` as ascending, distinct ids. The redo homes take the lowest
+/// and search the rest.
+fn ascending_vshards(vshards: &[VShardId]) -> Vec<u32> {
+    let mut ids: Vec<u32> = vshards.iter().map(|v| v.as_u32()).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::primitives::{
-        EngineKeySet, EngineTag, PassiveReadKey, ReadKeyIdent, SortedVec, VersionedReadEntry,
-        VersionedReadSet,
+        EngineKeySet, EngineTag, HomedPair, PassiveReadKey, ReadKeyIdent, SortedVec,
+        VersionedReadEntry, VersionedReadSet,
     };
     use super::*;
     use nodedb_types::id::CollectionKey;
@@ -707,6 +667,33 @@ mod tests {
     // ── MessagePack roundtrips ────────────────────────────────────────────────
 
     #[test]
+    fn restore_derived_rebuilds_the_cached_write_vshards() {
+        let tc = make_tx_class(multi_vshard_write_set());
+        let bytes = zerompk::to_msgpack_vec(&tc).unwrap();
+        let mut decoded: TxClass = zerompk::from_msgpack(&bytes).unwrap();
+        assert!(
+            decoded.write_vshards.is_empty(),
+            "the cache is not on the wire"
+        );
+        decoded.restore_derived().expect("restore derived");
+        let fresh: Vec<u32> = decoded
+            .write_set
+            .participating_vshards_in_database(decoded.database_id)
+            .expect("participants")
+            .into_iter()
+            .map(|v| v.as_u32())
+            .collect();
+        let mut fresh = fresh;
+        fresh.sort_unstable();
+        fresh.dedup();
+        assert!(fresh.len() >= 2);
+        assert_eq!(decoded.write_vshards, fresh);
+        assert_eq!(decoded.active_vshards(), fresh.as_slice());
+        assert_eq!(decoded.publish_vshard(), fresh.iter().copied().min());
+        assert_eq!(decoded.write_vshards, tc.write_vshards);
+    }
+
+    #[test]
     fn tx_class_msgpack_roundtrip() {
         let tc = make_tx_class(multi_vshard_write_set());
         let bytes = zerompk::to_msgpack_vec(&tc).unwrap();
@@ -806,7 +793,10 @@ mod tests {
         let (_src, _dst, sv, dv) = two_distinct_key_vshards();
         ReadWriteSet::new(vec![EngineKeySet::Edge {
             collection: "follows".to_owned(),
-            edges: SortedVec::new(vec![(1u32, 2u32)]),
+            edges: SortedVec::new(vec![
+                HomedPair::on(sv, (1u32, 2u32)),
+                HomedPair::on(dv, (1u32, 2u32)),
+            ]),
             home_vshards: SortedVec::new(vec![sv, dv]),
         }])
     }
@@ -959,19 +949,24 @@ mod tests {
             .map(|vshard| vshard.as_u32())
             .min();
         assert!(lowest.is_some());
-        assert_eq!(decoded.publish_vshard(), Ok(lowest));
+        assert_eq!(decoded.publish_vshard(), lowest);
     }
 
-    /// A class whose write set lacks its database's qualifier cannot name a
-    /// write vShard. Both homes report the error instead of `None`.
+    /// A write set that lacks its database's qualifier names no write vShard,
+    /// so construction refuses the class.
     #[test]
-    fn redo_homes_report_an_underivable_write_set() {
-        let mut tx = make_tx_class(multi_vshard_write_set());
-        tx.set_applied_key(vec![0x80], 0);
+    fn construction_refuses_an_underivable_write_set() {
         // The bare document collection names carry no `9/` qualifier.
-        tx.database_id = DatabaseId::new(9);
-        assert!(tx.publish_vshard().is_err());
-        assert!(tx.applied_key_home().is_err());
+        let built = TxClass::new_in_database(
+            ReadWriteSet::new(vec![]),
+            multi_vshard_write_set(),
+            vec![0x01, 0x02],
+            TenantId::new(1),
+            DatabaseId::new(9),
+            None,
+            VersionedReadSet::default(),
+        );
+        assert!(built.is_err());
     }
 
     /// The applied key rides the vShard its request addresses when the
@@ -987,7 +982,7 @@ mod tests {
             VersionedReadSet::default(),
         )
         .expect("valid TxClass");
-        assert_eq!(tx.applied_key_home(), Ok(None), "no key, no home");
+        assert_eq!(tx.applied_key_home(), None, "no key, no home");
         let mut homes: Vec<u32> = tx
             .participating_vshards()
             .iter()
@@ -1000,12 +995,12 @@ mod tests {
         let mut decoded: TxClass = zerompk::from_msgpack(&bytes).expect("decode");
         decoded.restore_derived().expect("restore derived");
         assert_eq!(decoded.applied_key, vec![0x80]);
-        assert_eq!(decoded.applied_key_home(), Ok(Some(highest)));
+        assert_eq!(decoded.applied_key_home(), Some(highest));
         let unwritten = (0..u32::MAX)
             .find(|vshard| !homes.contains(vshard))
             .unwrap_or(u32::MAX);
         decoded.set_applied_key(vec![0x80], unwritten);
-        assert_eq!(decoded.applied_key_home(), Ok(Some(lowest)));
+        assert_eq!(decoded.applied_key_home(), Some(lowest));
     }
 
     /// The metadata floor survives the codec, so every replica waits for the
@@ -1059,7 +1054,10 @@ mod tests {
 
         let ws = ReadWriteSet::new(vec![EngineKeySet::Edge {
             collection: "follows".to_owned(),
-            edges: SortedVec::new(vec![(1u32, 2u32)]),
+            edges: SortedVec::new(vec![
+                HomedPair::on(src_v, (1u32, 2u32)),
+                HomedPair::on(dst_v, (1u32, 2u32)),
+            ]),
             home_vshards: SortedVec::new(vec![src_v, dst_v]),
         }]);
 
@@ -1246,7 +1244,7 @@ mod tests {
         let only = VShardId::from_key(b"same").as_u32();
         let ws = ReadWriteSet::new(vec![EngineKeySet::Edge {
             collection: "follows".to_owned(),
-            edges: SortedVec::new(vec![(1u32, 2u32)]),
+            edges: SortedVec::new(vec![HomedPair::on(only, (1u32, 2u32))]),
             home_vshards: SortedVec::new(vec![only, only]),
         }]);
         let got: Vec<u32> = ws

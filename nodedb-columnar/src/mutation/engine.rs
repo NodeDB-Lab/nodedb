@@ -11,7 +11,7 @@ use nodedb_types::value::Value;
 use crate::delete_bitmap::DeleteBitmap;
 use crate::error::ColumnarError;
 use crate::memtable::ColumnarMemtable;
-use crate::pk_index::{PkIndex, encode_pk};
+use crate::pk_index::{PkIndex, RowLocation, encode_pk};
 use crate::wal_record::ColumnarWalRecord;
 
 /// Coordinates all columnar mutations for a single collection.
@@ -23,6 +23,10 @@ pub struct MutationEngine {
     pub(super) schema: ColumnarSchema,
     pub(super) memtable: ColumnarMemtable,
     pub(super) pk_index: PkIndex,
+    /// Primary key to the tombstone version the latest bitemporal close of
+    /// that key wrote. A closed key is unbound in `pk_index`. A later insert
+    /// of the key leaves the entry: the row it binds is the newer version.
+    pub(super) closed_index: PkIndex,
     /// Per-segment delete bitmaps. Key = segment_id.
     pub(super) delete_bitmaps: HashMap<u64, DeleteBitmap>,
     /// PK column indices in the schema.
@@ -82,6 +86,7 @@ impl MutationEngine {
             schema,
             memtable,
             pk_index: PkIndex::new(),
+            closed_index: PkIndex::new(),
             delete_bitmaps: HashMap::new(),
             pk_col_indices,
             next_segment_id: 1,
@@ -111,6 +116,12 @@ impl MutationEngine {
     /// Mutable access to the PK index (for cold-start rebuild).
     pub fn pk_index_mut(&mut self) -> &mut PkIndex {
         &mut self.pk_index
+    }
+
+    /// Where the tombstone the latest bitemporal close of `pk_bytes` wrote
+    /// lives. `None` for a key never closed.
+    pub fn closed_location(&self, pk_bytes: &[u8]) -> Option<RowLocation> {
+        self.closed_index.get(pk_bytes).copied()
     }
 
     /// Access a segment's delete bitmap.
@@ -274,11 +285,20 @@ impl MutationEngine {
     ///
     /// A cut row can carry a tombstone: a later row of the same write
     /// replaced it. Those tombstones are cleared too, so a row appended
-    /// later at that index starts live.
+    /// later at that index starts live. A close whose tombstone row is cut
+    /// loses its `closed_index` entry.
     pub(super) fn cut_memtable_to(&mut self, row_count: usize) {
         if let Some(bm) = self.delete_bitmaps.get_mut(&self.memtable_segment_id) {
             bm.unmark_from(row_count as u32);
         }
+        let memtable_segment_id = self.memtable_segment_id;
+        self.closed_index
+            .remap_segment(memtable_segment_id, |row_index| {
+                ((row_index as usize) < row_count).then_some(RowLocation {
+                    segment_id: memtable_segment_id,
+                    row_index,
+                })
+            });
         self.memtable.truncate_to(row_count);
         self.memtable_surrogates.truncate(row_count);
         self.memtable_row_counter = row_count as u32;

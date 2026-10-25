@@ -13,6 +13,7 @@ use crate::data::executor::handlers::transaction::overlay::SpatialOverlayMergePa
 use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
 use nodedb_physical::physical_plan::SpatialPredicate;
+use nodedb_spatial::Metric;
 use nodedb_types::SurrogateBitmap;
 
 use super::prefilter::prefilter_admits;
@@ -36,6 +37,7 @@ pub(super) struct SpatialFullScanParams<'a> {
 impl CoreLoop {
     /// Full scan when no R-tree exists for the field.
     pub(super) fn spatial_full_scan(&self, params: SpatialFullScanParams<'_>) -> Response {
+        let crs = self.crs_context();
         let SpatialFullScanParams {
             task,
             tid,
@@ -51,6 +53,10 @@ impl CoreLoop {
             prefilter,
         } = params;
         debug!(core = self.core_id, %collection, "spatial full scan (no R-tree index yet)");
+        let metric = match Metric::resolve(&crs, query_geom.srid) {
+            Ok(metric) => metric,
+            Err(e) => return self.response_error(task, crate::Error::from(e)),
+        };
 
         // The predicate is evaluated after the read, so the read cannot stop
         // at a multiple of the limit: a match past that prefix would be
@@ -97,12 +103,13 @@ impl CoreLoop {
                 Err(e) => return self.response_error(task, e),
             };
 
-            let doc_geom = match extract_geometry(&doc, field) {
-                Some(g) => g,
-                None => continue,
+            let doc_geom = match extract_geometry(&doc, field, &crs) {
+                Ok(Some(g)) => g,
+                Ok(None) => continue,
+                Err(e) => return self.response_error(task, crate::Error::from(e)),
             };
 
-            match apply_predicate(predicate, query_geom, &doc_geom, distance_meters) {
+            match apply_predicate(predicate, query_geom, &doc_geom, distance_meters, &metric) {
                 Ok(true) => {}
                 Ok(false) => continue,
                 Err(mismatch) => {
@@ -111,14 +118,14 @@ impl CoreLoop {
                 }
             }
 
-            match ScanFilter::all_match_value(attr_filters, &doc) {
+            match ScanFilter::all_match_value(attr_filters, &doc, &crs) {
                 Ok(true) => {}
                 Ok(false) => continue,
                 Err(e) => {
                     return self.response_error(task, ErrorCode::from(e));
                 }
             }
-            match ScanFilter::all_match_value(rls_filters, &doc) {
+            match ScanFilter::all_match_value(rls_filters, &doc, &crs) {
                 Ok(true) => {}
                 Ok(false) => continue,
                 Err(e) => {

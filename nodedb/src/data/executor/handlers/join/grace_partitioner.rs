@@ -148,7 +148,7 @@ pub(super) fn grace_join_in_memory(
             limit,
             probe_collection,
             index_collection,
-            join_filters: &[],
+            join_filters: None,
             emit_unmatched_right,
         });
     }
@@ -181,7 +181,7 @@ pub(super) fn grace_join_in_memory(
             limit: usize::MAX,
             probe_collection,
             index_collection,
-            join_filters: &[],
+            join_filters: None,
             emit_unmatched_right,
         })?;
         results.append(&mut part_results);
@@ -233,7 +233,7 @@ mod tests {
             limit: spec.limit,
             probe_collection: spec.probe_collection,
             index_collection: spec.index_collection,
-            join_filters: &[],
+            join_filters: None,
             emit_unmatched_right: spec.emit_unmatched_right,
         })
         .unwrap()

@@ -71,6 +71,8 @@ pub(super) fn stage_edge_put_with(
             properties,
             src_surrogate: doc_surrogate(src),
             dst_surrogate: doc_surrogate(dst),
+            valid_from_ms: None,
+            valid_until_ms: None,
         })),
     })
 }
@@ -104,6 +106,7 @@ fn neighbors(node: &str, label: &str) -> PhysicalPlan {
         direction: Direction::Out,
         rls_filters: Vec::new(),
         collection: None,
+        scope: nodedb_physical::physical_plan::GraphReadScope::default(),
     })
 }
 
@@ -199,6 +202,8 @@ fn rollback_to_savepoint_restores_cross_set_cleared_tombstone() {
             properties: Vec::new(),
             src_surrogate: doc_surrogate("x"),
             dst_surrogate: doc_surrogate("y"),
+            valid_from_ms: None,
+            valid_until_ms: None,
         }),
     );
 

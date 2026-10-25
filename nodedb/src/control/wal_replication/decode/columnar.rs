@@ -8,10 +8,19 @@ use nodedb_types::RlsWriteCheck;
 
 /// Reconstruct a `ColumnarOp::Truncate` plan. Same idempotent-replay
 /// contract as `kv::truncate`: whole-collection clear, no surrogate binding.
-pub(super) fn truncate(collection: &str, restart_identity: bool) -> PhysicalPlan {
+pub(super) fn truncate(
+    collection: &str,
+    restart_identity: bool,
+    erase_history: bool,
+) -> PhysicalPlan {
     PhysicalPlan::Columnar(ColumnarOp::Truncate {
         collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
         restart_identity,
+        // The data group's leader stamps the entry
+        // (`ReplicatedEntry::system_ordinal`), and every replica's funnel
+        // stamps it.
+        system_from: None,
+        erase_history,
     })
 }
 
@@ -55,12 +64,14 @@ pub(super) fn bulk_dml(
             collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
             filters: filters.to_vec(),
             updates: updates.to_vec(),
+            system_from: None,
             rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
         })
     } else {
         PhysicalPlan::Columnar(ColumnarOp::Delete {
             collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
             filters: filters.to_vec(),
+            system_from: None,
             rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
         })
     }
@@ -106,6 +117,7 @@ pub(super) fn bulk_dml_resolved(
         Ok(PhysicalPlan::Columnar(ColumnarOp::ResolvedUpdate {
             collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
             rows: decoded,
+            system_from: None,
             rls_write_check: RlsWriteCheck::decided_earlier_in_request(),
         }))
     } else {
@@ -116,6 +128,7 @@ pub(super) fn bulk_dml_resolved(
         Ok(PhysicalPlan::Columnar(ColumnarOp::ResolvedDelete {
             collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
             pks,
+            system_from: None,
             rls_write_check: RlsWriteCheck::decided_earlier_in_request(),
         }))
     }
@@ -157,10 +170,13 @@ mod tests {
         let plan = PhysicalPlan::Columnar(ColumnarOp::Truncate {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "cols"),
             restart_identity: true,
+            system_from: None,
+            erase_history: false,
         });
         let PhysicalPlan::Columnar(ColumnarOp::Truncate {
             collection,
             restart_identity,
+            ..
         }) = round_trip(&plan)
         else {
             panic!("decoded to the wrong shape");

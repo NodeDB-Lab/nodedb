@@ -233,6 +233,7 @@ pub(crate) fn streaming_shaped_response(
                 Some(&schema_out),
                 redaction.as_ref().map(|r| r.ctx(&state.redaction)),
                 None,
+                &crate::control::crs_context::crs_set_for(&state),
             )
             .map_err(|e| error_to_pg_in_context("failed to shape streamed batch", &e))?;
             for row in &shaped.rows {
@@ -345,6 +346,7 @@ pub(crate) async fn streaming_star_response(
         Some(schema),
         redaction.as_ref().map(|r| r.ctx(&state.redaction)),
         None,
+        &crate::control::crs_context::crs_set_for(state),
     ) {
         Ok(s) => s,
         Err(e) => {

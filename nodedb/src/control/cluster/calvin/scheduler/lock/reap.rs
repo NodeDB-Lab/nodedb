@@ -111,7 +111,10 @@ mod tests {
     fn reap_releases_expired_shared_reservation() {
         let mut lm = LockManager::new();
         let r = resv(1, 0);
-        assert_eq!(lm.acquire_shared(r, key("k")), AcquireOutcome::Ready);
+        assert_eq!(
+            lm.acquire_shared(r, key("k")).outcome,
+            AcquireOutcome::Ready
+        );
         assert_eq!(lm.lock_count(), 1);
 
         let promoted = lm.reap_expired_shared(100);
@@ -124,7 +127,10 @@ mod tests {
     fn reap_ignores_within_lease() {
         let mut lm = LockManager::new();
         let r = resv(90, 0);
-        assert_eq!(lm.acquire_shared(r, key("k")), AcquireOutcome::Ready);
+        assert_eq!(
+            lm.acquire_shared(r, key("k")).outcome,
+            AcquireOutcome::Ready
+        );
 
         let promoted = lm.reap_expired_shared(50);
         assert!(promoted.is_empty());
@@ -136,7 +142,7 @@ mod tests {
     fn reap_ignores_non_reservation_owner() {
         let mut lm = LockManager::new();
         let t = txn(1, 0);
-        assert_eq!(lm.acquire(t, keyset(&["k"])), AcquireOutcome::Ready);
+        assert_eq!(lm.acquire(t, keyset(&["k"])).outcome, AcquireOutcome::Ready);
 
         let promoted = lm.reap_expired_shared(100);
         assert!(promoted.is_empty());
@@ -152,9 +158,12 @@ mod tests {
     fn reap_skips_self_upgraded_reservation() {
         let mut lm = LockManager::new();
         let r = resv(1, 0);
-        assert_eq!(lm.acquire_shared(r, key("k")), AcquireOutcome::Ready);
+        assert_eq!(
+            lm.acquire_shared(r, key("k")).outcome,
+            AcquireOutcome::Ready
+        );
         // Self-upgrade to exclusive: a commit in flight under this reservation.
-        assert_eq!(lm.acquire(r, keyset(&["k"])), AcquireOutcome::Ready);
+        assert_eq!(lm.acquire(r, keyset(&["k"])).outcome, AcquireOutcome::Ready);
 
         let promoted = lm.reap_expired_shared(100);
         assert!(promoted.is_empty());
@@ -174,10 +183,16 @@ mod tests {
         let r = resv(1, 0);
         let writer = txn(5, 0);
 
-        assert_eq!(lm.acquire_shared(r, key("k")), AcquireOutcome::Ready);
+        assert_eq!(
+            lm.acquire_shared(r, key("k")).outcome,
+            AcquireOutcome::Ready
+        );
         // A younger writer waits behind the shared reservation (wound-wait
         // younger-waits, since the writer's epoch is greater than r's).
-        assert_eq!(lm.acquire(writer, keyset(&["k"])), AcquireOutcome::Blocked);
+        assert_eq!(
+            lm.acquire(writer, keyset(&["k"])).outcome,
+            AcquireOutcome::Blocked
+        );
         assert!(
             lm.table
                 .get(&key("k"))
@@ -207,9 +222,18 @@ mod tests {
         let r = resv(1, 0);
         let later = txn(2, 0);
 
-        assert_eq!(lm.acquire(writer, keyset(&["k"])), AcquireOutcome::Ready);
-        assert_eq!(lm.acquire_shared(r, key("k")), AcquireOutcome::Blocked);
-        assert_eq!(lm.acquire(later, keyset(&["k"])), AcquireOutcome::Blocked);
+        assert_eq!(
+            lm.acquire(writer, keyset(&["k"])).outcome,
+            AcquireOutcome::Ready
+        );
+        assert_eq!(
+            lm.acquire_shared(r, key("k")).outcome,
+            AcquireOutcome::Blocked
+        );
+        assert_eq!(
+            lm.acquire(later, keyset(&["k"])).outcome,
+            AcquireOutcome::Blocked
+        );
 
         assert!(lm.reap_expired_shared(100).is_empty());
         // The reaped reservation no longer queues ahead of `later`.

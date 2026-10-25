@@ -121,9 +121,14 @@ impl CoreLoop {
         // A bitemporal row is closed, never erased: its history stays readable
         // until the retention purge. One system time closes every row, so the
         // TRUNCATE removes them at one instant, as a `DELETE` with no `WHERE`.
-        let bitemporal_sys_from_ms = self
-            .is_bitemporal(database_id, tid, collection)
-            .then(|| self.bitemporal_now_ms());
+        let bitemporal_sys_from = if self.is_bitemporal(database_id, tid, collection) {
+            match self.rows_version_ordinal(database_id, tid, collection, &all_ids) {
+                Ok(ordinal) => Some(ordinal),
+                Err(e) => return self.response_error(task, ErrorCode::from(e)),
+            }
+        } else {
+            None
+        };
         let scope = TruncateScope {
             task,
             database_id,
@@ -133,7 +138,7 @@ impl CoreLoop {
             declared_primary_key,
             strict_schema: strict_schema.as_ref(),
             has_vectors,
-            bitemporal_sys_from_ms,
+            bitemporal_sys_from,
         };
         // Each document leaves with full cascade, one transaction per row.
         let mut progress = TruncateProgress::default();
@@ -318,7 +323,7 @@ mod tests {
                     tenant: TID,
                     coll: LEDGER,
                     doc_id: &key(surrogate),
-                    sys_from_ms: SEEDED_AT,
+                    sys_from: SEEDED_AT,
                     valid_from_ms: i64::MIN,
                     valid_until_ms: i64::MAX,
                     body: &body,
@@ -332,7 +337,7 @@ mod tests {
                     field: "kind",
                     value: kind,
                     doc_id: &key(surrogate),
-                    sys_from_ms: SEEDED_AT,
+                    sys_from: SEEDED_AT,
                 })
                 .expect("seed index entry");
         }
@@ -342,17 +347,10 @@ mod tests {
         core: &CoreLoop,
         database_id: u64,
         surrogate: u32,
-        sys_cutoff_ms: Option<i64>,
+        sys_cutoff: Option<i64>,
     ) -> Option<Vec<u8>> {
         core.sparse
-            .versioned_get_as_of(
-                database_id,
-                TID,
-                LEDGER,
-                &key(surrogate),
-                sys_cutoff_ms,
-                None,
-            )
+            .versioned_get_as_of(database_id, TID, LEDGER, &key(surrogate), sys_cutoff, None)
             .expect("read version")
     }
 
@@ -399,7 +397,7 @@ mod tests {
             .write_set
             .iter()
             .filter_map(|entry| match entry.effect {
-                RowEffect::Delete { system_from_ms } => Some(system_from_ms),
+                RowEffect::Delete { system_from } => Some(system_from),
                 _ => None,
             })
             .collect();

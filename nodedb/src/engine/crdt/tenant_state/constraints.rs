@@ -182,6 +182,7 @@ mod tests {
                 nodedb_crdt::CrdtAuthContext::default(),
                 &mk("u1", "users", "a@b.com"),
                 b"d".to_vec(),
+                &nodedb_crs::CrsContext::builtin_only(),
             )
             .unwrap();
 
@@ -192,7 +193,8 @@ mod tests {
                     1,
                     nodedb_crdt::CrdtAuthContext::default(),
                     &mk("u2", "users", "a@b.com"),
-                    b"d".to_vec()
+                    b"d".to_vec(),
+                    &nodedb_crs::CrsContext::builtin_only()
                 )
                 .is_err(),
             "duplicate email must violate the installed UNIQUE constraint"
@@ -205,6 +207,7 @@ mod tests {
                 nodedb_crdt::CrdtAuthContext::default(),
                 &mk("p1", "posts", "a@b.com"),
                 b"d".to_vec(),
+                &nodedb_crs::CrsContext::builtin_only(),
             )
             .unwrap();
 
@@ -216,6 +219,7 @@ mod tests {
                 nodedb_crdt::CrdtAuthContext::default(),
                 &mk("u3", "users", "a@b.com"),
                 b"d".to_vec(),
+                &nodedb_crs::CrsContext::builtin_only(),
             )
             .unwrap();
         assert!(engine.row_exists("users", "u3"));

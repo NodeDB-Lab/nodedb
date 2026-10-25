@@ -43,7 +43,7 @@ mod tests {
     use crate::control::security::siem::SiemConfig;
 
     fn configured_siem() -> Arc<SiemExporter> {
-        Arc::new(SiemExporter::new(SiemConfig {
+        Arc::new(SiemExporter::strict_for_test(SiemConfig {
             destinations: vec!["splunk".into()],
             ..SiemConfig::default()
         }))
@@ -79,7 +79,7 @@ mod tests {
 
     #[test]
     fn dormant_siem_takes_no_copy() {
-        let siem = Arc::new(SiemExporter::new(SiemConfig::default()));
+        let siem = Arc::new(SiemExporter::strict_for_test(SiemConfig::default()));
         let audit = audit_with(&siem);
         lock_audit_log(&audit).record(AuditEvent::AdminAction, None, "src", "dormant");
         assert!(siem.drain_audit().is_empty());

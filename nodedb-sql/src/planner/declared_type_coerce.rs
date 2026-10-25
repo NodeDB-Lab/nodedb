@@ -363,7 +363,7 @@ fn coerce_to_instant(column: &str, value: SqlValue, declared: &SqlDataType) -> R
             .and_then(|millis| NdbDateTime::from_millis(millis).ok())
             .map(tag)
             .ok_or_else(|| not_representable(column, &d.to_string(), declared_name)),
-        SqlValue::Bool(_) | SqlValue::Bytes(_) | SqlValue::Array(_) => {
+        SqlValue::Bool(_) | SqlValue::Bytes(_) | SqlValue::Array(_) | SqlValue::Geometry(_) => {
             Err(SqlError::TypeMismatch {
                 detail: format!(
                     "column '{column}': {} is not representable as {declared_name}",
@@ -406,6 +406,7 @@ fn literal_kind(value: &SqlValue) -> &'static str {
         SqlValue::Array(_) => "an array",
         SqlValue::Timestamp(_) => "a timestamp",
         SqlValue::Timestamptz(_) => "a timestamptz",
+        SqlValue::Geometry(_) => "a geometry",
     }
 }
 

@@ -101,6 +101,8 @@ pub(super) fn insert_graph(
                 properties: vec![],
                 src_surrogate: Surrogate::new(s),
                 dst_surrogate: Surrogate::new(s + 100),
+                valid_from_ms: None,
+                valid_until_ms: None,
             }),
         );
     }
@@ -166,6 +168,7 @@ pub(super) fn insert_columnar(
             schema_bytes: Vec::new(),
             provenance: None,
             wal_lsn: None,
+            system_from: None,
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             returning: None,
             rls_filters: Vec::new(),

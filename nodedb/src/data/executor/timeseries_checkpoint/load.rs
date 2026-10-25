@@ -113,11 +113,11 @@ impl CoreLoop {
         )?;
         let registry = read_registry(&ts_dir, self.segment_keks.ts_segment_kek.as_ref())?;
         let stamp = super::stamp::read_collection_ts_stamp(&ts_dir, &registry)?;
-        let merged = match self.ts_replay_stamps.get(&key) {
+        let merged = match self.ts_replay.stamps.get(&key) {
             Some(held) => held.union(&stamp),
             None => stamp,
         };
-        self.ts_replay_stamps.insert(key.clone(), merged);
+        self.ts_replay.stamps.insert(key.clone(), merged);
         // The memtable a flush drained kept its schema. An empty memtable
         // with the flushed schema restores that state, so a record replayed
         // or applied next meets the schema every other replica holds.

@@ -341,6 +341,7 @@ mod tests {
             bm25_query: None,
             bm25_field: None,
             stage: nodedb_physical::physical_plan::RagStage::Local,
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         })
     }
 

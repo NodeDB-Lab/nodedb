@@ -123,6 +123,7 @@ impl SystemCatalog {
 
         #[cfg(test)]
         if self
+            .faults
             .fail_next_function_wasm_write
             .swap(false, std::sync::atomic::Ordering::SeqCst)
         {

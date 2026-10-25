@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod alert;
+mod audit_text;
 mod backup;
 mod change_stream;
 mod clause;
@@ -11,6 +12,7 @@ mod copy_from;
 mod copy_from_stdin;
 mod copy_options;
 mod copy_to;
+mod credential;
 mod custom_type;
 pub mod database;
 mod dispatch;
@@ -27,10 +29,12 @@ mod retention;
 mod rls;
 mod schedule;
 mod sequence;
+mod spatial_ref_sys;
 mod synonym_group;
 mod tenant;
 mod trigger;
 mod user_auth;
 pub mod vector_primary;
 
+pub use audit_text::audit_text_for;
 pub use dispatch::parse;

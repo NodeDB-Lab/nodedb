@@ -106,7 +106,8 @@ pub(super) async fn resolve_predicate_sum_targets(
 
     // Folded from the SAME scan the resolution came from: a second scan will
     // see a different snapshot, and two snapshots is two totals.
-    let images = predicate_images(&scope, &read.rows)?;
+    let crs = crate::control::crs_context::crs_context_for(state);
+    let images = predicate_images(&scope, &read.rows, &crs)?;
     let input = SettleInput {
         source_collection: &scope.collection,
         images: &images,
@@ -115,6 +116,7 @@ pub(super) async fn resolve_predicate_sum_targets(
         // that JOINS the match set after the scan has to invalidate it too.
         source_row: None,
         read_version: read.read_version,
+        crs: &crs,
     };
     let settlement =
         settle_cross_shard_images(&bindings, &input, &resolved, txn_id, tenant_id, database_id)?;
@@ -131,6 +133,7 @@ pub(super) async fn resolve_predicate_sum_targets(
 fn predicate_images(
     scope: &PredicateScope,
     rows: &[serde_json::Value],
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<Vec<(Option<serde_json::Value>, Option<serde_json::Value>)>> {
     let mut images = Vec::with_capacity(rows.len());
     for row in rows {
@@ -138,7 +141,11 @@ fn predicate_images(
             PredicateEffect::Remove => (Some(row.clone()), None),
             PredicateEffect::Assign => (
                 Some(row.clone()),
-                Some(crate::query::apply_update_assignments(row, &scope.updates)?),
+                Some(crate::query::apply_update_assignments(
+                    row,
+                    &scope.updates,
+                    crs,
+                )?),
             ),
         });
     }
@@ -163,7 +170,13 @@ async fn resolve_scanned_rows(
 ) -> crate::Result<Vec<ResolvedSumTarget>> {
     let mut resolved = ResolvedTargets::new();
     for binding in bindings.iter() {
-        for join_value in crate::query::binding_join_keys(binding, updates, rows)? {
+        let join_values = crate::query::binding_join_keys(
+            binding,
+            updates,
+            rows,
+            &crate::control::crs_context::crs_context_for(state),
+        )?;
+        for join_value in join_values {
             resolved
                 .resolve(&binding.target_collection, join_value, async |v| {
                     lookup_join_value(state, binding, v, tenant_id, database_id, trace_id)

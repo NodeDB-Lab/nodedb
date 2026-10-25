@@ -14,12 +14,15 @@ pub mod insert;
 pub mod read_prior;
 pub mod row_ingest;
 pub mod schema;
+pub mod system_stamp;
 
 pub(in crate::data::executor) use geometry_index::GeometryIndexDelta;
 pub(in crate::data::executor) use geometry_remove::{RemovedSpatialEntry, schema_has_geometry};
 pub(in crate::data::executor) use insert::ColumnarInsertParams;
+pub(in crate::data::executor) use row_ingest::keep_fresh_system_stamp;
 pub(in crate::data::executor) use schema::{
-    coerce_columnar_row, ndb_field_to_value, row_values_to_object,
+    coerce_columnar_row, ndb_field_to_value, render_system_ms, row_values_to_object,
+    row_values_to_user_object,
 };
 // `ensure_columnar_engine_schema` is an inherent `CoreLoop` method (defined
 // in `schema.rs`), called via `self.` — no re-export needed.

@@ -52,7 +52,8 @@ fn constant_cell_type(value: Option<&nodedb_sql::types_expr::SqlValue>) -> DdlCo
             | SqlValue::Bytes(_)
             | SqlValue::Array(_)
             | SqlValue::Timestamp(_)
-            | SqlValue::Timestamptz(_),
+            | SqlValue::Timestamptz(_)
+            | SqlValue::Geometry(_),
         )
         | None => DdlColType::Text,
     }

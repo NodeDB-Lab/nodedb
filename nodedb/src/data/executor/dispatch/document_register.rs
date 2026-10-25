@@ -31,6 +31,7 @@ impl CoreLoop {
             vector_fields,
             declared_columns,
             declared_key,
+            incarnation,
         } = op
         else {
             return self.response_error(
@@ -56,6 +57,7 @@ impl CoreLoop {
                 vector_fields,
                 declared_columns,
                 declared_key: declared_key.as_deref(),
+                incarnation: *incarnation,
             },
         )
     }

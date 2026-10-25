@@ -20,6 +20,7 @@ pub(super) fn sql_value_to_ndb(v: SqlValue) -> nodedb_types::Value {
         }
         SqlValue::Timestamp(dt) => nodedb_types::Value::NaiveDateTime(dt),
         SqlValue::Timestamptz(dt) => nodedb_types::Value::DateTime(dt),
+        SqlValue::Geometry(g) => nodedb_types::Value::Geometry(g),
     }
 }
 
@@ -42,6 +43,7 @@ pub fn default_value_to_sql(column: &str, value: nodedb_types::Value) -> crate::
         nodedb_types::Value::Bytes(b) => SqlValue::Bytes(b),
         nodedb_types::Value::NaiveDateTime(dt) => SqlValue::Timestamp(dt),
         nodedb_types::Value::DateTime(dt) => SqlValue::Timestamptz(dt),
+        nodedb_types::Value::Geometry(g) => SqlValue::Geometry(g),
         nodedb_types::Value::Array(items) => SqlValue::Array(
             items
                 .into_iter()

@@ -5,7 +5,7 @@
 //! Parses simple WHEN predicates of the form `NEW.field OP value` or
 //! `OLD.field OP value` into a `(WhenTarget, ScanFilter)` pair.
 //!
-//! The caller can then call `filter.matches_binary(raw_bytes)` on the raw
+//! The caller can then call `filter.matches_binary(raw_bytes, crs)` on the raw
 //! MessagePack row bytes to reject non-matching rows before full HashMap decode.
 //!
 //! Supported patterns:

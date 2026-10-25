@@ -219,7 +219,7 @@ pub(super) fn parse_put_record(
 ///
 /// `is_set` distinguishes set (→ [`WriteOp::Insert`], added labels as
 /// `new_value`) from remove (→ [`WriteOp::Delete`], removed labels as
-/// `old_value`). The payload shape `(node_id, labels)` and the label-delta
+/// `old_value`). The [`crate::wal::NodeLabelRedo`] payload and the label-delta
 /// value encoding are exactly what the forward-path emit produces, so replayed
 /// events are byte-identical to forward events and dedup on LSN. A malformed
 /// payload is logged and skipped (never a panic).
@@ -237,8 +237,8 @@ pub(super) fn parse_graph_node_label_record(
         sources,
         commit_hlc,
     } = *scope;
-    let (node_id, labels) = match zerompk::from_msgpack::<(String, Vec<String>)>(payload) {
-        Ok(decoded) => decoded,
+    let (node_id, labels) = match crate::wal::NodeLabelRedo::decode(payload) {
+        Ok(decoded) => (decoded.node_id, decoded.labels),
         Err(_) => {
             warn!(
                 lsn = lsn.as_u64(),

@@ -130,23 +130,17 @@ pub(super) fn encode_variable(
     value: &Value,
 ) -> Result<(), StrictError> {
     match (&col.column_type, value) {
-        (ColumnType::String, Value::String(s))
-        | (ColumnType::Geometry, Value::String(s))
-        | (ColumnType::SparseVector, Value::String(s)) => {
-            // Geometry text is WKT or GeoJSON. Sparse vector text is a
-            // `'{id: weight}'` literal parsed at index-build time.
+        (ColumnType::String, Value::String(s)) | (ColumnType::SparseVector, Value::String(s)) => {
+            // Sparse vector text is a `'{id: weight}'` literal parsed at
+            // index-build time.
             var_data.extend_from_slice(s.as_bytes());
         }
         (ColumnType::Bytes | ColumnType::SparseVector, Value::Bytes(b)) => {
             var_data.extend_from_slice(b);
         }
-        // GeoJSON, with a `crs` member for any SRID other than 4326.
-        (ColumnType::Geometry, Value::Geometry(g)) => {
-            let json = sonic_rs::to_vec(g).map_err(|e| {
-                invalid_value(col, format!("geometry does not serialize to GeoJSON: {e}"))
-            })?;
-            var_data.extend_from_slice(&json);
-        }
+        // EWKB, so the cell keeps its SRID, Z and M. A stored SRID is
+        // checked for syntax only.
+        (ColumnType::Geometry, value) => append_geometry(var_data, col, value)?,
         (ColumnType::Json, Value::String(s)) => {
             // A JSON text stores as the value it spells. Any other text
             // stores as a JSON string.
@@ -224,6 +218,22 @@ fn check_vector_len(col: &ColumnDef, dim: u32, len: usize) -> Result<(), StrictE
             format!("expected {dim} elements, got {len}"),
         ))
     }
+}
+
+/// Append the EWKB of the geometry `value` holds, or refuse the value.
+fn append_geometry(
+    var_data: &mut Vec<u8>,
+    col: &ColumnDef,
+    value: &Value,
+) -> Result<(), StrictError> {
+    let ewkb = nodedb_spatial::ewkb_of_value(value, nodedb_spatial::SridCheck::Syntax).map_err(
+        |e| match e {
+            nodedb_spatial::SpatialError::NotGeometryValue { .. } => type_mismatch(col),
+            e => invalid_value(col, e.to_string()),
+        },
+    )?;
+    var_data.extend_from_slice(&ewkb);
+    Ok(())
 }
 
 fn type_mismatch(col: &ColumnDef) -> StrictError {

@@ -42,6 +42,9 @@ pub struct AlgoRequest<'a> {
     /// The session reads linearizably: each node the algorithm reads on
     /// confirms its groups first.
     pub linearizable: bool,
+    /// `AS OF SYSTEM TIME` / `AS OF VALID TIME`: the algorithm runs over the
+    /// graph at that cut.
+    pub temporal: nodedb_sql::temporal::TemporalScope,
 }
 
 pub async fn algo(
@@ -64,6 +67,7 @@ pub async fn algo(
         mode,
         personalization,
         linearizable,
+        temporal,
     } = request;
     let algorithm = resolve_algorithm(algorithm_name)?;
 
@@ -95,6 +99,9 @@ pub async fn algo(
     };
 
     let tenant_id = identity.tenant_id;
+    let scope = crate::control::server::graph_dispatch::graph_read_scope(state, &temporal)
+        .await
+        .map_err(|e| DdlError::from_error(&e))?;
 
     // The algorithm reads every partition of the collection's graph, on every
     // node that leads a data group (`graph_dispatch::whole_graph`).
@@ -104,7 +111,7 @@ pub async fn algo(
         database_id,
         algorithm,
         params,
-        None,
+        scope,
         linearizable,
     )
     .await

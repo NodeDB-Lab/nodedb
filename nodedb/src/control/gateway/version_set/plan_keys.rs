@@ -238,7 +238,6 @@ pub fn touched_collections(plan: &PhysicalPlan) -> Vec<String> {
                 | Match { .. }
                 | MatchContinuation { .. }
                 | MatchVarLenResume { .. }
-                | TemporalAlgorithm { .. }
                 | Stats {
                     collection: None, ..
                 }

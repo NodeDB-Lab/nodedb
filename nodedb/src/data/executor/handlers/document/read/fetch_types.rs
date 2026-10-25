@@ -13,9 +13,10 @@ pub(in crate::data::executor) enum DocScanMode {
     /// state from the versioned store; plain collections from the live table.
     Current,
     /// Newest version per document visible at a system-time cutoff and/or a
-    /// valid-time instant (`AS OF SYSTEM TIME` / `AS OF VALID TIME`).
+    /// valid-time instant (`AS OF SYSTEM TIME` / `AS OF VALID TIME`). The
+    /// system-time cutoff is an ordinal, the domain version keys hold.
     AsOf {
-        system_as_of_ms: Option<i64>,
+        system_as_of: Option<i64>,
         valid_at_ms: Option<i64>,
     },
     /// Every system-time version of every document (`AS OF SYSTEM TIME NULL`

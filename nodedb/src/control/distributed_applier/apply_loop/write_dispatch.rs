@@ -45,6 +45,9 @@ pub(super) struct EntryScope {
     /// The roles of the identity that wrote the write, which every replica
     /// judges a role-guarded state transition against.
     pub user_roles: Vec<String>,
+    /// The system-time ordinal the entry's leader assigned, which every
+    /// replica stamps the write's bitemporal versions from.
+    pub system_ordinal: Option<i64>,
 }
 
 /// Prepare a generic entry. `exclusive` marks an entry whose apply awaits its
@@ -89,6 +92,7 @@ async fn enqueue_generic_entry<'a>(
         event_source,
         incarnations,
         user_roles,
+        system_ordinal,
     } = scope;
     let ApplyContext { state, tracker, .. } = ctx;
     let AppliedPosition {
@@ -253,12 +257,15 @@ async fn enqueue_generic_entry<'a>(
             // resolved, so this replica's redo record and its live apply
             // install the byte-identical value every other replica does.
             // `change_position` gives the write's change events the entry's
-            // log position, which every replica shares.
+            // log position, which every replica shares. `system_ordinal` is
+            // the stamp the entry's leader assigned, which every replica's
+            // bitemporal versions take.
             durability: WalDurability::AppendHere {
                 now_override: resolved_now_ms,
                 apply_key: applied_key,
                 commit_hlc: pos.carried_commit_hlc(),
                 change_position: Some(pos.change_position(state, vshard_id.as_u32())),
+                system_ordinal,
             },
             // Raft committed this entry at a fixed log index; every
             // replica applies it in that order. Re-entering the

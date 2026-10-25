@@ -38,10 +38,9 @@ pub enum AlgoStage {
     /// Run over this core's own edges.
     Local,
     /// Run nothing. Answer this core's edges of the collection, after the
-    /// label filter, as a msgpack array of [`AlgoEdge`]. `system_as_of_ms`
-    /// bounds them to the edges live at that system time; `None` answers the
-    /// current edges.
-    ExportEdges { system_as_of_ms: Option<i64> },
+    /// label filter, as a msgpack array of [`AlgoEdge`], read at the `Algo`
+    /// plan's scope.
+    ExportEdges,
     /// Run over these edges, gathered from every core that holds the
     /// collection. The core reads no edges of its own.
     Gathered { edges: Vec<AlgoEdge> },

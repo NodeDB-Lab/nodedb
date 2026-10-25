@@ -128,6 +128,7 @@ impl CoreLoop {
         &self,
         params: TimeseriesOverlayMergeParams<'_>,
     ) -> crate::Result<StagedTsRows> {
+        let crs = self.crs_context();
         let TimeseriesOverlayMergeParams {
             txn_id,
             coll_key,
@@ -176,12 +177,12 @@ impl CoreLoop {
             // Re-apply the scan's WHERE predicate on the staged body (already
             // msgpack), exactly like the raw scan's `need_json_filter` path
             // does per base row.
-            if has_filters && !ScanFilter::all_match_binary(filter_predicates, body)? {
+            if has_filters && !ScanFilter::all_match_binary(filter_predicates, body, &crs)? {
                 continue;
             }
             // The caller's read policy, on the decoded row, after the WHERE
             // predicate and before the row takes a limit slot.
-            if !value_matches_filters(&row, rls_predicates)? {
+            if !value_matches_filters(&row, rls_predicates, &crs)? {
                 continue;
             }
 

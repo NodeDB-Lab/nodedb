@@ -123,10 +123,8 @@ impl ColumnData {
             Self::Geometry { data, offsets, .. } => {
                 let start = offsets[row] as usize;
                 let end = offsets[row + 1] as usize;
-                Value::String(
-                    utf8_cell(&data[start..end])
-                        .map_err(|e| corrupt(format!("text cell is not UTF-8: {e}")))?,
-                )
+                nodedb_spatial::value_of_ewkb(&data[start..end])
+                    .map_err(|e| corrupt(crate::geometry_cell::not_ewkb(e)))?
             }
             Self::Vector { data, dim, .. } => {
                 let d = *dim as usize;

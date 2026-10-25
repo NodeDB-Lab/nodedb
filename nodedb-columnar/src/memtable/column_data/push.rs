@@ -291,29 +291,18 @@ impl ColumnData {
                 offsets.push(data.len() as u32);
                 Self::push_valid(valid, true);
             }
+            // EWKB, so the cell keeps its SRID, Z and M. A value that does
+            // not parse or encode refuses the row.
             (
                 Self::Geometry {
                     data,
                     offsets,
                     valid,
                 },
-                Value::Geometry(g),
+                value,
             ) => {
-                if let Ok(json) = sonic_rs::to_vec(g) {
-                    data.extend_from_slice(&json);
-                }
-                offsets.push(data.len() as u32);
-                Self::push_valid(valid, true);
-            }
-            (
-                Self::Geometry {
-                    data,
-                    offsets,
-                    valid,
-                },
-                Value::String(s),
-            ) => {
-                data.extend_from_slice(s.as_bytes());
+                let ewkb = crate::geometry_cell::encode_geometry_cell(value, col_name)?;
+                data.extend_from_slice(&ewkb);
                 offsets.push(data.len() as u32);
                 Self::push_valid(valid, true);
             }

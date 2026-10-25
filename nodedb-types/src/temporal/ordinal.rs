@@ -22,8 +22,8 @@
 //! handled by the closed-timestamp wiring; `update_from_remote` is
 //! exposed here so that wiring has a single canonical API to call.
 
+use crate::wall_clock::wall_now_ns_i64;
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Nanoseconds in one millisecond.
 pub const NANOS_PER_MS: i64 = 1_000_000;
@@ -48,11 +48,24 @@ impl OrdinalClock {
     /// Return a strictly-greater ordinal than any previously returned value,
     /// seeded by the current wall-clock nanosecond.
     pub fn next_ordinal(&self) -> i64 {
-        let wall = wall_now_ns();
+        let wall = wall_now_ns_i64();
         let mut st = self.last.lock().unwrap_or_else(|p| p.into_inner());
         let next = wall.max(st.saturating_add(1));
         *st = next;
         next
+    }
+
+    /// Reserve `count` consecutive ordinals and return the first. Every one
+    /// is strictly greater than any ordinal handed out or folded in before,
+    /// and the next [`next_ordinal`](Self::next_ordinal) is greater than the
+    /// last of them. `count` 0 reserves one.
+    pub fn reserve(&self, count: usize) -> i64 {
+        let span = i64::try_from(count.max(1)).unwrap_or(i64::MAX);
+        let wall = wall_now_ns_i64();
+        let mut st = self.last.lock().unwrap_or_else(|p| p.into_inner());
+        let first = wall.max(st.saturating_add(1));
+        *st = first.saturating_add(span - 1);
+        first
     }
 
     /// Fold a remote peer's observed ordinal into the local clock so the
@@ -106,31 +119,6 @@ pub fn calvin_txn_ordinal(epoch_system_ms: i64, position: u32) -> i64 {
         .saturating_add(i64::from(position))
 }
 
-fn wall_now_ns() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| {
-            let ns = d.as_nanos();
-            if ns > i64::MAX as u128 {
-                i64::MAX
-            } else {
-                ns as i64
-            }
-        })
-        .unwrap_or_else(|_| {
-            use std::sync::atomic::{AtomicBool, Ordering};
-            static LOGGED: AtomicBool = AtomicBool::new(false);
-            if !LOGGED.swap(true, Ordering::Relaxed) {
-                tracing::error!(
-                    module = module_path!(),
-                    "system clock is before UNIX_EPOCH; using 0 (epoch) \
-                     — check NTP/RTC configuration"
-                );
-            }
-            0
-        })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,7 +138,7 @@ mod tests {
     fn next_ordinal_tracks_wall_clock_roughly() {
         let clock = OrdinalClock::new();
         let ord = clock.next_ordinal();
-        let wall = wall_now_ns();
+        let wall = wall_now_ns_i64();
         // The ordinal should be within one second of wall clock on any
         // reasonable machine — proves we're not emitting a pure counter.
         assert!((ord - wall).abs() < 1_000_000_000, "ord={ord} wall={wall}");
@@ -160,10 +148,26 @@ mod tests {
     fn update_from_remote_advances_on_greater() {
         let clock = OrdinalClock::new();
         let _ = clock.next_ordinal();
-        let remote = wall_now_ns() + 10_000_000_000; // 10s in future
+        let remote = wall_now_ns_i64() + 10_000_000_000; // 10s in future
         clock.update_from_remote(remote);
         let next = clock.next_ordinal();
         assert!(next > remote);
+    }
+
+    #[test]
+    fn a_reserved_run_sits_between_its_neighbours() {
+        let clock = OrdinalClock::new();
+        let before = clock.next_ordinal();
+        let first = clock.reserve(5);
+        assert!(first > before);
+        assert_eq!(
+            clock.peek(),
+            first + 4,
+            "the clock holds the run's last ordinal"
+        );
+        assert!(clock.next_ordinal() > first + 4);
+        let single = clock.reserve(0);
+        assert_eq!(clock.peek(), single, "an empty run reserves one ordinal");
     }
 
     #[test]

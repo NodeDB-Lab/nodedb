@@ -301,7 +301,6 @@ pub fn inject_returning_spec(plan: &mut PhysicalPlan, spec: ReturningSpec) {
             | GraphOp::SetNodeLabels { .. }
             | GraphOp::RemoveNodeLabels { .. }
             | GraphOp::TemporalNeighbors { .. }
-            | GraphOp::TemporalAlgorithm { .. }
             | GraphOp::Stats { .. }
             | GraphOp::ResolveEdgeDelete(_)
             | GraphOp::BspSuperstep(_)
@@ -396,6 +395,7 @@ pub fn inject_returning_spec(plan: &mut PhysicalPlan, spec: ReturningSpec) {
             | MetaOp::ConvertCollection { .. }
             | MetaOp::CreateTenantSnapshot { .. }
             | MetaOp::RestoreTenantSnapshot { .. }
+            | MetaOp::PurgeDepartedVShards { .. }
             | MetaOp::PurgeTenant { .. }
             | MetaOp::UnregisterCollection { .. }
             | MetaOp::UnregisterMaterializedView { .. }
@@ -418,6 +418,7 @@ pub fn inject_returning_spec(plan: &mut PhysicalPlan, spec: ReturningSpec) {
             | MetaOp::RebuildIndex { .. }
             | MetaOp::PutSynonymGroup { .. }
             | MetaOp::DeleteSynonymGroup { .. }
+            | MetaOp::SetCustomCrsSet { .. }
             | MetaOp::StageWrite { .. }
             | MetaOp::DropTxnOverlay { .. }
             | MetaOp::MarkSavepoint { .. }
@@ -545,6 +546,7 @@ mod tests {
             schema_bytes: Vec::new(),
             provenance: None,
             wal_lsn: None,
+            system_from: None,
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
             returning: None,
             rls_filters: Vec::new(),

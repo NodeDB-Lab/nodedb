@@ -6,10 +6,10 @@
 //! name. Every refusal carries its own SQLSTATE class: `42703` for an
 //! unknown dim, `22000` for every other georef error.
 
-use nodedb_array::ArrayError;
 use nodedb_array::schema::{ArrayGeoref, ArraySchema, DimSpec, GeoTransform};
 use nodedb_sql::types_array::{ArrayGeorefAlter, ArrayGeorefAst};
-use nodedb_types::geometry::Srid;
+
+use super::schema_recode::{decode_schema, reencode_checked, schema_error};
 
 /// The SQL form of `schema`'s georef, axes named by dim.
 ///
@@ -36,10 +36,13 @@ pub(crate) fn georef_from_ast(
     array: &str,
     ast: &ArrayGeorefAst,
     dims: &[DimSpec],
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<ArrayGeoref> {
-    let srid = Srid::try_from(ast.srid).map_err(|e| crate::Error::DataException {
-        detail: format!("array '{array}' GEOREF: {e}"),
-    })?;
+    let srid = crs
+        .resolve_u32(ast.srid)
+        .map_err(|e| crate::Error::DataException {
+            detail: format!("array '{array}' GEOREF: {e}"),
+        })?;
     let index = |name: &str| {
         dims.iter()
             .position(|d| d.name == name)
@@ -63,63 +66,17 @@ pub(crate) fn regeoref_schema(
     statement: &str,
     stored_msgpack: &[u8],
     change: &ArrayGeorefAlter,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<Vec<u8>> {
     let schema = decode_schema(statement, stored_msgpack)?;
     let georef = match change {
-        ArrayGeorefAlter::Set(ast) => Some(georef_from_ast(&schema.name, ast, &schema.dims)?),
+        ArrayGeorefAlter::Set(ast) => Some(georef_from_ast(&schema.name, ast, &schema.dims, crs)?),
         ArrayGeorefAlter::Drop => None,
     };
     let altered = schema
         .with_georef(georef)
         .map_err(|e| schema_error(statement, e))?;
-    let altered_msgpack =
-        zerompk::to_msgpack_vec(&altered).map_err(|e| crate::Error::Serialization {
-            format: "msgpack".into(),
-            detail: format!("{statement}: schema encode: {e}"),
-        })?;
-    check_same_content(statement, stored_msgpack, &altered_msgpack)?;
-    Ok(altered_msgpack)
-}
-
-/// Check that `altered_msgpack` keeps the content of `stored_msgpack`: every
-/// field `schema_hash` covers. Only the georef may differ.
-pub(crate) fn check_same_content(
-    statement: &str,
-    stored_msgpack: &[u8],
-    altered_msgpack: &[u8],
-) -> crate::Result<()> {
-    let stored = decode_schema(statement, stored_msgpack)?;
-    let altered = decode_schema(statement, altered_msgpack)?;
-    if stored.name != altered.name || stored.content_msgpack() != altered.content_msgpack() {
-        return Err(crate::Error::Internal {
-            detail: format!(
-                "{statement}: the altered schema changes more than the georef; \
-                 schema_hash would no longer match"
-            ),
-        });
-    }
-    Ok(())
-}
-
-fn decode_schema(statement: &str, msgpack: &[u8]) -> crate::Result<ArraySchema> {
-    zerompk::from_msgpack(msgpack).map_err(|e| crate::Error::Serialization {
-        format: "msgpack".into(),
-        detail: format!("{statement}: array schema decode: {e}"),
-    })
-}
-
-/// The error a schema build or georef change reports.
-///
-/// A georef refusal is `22000`. Every other schema refusal is a plan error.
-pub(crate) fn schema_error(statement: &str, error: ArrayError) -> crate::Error {
-    match error {
-        ArrayError::InvalidGeoref { .. } => crate::Error::DataException {
-            detail: format!("{statement}: {error}"),
-        },
-        other => crate::Error::PlanError {
-            detail: format!("{statement}: {other}"),
-        },
-    }
+    reencode_checked(statement, stored_msgpack, &altered)
 }
 
 /// The clause body DESCRIBE shows, in the DDL form that recreates it.
@@ -134,7 +91,9 @@ pub(crate) fn georef_sql(ast: &ArrayGeorefAst) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::schema_recode::check_same_content;
     use super::*;
+    use nodedb_array::ArrayError;
     use nodedb_array::schema::{ArraySchemaBuilder, AttrSpec, AttrType, DimType};
     use nodedb_array::types::domain::{Domain, DomainBound};
 
@@ -169,7 +128,13 @@ mod tests {
 
     #[test]
     fn ast_round_trips_through_the_engine_georef() {
-        let georef = georef_from_ast("scene", &ast(), &dims()).unwrap();
+        let georef = georef_from_ast(
+            "scene",
+            &ast(),
+            &dims(),
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .unwrap();
         assert_eq!(georef.x_dim, 1);
         assert_eq!(georef.y_dim, 0);
         let mut builder = ArraySchemaBuilder::new("scene");
@@ -189,7 +154,13 @@ mod tests {
     fn unknown_dim_is_undefined_column() {
         let mut bad = ast();
         bad.x_dim = "lon".into();
-        let err = georef_from_ast("scene", &bad, &dims()).unwrap_err();
+        let err = georef_from_ast(
+            "scene",
+            &bad,
+            &dims(),
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .unwrap_err();
         assert!(
             matches!(err, crate::Error::UndefinedColumn { .. }),
             "{err:?}"
@@ -199,8 +170,14 @@ mod tests {
     #[test]
     fn unsupported_srid_is_data_exception() {
         let mut bad = ast();
-        bad.srid = 2154;
-        let err = georef_from_ast("scene", &bad, &dims()).unwrap_err();
+        bad.srid = 999;
+        let err = georef_from_ast(
+            "scene",
+            &bad,
+            &dims(),
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .unwrap_err();
         assert!(matches!(err, crate::Error::DataException { .. }), "{err:?}");
     }
 
@@ -231,12 +208,26 @@ mod tests {
     #[test]
     fn regeoref_set_then_drop_keeps_content() {
         let plain = zerompk::to_msgpack_vec(&stored()).unwrap();
-        let set =
-            regeoref_schema("ALTER ARRAY scene", &plain, &ArrayGeorefAlter::Set(ast())).unwrap();
+        let set = regeoref_schema(
+            "ALTER ARRAY scene",
+            &plain,
+            &ArrayGeorefAlter::Set(ast()),
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .unwrap();
         let with: ArraySchema = zerompk::from_msgpack(&set).unwrap();
         assert_eq!(georef_ast(&with), Some(ast()));
-        assert_eq!(with.content_msgpack(), stored().content_msgpack());
-        let dropped = regeoref_schema("ALTER ARRAY scene", &set, &ArrayGeorefAlter::Drop).unwrap();
+        assert_eq!(
+            with.content_msgpack().unwrap(),
+            stored().content_msgpack().unwrap()
+        );
+        let dropped = regeoref_schema(
+            "ALTER ARRAY scene",
+            &set,
+            &ArrayGeorefAlter::Drop,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .unwrap();
         assert_eq!(dropped, plain);
     }
 
@@ -245,8 +236,13 @@ mod tests {
         let plain = zerompk::to_msgpack_vec(&stored()).unwrap();
         let mut unknown = ast();
         unknown.y_dim = "lat".into();
-        let err = regeoref_schema("ALTER ARRAY scene", &plain, &ArrayGeorefAlter::Set(unknown))
-            .unwrap_err();
+        let err = regeoref_schema(
+            "ALTER ARRAY scene",
+            &plain,
+            &ArrayGeorefAlter::Set(unknown),
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .unwrap_err();
         assert!(
             matches!(err, crate::Error::UndefinedColumn { .. }),
             "{err:?}"
@@ -257,6 +253,7 @@ mod tests {
             "ALTER ARRAY scene",
             &plain,
             &ArrayGeorefAlter::Set(singular),
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .unwrap_err();
         assert!(matches!(err, crate::Error::DataException { .. }), "{err:?}");

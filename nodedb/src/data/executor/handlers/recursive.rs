@@ -160,7 +160,7 @@ impl CoreLoop {
             distinct,
             limit,
         };
-        let results = match iterate(&rows, &spec) {
+        let results = match iterate(&rows, &spec, &self.crs_context()) {
             Ok(results) => results,
             Err(RecursionError::Eval(e)) => return self.response_error(task, ErrorCode::from(e)),
             Err(RecursionError::Decode(detail)) => {

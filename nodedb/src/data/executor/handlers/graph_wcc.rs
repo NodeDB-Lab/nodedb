@@ -11,7 +11,7 @@
 //! `GraphOp::WccSuperstep` plan variant and returned in [`WccSuperstepResult`].
 //!
 //! Ownership model (identical to BSP PageRank): each round builds a
-//! collection-scoped CSR via `build_csr_for_collection` so distributed WCC runs
+//! collection-scoped CSR via `CoreLoop::algo_csr` so distributed WCC runs
 //! over exactly the same `(collection, edge_label)` subgraph as single-node
 //! `GRAPH ALGO WCC ON <collection>`. Only nodes whose `VShardId::from_key(name)`
 //! is in `owned_vshards` are "owned" by this shard. For each owned node `u` and
@@ -37,15 +37,13 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
 use nodedb_physical::physical_plan::WccSuperstepResult;
 
-use super::graph_algo::build_csr_for_collection;
-
 /// The pure WCC contraction-round core: given an already-built `CsrIndex` and the
 /// owned-vShard set, builds the owned-node set, runs local union-find over
 /// owned→owned edges, records owned→ghost boundary edges, and computes each
 /// owned node's lexicographically-minimum-owned-name component label.
 ///
 /// Both [`CoreLoop::execute_wcc_superstep`] (after calling
-/// `build_csr_for_collection`) and the unit tests call this function, so the
+/// `CoreLoop::algo_csr`) and the unit tests call this function, so the
 /// tests exercise the real handler logic rather than a re-implementation.
 pub(super) fn run_wcc_superstep_core(csr: &CsrIndex, owned_vshards: &[u32]) -> WccSuperstepResult {
     // Build a HashSet of owned vShards for O(1) membership checks in the
@@ -133,6 +131,7 @@ impl CoreLoop {
         params: &nodedb_graph::AlgoParams,
         owned_vshards: &[u32],
         system_as_of: Option<i64>,
+        valid_at_ms: Option<i64>,
     ) -> Response {
         debug!(
             core = self.core_id,
@@ -162,27 +161,15 @@ impl CoreLoop {
             );
         };
 
-        let database_id = task.request.database_id.as_u64();
-        let memory = nodedb_mem::ScopedMemory::new(
-            self.governor.clone(),
-            task.request.database_id,
-            crate::types::TenantId::new(tid),
-            nodedb_mem::EngineId::Graph,
-        );
-
-        // Build a collection-scoped CSR from the edge store as of the cut —
-        // same call as execute_graph_algo — so distributed WCC runs over
-        // exactly the same (collection, edge_label) subgraph as single-node
+        // The collection-scoped CSR at the cut — the same read as
+        // execute_graph_algo — so distributed WCC runs over exactly the same
+        // (collection, edge_label) subgraph as single-node
         // GRAPH ALGO WCC ON <collection>.
-        let csr = match build_csr_for_collection(
-            &self.edge_store,
-            database_id,
-            tid,
-            &params.collection,
-            params.edge_label.as_deref(),
-            Some(system_as_of),
-            memory,
-        ) {
+        let scope = nodedb_physical::physical_plan::GraphReadScope::at_installed_cut(
+            system_as_of,
+            valid_at_ms,
+        );
+        let csr = match self.algo_csr(task.request.database_id, tid, params, &scope) {
             Ok(c) => c,
             Err(e) => return self.response_error(task, ErrorCode::from(e)),
         };

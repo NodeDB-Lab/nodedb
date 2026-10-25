@@ -60,6 +60,7 @@ impl CoreLoop {
                             if !crate::data::executor::handlers::rls_eval::rls_check_msgpack_bytes(
                                 rls_filters,
                                 body,
+                                &self.crs_context(),
                             ) {
                                 self.response_with_payload(task, Vec::new())
                             } else {
@@ -94,6 +95,7 @@ impl CoreLoop {
                 if !crate::data::executor::handlers::rls_eval::rls_check_msgpack_bytes(
                     rls_filters,
                     &value,
+                    &self.crs_context(),
                 ) {
                     return self.response_with_payload(task, Vec::new());
                 }

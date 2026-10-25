@@ -63,7 +63,16 @@ pub(crate) fn strict_row_to_msgpack(
     if version == 0 || version > schema.version {
         return Err(StrictImageFault::SchemaVersion);
     }
-    let value = binary_tuple_to_value(stored, schema).ok_or(StrictImageFault::Layout)?;
+    let mut value = binary_tuple_to_value(stored, schema).ok_or(StrictImageFault::Layout)?;
+    // The reserved bitemporal slots are storage bookkeeping (slot 0 holds the
+    // system-time ordinal), never row contents: an event shows the row's
+    // columns only, and a journalled image replays at the version key its
+    // record carries.
+    if let nodedb_types::value::Value::Object(map) = &mut value {
+        for reserved in nodedb_types::columnar::BITEMPORAL_RESERVED_COLUMNS {
+            map.remove(reserved);
+        }
+    }
     nodedb_types::value_to_msgpack(&value)
         .map(Some)
         .map_err(|_| StrictImageFault::Encode)
@@ -110,6 +119,43 @@ mod tests {
                 .and_then(|v| v.as_str()),
             Some("alice")
         );
+    }
+
+    /// A bitemporal tuple's image carries its columns, never the reserved
+    /// system-time and valid-time slots.
+    #[test]
+    fn bitemporal_tuple_image_leaves_out_the_reserved_slots() {
+        let schema = StrictSchema::new_bitemporal(vec![
+            ColumnDef::required("id", ColumnType::String),
+            ColumnDef::nullable("name", ColumnType::String),
+        ])
+        .expect("valid schema");
+        let row = Value::Object(
+            [
+                ("id".to_string(), Value::String("r1".into())),
+                ("name".to_string(), Value::String("alice".into())),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let stored = crate::data::executor::strict_format::value_to_binary_tuple_bitemporal(
+            &row,
+            &schema,
+            1_700_000_000_000_000_042,
+            i64::MIN,
+            i64::MAX,
+            "c",
+        )
+        .expect("row encodes");
+        let image = strict_row_to_msgpack(&stored, &schema)
+            .expect("tuple decodes")
+            .expect("a tuple converts");
+        let value = nodedb_types::value_from_msgpack(&image).expect("image is msgpack");
+        let object = value.as_object().expect("image is an object");
+        for reserved in nodedb_types::columnar::BITEMPORAL_RESERVED_COLUMNS {
+            assert!(!object.contains_key(reserved), "{reserved} stays out");
+        }
+        assert_eq!(object.get("name").and_then(|v| v.as_str()), Some("alice"));
     }
 
     #[test]

@@ -50,6 +50,8 @@ impl CoreLoop {
             properties,
             src_surrogate,
             dst_surrogate,
+            valid_from_ms,
+            valid_until_ms,
         } = params;
         debug!(core = self.core_id, tid, %collection, %src_id, %label, %dst_id, "edge put");
         let database_id = task.request.database_id.as_u64();
@@ -91,13 +93,26 @@ impl CoreLoop {
             Err(e) => return self.response_error(task, e),
         };
         let ord = stamp.system_from;
-        // Under a Calvin batch, `epoch_system_ms` is the deterministic epoch
-        // timestamp. Outside Calvin it is None and the valid time is the
-        // ordinal's wall time.
-        let valid_from_ms = match self.epoch_system_ms {
+        // A `VALID_TIME` the write names wins. Otherwise, under a Calvin
+        // batch, `epoch_system_ms` is the deterministic epoch timestamp.
+        // Outside Calvin it is None and the valid time is the ordinal's wall
+        // time.
+        let valid_from_ms = valid_from_ms.unwrap_or_else(|| match self.epoch_system_ms {
             Some(ms) => ms,
             None => nodedb_types::ordinal_to_ms(ord),
-        };
+        });
+        let valid_until_ms = valid_until_ms.unwrap_or(i64::MAX);
+        if valid_until_ms <= valid_from_ms {
+            return self.response_error(
+                task,
+                crate::Error::BadRequest {
+                    detail: format!(
+                        "edge ({src_id})-[{label}]->({dst_id}) valid time [{valid_from_ms}, \
+                         {valid_until_ms}) is empty"
+                    ),
+                },
+            );
+        }
         let target = EdgeTarget {
             database_id,
             tid,
@@ -123,10 +138,18 @@ impl CoreLoop {
             properties,
             stamp,
             valid_from_ms,
-            i64::MAX,
+            valid_until_ms,
             owns_logical_edge_stats(task, src_id),
         ) {
             Ok(version) => {
+                // A version at or below a cached historical cut changes what
+                // that cut reads.
+                self.historical_csr.note_version(
+                    task.request.database_id,
+                    TenantId::new(tid),
+                    collection,
+                    ord,
+                );
                 let current = version.current.clone();
                 let edge_undo = target.undo(version, csr_prior);
                 // The CSR follows what the edge resolves to: a version a
@@ -183,6 +206,8 @@ impl CoreLoop {
                                 dst_surrogate: dst_surrogate.as_u32(),
                                 system_from: Some(ord),
                                 applied: (stamp.applied != ord).then_some(stamp.applied),
+                                valid_from_ms: Some(valid_from_ms),
+                                valid_until_ms: Some(valid_until_ms),
                             },
                         ))];
                         response
@@ -230,6 +255,8 @@ mod tests {
                 properties: b"w=1",
                 src_surrogate: Surrogate::new(1),
                 dst_surrogate: Surrogate::new(2),
+                valid_from_ms: None,
+                valid_until_ms: None,
             },
         );
         assert_eq!(resp.status, Status::Ok);
@@ -326,6 +353,8 @@ mod tests {
                 properties: b"w=1",
                 src_surrogate: Surrogate::new(1),
                 dst_surrogate: Surrogate::ZERO,
+                valid_from_ms: None,
+                valid_until_ms: None,
             },
         );
         assert!(matches!(

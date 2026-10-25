@@ -11,7 +11,7 @@
 //! filters CoW-copied rows, and `if_absent` skips already-written rows — the
 //! per-page checkpoint is best-effort but the per-key probes cover it.
 
-use nodedb_types::{DatabaseId, TenantId};
+use nodedb_types::{DatabaseId, SystemTimeScope, TenantId};
 
 use crate::types::TxnId;
 
@@ -105,7 +105,7 @@ pub(crate) async fn scan_source_page(
     source_db_id: DatabaseId,
     source_qualified: &str,
     cursor: &[u8],
-    system_as_of_ms: Option<i64>,
+    system_time: SystemTimeScope,
     txn_id: Option<TxnId>,
 ) -> crate::Result<ScanPage> {
     let page = SourcePage {
@@ -113,10 +113,16 @@ pub(crate) async fn scan_source_page(
         source_db_id,
         source_qualified,
         cursor,
-        system_as_of_ms,
+        system_time,
         raw_bodies: false,
     };
     scan_page(state, page, txn_id).await
+}
+
+/// The scope a clone copy reads its source at: `AsOf` the clone's source
+/// time, or `Current` when the clone carries none.
+pub(super) fn clone_scope(system_as_of_ms: Option<i64>) -> SystemTimeScope {
+    system_as_of_ms.map_or(SystemTimeScope::Current, SystemTimeScope::AsOf)
 }
 
 /// One source-side scan page request.
@@ -125,7 +131,8 @@ pub(super) struct SourcePage<'a> {
     pub source_db_id: DatabaseId,
     pub source_qualified: &'a str,
     pub cursor: &'a [u8],
-    pub system_as_of_ms: Option<i64>,
+    /// `Current`, or the point-in-time cut every page reads at.
+    pub system_time: SystemTimeScope,
     /// Bodies as stored, with no `id` added.
     pub raw_bodies: bool,
 }
@@ -141,14 +148,14 @@ pub(super) async fn scan_page(
         source_db_id,
         source_qualified,
         cursor,
-        system_as_of_ms,
+        system_time,
         raw_bodies,
     } = page;
     let plan = PhysicalPlan::Document(DocumentOp::MaterializeScan {
         collection: nodedb_types::QualifiedCollection::from_stored(source_qualified.to_string()),
         cursor: cursor.to_vec(),
         count: SCAN_PAGE,
-        system_as_of_ms,
+        system_time,
         raw_bodies,
     });
     // A transaction's staging overlay lives on the source shard's leader, so

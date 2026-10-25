@@ -78,16 +78,20 @@ pub async fn restore_version(
     // addresses the Data Plane by the same qualified name.
     let qualified_collection =
         crate::control::planner::sql_plan_convert::convert::db_qualified(database_id, &collection);
+    let crs_set = crate::control::crs_context::crs_set_for(state);
     let policy = ExternalCrdtPostImagePolicy::from_identity(
         tenant_id,
         database_id,
         &qualified_collection,
         identity,
         "sql".into(),
-        &state.rls,
-        &audit,
+        crate::control::crdt_post_image_policy::PolicyServices {
+            rls: &state.rls,
+            audit: &audit,
+            crs_set: &crs_set,
+        },
     )
-    .with_type_guards_from(state.credentials.catalog(), database_id);
+    .with_type_guards_from(state, database_id);
     crate::control::crdt_admission::dispatch_crdt_restore_admitted(
         state,
         crate::control::crdt_admission::CrdtRestoreAdmissionRequest {
@@ -298,12 +302,12 @@ mod tests {
                 let request_id = request.request_id;
                 let applied_versions = crate::types::ReadVersions::single(
                     request.vshard_id,
-                    request
-                        .entry_version
-                        .unwrap_or(nodedb_types::WriteVersion::local_after(
+                    request.entry_version.map(|entry| entry.version).unwrap_or(
+                        nodedb_types::WriteVersion::local_after(
                             nodedb_types::WriteVersion::ZERO,
                             request.wal_lsn.unwrap_or(Lsn::ZERO).as_u64(),
-                        )),
+                        ),
+                    ),
                 );
                 let (step, payload, read_versions) = match request.plan {
                     PhysicalPlan::Crdt(CrdtOp::RestoreToVersion { .. }) => (

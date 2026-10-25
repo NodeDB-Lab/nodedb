@@ -88,6 +88,7 @@ impl RowSource {
     where
         F: FnMut(&str, &[u8]) -> crate::Result<()>,
     {
+        let crs = core.crs_context();
         match self {
             RowSource::LocalScan {
                 database_id,
@@ -105,7 +106,9 @@ impl RowSource {
                 let mut filters = decode_scan_filters(rls_filters, "RLS filter (join side)")?;
                 filters.extend(decode_scan_filters(scan_filters, "join side predicate")?);
                 core.scan_collection_for_each(*database_id, *tenant_id, collection, |id, bytes| {
-                    if crate::bridge::scan_filter::ScanFilter::all_match_binary(&filters, bytes)? {
+                    if crate::bridge::scan_filter::ScanFilter::all_match_binary(
+                        &filters, bytes, &crs,
+                    )? {
                         f(id, bytes)?;
                     }
                     Ok(())

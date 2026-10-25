@@ -6,7 +6,7 @@ use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use nodedb_query::msgpack_scan;
 
-use super::hash::{HashIndex, ProbeParams, probe_hash_index};
+use super::hash::{HashIndex, JoinResidual, ProbeParams, probe_hash_index};
 use super::params::HashJoinParams;
 use super::support::row_qualifier;
 
@@ -417,6 +417,7 @@ impl CoreLoop {
             )
         };
 
+        let crs = self.crs_context();
         let mut results = match probe_hash_index(&ProbeParams {
             probe_docs: &left_docs,
             index: &right_index,
@@ -426,7 +427,10 @@ impl CoreLoop {
             limit: probe_limit,
             probe_collection: left_prefix,
             index_collection: right_prefix,
-            join_filters: &join_filters,
+            join_filters: (!join_filters.is_empty()).then_some(JoinResidual {
+                filters: &join_filters,
+                crs: &crs,
+            }),
             emit_unmatched_right: true,
         }) {
             Ok(r) => r,
@@ -439,7 +443,7 @@ impl CoreLoop {
             return self.response_error(join.task, ErrorCode::ResourcesExhausted);
         }
 
-        if let Err(e) = join.filter_and_project(&mut results) {
+        if let Err(e) = join.filter_and_project(&mut results, &crs) {
             return self.response_error(join.task, ErrorCode::from(e));
         }
 

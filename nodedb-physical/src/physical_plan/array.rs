@@ -15,26 +15,67 @@ use nodedb_array::types::ArrayId;
 use nodedb_types::sync::wire::SyncProvenance;
 use nodedb_types::{ShardBucket, SurrogateBitmap, SystemTimeScope};
 
-/// Reducer for [`ArrayOp::Aggregate`]. Numeric `c_enum` keeps the
-/// wire encoding to a single byte.
+/// Reducer for [`ArrayOp::Aggregate`]. Mirrors
+/// `nodedb_array::query::aggregate::Reducer`.
 #[derive(
     Debug,
     Clone,
     Copy,
     PartialEq,
-    Eq,
     serde::Serialize,
     serde::Deserialize,
     zerompk::ToMessagePack,
     zerompk::FromMessagePack,
 )]
-#[msgpack(c_enum)]
 pub enum ArrayReducer {
     Sum,
     Count,
     Min,
     Max,
     Mean,
+    Median,
+    /// Exact percentile `p`, `0 <= p <= 1`.
+    Percentile {
+        p: f64,
+    },
+    StdDevPop,
+    StdDevSamp,
+    VarPop,
+    VarSamp,
+    Mode,
+    /// Fixed-width bin counts over `[lo, hi]`.
+    Histogram {
+        bins: u32,
+        lo: f64,
+        hi: f64,
+    },
+}
+
+impl ArrayReducer {
+    /// The engine reducer. A histogram's bins and range are checked.
+    pub fn engine(
+        self,
+    ) -> Result<nodedb_array::query::aggregate::Reducer, nodedb_types::array_agg::HistogramSpecError>
+    {
+        use nodedb_array::query::aggregate::Reducer;
+        Ok(match self {
+            ArrayReducer::Sum => Reducer::Sum,
+            ArrayReducer::Count => Reducer::Count,
+            ArrayReducer::Min => Reducer::Min,
+            ArrayReducer::Max => Reducer::Max,
+            ArrayReducer::Mean => Reducer::Mean,
+            ArrayReducer::Median => Reducer::Median,
+            ArrayReducer::Percentile { p } => Reducer::Percentile(p),
+            ArrayReducer::StdDevPop => Reducer::StdDevPop,
+            ArrayReducer::StdDevSamp => Reducer::StdDevSamp,
+            ArrayReducer::VarPop => Reducer::VarPop,
+            ArrayReducer::VarSamp => Reducer::VarSamp,
+            ArrayReducer::Mode => Reducer::Mode,
+            ArrayReducer::Histogram { bins, lo, hi } => {
+                Reducer::Histogram(nodedb_types::array_agg::HistogramSpec::new(bins, lo, hi)?)
+            }
+        })
+    }
 }
 
 /// Pairwise op for [`ArrayOp::Elementwise`].
@@ -170,6 +211,9 @@ pub enum ArrayOp {
         /// zerompk-encoded `nodedb_array::query::PolygonZone`. Only cells
         /// inside it are returned. Empty = no zone.
         zone_msgpack: Vec<u8>,
+        /// Read attrs physically: a nodata cell as NULL, and a cell of an
+        /// attr with a scale or offset as `raw * scale + offset`.
+        physical: bool,
     },
 
     /// Reduce one attribute column. `group_by_dim < 0` means no
@@ -193,10 +237,12 @@ pub enum ArrayOp {
         /// to this bucket contribute, so vShards that share one Data Plane
         /// count no cell twice. `None` includes every cell.
         shard_bucket: Option<ShardBucket>,
-        /// Bitemporal system-time cutoff. When `Some(t)`, only tile versions
-        /// with `system_from_ms <= t` contribute to the aggregate. `None` =
-        /// live read.
-        system_as_of: Option<i64>,
+        /// Bitemporal system-time scope. A point-in-time scope reads the
+        /// tile versions visible at its cutoff; a `Pinned` scope also names
+        /// the cut marker every serving node waits for. `Current` = live
+        /// read. `AllVersions` is refused: an aggregate over every version
+        /// has no meaning.
+        system_time: SystemTimeScope,
         /// Bitemporal valid-time point. When `Some(vt)`, only cells whose
         /// `valid_from_ms <= vt < valid_until_ms` contribute. `None` = no
         /// valid-time filter.
@@ -204,6 +250,9 @@ pub enum ArrayOp {
         /// zerompk-encoded `nodedb_array::query::ArrayRegion`. Only cells
         /// inside it contribute. Empty = the whole array.
         region_msgpack: Vec<u8>,
+        /// Reduce physical values: `raw * scale + offset` for an attr with a
+        /// scale or offset. A nodata cell never contributes, either way.
+        physical: bool,
     },
 
     /// Pairwise op between two coord-aligned arrays. Both must share
@@ -222,9 +271,9 @@ pub enum ArrayOp {
         /// to this bucket take part on either side, so vShards that share
         /// one Data Plane emit no row twice. `None` includes every cell.
         shard_bucket: Option<ShardBucket>,
-        /// Bitemporal system-time cutoff for both operands. `None` = live
-        /// read.
-        system_as_of: Option<i64>,
+        /// Bitemporal system-time scope for both operands, as on
+        /// `Aggregate`.
+        system_time: SystemTimeScope,
         /// Bitemporal valid-time point for both operands. `None` = no
         /// valid-time filter.
         valid_at_ms: Option<i64>,
@@ -316,9 +365,10 @@ mod tests {
             cell_filter: None,
             return_partial: false,
             shard_bucket: None,
-            system_as_of: None,
+            system_time: SystemTimeScope::Current,
             valid_at_ms: None,
             region_msgpack: vec![1, 2, 3],
+            physical: true,
         };
         let bytes = zerompk::to_msgpack_vec(&op).unwrap();
         let back: ArrayOp = zerompk::from_msgpack(&bytes).unwrap();
@@ -338,6 +388,7 @@ mod tests {
             system_time: SystemTimeScope::AllVersions,
             valid_at_ms: None,
             zone_msgpack: Vec::new(),
+            physical: false,
         };
         let bytes = zerompk::to_msgpack_vec(&op).unwrap();
         let back: ArrayOp = zerompk::from_msgpack(&bytes).unwrap();
@@ -367,6 +418,7 @@ mod tests {
             system_time: SystemTimeScope::AsOf(1_700_000_000_000),
             valid_at_ms: Some(1_600_000_000_000),
             zone_msgpack: vec![4, 5, 6],
+            physical: true,
         };
         let bytes = zerompk::to_msgpack_vec(&op).unwrap();
         let back: ArrayOp = zerompk::from_msgpack(&bytes).unwrap();
@@ -382,21 +434,32 @@ mod tests {
             attr_idx: 0,
             cell_filter: None,
             shard_bucket: None,
-            system_as_of: None,
+            system_time: SystemTimeScope::Current,
             valid_at_ms: None,
         };
         assert_eq!(op.primary_array().name, "L");
     }
 
     #[test]
-    fn binary_op_and_reducer_are_c_enum_one_byte() {
-        // c_enum encodes as a single u8 — confirm round-trip preserves identity.
+    fn binary_op_and_reducer_round_trip() {
         for r in [
             ArrayReducer::Sum,
             ArrayReducer::Count,
             ArrayReducer::Min,
             ArrayReducer::Max,
             ArrayReducer::Mean,
+            ArrayReducer::Median,
+            ArrayReducer::Percentile { p: 0.9 },
+            ArrayReducer::StdDevPop,
+            ArrayReducer::StdDevSamp,
+            ArrayReducer::VarPop,
+            ArrayReducer::VarSamp,
+            ArrayReducer::Mode,
+            ArrayReducer::Histogram {
+                bins: 10,
+                lo: 0.0,
+                hi: 1.0,
+            },
         ] {
             let bytes = zerompk::to_msgpack_vec(&r).unwrap();
             let back: ArrayReducer = zerompk::from_msgpack(&bytes).unwrap();

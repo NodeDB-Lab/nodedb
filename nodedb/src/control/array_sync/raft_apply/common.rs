@@ -140,6 +140,8 @@ pub(super) async fn submit_array_write(
                     group_id,
                     log_index,
                 )),
+                // An array cell version takes no system-time ordinal.
+                system_ordinal: None,
             },
             // Raft committed this entry at a fixed log index and every replica
             // applies it in that order; re-entering the write-admission gate

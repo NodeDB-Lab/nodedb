@@ -2,6 +2,8 @@
 
 pub mod cascade;
 pub mod node_identity;
+pub mod node_label_snapshot;
+pub mod node_labels;
 pub mod purge;
 pub mod query;
 pub mod scan;
@@ -11,12 +13,14 @@ pub mod store;
 pub mod temporal;
 
 pub use node_identity::NodeSurrogateRecord;
+pub use node_label_snapshot::NodeLabelVersionRecord;
+pub use node_labels::{NodeLabelVersion, NodeLabelsAtCut};
 pub use scan::TenantEdgeScan;
 pub use stats::CollectionStats;
 pub use store::{Direction, Edge, EdgeRecord, EdgeStore};
 pub use temporal::{
-    EdgeCountChange, EdgeCutInstall, EdgeFlip, EdgePropertyReader, EdgeRef, EdgeValuePayload,
-    EdgeVersionWrite, GDPR_ERASURE_SENTINEL, NeighborsAsOfParams, SYSTEM_TIME_WIDTH,
-    TOMBSTONE_SENTINEL, VersionStamp, edge_version_prefix, is_gdpr_erasure, is_sentinel,
-    is_tombstone, parse_versioned_edge_key, versioned_edge_key,
+    CutEdge, EdgeCountChange, EdgeCutInstall, EdgeFlip, EdgePropertyReader, EdgeRef,
+    EdgeValuePayload, EdgeVersionWrite, GDPR_ERASURE_SENTINEL, NeighborsAsOfParams,
+    SYSTEM_TIME_WIDTH, TOMBSTONE_SENTINEL, VersionStamp, edge_version_prefix, is_gdpr_erasure,
+    is_sentinel, is_tombstone, parse_versioned_edge_key, versioned_edge_key,
 };

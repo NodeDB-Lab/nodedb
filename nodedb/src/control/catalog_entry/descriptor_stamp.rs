@@ -293,7 +293,11 @@ pub fn stamp(
         | CatalogEntry::DeleteCloneSourceDrain { .. }
         | CatalogEntry::MoveTenantCutover { .. }
         | CatalogEntry::CommitConsumerOffsets(_)
-        | CatalogEntry::PutBackupScheduleMark(_)) => entry,
+        | CatalogEntry::PutBackupScheduleMark(_)
+        | CatalogEntry::PutSpatialRefSys(_)
+        | CatalogEntry::DropSpatialRefSys { .. }
+        | CatalogEntry::PutCredential(_)
+        | CatalogEntry::DropCredential { .. }) => entry,
     })
 }
 

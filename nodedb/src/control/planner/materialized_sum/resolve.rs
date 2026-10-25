@@ -144,6 +144,7 @@ pub async fn resolve_materialized_sum_targets(
                     );
                 }
                 let mut resolved = resolved.into_vec();
+                let crs = crate::control::crs_context::crs_context_for(state);
                 // Every row settles against the whole resolution, before any
                 // shipped value leaves it.
                 let mut settlements = Vec::with_capacity(stored.len());
@@ -155,6 +156,7 @@ pub async fn resolve_materialized_sum_targets(
                         images: &images.images,
                         source_row: Some(scope.surrogate),
                         read_version: images.read_version,
+                        crs: &crs,
                     };
                     let mut settlement = settle_cross_shard_images(
                         &bindings,

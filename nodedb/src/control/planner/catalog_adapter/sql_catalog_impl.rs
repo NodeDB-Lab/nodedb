@@ -12,6 +12,11 @@ use super::adapter::OriginCatalog;
 use super::type_convert::convert_collection_type;
 
 impl SqlCatalog for OriginCatalog {
+    /// The built-in registry plus the user-defined CRSs of this catalog.
+    fn crs_context(&self) -> nodedb_crs::CrsContext<'_> {
+        crate::control::crs_context::catalog_crs_context(self.credentials.catalog())
+    }
+
     /// Resolve any relation name to planner metadata. Catalog tables
     /// (pg_class, information_schema.*, _system.*, etc.) are returned
     /// directly from the static schema registry without a catalog round-trip.
@@ -355,6 +360,7 @@ impl SqlCatalog for OriginCatalog {
                     a.dtype,
                 ),
                 nullable: a.nullable,
+                meta: crate::control::array_catalog::attr_meta::meta_ast(&a.meta),
             })
             .collect();
 

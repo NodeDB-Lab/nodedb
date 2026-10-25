@@ -55,6 +55,8 @@ fn core_with(edges: &[(&str, &str, &str, Vec<u8>)]) -> Core {
                 properties: props.clone(),
                 src_surrogate: doc_surrogate(src),
                 dst_surrogate: doc_surrogate(dst),
+                valid_from_ms: None,
+                valid_until_ms: None,
             }),
         );
     }
@@ -84,6 +86,7 @@ fn walk_hop(
         rls_filters: Vec::new(),
         edge_predicate,
         with_properties,
+        scope: nodedb_physical::physical_plan::GraphReadScope::default(),
     })
 }
 
@@ -291,6 +294,7 @@ fn a_label_only_walk_hop_reads_staged_edges() {
         rls_filters: Vec::new(),
         edge_predicate: Vec::new(),
         with_properties: false,
+        scope: nodedb_physical::physical_plan::GraphReadScope::default(),
     });
     assert_eq!(
         read_rows(&mut core, Some(txn_id), plan),
@@ -314,6 +318,7 @@ fn label_set_hop(depth: usize) -> PhysicalPlan {
         rls_filters: Vec::new(),
         frontier_bitmap: None,
         collection: None,
+        scope: nodedb_physical::physical_plan::GraphReadScope::default(),
     })
 }
 
@@ -347,6 +352,7 @@ fn staged_edge_under_second_listed_label_is_read_back() {
             direction: Direction::Out,
             rls_filters: Vec::new(),
             collection: None,
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         }),
     );
     assert_eq!(resp.status, Status::Ok, "{:?}", resp.error_code);

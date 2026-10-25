@@ -254,10 +254,10 @@ impl CoreLoop {
         };
         // A versioned row's key was decided here, so its stamped image
         // replaces the unstamped pre-dispatch record.
-        if let Some(sys_from_ms) = prior.bitemporal_sys_from_ms {
+        if let Some(sys_from) = prior.bitemporal_sys_from {
             response.write_set = versioned_point_images(
                 WriteSetEntry::put(surrogate.as_u32(), document_identity, value.to_vec()),
-                sys_from_ms,
+                sys_from,
             );
         }
         response.write_set.extend(target_write_set);

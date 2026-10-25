@@ -148,11 +148,10 @@ pub(super) fn label_ops(ops: &[RedoSubRecord]) -> Vec<RedoLabelOp> {
                 Some(RecordType::GraphNodeLabelRemove) => false,
                 _ => return None,
             };
-            let (node_id, labels) =
-                zerompk::from_msgpack::<(String, Vec<String>)>(&sub.payload).ok()?;
+            let op = crate::wal::NodeLabelRedo::decode(&sub.payload).ok()?;
             Some(RedoLabelOp {
-                node_id,
-                labels,
+                node_id: op.node_id,
+                labels: op.labels,
                 is_set,
             })
         })

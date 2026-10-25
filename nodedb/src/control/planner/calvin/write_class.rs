@@ -234,7 +234,6 @@ fn graph_is_write(op: &GraphOp) -> bool {
         | GraphOp::BspSuperstep(_)
         | GraphOp::WccSuperstep(_)
         | GraphOp::TemporalNeighbors { .. }
-        | GraphOp::TemporalAlgorithm { .. }
         | GraphOp::Stats { .. }
         | GraphOp::NodePresenceRead { .. } => false,
     }
@@ -608,6 +607,8 @@ mod tests {
             dst_id: "b".to_owned(),
             src_surrogate: Surrogate::new(1),
             dst_surrogate: Surrogate::new(2),
+            valid_from_ms: None,
+            valid_until_ms: None,
         };
         let plan = PhysicalPlan::Graph(GraphOp::EdgePutBatch { edges: vec![edge] });
         assert!(
@@ -625,6 +626,8 @@ mod tests {
             dst_id: "b".to_owned(),
             src_surrogate: Surrogate::new(1),
             dst_surrogate: Surrogate::new(2),
+            valid_from_ms: None,
+            valid_until_ms: None,
         };
         let plan = PhysicalPlan::Graph(GraphOp::EdgeDeleteBatch { edges: vec![edge] });
         assert!(

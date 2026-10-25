@@ -18,9 +18,10 @@ use std::sync::Arc;
 use super::gateway_invalidation::invalidate_gateway_cache_for_entry;
 use super::{
     alert_rule, api_key, array, auth_user, change_stream, collection, consumer_group,
-    continuous_aggregate, custom_type, database, function, materialized_view, owner, permission,
-    procedure, quota, redaction, retention_policy, rls, role, schedule, scope_grant, scope_quota,
-    sequence, streaming_materialized_view, synonym_group, tenant, topic, trigger, user,
+    continuous_aggregate, custom_type, database, function, materialized_view, oidc_provider, owner,
+    permission, procedure, quota, redaction, retention_policy, rls, role, schedule, scope_grant,
+    scope_quota, sequence, streaming_materialized_view, synonym_group, tenant, topic, trigger,
+    user,
 };
 use crate::control::catalog_entry::entry::CatalogEntry;
 use crate::control::state::SharedState;
@@ -348,10 +349,8 @@ pub fn apply_post_apply_side_effects_sync(entry: &CatalogEntry, shared: &Arc<Sha
         } => {
             database::delete_grant(*db_id, *user_id, privilege.clone(), Arc::clone(shared));
         }
-        CatalogEntry::PutOidcProvider(_) | CatalogEntry::DeleteOidcProvider { .. } => {
-            // No in-memory cache to update yet; the OIDC verify path reads from
-            // catalog on each request. A runtime cache can be added when needed.
-        }
+        CatalogEntry::PutOidcProvider(provider) => oidc_provider::put(provider, shared),
+        CatalogEntry::DeleteOidcProvider { name } => oidc_provider::delete(name, shared),
         CatalogEntry::CloneDatabase {
             target_descriptor, ..
         } => {
@@ -489,5 +488,10 @@ pub fn apply_post_apply_side_effects_sync(entry: &CatalogEntry, shared: &Arc<Sha
         }
         // The scheduler reads the mark from the catalog row apply wrote.
         CatalogEntry::PutBackupScheduleMark(_) => {}
+        // Apply swapped the catalog's in-memory set. The cores receive it in
+        // the async post-apply.
+        CatalogEntry::PutSpatialRefSys(_) | CatalogEntry::DropSpatialRefSys { .. } => {}
+        // A credential is read from the catalog row on each use.
+        CatalogEntry::PutCredential(_) | CatalogEntry::DropCredential { .. } => {}
     }
 }

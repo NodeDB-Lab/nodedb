@@ -42,9 +42,10 @@ pub(in crate::data::executor) struct IndexedFetchParams<'a> {
     pub projection: &'a [String],
     pub limit: usize,
     pub offset: usize,
-    /// `FOR SYSTEM_TIME AS OF <ms>` cutoff on a bitemporal collection,
-    /// `None` for the current state.
-    pub system_as_of_ms: Option<i64>,
+    /// `FOR SYSTEM_TIME AS OF <ms>` cutoff on a bitemporal collection, as
+    /// the last system-time ordinal of that millisecond. `None` for the
+    /// current state.
+    pub system_as_of: Option<i64>,
 }
 
 impl CoreLoop {
@@ -160,7 +161,7 @@ impl CoreLoop {
             projection: _projection,
             limit,
             offset,
-            system_as_of_ms,
+            system_as_of,
         } = params;
         debug!(
             core = self.core_id,
@@ -178,15 +179,15 @@ impl CoreLoop {
         // row matches when its newest entry at or before the cutoff is live.
         // The planner refuses `AS OF` on a plain collection, so only a
         // bitemporal collection carries a cutoff.
-        let as_of_ms = system_as_of_ms.filter(|_| bitemporal);
-        let looked_up = match as_of_ms {
-            Some(ms) => self.sparse.versioned_index_lookup_as_of(
+        let as_of = system_as_of.filter(|_| bitemporal);
+        let looked_up = match as_of {
+            Some(cut) => self.sparse.versioned_index_lookup_as_of(
                 database_id,
                 tid,
                 collection,
                 path,
                 value,
-                Some(ms),
+                Some(cut),
             ),
             None => {
                 crate::engine::document::store::DocumentEngine::new(&self.sparse, database_id, tid)
@@ -254,7 +255,7 @@ impl CoreLoop {
         };
         // An `AS OF` read never sees the overlay, whose staged bodies are
         // current-version only, as the document scan does.
-        if let (Some(txn_id), None) = (task.request.txn_id, as_of_ms) {
+        if let (Some(txn_id), None) = (task.request.txn_id, as_of) {
             let (is_array, case_insensitive) = self.index_path_flags(&config_key, path);
             if let Err(e) = self.merge_overlay_into_index_lookup(
                 super::super::transaction::overlay::IndexOverlayMergeParams {
@@ -283,6 +284,7 @@ impl CoreLoop {
         let mut skipped = 0usize;
         let mut total_bytes = 0usize;
         let mut rows: Vec<(String, Vec<u8>)> = Vec::new();
+        let crs = self.crs_context();
         for doc_id in doc_ids.iter() {
             if rows.len() >= limit {
                 break;
@@ -293,13 +295,13 @@ impl CoreLoop {
             // the current version when the overlay has nothing staged for
             // this surrogate.
             // An `AS OF` read takes each row's version as of the cutoff.
-            let fetched = match as_of_ms {
-                Some(ms) => self.sparse.versioned_get_as_of(
+            let fetched = match as_of {
+                Some(cut) => self.sparse.versioned_get_as_of(
                     database_id,
                     tid,
                     collection,
                     doc_id,
-                    Some(ms),
+                    Some(cut),
                     None,
                 ),
                 None => self.overlay_or_base_body(task.request.txn_id, &coll_key, doc_id, || {
@@ -322,6 +324,7 @@ impl CoreLoop {
                             doc_id,
                             &bytes,
                             &identity_column,
+                            &crs,
                         )
                     } {
                         Ok(true) => {}

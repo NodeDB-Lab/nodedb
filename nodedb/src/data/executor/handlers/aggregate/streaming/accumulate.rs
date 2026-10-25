@@ -113,6 +113,7 @@ impl CoreLoop {
         // once accumulation stops — the first error breaks out of both loops.
         let mut spill_err: Option<crate::Error> = None;
         let chunk_size = self.query_tuning.aggregate_chunk_size;
+        let crs = self.crs_context();
 
         for chunk in docs.chunks(chunk_size) {
             if spill_err.is_some() {
@@ -125,7 +126,12 @@ impl CoreLoop {
                 let outer_key = if use_field_index {
                     let idx = msgpack_scan::FieldIndex::build(value, 0)
                         .unwrap_or_else(msgpack_scan::FieldIndex::empty);
-                    match ScanFilter::all_match_binary_indexed(&filter_predicates, value, &idx) {
+                    match ScanFilter::all_match_binary_indexed(
+                        &filter_predicates,
+                        value,
+                        &idx,
+                        &crs,
+                    ) {
                         Ok(true) => {}
                         Ok(false) => continue,
                         Err(e) => {
@@ -133,7 +139,9 @@ impl CoreLoop {
                             break;
                         }
                     }
-                    match msgpack_scan::group_key::build_group_key_indexed(value, group_by, &idx) {
+                    match msgpack_scan::group_key::build_group_key_indexed(
+                        value, group_by, &idx, &crs,
+                    ) {
                         Ok(k) => k,
                         Err(e) => {
                             spill_err = Some(crate::Error::from(e));
@@ -141,7 +149,7 @@ impl CoreLoop {
                         }
                     }
                 } else {
-                    match ScanFilter::all_match_binary(&filter_predicates, value) {
+                    match ScanFilter::all_match_binary(&filter_predicates, value, &crs) {
                         Ok(true) => {}
                         Ok(false) => continue,
                         Err(e) => {
@@ -149,7 +157,7 @@ impl CoreLoop {
                             break;
                         }
                     }
-                    match msgpack_scan::build_group_key(value, group_by) {
+                    match msgpack_scan::build_group_key(value, group_by, &crs) {
                         Ok(k) => k,
                         Err(e) => {
                             spill_err = Some(crate::Error::from(e));
@@ -158,13 +166,13 @@ impl CoreLoop {
                     }
                 };
 
-                if let Err(e) = spiller.feed(outer_key.clone(), aggregates, value) {
+                if let Err(e) = spiller.feed(outer_key.clone(), aggregates, value, &crs) {
                     spill_err = Some(e);
                     break;
                 }
 
                 if need_sub {
-                    let sub_key = match msgpack_scan::build_group_key(value, &sub_specs) {
+                    let sub_key = match msgpack_scan::build_group_key(value, &sub_specs, &crs) {
                         Ok(k) => k,
                         Err(e) => {
                             spill_err = Some(crate::Error::from(e));
@@ -173,7 +181,7 @@ impl CoreLoop {
                     };
                     // Composite key: outer + U+001F + sub.
                     let composite = format!("{outer_key}\x1F{sub_key}");
-                    if let Err(e) = spiller.feed(composite, sub_aggregates, value) {
+                    if let Err(e) = spiller.feed(composite, sub_aggregates, value, &crs) {
                         spill_err = Some(e);
                         break;
                     }

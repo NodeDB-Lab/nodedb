@@ -109,7 +109,7 @@ mod tests {
 
     fn georef(x: u32, y: u32, transform: Option<[f64; 6]>) -> ArrayGeoref {
         ArrayGeoref {
-            srid: Srid::Utm47N,
+            srid: Srid::new(32647).unwrap(),
             x_dim: x,
             y_dim: y,
             transform: transform.map(GeoTransform),

@@ -259,6 +259,7 @@ mod tests {
                     system_time: nodedb_types::SystemTimeScope::Current,
                     valid_at_ms: None,
                     zone_msgpack: Vec::new(),
+                    physical: false,
                 },
             ))
         })
@@ -365,7 +366,7 @@ mod tests {
         let entry = at(10);
         let write_task = ExecutionTask::with_wal_lsn(
             crate::bridge::envelope::Request {
-                entry_version: Some(entry),
+                entry_version: Some(crate::bridge::envelope::AppliedEntry::unstamped(entry)),
                 ..task_with_vshard(vshard).request
             },
             Some(Lsn::new(77)),

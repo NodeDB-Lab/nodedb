@@ -12,7 +12,7 @@ use redb::{ReadableDatabase, ReadableTable};
 
 use super::doc::{DOCUMENTS_VERSIONED, VersionedRow};
 use super::key::{coll_prefix, coll_prefix_end, format_sys_from};
-use super::value::{VersionedScanParams, decode_value};
+use super::value::{TAG_TOMBSTONE, VersionedScanParams, decode_value};
 use crate::engine::sparse::btree::{KeyedTable, SparseEngine, invalid_storage_key_err, redb_err};
 
 impl SparseEngine {
@@ -53,7 +53,7 @@ impl SparseEngine {
             database_id,
             tenant,
             coll,
-            sys_cutoff_ms,
+            sys_cutoff,
             valid_at_ms,
             limit,
         } = params;
@@ -65,7 +65,7 @@ impl SparseEngine {
             Some(after) => format!("{lo}{after}\x01"),
             None => lo.clone(),
         };
-        let cutoff_key = sys_cutoff_ms.map(format_sys_from);
+        let cutoff_key = sys_cutoff.map(format_sys_from);
         let txn = self.db.begin_read().map_err(|e| redb_err("read txn", e))?;
         let t = txn
             .open_table(DOCUMENTS_VERSIONED)
@@ -127,18 +127,23 @@ impl SparseEngine {
         Ok(out)
     }
 
-    /// Audit-log scan: every live system-time version of every doc in the
-    /// collection, ordered ascending by `sys_from_ms` (ties broken by
-    /// `doc_id`). Tombstone / GDPR-erased versions are skipped. Unlike
+    /// Audit-log scan: every system-time version of every doc in the
+    /// collection, delete versions included, ordered ascending by system-time
+    /// ordinal (ties broken by `doc_id`). A delete version
+    /// ([`VersionedRow::deleted`]) repeats the body of the live version it
+    /// closes under an empty valid interval (`i64::MIN` for both bounds); one
+    /// whose closed version is gone is skipped. GDPR-erased versions are
+    /// skipped. Unlike
     /// [`Self::versioned_scan_as_of`] this does **not** collapse to the
     /// newest-per-id — it yields the full history (`AS OF SYSTEM TIME NULL`).
     ///
-    /// Returns [`VersionedRow`] values carrying `doc_id`, `system_from_ms`, the
+    /// Returns [`VersionedRow`] values carrying `doc_id`, `system_from`, the
     /// row's stored valid-time interval, and `body`. The handler projects these
     /// into the output as the synthetic temporal columns.
     ///
-    /// `predicate` receives each version's doc-id and document body, and is
-    /// evaluated **before** the `limit` truncation, so a selective filter
+    /// `predicate` receives each version's doc-id and document body (the
+    /// closed version's body for a delete version), and is evaluated
+    /// **before** the `limit` truncation, so a selective filter
     /// never causes the scan to return fewer rows than exist (the caller must
     /// push its scan filters in here rather than filtering the truncated
     /// result). The doc-id carries a schemaless row's identity when its body
@@ -150,7 +155,7 @@ impl SparseEngine {
     /// [`never_stop`](crate::engine::sparse::scan_stop::never_stop) when
     /// nothing can cut the scan short.
     ///
-    /// `params.sys_cutoff_ms` is ignored: an audit-log scan yields every
+    /// `params.sys_cutoff` is ignored: an audit-log scan yields every
     /// system-time version, so there is no cutoff to apply.
     pub fn versioned_scan_all(
         &self,
@@ -162,7 +167,7 @@ impl SparseEngine {
             database_id,
             tenant,
             coll,
-            sys_cutoff_ms: _,
+            sys_cutoff: _,
             valid_at_ms,
             limit,
         } = params;
@@ -177,6 +182,10 @@ impl SparseEngine {
             .map_err(|e| redb_err("range", e))?;
 
         let mut all: Vec<VersionedRow> = Vec::new();
+        // The newest live version seen so far, with its document: a
+        // document's versions are contiguous and ascend by system time, so
+        // a delete version closes the live version before it.
+        let mut last_live: Option<(StorageKey, Vec<u8>)> = None;
         for r in range {
             if stop() {
                 break;
@@ -197,31 +206,54 @@ impl SparseEngine {
             };
             let bytes = v.value().to_vec();
             let decoded = decode_value(&bytes)?;
-            if !decoded.is_live() {
+            let deleted = decoded.tag == TAG_TOMBSTONE;
+            let (valid_from_ms, valid_until_ms, body) = if decoded.is_live() {
+                last_live = Some((doc_id, decoded.body.to_vec()));
+                (
+                    decoded.valid_from_ms,
+                    decoded.valid_until_ms,
+                    decoded.body.to_vec(),
+                )
+            } else if deleted {
+                // A delete version repeats the body of the live version it
+                // closes, under an empty valid interval. With no such version
+                // left (a retention purge or an erasure removed it) there is
+                // no row to show.
+                match last_live.take() {
+                    Some((live_id, live_body)) if live_id == doc_id => {
+                        (i64::MIN, i64::MIN, live_body)
+                    }
+                    _ => continue,
+                }
+            } else {
+                // A GDPR-erased version is not a row, and its content is
+                // never repeated.
+                last_live = None;
                 continue;
-            }
+            };
             if let Some(vt) = valid_at_ms
-                && (vt < decoded.valid_from_ms || vt >= decoded.valid_until_ms)
+                && (vt < valid_from_ms || vt >= valid_until_ms)
             {
                 continue;
             }
             // Push the caller's scan filters down here so the `limit` truncation
             // below counts only matching versions, never raw scanned rows.
-            if !predicate(&doc_id, decoded.body) {
+            if !predicate(&doc_id, &body) {
                 continue;
             }
             all.push(VersionedRow {
                 doc_id,
-                system_from_ms: sf,
-                valid_from_ms: decoded.valid_from_ms,
-                valid_until_ms: decoded.valid_until_ms,
-                body: decoded.body.to_vec(),
+                system_from: sf,
+                valid_from_ms,
+                valid_until_ms,
+                body,
+                deleted,
             });
         }
         // Global ascending order by system time; deterministic on ties.
         all.sort_by(|a, b| {
-            a.system_from_ms
-                .cmp(&b.system_from_ms)
+            a.system_from
+                .cmp(&b.system_from)
                 .then_with(|| a.doc_id.cmp(&b.doc_id))
         });
         all.truncate(limit);

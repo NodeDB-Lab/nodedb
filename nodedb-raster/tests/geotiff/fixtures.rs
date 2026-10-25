@@ -6,9 +6,9 @@
 //! floating-point-predictor fixtures write each chunk by hand through the
 //! `DirectoryEncoder`, since `ImageEncoder` writes chunky strips only.
 
-use std::io::{Cursor, Read, Seek, Write};
+use std::io::{Cursor, Seek, Write};
 
-use nodedb_raster::{GeoTiffReader, RasterError, RasterLimits};
+use nodedb_raster::RasterLimits;
 use tiff::encoder::colortype::ColorType;
 use tiff::encoder::compression::{CompressionAlgorithm, Deflate, Lzw};
 use tiff::encoder::{Compression, DirectoryEncoder, Predictor, TiffEncoder, TiffKind, TiffValue};
@@ -112,6 +112,8 @@ macro_rules! float_sample {
 }
 
 int_sample!(u8, 0);
+int_sample!(i8, 60);
+int_sample!(i32, 70_000);
 int_sample!(u16, 0);
 int_sample!(i16, 300);
 int_sample!(u32, 0);
@@ -422,45 +424,4 @@ pub fn encode_chunks<T: Sample>(
         .iter()
         .map(|chunk| chunk_bytes(chunk, chunk_w as usize * spp, spp, predictor, compression))
         .collect()
-}
-
-/// Open an owned copy of `bytes` under [`LIMITS`], so callers can pass a temporary.
-pub fn open(bytes: &[u8]) -> Result<GeoTiffReader<Cursor<Vec<u8>>>, RasterError> {
-    GeoTiffReader::open(Cursor::new(bytes.to_vec()), LIMITS)
-}
-
-/// Decode every block and reassemble one row-major `f64` plane per band.
-pub fn read_all<R: Read + Seek>(reader: &mut GeoTiffReader<R>) -> Vec<Vec<f64>> {
-    let width = reader.width() as usize;
-    let pixels = width * reader.height() as usize;
-    let mut out = vec![vec![f64::NAN; pixels]; usize::from(reader.band_count())];
-    for index in 0..reader.block_count() {
-        let block = reader.read_block(index).expect("block decodes");
-        let window = block.window;
-        assert_eq!(block.bands.len(), out.len(), "band count of block {index}");
-        for (band, samples) in block.bands.iter().enumerate() {
-            assert_eq!(samples.len(), window.pixels(), "samples in block {index}");
-            assert_eq!(samples.sample_type(), reader.sample_type());
-            for r in 0..window.height as usize {
-                for c in 0..window.width as usize {
-                    let row = window.row_off as usize + r;
-                    let col = window.col_off as usize + c;
-                    out[band][row * width + col] = samples
-                        .value_f64(r * window.width as usize + c)
-                        .expect("sample in window");
-                }
-            }
-        }
-    }
-    out
-}
-
-/// Open `bytes` with `limits` and decode every block; the first error.
-pub fn decode_everything(bytes: &[u8], limits: RasterLimits) -> Result<(), RasterError> {
-    let mut reader = GeoTiffReader::open(Cursor::new(bytes), limits)?;
-    reader.srid()?;
-    for index in 0..reader.block_count() {
-        reader.read_block(index)?;
-    }
-    Ok(())
 }

@@ -26,3 +26,16 @@ pub(crate) fn test_memory() -> ScopedMemory {
         EngineId::Spatial,
     )
 }
+
+/// A projected tree SRID with code `code`, planar space.
+pub(crate) fn planar_srid(code: u32) -> crate::rtree::TreeSrid {
+    crate::rtree::TreeSrid {
+        srid: nodedb_types::geometry::Srid::new(code).expect("test SRID code in range"),
+        space: nodedb_types::BboxSpace::Planar,
+    }
+}
+
+/// EPSG:32648, UTM zone 48N.
+pub(crate) fn utm48n() -> crate::rtree::TreeSrid {
+    planar_srid(32648)
+}

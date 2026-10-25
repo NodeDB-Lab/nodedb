@@ -111,6 +111,10 @@ pub struct CoreLoopSpawn {
     /// `timestamp`. That made every restart test here quietly weaker than it
     /// looked — none of them exercised the seeded path production always takes.
     pub doc_config_seed: Vec<nodedb::data::executor::core_loop::DocConfigSeedEntry>,
+    /// The catalog's user-defined CRS set, installed BEFORE WAL replay exactly
+    /// as production's `seed_catalog_state` does, so replay and every later
+    /// request resolve user-defined SRIDs.
+    pub crs_set_seed: Arc<nodedb_crs::CustomCrsSet>,
     /// The collections some Event Plane consumer reads, as production boot
     /// wires them. Build it with [`event_interest_for`].
     pub event_interest: Arc<EventInterest>,
@@ -147,6 +151,7 @@ pub fn spawn_core_loop(spawn: CoreLoopSpawn) -> tokio::task::JoinHandle<()> {
         query_tuning,
         timeseries_tuning,
         doc_config_seed,
+        crs_set_seed,
         event_interest,
         stop_rx,
     } = spawn;
@@ -180,6 +185,7 @@ pub fn spawn_core_loop(spawn: CoreLoopSpawn) -> tokio::task::JoinHandle<()> {
                 // `doc_configs`, and production seeds it in the same order
                 // (`seed_catalog_state` -> `replay_wal_and_rebuild_indexes`).
                 core.seed_doc_configs(&doc_config_seed);
+                core.set_crs_set(crs_set_seed);
                 if let Some(WalReplay {
                     records,
                     tombstones,

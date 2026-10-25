@@ -3,14 +3,13 @@
 //! `GraphOp`: graph engine physical operations dispatched to the Data Plane.
 
 use nodedb_graph::{AlgoParams, Direction, GraphAlgorithm, GraphTraversalOptions};
-use nodedb_types::{
-    QualifiedCollection, RlsWriteCheck, Surrogate, SurrogateBitmap, SystemTimeScope,
-};
+use nodedb_types::{QualifiedCollection, RlsWriteCheck, Surrogate, SurrogateBitmap};
 
 use super::algo_stage::AlgoStage;
 use super::batch_edge::BatchEdge;
 use super::bsp::BspSuperstepPlan;
 use super::rag_stage::RagStage;
+use super::read_scope::GraphReadScope;
 use super::wcc::WccSuperstepPlan;
 
 /// Graph engine physical operations.
@@ -37,6 +36,11 @@ pub enum GraphOp {
         properties: Vec<u8>,
         src_surrogate: Surrogate,
         dst_surrogate: Surrogate,
+        /// Start of the edge's valid time, ms since epoch. `None` takes the
+        /// write's wall time.
+        valid_from_ms: Option<i64>,
+        /// Exclusive end of the edge's valid time. `None` leaves it open.
+        valid_until_ms: Option<i64>,
     },
 
     /// Batched edge insert: many `(collection, src, label, dst)` tuples.
@@ -92,6 +96,8 @@ pub enum GraphOp {
         /// Optional surrogate prefilter restricting which frontier nodes are
         /// eligible as traversal targets. `None` = no restriction.
         frontier_bitmap: Option<SurrogateBitmap>,
+        /// The bitemporal cut the read sees. `AllVersions` is refused.
+        scope: GraphReadScope,
     },
 
     /// Immediate 1-hop neighbors lookup.
@@ -104,6 +110,8 @@ pub enum GraphOp {
         direction: Direction,
         /// RLS filters applied to neighbor nodes before returning.
         rls_filters: Vec<u8>,
+        /// The bitemporal cut the read sees. `AllVersions` is refused.
+        scope: GraphReadScope,
     },
 
     /// Batched 1-hop neighbors lookup: one RPC per hop of a BFS frontier
@@ -130,9 +138,11 @@ pub enum GraphOp {
         /// counts against `max_results`. Empty admits every edge. Non-empty
         /// requires `collection`.
         edge_predicate: Vec<nodedb_types::filter::MetadataFilter>,
-        /// Each row carries the crossed edge's current property object.
+        /// Each row carries the crossed edge's property object at `scope`.
         /// Requires `collection`.
         with_properties: bool,
+        /// The bitemporal cut the read sees. `AllVersions` is refused.
+        scope: GraphReadScope,
     },
 
     /// Shortest path between two nodes.
@@ -150,6 +160,8 @@ pub enum GraphOp {
         /// Optional surrogate prefilter restricting which nodes may appear
         /// on the path. `None` = no restriction.
         frontier_bitmap: Option<SurrogateBitmap>,
+        /// The bitemporal cut the read sees. `AllVersions` is refused.
+        scope: GraphReadScope,
     },
 
     /// Materialize a subgraph as edge tuples.
@@ -163,6 +175,8 @@ pub enum GraphOp {
         options: GraphTraversalOptions,
         /// RLS filters applied to subgraph nodes/edges before returning.
         rls_filters: Vec<u8>,
+        /// The bitemporal cut the read sees. `AllVersions` is refused.
+        scope: GraphReadScope,
     },
 
     /// GraphRAG fusion: vector search → graph expansion → RRF ranking.
@@ -195,6 +209,8 @@ pub enum GraphOp {
         bm25_field: Option<String>,
         /// Which part of the fusion the core runs.
         stage: RagStage,
+        /// The bitemporal cut the read sees. `AllVersions` is refused.
+        scope: GraphReadScope,
     },
 
     /// Graph algorithm execution (PageRank, WCC, SSSP, etc.).
@@ -203,6 +219,10 @@ pub enum GraphOp {
         params: AlgoParams,
         /// Where the algorithm reads its graph from.
         stage: AlgoStage,
+        /// The bitemporal cut of the graph the algorithm runs over. A
+        /// `Local` or `ExportEdges` stage reads its edges at it.
+        /// `AllVersions` is refused.
+        scope: GraphReadScope,
     },
 
     /// Graph pattern matching (MATCH clause execution).
@@ -215,6 +235,8 @@ pub enum GraphOp {
         /// frontier candidate for Control-Plane filtering (cluster
         /// orchestration). `false` (default) matches non-cluster MATCH output.
         cluster_mode: bool,
+        /// The bitemporal cut the read sees. `AllVersions` is refused.
+        scope: GraphReadScope,
     },
 
     /// Cross-shard MATCH continuation: resumes the SAME already-optimized
@@ -232,6 +254,8 @@ pub enum GraphOp {
         source_node: String,
         /// The binding variable bound to `source_node`.
         source_binding: String,
+        /// The cut of the originating `Match`.
+        scope: GraphReadScope,
     },
 
     /// Cross-shard MATCH variable-length RESUME: continues a `[*min..max]`
@@ -245,6 +269,8 @@ pub enum GraphOp {
         /// triple index, the source bindings, and the un-expanded frontier /
         /// resume depth.
         resume: Vec<u8>,
+        /// The cut of the originating `Match`.
+        scope: GraphReadScope,
     },
 
     /// One distributed-PageRank BSP superstep on this shard's local CSR.
@@ -272,12 +298,13 @@ pub enum GraphOp {
         labels: Vec<String>,
     },
 
-    /// Bitemporal 1-hop neighbors lookup.
+    /// Bitemporal 1-hop neighbors lookup, read from the versioned edge
+    /// store rather than a CSR.
     ///
-    /// Resolves edges whose latest version with `system_from <= system_as_of_ms`
-    /// (converted to HLC ordinal) is not a sentinel, optionally also filtering
-    /// by `valid_from_ms <= valid_at_ms < valid_until_ms`. The handler calls
-    /// `ceiling_resolve_edge` per candidate base edge.
+    /// Resolves each base edge to its newest version at or below the scope's
+    /// system cut that is not a sentinel, and whose valid time contains
+    /// `scope.valid_at_ms` when one is set. The answer has one row per base
+    /// edge, so `GraphSystemCut::AllVersions` answers a typed `Unsupported`.
     TemporalNeighbors {
         /// Edge store is collection-scoped; current-state `Neighbors` reads
         /// the tenant-wide CSR, but the versioned key layout is
@@ -287,27 +314,8 @@ pub enum GraphOp {
         node_id: String,
         edge_label: Option<String>,
         direction: Direction,
-        /// System-time selection. `Current` falls back to current-state
-        /// semantics identical to `Neighbors`; `AsOf(ms)` is point-in-time.
-        /// `AllVersions` returns a typed NotSupported error on graph.
-        system_time: SystemTimeScope,
-        /// Optional valid-time point. Skipped when `None`.
-        valid_at_ms: Option<i64>,
+        scope: GraphReadScope,
         rls_filters: Vec<u8>,
-    },
-
-    /// Bitemporal graph algorithm execution.
-    ///
-    /// Identical to `Algo` but builds its CSR snapshot via
-    /// `CsrSnapshot::from_edge_store_as_of` at the given system-time cutoff
-    /// before running the algorithm.
-    TemporalAlgorithm {
-        algorithm: GraphAlgorithm,
-        params: AlgoParams,
-        /// System-time selection. `Current` means current state (equivalent to
-        /// plain `Algo`); `AsOf(ms)` builds a snapshot at that cutoff.
-        /// `AllVersions` returns a typed NotSupported error on graph.
-        system_time: SystemTimeScope,
     },
 
     /// Read persistent graph-stats counters from the edge store.
@@ -379,4 +387,39 @@ pub enum GraphOp {
         vshard: u32,
         ids: Vec<String>,
     },
+}
+
+impl GraphOp {
+    /// The bitemporal scope a graph read op reads at. `None` for a write, a
+    /// guard, a stats read, or a superstep: a superstep carries its own cut
+    /// marker in its plan.
+    pub fn read_scope(&self) -> Option<&GraphReadScope> {
+        match self {
+            GraphOp::Hop { scope, .. }
+            | GraphOp::Neighbors { scope, .. }
+            | GraphOp::NeighborsMulti { scope, .. }
+            | GraphOp::Path { scope, .. }
+            | GraphOp::Subgraph { scope, .. }
+            | GraphOp::RagFusion { scope, .. }
+            | GraphOp::Algo { scope, .. }
+            | GraphOp::Match { scope, .. }
+            | GraphOp::MatchContinuation { scope, .. }
+            | GraphOp::MatchVarLenResume { scope, .. }
+            | GraphOp::TemporalNeighbors { scope, .. } => Some(scope),
+            GraphOp::EdgePut { .. }
+            | GraphOp::EdgePutBatch { .. }
+            | GraphOp::EdgeDelete { .. }
+            | GraphOp::ResolveEdgeDelete(_)
+            | GraphOp::EdgeDeleteBatch { .. }
+            | GraphOp::BspSuperstep(_)
+            | GraphOp::WccSuperstep(_)
+            | GraphOp::SetNodeLabels { .. }
+            | GraphOp::RemoveNodeLabels { .. }
+            | GraphOp::Stats { .. }
+            | GraphOp::NodeEdgeGuard { .. }
+            | GraphOp::NodePresenceGuard { .. }
+            | GraphOp::TruncateEdges { .. }
+            | GraphOp::NodePresenceRead { .. } => None,
+        }
+    }
 }

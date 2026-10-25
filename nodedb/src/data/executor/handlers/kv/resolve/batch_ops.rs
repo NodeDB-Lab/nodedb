@@ -122,6 +122,7 @@ impl CoreLoop {
             entries,
             intent,
             self.declared_columns_of(did, tid, collection),
+            &self.crs_context(),
             |key| {
                 let body = self.kv_resolve_read(did, tid, collection, key, now_ms);
                 stored_before.insert(key.to_vec(), body.clone());
@@ -133,12 +134,21 @@ impl CoreLoop {
         } = intent
         {
             for row in &rows {
-                admit_kv_row(rls_write_check, &row.stored, row.key, tid, collection)?;
+                admit_kv_row(
+                    rls_write_check,
+                    &row.stored,
+                    row.key,
+                    tid,
+                    collection,
+                    &self.crs_context(),
+                )?;
             }
         }
 
         let response_payload = match returning {
-            Some(spec) => kv_stored_rows_payload(spec, rls_filters, &stored_rows(&rows))?,
+            Some(spec) => {
+                kv_stored_rows_payload(spec, rls_filters, &stored_rows(&rows), &self.crs_context())?
+            }
             None => match intent {
                 KvBatchIntent::Merge { .. } => response_codec::encode_affected_with_op(
                     rows.len() as u64,

@@ -37,7 +37,8 @@ impl CoreLoop {
         collection: &str,
         filters: &[ScanFilter],
     ) -> crate::Result<Vec<MatchedRow>> {
-        let raw_matches = self.strict_aware_matcher(database_id, tid, collection, filters);
+        let crs = self.crs_context();
+        let raw_matches = self.strict_aware_matcher(database_id, tid, collection, filters, &crs);
         let held = HeldEvalError::default();
         let matches = |row_key: &StorageKey, body: &[u8]| held.check(|| raw_matches(row_key, body));
         let rows = self.current_rows_where(database_id, tid, collection, &matches)?;
@@ -77,7 +78,7 @@ impl CoreLoop {
                     database_id,
                     tenant: tid,
                     coll: collection,
-                    sys_cutoff_ms: None,
+                    sys_cutoff: None,
                     valid_at_ms: None,
                     limit: usize::MAX,
                 },
@@ -116,7 +117,7 @@ impl CoreLoop {
                     database_id,
                     tenant: tid,
                     coll: collection,
-                    sys_cutoff_ms: None,
+                    sys_cutoff: None,
                     valid_at_ms: None,
                     limit,
                 },
@@ -153,7 +154,7 @@ impl CoreLoop {
                     database_id,
                     tenant: tid,
                     coll: collection,
-                    sys_cutoff_ms: None,
+                    sys_cutoff: None,
                     valid_at_ms: None,
                     limit: BITEMPORAL_PAGE_ROWS,
                 },
@@ -320,7 +321,7 @@ mod tests {
                     tenant: TID,
                     coll: LEDGER,
                     doc_id: &key(surrogate),
-                    sys_from_ms: SEEDED_AT,
+                    sys_from: SEEDED_AT,
                     valid_from_ms: i64::MIN,
                     valid_until_ms: i64::MAX,
                     body: &body,
@@ -334,7 +335,7 @@ mod tests {
                     field: "kind",
                     value: kind,
                     doc_id: &key(surrogate),
-                    sys_from_ms: SEEDED_AT,
+                    sys_from: SEEDED_AT,
                 })
                 .expect("seed index entry");
         }
@@ -368,17 +369,10 @@ mod tests {
         core: &CoreLoop,
         database_id: u64,
         surrogate: u32,
-        sys_cutoff_ms: Option<i64>,
+        sys_cutoff: Option<i64>,
     ) -> Option<Vec<u8>> {
         core.sparse
-            .versioned_get_as_of(
-                database_id,
-                TID,
-                LEDGER,
-                &key(surrogate),
-                sys_cutoff_ms,
-                None,
-            )
+            .versioned_get_as_of(database_id, TID, LEDGER, &key(surrogate), sys_cutoff, None)
             .expect("read version")
     }
 
@@ -386,11 +380,11 @@ mod tests {
         core: &CoreLoop,
         database_id: u64,
         kind: &str,
-        sys_cutoff_ms: Option<i64>,
+        sys_cutoff: Option<i64>,
     ) -> Vec<u32> {
         let mut rows: Vec<u32> = core
             .sparse
-            .versioned_index_lookup_as_of(database_id, TID, LEDGER, "kind", kind, sys_cutoff_ms)
+            .versioned_index_lookup_as_of(database_id, TID, LEDGER, "kind", kind, sys_cutoff)
             .expect("index lookup")
             .into_iter()
             .map(|k| k.surrogate().as_u32())
@@ -483,7 +477,7 @@ mod tests {
             .write_set
             .iter()
             .filter_map(|entry| match entry.effect {
-                RowEffect::Delete { system_from_ms } => Some((entry.surrogate, system_from_ms)),
+                RowEffect::Delete { system_from } => Some((entry.surrogate, system_from)),
                 _ => None,
             })
             .collect();
@@ -559,7 +553,7 @@ mod tests {
                 RowEffect::Put {
                     version: Some(version),
                     ..
-                } => Some(version.sys_from_ms),
+                } => Some(version.sys_from),
                 _ => None,
             })
             .collect();

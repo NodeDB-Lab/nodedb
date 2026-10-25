@@ -87,7 +87,7 @@ pub(in crate::data::executor) struct BulkDeleteRowCascade<'a> {
     pub deleted_bytes: &'a [u8],
     /// The system time of the tombstone that closed a bitemporal row, `None`
     /// for a row removed from the plain table.
-    pub tombstone_sys_from_ms: Option<i64>,
+    pub tombstone_sys_from: Option<i64>,
     /// The collection's strict schema, when it stores Binary Tuples. Decodes
     /// `deleted_bytes` so the row's identity column is readable.
     pub strict_schema: Option<&'a StrictSchema>,
@@ -123,7 +123,7 @@ impl CoreLoop {
             collection,
             storage_key,
             deleted_bytes,
-            tombstone_sys_from_ms,
+            tombstone_sys_from,
             strict_schema,
             declared_primary_key,
             has_vectors,
@@ -210,7 +210,7 @@ impl CoreLoop {
         write_set.push(removed_row_image(
             row_surrogate.as_u32(),
             row_identity.clone(),
-            tombstone_sys_from_ms,
+            tombstone_sys_from,
         ));
         // Emit a delete event per affected row to the Event Plane, so
         // AFTER-DELETE triggers and CDC/change-stream consumers see

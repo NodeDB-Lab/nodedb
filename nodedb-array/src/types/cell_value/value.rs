@@ -40,6 +40,7 @@ pub enum CellValue {
     Int32(i32),
     UInt32(u32),
     Float32(f32),
+    Int8(i8),
 }
 
 impl CellValue {
@@ -61,6 +62,7 @@ impl CellValue {
             CellValue::Int32(_) => Some(AttrType::Int32),
             CellValue::UInt32(_) => Some(AttrType::UInt32),
             CellValue::Float32(_) => Some(AttrType::Float32),
+            CellValue::Int8(_) => Some(AttrType::Int8),
         }
     }
 
@@ -69,6 +71,7 @@ impl CellValue {
     pub fn as_i64(&self) -> Option<i64> {
         match self {
             CellValue::Int64(v) => Some(*v),
+            CellValue::Int8(v) => Some(i64::from(*v)),
             CellValue::UInt8(v) => Some(i64::from(*v)),
             CellValue::Int16(v) => Some(i64::from(*v)),
             CellValue::UInt16(v) => Some(i64::from(*v)),
@@ -90,6 +93,7 @@ impl CellValue {
             CellValue::Float64(v) => Some(*v),
             CellValue::Float32(v) => Some(widen_f32(*v)),
             CellValue::Int64(_)
+            | CellValue::Int8(_)
             | CellValue::UInt8(_)
             | CellValue::Int16(_)
             | CellValue::UInt16(_)
@@ -127,6 +131,8 @@ mod tests {
         assert_eq!(CellValue::Float32(0.5).as_float(), Some(0.5));
         assert_eq!(CellValue::Float32(0.5).as_i64(), None);
         assert_eq!(CellValue::UInt8(1).attr_type(), Some(AttrType::UInt8));
+        assert_eq!(CellValue::Int8(-1).attr_type(), Some(AttrType::Int8));
+        assert_eq!(CellValue::Int8(-128).as_i64(), Some(-128));
         assert_eq!(CellValue::Null.attr_type(), None);
     }
 }

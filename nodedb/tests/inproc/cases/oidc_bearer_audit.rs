@@ -53,7 +53,7 @@ async fn create_catalog_provider(
              JWKS_URI '{jwks_uri}' \
              AUDIENCE '{audience}' \
              TENANT 42 \
-             CLAIM MAPPING WHEN sub = '{mapped_sub}' SET DEFAULT_DATABASE = 1"
+             CLAIM MAPPING WHEN sub = '{mapped_sub}' SET DEFAULT_DATABASE = 0"
         ),
     )
     .await;

@@ -7,7 +7,10 @@
 //! This module re-exports everything and adds Origin-specific methods
 //! that depend on Origin-only types (e.g., `EdgeStore`).
 
+pub mod historical_cache;
 pub mod rebuild;
+
+pub use historical_cache::{HistoricalCsrCache, HistoricalCsrKey, HistoricalCsrSource};
 
 // Re-export all shared crate types.
 pub use nodedb_graph::GraphOverlayDelta;

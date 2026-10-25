@@ -6,5 +6,7 @@ mod document;
 mod query;
 mod vector;
 mod walk;
+mod walk_mut;
 
 pub use walk::children;
+pub use walk_mut::children_mut;

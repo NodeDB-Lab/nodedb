@@ -28,6 +28,11 @@ pub(in crate::data::executor) struct EdgePutParams<'a> {
     pub properties: &'a [u8],
     pub src_surrogate: nodedb_types::Surrogate,
     pub dst_surrogate: nodedb_types::Surrogate,
+    /// Start of the edge's valid time, ms since epoch. `None` takes the
+    /// write's epoch time under Calvin, else the ordinal's wall time.
+    pub valid_from_ms: Option<i64>,
+    /// Exclusive end of the edge's valid time. `None` leaves it open.
+    pub valid_until_ms: Option<i64>,
 }
 
 /// Bundled arguments for [`CoreLoop::execute_edge_delete`].
@@ -196,6 +201,7 @@ pub(super) mod test_support {
                 direction: nodedb_graph::Direction::Out,
                 rls_filters: Vec::new(),
                 collection: None,
+                scope: nodedb_physical::physical_plan::GraphReadScope::default(),
             }),
             deadline: Instant::now() + Duration::from_secs(5),
             priority: Priority::Normal,

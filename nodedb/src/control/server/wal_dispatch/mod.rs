@@ -11,9 +11,9 @@ mod core;
 mod crdt;
 mod document;
 mod graph;
-mod graph_labels;
 mod spatial;
 mod stamp;
+mod system_stamp;
 mod text;
 mod timeseries;
 mod vector;
@@ -24,6 +24,7 @@ pub use core::{
     wal_append_if_write_with_creds,
 };
 pub use stamp::stamp_minted_lsn;
+pub use system_stamp::stamp_system_ordinals;
 pub use write_set_redo::{
     GroupOrigin, GroupOriginAppend, GroupParts, WriteSetTarget, append_group_origin,
     append_group_parts, append_planned_parts, plan_group_parts, plan_post_apply_redo,
@@ -32,7 +33,6 @@ pub use write_set_redo::{
 // Payload encoders shared by the autocommit WAL path and transaction resolve, so
 // each engine's record shape lives in exactly one place.
 pub(crate) use crdt::encode_crdt_op_record;
-pub(crate) use graph_labels::encode_graph_node_label_payload;
 pub(crate) use text::encode_text_op_record;
 pub(crate) use timeseries::{
     TimeseriesIngestRecord, encode_columnar_truncate_payload, encode_timeseries_ingest_payload,

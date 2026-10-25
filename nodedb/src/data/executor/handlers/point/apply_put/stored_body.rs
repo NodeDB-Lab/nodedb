@@ -23,7 +23,9 @@ pub(in crate::data::executor) struct StoredBodyInput<'a> {
     /// The incoming MessagePack body, for both storage modes.
     pub value: &'a [u8],
     pub bitemporal: bool,
-    pub sys_from_ms: i64,
+    /// The version's system-time ordinal, stamped into a bitemporal strict
+    /// tuple.
+    pub sys_from: i64,
     pub valid_from_ms: i64,
     pub valid_until_ms: i64,
     /// Which fields this write puts in scope for typeguard validation.
@@ -54,7 +56,7 @@ impl CoreLoop {
             surrogate,
             value,
             bitemporal,
-            sys_from_ms,
+            sys_from,
             valid_from_ms,
             valid_until_ms,
             guards,
@@ -63,7 +65,8 @@ impl CoreLoop {
         // A HASH_CHAIN row a write re-applies keeps its durable bytes, so no
         // expression is evaluated a second time.
         let intent = self
-            .chain_intents
+            .chain
+            .intents
             .get(&(config_key.clone(), surrogate.as_u32()));
         if let Some(ChainIntent::Keep { stored }) = intent {
             return self.kept_stored_body(config_key, stored);
@@ -80,7 +83,7 @@ impl CoreLoop {
             && write_body::rewrites_body(config)
         {
             if let Ok(mut doc) = doc_format::decode_document(value) {
-                write_body::materialize_write_body(config, &mut doc, guards)
+                write_body::materialize_write_body(config, &mut doc, guards, &self.crs_context())
                     .map_err(crate::Error::DataPlane)?;
                 doc_format::encode_to_msgpack(&doc)
             } else {
@@ -162,7 +165,7 @@ impl CoreLoop {
                 strict_format::bytes_to_binary_tuple_bitemporal(
                     body,
                     schema,
-                    sys_from_ms,
+                    sys_from,
                     valid_from_ms,
                     valid_until_ms,
                     collection,

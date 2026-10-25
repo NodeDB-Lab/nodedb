@@ -7,7 +7,7 @@
 use loro::LoroValue;
 use nodedb_crdt::policy::{PolicyResolution, ResolvedAction};
 use nodedb_crdt::state::CrdtState;
-use nodedb_crdt::validator::Validator;
+use nodedb_crdt::validator::{IncomingDelta, Validator};
 
 use crate::common::{AuthCtx, rename_suffix_policy, schema, user_change};
 
@@ -27,11 +27,14 @@ fn multi_agent_unique_rename_advances_suffix_monotonically() {
     let r_a = validator
         .validate_with_policy(
             &leader,
-            1,
-            AuthCtx::default(),
             &user_change("user-a", "Alice", "alice@example.com"),
-            b"delta-a".to_vec(),
-            now_ms,
+            IncomingDelta {
+                peer_id: 1,
+                auth: AuthCtx::default(),
+                delta_bytes: b"delta-a".to_vec(),
+                hlc_timestamp: now_ms,
+            },
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .unwrap();
     assert!(
@@ -58,11 +61,14 @@ fn multi_agent_unique_rename_advances_suffix_monotonically() {
     let r_b = validator
         .validate_with_policy(
             &leader,
-            2,
-            AuthCtx::default(),
             &user_change("user-b", "Bob", "alice@example.com"),
-            b"delta-b".to_vec(),
-            now_ms + 100,
+            IncomingDelta {
+                peer_id: 2,
+                auth: AuthCtx::default(),
+                delta_bytes: b"delta-b".to_vec(),
+                hlc_timestamp: now_ms + 100,
+            },
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .unwrap();
     let suffix_b = match r_b {
@@ -101,11 +107,14 @@ fn multi_agent_unique_rename_advances_suffix_monotonically() {
     let r_c = validator
         .validate_with_policy(
             &leader,
-            3,
-            AuthCtx::default(),
             &user_change("user-c", "Carol", "alice@example.com"),
-            b"delta-c".to_vec(),
-            now_ms + 200,
+            IncomingDelta {
+                peer_id: 3,
+                auth: AuthCtx::default(),
+                delta_bytes: b"delta-c".to_vec(),
+                hlc_timestamp: now_ms + 200,
+            },
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .unwrap();
     let suffix_c = match r_c {

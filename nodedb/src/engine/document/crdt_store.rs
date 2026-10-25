@@ -105,6 +105,7 @@ mod tests {
             nodedb_crdt::CrdtAuthContext::default(),
             &change,
             b"delta".to_vec(),
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .unwrap();
 
@@ -130,6 +131,7 @@ mod tests {
             nodedb_crdt::CrdtAuthContext::default(),
             &change1,
             b"d1".to_vec(),
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .unwrap();
 
@@ -144,6 +146,7 @@ mod tests {
             nodedb_crdt::CrdtAuthContext::default(),
             &change2,
             b"d2".to_vec(),
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .unwrap();
 

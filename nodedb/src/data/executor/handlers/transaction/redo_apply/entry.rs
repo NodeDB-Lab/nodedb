@@ -660,7 +660,7 @@ mod tests {
             install(&mut core, 100, &later);
             core.flush_ts_collection(tenant, crate::types::DatabaseId::DEFAULT, "metrics", 0)
                 .expect("flush");
-            let stamp = &core.ts_replay_stamps.get(&key).expect("stamp").rows;
+            let stamp = &core.ts_replay.stamps.get(&key).expect("stamp").rows;
             assert!(stamp.skips(100) && !stamp.skips(50), "{stamp:?}");
             // The record at 50 applies afterwards and stays in the memtable.
             install(&mut core, 50, &earlier);
@@ -951,6 +951,8 @@ mod tests {
                 dst_surrogate: 32,
                 system_from: Some(500),
                 applied: None,
+                valid_from_ms: None,
+                valid_until_ms: None,
             })
             .expect("encode edge put"),
         };
@@ -1012,7 +1014,8 @@ mod tests {
         let (mut core, _req, _resp) = make_core_with_dir(dir.path());
         let label_set = RedoSubRecord {
             record_type: RecordType::GraphNodeLabelSet as u32,
-            payload: zerompk::to_msgpack_vec(&("carol".to_string(), vec!["Person".to_string()]))
+            payload: crate::wal::NodeLabelRedo::live("carol", &["Person".to_string()])
+                .encode()
                 .expect("encode label set"),
         };
         let redo = redo_bytes(vec![label_set, mismatched_ingest()]);

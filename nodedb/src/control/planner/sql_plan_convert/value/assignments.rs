@@ -21,7 +21,7 @@ pub(crate) fn assignments_to_update_values(
     let mut result = Vec::with_capacity(assignments.len());
     for (field, expr) in assignments {
         let value = match expr {
-            SqlExpr::Literal(v) => UpdateValue::Literal(sql_value_to_msgpack(v)),
+            SqlExpr::Literal(v) => UpdateValue::Literal(sql_value_to_msgpack(v)?),
             _ => UpdateValue::Expr(sql_expr_to_bridge_expr(expr)),
         };
         result.push((field.clone(), value));
@@ -38,7 +38,7 @@ pub(crate) fn assignments_to_update_values_qualified(
     let mut result = Vec::with_capacity(assignments.len());
     for (field, expr) in assignments {
         let value = match expr {
-            SqlExpr::Literal(v) => UpdateValue::Literal(sql_value_to_msgpack(v)),
+            SqlExpr::Literal(v) => UpdateValue::Literal(sql_value_to_msgpack(v)?),
             _ => UpdateValue::Expr(sql_expr_to_bridge_expr_qualified(expr)),
         };
         result.push((field.clone(), value));

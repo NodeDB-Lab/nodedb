@@ -18,11 +18,13 @@
 //! - [`replicated_entry`]: [`ReplicatedEntry`] (routing envelope) + (de)serialization.
 //! - [`transaction_redo_wire`]: wire types of the committed-transaction redo entry.
 //! - [`redo_chunk_wire`]: a redo body, inline or chunked across entries.
+//! - [`system_span`]: the run of system-time ordinals a write stamps.
 
 mod aliases;
 mod redo_chunk_wire;
 mod replicated_entry;
 mod replicated_write;
+mod system_span;
 mod transaction_redo_wire;
 mod wire_shapes;
 
@@ -33,6 +35,7 @@ pub use aliases::{
 pub use redo_chunk_wire::{RedoBody, RedoContent};
 pub use replicated_entry::{CollectionIncarnation, ReplicatedEntry};
 pub use replicated_write::ReplicatedWrite;
+pub(crate) use system_span::columnar_rows;
 pub use transaction_redo_wire::{CalvinRedoMeta, ReplicatedEventSource, ReplicatedIdentity};
 pub use wire_shapes::{
     BalanceDeltaFields, ColumnarResolvedRow, ConstraintChangeOp, DocumentResolvedMutationWire,

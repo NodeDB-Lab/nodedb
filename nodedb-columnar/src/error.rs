@@ -63,6 +63,13 @@ pub enum ColumnarError {
         source: nodedb_types::MsgpackError,
     },
 
+    /// A value for a `Geometry` column that does not parse or encode.
+    #[error("geometry for column '{column}': {source}")]
+    Geometry {
+        column: String,
+        source: nodedb_spatial::SpatialError,
+    },
+
     #[error("null violation: column '{0}' is NOT NULL")]
     NullViolation(String),
 

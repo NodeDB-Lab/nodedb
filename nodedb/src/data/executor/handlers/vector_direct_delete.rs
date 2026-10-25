@@ -94,9 +94,13 @@ impl CoreLoop {
                     Ok(None) => continue,
                     Err(e) => return self.response_error(task, e),
                 };
-                if let Err(e) =
-                    rls_write_gate::admit_document_value(rls_write_check, &image, tid, collection)
-                {
+                if let Err(e) = rls_write_gate::admit_document_value(
+                    rls_write_check,
+                    &image,
+                    tid,
+                    collection,
+                    &self.crs_context(),
+                ) {
                     return self.response_error(task, e);
                 }
             }

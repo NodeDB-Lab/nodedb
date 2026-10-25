@@ -13,6 +13,8 @@
 
 use std::collections::HashSet;
 
+use nodedb_physical::physical_plan::GraphReadScope;
+
 use crate::bridge::envelope::Response;
 use crate::control::state::SharedState;
 use crate::engine::graph::traversal_options::GraphTraversalOptions;
@@ -40,6 +42,8 @@ pub struct CrossCoreBfsParams<'a> {
     pub linearizable: bool,
     /// The session's transaction. The walk sees its staged edge writes.
     pub txn_id: Option<TxnId>,
+    /// The bitemporal cut every hop of the walk reads.
+    pub read_scope: GraphReadScope,
 }
 
 /// Cross-core BFS with explicit traversal options.
@@ -66,6 +70,7 @@ pub async fn cross_core_bfs_with_options(
         options,
         linearizable,
         txn_id,
+        read_scope,
     } = params;
     let cap = walk_visit_cap(shared, options);
     let whole = whole_hop();
@@ -85,6 +90,8 @@ pub async fn cross_core_bfs_with_options(
             options: &whole,
             linearizable,
             txn_id,
+            collection,
+            read_scope,
         },
         &frontier,
         &mut presence_reads,
@@ -115,6 +122,7 @@ pub async fn cross_core_bfs_with_options(
                 edge_predicate: &[],
                 with_properties: false,
                 txn_id,
+                read_scope,
             },
         )
         .await?;

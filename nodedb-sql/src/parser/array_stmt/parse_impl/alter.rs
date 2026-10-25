@@ -5,14 +5,24 @@
 use crate::error::Result;
 use crate::parser::array_stmt::ast::{AlterArrayAction, AlterArrayAst};
 use crate::parser::array_stmt::lexer::Tok;
-use crate::types_array::ArrayGeorefAlter;
+use crate::types_array::{ArrayAttrMetaAlter, ArrayAttrMetaChange, ArrayGeorefAlter};
 
 use super::core::Parser;
 
 impl<'a> Parser<'a> {
     pub(in crate::parser::array_stmt::parse) fn parse_alter(&mut self) -> Result<AlterArrayAst> {
         let name = self.expect_ident()?;
-        let action = if self.match_kw("DROP") {
+        let action = if self.match_kw("ALTER") {
+            self.expect_kw("ATTR")?;
+            let attr = self.expect_ident()?;
+            let change = if self.match_kw("DROP") {
+                ArrayAttrMetaChange::Drop(self.parse_meta_drop()?)
+            } else {
+                self.expect_kw("SET")?;
+                ArrayAttrMetaChange::Set(self.parse_meta_set()?)
+            };
+            AlterArrayAction::AttrMeta(ArrayAttrMetaAlter { attr, change })
+        } else if self.match_kw("DROP") {
             self.expect_kw("GEOREF")?;
             AlterArrayAction::Georef(ArrayGeorefAlter::Drop)
         } else {

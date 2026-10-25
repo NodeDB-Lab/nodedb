@@ -14,13 +14,131 @@ use crate::parser::object_literal::parse_object_literal_complete;
 use crate::types::SqlCatalog;
 use crate::types_array::{ArrayCoordLiteral, ArraySliceAst, NamedDimRange};
 
-pub(super) fn collect_args(args: &[ast::FunctionArg]) -> Vec<ast::Expr> {
-    args.iter()
-        .filter_map(|a| match a {
-            ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(e)) => Some(e.clone()),
-            _ => None,
-        })
-        .collect()
+/// The positional arguments of a call to `fn_name`, which takes no named
+/// argument. A named argument, or a wildcard, is refused.
+pub(super) fn collect_args(args: &[ast::FunctionArg], fn_name: &str) -> Result<Vec<ast::Expr>> {
+    let (positional, named) = split_args(args, fn_name)?;
+    if let Some((name, _)) = named.first() {
+        return Err(SqlError::Unsupported {
+            detail: format!("{fn_name}: takes no named argument, got '{name}'"),
+        });
+    }
+    Ok(positional)
+}
+
+/// `name => value` arguments in call order, names lower-cased.
+pub(super) type NamedArgs = Vec<(String, ast::Expr)>;
+
+/// The positional and the `name => value` arguments of a call to
+/// `fn_name`, each in call order. Names are lower-cased. A wildcard
+/// argument, a name that is not an identifier, or `=` in place of `=>` is
+/// refused.
+pub(super) fn split_args(
+    args: &[ast::FunctionArg],
+    fn_name: &str,
+) -> Result<(Vec<ast::Expr>, NamedArgs)> {
+    let mut positional = Vec::new();
+    let mut named: NamedArgs = Vec::new();
+    for arg in args {
+        let (name, value, operator) = match arg {
+            ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(e)) => {
+                positional.push(e.clone());
+                continue;
+            }
+            ast::FunctionArg::Unnamed(other) => {
+                return Err(SqlError::Unsupported {
+                    detail: format!("{fn_name}: argument {other} is not a value"),
+                });
+            }
+            ast::FunctionArg::Named {
+                name,
+                arg,
+                operator,
+            } => (name.value.to_ascii_lowercase(), arg, operator),
+            ast::FunctionArg::ExprNamed {
+                name: ast::Expr::Identifier(ident),
+                arg,
+                operator,
+            } => (ident.value.to_ascii_lowercase(), arg, operator),
+            ast::FunctionArg::ExprNamed { name, .. } => {
+                return Err(SqlError::Unsupported {
+                    detail: format!("{fn_name}: argument name {name} is not an identifier"),
+                });
+            }
+        };
+        if *operator != ast::FunctionArgOperator::RightArrow {
+            return Err(SqlError::Unsupported {
+                detail: format!("{fn_name}: use '=>' not '{operator}' for named argument '{name}'"),
+            });
+        }
+        let ast::FunctionArgExpr::Expr(value) = value else {
+            return Err(SqlError::Unsupported {
+                detail: format!("{fn_name}: named argument '{name}' expects a value"),
+            });
+        };
+        if named.iter().any(|(n, _)| *n == name) {
+            return Err(SqlError::Unsupported {
+                detail: format!("{fn_name}: named argument '{name}' is given twice"),
+            });
+        }
+        named.push((name, value.clone()));
+    }
+    Ok((positional, named))
+}
+
+/// The named arguments of a call to `fn_name`, each name checked against
+/// the closed set `allowed`. An unknown name is refused, naming the set.
+pub(super) fn collect_named_args(
+    named: NamedArgs,
+    fn_name: &str,
+    allowed: &[&str],
+) -> Result<NamedArgs> {
+    if let Some((name, _)) = named.iter().find(|(n, _)| !allowed.contains(&n.as_str())) {
+        let detail = if allowed.is_empty() {
+            format!("{fn_name}: takes no named argument, got '{name}'")
+        } else {
+            format!(
+                "{fn_name}: unknown named argument '{name}'; valid: {}",
+                allowed.join(", ")
+            )
+        };
+        return Err(SqlError::Unsupported { detail });
+    }
+    Ok(named)
+}
+
+/// A boolean literal.
+pub(super) fn expect_bool(expr: &ast::Expr, ctx: &str) -> Result<bool> {
+    match expr {
+        ast::Expr::Value(v) => match &v.value {
+            ast::Value::Boolean(b) => Ok(*b),
+            other => Err(SqlError::TypeMismatch {
+                detail: format!("{ctx}: expected true or false, got {other}"),
+            }),
+        },
+        _ => Err(SqlError::TypeMismatch {
+            detail: format!("{ctx}: expected true or false, got {expr}"),
+        }),
+    }
+}
+
+/// A numeric literal, with an optional leading minus.
+pub(super) fn expect_f64(expr: &ast::Expr, ctx: &str) -> Result<f64> {
+    let mismatch = || SqlError::TypeMismatch {
+        detail: format!("{ctx}: expected a number, got {expr}"),
+    };
+    match expr {
+        ast::Expr::Value(v) => match &v.value {
+            ast::Value::Number(n, _) => n.parse::<f64>().map_err(|_| mismatch()),
+            _ => Err(mismatch()),
+        },
+        ast::Expr::UnaryOp {
+            op: ast::UnaryOperator::Minus,
+            expr: inner,
+        } => expect_f64(inner, ctx).map(|v| -v),
+        ast::Expr::Nested(inner) => expect_f64(inner, ctx),
+        _ => Err(mismatch()),
+    }
 }
 
 pub(super) fn require_array_name(
@@ -99,7 +217,7 @@ pub(super) fn expect_string_array(expr: &ast::Expr, ctx: &str) -> Result<Vec<Str
             ) =>
         {
             match &f.args {
-                ast::FunctionArguments::List(list) => collect_args(&list.args),
+                ast::FunctionArguments::List(list) => collect_args(&list.args, ctx)?,
                 _ => Vec::new(),
             }
         }

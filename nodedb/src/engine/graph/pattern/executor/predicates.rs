@@ -31,6 +31,25 @@ pub struct PropertyLookup<'a> {
     pub database_id: u64,
     pub tenant_id: u64,
     pub collection: Option<&'a str>,
+    /// Where the node collection keeps its documents, and the cut a
+    /// versioned read takes.
+    pub document_cut: DocumentCut,
+}
+
+/// How a node's document is read.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DocumentCut {
+    /// A plain collection: the current document.
+    #[default]
+    Plain,
+    /// A bitemporal collection: the newest version at or before the
+    /// system-time ordinal `system_as_of` (`None` = current) whose valid
+    /// time contains `valid_at_ms` (`None` = any). The ordinal is the cut
+    /// the MATCH reads its edges at, so documents and edges split alike.
+    Versioned {
+        system_as_of: Option<i64>,
+        valid_at_ms: Option<i64>,
+    },
 }
 
 /// Apply a WHERE predicate to filter rows.
@@ -253,12 +272,26 @@ fn fetch_node_doc(
         return Ok(None);
     };
     let doc_id = crate::engine::document::store::key::StorageKey::for_surrogate(surrogate);
-    let bytes = match props
-        .sparse
-        .get(props.database_id, props.tenant_id, collection, &doc_id)?
-    {
-        Some(b) => b,
-        None => return Ok(None),
+    let stored = match props.document_cut {
+        DocumentCut::Plain => {
+            props
+                .sparse
+                .get(props.database_id, props.tenant_id, collection, &doc_id)?
+        }
+        DocumentCut::Versioned {
+            system_as_of,
+            valid_at_ms,
+        } => props.sparse.versioned_get_as_of(
+            props.database_id,
+            props.tenant_id,
+            collection,
+            &doc_id,
+            system_as_of,
+            valid_at_ms,
+        )?,
+    };
+    let Some(bytes) = stored else {
+        return Ok(None);
     };
 
     let doc =

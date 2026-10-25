@@ -80,6 +80,7 @@ impl CoreLoop {
         params: CrdtApplyParams<'_>,
         prov: &SyncProvenance,
     ) -> Response {
+        let crs = self.crs_context();
         let CrdtApplyParams {
             collection,
             document_id,
@@ -208,6 +209,7 @@ impl CoreLoop {
                         required: signing_required,
                         preverified: true,
                     },
+                    &crs,
                 );
                 // On a Clean apply that actually imported something, read the
                 // merged row back and encode it while the engine borrow is

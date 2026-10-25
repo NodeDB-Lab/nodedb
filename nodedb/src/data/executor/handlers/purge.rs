@@ -76,9 +76,18 @@ impl CoreLoop {
             Ok(n) => n,
             Err(e) => {
                 warn!(tenant_id, error = %e, "edge store purge failed");
-                0
+                return self.response_error(
+                    task,
+                    ErrorCode::Internal {
+                        detail: format!("edge store purge: {e}"),
+                    },
+                );
             }
         };
+        self.historical_csr.invalidate_tenant(
+            nodedb_types::DatabaseId::new(database_id),
+            crate::types::TenantId::new(tenant_id),
+        );
         // CSR in-memory index: drop the (database, tenant) partition outright.
         // O(1) structural deletion — no key-prefix scan needed.
         self.csr.drop_partition(
@@ -124,7 +133,7 @@ impl CoreLoop {
             self.columnar_memtable_mem
                 .retain(|(_, t, _), _| *t != tid_key);
             self.ts_registries.retain(|(_, t, _), _| *t != tid_key);
-            self.ts_replay_stamps.retain(|(_, t, _), _| *t != tid_key);
+            self.ts_replay.stamps.retain(|(_, t, _), _| *t != tid_key);
             self.ts_last_value_caches
                 .retain(|(_, t, _), _| *t != tid_key);
             self.ts_series_catalogs.retain(|(_, t, _), _| *t != tid_key);
@@ -162,7 +171,7 @@ impl CoreLoop {
         // only the map would let the next restart rehydrate the head of a
         // purged collection, so a tenant recreated under the same id would
         // resume a chain whose rows are gone.
-        self.chain_hashes.retain(|(_, t, _), _| *t != tid_key);
+        self.chain.heads.retain(|(_, t, _), _| *t != tid_key);
         if let Err(e) = self.sparse.delete_chain_heads_for_tenant(tenant_id) {
             warn!(tenant_id, error = %e, "sparse chain-head purge failed");
             return self.response_error(

@@ -38,7 +38,11 @@ pub(super) async fn resolve_update_period_values(
     let Some(old_row) = read.rows else {
         return Ok(Vec::new());
     };
-    let new_row = crate::query::apply_update_assignments(&old_row, updates)?;
+    let new_row = crate::query::apply_update_assignments(
+        &old_row,
+        updates,
+        &crate::control::crs_context::crs_context_for(scope.state),
+    )?;
 
     // `ResolvedTargets` dedupes on `(target, value)` itself, so the old and
     // new images resolve through the same call whether or not they carry the

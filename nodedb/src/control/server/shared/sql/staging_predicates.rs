@@ -716,6 +716,7 @@ mod tests {
             system_time: nodedb_types::SystemTimeScope::Current,
             valid_at_ms: None,
             zone_msgpack: Vec::new(),
+            physical: false,
         });
         assert!(!is_stageable_write(&slice));
     }
@@ -997,6 +998,8 @@ mod tests {
             PhysicalPlan::Columnar(ColumnarOp::Truncate {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 restart_identity: false,
+                system_from: None,
+                erase_history: false,
             }),
             PhysicalPlan::Timeseries(TimeseriesOp::Truncate {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "ts"),

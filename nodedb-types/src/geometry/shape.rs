@@ -34,6 +34,92 @@ impl Coord {
     }
 }
 
+/// The kind of a geometry, without its coordinates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GeometryKind {
+    Point,
+    LineString,
+    Polygon,
+    MultiPoint,
+    MultiLineString,
+    MultiPolygon,
+    GeometryCollection,
+}
+
+impl GeometryKind {
+    /// The OGC type name, as `ST_GeometryType` and GeoJSON spell it.
+    pub fn name(self) -> &'static str {
+        match self {
+            GeometryKind::Point => "Point",
+            GeometryKind::LineString => "LineString",
+            GeometryKind::Polygon => "Polygon",
+            GeometryKind::MultiPoint => "MultiPoint",
+            GeometryKind::MultiLineString => "MultiLineString",
+            GeometryKind::MultiPolygon => "MultiPolygon",
+            GeometryKind::GeometryCollection => "GeometryCollection",
+        }
+    }
+
+    /// The upper-case WKT keyword.
+    pub fn wkt_keyword(self) -> &'static str {
+        match self {
+            GeometryKind::Point => "POINT",
+            GeometryKind::LineString => "LINESTRING",
+            GeometryKind::Polygon => "POLYGON",
+            GeometryKind::MultiPoint => "MULTIPOINT",
+            GeometryKind::MultiLineString => "MULTILINESTRING",
+            GeometryKind::MultiPolygon => "MULTIPOLYGON",
+            GeometryKind::GeometryCollection => "GEOMETRYCOLLECTION",
+        }
+    }
+
+    /// The ISO WKB base type code, 1 to 7.
+    pub fn wkb_code(self) -> u32 {
+        match self {
+            GeometryKind::Point => 1,
+            GeometryKind::LineString => 2,
+            GeometryKind::Polygon => 3,
+            GeometryKind::MultiPoint => 4,
+            GeometryKind::MultiLineString => 5,
+            GeometryKind::MultiPolygon => 6,
+            GeometryKind::GeometryCollection => 7,
+        }
+    }
+
+    /// The kind with WKB base type code `code`.
+    pub fn from_wkb_code(code: u32) -> Option<Self> {
+        Some(match code {
+            1 => GeometryKind::Point,
+            2 => GeometryKind::LineString,
+            3 => GeometryKind::Polygon,
+            4 => GeometryKind::MultiPoint,
+            5 => GeometryKind::MultiLineString,
+            6 => GeometryKind::MultiPolygon,
+            7 => GeometryKind::GeometryCollection,
+            _ => return None,
+        })
+    }
+
+    /// The kind GeoJSON names `name`, case-sensitive as RFC 7946 requires.
+    pub fn from_geojson_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "Point" => GeometryKind::Point,
+            "LineString" => GeometryKind::LineString,
+            "Polygon" => GeometryKind::Polygon,
+            "MultiPoint" => GeometryKind::MultiPoint,
+            "MultiLineString" => GeometryKind::MultiLineString,
+            "MultiPolygon" => GeometryKind::MultiPolygon,
+            "GeometryCollection" => GeometryKind::GeometryCollection,
+            _ => return None,
+        })
+    }
+}
+
+/// Whether a coordinate is the NaN pair of an EMPTY point.
+pub fn is_empty_coord(c: [f64; 2]) -> bool {
+    c[0].is_nan() && c[1].is_nan()
+}
+
 /// GeoJSON-compatible geometry types.
 #[derive(
     Debug,
@@ -45,7 +131,6 @@ impl Coord {
     zerompk::FromMessagePack,
 )]
 #[serde(tag = "type")]
-#[non_exhaustive]
 pub enum Geometry {
     Point {
         coordinates: [f64; 2],
@@ -95,18 +180,121 @@ impl Geometry {
 
     /// Get the type name of this geometry.
     pub fn geometry_type(&self) -> &'static str {
-        match self {
-            Geometry::Point { .. } => "Point",
-            Geometry::LineString { .. } => "LineString",
-            Geometry::Polygon { .. } => "Polygon",
-            Geometry::MultiPoint { .. } => "MultiPoint",
-            Geometry::MultiLineString { .. } => "MultiLineString",
-            Geometry::MultiPolygon { .. } => "MultiPolygon",
-            Geometry::GeometryCollection { .. } => "GeometryCollection",
+        self.kind().name()
+    }
+
+    /// The EMPTY point. Its two ordinates are NaN, the encoding WKB uses.
+    pub fn empty_point() -> Self {
+        Geometry::Point {
+            coordinates: [f64::NAN, f64::NAN],
         }
     }
 
-    /// Map every coordinate through `f`, keeping the shape.
+    /// An EMPTY geometry of `kind`.
+    pub fn empty(kind: GeometryKind) -> Self {
+        match kind {
+            GeometryKind::Point => Self::empty_point(),
+            GeometryKind::LineString => Geometry::LineString {
+                coordinates: Vec::new(),
+            },
+            GeometryKind::Polygon => Geometry::Polygon {
+                coordinates: Vec::new(),
+            },
+            GeometryKind::MultiPoint => Geometry::MultiPoint {
+                coordinates: Vec::new(),
+            },
+            GeometryKind::MultiLineString => Geometry::MultiLineString {
+                coordinates: Vec::new(),
+            },
+            GeometryKind::MultiPolygon => Geometry::MultiPolygon {
+                coordinates: Vec::new(),
+            },
+            GeometryKind::GeometryCollection => Geometry::GeometryCollection {
+                geometries: Vec::new(),
+            },
+        }
+    }
+
+    /// The kind of this geometry.
+    pub fn kind(&self) -> GeometryKind {
+        match self {
+            Geometry::Point { .. } => GeometryKind::Point,
+            Geometry::LineString { .. } => GeometryKind::LineString,
+            Geometry::Polygon { .. } => GeometryKind::Polygon,
+            Geometry::MultiPoint { .. } => GeometryKind::MultiPoint,
+            Geometry::MultiLineString { .. } => GeometryKind::MultiLineString,
+            Geometry::MultiPolygon { .. } => GeometryKind::MultiPolygon,
+            Geometry::GeometryCollection { .. } => GeometryKind::GeometryCollection,
+        }
+    }
+
+    /// Whether the geometry has no coordinates (OGC EMPTY). A point is
+    /// EMPTY when both its ordinates are NaN.
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Geometry::Point { coordinates } => is_empty_coord(*coordinates),
+            Geometry::LineString { coordinates } | Geometry::MultiPoint { coordinates } => {
+                coordinates.is_empty()
+            }
+            Geometry::Polygon { coordinates } | Geometry::MultiLineString { coordinates } => {
+                coordinates.iter().all(Vec::is_empty)
+            }
+            Geometry::MultiPolygon { coordinates } => coordinates
+                .iter()
+                .all(|polygon| polygon.iter().all(Vec::is_empty)),
+            Geometry::GeometryCollection { geometries } => geometries.iter().all(Self::is_empty),
+        }
+    }
+
+    /// Number of XY coordinates, in the order [`Geometry::coords`] yields
+    /// them. An EMPTY point has none.
+    pub fn coord_count(&self) -> usize {
+        match self {
+            Geometry::Point { coordinates } => usize::from(!is_empty_coord(*coordinates)),
+            Geometry::LineString { coordinates } | Geometry::MultiPoint { coordinates } => {
+                coordinates.len()
+            }
+            Geometry::Polygon { coordinates } | Geometry::MultiLineString { coordinates } => {
+                coordinates.iter().map(Vec::len).sum()
+            }
+            Geometry::MultiPolygon { coordinates } => coordinates
+                .iter()
+                .flat_map(|polygon| polygon.iter())
+                .map(Vec::len)
+                .sum(),
+            Geometry::GeometryCollection { geometries } => {
+                geometries.iter().map(Self::coord_count).sum()
+            }
+        }
+    }
+
+    /// Every XY coordinate in traversal order: rings in order, polygons in
+    /// order, collection members in order. Z and M arrays index the same
+    /// sequence.
+    pub fn coords(&self) -> Box<dyn Iterator<Item = [f64; 2]> + '_> {
+        match self {
+            Geometry::Point { coordinates } => Box::new(
+                (!is_empty_coord(*coordinates))
+                    .then_some(*coordinates)
+                    .into_iter(),
+            ),
+            Geometry::LineString { coordinates } | Geometry::MultiPoint { coordinates } => {
+                Box::new(coordinates.iter().copied())
+            }
+            Geometry::Polygon { coordinates } | Geometry::MultiLineString { coordinates } => {
+                Box::new(coordinates.iter().flatten().copied())
+            }
+            Geometry::MultiPolygon { coordinates } => {
+                Box::new(coordinates.iter().flatten().flatten().copied())
+            }
+            Geometry::GeometryCollection { geometries } => {
+                Box::new(geometries.iter().flat_map(Self::coords))
+            }
+        }
+    }
+
+    /// Map every coordinate through `f`, keeping the shape. An EMPTY point
+    /// stays EMPTY and `f` never sees it.
     ///
     /// Stops at the first coordinate `f` rejects and returns its error.
     pub fn try_map_coords<E>(
@@ -114,6 +302,7 @@ impl Geometry {
         f: &mut impl FnMut([f64; 2]) -> Result<[f64; 2], E>,
     ) -> Result<Geometry, E> {
         Ok(match self {
+            Geometry::Point { coordinates } if is_empty_coord(*coordinates) => self.clone(),
             Geometry::Point { coordinates } => Geometry::Point {
                 coordinates: f(*coordinates)?,
             },
@@ -210,6 +399,40 @@ mod tests {
             panic!("shape changed");
         };
         assert_eq!(geometries[0], Geometry::point(11.0, 2.0));
+    }
+
+    #[test]
+    fn coords_follow_traversal_order_and_skip_an_empty_point() {
+        let gc = Geometry::GeometryCollection {
+            geometries: vec![
+                Geometry::empty_point(),
+                Geometry::polygon(vec![vec![[0.0, 0.0], [1.0, 0.0], [0.0, 0.0]]]),
+                Geometry::point(5.0, 6.0),
+            ],
+        };
+        let coords: Vec<_> = gc.coords().collect();
+        assert_eq!(coords.len(), gc.coord_count());
+        assert_eq!(coords, vec![[0.0, 0.0], [1.0, 0.0], [0.0, 0.0], [5.0, 6.0]]);
+    }
+
+    #[test]
+    fn every_kind_has_an_empty_form() {
+        for kind in [
+            GeometryKind::Point,
+            GeometryKind::LineString,
+            GeometryKind::Polygon,
+            GeometryKind::MultiPoint,
+            GeometryKind::MultiLineString,
+            GeometryKind::MultiPolygon,
+            GeometryKind::GeometryCollection,
+        ] {
+            let g = Geometry::empty(kind);
+            assert!(g.is_empty(), "{kind:?}");
+            assert_eq!(g.kind(), kind);
+            assert_eq!(g.coord_count(), 0);
+            assert_eq!(GeometryKind::from_wkb_code(kind.wkb_code()), Some(kind));
+        }
+        assert!(!Geometry::point(0.0, 0.0).is_empty());
     }
 
     #[test]

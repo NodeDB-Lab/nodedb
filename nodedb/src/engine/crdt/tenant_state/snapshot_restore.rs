@@ -36,11 +36,8 @@ impl TenantCrdtEngine {
         // ceilings a collection that grew past them could be written but never
         // rolled back, and the transaction driver would be handed a failure it
         // has no way to act on.
-        let replacement = CrdtState::from_local_snapshot(
-            Self::collection_peer_id(self.peer_id, collection),
-            snapshot,
-        )
-        .map_err(crate::Error::Crdt)?;
+        let replacement = CrdtState::from_local_snapshot(self.peer_id_of(collection), snapshot)
+            .map_err(crate::Error::Crdt)?;
         self.collections.insert(collection.to_owned(), replacement);
         Ok(())
     }

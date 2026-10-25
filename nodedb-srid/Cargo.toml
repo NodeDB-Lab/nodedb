@@ -1,0 +1,22 @@
+[package]
+name = "nodedb-srid"
+description = "Spatial reference system identifiers for NodeDB: SRID codes, CRS names and the resolver trait"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "Apache-2.0"
+readme = "README.md"
+authors = ["Biz Impulse Solutions Sdn. Bhd. and the NodeDB contributors"]
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/nodedb-srid"
+keywords = ["crs", "srid", "epsg", "geospatial"]
+categories = ["science::geo"]
+
+[features]
+default = []
+
+[dependencies]
+thiserror = { workspace = true }
+serde = { workspace = true }
+zerompk = { workspace = true }

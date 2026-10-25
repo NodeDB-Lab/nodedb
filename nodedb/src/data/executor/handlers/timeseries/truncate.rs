@@ -135,7 +135,7 @@ impl CoreLoop {
         let series_catalog = self.ts_series_catalogs.remove(&key);
         let truncated = memtable.as_ref().map(|m| m.row_count()).unwrap_or(0)
             + registry.as_ref().map(|r| r.total_row_count()).unwrap_or(0);
-        let replay_stamp = self.ts_replay_stamps.insert(key.clone(), stamp);
+        let replay_stamp = self.ts_replay.stamps.insert(key.clone(), stamp);
 
         // The aggregates' image moved aside with the directory, so the
         // reset aggregates reload empty. An undo moves the directory back and
@@ -445,7 +445,7 @@ mod tests {
             vec![TS_STAMP_FILE.to_string()],
             "the partitions are gone; the fresh directory holds the stamp"
         );
-        let stamp = core.ts_replay_stamps.get(&key()).expect("stamp");
+        let stamp = core.ts_replay.stamps.get(&key()).expect("stamp");
         assert!(stamp.rows.skips(1) && stamp.rows.skips(2), "{stamp:?}");
         assert!(stamp.truncates.skips(3) && !stamp.truncates.skips(2));
         assert_eq!(
@@ -524,7 +524,7 @@ mod tests {
             Status::Ok
         );
         let ts_dir = super::super::paths::ts_collection_dir(dir.path(), 0, TENANT, COLLECTION);
-        let stamp_before = core.ts_replay_stamps.get(&key()).cloned();
+        let stamp_before = core.ts_replay.stamps.get(&key()).cloned();
 
         let mut undo = Vec::new();
         let resp = core.execute_timeseries_truncate(&task_at(3), COLLECTION, Some(&mut undo));
@@ -549,7 +549,7 @@ mod tests {
         assert_eq!(memtable_rows(&core), 1);
         assert_eq!(partition_rows(&core), 1);
         assert_eq!(
-            core.ts_replay_stamps.get(&key()).cloned(),
+            core.ts_replay.stamps.get(&key()).cloned(),
             stamp_before,
             "the stamp is rewound"
         );

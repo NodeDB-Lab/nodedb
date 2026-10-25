@@ -83,6 +83,7 @@ pub fn columnar_ingest(wire: ColumnarIngestWire<'_>) -> crate::Result<PhysicalPl
         schema_bytes: wire.schema_bytes.to_vec(),
         provenance,
         wal_lsn: None,
+        system_from: None,
         // No predicate here: this node applies an already-committed sync
         // write. The writing identity is not available on this node.
         rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
@@ -231,6 +232,7 @@ mod tests {
             schema_bytes: Vec::new(),
             provenance: Some(prov.clone()),
             wal_lsn: None,
+            system_from: None,
             rls_write_check: RlsWriteCheck::NoPolicyApplies,
             returning: None,
             rls_filters: Vec::new(),
@@ -332,6 +334,7 @@ mod tests {
             schema_bytes: Vec::new(),
             provenance: None,
             wal_lsn: None,
+            system_from: None,
             rls_write_check: RlsWriteCheck::NoPolicyApplies,
             returning: None,
             rls_filters: Vec::new(),
@@ -377,6 +380,7 @@ mod tests {
             schema_bytes: Vec::new(),
             provenance: None,
             wal_lsn: None,
+            system_from: None,
             rls_write_check: RlsWriteCheck::NoPolicyApplies,
             returning: None,
             rls_filters: Vec::new(),
@@ -419,6 +423,7 @@ mod tests {
             schema_bytes: Vec::new(),
             provenance: None,
             wal_lsn: None,
+            system_from: None,
             rls_write_check: RlsWriteCheck::NoPolicyApplies,
             returning: None,
             rls_filters: Vec::new(),
@@ -468,6 +473,7 @@ mod tests {
             schema_bytes: Vec::new(),
             provenance: None,
             wal_lsn: None,
+            system_from: None,
             rls_write_check: RlsWriteCheck::NoPolicyApplies,
             returning: Some(spec.clone()),
             rls_filters: Vec::new(),
@@ -510,6 +516,7 @@ mod tests {
             schema_bytes: Vec::new(),
             provenance: None,
             wal_lsn: None,
+            system_from: None,
             rls_write_check: RlsWriteCheck::NoPolicyApplies,
             returning: None,
             rls_filters: b"rls-predicate".to_vec(),
@@ -707,7 +714,7 @@ mod tests {
             seq: 44,
         };
         let geometry = nodedb_types::geometry::SridGeometry::new(
-            nodedb_types::geometry::Srid::PeninsularRso,
+            nodedb_types::geometry::Srid::new(3375).expect("srid"),
             Geometry::Point {
                 coordinates: [412_834.0, 349_472.0],
             },

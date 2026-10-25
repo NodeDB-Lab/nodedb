@@ -116,7 +116,13 @@ pub(super) async fn fire_before(
             DmlEvent::Insert
         };
     }
-    let Some(new_fields) = new_row(&task.plan, &info, old_row.as_ref())? else {
+    let new_fields = new_row(
+        &task.plan,
+        &info,
+        old_row.as_ref(),
+        &crate::control::crs_context::crs_context_for(ctx.state),
+    )?;
+    let Some(new_fields) = new_fields else {
         // An UPDATE or DELETE that finds no row changes nothing.
         return Ok(BeforeOutcome::Proceed(None));
     };
@@ -228,6 +234,7 @@ fn new_row(
     plan: &PhysicalPlan,
     info: &DmlWriteInfo,
     old_row: Option<&Row>,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<Option<Option<Row>>> {
     let incoming = || info.new_fields.clone().unwrap_or_default();
     match info.event {
@@ -239,12 +246,12 @@ fn new_row(
             };
             let new = match plan {
                 PhysicalPlan::Document(DocumentOp::PointUpdate { updates, .. }) => {
-                    update_new_row(old, updates)?
+                    update_new_row(old, updates, crs)?
                 }
                 PhysicalPlan::Document(DocumentOp::Upsert {
                     on_conflict_updates,
                     ..
-                }) => upsert_new_row(old, &incoming(), on_conflict_updates)?,
+                }) => upsert_new_row(old, &incoming(), on_conflict_updates, crs)?,
                 // An expanded update's `PointPut` carries the whole row.
                 _ => incoming(),
             };
@@ -260,6 +267,7 @@ fn upsert_new_row(
     old: &Row,
     incoming: &Row,
     on_conflict_updates: &[(String, UpdateValue)],
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<Row> {
     if on_conflict_updates.is_empty() {
         let mut new = old.clone();
@@ -280,7 +288,7 @@ fn upsert_new_row(
                 })?
             }
             UpdateValue::Expr(expr) => expr
-                .eval_with_excluded(&old_row, &excluded)
+                .eval_with_excluded(&old_row, &excluded, crs)
                 .map_err(crate::Error::from)?,
         };
         new.insert(field.clone(), value);

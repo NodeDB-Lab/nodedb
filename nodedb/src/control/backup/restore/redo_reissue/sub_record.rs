@@ -7,9 +7,9 @@
 //! arm a committed transaction's row does:
 //!
 //! * document put: `(collection, document_id, value, prov, surrogate)`, plus
-//!   `(sys_from_ms, valid_from_ms, valid_until_ms)` for a version of a
+//!   `(sys_from, valid_from_ms, valid_until_ms)` for a version of a
 //!   `bitemporal=true` collection;
-//! * document delete: `(collection, document_id, prov, surrogate, sys_from_ms)`,
+//! * document delete: `(collection, document_id, prov, surrogate, sys_from)`,
 //!   a tombstone version of a `bitemporal=true` collection.
 //!
 //! A restored edge version travels typed, and its transaction's resolve
@@ -20,10 +20,10 @@ use nodedb_wal::record::RecordType;
 
 use crate::wal::RedoSubRecord;
 
-/// The system and valid time a document version was stored at.
+/// The system-time ordinal and valid time a document version was stored at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct VersionStamp {
-    pub sys_from_ms: i64,
+    pub sys_from: i64,
     pub valid_from_ms: i64,
     pub valid_until_ms: i64,
 }
@@ -53,7 +53,7 @@ pub(super) fn document_put(
             value,
             prov,
             surrogate,
-            s.sys_from_ms,
+            s.sys_from,
             s.valid_from_ms,
             s.valid_until_ms,
         )),
@@ -66,15 +66,15 @@ pub(super) fn document_put(
     })
 }
 
-/// The tombstone version of a `bitemporal=true` document at `sys_from_ms`.
+/// The tombstone version of a `bitemporal=true` document at `sys_from`.
 pub(super) fn document_tombstone(
     collection: &str,
     document_id: &str,
     surrogate: u32,
-    sys_from_ms: i64,
+    sys_from: i64,
 ) -> crate::Result<RedoSubRecord> {
     let prov: Option<SyncProvenance> = None;
-    let payload = zerompk::to_msgpack_vec(&(collection, document_id, prov, surrogate, sys_from_ms))
+    let payload = zerompk::to_msgpack_vec(&(collection, document_id, prov, surrogate, sys_from))
         .map_err(|e| encode_error("document tombstone", e))?;
     Ok(RedoSubRecord {
         record_type: RecordType::Delete as u32,
@@ -116,7 +116,7 @@ mod tests {
     #[test]
     fn a_version_keeps_its_stamp() {
         let stamp = VersionStamp {
-            sys_from_ms: 1_000,
+            sys_from: 1_000,
             valid_from_ms: 10,
             valid_until_ms: 20,
         };

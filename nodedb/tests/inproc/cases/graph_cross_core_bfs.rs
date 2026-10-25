@@ -44,6 +44,8 @@ async fn seed_star(server: &TestServer, collection: &str, leaf_prefix: &str, cou
                     dst_surrogate: nodedb_test_support::kv_rows::kv_row_surrogate(
                         format!("{leaf_prefix}{index}").as_bytes(),
                     ),
+                    valid_from_ms: None,
+                    valid_until_ms: None,
                 })
                 .collect(),
         }),

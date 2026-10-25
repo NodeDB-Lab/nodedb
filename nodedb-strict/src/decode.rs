@@ -269,7 +269,7 @@ impl TupleDecoder {
                         column: col.name.clone(),
                         expected: col.column_type,
                     })?;
-            Ok(decode_variable_value(&col.column_type, raw))
+            decode_variable_value(&col.column_type, raw)
         }
     }
 
@@ -337,7 +337,7 @@ impl TupleDecoder {
     }
 
     /// Extract the three bitemporal timestamps from a tuple:
-    /// `(system_from_ms, valid_from_ms, valid_until_ms)`. Only valid for
+    /// `(system_from, valid_from_ms, valid_until_ms)`. Only valid for
     /// schemas constructed with `StrictSchema::new_bitemporal`.
     pub fn extract_bitemporal_timestamps(
         &self,

@@ -10,9 +10,9 @@
 //! Metadata DDL is not a hot path (hundreds per second at most), so the
 //! clock is backed by a short-lived mutex rather than atomics.
 
+use crate::wall_clock::wall_now_ns;
 use std::cmp::Ordering;
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -186,24 +186,6 @@ impl HlcClock {
     pub fn peek(&self) -> Hlc {
         *self.state.lock().unwrap_or_else(|p| p.into_inner())
     }
-}
-
-fn wall_now_ns() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or_else(|_| {
-            use std::sync::atomic::{AtomicBool, Ordering};
-            static LOGGED: AtomicBool = AtomicBool::new(false);
-            if !LOGGED.swap(true, Ordering::Relaxed) {
-                tracing::error!(
-                    module = module_path!(),
-                    "system clock is before UNIX_EPOCH; using 0 (epoch) \
-                     — check NTP/RTC configuration"
-                );
-            }
-            0
-        })
 }
 
 #[cfg(test)]

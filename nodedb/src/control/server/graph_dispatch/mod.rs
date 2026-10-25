@@ -29,7 +29,7 @@ pub(crate) mod neighbor_rows;
 pub(crate) mod presence;
 pub mod rag_fusion;
 pub mod read_groups;
-pub(crate) mod run_cut;
+pub mod read_scope;
 pub(crate) mod shard_reads;
 pub mod shortest_path;
 pub(crate) mod subgraph_edges;
@@ -47,6 +47,7 @@ pub use match_broadcast::{
 pub use match_scatter::{MatchScatterOutcome, scatter_match};
 pub use rag_fusion::serve_rag_plan;
 pub use read_groups::{confirm_graph_read, graph_read_groups};
+pub use read_scope::{check_walk_scope, graph_read_scope};
 pub use shortest_path::{CrossCoreShortestPathParams, cross_core_shortest_path};
 pub use traverse_subgraph::{CrossCoreTraverseSubgraphParams, cross_core_traverse_subgraph};
 pub use walk_reads::serve_walk_plan;

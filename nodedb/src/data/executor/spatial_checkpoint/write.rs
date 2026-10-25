@@ -218,7 +218,7 @@ mod tests {
         let (db, tid, coll, field) = key();
         let mut rtree = RTree::new(
             test_rtree_memory(db, tid),
-            nodedb_types::geometry::Srid::Wgs84,
+            crate::engine::spatial::TreeSrid::WGS84,
         );
         rtree.insert(RTreeEntry {
             id: 1,
@@ -318,7 +318,7 @@ mod tests {
         let (db, tid, _, _) = key();
         let mut rtree = RTree::new(
             test_rtree_memory(db, tid),
-            nodedb_types::geometry::Srid::Wgs84,
+            crate::engine::spatial::TreeSrid::WGS84,
         );
         rtree.insert(RTreeEntry {
             id: 1,

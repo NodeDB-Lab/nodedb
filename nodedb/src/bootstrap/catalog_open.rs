@@ -101,6 +101,13 @@ impl CatalogForRead {
             Self::Repaired(c) => c.list_all_vector_index_params(),
         }
     }
+
+    pub(crate) fn load_custom_crs_set(&self) -> crate::Result<nodedb_crs::CustomCrsSet> {
+        match self {
+            Self::ReadOnly(c) => c.load_custom_crs_set(),
+            Self::Repaired(c) => Ok(nodedb_crs::CustomCrsSet::clone(&c.custom_crs_set())),
+        }
+    }
 }
 
 impl CollectionSource for CatalogForRead {

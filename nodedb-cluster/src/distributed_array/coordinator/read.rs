@@ -435,6 +435,7 @@ mod tests {
             valid_at_ms: None,
             txn_id: None,
             zone_msgpack: vec![],
+            physical: false,
         };
 
         // 3 shards × 2 rows each = 6 merged rows.
@@ -477,6 +478,7 @@ mod tests {
             valid_at_ms: None,
             txn_id: None,
             zone_msgpack: vec![],
+            physical: false,
         };
 
         let result = coord
@@ -495,10 +497,11 @@ mod tests {
             group_by_dim: -1,
             cell_filter_msgpack: vec![],
             shard_bucket: None,
-            system_as_of: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
             valid_at_ms: None,
             txn_id: None,
             region_msgpack: vec![],
+            physical: false,
         }
     }
 
@@ -663,6 +666,7 @@ mod tests {
             valid_at_ms: None,
             txn_id: None,
             zone_msgpack: vec![],
+            physical: false,
         };
 
         // coordinator_limit = 0 → no cutoff → 20 rows.
@@ -738,6 +742,7 @@ mod tests {
                 valid_at_ms: None,
                 txn_id: None,
                 zone_msgpack: vec![],
+                physical: false,
             };
             let result = coord
                 .coord_slice(req, 0, nodedb_types::SystemTimeScope::Current)

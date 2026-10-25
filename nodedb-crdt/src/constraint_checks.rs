@@ -39,6 +39,7 @@ impl Validator {
         state: &impl RowLookup,
         change: &ProposedChange,
         constraint: &Constraint,
+        crs: &nodedb_crs::CrsContext<'_>,
     ) -> Result<Option<Violation>, nodedb_query::EvalError> {
         match &constraint.kind {
             ConstraintKind::Unique => Ok(self.check_unique(state, change, constraint)),
@@ -51,7 +52,7 @@ impl Validator {
                 ref_key,
             } => Ok(self.check_foreign_key(state, change, constraint, ref_collection, ref_key)),
             ConstraintKind::NotNull => Ok(self.check_not_null(change, constraint)),
-            ConstraintKind::Check { expr, .. } => self.check_expr(change, constraint, expr),
+            ConstraintKind::Check { expr, .. } => self.check_expr(change, constraint, expr, crs),
         }
     }
 
@@ -66,6 +67,7 @@ impl Validator {
         change: &ProposedChange,
         constraint: &Constraint,
         expr: &str,
+        crs: &nodedb_crs::CrsContext<'_>,
     ) -> Result<Option<Violation>, nodedb_query::EvalError> {
         // Build a row Value::Object from the proposed change's fields so the
         // expression evaluator can resolve column references by name.
@@ -100,7 +102,7 @@ impl Validator {
         // `ValidationOutcome::EvalError`. That keeps it out of the conflict-
         // policy machinery: an unevaluable predicate is a hard SQLSTATE-22012
         // failure, never something LastWriterWins et al. may "resolve".
-        match parsed.eval(&row_value) {
+        match parsed.eval(&row_value, crs) {
             Ok(nodedb_types::Value::Bool(true)) => Ok(None),
             Ok(nodedb_types::Value::Null) => Ok(None),
             Ok(_) => Ok(Some(Violation {

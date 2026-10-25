@@ -35,8 +35,9 @@ pub fn pre_validate(
     validator: &Validator,
     state: &impl RowLookup,
     change: &ProposedChange,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> PreValidationResult {
-    match validator.validate(state, change) {
+    match validator.validate(state, change, crs) {
         ValidationOutcome::Accepted => PreValidationResult::Proceed,
         ValidationOutcome::Rejected(violations) => {
             let v = &violations[0];
@@ -79,7 +80,12 @@ mod tests {
             fields: vec![("email".into(), LoroValue::String("a@b.com".into()))],
         };
 
-        match pre_validate(&validator, &state, &change) {
+        match pre_validate(
+            &validator,
+            &state,
+            &change,
+            &nodedb_crs::CrsContext::builtin_only(),
+        ) {
             PreValidationResult::FastReject { constraint, .. } => {
                 assert_eq!(constraint, "name_nn");
             }
@@ -102,7 +108,12 @@ mod tests {
         };
 
         assert!(matches!(
-            pre_validate(&validator, &state, &change),
+            pre_validate(
+                &validator,
+                &state,
+                &change,
+                &nodedb_crs::CrsContext::builtin_only()
+            ),
             PreValidationResult::Proceed
         ));
     }

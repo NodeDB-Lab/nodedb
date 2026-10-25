@@ -129,11 +129,11 @@ impl CoreLoop {
             memtable.drain_front(rows, &known);
         }
         self.recharge_ts_memtable_budget(key.1, key.0, &key.2);
-        let merged = match self.ts_replay_stamps.get(key) {
+        let merged = match self.ts_replay.stamps.get(key) {
             Some(held) => held.union(&stamp),
             None => stamp,
         };
-        self.ts_replay_stamps.insert(key.clone(), merged);
+        self.ts_replay.stamps.insert(key.clone(), merged);
 
         let registry = self.ts_registries.entry(key.clone()).or_insert_with(|| {
             PartitionRegistry::new(

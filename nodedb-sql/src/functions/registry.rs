@@ -62,6 +62,7 @@ pub enum SearchTrigger {
     HybridSearch,
     TextMatch,
     SpatialDWithin,
+    SpatialDWithin3D,
     SpatialContains,
     SpatialIntersects,
     SpatialWithin,

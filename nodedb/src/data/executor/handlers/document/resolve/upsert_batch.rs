@@ -92,7 +92,8 @@ impl CoreLoop {
                         detail: "failed to decode document for upsert".into(),
                     }
                 })?;
-                let merged = merge_upsert_body(existing, value, on_conflict_updates)?;
+                let merged =
+                    merge_upsert_body(existing, value, on_conflict_updates, &self.crs_context())?;
                 key.body = merged.body;
                 if let Some(assigned) = &mut key.assigned {
                     assigned.extend(merged.assigned);
@@ -108,7 +109,12 @@ impl CoreLoop {
                             current_bytes,
                             ctx.strict_schema.as_ref(),
                         )?;
-                    let merged = merge_upsert_body(existing_value, value, on_conflict_updates)?;
+                    let merged = merge_upsert_body(
+                        existing_value,
+                        value,
+                        on_conflict_updates,
+                        &self.crs_context(),
+                    )?;
                     (merged.body, Some(merged.assigned))
                 }
                 None => (value.clone(), None),
@@ -129,7 +135,7 @@ impl CoreLoop {
             crate::types::TenantId::new(tid),
             collection.to_string(),
         );
-        let sys_from_ms = self.bitemporal_now_ms();
+        let sys_from = self.bitemporal_ordinal();
         let mut stored_images: Vec<Vec<u8>> = Vec::with_capacity(keys.len());
         for key in &keys {
             let row_identity =
@@ -137,12 +143,15 @@ impl CoreLoop {
                     .to_identity();
             rls_write_gate::admit_stored_row(
                 rls_write_check,
-                &key.body,
-                &row_identity,
-                None,
-                &ctx.identity_column,
+                rls_write_gate::GatedRow {
+                    body: &key.body,
+                    identity: &row_identity,
+                    strict_schema: None,
+                    identity_column: &ctx.identity_column,
+                },
                 tid,
                 collection,
+                &self.crs_context(),
             )
             .map_err(ErrorCode::from)?;
             let guards = match &key.assigned {
@@ -158,7 +167,7 @@ impl CoreLoop {
                     surrogate: key.surrogate,
                     value: &key.body,
                     bitemporal: ctx.bitemporal,
-                    sys_from_ms,
+                    sys_from,
                     valid_from_ms: i64::MIN,
                     valid_until_ms: i64::MAX,
                     guards,
@@ -177,7 +186,8 @@ impl CoreLoop {
             .iter()
             .filter_map(|&slot| Some((identities.get(slot)?, stored_images.get(slot)?.as_slice())))
             .collect();
-        let response_payload = resolved_response_payload(returning, rls_filters, &ctx, &rows)?;
+        let response_payload =
+            resolved_response_payload(returning, rls_filters, &ctx, &rows, &self.crs_context())?;
 
         Ok(DocumentResolveOutcome {
             mutations: keys

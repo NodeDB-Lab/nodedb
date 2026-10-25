@@ -106,6 +106,7 @@ impl SystemCatalog {
     ) -> crate::Result<()> {
         #[cfg(test)]
         if self
+            .faults
             .fail_next_collection_write
             .swap(false, std::sync::atomic::Ordering::SeqCst)
         {

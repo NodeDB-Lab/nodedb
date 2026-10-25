@@ -77,11 +77,12 @@ pub(crate) fn build_kv_insert_plan(params: KvInsertParams<'_>) -> Result<Vec<Sql
     let compiled_defaults = ColumnDefaults::compile_columns(declared_columns)?;
     let mut coerced_rows: Vec<Vec<(String, SqlValue)>> = Vec::with_capacity(rows_ast.len());
     let mut volatile_defaults = false;
+    let crs = catalog.crs_context();
     for row_exprs in rows_ast {
         let mut row: Vec<(String, SqlValue)> = Vec::with_capacity(columns.len());
         for (i, col) in columns.iter().enumerate() {
             let Some(expr) = row_exprs.get(i) else { break };
-            row.push((col.clone(), expr_to_sql_value(expr)?));
+            row.push((col.clone(), expr_to_sql_value(expr, &crs)?));
         }
         volatile_defaults |= compiled_defaults.materialize_row(&mut row, catalog)?;
         // The key column is exempt — see `coerce_rows_to_declared_types`.

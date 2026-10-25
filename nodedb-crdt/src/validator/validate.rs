@@ -8,6 +8,7 @@ use crate::policy::PolicyResolution;
 use crate::row_lookup::RowLookup;
 
 use super::core::Validator;
+use super::incoming::IncomingDelta;
 use super::types::{ProposedChange, ValidationOutcome, Violation};
 
 /// Convert the first violation into a [`CrdtError::ConstraintViolation`], appending
@@ -77,13 +78,19 @@ impl Validator {
     /// Validate a proposed change against all applicable constraints.
     ///
     /// Returns `Accepted` if all constraints pass, or `Rejected` with
-    /// detailed violation information.
-    pub fn validate(&self, state: &impl RowLookup, change: &ProposedChange) -> ValidationOutcome {
+    /// detailed violation information. CHECK predicates resolve SRIDs
+    /// through `crs`.
+    pub fn validate(
+        &self,
+        state: &impl RowLookup,
+        change: &ProposedChange,
+        crs: &nodedb_crs::CrsContext<'_>,
+    ) -> ValidationOutcome {
         let constraints = self.constraints.for_collection(&change.collection);
         let mut violations = Vec::new();
 
         for constraint in constraints {
-            match self.check_constraint(state, change, constraint) {
+            match self.check_constraint(state, change, constraint, crs) {
                 Ok(Some(violation)) => violations.push(violation),
                 Ok(None) => {}
                 // A predicate that could not be evaluated (division/modulo by
@@ -129,6 +136,7 @@ impl Validator {
         auth: CrdtAuthContext,
         change: &ProposedChange,
         delta_bytes: Vec<u8>,
+        crs: &nodedb_crs::CrsContext<'_>,
     ) -> Result<()> {
         // Check auth expiry: agents that accumulated deltas offline must
         // re-authenticate before syncing.
@@ -152,7 +160,17 @@ impl Validator {
             .unwrap_or_default()
             .as_millis() as u64;
 
-        match self.validate_with_policy(state, peer_id, auth, change, delta_bytes, hlc_timestamp)? {
+        match self.validate_with_policy(
+            state,
+            change,
+            IncomingDelta {
+                peer_id,
+                auth,
+                delta_bytes,
+                hlc_timestamp,
+            },
+            crs,
+        )? {
             PolicyResolution::AutoResolved(_) => Ok(()),
             PolicyResolution::Deferred { violations, .. } => {
                 // Violation was deferred for retry; return error to signal this.
@@ -208,7 +226,7 @@ mod tests {
         };
 
         assert!(matches!(
-            validator.validate(&state, &change),
+            validator.validate(&state, &change, &nodedb_crs::CrsContext::builtin_only()),
             ValidationOutcome::Accepted
         ));
     }
@@ -229,7 +247,7 @@ mod tests {
             )],
         };
 
-        match validator.validate(&state, &change) {
+        match validator.validate(&state, &change, &nodedb_crs::CrsContext::builtin_only()) {
             ValidationOutcome::Rejected(v) => {
                 assert_eq!(v.len(), 1);
                 assert_eq!(v[0].constraint_name, "users_name_nn");
@@ -254,7 +272,7 @@ mod tests {
             fields: vec![("author_id".into(), LoroValue::String("u1".into()))],
         };
 
-        match validator.validate(&state, &change) {
+        match validator.validate(&state, &change, &nodedb_crs::CrsContext::builtin_only()) {
             ValidationOutcome::Rejected(v) => {
                 assert_eq!(v[0].constraint_name, "posts_author_fk");
                 assert!(matches!(
@@ -290,7 +308,7 @@ mod tests {
         };
 
         assert!(matches!(
-            validator.validate(&state, &change),
+            validator.validate(&state, &change, &nodedb_crs::CrsContext::builtin_only()),
             ValidationOutcome::Accepted
         ));
     }
@@ -318,6 +336,7 @@ mod tests {
                 CrdtAuthContext::default(),
                 &change,
                 b"delta-bytes".to_vec(),
+                &nodedb_crs::CrsContext::builtin_only(),
             )
             .unwrap_err();
 
@@ -344,7 +363,7 @@ mod tests {
         };
 
         assert!(matches!(
-            validator.validate(&state, &change),
+            validator.validate(&state, &change, &nodedb_crs::CrsContext::builtin_only()),
             ValidationOutcome::Accepted
         ));
     }
@@ -363,7 +382,7 @@ mod tests {
             fields: vec![("age".into(), LoroValue::I64(-1))],
         };
 
-        match validator.validate(&state, &change) {
+        match validator.validate(&state, &change, &nodedb_crs::CrsContext::builtin_only()) {
             ValidationOutcome::Rejected(v) => {
                 assert_eq!(v.len(), 1);
                 assert_eq!(v[0].constraint_name, "people_age_check");
@@ -390,7 +409,7 @@ mod tests {
             fields: vec![("age".into(), LoroValue::I64(5))],
         };
 
-        match validator.validate(&state, &change) {
+        match validator.validate(&state, &change, &nodedb_crs::CrsContext::builtin_only()) {
             ValidationOutcome::Rejected(v) => {
                 assert_eq!(v.len(), 1);
                 assert_eq!(v[0].constraint_name, "people_age_check");
@@ -425,7 +444,7 @@ mod tests {
             fields: vec![("age".into(), LoroValue::I64(0))],
         };
 
-        match validator.validate(&state, &change) {
+        match validator.validate(&state, &change, &nodedb_crs::CrsContext::builtin_only()) {
             ValidationOutcome::EvalError {
                 constraint_name,
                 error,
@@ -468,6 +487,7 @@ mod signing_tests {
                 CrdtAuthContext::default(),
                 &change(),
                 b"delta".to_vec(),
+                &nodedb_crs::CrsContext::builtin_only(),
             )
             .unwrap_err();
         assert!(matches!(error, CrdtError::InvalidSignature { .. }));
@@ -483,7 +503,14 @@ mod signing_tests {
         };
 
         let error = validator
-            .validate_or_reject(&state, 2, auth, &change(), b"delta".to_vec())
+            .validate_or_reject(
+                &state,
+                2,
+                auth,
+                &change(),
+                b"delta".to_vec(),
+                &nodedb_crs::CrsContext::builtin_only(),
+            )
             .unwrap_err();
         assert!(matches!(error, CrdtError::InvalidSignature { .. }));
     }

@@ -4,9 +4,9 @@
 
 use super::{
     alert, backup, change_stream, cluster_admin, collection, conflict_policy, copy_from, copy_to,
-    custom_type, database, grant, graph_stats, index, maintenance, materialized_view,
-    oidc_provider, redaction, retention, rls, schedule, sequence, synonym_group, tenant, trigger,
-    user_auth,
+    credential, custom_type, database, grant, graph_stats, index, maintenance, materialized_view,
+    oidc_provider, redaction, retention, rls, schedule, sequence, spatial_ref_sys, synonym_group,
+    tenant, trigger, user_auth,
 };
 use crate::ddl_ast::graph_parse;
 use crate::ddl_ast::statement::NodedbStatement;
@@ -66,6 +66,7 @@ pub fn parse(sql: &str) -> Option<Result<NodedbStatement, SqlError>> {
     // `SHOW GRAPH STATS` must be checked before the generic collection parser
     // so its `SHOW` prefix is not consumed by `SHOW COLLECTIONS`/etc.
     try_family!(graph_stats::try_parse(&upper, &parts, trimmed));
+    try_family!(credential::try_parse(&upper, trimmed));
     // Conflict policy must be checked before the generic collection parser
     // so "SET ON CONFLICT" does not fall through to the raw-SQL path.
     try_family!(conflict_policy::try_parse(&upper, &parts, trimmed));
@@ -91,6 +92,7 @@ pub fn parse(sql: &str) -> Option<Result<NodedbStatement, SqlError>> {
     try_family!(redaction::try_parse(&upper, &parts, trimmed));
     try_family!(materialized_view::try_parse(&upper, &parts, trimmed));
     try_family!(synonym_group::try_parse(&upper, &parts, trimmed));
+    try_family!(spatial_ref_sys::try_parse(&upper, trimmed));
     try_family!(custom_type::try_parse(&upper, &parts, trimmed));
     try_family!(database::try_parse(&upper, &parts, trimmed));
     try_family!(tenant::try_parse(&upper, &parts, trimmed));
@@ -469,7 +471,7 @@ mod tests {
     fn match_query_uses_body_field() {
         let stmt = ok("MATCH (x)-[:l]->(y) RETURN x, y");
         match stmt {
-            NodedbStatement::Graph(GraphStmt::MatchQuery { body }) => {
+            NodedbStatement::Graph(GraphStmt::MatchQuery { body, .. }) => {
                 assert!(body.starts_with("MATCH"), "body must hold the original SQL");
             }
             other => panic!("expected MatchQuery, got {other:?}"),

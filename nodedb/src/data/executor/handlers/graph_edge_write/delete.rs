@@ -89,6 +89,7 @@ impl CoreLoop {
             old_properties.as_deref(),
             tid,
             collection,
+            &self.crs_context(),
         ) {
             return self.response_error(task, error);
         }
@@ -123,6 +124,12 @@ impl CoreLoop {
             owns_logical_edge_stats(task, src_id),
         ) {
             Ok(tombstone) => {
+                self.historical_csr.note_version(
+                    task.request.database_id,
+                    TenantId::new(tid),
+                    collection,
+                    ord,
+                );
                 let current = tombstone.current.clone();
                 let edge_undo = target.undo(tombstone, csr_prior);
                 // The CSR follows what the edge resolves to: a tombstone a
@@ -231,6 +238,8 @@ mod tests {
                         properties: &owner_properties("alice"),
                         src_surrogate: Surrogate::new(1),
                         dst_surrogate: Surrogate::new(2),
+                        valid_from_ms: None,
+                        valid_until_ms: None,
                     },
                 )
                 .status,
@@ -289,6 +298,8 @@ mod tests {
                         properties: &owner_properties("alice"),
                         src_surrogate: Surrogate::new(1),
                         dst_surrogate: Surrogate::new(2),
+                        valid_from_ms: None,
+                        valid_until_ms: None,
                     },
                 )
                 .status,
@@ -363,6 +374,8 @@ mod tests {
                         properties: b"",
                         src_surrogate: Surrogate::new(1),
                         dst_surrogate: Surrogate::new(2),
+                        valid_from_ms: None,
+                        valid_until_ms: None,
                     },
                 )
                 .status,

@@ -26,6 +26,8 @@ pub(super) struct WalAppendOutcome {
     pub group_origin: Option<wal_dispatch::GroupOrigin>,
     /// The replicated position whose marker precedes the write's records.
     pub change_position: Option<crate::event::cdc::position::ReplicatedPosition>,
+    /// The system-time ordinal the leader of the applied entry assigned.
+    pub system_ordinal: Option<i64>,
 }
 
 /// Where and how [`authorize_and_append`] journals one write.
@@ -88,11 +90,13 @@ pub(super) fn authorize_and_append(
         });
     }
 
-    let marked_position = match &durability {
+    let (marked_position, system_ordinal) = match &durability {
         WalDurability::AppendHere {
-            change_position, ..
-        } => *change_position,
-        WalDurability::CallerSupplied { .. } => None,
+            change_position,
+            system_ordinal,
+            ..
+        } => (*change_position, *system_ordinal),
+        WalDurability::CallerSupplied { .. } => (None, None),
     };
     let (wal_lsn, resolved_now_ms, group_origin) = match durability {
         WalDurability::AppendHere {
@@ -103,6 +107,14 @@ pub(super) fn authorize_and_append(
         } => {
             // The marker precedes the redo in the WAL, so the fsync that makes
             // the redo durable makes the marker durable too.
+            // The rows' system-time ordinals are fixed here, under the guard
+            // and before the record, so the record carries them: the run the
+            // applied entry's leader assigned, else a run of this node's clock.
+            wal_dispatch::stamp_system_ordinals(
+                &mut plan,
+                &shared.wal.ordinal_clock(),
+                system_ordinal,
+            );
             if let Some(position) = change_position {
                 let marker = ChangePositionMarker {
                     apply_key,
@@ -166,6 +178,7 @@ pub(super) fn authorize_and_append(
         resolved_now_ms,
         group_origin,
         change_position: marked_position,
+        system_ordinal,
     })
 }
 

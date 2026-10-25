@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license = "Apache-2.0"
+authors = ["Biz Impulse Solutions Sdn. Bhd. and the NodeDB contributors"]
 readme = "README.md"
 repository.workspace = true
 homepage.workspace = true
@@ -12,6 +13,7 @@ documentation = "https://docs.rs/nodedb-physical"
 
 [dependencies]
 nodedb-array = { workspace = true }
+nodedb-crs = { workspace = true }
 nodedb-graph = { workspace = true }
 nodedb-query = { workspace = true }
 nodedb-sql = { workspace = true }

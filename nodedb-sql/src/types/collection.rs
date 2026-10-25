@@ -19,7 +19,7 @@ pub struct CollectionInfo {
     /// choosing an index lookup — only `Ready` indexes back query rewrites.
     pub indexes: Vec<IndexSpec>,
     /// When `true`, this collection stores every write as an immutable
-    /// version keyed by `system_from_ms`. Enables `FOR SYSTEM_TIME AS OF`
+    /// version keyed by its system time. Enables `FOR SYSTEM_TIME AS OF`
     /// and `FOR VALID_TIME` queries. Only meaningful for document engines
     /// today; other engines ignore this flag.
     pub bitemporal: bool,

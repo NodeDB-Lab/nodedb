@@ -20,6 +20,7 @@ pub(super) fn find_arm<'a>(
     clauses: &'a [MergeClauseOp],
     kind: MergeClauseKindOp,
     context_doc: &serde_json::Value,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<Option<&'a MergeClauseOp>> {
     let context_bytes = doc_format::encode_to_msgpack(context_doc);
     for c in clauses {
@@ -34,7 +35,7 @@ pub(super) fn find_arm<'a>(
         let filters = decode_scan_filters(&c.extra_predicate, "MERGE clause predicate")?;
         let mut all_match = true;
         for f in &filters {
-            if !f.matches_binary(&context_bytes)? {
+            if !f.matches_binary(&context_bytes, crs)? {
                 all_match = false;
                 break;
             }
@@ -59,6 +60,7 @@ pub(in crate::data::executor) fn build_insert_doc(
     values: &[UpdateValue],
     source_doc: &serde_json::Value,
     source_alias: &str,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<serde_json::Value> {
     let mut new_doc = serde_json::Map::new();
     if columns.is_empty() {
@@ -77,7 +79,7 @@ pub(in crate::data::executor) fn build_insert_doc(
         );
         let merged_ndb: nodedb_types::Value = merged.into();
         for (col, val) in columns.iter().zip(values.iter()) {
-            new_doc.insert(col.clone(), resolve_update_value(val, &merged_ndb)?);
+            new_doc.insert(col.clone(), resolve_update_value(val, &merged_ndb, crs)?);
         }
     }
     Ok(serde_json::Value::Object(new_doc))
@@ -95,6 +97,7 @@ pub(in crate::data::executor) fn build_update_doc(
     source_alias: &str,
     updates: &[(String, UpdateValue)],
     declared_primary_key: Option<&str>,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<serde_json::Value> {
     let merged = build_merged(target_doc, source_doc, source_alias);
     let merged_ndb: nodedb_types::Value = merged.into();
@@ -103,7 +106,7 @@ pub(in crate::data::executor) fn build_update_doc(
         for (field, update_val) in updates {
             obj.insert(
                 field.clone(),
-                resolve_update_value(update_val, &merged_ndb)?,
+                resolve_update_value(update_val, &merged_ndb, crs)?,
             );
         }
     }
@@ -140,6 +143,7 @@ pub(in crate::data::executor) fn check_declared_pk_not_null(
 fn resolve_update_value(
     val: &UpdateValue,
     merged_ndb: &nodedb_types::Value,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<serde_json::Value> {
     Ok(match val {
         UpdateValue::Literal(bytes) => {
@@ -147,7 +151,7 @@ fn resolve_update_value(
                 detail: format!("MERGE assignment literal: {e}"),
             })?
         }
-        UpdateValue::Expr(expr) => expr.eval(merged_ndb)?.into(),
+        UpdateValue::Expr(expr) => expr.eval(merged_ndb, crs)?.into(),
     })
 }
 

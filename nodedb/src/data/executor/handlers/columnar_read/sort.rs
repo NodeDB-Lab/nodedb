@@ -16,6 +16,7 @@ pub(in crate::data::executor) fn eval_row_sort_values(
     row: &[Value],
     schema: &nodedb_types::columnar::ColumnarSchema,
     sort_keys: &[SortKeySpec],
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<Vec<Value>> {
     let mut out = Vec::with_capacity(sort_keys.len());
     let mut row_object: Option<Value> = None;
@@ -37,7 +38,7 @@ pub(in crate::data::executor) fn eval_row_sort_values(
             Some(ref o) => o,
             None => row_object.insert(row_to_object(row, schema)),
         };
-        out.push(key.expr.eval(object).map_err(crate::Error::from)?);
+        out.push(key.expr.eval(object, crs).map_err(crate::Error::from)?);
     }
     Ok(out)
 }

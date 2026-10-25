@@ -63,8 +63,9 @@ pub use document::{
 pub use exchange::{ExchangeMode, ExchangeOp};
 pub use gathered_source::GatheredSource;
 pub use graph::{
-    AlgoEdge, AlgoStage, BatchEdge, BspSuperstepPlan, BspSuperstepResult, GraphOp, RagBindingRow,
-    RagLegs, RagStage, RagTextHit, RagVectorHit, WccSuperstepPlan, WccSuperstepResult,
+    ALL_VERSIONS_REFUSED, AlgoEdge, AlgoStage, BatchEdge, BspSuperstepPlan, BspSuperstepResult,
+    GraphOp, GraphReadScope, GraphSystemCut, RagBindingRow, RagLegs, RagStage, RagTextHit,
+    RagVectorHit, WccSuperstepPlan, WccSuperstepResult,
 };
 pub use kv::{
     KvBatchIntent, KvCounterShape, KvOp, KvResolveOutcome, KvResolvedMutation, SortedIndexRead,
@@ -72,8 +73,10 @@ pub use kv::{
 };
 pub use meta::MetaOp;
 pub use meta_home::{HomeAnswer, HomeVersion, HomeVersionProbe};
-pub use meta_restore::{RestoredEdgeVersion, RestoredIdentity, RestoredRedo, RestoredRow};
-pub use meta_snapshot::{CutCaptureRequest, SnapshotClearTarget};
+pub use meta_restore::{
+    RestoredEdgeVersion, RestoredIdentity, RestoredNodeLabels, RestoredRedo, RestoredRow,
+};
+pub use meta_snapshot::{CutCaptureRequest, DepartedCollection, SnapshotClearTarget};
 pub use plan::PhysicalPlan;
 pub use query::{AggregateSpec, GroupKeySpec, JoinProjection, QueryOp};
 pub use redo_origin::RedoOrigin;

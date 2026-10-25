@@ -22,11 +22,17 @@ pub(in crate::control::cluster::calvin::scheduler::driver::core) enum PartsError
     },
     #[error("part {part} interrupts the chunks of task {task}")]
     InterruptsChunks { part: u32, task: u32 },
-    #[error("part {part} does not decode: {source}")]
-    PartUndecodable {
+    #[error("part {part} tasks are malformed: {source}")]
+    PartTasksInvalid {
         part: u32,
-        source: Box<crate::Error>,
+        source: nodedb_cluster::calvin::types::PartTasksError,
     },
+    #[error("part {part} names a task past the last task index")]
+    TaskIndexOverflow { part: u32 },
+    #[error("part {part} task {task} routes to other vShards than its homes")]
+    HomesMismatch { part: u32, task: u32 },
+    #[error("task {task} arrives in more than one part")]
+    TaskRepeated { task: u32 },
     #[error("part {part} does not continue the chunks of task {task}")]
     BrokenChunks { part: u32, task: u32 },
     #[error("task {task} chunks run past its {total_len} bytes")]

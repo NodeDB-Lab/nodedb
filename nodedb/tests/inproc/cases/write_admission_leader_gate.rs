@@ -71,6 +71,7 @@ async fn an_admitted_entry_holds_its_keys_until_its_apply_starts() {
         )
         .await
         .expect("admit")
+        .hold
         .expect("an uncontended row write holds its keys");
     let (group_id, log_index) = (3, 10);
     hold.landed(group_id, log_index);
@@ -78,7 +79,10 @@ async fn an_admitted_entry_holds_its_keys_until_its_apply_starts() {
     let truncate = TxnId::new(9, 0);
     let keys = truncate_keys(coll);
     assert_eq!(
-        lm.lock().expect("lm").acquire(truncate, keys.clone()),
+        lm.lock()
+            .expect("lm")
+            .acquire(truncate, keys.clone())
+            .outcome,
         AcquireOutcome::Blocked,
         "a Calvin truncate waits for the admitted write"
     );
@@ -110,7 +114,8 @@ async fn a_contended_sequenced_entry_routes_to_the_sequencer() {
     assert_eq!(
         lm.lock()
             .expect("lm")
-            .acquire(TxnId::new(9, 0), truncate_keys(coll)),
+            .acquire(TxnId::new(9, 0), truncate_keys(coll))
+            .outcome,
         AcquireOutcome::Ready
     );
     let gate = LeaderWriteGate::new(&shared);
@@ -138,7 +143,8 @@ async fn a_contended_resolved_entry_waits_for_its_keys() {
     assert_eq!(
         lm.lock()
             .expect("lm")
-            .acquire(truncate, truncate_keys(coll)),
+            .acquire(truncate, truncate_keys(coll))
+            .outcome,
         AcquireOutcome::Ready
     );
     let resolved = PhysicalPlan::Kv(KvOp::ResolvedWrite {
@@ -171,12 +177,14 @@ async fn a_contended_resolved_entry_waits_for_its_keys() {
         .await
         .expect("join")
         .expect("the keys free up")
+        .hold
         .expect("the resolved write holds its row");
     drop(hold);
     assert_eq!(
         lm.lock()
             .expect("lm")
-            .acquire(TxnId::new(10, 0), truncate_keys(coll)),
+            .acquire(TxnId::new(10, 0), truncate_keys(coll))
+            .outcome,
         AcquireOutcome::Ready,
         "dropping the hold frees every key it held"
     );
@@ -193,7 +201,8 @@ async fn a_contended_entry_waits_no_longer_than_its_budget() {
     assert_eq!(
         lm.lock()
             .expect("lm")
-            .acquire(TxnId::new(9, 0), truncate_keys(coll)),
+            .acquire(TxnId::new(9, 0), truncate_keys(coll))
+            .outcome,
         AcquireOutcome::Ready
     );
     let resolved = PhysicalPlan::Kv(KvOp::ResolvedWrite {
@@ -228,4 +237,59 @@ async fn a_contended_entry_waits_no_longer_than_its_budget() {
         tokio::time::Instant::now() >= deadline,
         "the gate waits until the budget runs out"
     );
+}
+
+/// The leader stamps a document write with an ordinal of its clock as it
+/// admits the entry, and a later write with a later one. A KV write lands no
+/// system-time version and proposes as sent.
+#[tokio::test]
+async fn the_leader_stamps_a_document_write_from_its_clock() {
+    let (shared, _dir) = build_shared();
+    let gate = LeaderWriteGate::new(&shared);
+    let vshard = VShardId::new(0);
+    let put = |document_id: &str| {
+        PhysicalPlan::Document(nodedb_physical::physical_plan::DocumentOp::PointPut {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "leader_gate_stamp"),
+            document_id: document_id.into(),
+            value: vec![0x80],
+            surrogate: Surrogate::new(7),
+            pk_bytes: Vec::new(),
+            returning: None,
+            rls_filters: Vec::new(),
+            resolved_sum_targets: Vec::new(),
+        })
+    };
+    let mut stamps = Vec::new();
+    for document_id in ["d1", "d2"] {
+        let admitted = gate
+            .admit(
+                vshard.as_u32(),
+                &entry_bytes(vshard, &put(document_id)),
+                far_deadline(),
+            )
+            .await
+            .expect("admit");
+        let stamped = admitted.entry.expect("a document write is stamped");
+        let entry = nodedb::control::wal_replication::ReplicatedEntry::from_bytes(&stamped)
+            .expect("the stamped bytes decode");
+        stamps.push(entry.carried_system_ordinal().expect("an ordinal"));
+    }
+    assert!(
+        stamps[1] > stamps[0],
+        "a later write stamps later: {stamps:?}"
+    );
+    assert!(
+        shared.wal.ordinal_clock().peek() >= stamps[1],
+        "the stamp comes from the leader's clock"
+    );
+
+    let kv = gate
+        .admit(
+            vshard.as_u32(),
+            &entry_bytes(vshard, &kv_put("leader_gate_stamp_kv", b"K")),
+            far_deadline(),
+        )
+        .await
+        .expect("admit");
+    assert!(kv.entry.is_none(), "a KV write proposes as sent");
 }

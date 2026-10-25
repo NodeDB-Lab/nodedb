@@ -268,6 +268,8 @@ pub async fn create_graph_index(
             dst_id: child.to_string(),
             src_surrogate: *src_surrogate,
             dst_surrogate: *dst_surrogate,
+            valid_from_ms: None,
+            valid_until_ms: None,
         });
         total_edges += 1;
     }

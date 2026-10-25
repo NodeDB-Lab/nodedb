@@ -39,5 +39,5 @@ mod vector;
 mod vector_direct;
 
 pub use entry::{decode_parsed_entry, decode_replicated_entry, from_replicated_entry};
-pub use entry_graph::edge_write_plan;
+pub use entry_graph::sequenced_graph_write_plan;
 pub use transaction_redo::{ChunkedRedo, DecodedTransactionRedo, decode_transaction_redo};

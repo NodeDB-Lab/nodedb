@@ -5,21 +5,30 @@
 //! Handles HTTP fetch, JSON deserialization, key extraction, and error
 //! reporting. Used by the registry for initial load and periodic refresh.
 //!
-//! SSRF defense: every URL (initial + each redirect hop) is re-validated
-//! against [`super::url::validate_jwks_url`], and the hostname is resolved
-//! up-front with every returned address checked against
-//! [`super::url::validate_resolved_addrs`]. A maximum of 3 redirect hops
-//! is allowed.
+//! SSRF defense: the request goes through the egress client. The URL and
+//! every redirect hop pass the [`EgressPolicy`], and every address a host
+//! resolves to is checked at connect time, so a rebinding DNS answer never
+//! reaches a private address. A maximum of 3 redirect hops is allowed.
 
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::sync::Arc;
+use std::time::Duration;
 
 use tracing::{debug, info, warn};
 
 use super::cache::JwksCache;
 use super::key::{JwksResponse, VerificationKey, parse_jwk};
-use super::url::{JwksPolicy, UrlValidationError};
+use crate::control::security::egress::{
+    EgressClientOptions, EgressError, EgressFault, EgressPolicy, SystemLookup, classify,
+    egress_client,
+};
 
 const MAX_REDIRECTS: usize = 3;
+
+/// Cap on a JWKS response body. 1 MiB is far beyond any real JWKS document.
+const MAX_BODY: usize = 1 << 20;
+
+/// Cap on one JWKS request, connect and read included.
+const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Fetch JWKS from a provider's endpoint and update the cache.
 ///
@@ -33,7 +42,7 @@ pub async fn fetch_and_cache(
     provider_name: &str,
     jwks_url: &str,
     cache: &JwksCache,
-    policy: &JwksPolicy,
+    policy: &EgressPolicy,
 ) -> usize {
     match fetch_jwks(jwks_url, policy).await {
         Ok(keys) => {
@@ -73,81 +82,43 @@ pub async fn fetch_and_cache(
 /// Fetch and parse JWKS from a URL, with full SSRF defense.
 async fn fetch_jwks(
     url: &str,
-    policy: &JwksPolicy,
+    policy: &EgressPolicy,
 ) -> Result<Vec<VerificationKey>, JwksFetchError> {
     debug!(url = %url, "fetching JWKS");
 
-    // 1. Syntactic validation (scheme + not-IP-literal, respecting policy).
+    // Scheme and host before any connection, respecting the policy.
     policy
         .check_url(url)
         .map_err(JwksFetchError::UrlValidation)?;
 
-    // 2. Resolve host and validate every address against the policy.
-    let parsed = reqwest::Url::parse(url)
-        .map_err(|_| JwksFetchError::UrlValidation(UrlValidationError::Malformed))?;
-    let host = parsed
-        .host_str()
-        .ok_or(JwksFetchError::UrlValidation(UrlValidationError::NoHost))?
-        .to_owned();
-    let port = parsed.port_or_known_default().unwrap_or(443);
-    let addrs = resolve_host(&host, port).await?;
-    let ips: Vec<_> = addrs.iter().map(|a| a.ip()).collect();
-    policy
-        .check_resolved(&host, &ips)
-        .map_err(JwksFetchError::UrlValidation)?;
-
-    // Pin the first resolved SocketAddr so reqwest uses the IP we
-    // validated instead of re-resolving. This closes the DNS-rebinding
-    // window between our validation and reqwest's own resolution.
-    let pinned = addrs[0];
-
-    // 3. Build a reqwest client that enforces per-hop URL check, caps
-    //    redirect depth, and uses the pinned IP for the target host.
-    let policy_for_redirect = policy.clone();
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .resolve(&host, pinned)
-        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
-            if attempt.previous().len() >= MAX_REDIRECTS {
-                return attempt.error(redirect_limit_err());
-            }
-            if policy_for_redirect.check_parsed(attempt.url()).is_err() {
-                return attempt.stop();
-            }
-            attempt.follow()
-        }))
-        .build()
-        .map_err(|_| JwksFetchError::HttpClient)?;
+    let client = egress_client(
+        Arc::new(policy.clone()),
+        Arc::new(SystemLookup),
+        EgressClientOptions {
+            timeout: Some(FETCH_TIMEOUT),
+            connect_timeout: FETCH_TIMEOUT,
+            read_timeout: FETCH_TIMEOUT,
+            max_redirects: MAX_REDIRECTS,
+        },
+    )
+    .map_err(|_| JwksFetchError::HttpClient)?;
 
     let response = client
         .get(url)
         .header("accept", "application/json")
         .send()
         .await
-        .map_err(|e| {
-            // Distinguish our redirect-limit sentinel from generic errors.
-            if format!("{e}").contains(REDIRECT_LIMIT_SENTINEL) {
-                JwksFetchError::RedirectLimit
-            } else {
-                JwksFetchError::HttpRequest
-            }
+        .map_err(|e| match classify(&e) {
+            EgressFault::TooManyRedirects(_) => JwksFetchError::RedirectLimit,
+            EgressFault::Refused(refused) => JwksFetchError::UrlValidation(refused),
+            EgressFault::Other => JwksFetchError::HttpRequest,
         })?;
 
     let status = response.status();
     if !status.is_success() {
         return Err(JwksFetchError::HttpStatus(status.as_u16()));
     }
-
-    // Cap body size to prevent a hostile endpoint from forcing unbounded
-    // allocation. 1 MiB is well beyond any real JWKS document.
-    const MAX_BODY: usize = 1 << 20;
-    let body = response
-        .bytes()
-        .await
-        .map_err(|_| JwksFetchError::HttpBody)?;
-    if body.len() > MAX_BODY {
-        return Err(JwksFetchError::BodyTooLarge);
-    }
+    let body = read_bounded(response).await?;
 
     let jwks: JwksResponse =
         crate::util::bounded_json::from_slice(&body).map_err(|_| JwksFetchError::JsonParse)?;
@@ -157,21 +128,27 @@ async fn fetch_jwks(
     Ok(keys)
 }
 
-/// Resolve a hostname to socket addresses using the blocking resolver on a
-/// worker thread (tokio's async resolver isn't available without
-/// additional deps and std's resolver is well-exercised for this purpose).
-async fn resolve_host(host: &str, port: u16) -> Result<Vec<SocketAddr>, JwksFetchError> {
-    let h = host.to_owned();
-    tokio::task::spawn_blocking(move || (h.as_str(), port).to_socket_addrs().map(|i| i.collect()))
+/// The response body, read chunk by chunk. A hostile endpoint that sends
+/// more than [`MAX_BODY`] bytes fails before the buffer grows past the cap.
+async fn read_bounded(mut response: reqwest::Response) -> Result<Vec<u8>, JwksFetchError> {
+    if response
+        .content_length()
+        .is_some_and(|len| len > MAX_BODY as u64)
+    {
+        return Err(JwksFetchError::BodyTooLarge);
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map_err(|_| JwksFetchError::DnsResolution)?
-        .map_err(|_| JwksFetchError::DnsResolution)
-}
-
-const REDIRECT_LIMIT_SENTINEL: &str = "nodedb-jwks-redirect-limit";
-
-fn redirect_limit_err() -> Box<dyn std::error::Error + Send + Sync> {
-    Box::<dyn std::error::Error + Send + Sync>::from(REDIRECT_LIMIT_SENTINEL)
+        .map_err(|_| JwksFetchError::HttpBody)?
+    {
+        if body.len() + chunk.len() > MAX_BODY {
+            return Err(JwksFetchError::BodyTooLarge);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 /// JWKS fetch errors. Variants carry no external data so they cannot
@@ -179,9 +156,7 @@ fn redirect_limit_err() -> Box<dyn std::error::Error + Send + Sync> {
 #[derive(Debug, thiserror::Error)]
 pub enum JwksFetchError {
     #[error("JWKS URL failed validation: {0}")]
-    UrlValidation(#[from] UrlValidationError),
-    #[error("DNS resolution failed")]
-    DnsResolution,
+    UrlValidation(#[from] EgressError),
     #[error("HTTP client construction failed")]
     HttpClient,
     #[error("HTTP request failed")]
@@ -203,7 +178,6 @@ impl JwksFetchError {
     pub fn category(&self) -> &'static str {
         match self {
             Self::UrlValidation(_) => "url_validation",
-            Self::DnsResolution => "dns_resolution",
             Self::HttpClient => "http_client",
             Self::HttpRequest => "http_request",
             Self::HttpStatus(_) => "http_status",
@@ -217,13 +191,15 @@ impl JwksFetchError {
 
 /// Start the periodic JWKS refresh task.
 ///
-/// Spawns a Tokio task that refreshes JWKS keys for all providers
-/// at the configured interval. Runs on the Control Plane.
+/// Spawns a Tokio task that refreshes JWKS keys for every target at the
+/// configured interval. Each tick reads `targets` afresh, so a catalog
+/// provider registered after the start is refreshed too. Runs on the
+/// Control Plane.
 pub fn spawn_refresh_task(
-    providers: Vec<(String, String, String)>, // (cache identity, name, jwks_url) triples
+    targets: Arc<parking_lot::RwLock<super::registry::targets::RefreshTargets>>,
     cache: std::sync::Arc<JwksCache>,
     refresh_interval_secs: u64,
-    policy: std::sync::Arc<JwksPolicy>,
+    policy: std::sync::Arc<EgressPolicy>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval =
@@ -233,9 +209,121 @@ pub fn spawn_refresh_task(
 
         loop {
             interval.tick().await;
-            for (cache_identity, name, url) in &providers {
-                fetch_and_cache(cache_identity, name, url, &cache, &policy).await;
+            let snapshot = targets.read().snapshot();
+            for target in &snapshot {
+                fetch_and_cache(
+                    &target.cache_identity,
+                    &target.provider_name,
+                    &target.jwks_url,
+                    &cache,
+                    &policy,
+                )
+                .await;
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    use super::*;
+
+    /// Serve `head` and then `body_chunks` as a chunked body on every
+    /// connection. Returns the port.
+    async fn serve(head: String, body_chunks: usize, chunk: usize) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let head = head.clone();
+                tokio::spawn(async move {
+                    let mut request = [0u8; 4096];
+                    let _ = socket.read(&mut request).await;
+                    if socket.write_all(head.as_bytes()).await.is_err() {
+                        return;
+                    }
+                    let data = vec![b' '; chunk];
+                    for _ in 0..body_chunks {
+                        let frame = format!("{chunk:x}\r\n");
+                        if socket.write_all(frame.as_bytes()).await.is_err()
+                            || socket.write_all(&data).await.is_err()
+                            || socket.write_all(b"\r\n").await.is_err()
+                        {
+                            return;
+                        }
+                    }
+                    let _ = socket.write_all(b"0\r\n\r\n").await;
+                });
+            }
+        });
+        port
+    }
+
+    fn local_policy() -> EgressPolicy {
+        EgressPolicy::from_parts(
+            true,
+            &["localhost".to_string()],
+            &["127.0.0.0/8".to_string(), "::1/128".to_string()],
+        )
+        .expect("valid policy")
+    }
+
+    #[tokio::test]
+    async fn a_chunked_body_over_the_cap_is_refused() {
+        let head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                    Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+            .to_string();
+        // 2 MiB in 64 KiB chunks, with no Content-Length to check up front.
+        let port = serve(head, 32, 64 * 1024).await;
+        let url = format!("http://localhost:{port}/jwks.json");
+        let err = fetch_jwks(&url, &local_policy())
+            .await
+            .expect_err("over the cap");
+        assert!(matches!(err, JwksFetchError::BodyTooLarge), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_redirect_loop_hits_the_redirect_limit() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let head = format!(
+            "HTTP/1.1 302 Found\r\nLocation: http://localhost:{port}/again\r\n\
+             Content-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let head = head.clone();
+                tokio::spawn(async move {
+                    let mut request = [0u8; 4096];
+                    let _ = socket.read(&mut request).await;
+                    let _ = socket.write_all(head.as_bytes()).await;
+                });
+            }
+        });
+        let url = format!("http://localhost:{port}/jwks.json");
+        let err = fetch_jwks(&url, &local_policy())
+            .await
+            .expect_err("redirect loop");
+        assert!(matches!(err, JwksFetchError::RedirectLimit), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_host_outside_the_allow_list_is_refused_at_resolve() {
+        // https passes the URL check, and the strict policy refuses the
+        // loopback address localhost resolves to before any connect.
+        let url = "https://localhost:9/jwks.json";
+        let err = fetch_jwks(url, &EgressPolicy::strict())
+            .await
+            .expect_err("loopback");
+        assert!(
+            matches!(
+                err,
+                JwksFetchError::UrlValidation(EgressError::PrivateAddress)
+            ),
+            "{err}"
+        );
+    }
 }

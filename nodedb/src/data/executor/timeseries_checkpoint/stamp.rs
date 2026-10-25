@@ -167,7 +167,8 @@ impl CoreLoop {
     /// Whether `key`'s collection stamp names the record at `lsn` as held by
     /// a partition or removed by a truncate.
     pub(in crate::data::executor) fn ts_rows_named(&self, key: &TsCollectionKey, lsn: u64) -> bool {
-        self.ts_replay_stamps
+        self.ts_replay
+            .stamps
             .get(key)
             .is_some_and(|stamp| stamp.rows.skips(lsn))
     }
@@ -179,7 +180,8 @@ impl CoreLoop {
         key: &TsCollectionKey,
         lsn: u64,
     ) -> bool {
-        self.ts_replay_stamps
+        self.ts_replay
+            .stamps
             .get(key)
             .is_some_and(|stamp| stamp.truncates.skips(lsn))
     }
@@ -187,7 +189,7 @@ impl CoreLoop {
     /// The records this core applied, as a flush or truncate writing now
     /// states them. See the module docs for the restart-replay cursor.
     pub(in crate::data::executor) fn ts_applied_stamp(&self) -> crate::Result<ReplayStamp> {
-        match self.ts_replay_cursor {
+        match self.ts_replay.cursor {
             Some(through) => Ok(ReplayStamp::through(through)),
             None => Ok(self.floors.applied_prefix.stamp()?),
         }
@@ -204,7 +206,8 @@ impl CoreLoop {
             truncates: ReplayStamp::default(),
         };
         Ok(self
-            .ts_replay_stamps
+            .ts_replay
+            .stamps
             .get(key)
             .map_or_else(|| applied.clone(), |stamp| stamp.union(&applied)))
     }
@@ -214,7 +217,7 @@ impl CoreLoop {
     /// flush that can write them.
     pub(in crate::data::executor) fn note_ts_record_applied(&mut self, lsn: u64) {
         self.floors.applied_prefix.note_applied(Lsn::new(lsn));
-        if let Some(cursor) = self.ts_replay_cursor.as_mut() {
+        if let Some(cursor) = self.ts_replay.cursor.as_mut() {
             *cursor = (*cursor).max(lsn);
         }
     }
@@ -226,7 +229,7 @@ impl CoreLoop {
         &self,
         key: &TsCollectionKey,
     ) -> crate::Result<()> {
-        let Some(stamp) = self.ts_replay_stamps.get(key) else {
+        let Some(stamp) = self.ts_replay.stamps.get(key) else {
             return Ok(());
         };
         let (database_id, tenant_id, collection) = key;

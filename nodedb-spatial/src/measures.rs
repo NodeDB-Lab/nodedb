@@ -1,115 +1,36 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Geodesic measures over geometry: area and centroid.
+//! Centroid of a geometry.
 //!
-//! Area uses the spherical-excess formula rather than a projected shoelace,
-//! so it stays correct for polygons spanning arbitrary extents — the same
-//! basis as [`crate::st_distance`], which is haversine. Centroid follows OGC
-//! semantics: the result is the centroid of the highest-dimension components
-//! present, so a `GeometryCollection` of a polygon and a stray point returns
-//! the polygon's centroid, not a blend of the two.
+//! The result is the centroid of the highest-dimension components present,
+//! so a `GeometryCollection` of a polygon and a stray point returns the
+//! polygon's centroid, not a blend of the two. Components weigh by their
+//! area or length in the CRS's [`Metric`]: geodesic on a geographic CRS,
+//! planar on a projected one.
 
-use nodedb_types::BboxSpace;
 use nodedb_types::geometry::Geometry;
 
-/// Mean Earth radius in meters, matching `nodedb_types::geometry`'s haversine.
-const EARTH_RADIUS_M: f64 = 6_371_000.0;
-
-/// Geodesic area of a geometry in square meters.
-///
-/// Areal geometries (`Polygon`, `MultiPolygon`) measure their exterior ring
-/// minus their holes. Point and linear geometries have zero area, matching
-/// PostGIS. A `GeometryCollection` sums the areas of its members.
-pub fn st_area(geom: &Geometry) -> f64 {
-    match geom {
-        Geometry::Polygon { coordinates } => polygon_area(coordinates),
-        Geometry::MultiPolygon { coordinates } => {
-            coordinates.iter().map(|rings| polygon_area(rings)).sum()
-        }
-        Geometry::GeometryCollection { geometries } => geometries.iter().map(st_area).sum(),
-        Geometry::Point { .. }
-        | Geometry::LineString { .. }
-        | Geometry::MultiPoint { .. }
-        | Geometry::MultiLineString { .. } => 0.0,
-        // `Geometry` is `#[non_exhaustive]`. A geometry kind added upstream is
-        // not known to be areal, and reporting a fabricated area for it would
-        // be worse than reporting none.
-        _ => 0.0,
-    }
-}
-
-/// Area of one polygon: exterior ring less every hole.
-fn polygon_area(rings: &[Vec<[f64; 2]>]) -> f64 {
-    let mut iter = rings.iter();
-    let Some(exterior) = iter.next() else {
-        return 0.0;
-    };
-    let holes: f64 = iter.map(|ring| ring_area(ring)).sum();
-    (ring_area(exterior) - holes).max(0.0)
-}
-
-/// Unsigned area of a single closed ring via spherical excess.
-///
-/// For a ring of vertices `(λᵢ, φᵢ)` in radians the enclosed area is
-/// `R²/2 · |Σ (λᵢ₊₁ − λᵢ)(2 + sin φᵢ + sin φᵢ₊₁)|`. Longitude deltas are
-/// normalized into `[-π, π]` so a ring crossing the antimeridian measures its
-/// true extent instead of wrapping the long way around the globe.
-fn ring_area(ring: &[[f64; 2]]) -> f64 {
-    if ring.len() < 3 {
-        return 0.0;
-    }
-    let mut total = 0.0;
-    for i in 0..ring.len() {
-        let a = ring[i];
-        let b = ring[(i + 1) % ring.len()];
-        let mut dlng = (b[0] - a[0]).to_radians();
-        if dlng > std::f64::consts::PI {
-            dlng -= std::f64::consts::TAU;
-        } else if dlng < -std::f64::consts::PI {
-            dlng += std::f64::consts::TAU;
-        }
-        total += dlng * (2.0 + a[1].to_radians().sin() + b[1].to_radians().sin());
-    }
-    (total * EARTH_RADIUS_M * EARTH_RADIUS_M / 2.0).abs()
-}
+use crate::metric::Metric;
 
 /// Centroid of a geometry, as a `Point`.
 ///
 /// Follows OGC dimension precedence: areal components win over linear, which
 /// win over punctual. Returns `None` only when the geometry carries no
-/// vertices at all, or when every component of its winning dimension is
-/// degenerate (zero area / zero length) — those fall back to the next
-/// dimension down rather than returning nothing.
-///
-/// Weights are geodesic (spherical area, haversine length). Same as
-/// `st_centroid_in(geom, BboxSpace::Geographic)`.
-pub fn st_centroid(geom: &Geometry) -> Option<Geometry> {
-    st_centroid_in(geom, BboxSpace::Geographic)
+/// vertices at all. A winning dimension whose every component is degenerate
+/// (zero area or zero length) falls back to the next dimension down.
+pub fn st_centroid(geom: &Geometry, metric: &Metric) -> Option<Geometry> {
+    let [x, y] = centroid_coords(geom, metric)?;
+    Some(Geometry::point(x, y))
 }
 
-/// Centroid of a geometry in `space`, as a `Point`.
-///
-/// Planar space weights components by planar area and Euclidean length, so
-/// a projected geometry's centroid is in the same metres as its input.
-pub fn st_centroid_in(geom: &Geometry, space: BboxSpace) -> Option<Geometry> {
-    let [lng, lat] = centroid_coords(geom, space)?;
-    Some(Geometry::point(lng, lat))
+/// Unsigned area of a ring, square metres.
+fn ring_weight(ring: &[[f64; 2]], metric: &Metric) -> f64 {
+    metric.ring_area(ring)
 }
 
-/// Unsigned area of a ring in `space`: square metres in either space.
-fn ring_weight(ring: &[[f64; 2]], space: BboxSpace) -> f64 {
-    match space {
-        BboxSpace::Geographic => ring_area(ring),
-        BboxSpace::Planar => crate::planar::area::planar_ring_area(ring),
-    }
-}
-
-/// Length of one segment in `space`, metres.
-fn segment_weight(a: [f64; 2], b: [f64; 2], space: BboxSpace) -> f64 {
-    match space {
-        BboxSpace::Geographic => nodedb_types::geometry::haversine_distance(a[0], a[1], b[0], b[1]),
-        BboxSpace::Planar => (b[0] - a[0]).hypot(b[1] - a[1]),
-    }
+/// Length of one segment, metres.
+fn segment_weight(a: [f64; 2], b: [f64; 2], metric: &Metric) -> f64 {
+    metric.segment_length(a, b)
 }
 
 /// A weighted point accumulator: `(Σ w·lng, Σ w·lat, Σ w)`.
@@ -142,55 +63,49 @@ impl Weighted {
     }
 }
 
-fn centroid_coords(geom: &Geometry, space: BboxSpace) -> Option<[f64; 2]> {
-    areal_centroid(geom, space)
+fn centroid_coords(geom: &Geometry, metric: &Metric) -> Option<[f64; 2]> {
+    areal_centroid(geom, metric)
         .and_then(Weighted::resolve)
-        .or_else(|| linear_centroid(geom, space).and_then(Weighted::resolve))
+        .or_else(|| linear_centroid(geom, metric).and_then(Weighted::resolve))
         .or_else(|| punctual_centroid(geom).and_then(Weighted::resolve))
 }
 
 /// Area-weighted centroid of every areal component, or `None` if there are no
 /// areal components at all.
-fn areal_centroid(geom: &Geometry, space: BboxSpace) -> Option<Weighted> {
+fn areal_centroid(geom: &Geometry, metric: &Metric) -> Option<Weighted> {
     match geom {
-        Geometry::Polygon { coordinates } => Some(polygon_centroid(coordinates, space)),
+        Geometry::Polygon { coordinates } => Some(polygon_centroid(coordinates, metric)),
         Geometry::MultiPolygon { coordinates } => {
             let mut acc = Weighted::default();
             for rings in coordinates {
-                acc.merge(polygon_centroid(rings, space));
+                acc.merge(polygon_centroid(rings, metric));
             }
             Some(acc)
         }
-        Geometry::GeometryCollection { geometries } => collect(geometries, space, areal_centroid),
+        Geometry::GeometryCollection { geometries } => collect(geometries, metric, areal_centroid),
         Geometry::Point { .. }
         | Geometry::LineString { .. }
         | Geometry::MultiPoint { .. }
         | Geometry::MultiLineString { .. } => None,
-        // `Geometry` is `#[non_exhaustive]`; an unknown kind is not areal, so
-        // it falls through to the linear and punctual dimensions below.
-        _ => None,
     }
 }
 
 /// Length-weighted centroid of every linear component.
-fn linear_centroid(geom: &Geometry, space: BboxSpace) -> Option<Weighted> {
+fn linear_centroid(geom: &Geometry, metric: &Metric) -> Option<Weighted> {
     match geom {
-        Geometry::LineString { coordinates } => Some(line_centroid(coordinates, space)),
+        Geometry::LineString { coordinates } => Some(line_centroid(coordinates, metric)),
         Geometry::MultiLineString { coordinates } => {
             let mut acc = Weighted::default();
             for line in coordinates {
-                acc.merge(line_centroid(line, space));
+                acc.merge(line_centroid(line, metric));
             }
             Some(acc)
         }
-        Geometry::GeometryCollection { geometries } => collect(geometries, space, linear_centroid),
+        Geometry::GeometryCollection { geometries } => collect(geometries, metric, linear_centroid),
         Geometry::Point { .. }
         | Geometry::MultiPoint { .. }
         | Geometry::Polygon { .. }
         | Geometry::MultiPolygon { .. } => None,
-        // `Geometry` is `#[non_exhaustive]`; an unknown kind is not linear, so
-        // it falls through to the punctual dimension.
-        _ => None,
     }
 }
 
@@ -208,13 +123,13 @@ fn punctual_centroid(geom: &Geometry) -> Option<Weighted> {
 /// when no member contributed at that dimension.
 fn collect(
     geometries: &[Geometry],
-    space: BboxSpace,
-    f: fn(&Geometry, BboxSpace) -> Option<Weighted>,
+    metric: &Metric,
+    f: fn(&Geometry, &Metric) -> Option<Weighted>,
 ) -> Option<Weighted> {
     let mut acc = Weighted::default();
     let mut any = false;
     for member in geometries {
-        if let Some(part) = f(member, space) {
+        if let Some(part) = f(member, metric) {
             acc.merge(part);
             any = true;
         }
@@ -224,23 +139,23 @@ fn collect(
 
 /// Centroid of one polygon, weighting the exterior ring positively and each
 /// hole negatively so the hole's mass is removed from the result.
-fn polygon_centroid(rings: &[Vec<[f64; 2]>], space: BboxSpace) -> Weighted {
+fn polygon_centroid(rings: &[Vec<[f64; 2]>], metric: &Metric) -> Weighted {
     let mut acc = Weighted::default();
     let mut iter = rings.iter();
     let Some(exterior) = iter.next() else {
         return acc;
     };
     if let Some(point) = ring_centroid(exterior) {
-        acc.add(point, ring_weight(exterior, space));
+        acc.add(point, ring_weight(exterior, metric));
     }
     for hole in iter {
         if let Some(point) = ring_centroid(hole) {
-            acc.add(point, -ring_weight(hole, space));
+            acc.add(point, -ring_weight(hole, metric));
         }
     }
-    // Holes can only ever cancel the exterior down to nothing; a negative
-    // total weight would mean malformed input (holes larger than the shell),
-    // which must not flip the centroid to the far side of the polygon.
+    // Holes cancel at most the whole exterior. A negative total weight
+    // means malformed input (holes larger than the shell), and it must not
+    // flip the centroid to the far side of the polygon.
     if acc.weight <= 0.0 {
         return Weighted::default();
     }
@@ -275,108 +190,28 @@ fn ring_centroid(ring: &[[f64; 2]]) -> Option<[f64; 2]> {
 }
 
 /// Length-weighted centroid of a polyline: each segment contributes its
-/// midpoint weighted by its length in `space`.
-fn line_centroid(coords: &[[f64; 2]], space: BboxSpace) -> Weighted {
+/// midpoint weighted by its length in `metric`.
+fn line_centroid(coords: &[[f64; 2]], metric: &Metric) -> Weighted {
     let mut acc = Weighted::default();
     for pair in coords.windows(2) {
         let (a, b) = (pair[0], pair[1]);
-        let length = segment_weight(a, b, space);
+        let length = segment_weight(a, b, metric);
         acc.add([(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0], length);
     }
     acc
 }
 
 /// Every vertex of a geometry, in document order.
-fn vertices(geom: &Geometry) -> Vec<[f64; 2]> {
-    match geom {
-        Geometry::Point { coordinates } => vec![*coordinates],
-        Geometry::LineString { coordinates } | Geometry::MultiPoint { coordinates } => {
-            coordinates.clone()
-        }
-        Geometry::Polygon { coordinates } | Geometry::MultiLineString { coordinates } => {
-            coordinates.iter().flatten().copied().collect()
-        }
-        Geometry::MultiPolygon { coordinates } => {
-            coordinates.iter().flatten().flatten().copied().collect()
-        }
-        Geometry::GeometryCollection { geometries } => {
-            geometries.iter().flat_map(vertices).collect()
-        }
-        // `Geometry` is `#[non_exhaustive]`; an unknown kind exposes no
-        // coordinates this crate can read, so it contributes no vertices and
-        // the centroid of a geometry made only of such parts is `None`.
-        _ => Vec::new(),
-    }
+fn vertices(geom: &Geometry) -> impl Iterator<Item = [f64; 2]> + '_ {
+    geom.coords()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// One degree of latitude at the equator is ~111.19 km; a 1°×1° cell is
-    /// therefore ~1.236e10 m². Spherical excess must land within a fraction of
-    /// a percent of that.
-    #[test]
-    fn area_of_unit_degree_cell_at_equator() {
-        let poly = Geometry::polygon(vec![vec![
-            [0.0, 0.0],
-            [1.0, 0.0],
-            [1.0, 1.0],
-            [0.0, 1.0],
-            [0.0, 0.0],
-        ]]);
-        let area = st_area(&poly);
-        let expected = 1.236e10;
-        assert!(
-            (area - expected).abs() / expected < 0.01,
-            "expected ~{expected} m², got {area}"
-        );
-    }
-
-    /// Winding order must not change the magnitude of the result.
-    #[test]
-    fn area_is_orientation_independent() {
-        let ccw = Geometry::polygon(vec![vec![
-            [0.0, 0.0],
-            [1.0, 0.0],
-            [1.0, 1.0],
-            [0.0, 1.0],
-            [0.0, 0.0],
-        ]]);
-        let cw = Geometry::polygon(vec![vec![
-            [0.0, 0.0],
-            [0.0, 1.0],
-            [1.0, 1.0],
-            [1.0, 0.0],
-            [0.0, 0.0],
-        ]]);
-        assert!((st_area(&ccw) - st_area(&cw)).abs() < 1.0);
-    }
-
-    #[test]
-    fn area_subtracts_holes() {
-        let solid = Geometry::polygon(vec![vec![
-            [0.0, 0.0],
-            [4.0, 0.0],
-            [4.0, 4.0],
-            [0.0, 4.0],
-            [0.0, 0.0],
-        ]]);
-        let with_hole = Geometry::polygon(vec![
-            vec![[0.0, 0.0], [4.0, 0.0], [4.0, 4.0], [0.0, 4.0], [0.0, 0.0]],
-            vec![[1.0, 1.0], [2.0, 1.0], [2.0, 2.0], [1.0, 2.0], [1.0, 1.0]],
-        ]);
-        assert!(
-            st_area(&with_hole) < st_area(&solid),
-            "hole must reduce the measured area"
-        );
-    }
-
-    #[test]
-    fn area_of_non_areal_geometry_is_zero() {
-        let line = Geometry::line_string(vec![[0.0, 0.0], [1.0, 1.0]]);
-        assert_eq!(st_area(&line), 0.0);
-        assert_eq!(st_area(&Geometry::point(1.0, 2.0)), 0.0);
+    fn st_centroid(geom: &Geometry) -> Option<Geometry> {
+        super::st_centroid(geom, &Metric::wgs84())
     }
 
     #[test]
@@ -401,8 +236,8 @@ mod tests {
         assert!((coordinates[1] - 1.0).abs() < 1e-9);
     }
 
-    /// An L-shape's centroid must sit at the area-weighted center, which the
-    /// vertex mean would get wrong.
+    /// An L-shape's centroid sits at the area-weighted center, which the
+    /// vertex mean misses.
     #[test]
     fn centroid_is_area_weighted_not_vertex_mean() {
         let l_shape = Geometry::polygon(vec![vec![
@@ -419,7 +254,7 @@ mod tests {
         };
         // A 4x1 arm (area 4, centroid (2, 0.5)) plus a 1x3 arm (area 3,
         // centroid (0.5, 2.5)) gives 9.5/7 ≈ 1.357 on both axes. The vertex
-        // mean would be 10/6 ≈ 1.667, so this discriminates the two.
+        // mean is 10/6 ≈ 1.667, so this discriminates the two.
         let expected = 9.5 / 7.0;
         assert!(
             (coordinates[0] - expected).abs() < 0.01 && (coordinates[1] - expected).abs() < 0.01,

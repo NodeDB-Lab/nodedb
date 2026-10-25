@@ -2,6 +2,7 @@
 
 //! Protocol-neutral COMMIT orchestration shared by pgwire and native sessions.
 
+mod buffered_dispatch;
 pub mod metering;
 mod read_split;
 mod read_validation;

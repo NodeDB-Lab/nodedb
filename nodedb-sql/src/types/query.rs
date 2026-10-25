@@ -53,6 +53,7 @@ impl JoinType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpatialPredicate {
     DWithin,
+    DWithin3D,
     Contains,
     Intersects,
     Within,

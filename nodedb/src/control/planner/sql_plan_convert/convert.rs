@@ -139,6 +139,18 @@ impl ConvertContext {
         self.purpose == PlanningPurpose::Metadata
     }
 
+    /// The CRS context SRIDs resolve against. A context with no catalog
+    /// reaches no user-defined CRS, so it resolves through the built-in
+    /// registry only.
+    pub fn crs_context(&self) -> nodedb_crs::CrsContext<'_> {
+        match &self.credentials {
+            Some(credentials) => {
+                crate::control::crs_context::catalog_crs_context(credentials.catalog())
+            }
+            None => nodedb_crs::CrsContext::builtin_only(),
+        }
+    }
+
     /// The canonical key of `bare`, a catalog collection name in this
     /// context's database. Placement and surrogate identity use this key.
     pub fn collection_key<'a>(&self, bare: &'a str) -> nodedb_types::CollectionKey<'a> {

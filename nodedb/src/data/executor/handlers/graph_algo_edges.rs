@@ -10,38 +10,59 @@
 
 use nodedb_graph::CsrIndex;
 use nodedb_graph::csr::weights::extract_weight_from_properties;
-use nodedb_physical::physical_plan::AlgoEdge;
-use nodedb_types::{DatabaseId, TenantId};
+use nodedb_physical::physical_plan::{AlgoEdge, GraphReadScope};
+use nodedb_types::{DatabaseId, QualifiedCollection, TenantId};
 
 use crate::engine::graph::edge_store::EdgeStore;
 
-/// The edges of `(database, tid, collection)` in this core's edge store,
-/// optionally one label only, in edge-store order. `system_as_of` selects a
-/// historical snapshot; `None` reads current state.
+/// The edge-store name of an algorithm's collection in `database`.
+/// `AlgoParams::collection` names it bare; an already qualified name stays
+/// as it is.
+pub(in crate::data::executor) fn algo_collection(database: DatabaseId, collection: &str) -> String {
+    let bare = QualifiedCollection::from_stored(collection.to_string())
+        .collection_name(database)
+        .to_string();
+    QualifiedCollection::new(database, &bare)
+        .as_str()
+        .to_string()
+}
+
+/// The system-time ordinal an algorithm reads at `scope`. `AllVersions` has
+/// no single graph to run over.
+pub(in crate::data::executor) fn algo_cutoff(scope: &GraphReadScope) -> crate::Result<i64> {
+    scope
+        .cutoff_ordinal()
+        .ok_or_else(|| crate::Error::BadRequest {
+            detail: nodedb_physical::physical_plan::ALL_VERSIONS_REFUSED.into(),
+        })
+}
+
+/// The edges of `(database, tid, collection)` in this core's edge store at
+/// `scope`, optionally one label only, in edge-store order.
 pub(super) fn collection_edges(
     edge_store: &EdgeStore,
     database_id: u64,
     tid: u64,
     collection: &str,
     edge_label: Option<&str>,
-    system_as_of: Option<i64>,
+    scope: &GraphReadScope,
 ) -> crate::Result<Vec<AlgoEdge>> {
-    let records = edge_store.scan_all_edges_decoded(system_as_of)?;
-    let target_db = DatabaseId::new(database_id);
-    let target_tid = TenantId::new(tid);
+    let collection = algo_collection(DatabaseId::new(database_id), collection);
+    let records = edge_store.scan_collection_as_of(
+        database_id,
+        TenantId::new(tid),
+        &collection,
+        edge_label,
+        algo_cutoff(scope)?,
+        scope.valid_at_ms,
+    )?;
     Ok(records
         .into_iter()
-        .filter(|(rec_db, rec_tid, coll, _, label, _, _)| {
-            *rec_db == target_db
-                && *rec_tid == target_tid
-                && coll == collection
-                && edge_label.is_none_or(|el| label == el)
-        })
-        .map(|(_, _, _, src, label, dst, props)| AlgoEdge {
-            weight: extract_weight_from_properties(&props),
-            src,
-            label,
-            dst,
+        .map(|edge| AlgoEdge {
+            weight: extract_weight_from_properties(&edge.properties),
+            src: edge.src,
+            label: edge.label,
+            dst: edge.dst,
         })
         .collect())
 }

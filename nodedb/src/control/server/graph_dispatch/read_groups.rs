@@ -174,6 +174,7 @@ mod tests {
             rls_filters: Vec::new(),
             edge_predicate: Vec::new(),
             with_properties: false,
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         })
     }
 
@@ -204,6 +205,7 @@ mod tests {
             query: Vec::new(),
             frontier_bitmap: None,
             cluster_mode: true,
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         });
         let mut groups =
             graph_read_groups(&state, DatabaseId::DEFAULT, &plan).expect("read groups");

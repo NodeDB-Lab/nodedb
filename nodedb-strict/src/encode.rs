@@ -164,14 +164,16 @@ impl TupleEncoder {
     }
 
     /// Encode a row for a bitemporal strict schema. The three reserved
-    /// slots (0/1/2) are populated from the provided timestamps; the
-    /// remaining slots are filled from `user_values` in schema order.
+    /// slots (0/1/2) are populated from the provided system-time key and
+    /// valid-time bounds; the remaining slots are filled from `user_values`
+    /// in schema order. The system-time key is opaque here: the host engine
+    /// decides its domain (Origin stores the system-time ordinal).
     ///
     /// Errors if the schema is not bitemporal or if `user_values.len() !=
     /// schema.len() - 3`.
     pub fn encode_bitemporal(
         &self,
-        system_from_ms: i64,
+        system_from: i64,
         valid_from_ms: i64,
         valid_until_ms: i64,
         user_values: &[Value],
@@ -190,7 +192,7 @@ impl TupleEncoder {
             });
         }
         let mut all = Vec::with_capacity(self.schema.columns.len());
-        all.push(Value::Integer(system_from_ms));
+        all.push(Value::Integer(system_from));
         all.push(Value::Integer(valid_from_ms));
         all.push(Value::Integer(valid_until_ms));
         all.extend_from_slice(user_values);

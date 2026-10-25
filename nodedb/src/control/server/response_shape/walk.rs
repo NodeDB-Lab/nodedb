@@ -73,6 +73,7 @@ mod tests {
             options: GraphTraversalOptions::default(),
             rls_filters: Vec::new(),
             frontier_bitmap: None,
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         })
     }
 
@@ -83,9 +84,14 @@ mod tests {
         let names = vec!["a".to_string(), "c".to_string(), "b".to_string()];
         let payload = zerompk::to_msgpack_vec(&names).expect("names encode");
         let wrapped = apply_walk_wrap(&hop(), &payload).expect("walk wraps");
-        let Ok(ShapeOutcome::Rows(shaped)) =
-            shape_payload_no_plan(&wrapped, PlanKind::MultiRow, None, None, None)
-        else {
+        let Ok(ShapeOutcome::Rows(shaped)) = shape_payload_no_plan(
+            &wrapped,
+            PlanKind::MultiRow,
+            None,
+            None,
+            None,
+            nodedb_crs::CustomCrsSet::empty(),
+        ) else {
             panic!("a walk shapes into rows");
         };
         let got: Vec<Value> = shaped

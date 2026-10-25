@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Flushed-segment PK lookup for ON CONFLICT DO UPDATE prior-row reads.
+//! Flushed-segment PK lookup for ON CONFLICT DO UPDATE prior-row reads,
+//! and the tombstone read of a closed bitemporal key.
 
+use nodedb_columnar::pk_index::RowLocation;
 use nodedb_types::value::Value;
 
 use crate::data::executor::core_loop::CoreLoop;
@@ -51,6 +53,44 @@ impl CoreLoop {
         if loc.segment_id == engine.memtable_segment_id() {
             return Ok(None);
         }
+        self.read_flushed_row_at(engine_key, loc)
+    }
+
+    /// Read the tombstone the latest bitemporal close of `pk_bytes` wrote.
+    /// `Ok(None)` for a key never closed, or one whose tombstone a retention
+    /// purge removed.
+    ///
+    /// `Err` when the tombstone does not read.
+    pub(in crate::data::executor) fn read_columnar_closed_row(
+        &self,
+        engine_key: &(nodedb_types::DatabaseId, crate::types::TenantId, String),
+        pk_bytes: &[u8],
+    ) -> crate::Result<Option<Vec<Value>>> {
+        let Some(engine) = self.columnar_engines.get(engine_key) else {
+            return Ok(None);
+        };
+        let Some(loc) = engine.closed_location(pk_bytes) else {
+            return Ok(None);
+        };
+        if loc.segment_id == engine.memtable_segment_id() {
+            return Ok(engine.get_memtable_row(loc.row_index as usize)?);
+        }
+        self.read_flushed_row_at(engine_key, loc)
+    }
+
+    /// Read the flushed row at `loc`. `Ok(None)` when its segment's delete
+    /// bitmap marks it.
+    ///
+    /// `Err` when `loc` names a segment or row this core does not hold, or
+    /// when the segment does not decode.
+    fn read_flushed_row_at(
+        &self,
+        engine_key: &(nodedb_types::DatabaseId, crate::types::TenantId, String),
+        loc: RowLocation,
+    ) -> crate::Result<Option<Vec<Value>>> {
+        let Some(engine) = self.columnar_engines.get(engine_key) else {
+            return Ok(None);
+        };
         // Tombstoned — prior row no longer logically present.
         if engine
             .delete_bitmap(loc.segment_id)
@@ -61,7 +101,7 @@ impl CoreLoop {
         let collection = engine_key.2.as_str();
         let unheld = || crate::Error::Internal {
             detail: format!(
-                "columnar '{collection}': the PK index binds a row to flushed segment {} row {}, \
+                "columnar '{collection}': an index binds a row to flushed segment {} row {}, \
                  which this core does not hold",
                 loc.segment_id, loc.row_index
             ),

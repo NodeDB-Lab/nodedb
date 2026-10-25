@@ -43,9 +43,10 @@ pub(crate) async fn execute_plan_all_local_cores(
     match &plan {
         PhysicalPlan::Graph(g) => match g {
             // ── MATCH / MatchContinuation ─────────────────────────────────────
-            GraphOp::Match { .. }
-            | GraphOp::MatchContinuation { .. }
-            | GraphOp::MatchVarLenResume { .. } => {
+            GraphOp::Match { scope, .. }
+            | GraphOp::MatchContinuation { scope, .. }
+            | GraphOp::MatchVarLenResume { scope, .. } => {
+                let scope = *scope;
                 use crate::control::server::graph_dispatch::match_broadcast::broadcast_match_to_all_cores;
                 use crate::data::executor::handlers::graph_match::encode_match_envelope_raw;
 
@@ -63,6 +64,7 @@ pub(crate) async fn execute_plan_all_local_cores(
                     crate::control::server::graph_dispatch::GraphRead {
                         txn_id,
                         linearizable: false,
+                        scope,
                     },
                 )
                 .await?;
@@ -111,7 +113,6 @@ pub(crate) async fn execute_plan_all_local_cores(
             | GraphOp::SetNodeLabels { .. }
             | GraphOp::RemoveNodeLabels { .. }
             | GraphOp::TemporalNeighbors { .. }
-            | GraphOp::TemporalAlgorithm { .. }
             | GraphOp::Stats { .. }
             | GraphOp::NodeEdgeGuard { .. }
             | GraphOp::NodePresenceGuard { .. }
@@ -150,6 +151,11 @@ pub(crate) async fn execute_plan_all_local_cores(
             MetaOp::TransactionBatch { .. } => Err(fanned_scoped_plan("TransactionBatch")),
             MetaOp::ApplyTransactionRedo { .. } => Err(fanned_scoped_plan("ApplyTransactionRedo")),
             MetaOp::RestoreRedo(_) => Err(fanned_scoped_plan("RestoreRedo")),
+            MetaOp::PurgeDepartedVShards { .. } => Err(crate::Error::Internal {
+                detail: "PurgeDepartedVShards reached the all-core fan; the departure purge \
+                         sends it to every core itself"
+                    .into(),
+            }),
             // One image per core, kept apart by core id. A merged payload
             // loses which core each image belongs to.
             // Each core answers the probes of the vShards it owns.
@@ -216,6 +222,7 @@ pub(crate) async fn execute_plan_all_local_cores(
             | MetaOp::RebuildIndex { .. }
             | MetaOp::PutSynonymGroup { .. }
             | MetaOp::DeleteSynonymGroup { .. }
+            | MetaOp::SetCustomCrsSet { .. }
             | MetaOp::CalvinDrop { .. } => {
                 generic_gather(state, tenant_id, database_id, plan, trace_id, txn_id).await
             }

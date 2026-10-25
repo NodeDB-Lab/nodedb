@@ -107,8 +107,9 @@ impl ArrayEngine {
     ) -> ArrayEngineResult<()> {
         if let Some(existing) = self.arrays.get_mut(&id) {
             if existing.schema_hash() == schema_hash {
-                // An equal hash means equal content. Only the georef can
-                // differ, so the open store adopts the new schema in place.
+                // An equal hash means equal content. Only the georef and attr
+                // metadata can differ, so the open store adopts the new
+                // schema in place.
                 existing.adopt_schema(schema);
                 return Ok(());
             }
@@ -348,7 +349,7 @@ mod tests {
             .unwrap();
 
         let georef = ArrayGeoref {
-            srid: nodedb_types::geometry::Srid::Utm47N,
+            srid: nodedb_types::geometry::Srid::new(32647).expect("srid"),
             x_dim: 0,
             y_dim: 1,
             transform: Some(GeoTransform([600_000.0, 10.0, 0.0, 700_000.0, 0.0, -10.0])),

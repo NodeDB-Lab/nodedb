@@ -14,7 +14,7 @@ use tracing::debug;
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::core_loop::redo_image::StoredRow;
+use crate::data::executor::core_loop::redo_image::WriteSetRow;
 use crate::data::executor::handlers::returning_doc;
 use crate::data::executor::handlers::returning_rows;
 use crate::data::executor::handlers::rls_write_gate;
@@ -134,12 +134,16 @@ impl CoreLoop {
             .any(|(_, v)| matches!(v, UpdateValue::Expr(_)));
 
         let bitemporal = self.is_bitemporal(task.request.database_id.as_u64(), tid, collection);
+        let database_id = task.request.database_id.as_u64();
+        // The ordinal the apply stamps the row's new version with.
         let sys_from_for_encode = if bitemporal {
-            self.bitemporal_now_ms()
+            match self.row_version_ordinal(database_id, tid, collection, &storage_key) {
+                Ok(ordinal) => ordinal,
+                Err(e) => return self.response_error(task, ErrorCode::from(e)),
+            }
         } else {
             0
         };
-        let database_id = task.request.database_id.as_u64();
         match self.current_row_body(database_id, tid, collection, &storage_key) {
             Ok(Some(current_bytes)) => {
                 // A period lock gates both images of an update: the PRE-image,
@@ -179,7 +183,7 @@ impl CoreLoop {
                     has_generated,
                     has_expr,
                     bitemporal,
-                    sys_from_ms: sys_from_for_encode,
+                    sys_from: sys_from_for_encode,
                     declared_primary_key,
                 }) {
                     Ok(bytes) => bytes,
@@ -223,12 +227,15 @@ impl CoreLoop {
                 let identity_column = self.identity_column(database_id, tid, collection);
                 if let Err(e) = rls_write_gate::admit_stored_row(
                     rls_write_check,
-                    &updated_bytes,
-                    &document_identity,
-                    strict_schema.as_ref(),
-                    &identity_column,
+                    rls_write_gate::GatedRow {
+                        body: &updated_bytes,
+                        identity: &document_identity,
+                        strict_schema: strict_schema.as_ref(),
+                        identity_column: &identity_column,
+                    },
                     tid,
                     collection,
+                    &self.crs_context(),
                 ) {
                     return self.response_error(task, e);
                 }
@@ -242,7 +249,7 @@ impl CoreLoop {
                     current_bytes: &current_bytes,
                     updated_bytes: &updated_bytes,
                     bitemporal,
-                    sys_from_ms: sys_from_for_encode,
+                    sys_from: sys_from_for_encode,
                     wal_lsn: task.wal_lsn(),
                     write_stamp: self.task_write_stamp(task),
                     resolved_sum_targets,
@@ -308,7 +315,12 @@ impl CoreLoop {
                                 Ok(doc) => doc,
                                 Err(e) => return self.response_error(task, e),
                             };
-                            match returning_rows::build_rows_payload(spec, rls_filters, &[doc]) {
+                            match returning_rows::build_rows_payload(
+                                spec,
+                                rls_filters,
+                                &[doc],
+                                &self.crs_context(),
+                            ) {
                                 Ok(payload) => self.response_with_payload(task, payload),
                                 Err(e) => {
                                     return self.response_error(
@@ -328,7 +340,7 @@ impl CoreLoop {
                         // A versioned row landed at the system time the
                         // update encoded it with, valid for all time.
                         response.write_set = match self.stored_row_image(
-                            StoredRow {
+                            WriteSetRow {
                                 database_id,
                                 tid,
                                 collection,

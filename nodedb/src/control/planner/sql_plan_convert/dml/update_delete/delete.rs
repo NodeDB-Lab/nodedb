@@ -106,6 +106,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_delete(
             plan: PhysicalPlan::Columnar(ColumnarOp::Delete {
                 collection: qualified_collection.clone(),
                 filters: effective_filter,
+                system_from: None,
                 rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
             }),
             post_set_op: PostSetOp::None,

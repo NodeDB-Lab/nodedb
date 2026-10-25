@@ -19,13 +19,14 @@ use crate::bridge::envelope::Response;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::graph_expansion::{GraphExpansionParams, GraphSeeds};
 use crate::data::executor::handlers::graph_rag::{
-    RagResponseParams, graph_nodes_to_ranked_results, vector_ranked_list,
+    RagResponseParams, VectorLeg, graph_nodes_to_ranked_results, vector_ranked_list,
 };
 use crate::data::executor::handlers::rag_key::RagKey;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::graph::edge_store::Direction;
 use crate::query::fusion::{RankedResult, reciprocal_rank_fusion_weighted};
 use crate::types::TenantId;
+use nodedb_physical::physical_plan::GraphReadScope;
 
 /// The BM25 leg of a three-source fusion: the query and the field whose
 /// index it searches.
@@ -50,6 +51,8 @@ pub(in crate::data::executor) struct GraphRagFusionTripleParams<'a> {
     pub max_visited: usize,
     pub bm25_query: &'a str,
     pub bm25_field: &'a str,
+    /// The bitemporal cut the graph expansion walks.
+    pub scope: &'a GraphReadScope,
 }
 
 impl CoreLoop {
@@ -72,6 +75,7 @@ impl CoreLoop {
             max_visited,
             bm25_query,
             bm25_field,
+            scope,
         } = params;
         debug!(
             core = self.core_id,
@@ -88,11 +92,14 @@ impl CoreLoop {
 
         let (vector_results, vector_scores, seeds) = match self.vector_search_to_node_scores(
             task,
-            tenant_id,
-            collection,
-            query_vector,
-            vector_top_k,
-            vector_field,
+            VectorLeg {
+                tenant_id,
+                collection,
+                query_vector,
+                vector_top_k,
+                vector_field,
+                scope,
+            },
         ) {
             Ok(r) => r,
             Err(resp) => return resp,
@@ -109,7 +116,7 @@ impl CoreLoop {
         };
 
         // Graph expansion seeded directly by the vector hits' surrogates.
-        let expansion = self.expand_graph(GraphExpansionParams {
+        let expansion = match self.expand_graph(GraphExpansionParams {
             database_id: task.request.database_id.as_u64(),
             tid: tenant_id,
             seeds: GraphSeeds::Surrogates(&seeds),
@@ -118,7 +125,11 @@ impl CoreLoop {
             max_depth: expansion_depth,
             max_visited,
             collection,
-        });
+            scope,
+        }) {
+            Ok(expansion) => expansion,
+            Err(e) => return self.response_error(task, e),
+        };
         let (expanded_nodes, hop_distances, bfs_truncated, unaddressable) = (
             expansion.names,
             expansion.distances,
@@ -129,7 +140,15 @@ impl CoreLoop {
         let (vector_k, text_k, graph_k) = rrf_k;
 
         let vector_list = vector_ranked_list(&vector_scores);
-        let csr = self.csr_partition(task.request.database_id.as_u64(), tenant_id);
+        let csr = match self.csr_view(
+            task.request.database_id.as_u64(),
+            tenant_id,
+            Some(collection),
+            scope,
+        ) {
+            Ok(csr) => csr,
+            Err(e) => return self.response_error(task, e),
+        };
         let text_list = text_ranked_list(&text_results, |s| {
             csr.and_then(|c| c.node_id_for_surrogate(s))
         });

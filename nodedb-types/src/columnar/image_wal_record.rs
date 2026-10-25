@@ -40,6 +40,14 @@ pub struct ColumnarImageWalRow {
     /// MessagePack-encoded post-image (`Value::Object`, column name to value,
     /// bitemporal columns included). Empty for a delete.
     pub image_msgpack: Vec<u8>,
+    /// The system-time ordinal the transaction's resolve fixed for this row
+    /// in a bitemporal collection: the post-image's `_ts_system`, and the
+    /// stamp of the tombstone that closes the base key when the write removes
+    /// it (a delete, or an update that changes the key). `None` for a
+    /// collection that is not bitemporal.
+    #[msgpack(default)]
+    #[serde(default)]
+    pub system_from: Option<i64>,
 }
 
 /// Map-encoded columnar row-image WAL record.
@@ -81,11 +89,13 @@ mod tests {
                     surrogate: 7,
                     prior_pk_msgpack: vec![1],
                     image_msgpack: vec![2, 3],
+                    system_from: Some(11),
                 },
                 ColumnarImageWalRow {
                     surrogate: 8,
                     prior_pk_msgpack: vec![4],
                     image_msgpack: Vec::new(),
+                    system_from: None,
                 },
             ],
         }

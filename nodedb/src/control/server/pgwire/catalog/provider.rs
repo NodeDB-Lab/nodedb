@@ -11,7 +11,7 @@ use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::state::SharedState;
 
 use super::schema::{catalog_collection_info, known_table};
-use super::{audit_log, dropped_collections, l2_cleanup_queue, tables};
+use super::{audit_log, dropped_collections, l2_cleanup_queue, spatial_ref_sys, tables};
 
 /// Produce the rows of a catalog relation, identity-scoped, per request.
 ///
@@ -47,6 +47,7 @@ pub async fn catalog_rows(
             dropped_collections::dropped_collections(state, identity, database_id).await
         }
         Some("_system.l2_cleanup_queue") => l2_cleanup_queue::l2_cleanup_queue(state, identity),
+        Some("nodedb.spatial_ref_sys") => spatial_ref_sys::spatial_ref_sys(state),
         _ => Ok(Vec::new()),
     }
 }

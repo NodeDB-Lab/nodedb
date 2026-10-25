@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! WAL replay for graph node-label mutations (`GraphNodeLabelSet` /
-//! `GraphNodeLabelRemove`, autocommit path).
+//! `GraphNodeLabelRemove`): standalone records and the sub-records of
+//! committed `TransactionRedo` records.
 //!
 //! Unlike graph edges — which are durable via redb's synchronous commit at
 //! apply time and rebuilt into the CSR from the `EdgeStore` at
@@ -34,93 +35,153 @@
 //! the record with the same error code the live handler answered.
 //! `remove_node_label` never vivifies (it no-ops on an unknown node or unknown
 //! label), so it is identical to live.
+//!
+//! ## One record, one version commit
+//!
+//! A committed transaction's redo record carries one sub-record per staged
+//! node delta, all at the record's LSN. The versions of all of them commit in
+//! one storage transaction with the record's LSN mark. A crash therefore
+//! leaves the record versioned whole or not at all, and replay never skips a
+//! version of a record whose mark landed.
 
 use nodedb_wal::WalRecord;
 use nodedb_wal::record::RecordType;
 
 use super::core_loop::CoreLoop;
-use crate::types::DatabaseId;
+use super::graph_label_apply::LabelOpKind;
+use crate::bridge::envelope::ErrorCode;
+use crate::wal::NodeLabelRedo;
+
+/// The label op kind of `record`, `None` when it is no label record.
+fn label_kind(record: &WalRecord) -> Option<LabelOpKind> {
+    match RecordType::from_raw(record.logical_record_type())? {
+        RecordType::GraphNodeLabelSet => Some(LabelOpKind::Set),
+        RecordType::GraphNodeLabelRemove => Some(LabelOpKind::Remove),
+        _ => None,
+    }
+}
+
+/// Whether two records belong to one WAL record: the sub-records of one
+/// redo record share its LSN, tenant and database.
+fn same_record(a: &WalRecord, b: &WalRecord) -> bool {
+    a.header.lsn == b.header.lsn
+        && a.header.tenant_id == b.header.tenant_id
+        && a.header.database_id == b.header.database_id
+}
 
 impl CoreLoop {
-    /// Try to decode+replay one record as a graph node-label mutation.
+    /// Replay the label records of one WAL record: every op applies to the
+    /// CSR, then every version the record writes commits in one storage
+    /// transaction with the record's LSN mark. Returns how many ops applied.
     ///
-    /// Returns `None` when `record` is not a `GraphNodeLabelSet` /
-    /// `GraphNodeLabelRemove` record (caller skips), `Some(0)` when it is one
-    /// of ours but was not applied (malformed payload, or a typed error from
-    /// the live handler such as node-id space exhaustion — always logged,
-    /// never a panic), or `Some(1)` on successful replay.
-    pub(crate) fn try_replay_graph_node_label(
-        &mut self,
-        record: &WalRecord,
-        database_id: DatabaseId,
-    ) -> Option<usize> {
-        let record_type = RecordType::from_raw(record.logical_record_type())?;
-        let is_set = record_type == RecordType::GraphNodeLabelSet;
-        let is_remove = record_type == RecordType::GraphNodeLabelRemove;
-        if !is_set && !is_remove {
-            return None;
-        }
-
-        let tenant_id = record.header.tenant_id;
-        let record_lsn = record.header.lsn;
-
-        let Ok((node_id, labels)) = zerompk::from_msgpack::<(String, Vec<String>)>(&record.payload)
-        else {
-            self.replay_record_rejected(
-                "graph",
-                record_lsn,
-                None,
-                "malformed graph node-label WAL record",
-            );
-            return Some(0);
+    /// A malformed payload, or an op the live handler refuses (node-id space
+    /// exhaustion, the distinct node-label limit), is logged and skipped:
+    /// never a panic. A version write that fails takes back every op of the
+    /// record. In a committed-redo install each op's undo goes to the
+    /// install's undo log, so a failed install takes the record back whole.
+    pub(crate) fn replay_label_record(&mut self, records: &[&WalRecord]) -> usize {
+        let Some(first) = records.first() else {
+            return 0;
         };
-        if self.claim_for_validation() {
-            return Some(0);
-        }
-        if self.recording_redo_undo() {
-            let undo =
-                self.capture_node_labels_undo(database_id.as_u64(), tenant_id, &node_id, &labels);
-            self.record_redo_undo([undo]);
-        }
-
-        if is_set {
-            // The same all-or-none set the live `SetNodeLabels` handler runs,
-            // so a record refused live is refused again here.
-            if let Err(code) =
-                self.set_node_labels(database_id.as_u64(), tenant_id, &node_id, &labels)
-            {
-                let detail = format!("setting labels {labels:?} on node '{node_id}' failed");
-                self.replay_record_rejected("graph", record_lsn, Some(Box::new(code)), &detail);
-                return Some(0);
+        let lsn = first.header.lsn;
+        let tenant_id = first.header.tenant_id;
+        let database_id = first.header.database_id;
+        let recording = self.recording_redo_undo();
+        let mut versions = Vec::new();
+        let mut local_undo = Vec::new();
+        let mut applied = 0usize;
+        for record in records {
+            let Some(kind) = label_kind(record) else {
+                continue;
+            };
+            let Ok(op) = NodeLabelRedo::decode(&record.payload) else {
+                self.replay_record_rejected(
+                    "graph",
+                    lsn,
+                    None,
+                    "malformed graph node-label WAL record",
+                );
+                continue;
+            };
+            if self.claim_for_validation() {
+                continue;
             }
-        } else {
-            let partition = self.csr_partition_mut(database_id.as_u64(), tenant_id);
-            // `remove_node_label` no-ops on an unknown node or unknown label —
-            // it never vivifies, so calling it unconditionally is already
-            // identical to the live `RemoveNodeLabels` handler.
-            for label in &labels {
-                partition.remove_node_label(&node_id, label);
+            match self.apply_label_op(database_id, tenant_id, &op, kind, Some(lsn)) {
+                Ok(done) => {
+                    if recording {
+                        self.record_redo_undo([done.undo]);
+                    } else {
+                        local_undo.push(done.undo);
+                    }
+                    versions.extend(done.version);
+                    applied += 1;
+                }
+                Err(code) => {
+                    let detail = format!(
+                        "{kind:?} of labels {:?} on node '{}' failed",
+                        op.labels, op.node_id
+                    );
+                    self.replay_record_rejected("graph", lsn, Some(Box::new(code)), &detail);
+                }
             }
         }
-        Some(1)
+        if versions.is_empty() {
+            return applied;
+        }
+        match self
+            .edge_store
+            .put_node_label_versions(&versions, Some(lsn))
+        {
+            Ok(replaced) => {
+                if recording {
+                    let undo: Vec<_> = versions
+                        .iter()
+                        .zip(replaced)
+                        .map(|(version, replaced)| Self::label_version_undo(version, replaced))
+                        .collect();
+                    self.record_redo_undo(undo);
+                }
+                applied
+            }
+            Err(error) => {
+                // An install's own rollback takes back the recorded ops.
+                let code = match self.rollback_undo_log(database_id, tenant_id, local_undo) {
+                    Ok(()) => ErrorCode::from(error),
+                    Err(undo_error) => ErrorCode::from(undo_error),
+                };
+                let detail = format!(
+                    "writing the {} label versions of the record failed",
+                    versions.len()
+                );
+                self.replay_record_rejected("graph", lsn, Some(Box::new(code)), &detail);
+                0
+            }
+        }
     }
 
-    /// Replay every `GraphNodeLabelSet` / `GraphNodeLabelRemove` record in
-    /// `records`, routing each through [`CoreLoop::try_replay_graph_node_label`].
+    /// Replay every label record in `records` that routes to this core,
+    /// each sub-record group of one WAL record as one
+    /// [`CoreLoop::replay_label_record`]. `records` is in LSN order.
     ///
-    /// Called once during startup, after the CSR has been rebuilt from the
-    /// `EdgeStore` (in `CoreLoop::open`) and before the event loop starts.
-    /// Node-label records carry no `collection` field (labels are
-    /// tenant/database-scoped, not collection-scoped — see
-    /// `GraphOp::SetNodeLabels`), so there is nothing to check against
-    /// `CollectionTombstoned` tombstones here, unlike the other per-engine
-    /// replay passes.
-    pub(crate) fn replay_graph_node_label_wal(&mut self, records: &[WalRecord], num_cores: usize) {
+    /// A record at or below the label checkpoint's durable LSN is skipped:
+    /// the restored labels hold it. A snapshot install leaves labels no WAL
+    /// record carries, and its checkpoint is durable through the install, so
+    /// an older record of the installed nodes never lands on top of them.
+    pub(crate) fn replay_label_records(
+        &mut self,
+        records: &[WalRecord],
+        num_cores: usize,
+    ) -> usize {
+        let floor = self.floors.graph_label_durable_lsn.as_u64();
         let mut replayed = 0usize;
-
+        let mut group: Vec<&WalRecord> = Vec::new();
         for record in records {
             if self.replay_halted() {
+                group.clear();
                 break;
+            }
+            if label_kind(record).is_none() || record.header.lsn <= floor {
+                continue;
             }
             let vshard_id = record.header.vshard_id as usize;
             let target_core = if num_cores > 0 {
@@ -131,18 +192,56 @@ impl CoreLoop {
             if target_core != self.core_id {
                 continue;
             }
-
-            let database_id = DatabaseId::new(record.header.database_id);
-            if let Some(applied) = self.try_replay_graph_node_label(record, database_id) {
-                replayed += applied;
+            if group
+                .first()
+                .is_some_and(|first| !same_record(first, record))
+            {
+                replayed += self.replay_label_record(&group);
+                group.clear();
             }
+            group.push(record);
         }
+        if !group.is_empty() {
+            replayed += self.replay_label_record(&group);
+        }
+        replayed
+    }
 
+    /// Replay every standalone `GraphNodeLabelSet` / `GraphNodeLabelRemove`
+    /// record in `records`.
+    ///
+    /// Called once during startup, after the CSR has been rebuilt from the
+    /// `EdgeStore` (in `CoreLoop::open`) and before the event loop starts.
+    /// Node-label records carry no `collection` field (labels are
+    /// tenant/database-scoped, not collection-scoped — see
+    /// `GraphOp::SetNodeLabels`), so there is nothing to check against
+    /// `CollectionTombstoned` tombstones here, unlike the other per-engine
+    /// replay passes.
+    pub(crate) fn replay_graph_node_label_wal(&mut self, records: &[WalRecord], num_cores: usize) {
+        let replayed = self.replay_label_records(records, num_cores);
         if replayed > 0 {
             tracing::info!(
                 core = self.core_id,
                 replayed,
                 "WAL graph node-label replay complete"
+            );
+        }
+    }
+
+    /// Replay the `GraphNodeLabelSet` / `GraphNodeLabelRemove` sub-records
+    /// reconstituted from committed `TransactionRedo` records. The sub-records
+    /// of one redo record share its LSN, so they replay as one record.
+    pub(crate) fn replay_graph_node_labels_redo(
+        &mut self,
+        records: &[WalRecord],
+        num_cores: usize,
+    ) {
+        let replayed = self.replay_label_records(records, num_cores);
+        if replayed > 0 {
+            tracing::info!(
+                core = self.core_id,
+                replayed,
+                "WAL graph node-label redo replay complete"
             );
         }
     }
@@ -390,5 +489,191 @@ mod tests {
         h.core
             .replay_graph_node_label_wal(std::slice::from_ref(&record), 1);
         // No panic is the assertion.
+    }
+
+    fn open_core_at(dir: &std::path::Path) -> CoreLoop {
+        use crate::bridge::dispatch::{BridgeRequest, BridgeResponse};
+        use nodedb_bridge::buffer::RingBuffer;
+
+        let (_req_tx, req_rx) = RingBuffer::channel::<BridgeRequest>(64);
+        let (resp_tx, _resp_rx) = RingBuffer::channel::<BridgeResponse>(64);
+        CoreLoop::open(
+            0,
+            req_rx,
+            resp_tx,
+            dir,
+            Arc::new(nodedb_types::OrdinalClock::new()),
+            crate::data::executor::core_loop::test_governor(),
+        )
+        .expect("open core")
+    }
+
+    /// A committed redo record at `lsn` with one label set per `(node,
+    /// label)`, each without an ordinal: each version takes the applying
+    /// core's clock, so a version written twice shows as two versions.
+    fn label_redo(lsn: u64, sets: &[(&str, &str)]) -> WalRecord {
+        let ops = sets
+            .iter()
+            .map(|(node, label)| crate::wal::RedoSubRecord {
+                record_type: RecordType::GraphNodeLabelSet as u32,
+                payload: crate::wal::NodeLabelRedo::live(node, &[label.to_string()])
+                    .encode()
+                    .expect("encode label op"),
+            })
+            .collect();
+        let redo = crate::wal::RedoRecord {
+            version: 1,
+            ops,
+            calvin_stamp: None,
+            cross_shard_applied: None,
+            row_sources: Vec::new(),
+            publishes: Vec::new(),
+            row_changes: Vec::new(),
+            user_roles: Vec::new(),
+        };
+        WalRecord::new(WalRecordArgs {
+            record_type: RecordType::TransactionRedo as u32,
+            lsn,
+            tenant_id: TID,
+            vshard_id: 0,
+            database_id: DatabaseId::DEFAULT.as_u64(),
+            payload: redo.to_bytes().expect("encode redo"),
+            encryption_key: None,
+            preamble_bytes: None,
+        })
+        .expect("wal record")
+    }
+
+    fn version_count(core: &CoreLoop) -> usize {
+        core.edge_store
+            .scan_node_label_versions(DatabaseId::DEFAULT, TenantId::new(TID))
+            .expect("scan label versions")
+            .len()
+    }
+
+    fn replay(core: &mut CoreLoop, record: &WalRecord) {
+        core.replay_transaction_redo_wal(
+            std::slice::from_ref(record),
+            1,
+            &nodedb_wal::TombstoneSet::new(),
+        )
+        .expect("redo replay");
+    }
+
+    /// The store's mark is behind a redo record carrying two label ops. Replay
+    /// writes both versions, once each. A restart replays the record again
+    /// and writes neither a second time: both versions committed with the
+    /// record's mark.
+    #[test]
+    fn every_version_of_a_redo_record_lands_exactly_once() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        {
+            let core = open_core_at(dir.path());
+            // An earlier record's version leaves the mark at 10.
+            core.edge_store
+                .put_node_label_version(
+                    DatabaseId::DEFAULT,
+                    TenantId::new(TID),
+                    "carol",
+                    1,
+                    Some(10),
+                    &["City".to_string()],
+                )
+                .expect("seed an earlier version");
+        }
+        let record = label_redo(50, &[("alice", "Person"), ("bob", "Robot")]);
+        {
+            let mut core = open_core_at(dir.path());
+            replay(&mut core, &record);
+            assert_eq!(version_count(&core), 3, "both versions of the record land");
+            assert!(has_label(&core, "alice", "Person"));
+            assert!(has_label(&core, "bob", "Robot"));
+        }
+        let mut core = open_core_at(dir.path());
+        replay(&mut core, &record);
+        assert_eq!(
+            version_count(&core),
+            3,
+            "a record whose mark landed writes no version again"
+        );
+        assert!(has_label(&core, "alice", "Person"));
+        assert!(has_label(&core, "bob", "Robot"));
+    }
+
+    /// A redo label op that carries its ordinal writes its version at that
+    /// ordinal, whatever the applying core's clock reads.
+    #[test]
+    fn a_carried_ordinal_is_the_versions_ordinal() {
+        let mut h = make_core();
+        let op = crate::wal::NodeLabelRedo {
+            node_id: "alice".into(),
+            labels: vec!["Person".into()],
+            system_from: Some(7_000),
+            exact: false,
+        };
+        let record = WalRecord::new(WalRecordArgs {
+            record_type: RecordType::GraphNodeLabelSet as u32,
+            lsn: 3,
+            tenant_id: TID,
+            vshard_id: 0,
+            database_id: DatabaseId::DEFAULT.as_u64(),
+            payload: op.encode().expect("encode"),
+            encryption_key: None,
+            preamble_bytes: None,
+        })
+        .expect("wal record");
+        h.core
+            .replay_graph_node_label_wal(std::slice::from_ref(&record), 1);
+        assert_eq!(
+            h.core
+                .edge_store
+                .scan_node_label_versions(DatabaseId::DEFAULT, TenantId::new(TID))
+                .expect("scan"),
+            vec![("alice".to_string(), 7_000, vec!["Person".to_string()])]
+        );
+    }
+
+    /// An exact set replaces the node's labels and writes exactly its labels.
+    /// A newer stored version keeps the CSR at that version's labels.
+    #[test]
+    fn an_exact_set_restores_a_version_and_respects_a_newer_one() {
+        let mut h = make_core();
+        h.core
+            .csr_partition_mut(DatabaseId::DEFAULT.as_u64(), TID)
+            .add_node_label("alice", "Stale")
+            .expect("seed label");
+        let exact = |ordinal: i64, labels: &[&str]| crate::wal::NodeLabelRedo {
+            node_id: "alice".into(),
+            labels: labels.iter().map(|l| l.to_string()).collect(),
+            system_from: Some(ordinal),
+            exact: true,
+        };
+        let db = DatabaseId::DEFAULT.as_u64();
+        let set = super::LabelOpKind::Set;
+        let applied = h
+            .core
+            .apply_label_op(db, TID, &exact(500, &["Admin"][..]), set, None)
+            .expect("exact set at 500");
+        let version = applied.version.expect("a version");
+        assert_eq!(version.labels, vec!["Admin".to_string()]);
+        h.core
+            .edge_store
+            .put_node_label_versions(&[version], None)
+            .expect("write version");
+        assert!(has_label(&h.core, "alice", "Admin"));
+        assert!(!has_label(&h.core, "alice", "Stale"));
+
+        // An older restored version: history gains it, the CSR keeps the
+        // newer version's labels.
+        let applied = h
+            .core
+            .apply_label_op(db, TID, &exact(100, &["Person"][..]), set, None)
+            .expect("exact set at 100");
+        assert_eq!(
+            applied.version.map(|v| v.labels),
+            Some(vec!["Person".to_string()])
+        );
+        assert!(has_label(&h.core, "alice", "Admin"));
+        assert!(!has_label(&h.core, "alice", "Person"));
     }
 }

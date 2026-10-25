@@ -71,7 +71,7 @@ impl ChainGuard {
             .get(&key)
             .is_some_and(|c| c.enforcement.hash_chain);
         let prior = if enabled {
-            Some(core.chain_hashes.get(&key).cloned())
+            Some(core.chain.heads.get(&key).cloned())
         } else {
             None
         };
@@ -107,7 +107,8 @@ impl ChainGuard {
         let doc = doc_format::decode_document(value)?;
         hash_chain::refuse_supplied_link(&self.key.2, &doc)?;
         let head = core
-            .chain_hashes
+            .chain
+            .heads
             .get(&self.key)
             .cloned()
             .unwrap_or_else(ChainHead::genesis);
@@ -152,7 +153,8 @@ impl ChainGuard {
                 hash_chain::refuse_supplied_link(&self.key.2, &doc)?;
             }
             let head = core
-                .chain_hashes
+                .chain
+                .heads
                 .get(&self.key)
                 .cloned()
                 .unwrap_or_else(ChainHead::genesis);
@@ -204,7 +206,8 @@ impl ChainGuard {
         stored: &[u8],
     ) -> crate::Result<()> {
         let Some(intent) = core
-            .chain_intents
+            .chain
+            .intents
             .remove(&(self.key.clone(), surrogate.as_u32()))
         else {
             return Ok(());
@@ -220,14 +223,15 @@ impl ChainGuard {
                     surrogate.as_u32()
                 ),
             })?;
-            core.chain_hashes.insert(self.key.clone(), link);
+            core.chain.heads.insert(self.key.clone(), link);
             self.mutated = true;
         }
         Ok(())
     }
 
     fn set_intent(&mut self, core: &mut CoreLoop, surrogate: Surrogate, intent: ChainIntent) {
-        core.chain_intents
+        core.chain
+            .intents
             .insert((self.key.clone(), surrogate.as_u32()), intent);
         self.pending.push(surrogate.as_u32());
     }
@@ -246,7 +250,7 @@ impl ChainGuard {
         if !self.mutated {
             return Ok(());
         }
-        let Some(head) = core.chain_hashes.get(&self.key).cloned() else {
+        let Some(head) = core.chain.heads.get(&self.key).cloned() else {
             return Ok(());
         };
         core.sparse.put_chain_head_in_txn(
@@ -267,17 +271,17 @@ impl ChainGuard {
     /// (`undo_chain_hash`).
     pub(in crate::data::executor) fn restore(&mut self, core: &mut CoreLoop) {
         for surrogate in self.pending.drain(..) {
-            core.chain_intents.remove(&(self.key.clone(), surrogate));
+            core.chain.intents.remove(&(self.key.clone(), surrogate));
         }
         if !self.mutated {
             return;
         }
         match &self.prior {
             Some(None) => {
-                core.chain_hashes.remove(&self.key);
+                core.chain.heads.remove(&self.key);
             }
             Some(Some(prev)) => {
-                core.chain_hashes.insert(self.key.clone(), prev.clone());
+                core.chain.heads.insert(self.key.clone(), prev.clone());
             }
             None => {}
         }
@@ -486,11 +490,11 @@ mod tests {
         value.push(0xC0);
         assert!(mark(&mut core, 1, &value).is_err());
         assert!(
-            core.chain_hashes.is_empty(),
+            core.chain.heads.is_empty(),
             "a failed insert must not advance the head"
         );
         assert!(
-            core.chain_intents.is_empty(),
+            core.chain.intents.is_empty(),
             "a failed insert must mark nothing"
         );
     }
@@ -506,7 +510,7 @@ mod tests {
             mark(&mut core, 1, &value),
             Err(crate::Error::RejectedConstraint { .. })
         ));
-        assert!(core.chain_intents.is_empty());
+        assert!(core.chain.intents.is_empty());
     }
 
     /// Each committed row stores the link that became the head, one position
@@ -539,12 +543,12 @@ mod tests {
             let link = hash_chain::stored_link(&view).expect("the row stores its link");
             assert_eq!(link.seq, u64::from(surrogate));
             assert_eq!(
-                core.chain_hashes.get(&key()),
+                core.chain.heads.get(&key()),
                 Some(&link),
                 "the link is the head"
             );
         }
-        assert!(core.chain_intents.is_empty());
+        assert!(core.chain.intents.is_empty());
     }
 
     #[test]
@@ -552,7 +556,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let (mut core, _req, _resp) = make_core_with_dir(dir.path());
         assert!(mark(&mut core, 1, b"anything at all").is_ok());
-        assert!(core.chain_intents.is_empty());
+        assert!(core.chain.intents.is_empty());
     }
 
     /// The head is durable: a reopened core resumes the chain where the
@@ -575,13 +579,13 @@ mod tests {
                 );
                 assert_eq!(resp.status, Status::Ok, "pre-restart insert must succeed");
             }
-            core.chain_hashes.get(&key()).cloned()
+            core.chain.heads.get(&key()).cloned()
         };
         assert_eq!(head_before_restart.as_ref().map(|head| head.seq), Some(2));
 
         let (mut core, _req, _resp) = make_core_with_dir(dir.path());
         assert_eq!(
-            core.chain_hashes.get(&key()).cloned(),
+            core.chain.heads.get(&key()).cloned(),
             head_before_restart,
             "the reopened core must rehydrate the persisted head"
         );
@@ -782,7 +786,7 @@ mod tests {
             error.is_some(),
             "a commit's put carrying a chain link must refuse"
         );
-        assert!(core.chain_intents.is_empty());
+        assert!(core.chain.intents.is_empty());
     }
 
     fn strict_schema() -> nodedb_types::columnar::StrictSchema {

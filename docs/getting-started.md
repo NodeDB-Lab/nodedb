@@ -335,7 +335,9 @@ key_path = "/etc/nodedb/keys/wal.key"
 With `pitr.enabled = true`, startup stops unless `[cold_storage]` is
 configured and opens, and unless `[encryption]` is configured. The WAL archive
 is the only copy of a segment once a checkpoint deletes it locally. Base
-snapshots are encrypted with the WAL key. With `pitr.enabled = false` and no
+snapshots are encrypted with the WAL key, which `[encryption]` reads from
+`key_path` or from Vault or AWS KMS (see `security/encryption.md`). With
+`pitr.enabled = false` and no
 `[cold_storage]`, checkpoints delete WAL segments without archiving them.
 
 Archived segments are stored under `{prefix}wal/{node_id}/{incarnation}/`.
@@ -661,8 +663,13 @@ Each value must be between `1` and `86400000` (one day). Both keys belong under
 | `observability.otlp.export.metrics_interval_secs` | `NODEDB_OTLP_EXPORT_INTERVAL`     | `15`           |
 | `observability.debug_endpoints_enabled`           | `NODEDB_DEBUG_ENDPOINTS_ENABLED`  | `false`        |
 
-`NODEDB_OTLP_EXPORT_ENDPOINT` takes an `http://` or `https://` URL. The debug
-endpoints expose raft internals, so they stay off until you enable them.
+`NODEDB_OTLP_EXPORT_ENDPOINT` takes an `http://` or `https://` URL with a DNS
+host. With export enabled, the server pushes its metrics to
+`<endpoint>/v1/metrics` every `metrics_interval_secs` and its trace spans to
+`<endpoint>/v1/traces`. Both go through the `[egress]` policy: a collector on a private
+network, or one reached over `http://`, needs its host on `allow_hosts` and its
+addresses in `allow_cidrs`. The debug endpoints expose raft internals, so they
+stay off until you enable them.
 
 ### Startup validation
 

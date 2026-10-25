@@ -341,6 +341,7 @@ mod tests {
                 system_time: nodedb_types::SystemTimeScope::Current,
                 valid_at_ms: None,
                 zone_msgpack: Vec::new(),
+                physical: false,
             });
             assert_eq!(r.status, Status::Ok, "array slice: {r:?}");
             decode_cells(r.payload.as_bytes())

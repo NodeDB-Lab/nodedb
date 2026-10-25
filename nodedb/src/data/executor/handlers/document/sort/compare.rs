@@ -116,6 +116,7 @@ pub(in crate::data::executor) fn all_column_keys(sort_keys: &[SortKeySpec]) -> b
 pub(in crate::data::executor) fn eval_sort_values(
     doc_bytes: &[u8],
     sort_keys: &[SortKeySpec],
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<SortValues> {
     let doc = nodedb_types::json_from_msgpack(doc_bytes).map_err(|e| crate::Error::Codec {
         detail: format!("ORDER BY document decode: {e}"),
@@ -123,7 +124,7 @@ pub(in crate::data::executor) fn eval_sort_values(
 
     sort_keys
         .iter()
-        .map(|k| eval_expr_on_json(&k.expr, &doc).map_err(crate::Error::from))
+        .map(|k| eval_expr_on_json(&k.expr, &doc, crs).map_err(crate::Error::from))
         .collect()
 }
 

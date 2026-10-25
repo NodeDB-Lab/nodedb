@@ -67,12 +67,15 @@ impl CoreLoop {
         // without a schema.
         if let Err(e) = rls_write_gate::admit_stored_row(
             rls_write_check,
-            value,
-            &document_identity,
-            None,
-            &identity_column,
+            rls_write_gate::GatedRow {
+                body: value,
+                identity: &document_identity,
+                strict_schema: None,
+                identity_column: &identity_column,
+            },
             tid,
             collection,
+            &self.crs_context(),
         ) {
             return self.response_error(task, e);
         }
@@ -245,7 +248,7 @@ impl CoreLoop {
             surrogate.as_u32(),
             document_identity,
             value.to_vec(),
-            prior.bitemporal_sys_from_ms,
+            prior.bitemporal_sys_from,
         )];
         response.write_set.extend(target_write_set);
         response

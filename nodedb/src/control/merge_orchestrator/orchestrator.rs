@@ -225,6 +225,7 @@ pub(crate) async fn run_merge(state: &SharedState, args: MergeArgs<'_>) -> crate
                 .chain(arms.inserts.iter().map(|(_, body)| body.as_slice())),
             args.tenant_id,
             args.target_collection,
+            &crate::control::crs_context::crs_context_for(state),
         )?;
 
         let insert_rows = arms.inserts;

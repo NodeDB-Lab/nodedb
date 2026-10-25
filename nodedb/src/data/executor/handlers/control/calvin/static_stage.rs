@@ -82,9 +82,12 @@ impl CoreLoop {
 
         // Stage every plan before publishing `PendingCommit`. Panic isolation
         // cleans both staging representations after any failure. Staging reads
-        // the epoch's time anchor, so every replica stages the same images.
+        // the epoch's time anchor and the transaction's ordinal, so every
+        // replica stages the same images.
         let prev_epoch_ms = self.epoch_system_ms;
         self.epoch_system_ms = Some(epoch_system_ms);
+        self.apply_scope.calvin_txn_ordinal =
+            Some(nodedb_types::calvin_txn_ordinal(epoch_system_ms, position));
         let stage_result = catch_unwind(AssertUnwindSafe(|| {
             let mut staging = CalvinStaging::default();
             for (index, plan) in plans.iter().enumerate() {
@@ -96,6 +99,7 @@ impl CoreLoop {
             }
             Ok::<CalvinReply, ErrorCode>(staging.reply)
         }));
+        self.apply_scope.calvin_txn_ordinal = None;
         self.epoch_system_ms = prev_epoch_ms;
         let reply = match stage_result {
             Ok(Ok(reply)) => reply,

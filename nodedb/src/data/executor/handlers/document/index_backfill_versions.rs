@@ -50,32 +50,31 @@ impl CoreLoop {
         txn: &WriteTransaction,
         b: &VersionedBackfill<'_>,
     ) -> crate::Result<()> {
+        let crs = self.crs_context();
         let mut row: Option<StorageKey> = None;
         let mut held: BTreeSet<String> = BTreeSet::new();
         self.sparse.versioned_for_each_version(
             b.database_id,
             b.tid,
             b.collection,
-            |doc_id, sys_from_ms, body| {
+            |doc_id, sys_from, body| {
                 if row != Some(*doc_id) {
                     row = Some(*doc_id);
                     held.clear();
                 }
                 let values = match body {
-                    Some(body) => version_values(body, b)?,
+                    Some(body) => version_values(body, b, &crs)?,
                     None => BTreeSet::new(),
                 };
                 for value in held.difference(&values) {
                     self.sparse.versioned_index_tombstone_in_txn(
                         txn,
-                        index_entry(b, doc_id, value, sys_from_ms),
+                        index_entry(b, doc_id, value, sys_from),
                     )?;
                 }
                 for value in &values {
-                    self.sparse.versioned_index_put_in_txn(
-                        txn,
-                        index_entry(b, doc_id, value, sys_from_ms),
-                    )?;
+                    self.sparse
+                        .versioned_index_put_in_txn(txn, index_entry(b, doc_id, value, sys_from))?;
                 }
                 held = values;
                 Ok(())
@@ -84,12 +83,12 @@ impl CoreLoop {
     }
 }
 
-/// The versioned index entry of `value` for row `doc_id` at `sys_from_ms`.
+/// The versioned index entry of `value` for row `doc_id` at `sys_from`.
 fn index_entry<'a>(
     b: &VersionedBackfill<'a>,
     doc_id: &'a StorageKey,
     value: &'a str,
-    sys_from_ms: i64,
+    sys_from: i64,
 ) -> VersionedIndexEntry<'a> {
     VersionedIndexEntry {
         database_id: b.database_id,
@@ -98,17 +97,21 @@ fn index_entry<'a>(
         field: b.path,
         value,
         doc_id,
-        sys_from_ms,
+        sys_from,
     }
 }
 
 /// The values one live version contributes to the index: none when the
 /// partial-index predicate rejects it, lowercased for a case-insensitive
 /// index.
-fn version_values(body: &[u8], b: &VersionedBackfill<'_>) -> crate::Result<BTreeSet<String>> {
+fn version_values(
+    body: &[u8],
+    b: &VersionedBackfill<'_>,
+    crs: &nodedb_crs::CrsContext<'_>,
+) -> crate::Result<BTreeSet<String>> {
     let doc = decode_scanned_document(body, b.body_format)?;
     if let Some(predicate) = b.predicate
-        && !predicate.evaluate_json(&doc)
+        && !predicate.evaluate_json(&doc, crs)
     {
         return Ok(BTreeSet::new());
     }

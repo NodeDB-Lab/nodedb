@@ -2,7 +2,7 @@
 
 //! Document write paths: JSON and raw-MessagePack entry points.
 
-use super::batch::{DocumentEngine, wall_now_ms};
+use super::batch::DocumentEngine;
 use crate::engine::document::store::StorageKey;
 use crate::engine::document::store::extract::{
     extract_index_values_rmpv, json_to_msgpack, rmpv_to_json,
@@ -39,16 +39,21 @@ impl<'a> DocumentEngine<'a> {
         msgpack_bytes: &[u8],
     ) -> crate::Result<()> {
         let bitemporal = self.is_bitemporal(collection);
+        // One system-time ordinal keys the version and its index entries.
+        let sys_from = if bitemporal {
+            self.clock.next_ordinal()
+        } else {
+            0
+        };
 
         if bitemporal {
-            let sys_from = wall_now_ms();
             self.sparse
                 .versioned_put(crate::engine::sparse::btree_versioned::VersionedPut {
                     database_id: self.database_id,
                     tenant: self.tenant_id,
                     coll: collection,
                     doc_id,
-                    sys_from_ms: sys_from,
+                    sys_from,
                     valid_from_ms: i64::MIN,
                     valid_until_ms: i64::MAX,
                     body: msgpack_bytes,
@@ -71,7 +76,6 @@ impl<'a> DocumentEngine<'a> {
                     extract_index_values_rmpv(&value, &index_path.path, index_path.is_array);
                 for v in values {
                     if bitemporal {
-                        let sys_from = wall_now_ms();
                         self.sparse.versioned_index_put(
                             crate::engine::sparse::btree_versioned::VersionedIndexEntry {
                                 database_id: self.database_id,
@@ -80,7 +84,7 @@ impl<'a> DocumentEngine<'a> {
                                 field: &index_path.path,
                                 value: &v,
                                 doc_id,
-                                sys_from_ms: sys_from,
+                                sys_from,
                             },
                         )?;
                     } else {

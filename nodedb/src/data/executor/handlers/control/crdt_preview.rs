@@ -167,7 +167,7 @@ mod tests {
         )
         .expect("tenant engine");
         tenant
-            .import_snapshot_bytes("docs", &snapshot)
+            .import_snapshot_bytes("docs", &snapshot, &nodedb_crs::CrsContext::builtin_only())
             .expect("tenant snapshot");
         let version_json = tenant.version_vector_json("docs").expect("version json");
         assert!(
@@ -192,7 +192,11 @@ mod tests {
             )
             .expect("historical tenant");
             historical_tenant
-                .import_snapshot_bytes("docs", &historical_snapshot)
+                .import_snapshot_bytes(
+                    "docs",
+                    &historical_snapshot,
+                    &nodedb_crs::CrsContext::builtin_only(),
+                )
                 .expect("historical import");
             historical_tenant
                 .version_vector_json("docs")

@@ -31,12 +31,16 @@ pub struct WccSuperstepPlan {
     pub owned_vshards: Vec<u32>,
     /// The watermark of the Calvin cut marker the read cut comes from, `0`
     /// when `system_as_of` already holds it. Every node resolves the same
-    /// cut from it (see `BspSuperstepPlan::read_cut_marker`), so every node
+    /// cut from it, or waits for it under a historical round's pinned
+    /// ordinal (see `BspSuperstepPlan::read_cut_marker`), so every node
     /// reads the same graph.
     pub read_cut_marker: u64,
     /// The system-time ordinal every core reads the graph at. The handler
     /// refuses a plan without one.
     pub system_as_of: Option<i64>,
+    /// The valid-time instant every edge read must contain (`AS OF VALID
+    /// TIME`), or `None` for every valid time.
+    pub valid_at_ms: Option<i64>,
 }
 
 /// Result of one [`super::op::GraphOp::WccSuperstep`] on a single shard.

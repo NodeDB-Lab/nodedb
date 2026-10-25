@@ -46,6 +46,14 @@ pub struct ColumnarDmlWalRecord {
     /// value is a MessagePack-encoded `UpdateValue`, a literal or an
     /// expression over the row. Always empty for `Delete`.
     pub updates: Vec<(String, Vec<u8>)>,
+    /// System-time ordinal every new version an update writes stamps, or at
+    /// which a delete closes each removed key on a bitemporal collection,
+    /// raised above the key's bound row at apply. Replay stamps what the
+    /// live write stamped. `None` for a writer that leaves the stamp to the
+    /// apply.
+    #[serde(default)]
+    #[msgpack(default)]
+    pub system_from: Option<i64>,
 }
 
 #[cfg(test)]
@@ -61,6 +69,7 @@ mod tests {
             is_update: false,
             filters: vec![1, 2, 3],
             updates: Vec::new(),
+            system_from: None,
         };
         let bytes = zerompk::to_msgpack_vec(&rec).expect("encode");
         let decoded: ColumnarDmlWalRecord = zerompk::from_msgpack(&bytes).expect("decode");
@@ -75,6 +84,7 @@ mod tests {
             is_update: true,
             filters: vec![4, 5],
             updates: vec![("v".to_string(), vec![9, 9])],
+            system_from: Some(1_700_000_000_000_000_011),
         };
         let bytes = zerompk::to_msgpack_vec(&rec).expect("encode");
         let decoded: ColumnarDmlWalRecord = zerompk::from_msgpack(&bytes).expect("decode");
@@ -93,6 +103,7 @@ mod tests {
             is_update: false,
             filters: vec![1],
             updates: Vec::new(),
+            system_from: None,
         };
         let bytes = zerompk::to_msgpack_vec(&rec).expect("encode");
         let as_row_record: Result<ColumnarWalRecord, _> = zerompk::from_msgpack(&bytes);
@@ -111,6 +122,7 @@ mod tests {
             provenance: None,
             surrogates: Vec::new(),
             conflict_policy: Vec::new(),
+            system_from: None,
         };
         let bytes = zerompk::to_msgpack_vec(&rec).expect("encode");
         let as_dml_record: Result<ColumnarDmlWalRecord, _> = zerompk::from_msgpack(&bytes);

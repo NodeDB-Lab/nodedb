@@ -77,20 +77,8 @@ pub async fn wire_state(
         root_span.record("node_id", cluster_handle.node_id);
     }
 
-    // Initialise JWKS registry.
-    if let Some(ref jwt_config) = config.auth.jwt
-        && !jwt_config.providers.is_empty()
-        && let Some(state) = Arc::get_mut(shared)
-    {
-        let registry =
-            crate::control::security::jwks::registry::JwksRegistry::init(jwt_config.clone())
-                .await?;
-        state.jwks_registry = Some(Arc::new(registry));
-        info!(
-            "JWKS registry initialised with {} providers",
-            jwt_config.providers.len()
-        );
-    }
+    // The JWKS registry verifies static and catalog OIDC providers alike.
+    super::jwks_registry::wire_jwks_registry(shared, config).await?;
 
     // Initialise cold storage (L2 tiering and the WAL archive).
     if let Some(ref cold_settings) = config.cold_storage {
@@ -212,7 +200,7 @@ pub async fn wire_state(
                     state.backup_kek = Some(Arc::new(key_bytes));
                 }
                 if let Some(ref enc) = config.encryption
-                    && enc.key_path == benc.key_path
+                    && enc.key_file() == Some(benc.key_path.as_path())
                 {
                     tracing::warn!(
                         path = %benc.key_path.display(),
@@ -241,6 +229,8 @@ pub async fn wire_state(
         }
     }
 
+    super::remote_sources::wire_remote_sources(shared, config)?;
+
     // Wire OTLP trace exporter and misc config fields.
     if let Some(state) = Arc::get_mut(shared) {
         let otlp = &config.observability.otlp.export;
@@ -248,6 +238,7 @@ pub async fn wire_state(
             crate::control::trace_export::TraceExporter::new(
                 otlp.endpoint.clone(),
                 std::time::Duration::from_secs(5),
+                Arc::clone(state.remote_sources.egress()),
             )
             .map_err(|e| crate::Error::Config {
                 detail: format!("OTLP trace exporter: {e}"),
@@ -257,6 +248,27 @@ pub async fn wire_state(
         };
         state.debug_endpoints_enabled = config.observability.debug_endpoints_enabled;
         state.scheduler_config = config.scheduler.clone();
+    }
+
+    // OTLP metrics push. It holds no clone of the shared state, so the
+    // `Arc::get_mut` installs below still succeed.
+    let otlp = &config.observability.otlp.export;
+    let metrics_exporter = crate::control::otel::exporter::ExporterConfig {
+        endpoint: if otlp.enabled {
+            otlp.endpoint.clone()
+        } else {
+            String::new()
+        },
+        metrics_interval: std::time::Duration::from_secs(otlp.metrics_interval_secs),
+        export_traces: otlp.enabled,
+        export_metrics: otlp.enabled,
+    };
+    if crate::control::otel::exporter::spawn_metrics_exporter(shared, metrics_exporter).map_err(
+        |e| crate::Error::Config {
+            detail: format!("OTLP metrics exporter: the endpoint fails the [egress] policy: {e}"),
+        },
+    )? {
+        info!(endpoint = %otlp.endpoint, "OTLP metrics export running");
     }
 
     // The gateway's weak back-reference outlives this call, so every

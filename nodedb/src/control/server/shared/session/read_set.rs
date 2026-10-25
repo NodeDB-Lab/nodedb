@@ -62,7 +62,7 @@ pub use nodedb_types::calvin::EngineTag;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReadKey {
     /// A single-row keyed observation.
-    Point { repr: KeyRepr },
+    Point { repr: ReadPoint },
     /// A collection-scoped predicate observation.
     Predicate,
     /// A secondary-index equality observation on one indexed field, carrying
@@ -76,6 +76,28 @@ pub enum ReadKey {
         lo: Option<String>,
         hi: Option<String>,
     },
+}
+
+/// The row a point read names.
+///
+/// A graph read records a predicate on each vShard it observed. No point
+/// read names an edge, so no read lock or validation home places one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadPoint {
+    /// Cross-engine `u32` surrogate of a document or vector row.
+    Surrogate(u32),
+    /// Raw Key-Value engine key bytes.
+    KvKey(Box<[u8]>),
+}
+
+impl ReadPoint {
+    /// The write-index identity this read validates against.
+    pub fn to_key_repr(&self) -> KeyRepr {
+        match self {
+            ReadPoint::Surrogate(surrogate) => KeyRepr::Surrogate(*surrogate),
+            ReadPoint::KvKey(key) => KeyRepr::KvKey(key.clone()),
+        }
+    }
 }
 
 /// Why a read is on the transaction's read-set — and therefore whether the
@@ -344,13 +366,13 @@ pub async fn record_read_set(
 pub(super) fn lock_key_of_read(key: &ReadKey, collection: &str) -> Option<LockKey> {
     match key {
         ReadKey::Point {
-            repr: KeyRepr::Surrogate(s),
+            repr: ReadPoint::Surrogate(s),
         } => Some(LockKey::Surrogate {
             collection: Arc::from(collection),
             surrogate: *s,
         }),
         ReadKey::Point {
-            repr: KeyRepr::KvKey(k),
+            repr: ReadPoint::KvKey(k),
         } => Some(LockKey::Kv {
             collection: Arc::from(collection),
             key: Arc::from(&**k),
@@ -496,7 +518,7 @@ mod tests {
         assert_eq!(
             rs[0].key,
             ReadKey::Point {
-                repr: KeyRepr::KvKey(Box::from(b"k1".as_slice())),
+                repr: ReadPoint::KvKey(Box::from(b"k1".as_slice())),
             }
         );
     }
@@ -628,7 +650,7 @@ mod tests {
         assert_eq!(
             rs[0].key,
             ReadKey::Point {
-                repr: KeyRepr::KvKey(Box::from(b"missing".as_slice())),
+                repr: ReadPoint::KvKey(Box::from(b"missing".as_slice())),
             }
         );
     }
@@ -668,7 +690,7 @@ mod tests {
         assert_eq!(
             rs[0].key,
             ReadKey::Point {
-                repr: KeyRepr::Surrogate(42),
+                repr: ReadPoint::Surrogate(42),
             }
         );
     }
@@ -765,7 +787,7 @@ mod tests {
         assert_eq!(
             read_key_of(&plan, true),
             ReadKey::Point {
-                repr: KeyRepr::Surrogate(42),
+                repr: ReadPoint::Surrogate(42),
             }
         );
         assert_eq!(plan_engine(&plan), EngineTag::Document);
@@ -780,7 +802,7 @@ mod tests {
             projection: Vec::new(),
             limit: 0,
             offset: 0,
-            system_as_of_ms: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         })
     }
 

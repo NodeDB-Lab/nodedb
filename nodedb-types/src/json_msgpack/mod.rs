@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod error;
+pub mod geometry_ext;
 pub mod instant_ext;
 pub mod json_value;
 pub mod native_cell;
@@ -9,6 +10,7 @@ pub mod transcoder;
 pub mod writer;
 
 pub use error::{MsgpackError, MsgpackResult};
+pub use geometry_ext::{EXT_GEOMETRY, geometry_from_ext, write_geometry_ext};
 pub use instant_ext::{
     EXT_INSTANT_NAIVE, EXT_INSTANT_UTC, INSTANT_EXT_LEN, InstantKind, instant_from_ext,
     read_instant, write_instant,

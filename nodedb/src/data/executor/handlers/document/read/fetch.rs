@@ -54,11 +54,12 @@ impl CoreLoop {
         let stop = || deadline.expired();
         let identity_column =
             self.identity_column(task.request.database_id.as_u64(), tid, collection);
+        let crs = self.crs_context();
 
         match params.mode {
             DocScanMode::Current => self.fetch_current(task, tid, &params, &deadline),
             DocScanMode::AsOf {
-                system_as_of_ms,
+                system_as_of,
                 valid_at_ms,
             } => {
                 // `versioned_scan_as_of` returns each version's stored body
@@ -79,6 +80,7 @@ impl CoreLoop {
                             doc_id,
                             body,
                             &identity_column,
+                            &crs,
                         )
                     })
                 };
@@ -87,7 +89,7 @@ impl CoreLoop {
                         database_id: task.request.database_id.as_u64(),
                         tenant: tid,
                         coll: collection,
-                        sys_cutoff_ms: *system_as_of_ms,
+                        sys_cutoff: *system_as_of,
                         valid_at_ms: *valid_at_ms,
                         limit: scan_limit,
                     },
@@ -118,10 +120,13 @@ impl CoreLoop {
                 })
             }
             DocScanMode::AllVersions { valid_at_ms } => {
-                // Every system-time version of every document. Each version is
-                // normalized to MessagePack and gets the synthetic `_ts_*`
-                // temporal columns injected BEFORE the shared downstream runs,
-                // so a user can `SELECT` / `ORDER BY` / project on them.
+                // Every system-time version of every document, delete versions
+                // included. Each version is normalized to MessagePack and gets
+                // the synthetic `_ts_*` temporal columns injected BEFORE the
+                // shared downstream runs, so a user can `SELECT` / `ORDER BY` /
+                // project on them. A delete version repeats the cells of the
+                // version it closes, with its own `_ts_system` and an empty
+                // valid interval.
                 // See the `AsOf` arm above for the held-error rationale.
                 let held = HeldEvalError::default();
                 let predicate = |doc_id: &StorageKey, body: &[u8]| {
@@ -132,6 +137,7 @@ impl CoreLoop {
                             doc_id,
                             body,
                             &identity_column,
+                            &crs,
                         )
                     })
                 };
@@ -140,7 +146,7 @@ impl CoreLoop {
                         database_id: task.request.database_id.as_u64(),
                         tenant: tid,
                         coll: collection,
-                        sys_cutoff_ms: None,
+                        sys_cutoff: None,
                         valid_at_ms: *valid_at_ms,
                         limit: scan_limit,
                     },
@@ -156,7 +162,7 @@ impl CoreLoop {
                     };
                     let with_ts = inject_temporal_columns(
                         &msgpack_body,
-                        row.system_from_ms,
+                        row.system_from,
                         row.valid_from_ms,
                         row.valid_until_ms,
                     )?;
@@ -221,6 +227,7 @@ impl CoreLoop {
         // predicate, so a division/modulo-by-zero is held and returned once
         // every branch below returns, rather than silently folded away.
         let held = HeldEvalError::default();
+        let crs = self.crs_context();
         let matches = |key: &StorageKey, value: &[u8]| -> bool {
             if filter_predicates.is_empty() {
                 return true;
@@ -243,6 +250,7 @@ impl CoreLoop {
                     key,
                     value,
                     &identity_column,
+                    &crs,
                 )
             })
         };
@@ -254,7 +262,7 @@ impl CoreLoop {
                         database_id,
                         tenant: tid,
                         coll: collection,
-                        sys_cutoff_ms: None,
+                        sys_cutoff: None,
                         valid_at_ms: None,
                         limit: fetch_limit,
                     },
@@ -282,7 +290,7 @@ impl CoreLoop {
                     database_id,
                     tenant: tid,
                     coll: collection,
-                    sys_cutoff_ms: None,
+                    sys_cutoff: None,
                     valid_at_ms: None,
                     limit: fetch_limit,
                 },

@@ -101,6 +101,18 @@ pub async fn create_alert(
 
     // Parse NOTIFY targets.
     let notify_targets = parse_notify_targets_raw(notify_targets_raw)?;
+    // A webhook URL is user-supplied: it passes the `[egress]` policy here, and
+    // again before every send.
+    for target in &notify_targets {
+        if let NotifyTarget::Webhook { url } = target {
+            state.remote_sources.egress().check_url(url).map_err(|e| {
+                err(
+                    "42501",
+                    format!("NOTIFY WEBHOOK fails the [egress] policy: {e}"),
+                )
+            })?;
+        }
+    }
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

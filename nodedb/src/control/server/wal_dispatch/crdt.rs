@@ -295,7 +295,7 @@ fn bound_document_surrogate(
 
 /// Encode a `CrdtListOpWalRecord` for a `CrdtOp::ListInsert` / `ListDelete` /
 /// `ListMove` append. Shared by all three arms above so the msgpack encode +
-/// error-mapping logic is written once (mirrors `encode_graph_node_label_payload`).
+/// error-mapping logic is written once.
 fn encode_crdt_list_op_payload(payload: crate::wal::CrdtListOpWalRecord) -> crate::Result<Vec<u8>> {
     zerompk::to_msgpack_vec(&payload).map_err(|e| crate::Error::Serialization {
         format: "msgpack".into(),

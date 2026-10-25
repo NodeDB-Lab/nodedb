@@ -71,6 +71,7 @@ impl CoreLoop {
             source_key,
             tid,
             collection,
+            &self.crs_context(),
         )?;
         admit_kv_row(
             rls_write_check,
@@ -78,6 +79,7 @@ impl CoreLoop {
             dest_key,
             tid,
             collection,
+            &self.crs_context(),
         )?;
 
         // `execute_kv_transfer` puts both rows with `ttl_ms: 0`, clearing any
@@ -157,6 +159,7 @@ impl CoreLoop {
             item_key,
             tid,
             source_collection,
+            &self.crs_context(),
         )?;
         admit_kv_row(
             dest_rls_write_check,
@@ -164,6 +167,7 @@ impl CoreLoop {
             dest_key,
             tid,
             dest_collection,
+            &self.crs_context(),
         )?;
 
         // The destination is read only to pin its drift precondition: the live

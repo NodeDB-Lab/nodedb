@@ -60,6 +60,7 @@ impl SystemCatalog {
         }
         #[cfg(test)]
         if self
+            .faults
             .fail_next_redo_snapshot_owed_write
             .swap(false, std::sync::atomic::Ordering::SeqCst)
         {

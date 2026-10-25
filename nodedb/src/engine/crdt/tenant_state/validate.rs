@@ -27,6 +27,7 @@ impl TenantCrdtEngine {
         collection: &str,
         row_id: &str,
         surrogate: Surrogate,
+        crs: &nodedb_crs::CrsContext<'_>,
     ) -> ValidationOutcome {
         let Some(state) = self.collections.get(collection) else {
             return ValidationOutcome::Accepted;
@@ -38,6 +39,6 @@ impl TenantCrdtEngine {
             collections: &self.collections,
             array_surrogate_ids: &self.array_surrogate_ids,
         };
-        self.validator.validate(&view, &change)
+        self.validator.validate(&view, &change, crs)
     }
 }

@@ -36,8 +36,9 @@ pub(in crate::data::executor) struct DocumentMaterializeScan<'a> {
     pub cursor: &'a [u8],
     /// Rows per page outside a transaction.
     pub count: usize,
-    /// The system time the plan names. The scan reads the current rows.
-    pub system_as_of_ms: Option<i64>,
+    /// The system-time ordinal cut the plan's millisecond converts to.
+    /// `None` reads the current rows.
+    pub system_as_of: Option<i64>,
     /// Copy the stored bodies as they are, with no `id` field added.
     pub raw_bodies: bool,
 }
@@ -54,7 +55,7 @@ impl CoreLoop {
             collection,
             cursor,
             count,
-            system_as_of_ms,
+            system_as_of,
             raw_bodies,
         } = scan;
         // Quiesce gate: same contract as the standard scan.
@@ -77,12 +78,12 @@ impl CoreLoop {
         };
 
         // A bitemporal collection stores its rows as versions: the scan reads
-        // each row's version as of `system_as_of_ms`, or its current version
+        // each row's version as of `system_as_of`, or its current version
         // when unset. A system-time cut on any other collection is refused,
         // as the SQL planner refuses `FOR SYSTEM_TIME` on one.
         let base = if self.is_bitemporal(page.database_id, tid, collection) {
-            self.materialize_versioned_rows(&page, system_as_of_ms)
-        } else if system_as_of_ms.is_some() {
+            self.materialize_versioned_rows(&page, system_as_of)
+        } else if system_as_of.is_some() {
             Err(crate::bridge::envelope::ErrorCode::BadRequest {
                 detail: format!(
                     "a materialize scan AS OF SYSTEM TIME requires a bitemporal collection; \
@@ -252,12 +253,12 @@ impl CoreLoop {
     }
 
     /// One page of a bitemporal collection's rows after the cursor: each
-    /// row's version as of `system_as_of_ms`, its current version when unset.
+    /// row's version as of `system_as_of`, its current version when unset.
     /// A row deleted before the cut, or created after it, is absent.
     fn materialize_versioned_rows(
         &self,
         page: &BasePage<'_>,
-        system_as_of_ms: Option<i64>,
+        system_as_of: Option<i64>,
     ) -> Result<BaseRows, ErrorCode> {
         let after = if page.cursor.is_empty() {
             None
@@ -277,7 +278,7 @@ impl CoreLoop {
                     database_id: page.database_id,
                     tenant: page.tid,
                     coll: page.collection,
-                    sys_cutoff_ms: system_as_of_ms,
+                    sys_cutoff: system_as_of,
                     valid_at_ms: None,
                     limit: page.limit,
                 },
@@ -373,8 +374,8 @@ mod tests {
     }
 
     /// Append the version of row `surrogate` that holds `state` from
-    /// `sys_from_ms` on.
-    fn put_version(core: &CoreLoop, surrogate: u32, sys_from_ms: i64, state: &str) {
+    /// `sys_from` on.
+    fn put_version(core: &CoreLoop, surrogate: u32, sys_from: i64, state: &str) {
         let doc_id = StorageKey::for_surrogate(Surrogate::new(surrogate));
         let body = nodedb_types::json_to_msgpack(&serde_json::json!({ "state": state }))
             .expect("encode body");
@@ -384,7 +385,7 @@ mod tests {
                 tenant: TID,
                 coll: COLL,
                 doc_id: &doc_id,
-                sys_from_ms,
+                sys_from,
                 valid_from_ms: i64::MIN,
                 valid_until_ms: i64::MAX,
                 body: &body,
@@ -392,7 +393,7 @@ mod tests {
             .expect("versioned put");
     }
 
-    fn scan(core: &CoreLoop, collection: &str, system_as_of_ms: Option<i64>) -> Response {
+    fn scan(core: &CoreLoop, collection: &str, system_as_of: Option<i64>) -> Response {
         core.execute_document_materialize_scan(
             &make_default_task(),
             DocumentMaterializeScan {
@@ -400,7 +401,7 @@ mod tests {
                 collection,
                 cursor: &[],
                 count: 16,
-                system_as_of_ms,
+                system_as_of,
                 raw_bodies: true,
             },
         )
@@ -441,6 +442,21 @@ mod tests {
             states(&scan(&core, COLL, Some(500))).is_empty(),
             "a row created after the cut is absent"
         );
+    }
+
+    /// Two versions written in one millisecond split at an ordinal cut
+    /// between them, as edge versions split at that ordinal.
+    #[test]
+    fn versions_inside_one_millisecond_split_at_an_ordinal_cut() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (mut core, _req_tx, _resp_rx) = make_core_with_dir(dir.path());
+        register(&mut core, COLL, true);
+        let first = 1_700_000_000_123 * nodedb_types::NANOS_PER_MS + 1;
+        put_version(&core, 7, first, "old");
+        put_version(&core, 7, first + 2, "new");
+
+        assert_eq!(states(&scan(&core, COLL, Some(first + 1))), ["old"]);
+        assert_eq!(states(&scan(&core, COLL, Some(first + 2))), ["new"]);
     }
 
     #[test]

@@ -119,6 +119,7 @@ pub(super) fn compensation_hint_for_dispatch_error(e: &crate::Error) -> Compensa
         | crate::Error::DivisionByZero
         | crate::Error::DataException { .. }
         | crate::Error::MixedSrid { .. }
+        | crate::Error::UnknownSrid { .. }
         | crate::Error::NumericValueOutOfRange { .. }
         | crate::Error::InvalidTextRepresentation { .. }
         | crate::Error::DatatypeMismatch { .. }
@@ -239,7 +240,8 @@ fn compensation_hint_for_code(code: &ErrorCode) -> CompensationHint {
         | ErrorCode::BadRequest { .. }
         | ErrorCode::ActiveSqlTransaction { .. }
         | ErrorCode::DependentObjectsExist { .. }
-        | ErrorCode::NodeLabelLimit { .. }) => CompensationHint::Custom {
+        | ErrorCode::NodeLabelLimit { .. }
+        | ErrorCode::ProgramLimitExceeded { .. }) => CompensationHint::Custom {
             constraint: "apply_failed".into(),
             detail: format!("{other:?}"),
         },

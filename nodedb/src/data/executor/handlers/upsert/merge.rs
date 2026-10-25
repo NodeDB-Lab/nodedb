@@ -18,6 +18,7 @@ pub(in crate::data::executor) fn apply_on_conflict_updates(
     existing: nodedb_types::Value,
     excluded: &nodedb_types::Value,
     updates: &[(String, nodedb_physical::physical_plan::UpdateValue)],
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<nodedb_types::Value> {
     let existing_kind = existing.type_name();
     let nodedb_types::Value::Object(mut obj) = existing else {
@@ -45,7 +46,7 @@ pub(in crate::data::executor) fn apply_on_conflict_updates(
             // division/modulo-by-zero fails the statement instead of
             // silently writing NULL.
             nodedb_physical::physical_plan::UpdateValue::Expr(expr) => {
-                expr.eval_with_excluded(&snapshot, excluded)?
+                expr.eval_with_excluded(&snapshot, excluded, crs)?
             }
         };
         obj.insert(field.clone(), new_val);
@@ -107,16 +108,26 @@ mod tests {
     #[test]
     fn literal_assignment_overlays_the_existing_row() {
         let updates = vec![("n".to_string(), literal(Value::Integer(2)))];
-        let merged = apply_on_conflict_updates(obj(&[("n", 1), ("m", 9)]), &obj(&[]), &updates)
-            .expect("merge");
+        let merged = apply_on_conflict_updates(
+            obj(&[("n", 1), ("m", 9)]),
+            &obj(&[]),
+            &updates,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("merge");
         assert_eq!(merged, obj(&[("n", 2), ("m", 9)]));
     }
 
     #[test]
     fn non_object_existing_row_is_refused_not_merged_onto_a_blank_row() {
         let updates = vec![("n".to_string(), literal(Value::Integer(2)))];
-        let err = apply_on_conflict_updates(Value::Integer(118), &obj(&[]), &updates)
-            .expect_err("a scalar existing row must be refused");
+        let err = apply_on_conflict_updates(
+            Value::Integer(118),
+            &obj(&[]),
+            &updates,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect_err("a scalar existing row must be refused");
         assert!(
             matches!(err, crate::Error::Serialization { .. }),
             "got {err:?}"
@@ -127,8 +138,13 @@ mod tests {
     #[test]
     fn non_object_excluded_row_is_refused() {
         let updates = vec![("n".to_string(), literal(Value::Integer(2)))];
-        let err = apply_on_conflict_updates(obj(&[]), &Value::String("x".into()), &updates)
-            .expect_err("a scalar EXCLUDED row must be refused");
+        let err = apply_on_conflict_updates(
+            obj(&[]),
+            &Value::String("x".into()),
+            &updates,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect_err("a scalar EXCLUDED row must be refused");
         assert!(err.to_string().contains("EXCLUDED row is string"), "{err}");
     }
 
@@ -136,8 +152,13 @@ mod tests {
     fn undecodable_literal_fails_the_statement() {
         // fixmap header claiming one entry, then nothing.
         let updates = vec![("n".to_string(), UpdateValue::Literal(vec![0x81]))];
-        let err = apply_on_conflict_updates(obj(&[("n", 1)]), &obj(&[]), &updates)
-            .expect_err("a truncated literal must not be skipped");
+        let err = apply_on_conflict_updates(
+            obj(&[("n", 1)]),
+            &obj(&[]),
+            &updates,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect_err("a truncated literal must not be skipped");
         assert!(
             matches!(err, crate::Error::Serialization { .. }),
             "got {err:?}"
@@ -152,8 +173,13 @@ mod tests {
             ("a".to_string(), literal(Value::Integer(5))),
             ("b".to_string(), literal(Value::Integer(6))),
         ];
-        let merged =
-            apply_on_conflict_updates(Value::Object(fields), &obj(&[]), &updates).expect("merge");
+        let merged = apply_on_conflict_updates(
+            Value::Object(fields),
+            &obj(&[]),
+            &updates,
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("merge");
         assert_eq!(merged, obj(&[("a", 5), ("b", 6)]));
     }
 }

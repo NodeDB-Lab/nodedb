@@ -16,7 +16,7 @@ pub(super) mod varlen_named;
 pub use self::continuation::{execute_continuation, execute_varlen_resume};
 pub use self::core::{MatchExecCtx, execute, rows_to_msgpack};
 pub use self::expansion::VarLenCaps;
-pub use self::predicates::PropertyLookup;
+pub use self::predicates::{DocumentCut, PropertyLookup};
 pub use self::types::{
     BindingRow, ContinuationSeed, MatchOutcome, UnresolvedExpansion, VarLenResume,
 };

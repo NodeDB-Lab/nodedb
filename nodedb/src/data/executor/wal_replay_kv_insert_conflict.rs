@@ -127,6 +127,7 @@ impl CoreLoop {
             value,
             updates,
             self.declared_columns_of(database_id, tenant_id, collection),
+            &self.crs_context(),
         ) {
             Ok(b) => b,
             Err(e) => {
@@ -320,6 +321,7 @@ mod tests {
             existing_val,
             &excluded_val,
             &updates,
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .unwrap();
 
@@ -479,6 +481,7 @@ mod tests {
             existing_val,
             &excluded_val,
             &updates,
+            &nodedb_crs::CrsContext::builtin_only(),
         )
         .unwrap();
         // Read at now_ms=0: this record installs an absolute expiry of 6_000,

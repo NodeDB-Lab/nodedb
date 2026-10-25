@@ -119,7 +119,7 @@ mod tests {
             op_msgpack: vec![0x00],
             attr_idx: 0,
             shard_bucket: None,
-            system_as_of: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
             valid_at_ms: None,
             txn_id: None,
         }

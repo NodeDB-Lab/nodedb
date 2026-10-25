@@ -19,7 +19,7 @@ use super::shape::RowShaper;
 /// A page-by-page reader over a [`DocumentPageSource`].
 pub(crate) struct PageReader {
     collection: String,
-    system_as_of_ms: Option<i64>,
+    system_time: nodedb_types::SystemTimeScope,
     filters: Vec<ScanFilter>,
     shaper: RowShaper,
     cursor: Vec<u8>,
@@ -42,7 +42,7 @@ impl PageReader {
         };
         Ok(Self {
             collection: page.collection.as_str().to_owned(),
-            system_as_of_ms: page.system_as_of_ms,
+            system_time: page.system_time,
             filters,
             shaper: RowShaper::decode(&page.column_map)?,
             cursor: Vec::new(),
@@ -68,23 +68,26 @@ impl PageReader {
             ctx.database_id,
             &self.collection,
             &self.cursor,
-            self.system_as_of_ms,
+            self.system_time,
             ctx.txn_id,
         )
         .await?;
+        let crs = crate::control::crs_context::crs_context_for(ctx.state);
         let mut rows = Vec::with_capacity(entries.len());
         for (_doc_id, _surrogate, body) in entries {
             if self.remaining == Some(0) {
                 break;
             }
-            if !self.filters.is_empty() && !ScanFilter::all_match_binary(&self.filters, &body)? {
+            if !self.filters.is_empty()
+                && !ScanFilter::all_match_binary(&self.filters, &body, &crs)?
+            {
                 continue;
             }
             if self.skip > 0 {
                 self.skip -= 1;
                 continue;
             }
-            rows.push(self.shaper.shape(body)?);
+            rows.push(self.shaper.shape(body, &crs)?);
             if let Some(remaining) = self.remaining.as_mut() {
                 *remaining -= 1;
             }
@@ -106,7 +109,7 @@ mod tests {
         DocumentPageSource {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "src"),
             filters: Vec::new(),
-            system_as_of_ms: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
             offset,
             limit,
             column_map: Vec::new(),

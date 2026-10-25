@@ -27,6 +27,9 @@ pub struct StateMachineMetrics {
     /// already applied, and therefore skipped as no-ops. Routine on restart —
     /// this is an activity counter, not a fault counter.
     pub entries_redelivered: AtomicU64,
+    /// Committed entries the catch-up replay decoded from a log read. Each
+    /// entry decodes once per node while the replay cache holds it.
+    pub replay_decodes: AtomicU64,
 }
 
 impl StateMachineMetrics {
@@ -44,6 +47,7 @@ impl Default for StateMachineMetrics {
             epochs_skipped_gap: AtomicU64::new(0),
             epochs_refused_regression: AtomicU64::new(0),
             entries_redelivered: AtomicU64::new(0),
+            replay_decodes: AtomicU64::new(0),
         }
     }
 }

@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+authors.workspace = true
 publish = false
 description = "Shared test harness for NodeDB integration tests (not for end-user consumption)."
 
@@ -24,6 +25,7 @@ nodedb-bridge = { workspace = true }
 nodedb-client = { workspace = true, features = ["native"] }
 nodedb-cluster = { workspace = true }
 nodedb-crdt = { workspace = true }
+nodedb-crs = { workspace = true }
 nodedb-mem = { workspace = true }
 nodedb-types = { workspace = true }
 nodedb-wal = { workspace = true }

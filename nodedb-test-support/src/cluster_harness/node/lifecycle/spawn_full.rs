@@ -224,6 +224,16 @@ impl TestClusterNode {
             // Fixed test KEK so backup tests produce encrypted envelopes.
             state.backup_kek = Some(Arc::new([0x42u8; 32]));
             state.backup_storage = config.backup_storage.clone().map(Arc::new);
+            // Webhook sinks in tests listen on loopback. The `[egress]` policy
+            // admits `http://localhost` there, as an operator allow-lists a
+            // private sink.
+            state.remote_sources = nodedb::control::security::egress::RemoteSources::new(
+                Arc::new(nodedb::control::security::egress::EgressPolicy::from_parts(
+                    true,
+                    &["localhost".to_string()],
+                    &["127.0.0.0/8".to_string(), "::1/128".to_string()],
+                )?),
+            )?;
             super::wire_state::open_producer_registry(state)?;
             // Drains, pending DDL records, and the DDL preparation owner load
             // from their rows (mirrors production `SharedState::open`).
@@ -274,6 +284,7 @@ impl TestClusterNode {
                     doc_config_seed: nodedb::bootstrap::data_plane::load_doc_config_registry_from(
                         shared.credentials.catalog(),
                     ),
+                    crs_set_seed: shared.credentials.catalog().custom_crs_set(),
                     event_interest: crate::core_loop_runner::event_interest_for(&shared),
                     stop_rx: core_stop_rx,
                 });

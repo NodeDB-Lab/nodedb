@@ -151,7 +151,7 @@ pub struct StoredCollection {
     #[msgpack(default)]
     pub lvc_enabled: bool,
     /// Bitemporal storage: every write is appended as an immutable version
-    /// keyed by `system_from_ms`, enabling `FOR SYSTEM_TIME AS OF` /
+    /// keyed by its system-time ordinal, enabling `FOR SYSTEM_TIME AS OF` /
     /// `FOR VALID_TIME` queries. Only honored for document engines today;
     /// other engines ignore it.
     #[msgpack(default)]

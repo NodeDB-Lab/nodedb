@@ -237,6 +237,7 @@ impl<'a> ColumnarDispatcher for SharedStateColumnarDispatcher<'a> {
             provenance: Some(prov),
             // Each replica's apply allocates its own LSN.
             wal_lsn: None,
+            system_from: None,
             // Edge-to-origin sync replays rows already decided by the policy
             // where they were written; the writing device's session is not
             // present here to resolve `$auth.*` against.

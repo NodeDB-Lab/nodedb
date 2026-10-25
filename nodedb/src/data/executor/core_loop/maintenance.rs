@@ -157,12 +157,13 @@ impl CoreLoop {
             doc_id,
             index_paths,
         } = inputs;
+        let crs = self.crs_context();
         let mut added = Vec::new();
         let mut removed = Vec::new();
         for index_path in index_paths {
-            let new_vals = index_values_for(new_doc, index_path);
+            let new_vals = index_values_for(new_doc, index_path, &crs);
             let old_vals = old_doc
-                .map(|d| index_values_for(d, index_path))
+                .map(|d| index_values_for(d, index_path, &crs))
                 .unwrap_or_default();
             for v in new_vals.difference(&old_vals) {
                 self.sparse.index_put_in_txn(
@@ -221,9 +222,10 @@ impl CoreLoop {
         doc: &serde_json::Value,
         index_paths: &[crate::engine::document::store::IndexPath],
     ) -> Vec<(String, String)> {
+        let crs = self.crs_context();
         let mut out = Vec::new();
         for index_path in index_paths {
-            for v in index_values_for(doc, index_path) {
+            for v in index_values_for(doc, index_path, &crs) {
                 out.push((index_path.path.clone(), v));
             }
         }
@@ -248,9 +250,10 @@ fn maybe_lowercase(v: &str, case_insensitive: bool) -> String {
 fn index_values_for(
     doc: &serde_json::Value,
     index_path: &crate::engine::document::store::IndexPath,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> std::collections::HashSet<String> {
     if let Some(ref p) = index_path.predicate
-        && !p.evaluate_json(doc)
+        && !p.evaluate_json(doc, crs)
     {
         return std::collections::HashSet::new();
     }

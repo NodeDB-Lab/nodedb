@@ -605,7 +605,7 @@ mod tests {
             attr_idx: 0,
             cell_filter: None,
             shard_bucket: None,
-            system_as_of: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
             valid_at_ms: None,
         });
         assert_eq!(r.status, Status::Ok, "ew failed: {r:?}");
@@ -658,7 +658,7 @@ mod tests {
             attr_idx: 0,
             cell_filter: Some(bm),
             shard_bucket: None,
-            system_as_of: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
             valid_at_ms: None,
         });
         assert_eq!(r.status, Status::Ok, "ew+filter failed: {r:?}");
@@ -691,7 +691,7 @@ mod tests {
             attr_idx: 0,
             cell_filter: None,
             shard_bucket: None,
-            system_as_of: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
             valid_at_ms: None,
         });
         assert_ne!(r.status, Status::Ok);
@@ -731,7 +731,7 @@ mod tests {
             attr_idx: 0,
             cell_filter: None,
             shard_bucket,
-            system_as_of: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
             valid_at_ms: None,
         }
     }
@@ -848,7 +848,10 @@ mod tests {
             attr_idx,
             cell_filter: None,
             shard_bucket: None,
-            system_as_of,
+            system_time: system_as_of.map_or(
+                nodedb_types::SystemTimeScope::Current,
+                nodedb_types::SystemTimeScope::AsOf,
+            ),
             valid_at_ms: None,
         }
     }

@@ -212,7 +212,7 @@ fn kv_entry_value(value_cols: &[(String, SqlValue)]) -> crate::Result<Vec<u8>> {
     write_msgpack_map_header(&mut buf, value_cols.len());
     for (col, val) in value_cols {
         write_msgpack_str(&mut buf, col);
-        write_msgpack_value(&mut buf, val);
+        write_msgpack_value(&mut buf, val)?;
     }
     Ok(buf)
 }

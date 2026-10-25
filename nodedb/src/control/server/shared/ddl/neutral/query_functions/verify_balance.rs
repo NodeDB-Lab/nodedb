@@ -166,13 +166,20 @@ pub async fn verify_balance(
                 continue;
             }
             let src_val = nodedb_types::Value::from(serde_json::Value::Object(src_doc.clone()));
-            let delta =
-                serde_json::Value::from(mat_def.value_expr.eval(&src_val).map_err(|e| {
-                    err(
-                        nodedb_types::error::sqlstate::DIVISION_BY_ZERO,
-                        &format!("VERIFY_BALANCE: value_expr failed to evaluate: {e}"),
+            let delta = serde_json::Value::from(
+                mat_def
+                    .value_expr
+                    .eval(
+                        &src_val,
+                        &crate::control::crs_context::crs_context_for(state),
                     )
-                })?);
+                    .map_err(|e| {
+                        err(
+                            crate::control::server::shared::ddl::sqlstate::eval_error_sqlstate(&e),
+                            &format!("VERIFY_BALANCE: value_expr failed to evaluate: {e}"),
+                        )
+                    })?,
+            );
             if let Some(d) = json_to_decimal(&delta) {
                 computed += d;
             }

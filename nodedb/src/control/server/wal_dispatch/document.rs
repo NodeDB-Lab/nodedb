@@ -11,8 +11,9 @@ use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
 use crate::wal::manager::WalAppender;
 
 /// Encode a document PUT redo record: `(collection, document_id, value,
-/// Option<SyncProvenance>, surrogate)`, with `(sys_from_ms, valid_from_ms,
-/// valid_until_ms)` appended when `version` is `Some`. Must match
+/// Option<SyncProvenance>, surrogate)`, with `(sys_from, valid_from_ms,
+/// valid_until_ms)` appended when `version` is `Some`; `sys_from` is the
+/// version's system-time ordinal. Must match
 /// `wal_replay_redo_document`'s decode.
 ///
 /// `document_id` is the row's client identity. The Event Plane replay reads
@@ -32,7 +33,7 @@ pub(crate) fn encode_document_put_record(
             value,
             prov,
             surrogate,
-            v.sys_from_ms,
+            v.sys_from,
             v.valid_from_ms,
             v.valid_until_ms,
         )),
@@ -46,17 +47,18 @@ pub(crate) fn encode_document_put_record(
 
 /// Encode a document DELETE redo record: `(collection, document_id,
 /// Option<SyncProvenance>, surrogate)` — surrogate keys the redb storage row —
-/// with the tombstone's system time appended when `system_from_ms` is `Some`.
+/// with the tombstone's system-time ordinal appended when `system_from` is
+/// `Some`.
 ///
 /// `document_id` is the row's client identity, as for the PUT record.
 pub(crate) fn encode_document_delete_record(
     collection: &str,
     document_id: &str,
     surrogate: u32,
-    system_from_ms: Option<i64>,
+    system_from: Option<i64>,
 ) -> crate::Result<Vec<u8>> {
     let prov: Option<nodedb_types::sync::wire::SyncProvenance> = None;
-    match system_from_ms {
+    match system_from {
         Some(sys) => zerompk::to_msgpack_vec(&(collection, document_id, prov, surrogate, sys)),
         None => zerompk::to_msgpack_vec(&(collection, document_id, prov, surrogate)),
     }

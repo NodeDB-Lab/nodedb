@@ -149,6 +149,9 @@ fn entry_scope(decoded: &mut Option<ReplicatedEntry>) -> EntryScope {
             .as_mut()
             .map(|e| std::mem::take(&mut e.user_roles))
             .unwrap_or_default(),
+        system_ordinal: decoded
+            .as_ref()
+            .and_then(ReplicatedEntry::carried_system_ordinal),
     }
 }
 

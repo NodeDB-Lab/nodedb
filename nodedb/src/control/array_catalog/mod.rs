@@ -7,6 +7,7 @@
 //! The Data Plane never touches this directly — dispatch handlers
 //! consult the in-memory registry via the shared [`ArrayCatalogHandle`].
 
+pub(crate) mod attr_meta;
 pub(crate) mod cell_route;
 pub(crate) mod ddl;
 pub mod entry;
@@ -14,6 +15,7 @@ pub(crate) mod georef;
 pub mod persist;
 pub mod registry;
 pub(crate) mod retention;
+pub(crate) mod schema_recode;
 
 pub use entry::{ArrayCatalogEntry, ArrayMove};
 pub use registry::{ArrayCatalog, ArrayCatalogHandle};

@@ -208,6 +208,14 @@ pub fn retain_tenant_data_for_vshards(
     snap.edge_hidden.clear();
     snap.edge_cuts.clear();
     snap.edge_applied.clear();
+    // A node's labels home by the node, whatever collection its edges live
+    // in. The source of that home keeps them.
+    let owned_node =
+        |node: &str| RecordHomes::of(HomedRecord::NodeLabels { node }).owned_by(source_vshards);
+    snap.node_labels
+        .retain(|(_, _, node, _)| owned_node(node.as_str()));
+    snap.node_label_versions
+        .retain(|(_, _, node, _, _)| owned_node(node.as_str()));
 
     // CRDT (`crdt_state`): each entry carries its single collection. Keep it iff
     // that collection's vshard is in this source set — exactly one source node

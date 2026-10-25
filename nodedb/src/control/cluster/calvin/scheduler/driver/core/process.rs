@@ -24,7 +24,9 @@ pub(in crate::control::cluster::calvin::scheduler::driver::core) enum LedgerMark
     /// before the group's applied index passed the entry.
     ByApply,
 }
-use crate::control::cluster::calvin::scheduler::lock_manager::{AcquireOutcome, TxnId};
+use crate::control::cluster::calvin::scheduler::lock_manager::{
+    AcquireOutcome, Acquisition, TxnId,
+};
 
 /// Epochs a read reservation can live before the scheduler reaps it as orphaned.
 /// At the default 20ms epoch tick this is ~5s of wall-clock — far longer than any
@@ -99,10 +101,9 @@ impl Scheduler {
 
     /// Install a SHARED reservation on `key` for interactive txn `owner`.
     ///
-    /// The `AcquireOutcome` is intentionally discarded: promotion of a
-    /// reservation that blocks behind an exclusive holder is handled by the
-    /// existing FIFO waiter mechanics, and lock-promotion wiring for reservations
-    /// lands in a later change.
+    /// A blocked reservation waits FIFO on the key. An owner that raises its
+    /// held mode drops the hold to wait. The waiters that drop completes
+    /// dispatch here.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn install_reservation(
         &mut self,
         owner: TxnIdWire,
@@ -110,8 +111,11 @@ impl Scheduler {
     ) {
         let txn_id: TxnId = owner.into();
         let lock_key = super::super::helpers::decode_lock_key(&key);
-        let mut lm = self.lock_manager.lock().unwrap_or_else(|p| p.into_inner());
-        let _outcome = lm.acquire_shared(txn_id, lock_key);
+        let promoted = {
+            let mut lm = self.lock_manager.lock().unwrap_or_else(|p| p.into_inner());
+            lm.acquire_shared(txn_id, lock_key).promoted
+        };
+        self.dispatch_promoted(promoted);
     }
 
     /// Release ALL shared reservations held by `owner`, promoting any waiters that
@@ -201,7 +205,11 @@ impl Scheduler {
         // here on, whether its locks are granted now or later.
         self.open_assembly(&txn);
 
-        let keys = super::super::helpers::expand_rw_set(&txn);
+        // This table locks the graph pairs homed on its own vShard only.
+        let keys = super::super::helpers::expand_rw_set(
+            &txn,
+            super::super::helpers::LockSite::On(self.vshard_id),
+        );
         let keys_count = keys.len();
         let _acquire_span = tracing::info_span!(
             "scheduler_acquire_locks",
@@ -211,7 +219,7 @@ impl Scheduler {
             keys_count,
         )
         .entered();
-        let outcome = {
+        let Acquisition { outcome, promoted } = {
             let mut lm = self.lock_manager.lock().unwrap_or_else(|p| p.into_inner());
             lm.acquire(lock_owner, keys.clone())
         };
@@ -233,6 +241,8 @@ impl Scheduler {
                 );
             }
         }
+        // A raise that queued this txn can grant earlier waiters on its keys.
+        self.dispatch_promoted(promoted);
     }
 
     /// Route a granted txn: a follower holds it, the leader stages it as a
@@ -438,11 +448,14 @@ impl Scheduler {
                     continue;
                 }
                 let keys = blocked.keys.clone();
-                let outcome = guard.acquire(waiter_id, keys);
+                let acquisition = guard.acquire(waiter_id, keys);
                 debug_assert_eq!(
-                    outcome,
-                    AcquireOutcome::Ready,
-                    "is_ready returned true but acquire returned Blocked"
+                    acquisition,
+                    Acquisition {
+                        outcome: AcquireOutcome::Ready,
+                        promoted: Vec::new(),
+                    },
+                    "a ready txn re-acquires its held keys and grants nothing"
                 );
 
                 if let Some(blocked_txn) = self.blocked.remove(&waiter_id) {

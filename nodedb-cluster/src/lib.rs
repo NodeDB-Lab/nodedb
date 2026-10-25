@@ -86,7 +86,9 @@ pub use bootstrap::{
     start_cluster_subsystems,
 };
 #[doc(hidden)]
-pub use calvin::{EngineKeySet, EpochBatch, ReadWriteSet, SequencedTxn, SortedVec, TxClass};
+pub use calvin::{
+    EngineKeySet, EpochBatch, HomedPair, ReadWriteSet, SequencedTxn, SortedVec, TxClass,
+};
 pub use catalog::ClusterCatalog;
 #[doc(hidden)]
 pub use circuit_breaker::BreakerSnapshot;
@@ -117,9 +119,9 @@ pub use migration_executor::{
 };
 pub use multi_raft::{GroupStatus, MultiRaft};
 pub use raft_loop::{
-    ApplyPermit, AssignRemoteSurrogate, AuthLeaseService, BuiltGroupSnapshot, CalvinSubmit,
-    CalvinSubmitInbox, CommitApplier, DataProposeGate, GroupApplyGates, InstallPermit,
-    MetadataSnapshotCapture, ProposeHold, RaftLoop, ReleaseReservation, ReserveRead,
+    Admitted, ApplyPermit, AssignRemoteSurrogate, AuthLeaseService, BuiltGroupSnapshot,
+    CalvinSubmit, CalvinSubmitInbox, CommitApplier, DataProposeGate, GroupApplyGates,
+    InstallPermit, MetadataSnapshotCapture, ProposeHold, RaftLoop, ReleaseReservation, ReserveRead,
     ShuffleAggregator, ShuffleConsumer, ShuffleProducer, ShuffleReceiver, SnapshotApplier,
     SnapshotBuilder, SnapshotQuarantineHook, VShardEnvelopeHandler,
 };

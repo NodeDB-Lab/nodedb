@@ -1,34 +1,65 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Typed errors of the GeoTIFF reader.
+//! Typed errors of the raster readers.
 
 use std::io;
 
-use nodedb_types::geometry::UnsupportedSrid;
-use tiff::TiffError;
+use nodedb_crs::{CrsParseError, UnknownSrid};
 
-use crate::geokeys::GeoKeyError;
+use crate::codec::error::CodecError;
 use crate::sample::SampleFormatCode;
+use crate::source::range::ByteRange;
+use crate::tiff::error::{TiffFormatError, UnsupportedTiff};
+use crate::tiff::geokeys::GeoKeyError;
 
-/// Every way opening or decoding a GeoTIFF can fail.
+/// Every way opening or decoding a raster can fail.
 #[derive(Debug, thiserror::Error)]
 pub enum RasterError {
-    /// The underlying reader failed for a reason outside the file's bytes.
-    #[error("GeoTIFF read failed: {0}")]
-    Io(#[source] io::Error),
+    /// The byte source failed for a reason outside the file's bytes.
+    #[error("raster read failed: {0}")]
+    Io(#[from] io::Error),
 
     /// The bytes do not form a valid TIFF: truncated, corrupt, or
     /// self-contradictory.
     #[error("malformed TIFF: {0}")]
-    Malformed(#[source] TiffError),
+    Malformed(#[from] TiffFormatError),
+
+    /// A compressed chunk does not decode.
+    #[error("corrupt compressed block: {0}")]
+    Codec(#[from] CodecError),
 
     /// The TIFF is valid, but it uses a feature the decoder does not read.
     #[error("unsupported TIFF feature: {0}")]
-    UnsupportedTiff(#[source] TiffError),
+    UnsupportedTiff(#[from] UnsupportedTiff),
 
-    /// One block decodes to more bytes than the caller allows.
+    /// The byte source has no object with this id.
+    #[error("raster source object {object} does not exist")]
+    SourceMissing { object: u32 },
+
+    /// A source returned more bytes than the range asked for.
+    #[error("raster source returned {got} bytes for the {len}-byte range {range:?}")]
+    RangeOverrun {
+        range: ByteRange,
+        len: u64,
+        got: usize,
+    },
+
+    /// The header ranges an open needs exceed the header byte cap.
     #[error(
-        "GeoTIFF block needs {needed_bytes} decoded bytes, over the {limit_bytes}-byte limit; \
+        "raster header data exceeds the {limit_bytes}-byte header cap; \
+         the file has too many blocks or too large tag values"
+    )]
+    HeaderTooLarge { limit_bytes: usize },
+
+    /// An open asked for ranges it already holds, or kept asking past the
+    /// round cap.
+    #[error("raster open made no progress after {rounds} fetch rounds")]
+    OpenStalled { rounds: usize },
+
+    /// One block decodes to more bytes than the caller allows, or one
+    /// compressed chunk is larger than that cap.
+    #[error(
+        "raster block needs {needed_bytes} bytes, over the {limit_bytes}-byte limit; \
          rewrite the file with smaller strips or tiles"
     )]
     BlockTooLarge {
@@ -36,53 +67,46 @@ pub enum RasterError {
         limit_bytes: usize,
     },
 
-    /// An IFD 0 tag value ends past the end of the file or exceeds the
-    /// tag value cap.
-    #[error(
-        "GeoTIFF tag {tag} declares a {bytes}-byte value, past the {file_len}-byte file \
-         or over the tag value cap"
-    )]
-    TagValueOutOfBounds { tag: u16, bytes: u64, file_len: u64 },
+    /// A tag value exceeds the tag value cap.
+    #[error("TIFF tag {tag} declares a {bytes}-byte value, over the {limit_bytes}-byte cap")]
+    TagValueTooLarge {
+        tag: u16,
+        bytes: u64,
+        limit_bytes: usize,
+    },
 
-    /// The tiff decoder hit its own buffer limit.
-    #[error("GeoTIFF decode exceeds the {limit_bytes}-byte buffer limit")]
-    DecodeLimitExceeded { limit_bytes: usize },
-
-    /// The compression method is not deflate, LZW, PackBits, or none.
+    /// The compression method has no decoder.
     #[error(
-        "GeoTIFF compression code {code} is not supported; \
-         supported: none (1), LZW (5), deflate (8, 32946), PackBits (32773)"
+        "TIFF compression code {code} is not supported; supported: none (1), LZW (5), \
+         JPEG (7), deflate (8, 32946), PackBits (32773), LERC (34887), ZSTD (50000)"
     )]
     UnsupportedCompression { code: u16 },
 
-    /// The sample format and width are outside u8, u16, i16, u32, f32, f64.
+    /// The sample format and width are outside the supported types.
     #[error(
-        "GeoTIFF samples of format {format} with {bits} bits are not supported; \
-         supported: u8, u16, i16, u32, f32, f64"
+        "TIFF samples of format {format} with {bits} bits are not supported; \
+         supported: u8, i8, u16, i16, u32, i32, f32, f64"
     )]
-    UnsupportedSampleType { format: SampleFormatCode, bits: u8 },
+    UnsupportedSampleType { format: SampleFormatCode, bits: u16 },
 
     /// The photometric interpretation transforms samples on decode, or
     /// stores palette indexes.
     #[error(
-        "GeoTIFF photometric interpretation {code} is not supported; \
-         supported: BlackIsZero (1), RGB (2), CMYK (5), YCbCr (6)"
+        "TIFF photometric interpretation {code} is not supported; supported: \
+         BlackIsZero (1), RGB (2), CMYK (5), YCbCr (6) with JPEG or without subsampling"
     )]
     UnsupportedPhotometric { code: u16 },
 
-    /// A chunky pixel decodes to fewer samples than the file stores.
+    /// The first image of the IFD chain is an overview.
     #[error(
-        "GeoTIFF stores {samples} samples per pixel, but its color type decodes {decoded}; \
-         write the extra bands as BlackIsZero multiband"
-    )]
-    UnsupportedBandLayout { samples: u16, decoded: u16 },
-
-    /// IFD 0 is an overview, so the full-resolution image is elsewhere.
-    #[error(
-        "GeoTIFF IFD 0 is a reduced-resolution image; \
+        "TIFF first image is a reduced-resolution image; \
          the full-resolution image must be the first IFD"
     )]
     ReducedResolutionFirstImage,
+
+    /// The caller selected an image the file does not hold.
+    #[error("TIFF image {index} is out of range; the file has {count} images")]
+    ImageOutOfRange { index: u32, count: u32 },
 
     /// The GeoKey directory does not parse.
     #[error("malformed GeoKey directory: {0}")]
@@ -129,55 +153,67 @@ pub enum RasterError {
     #[error("GeoTIFF model type {model} needs GeoKey {key}, which is absent")]
     MissingCrsKey { model: u16, key: u16 },
 
-    /// The CRS is user-defined, so no EPSG code names it.
-    #[error("GeoTIFF CRS is user-defined (GeoKey {key} = 32767); only EPSG codes are supported")]
-    UserDefinedCrs { key: u16 },
-
-    /// The CRS EPSG code is outside the supported set.
+    /// The CRS code names no defined CRS.
     #[error("GeoTIFF CRS: {0}")]
-    UnsupportedCrs(#[from] UnsupportedSrid),
+    UnknownCrs(#[from] UnknownSrid),
 
-    /// GDAL_NODATA is not a number.
-    #[error("GeoTIFF GDAL_NODATA '{text}' is not a number")]
+    /// A user-defined CRS (GeoKey value 32767) uses a GeoKey value the
+    /// decoder does not read.
+    #[error("GeoTIFF user-defined CRS: {detail}")]
+    UnsupportedUserCrs { detail: String },
+
+    /// A user-defined CRS decodes to PROJ text the CRS parser refuses.
+    #[error("GeoTIFF user-defined CRS: {0}")]
+    UserCrsParse(#[from] CrsParseError),
+
+    /// A user-defined CRS matches no registered CRS by projection,
+    /// ellipsoid, unit and datum.
+    #[error(
+        "GeoTIFF user-defined CRS matches no registered CRS: {proj}; \
+         define it with CREATE SPATIAL_REF_SYS and load again"
+    )]
+    UnmatchedUserCrs { proj: String },
+
+    /// A user-defined CRS names an ellipsoid but no datum, and registered
+    /// CRSs of its shape sit on more than one datum.
+    #[error(
+        "GeoTIFF user-defined CRS {proj} names no datum and matches CRSs on different \
+         datums, SRID {first} and SRID {second}; write the datum code into the file, \
+         or define the CRS with CREATE SPATIAL_REF_SYS and load again"
+    )]
+    AmbiguousUserCrs {
+        proj: String,
+        first: nodedb_crs::Srid,
+        second: nodedb_crs::Srid,
+    },
+
+    /// A nodata value (`GDAL_NODATA` or a `GDAL_METADATA` item) is not a
+    /// number.
+    #[error("raster nodata '{text}' is not a number")]
     InvalidNodata { text: String },
 
+    /// A `GDAL_METADATA` band number or numeric item does not parse.
+    #[error("GDAL_METADATA item '{name}' holds '{text}', which is not a valid value")]
+    InvalidMetadata { name: String, text: String },
+
     /// The caller asked for a block the image does not have.
-    #[error("GeoTIFF block {index} is out of range; the image has {count} blocks")]
+    #[error("raster block {index} is out of range; the image has {count} blocks")]
     BlockOutOfRange { index: u32, count: u32 },
 
-    /// The decoder returned fewer samples than the block holds.
-    #[error("GeoTIFF block {index} decoded {found} samples, expected at least {expected}")]
+    /// The caller passed a different number of byte buffers than
+    /// `block_ranges` returned.
+    #[error("raster block {index} got {found} byte buffers, expected {expected}")]
+    BlockBuffers {
+        index: u32,
+        found: usize,
+        expected: usize,
+    },
+
+    /// A block decoded to fewer samples than it holds.
+    #[error("raster block {index} decoded {found} bytes, expected at least {expected}")]
     ShortBlock {
         index: u32,
         found: usize,
         expected: usize,
     },
-}
-
-impl RasterError {
-    /// Classify a tiff decoder error. `limit_bytes` is the buffer cap the
-    /// decoder ran under.
-    pub(crate) fn from_tiff(error: TiffError, limit_bytes: usize) -> Self {
-        match error {
-            TiffError::IoError(io) => RasterError::from(io),
-            TiffError::UnsupportedError(_) => RasterError::UnsupportedTiff(error),
-            TiffError::LimitsExceeded => RasterError::DecodeLimitExceeded { limit_bytes },
-            TiffError::FormatError(_) | TiffError::IntSizeError | TiffError::UsageError(_) => {
-                RasterError::Malformed(error)
-            }
-        }
-    }
-}
-
-impl From<io::Error> for RasterError {
-    /// A short or undecodable stream is a malformed file. Every other kind
-    /// is a reader error.
-    fn from(error: io::Error) -> Self {
-        match error.kind() {
-            io::ErrorKind::UnexpectedEof
-            | io::ErrorKind::InvalidData
-            | io::ErrorKind::InvalidInput => RasterError::Malformed(TiffError::IoError(error)),
-            _ => RasterError::Io(error),
-        }
-    }
 }

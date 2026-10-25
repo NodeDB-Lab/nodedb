@@ -3,16 +3,17 @@
 //! Refusals and hostile input: every failure is a typed error, never a
 //! panic and never an allocation past the cap.
 
-use nodedb_raster::geokeys::{GT_MODEL_TYPE, PROJECTED_CS_TYPE};
+use nodedb_raster::tiff::geokeys::{GT_MODEL_TYPE, PROJECTED_CS_TYPE};
 use nodedb_raster::{RasterError, RasterLimits};
-use tiff::encoder::colortype::{Gray16, Gray64, GrayI8};
+use tiff::encoder::colortype::{Gray16, Gray64, GrayI64};
 use tiff::encoder::{Compression, DeflateLevel};
 use tiff::tags::Tag;
 
 use crate::fixtures::{
-    DEFLATE, Extra, LIMITS, Pred, RawImage, RawLayout, StripSpec, decode_everything, encode_chunks,
-    encode_raw, encode_strips, geokeys, open, planes, strip_spec,
+    DEFLATE, Extra, LIMITS, Pred, RawImage, RawLayout, StripSpec, encode_chunks, encode_raw,
+    encode_strips, geokeys, planes, strip_spec,
 };
+use crate::image::{decode_everything, open};
 
 /// A small planar tiled GeoTIFF with GeoKeys: every code path the reader
 /// has, in a few hundred bytes.
@@ -149,10 +150,10 @@ fn unsupported_sample_types_are_refused_at_open() {
         compression: Compression::Deflate(DeflateLevel::Fast),
         ..strip_spec(4, 4)
     };
-    let signed_bytes = vec![-3_i8; 16];
+    let wide_signed = vec![-3_i64; 16];
     assert!(matches!(
-        open(&encode_strips::<GrayI8>(&spec, &signed_bytes)),
-        Err(RasterError::UnsupportedSampleType { bits: 8, .. })
+        open(&encode_strips::<GrayI64>(&spec, &wide_signed)),
+        Err(RasterError::UnsupportedSampleType { bits: 64, .. })
     ));
     let wide = vec![7_u64; 16];
     assert!(matches!(
@@ -182,8 +183,8 @@ fn raw_gray16(compression: u16, photometric: u16) -> Vec<u8> {
 
 #[test]
 fn unsupported_compression_is_refused_at_open() {
-    // 50000 is ZSTD, 34887 LERC, 7 JPEG.
-    for code in [50000, 34887, 7] {
+    // 2 is CCITT RLE, 34925 LZMA, 50001 WebP.
+    for code in [2, 34925, 50001] {
         assert!(matches!(
             open(&raw_gray16(code, 1)),
             Err(RasterError::UnsupportedCompression { code: c }) if c == code
@@ -204,7 +205,7 @@ fn transforming_photometrics_are_refused_at_open() {
 
 #[test]
 fn an_out_of_range_block_is_a_typed_error() {
-    let mut reader = open(&small_fixture()).expect("opens");
+    let reader = open(&small_fixture()).expect("opens");
     let count = reader.block_count();
     assert!(matches!(
         reader.read_block(count),

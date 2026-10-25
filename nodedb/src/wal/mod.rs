@@ -24,7 +24,7 @@ pub use manager::WalManager;
 pub use redo::{
     CalvinStamp, CapturedEntry, CarriedRedoStream, CascadedEdge, ContinuedRedo,
     CrossShardAppliedKey, EVERY_ROW, EdgeCutRedo, EdgeDeleteRedo, EdgePutRedo, GroupMembership,
-    NodeCascadeRedo, OriginAppend, PublishPosition, RedoChunkHeader, RedoChunkPiece,
+    NodeCascadeRedo, NodeLabelRedo, OriginAppend, PublishPosition, RedoChunkHeader, RedoChunkPiece,
     RedoChunkRecord, RedoPublish, RedoRecord, RedoRowChange, RedoRowKind, RedoRowSource,
     RedoStreamId, RedoSubRecord, RowSourceIndex, SplitRedo, WriteGroup, WriteGroupRecord,
     WriteSetCapture, split_redo,

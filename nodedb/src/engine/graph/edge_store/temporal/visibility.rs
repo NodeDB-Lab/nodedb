@@ -204,6 +204,22 @@ where
         // ordinal, so the applied ordinal is read whatever the system time.
         Ok(self.applied_at(db, tid, fwd_key, system_from)? < cut)
     }
+
+    /// Whether a read at `as_of` sees the version of `collection` under
+    /// `fwd_key`, at `system_from`: the version is at or below `as_of`, and
+    /// no TRUNCATE cut hides it.
+    pub(in crate::engine::graph::edge_store) fn visible_at(
+        &mut self,
+        db: u64,
+        tid: u64,
+        collection: &str,
+        fwd_key: &str,
+        system_from: i64,
+        as_of: i64,
+    ) -> crate::Result<bool> {
+        Ok(system_from <= as_of
+            && !self.hidden(db, tid, collection, fwd_key, system_from, as_of)?)
+    }
 }
 
 /// The version of `edge` a read at `as_of` resolves to: the newest at or

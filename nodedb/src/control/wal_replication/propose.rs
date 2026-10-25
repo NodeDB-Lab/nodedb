@@ -52,8 +52,8 @@ pub(crate) fn stamp_collection_incarnations(
 /// every replica. A write whose plan names no single user collection stamps
 /// none.
 ///
-/// An edge write is not proposed. It runs as a Calvin transaction
-/// (`planner::calvin::edge_sequencing`), and its applied payload and read
+/// An edge or label write is not proposed. It runs as a Calvin transaction
+/// (`planner::calvin::graph_sequencing`), and its applied payload and read
 /// version come back the same way.
 ///
 /// `deadline` is the caller's deadline. Every attempt, each attempt's wait at
@@ -76,10 +76,11 @@ pub(crate) async fn propose_replicated_entry(
     mut entry: ReplicatedEntry,
     deadline: tokio::time::Instant,
 ) -> crate::Result<super::types::AppliedOutput> {
-    // An edge write runs as a Calvin transaction, never as a data-group
-    // entry, so every edge version of a collection takes a Calvin ordinal.
+    // An edge or label write runs as a Calvin transaction, never as a
+    // data-group entry, so every edge and label version takes a Calvin
+    // ordinal.
     if let Some(response) =
-        crate::control::planner::calvin::sequence_replicated_edge_write(state, &entry).await?
+        crate::control::planner::calvin::sequence_replicated_graph_write(state, &entry).await?
     {
         return Ok((response.payload.to_vec(), response.read_versions));
     }

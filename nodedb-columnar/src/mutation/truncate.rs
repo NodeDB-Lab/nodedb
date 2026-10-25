@@ -20,6 +20,7 @@ use super::engine::MutationEngine;
 pub struct TruncatedRows {
     memtable: ColumnarMemtable,
     pk_index: PkIndex,
+    closed_index: PkIndex,
     delete_bitmaps: HashMap<u64, DeleteBitmap>,
     memtable_row_counter: u32,
     memtable_surrogates: Vec<Option<Surrogate>>,
@@ -46,6 +47,7 @@ impl MutationEngine {
         TruncatedRows {
             memtable,
             pk_index: std::mem::take(&mut self.pk_index),
+            closed_index: std::mem::take(&mut self.closed_index),
             delete_bitmaps: std::mem::take(&mut self.delete_bitmaps),
             memtable_row_counter: std::mem::replace(&mut self.memtable_row_counter, 0),
             memtable_surrogates: std::mem::take(&mut self.memtable_surrogates),
@@ -58,12 +60,14 @@ impl MutationEngine {
         let TruncatedRows {
             memtable,
             pk_index,
+            closed_index,
             delete_bitmaps,
             memtable_row_counter,
             memtable_surrogates,
         } = rows;
         self.memtable = memtable;
         self.pk_index = pk_index;
+        self.closed_index = closed_index;
         self.delete_bitmaps = delete_bitmaps;
         self.memtable_row_counter = memtable_row_counter;
         self.memtable_surrogates = memtable_surrogates;

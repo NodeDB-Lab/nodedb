@@ -58,7 +58,7 @@ mod tests {
                 nodedb_physical::physical_plan::DocumentPageSource {
                     collection: QualifiedCollection::new(DatabaseId::DEFAULT, "source"),
                     filters: Vec::new(),
-                    system_as_of_ms: None,
+                    system_time: nodedb_types::SystemTimeScope::Current,
                     offset: 0,
                     limit: None,
                     column_map: Vec::new(),

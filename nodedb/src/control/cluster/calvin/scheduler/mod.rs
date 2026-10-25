@@ -24,7 +24,7 @@ pub use driver::{
     SequencerProposer, propose_calvin_read_result,
 };
 pub use inbox::{CalvinApplyEvent, CalvinInboxes, CalvinVShardInbox, InboxHandle};
-pub use lock::{AcquireOutcome, HotKeyTable, LockKey, LockManager, LockMode, TxnId};
+pub use lock::{AcquireOutcome, Acquisition, HotKeyTable, LockKey, LockManager, LockMode, TxnId};
 // Existing call sites reference this module as `scheduler::lock_manager::…`;
 // keep that path stable via an alias while the module lives under `lock/`.
 pub use lock as lock_manager;

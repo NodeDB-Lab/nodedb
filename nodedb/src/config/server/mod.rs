@@ -7,6 +7,7 @@ mod cluster;
 mod cold_storage;
 mod config;
 mod domain;
+mod egress;
 mod env;
 mod env_expand;
 mod log_format;
@@ -28,6 +29,7 @@ pub use checkpoint::CheckpointSettings;
 pub use cluster::{ClusterSettings, TlsPaths};
 pub use cold_storage::ColdStorageSettings;
 pub use config::ServerConfig;
+pub use egress::{CredentialEncryptionSettings, EgressSettings};
 pub use env::{apply_env_overrides, parse_memory_size, parse_seed_nodes};
 pub use log_format::LogFormat;
 pub use observability::{

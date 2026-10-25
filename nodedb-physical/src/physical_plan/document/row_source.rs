@@ -47,9 +47,9 @@ pub struct DocumentPageSource {
     /// Serialized `Vec<ScanFilter>`: the WHERE clause, ANDed with the
     /// collection's read policy by the RLS pass.
     pub filters: Vec<u8>,
-    /// `FOR SYSTEM_TIME AS OF` cut, in epoch milliseconds. `None` reads the
-    /// current version.
-    pub system_as_of_ms: Option<i64>,
+    /// `Current`, or the `AS OF SYSTEM TIME` cut every page reads at. Never
+    /// `AllVersions`.
+    pub system_time: nodedb_types::SystemTimeScope,
     /// Matching rows skipped before the first row is read.
     pub offset: usize,
     /// Matching rows read after the offset. `None` reads every matching row.
@@ -85,7 +85,7 @@ impl RowSource {
         RowSource::DocumentPages(DocumentPageSource {
             collection,
             filters: Vec::new(),
-            system_as_of_ms: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
             offset: 0,
             limit: None,
             column_map: Vec::new(),
@@ -106,6 +106,15 @@ impl RowSource {
         match self {
             RowSource::DocumentPages(_) => None,
             RowSource::Query(query) => Some(&query.plan),
+        }
+    }
+
+    /// The plan a query source runs, for an in-place rewrite. `None` for a
+    /// page source.
+    pub fn query_plan_mut(&mut self) -> Option<&mut PhysicalPlan> {
+        match self {
+            RowSource::DocumentPages(_) => None,
+            RowSource::Query(query) => Some(&mut query.plan),
         }
     }
 

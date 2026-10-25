@@ -2,6 +2,7 @@
 
 //! Offset window functions: lag, lead, nth_value.
 
+use nodedb_crs::CrsContext;
 use nodedb_types::Value;
 
 use super::arg::{arg_at, const_default_arg, const_usize_arg, eval_arg_values};
@@ -12,8 +13,9 @@ pub(super) fn apply_lag(
     rows: &mut [(String, Value)],
     indices: &[usize],
     spec: &WindowFuncSpec,
+    crs: &CrsContext<'_>,
 ) -> Result<(), crate::expr::EvalError> {
-    let arg_values = eval_arg_values(rows, indices, spec, 0)?;
+    let arg_values = eval_arg_values(rows, indices, spec, 0, crs)?;
     let offset = const_usize_arg(spec, 1, 1);
     let default = const_default_arg(spec, 2);
 
@@ -32,8 +34,9 @@ pub(super) fn apply_lead(
     rows: &mut [(String, Value)],
     indices: &[usize],
     spec: &WindowFuncSpec,
+    crs: &CrsContext<'_>,
 ) -> Result<(), crate::expr::EvalError> {
-    let arg_values = eval_arg_values(rows, indices, spec, 0)?;
+    let arg_values = eval_arg_values(rows, indices, spec, 0, crs)?;
     let offset = const_usize_arg(spec, 1, 1);
     let default = const_default_arg(spec, 2);
 
@@ -57,8 +60,9 @@ pub(super) fn apply_nth_value(
     rows: &mut [(String, Value)],
     indices: &[usize],
     spec: &WindowFuncSpec,
+    crs: &CrsContext<'_>,
 ) -> Result<(), crate::expr::EvalError> {
-    let arg_values = eval_arg_values(rows, indices, spec, 0)?;
+    let arg_values = eval_arg_values(rows, indices, spec, 0, crs)?;
     let n = const_usize_arg(spec, 1, 1).max(1);
 
     for (pos, &i) in indices.iter().enumerate() {

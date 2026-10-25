@@ -12,8 +12,24 @@ use super::visitor;
 
 impl CoreLoop {
     /// Execute a physical plan. Dispatches to the appropriate sub-dispatcher.
+    ///
+    /// A task that applies a replicated data-group entry carries the
+    /// system-time ordinal the entry's leader assigned. It scopes the apply
+    /// (`ApplyScope::replicated_ordinal`) and folds into the shared clock, so
+    /// the write's bitemporal versions take it and a later local write
+    /// stamps above it.
     pub(in crate::data::executor) fn execute(&mut self, task: &ExecutionTask) -> Response {
-        self.execute_plan(task, task.plan())
+        let carried = task
+            .request
+            .entry_version
+            .and_then(|entry| entry.system_ordinal);
+        if let Some(ordinal) = carried {
+            self.observe_bitemporal_ordinal(ordinal);
+        }
+        let previous = std::mem::replace(&mut self.apply_scope.replicated_ordinal, carried);
+        let response = self.execute_plan(task, task.plan());
+        self.apply_scope.replicated_ordinal = previous;
+        response
     }
 
     /// Execute an arbitrary physical plan (used for inline sub-plans in multi-way joins).

@@ -5,12 +5,15 @@
 //! Arrays live in the array catalog, not in `StoredCollection`. The result
 //! uses the DESCRIBE COLLECTION columns: one row per dim, one row per attr,
 //! then `__storage`, `__tile_extents`, and `__georef` when the array has one.
+//! An attr's type carries its metadata clauses in DDL form:
+//! `UINT16 NODATA 0.0 SCALE 2.75e-5 OFFSET -0.2 UNITS 'reflectance'`.
 
 use nodedb_array::schema::{ArraySchema, DimType};
 use nodedb_array::types::domain::DomainBound;
 use nodedb_types::{DatabaseId, TenantId};
 use serde_json::{Map, Value as JsonValue};
 
+use crate::control::array_catalog::attr_meta::{meta_ast, meta_sql};
 use crate::control::array_catalog::georef::{georef_ast, georef_sql};
 use crate::control::server::response_shape::types::{DdlColType, ShapedRows};
 use crate::control::state::SharedState;
@@ -69,7 +72,12 @@ fn rows(schema: &ArraySchema) -> Vec<Map<String, JsonValue>> {
     }
     for attr in &schema.attrs {
         let nullable = if attr.nullable { "true" } else { "false" };
-        rows.push(row(&attr.name, attr.dtype.sql_name(), nullable));
+        let ty = format!(
+            "{}{}",
+            attr.dtype.sql_name(),
+            meta_sql(&meta_ast(&attr.meta))
+        );
+        rows.push(row(&attr.name, &ty, nullable));
     }
     rows.push(row("__storage", "array", "false"));
     let extents: Vec<String> = schema.tile_extents.iter().map(u64::to_string).collect();
@@ -154,9 +162,37 @@ mod tests {
     }
 
     #[test]
+    fn attr_rows_show_their_metadata() {
+        let schema = ArraySchemaBuilder::new("scene")
+            .dim(DimSpec::new(
+                "row",
+                DimType::Int64,
+                Domain::new(DomainBound::Int64(0), DomainBound::Int64(9)),
+            ))
+            .attr(AttrSpec::new("red", AttrType::UInt16, true).with_meta(
+                nodedb_array::schema::AttrMeta {
+                    nodata: Some(0.0),
+                    scale: Some(0.0000275),
+                    offset: Some(-0.2),
+                    units: Some("reflectance".into()),
+                },
+            ))
+            .attr(AttrSpec::new("qa", AttrType::Int8, true))
+            .tile_extents(vec![10])
+            .build()
+            .unwrap();
+        let rows = rows(&schema);
+        assert_eq!(
+            field(&rows, "red").as_deref(),
+            Some("UINT16 NODATA 0.0 SCALE 2.75e-5 OFFSET -0.2 UNITS 'reflectance'")
+        );
+        assert_eq!(field(&rows, "qa").as_deref(), Some("INT8"));
+    }
+
+    #[test]
     fn rows_show_the_georef() {
         let rows = rows(&schema(Some(ArrayGeoref {
-            srid: nodedb_types::geometry::Srid::Utm47N,
+            srid: nodedb_types::geometry::Srid::new(32647).expect("srid"),
             x_dim: 1,
             y_dim: 0,
             transform: Some(GeoTransform([600_000.0, 10.0, 0.0, 700_000.0, 0.0, -10.0])),

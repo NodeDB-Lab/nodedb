@@ -39,9 +39,12 @@ pub(super) struct TimeseriesAppendOutcome {
 
 /// Append the WAL record for a `TimeseriesOp`.
 ///
-/// An ingest resolves its default row timestamp here, once: `now_override`
-/// when the instant was decided elsewhere, else this node's clock. The record
-/// carries it, and the live apply receives it as `resolved_now_ms`.
+/// An ingest resolves its stamp here, once: `now_override` when it was
+/// decided elsewhere (a replicated entry's leader stamp), else the
+/// millisecond of a fresh ordinal of this node's system-time clock. It is
+/// the `_ts_system` of the batch's bitemporal rows and the default timestamp
+/// of its untimed rows. The record carries it, and the live apply receives
+/// it as `resolved_now_ms`.
 pub(super) fn wal_append_timeseries_op(
     append: TimeseriesAppend<'_>,
 ) -> crate::Result<TimeseriesAppendOutcome> {
@@ -62,7 +65,7 @@ pub(super) fn wal_append_timeseries_op(
             provenance,
             ..
         } => {
-            let now_ms = now_override.unwrap_or_else(crate::engine::kv::current_ms);
+            let now_ms = now_override.unwrap_or_else(|| wal.ordinal_now_ms());
             // WAL bypass: skip WAL if collection has wal=false in timeseries_config.
             let bypassed = credentials.is_some_and(|creds| {
                 matches!(
@@ -113,7 +116,7 @@ pub(super) fn wal_append_timeseries_op(
             collection,
             restart_identity: _,
         } => {
-            let wal_payload = encode_columnar_truncate_payload(collection.as_str())?;
+            let wal_payload = encode_columnar_truncate_payload(collection.as_str(), None, false)?;
             TimeseriesAppendOutcome {
                 lsn: Some(wal.append_timeseries_truncate(
                     tenant_id,
@@ -148,10 +151,18 @@ pub(super) fn wal_append_timeseries_op(
 }
 
 /// Encode the payload of a `ColumnarTruncate` / `TimeseriesTruncate` WAL
-/// record: the collection name only. The record type names the engine.
-pub(crate) fn encode_columnar_truncate_payload(collection: &str) -> crate::Result<Vec<u8>> {
+/// record. The record type names the engine. `system_from` and
+/// `erase_history` are those of `ColumnarOp::Truncate`: a timeseries truncate
+/// passes `None` and `false`.
+pub(crate) fn encode_columnar_truncate_payload(
+    collection: &str,
+    system_from: Option<i64>,
+    erase_history: bool,
+) -> crate::Result<Vec<u8>> {
     let record = nodedb_types::columnar::ColumnarTruncateWalRecord {
         collection: collection.to_string(),
+        system_from,
+        erase_history,
     };
     zerompk::to_msgpack_vec(&record).map_err(|e| crate::Error::Serialization {
         format: "msgpack".into(),
@@ -209,6 +220,8 @@ pub(crate) struct ColumnarBatchRecord<'a> {
     pub surrogates: &'a [nodedb_types::Surrogate],
     /// What a row whose primary key already exists does.
     pub conflict_policy: &'a crate::wal::ColumnarConflictPolicy,
+    /// System-time ordinal of the first row of a bitemporal insert.
+    pub system_from: Option<i64>,
 }
 
 /// Encode the payload of a `TimeseriesBatch` WAL record for a columnar batch.
@@ -225,6 +238,7 @@ pub(crate) fn encode_columnar_batch_payload(
         provenance,
         surrogates,
         conflict_policy,
+        system_from,
     } = record;
     let record = nodedb_types::columnar::ColumnarWalRecord {
         kind: "columnar".to_string(),
@@ -233,6 +247,7 @@ pub(crate) fn encode_columnar_batch_payload(
         provenance: provenance.cloned(),
         surrogates: surrogates.to_vec(),
         conflict_policy: conflict_policy.encode()?,
+        system_from,
     };
     zerompk::to_msgpack_vec(&record).map_err(|e| crate::Error::Serialization {
         format: "msgpack".into(),
@@ -248,6 +263,7 @@ pub(crate) fn encode_columnar_dml_payload(
     is_update: bool,
     filters: &[u8],
     updates: &[(String, nodedb_physical::physical_plan::UpdateValue)],
+    system_from: Option<i64>,
 ) -> crate::Result<Vec<u8>> {
     let record = nodedb_types::columnar::ColumnarDmlWalRecord {
         kind: "columnar_dml".to_string(),
@@ -255,6 +271,7 @@ pub(crate) fn encode_columnar_dml_payload(
         is_update,
         filters: filters.to_vec(),
         updates: crate::wal::encode_columnar_dml_updates(updates)?,
+        system_from,
     };
     zerompk::to_msgpack_vec(&record).map_err(|e| crate::Error::Serialization {
         format: "msgpack".into(),
@@ -270,6 +287,7 @@ pub(crate) fn encode_columnar_resolved_dml_payload(
     is_update: bool,
     rows: &[(nodedb_types::Value, Vec<nodedb_types::Value>)],
     pks: &[nodedb_types::Value],
+    system_from: Option<i64>,
 ) -> crate::Result<Vec<u8>> {
     let to_msgpack = |v: &nodedb_types::Value| {
         nodedb_types::value_to_msgpack(v).map_err(|e| crate::Error::Serialization {
@@ -301,6 +319,7 @@ pub(crate) fn encode_columnar_resolved_dml_payload(
         collection: collection.to_string(),
         is_update,
         rows: wal_rows,
+        system_from,
     };
     zerompk::to_msgpack_vec(&record).map_err(|e| crate::Error::Serialization {
         format: "msgpack".into(),

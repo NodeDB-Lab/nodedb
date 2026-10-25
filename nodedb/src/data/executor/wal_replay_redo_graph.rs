@@ -142,6 +142,8 @@ impl CoreLoop {
                     properties,
                     system_from,
                     applied,
+                    valid_from_ms,
+                    valid_until_ms,
                     ..
                 } = edge;
                 if tombstones.is_tombstoned(
@@ -170,6 +172,8 @@ impl CoreLoop {
                         properties: properties.clone(),
                         src_surrogate,
                         dst_surrogate,
+                        valid_from_ms,
+                        valid_until_ms,
                     }),
                 );
                 self.apply_scope.graph_system_from = system_from;
@@ -187,6 +191,8 @@ impl CoreLoop {
                         properties: &properties,
                         src_surrogate,
                         dst_surrogate,
+                        valid_from_ms,
+                        valid_until_ms,
                     },
                     recording.then_some(&mut undo),
                 );
@@ -337,6 +343,10 @@ impl CoreLoop {
         }
         let database_id = record.header.database_id;
         let tenant_id = record.header.tenant_id;
+        self.historical_csr.invalidate_tenant(
+            nodedb_types::DatabaseId::new(database_id),
+            crate::types::TenantId::new(tenant_id),
+        );
         if let Err(e) = self.edge_store.apply_node_cascade(
             database_id,
             crate::types::TenantId::new(tenant_id),
@@ -354,59 +364,6 @@ impl CoreLoop {
         self.csr_partition_mut(database_id, tenant_id)
             .remove_node_edges(&cascade.node);
         true
-    }
-
-    /// Replay reconstituted `GraphNodeLabelSet` / `GraphNodeLabelRemove` redo
-    /// sub-records — the transaction-resolve counterpart of
-    /// `replay_graph_node_label_wal` (autocommit, `wal_replay_graph_labels.rs`).
-    ///
-    /// A transaction's staged node-label deltas resolve to the SAME
-    /// `(node_id, labels)` payload shape the autocommit path produces (see
-    /// `resolve/graph.rs`'s `serialize_node_label_deltas`), so this routes
-    /// each reconstituted record through the SAME `try_replay_graph_node_label`
-    /// decoder rather than reimplementing it — producer and both replay paths
-    /// never drift on shape.
-    pub(crate) fn replay_graph_node_labels_redo(
-        &mut self,
-        records: &[WalRecord],
-        num_cores: usize,
-    ) {
-        let mut replayed = 0usize;
-
-        for record in records {
-            if self.replay_halted() {
-                break;
-            }
-            let record_type = RecordType::from_raw(record.logical_record_type());
-            let is_set = record_type == Some(RecordType::GraphNodeLabelSet);
-            let is_remove = record_type == Some(RecordType::GraphNodeLabelRemove);
-            if !is_set && !is_remove {
-                continue;
-            }
-
-            let vshard_id = record.header.vshard_id as usize;
-            let target_core = if num_cores > 0 {
-                vshard_id % num_cores
-            } else {
-                0
-            };
-            if target_core != self.core_id {
-                continue;
-            }
-
-            let database_id = DatabaseId::new(record.header.database_id);
-            if let Some(applied) = self.try_replay_graph_node_label(record, database_id) {
-                replayed += applied;
-            }
-        }
-
-        if replayed > 0 {
-            tracing::info!(
-                core = self.core_id,
-                replayed,
-                "WAL graph node-label redo replay complete"
-            );
-        }
     }
 
     /// Build a synthetic `ExecutionTask` for graph edge redo replay. Carries the
@@ -503,6 +460,8 @@ mod tests {
             dst_surrogate: 20,
             system_from: Some(nodedb_types::ms_to_ordinal_upper(100)),
             applied: None,
+            valid_from_ms: None,
+            valid_until_ms: None,
         })
         .expect("encode edge put sub-record");
         RedoSubRecord {

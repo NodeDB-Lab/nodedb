@@ -57,6 +57,8 @@ pub struct ArrayShardSliceReq {
     /// Zerompk encoding of `nodedb_array::query::PolygonZone`, forwarded from
     /// `ArrayOp::Slice::zone_msgpack`. Empty = no zone.
     pub zone_msgpack: Vec<u8>,
+    /// Read attrs physically, forwarded from `ArrayOp::Slice::physical`.
+    pub physical: bool,
 }
 
 /// Gather response: shard returns matching rows as opaque msgpack row bytes.
@@ -67,7 +69,7 @@ pub struct ArrayShardSliceResp {
     pub rows_msgpack: Vec<Vec<u8>>,
     /// True when the shard hit the `limit` and may have more rows.
     pub truncated: bool,
-    /// True when `system_as_of` is below the oldest tile version on this shard
+    /// True when the system-time cutoff is below the oldest tile version on this shard
     /// and the shard produced zero rows as a result of that horizon.
     pub truncated_before_horizon: bool,
     /// The write versions the shard read observed, one per vShard it covers,
@@ -83,7 +85,7 @@ pub struct ArrayShardSliceResp {
 pub struct ArrayShardAggReq {
     pub array_id_msgpack: Vec<u8>,
     pub attr_idx: u32,
-    /// Zerompk encoding of `ArrayReducer` (c_enum, 1 byte on wire).
+    /// Zerompk encoding of `ArrayReducer`.
     pub reducer_msgpack: Vec<u8>,
     /// Negative means no group-by; non-negative is the dimension index.
     pub group_by_dim: i32,
@@ -92,9 +94,10 @@ pub struct ArrayShardAggReq {
     /// The bucket this shard owns. The shard counts only cells whose tile
     /// key falls in it. `None` counts every cell.
     pub shard_bucket: Option<nodedb_types::ShardBucket>,
-    /// Bitemporal system-time cutoff forwarded from `ArrayOp::Aggregate::system_as_of`.
-    /// `None` = live read.
-    pub system_as_of: Option<i64>,
+    /// Bitemporal system-time scope forwarded from
+    /// `ArrayOp::Aggregate::system_time`. A `Pinned` scope names the cut
+    /// marker the shard waits for before it reads.
+    pub system_time: nodedb_types::SystemTimeScope,
     /// Bitemporal valid-time point forwarded from `ArrayOp::Aggregate::valid_at_ms`.
     /// `None` = no valid-time filter.
     pub valid_at_ms: Option<i64>,
@@ -111,6 +114,8 @@ pub struct ArrayShardAggReq {
     /// Zerompk encoding of `nodedb_array::query::ArrayRegion`, forwarded from
     /// `ArrayOp::Aggregate::region_msgpack`. Empty = the whole array.
     pub region_msgpack: Vec<u8>,
+    /// Reduce physical values, forwarded from `ArrayOp::Aggregate::physical`.
+    pub physical: bool,
 }
 
 /// Gather response: shard returns partial aggregate(s) for merge.
@@ -119,7 +124,7 @@ pub struct ArrayShardAggResp {
     pub shard_id: u32,
     /// One partial per group-by bucket (or one entry when group_by_dim < 0).
     pub partials: Vec<super::merge::ArrayAggPartial>,
-    /// True when `system_as_of` is below the oldest tile version on this shard
+    /// True when the system-time cutoff is below the oldest tile version on this shard
     /// and the shard produced zero rows as a result of that horizon.
     pub truncated_before_horizon: bool,
     /// The write versions the shard read observed (see
@@ -147,8 +152,9 @@ pub struct ArrayShardElementwiseReq {
     /// falls in it, so vShards that share one Data Plane emit no row twice.
     /// `None` pairs every cell.
     pub shard_bucket: Option<nodedb_types::ShardBucket>,
-    /// Bitemporal system-time cutoff for both operands. `None` = live read.
-    pub system_as_of: Option<i64>,
+    /// Bitemporal system-time scope for both operands (see
+    /// [`ArrayShardAggReq::system_time`]).
+    pub system_time: nodedb_types::SystemTimeScope,
     /// Bitemporal valid-time point for both operands. `None` = no
     /// valid-time filter.
     pub valid_at_ms: Option<i64>,

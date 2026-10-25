@@ -37,7 +37,7 @@ pub(crate) fn row_to_msgpack_with(
     write_msgpack_map_header(&mut buf, row.len());
     for (key, val) in row {
         write_msgpack_str(&mut buf, key);
-        write_msgpack_value_with(&mut buf, val, instants);
+        write_msgpack_value_with(&mut buf, val, instants)?;
     }
     Ok(buf)
 }
@@ -85,12 +85,17 @@ pub(crate) fn write_msgpack_str(buf: &mut Vec<u8>, s: &str) {
 }
 
 /// Write one value with instants as ISO 8601 text.
-pub(crate) fn write_msgpack_value(buf: &mut Vec<u8>, val: &SqlValue) {
+pub(crate) fn write_msgpack_value(buf: &mut Vec<u8>, val: &SqlValue) -> crate::Result<()> {
     write_msgpack_value_with(buf, val, InstantForm::Iso8601)
 }
 
-/// Write one value with instants in the given form.
-pub(crate) fn write_msgpack_value_with(buf: &mut Vec<u8>, val: &SqlValue, instants: InstantForm) {
+/// Write one value with instants in the given form. A geometry is the
+/// geometry ext, which keeps its SRID, Z and M.
+pub(crate) fn write_msgpack_value_with(
+    buf: &mut Vec<u8>,
+    val: &SqlValue,
+    instants: InstantForm,
+) -> crate::Result<()> {
     match val {
         SqlValue::Null => buf.push(0xC0),
         SqlValue::Bool(true) => buf.push(0xC3),
@@ -118,7 +123,7 @@ pub(crate) fn write_msgpack_value_with(buf: &mut Vec<u8>, val: &SqlValue, instan
         SqlValue::Array(arr) => {
             write_msgpack_array_header(buf, arr.len());
             for item in arr {
-                write_msgpack_value_with(buf, item, instants);
+                write_msgpack_value_with(buf, item, instants)?;
             }
         }
         SqlValue::Bytes(b) => write_msgpack_bin(buf, b),
@@ -130,7 +135,15 @@ pub(crate) fn write_msgpack_value_with(buf: &mut Vec<u8>, val: &SqlValue, instan
             InstantForm::Iso8601 => write_msgpack_str(buf, &dt.to_iso8601()),
             InstantForm::Ext => write_instant(buf, InstantKind::Utc, dt.micros),
         },
+        SqlValue::Geometry(g) => {
+            let ext = nodedb_types::value_to_msgpack(&nodedb_types::Value::Geometry(g.clone()))
+                .map_err(|e| crate::Error::Internal {
+                    detail: format!("geometry does not encode as MessagePack: {e}"),
+                })?;
+            buf.extend_from_slice(&ext);
+        }
     }
+    Ok(())
 }
 
 fn write_msgpack_int(buf: &mut Vec<u8>, i: i64) {
@@ -193,7 +206,7 @@ mod tests {
     #[test]
     fn write_msgpack_value_int() {
         let mut buf = Vec::new();
-        write_msgpack_value(&mut buf, &SqlValue::Int(42));
+        write_msgpack_value(&mut buf, &SqlValue::Int(42)).unwrap();
         assert_eq!(buf, vec![42]);
     }
 
@@ -203,7 +216,7 @@ mod tests {
     fn wide_integer_decimal_is_uint64() {
         let wide = rust_decimal::Decimal::from(u64::MAX);
         let mut buf = Vec::new();
-        write_msgpack_value(&mut buf, &SqlValue::Decimal(wide));
+        write_msgpack_value(&mut buf, &SqlValue::Decimal(wide)).unwrap();
         assert_eq!(buf, [0xCF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
         assert_eq!(
             nodedb_types::value_from_msgpack(&buf).unwrap(),
@@ -212,7 +225,7 @@ mod tests {
 
         let mut buf = Vec::new();
         let fractional = rust_decimal::Decimal::from_str_exact("1.5").unwrap();
-        write_msgpack_value(&mut buf, &SqlValue::Decimal(fractional));
+        write_msgpack_value(&mut buf, &SqlValue::Decimal(fractional)).unwrap();
         let mut expected = Vec::new();
         write_msgpack_str(&mut expected, "1.5");
         assert_eq!(buf, expected);
@@ -221,7 +234,7 @@ mod tests {
     #[test]
     fn write_msgpack_value_string() {
         let mut buf = Vec::new();
-        write_msgpack_value(&mut buf, &SqlValue::String("hi".into()));
+        write_msgpack_value(&mut buf, &SqlValue::String("hi".into())).unwrap();
         assert_eq!(buf, vec![0xA2, b'h', b'i']);
     }
 
@@ -234,7 +247,7 @@ mod tests {
         let dt = nodedb_types::NdbDateTime::from_micros(EARLY_MICROS);
         for val in [SqlValue::Timestamp(dt), SqlValue::Timestamptz(dt)] {
             let mut buf = Vec::new();
-            write_msgpack_value(&mut buf, &val);
+            write_msgpack_value(&mut buf, &val).unwrap();
             let mut expected = Vec::new();
             write_msgpack_str(&mut expected, "2020-03-05T10:00:00.000000Z");
             assert_eq!(buf, expected);
@@ -251,7 +264,7 @@ mod tests {
         ];
         for (val, kind) in cases {
             let mut buf = Vec::new();
-            write_msgpack_value_with(&mut buf, &val, InstantForm::Ext);
+            write_msgpack_value_with(&mut buf, &val, InstantForm::Ext).unwrap();
             assert_eq!(
                 nodedb_types::read_instant(&buf, 0),
                 Some((kind, EARLY_MICROS)),

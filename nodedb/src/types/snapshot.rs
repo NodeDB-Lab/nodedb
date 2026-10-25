@@ -169,6 +169,18 @@ pub struct TenantDataSnapshot {
     #[serde(default)]
     pub tenant_edge_applied: Vec<(u64, u64, String, i64)>,
 
+    /// Every labeled node's current label set, as `(database_id, tenant_id,
+    /// node, labels)`. A node's labels home on `VShardId::from_key(node)`.
+    #[msgpack(default)]
+    #[serde(default)]
+    pub node_labels: Vec<NodeLabelsEntry>,
+
+    /// Every node-label version, as `(database_id, tenant_id, node,
+    /// system_from, labels)`. Each keeps its system time.
+    #[msgpack(default)]
+    #[serde(default)]
+    pub node_label_versions: Vec<NodeLabelVersionEntry>,
+
     /// CRDT constraint state, one entry per `(tenant, collection)` that has an
     /// installed constraint set: `[(tenant_id, collection, constraint_version,
     /// per_constraint_zerompk_bytes), ...]`. Each inner `Vec<u8>` is one
@@ -296,6 +308,13 @@ pub struct TenantDataSnapshot {
     #[serde(default)]
     pub group_redo_streams: Vec<crate::wal::CarriedRedoStream>,
 }
+
+/// One node's current label set: `(database_id, tenant_id, node, labels)`.
+pub type NodeLabelsEntry = (u64, u64, String, Vec<String>);
+
+/// One node-label version: `(database_id, tenant_id, node, system_from,
+/// labels)`.
+pub type NodeLabelVersionEntry = (u64, u64, String, i64, Vec<String>);
 
 /// One `(partition, epoch, index, sequence)` position with its held row.
 pub type HeldAtPosition = (u32, u64, u64, u64, Vec<u8>);

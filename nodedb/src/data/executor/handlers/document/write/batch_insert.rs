@@ -305,7 +305,7 @@ impl CoreLoop {
                 surrogate.as_u32(),
                 row_identity.clone(),
                 value.clone(),
-                outcome.bitemporal_sys_from_ms,
+                outcome.bitemporal_sys_from,
             ));
             if task.wal_lsn().is_some() {
                 let mut tuples = outcome.secondary_index_added;

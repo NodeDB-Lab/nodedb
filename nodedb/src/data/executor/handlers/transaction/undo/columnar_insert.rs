@@ -42,7 +42,9 @@ impl CoreLoop {
                         inserted_pks.push(pk_bytes);
                     }
                 }
-                ColumnarInsertIntent::Insert | ColumnarInsertIntent::Put => {
+                ColumnarInsertIntent::Insert
+                | ColumnarInsertIntent::Put
+                | ColumnarInsertIntent::Restore => {
                     // The insert tombstones the prior row wherever it lives,
                     // in the memtable or a flushed segment, so the undo puts
                     // back either one.

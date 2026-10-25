@@ -228,6 +228,7 @@ pub(in super::super::super) fn convert_insert(
                 schema_bytes,
                 provenance: None,
                 wal_lsn: None,
+                system_from: None,
                 rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
                 // Both slots are filled by later passes over the built plan —
                 // `inject_returning_spec` from the statement's RETURNING list,

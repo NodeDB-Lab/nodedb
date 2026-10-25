@@ -16,7 +16,7 @@ use super::super::expr::convert_sort_keys;
 use super::super::filter::serialize_filters;
 use super::super::scan_params::ScanParams;
 use super::super::value::{sql_value_to_bytes, sql_value_to_nodedb_value, sql_value_to_string};
-use super::helpers::valid_at_from_scope;
+use crate::control::planner::sql_plan_convert::valid_time_point;
 use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 
 pub(in crate::control::planner::sql_plan_convert) fn convert_scan(
@@ -103,7 +103,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_scan(
                 computed_columns: computed_bytes,
                 rls_filters: Vec::new(),
                 system_time: temporal.system_time,
-                valid_at_ms: valid_at_from_scope(temporal),
+                valid_at_ms: valid_time_point(temporal.valid_time, "timeseries")?,
                 having: Vec::new(),
                 tiering: None,
                 output_columns: Vec::new(),
@@ -117,7 +117,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_scan(
             rls_filters: Vec::new(),
             sort_keys: sort.clone(),
             system_time: temporal.system_time,
-            valid_at_ms: valid_at_from_scope(temporal),
+            valid_at_ms: valid_time_point(temporal.valid_time, "columnar")?,
             prefilter: None,
             computed_columns: computed_bytes.clone(),
         }),
@@ -133,7 +133,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_scan(
             rls_filters: Vec::new(),
             sort_keys: sort.clone(),
             system_time: temporal.system_time,
-            valid_at_ms: valid_at_from_scope(temporal),
+            valid_at_ms: valid_time_point(temporal.valid_time, "spatial")?,
             prefilter: None,
             computed_columns: computed_bytes.clone(),
         }),
@@ -171,7 +171,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_scan(
                 computed_columns: computed_bytes,
                 window_functions: window_bytes,
                 system_time: temporal.system_time,
-                valid_at_ms: valid_at_from_scope(temporal),
+                valid_at_ms: valid_time_point(temporal.valid_time, "document")?,
                 prefilter: None,
             })
         }
@@ -256,9 +256,10 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_document_index_look
             detail: format!("index lookup on '{collection}' cannot answer a valid-time read"),
         });
     }
-    let system_as_of_ms = match temporal.system_time {
-        SystemTimeScope::Current => None,
-        SystemTimeScope::AsOf(ms) => Some(ms),
+    let system_time = match temporal.system_time {
+        scope @ (SystemTimeScope::Current
+        | SystemTimeScope::AsOf(_)
+        | SystemTimeScope::Pinned { .. }) => scope,
         SystemTimeScope::AllVersions => {
             return Err(crate::Error::PlanError {
                 detail: format!("index lookup on '{collection}' cannot list every version"),
@@ -279,7 +280,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_document_index_look
         // No LIMIT fetches every matching row under the byte budget.
         limit: limit.unwrap_or(usize::MAX),
         offset,
-        system_as_of_ms,
+        system_time,
     });
     Ok(vec![PhysicalTask {
         tenant_id,

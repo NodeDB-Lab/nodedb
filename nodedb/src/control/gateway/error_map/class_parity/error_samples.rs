@@ -221,6 +221,9 @@ pub(crate) fn error_samples() -> Vec<crate::Error> {
             index_srid: 4326,
             row_srid: 32648,
         },
+        E::UnknownSrid {
+            source: nodedb_crs::UnknownSrid::Undefined { code: 999 },
+        },
         E::NumericValueOutOfRange { detail: text() },
         E::InvalidTextRepresentation { detail: text() },
         E::DatatypeMismatch { detail: text() },

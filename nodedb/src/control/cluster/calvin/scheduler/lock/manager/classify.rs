@@ -3,7 +3,7 @@
 //! Per-key classification of a lock request, and the grant that installs a
 //! requester on a key it can take now.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 
 use smallvec::smallvec;
 
@@ -42,7 +42,7 @@ impl LockManager {
             }
             return KeyState::Conflict;
         }
-        if entry.has_waiter(txn) {
+        if self.is_waiting(txn, key) {
             return KeyState::Conflict;
         }
         if entry.mode.compatible(mode) && entry.waiters.is_empty() {
@@ -76,14 +76,33 @@ impl LockManager {
     /// A txn that holds the key and needs a stronger mode drops its own hold
     /// and waits for the merged mode. Its read degrades to plain OCC until the
     /// grant, and the key can drain so the grant can fire.
-    pub(super) fn enqueue(&mut self, txn: TxnId, key: &LockKey, mode: LockMode) {
+    ///
+    /// A txn that already waits on the key raises its queued mode in place
+    /// and keeps its queue position.
+    ///
+    /// A dropped hold can make front waiters compatible with the remaining
+    /// holders. The key then promotes them, and each waiter that now holds
+    /// its whole request joins `promoted`. The requester never joins it: an
+    /// incompatible holder remains, and its entry is at the queue back.
+    pub(super) fn enqueue(
+        &mut self,
+        txn: TxnId,
+        key: &LockKey,
+        mode: LockMode,
+        promoted: &mut BTreeSet<TxnId>,
+    ) {
+        let waits = self.is_waiting(txn, key);
         let Some(entry) = self.table.get_mut(key) else {
             return;
         };
-        if entry.has_waiter(txn) {
+        if waits {
+            if let Some((_, queued)) = entry.waiters.iter_mut().find(|(w, _)| *w == txn) {
+                *queued = queued.merge(mode);
+            }
             return;
         }
-        let wanted = match entry.mode_of(txn) {
+        let held = entry.mode_of(txn);
+        let wanted = match held {
             Some(own) => {
                 entry.drop_holder(txn);
                 own.merge(mode)
@@ -91,5 +110,9 @@ impl LockManager {
             None => mode,
         };
         entry.waiters.push_back((txn, wanted));
+        self.waiting.entry(txn).or_default().insert(key.clone());
+        if held.is_some() {
+            self.promote_waiters(key, promoted);
+        }
     }
 }

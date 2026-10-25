@@ -31,7 +31,7 @@ pub(in crate::data::executor) struct TruncateScope<'a> {
     pub has_vectors: bool,
     /// The tombstones' system time on a bitemporal collection, `None` on any
     /// other.
-    pub bitemporal_sys_from_ms: Option<i64>,
+    pub bitemporal_sys_from: Option<i64>,
 }
 
 /// What a TRUNCATE has removed so far.
@@ -77,7 +77,7 @@ impl CoreLoop {
                     tid,
                     collection,
                     storage_key,
-                    bitemporal_sys_from_ms: s.bitemporal_sys_from_ms,
+                    bitemporal_sys_from: s.bitemporal_sys_from,
                 },
             )
             .map_err(|e| refuse(progress.truncated, e))?;
@@ -144,7 +144,7 @@ impl CoreLoop {
         progress.write_set.push(removed_row_image(
             surrogate.as_u32(),
             row_identity.clone(),
-            removal.tombstone_sys_from_ms,
+            removal.tombstone_sys_from,
         ));
         // The collection's edges keep their place here: the TRUNCATE's
         // transaction cuts them with one `TruncateEdges` per vShard.

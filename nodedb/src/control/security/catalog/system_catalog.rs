@@ -2,13 +2,12 @@
 
 //! SystemCatalog: redb-backed persistent catalog database.
 //!
-//! Opens or creates the system.redb file, initializes all tables,
-//! and provides raw WASM module storage methods.
+//! Opens or creates the system.redb file and initializes all tables.
 
 use std::path::Path;
 use std::sync::Arc;
 
-use redb::{Database, ReadableDatabase, ReadableTable};
+use redb::{Database, ReadableDatabase};
 use tracing::info;
 
 use super::types::*;
@@ -24,26 +23,14 @@ pub struct SystemCatalog {
     /// Committed DEFINE EVENT definitions, for readers that must not read
     /// redb.
     pub(super) event_defs: Arc<super::event_defs_index::EventDefsIndex>,
+    /// The user-defined CRS set, loaded at open and swapped on each write.
+    pub(super) crs_set: Arc<std::sync::RwLock<Arc<nodedb_crs::CustomCrsSet>>>,
     /// Whether a barrier log row committed without persisting since the
     /// last `persist_calvin_barrier_logs`.
     pub(super) calvin_barrier_logs_pending: Arc<std::sync::atomic::AtomicBool>,
+    /// Test-only fault switches and read counters.
     #[cfg(test)]
-    pub(super) fail_next_calvin_barrier_persist: Arc<std::sync::atomic::AtomicBool>,
-    #[cfg(test)]
-    pub(super) fail_next_calvin_barrier_replace: Arc<std::sync::atomic::AtomicBool>,
-    #[cfg(test)]
-    pub(super) fail_next_user_counter_write: Arc<std::sync::atomic::AtomicBool>,
-    #[cfg(test)]
-    pub(super) fail_next_function_wasm_write: Arc<std::sync::atomic::AtomicBool>,
-    #[cfg(test)]
-    pub(super) fail_next_collection_write: Arc<std::sync::atomic::AtomicBool>,
-    #[cfg(test)]
-    pub(super) fail_next_surrogate_write: Arc<std::sync::atomic::AtomicBool>,
-    #[cfg(test)]
-    pub(super) fail_next_redo_snapshot_owed_write: Arc<std::sync::atomic::AtomicBool>,
-    /// Audit rows the DML position read decoded, so a test can tell a range read from a full scan.
-    #[cfg(test)]
-    pub(super) dml_audit_rows_read: Arc<std::sync::atomic::AtomicU64>,
+    pub(super) faults: super::test_faults::CatalogTestFaults,
 }
 
 impl crate::storage::RedbBacked for SystemCatalog {
@@ -67,31 +54,7 @@ impl SystemCatalog {
             info!(path = %path.display(), "system catalog opened");
         }
 
-        let catalog = Self {
-            db: Arc::new(db),
-            crdt_signing_root: Arc::new(std::sync::RwLock::new(None)),
-            event_defs: Arc::new(super::event_defs_index::EventDefsIndex::new()),
-            calvin_barrier_logs_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            #[cfg(test)]
-            fail_next_calvin_barrier_persist: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            #[cfg(test)]
-            fail_next_calvin_barrier_replace: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            #[cfg(test)]
-            fail_next_user_counter_write: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            #[cfg(test)]
-            fail_next_function_wasm_write: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            #[cfg(test)]
-            fail_next_collection_write: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            #[cfg(test)]
-            fail_next_surrogate_write: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            #[cfg(test)]
-            fail_next_redo_snapshot_owed_write: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            #[cfg(test)]
-            dml_audit_rows_read: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        };
-        catalog.bootstrap_default_database()?;
-        catalog.reload_event_definitions()?;
-        Ok(catalog)
+        Self::from_bootstrapped(db)
     }
 
     /// Open a non-persistent system catalog backed by an in-memory redb
@@ -102,81 +65,27 @@ impl SystemCatalog {
             .create_with_backend(redb::backends::InMemoryBackend::new())
             .map_err(|e| catalog_err("open in-memory", e))?;
         Self::ensure_bootstrapped(&db)?;
+        Self::from_bootstrapped(db)
+    }
+
+    /// The catalog over `db`, whose tables exist: seeds the default database
+    /// and loads the event definitions and the custom CRS set.
+    fn from_bootstrapped(db: Database) -> crate::Result<Self> {
         let catalog = Self {
             db: Arc::new(db),
             crdt_signing_root: Arc::new(std::sync::RwLock::new(None)),
             event_defs: Arc::new(super::event_defs_index::EventDefsIndex::new()),
+            crs_set: Arc::new(std::sync::RwLock::new(Arc::new(
+                nodedb_crs::CustomCrsSet::new(),
+            ))),
             calvin_barrier_logs_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(test)]
-            fail_next_calvin_barrier_persist: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            #[cfg(test)]
-            fail_next_calvin_barrier_replace: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            #[cfg(test)]
-            fail_next_user_counter_write: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            #[cfg(test)]
-            fail_next_function_wasm_write: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            #[cfg(test)]
-            fail_next_collection_write: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            #[cfg(test)]
-            fail_next_surrogate_write: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            #[cfg(test)]
-            fail_next_redo_snapshot_owed_write: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            #[cfg(test)]
-            dml_audit_rows_read: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            faults: super::test_faults::CatalogTestFaults::default(),
         };
         catalog.bootstrap_default_database()?;
         catalog.reload_event_definitions()?;
+        catalog.reload_custom_crs_set()?;
         Ok(catalog)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn fail_next_user_counter_write_for_test(&self) {
-        self.fail_next_user_counter_write
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn fail_next_function_wasm_write_for_test(&self) {
-        self.fail_next_function_wasm_write
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    /// Make the next `put_collection` raise, so an applier's error path runs.
-    #[cfg(test)]
-    pub(crate) fn fail_next_collection_write_for_test(&self) {
-        self.fail_next_collection_write
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    /// Make the next surrogate watermark write raise, so an applier's error
-    /// path runs.
-    #[cfg(test)]
-    pub(crate) fn fail_next_surrogate_write_for_test(&self) {
-        self.fail_next_surrogate_write
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    /// Make the next `save_redo_snapshot_owed` raise, so a held group's debt
-    /// write fails once.
-    #[cfg(test)]
-    pub(crate) fn fail_next_redo_snapshot_owed_write_for_test(&self) {
-        self.fail_next_redo_snapshot_owed_write
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    /// Make the next `persist_calvin_barrier_logs` raise. The pending rows
-    /// stay pending.
-    #[cfg(test)]
-    pub(crate) fn fail_next_calvin_barrier_persist_for_test(&self) {
-        self.fail_next_calvin_barrier_persist
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    /// Make the next `replace_calvin_barrier_logs` raise before it commits.
-    #[cfg(test)]
-    pub(crate) fn fail_next_calvin_barrier_replace_for_test(&self) {
-        self.fail_next_calvin_barrier_replace
-            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Bootstrap every `_system.*` table from the canonical registry —
@@ -211,67 +120,6 @@ impl SystemCatalog {
                 .map_err(|e| catalog_err("init commit", e))?;
         }
         Ok(needs_bootstrap)
-    }
-
-    /// Execute a write transaction on the WASM_MODULES table.
-    fn wasm_write<F, T>(&self, op: &str, f: F) -> crate::Result<T>
-    where
-        F: FnOnce(&mut redb::Table<&str, &[u8]>) -> crate::Result<T>,
-    {
-        let txn = self
-            .db
-            .begin_write()
-            .map_err(|e| catalog_err(&format!("{op} txn"), e))?;
-        let result = {
-            let mut table = txn
-                .open_table(WASM_MODULES)
-                .map_err(|e| catalog_err(&format!("{op} open"), e))?;
-            f(&mut table)?
-        };
-        txn.commit()
-            .map_err(|e| catalog_err(&format!("{op} commit"), e))?;
-        Ok(result)
-    }
-
-    /// Store raw bytes under a string key in the WASM_MODULES table.
-    pub fn put_raw(&self, key: &[u8], value: &[u8]) -> crate::Result<()> {
-        let key_str = std::str::from_utf8(key).map_err(|e| catalog_err("put_raw key", e))?;
-        self.wasm_write("put_raw", |table| {
-            table
-                .insert(key_str, value)
-                .map_err(|e| catalog_err("put_raw insert", e))?;
-            Ok(())
-        })
-    }
-
-    /// Load raw bytes by string key from the WASM_MODULES table.
-    pub fn get_raw(&self, key: &[u8]) -> crate::Result<Option<Vec<u8>>> {
-        let key_str = std::str::from_utf8(key).map_err(|e| catalog_err("get_raw key", e))?;
-        let txn = self
-            .db
-            .begin_read()
-            .map_err(|e| catalog_err("get_raw txn", e))?;
-        let table = txn
-            .open_table(WASM_MODULES)
-            .map_err(|e| catalog_err("get_raw open", e))?;
-        match table
-            .get(key_str)
-            .map_err(|e| catalog_err("get_raw get", e))?
-        {
-            Some(v) => Ok(Some(v.value().to_vec())),
-            None => Ok(None),
-        }
-    }
-
-    /// Delete raw bytes by string key from the WASM_MODULES table.
-    pub fn delete_raw(&self, key: &[u8]) -> crate::Result<()> {
-        let key_str = std::str::from_utf8(key).map_err(|e| catalog_err("delete_raw key", e))?;
-        self.wasm_write("delete_raw", |table| {
-            table
-                .remove(key_str)
-                .map_err(|e| catalog_err("delete_raw remove", e))?;
-            Ok(())
-        })
     }
 }
 

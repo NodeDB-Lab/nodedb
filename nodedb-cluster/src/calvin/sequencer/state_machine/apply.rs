@@ -85,7 +85,9 @@ impl SequencerStateMachine {
         };
 
         match entry {
-            SequencerEntry::EpochBatch { batch } => self.apply_epoch_batch(index, batch),
+            SequencerEntry::EpochBatch { batch } => {
+                self.apply_epoch_batch(index, data.len(), batch)
+            }
             SequencerEntry::CompletionAck {
                 epoch,
                 position,
@@ -194,16 +196,20 @@ impl SequencerStateMachine {
         }
     }
 
-    /// Apply a committed epoch batch: re-derive each txn's participants,
-    /// check the epoch order, then fan the batch out.
-    fn apply_epoch_batch(&mut self, index: u64, mut batch: EpochBatch) {
+    /// Apply a committed epoch batch, decoded from `raw_len` bytes: re-derive
+    /// each txn's participants, check the epoch order, then fan the batch out.
+    ///
+    /// While an armed vShard's replay covers `index`, the decoded batch moves
+    /// into the replay cache, so no replay decodes it again.
+    fn apply_epoch_batch(&mut self, index: u64, raw_len: usize, mut batch: EpochBatch) {
         // Re-derive the participating_vshards field which is skipped
         // during serialization (it is computed from write_set collection names).
         // A class whose participants cannot be derived makes the entry
         // as unusable as one that fails to decode, so it is skipped the
         // same way.
         for txn in &mut batch.txns {
-            if let Err(err) = txn.tx_class.restore_derived() {
+            // A freshly decoded class is unshared, so `make_mut` copies nothing.
+            if let Err(err) = std::sync::Arc::make_mut(&mut txn.tx_class).restore_derived() {
                 error!(
                     epoch = batch.epoch,
                     raft_index = index,
@@ -216,6 +222,7 @@ impl SequencerStateMachine {
                     index,
                     &err.to_string(),
                 );
+                self.keep_skipped_for_replay(index, raw_len);
                 return;
             }
         }
@@ -227,8 +234,9 @@ impl SequencerStateMachine {
                     }),
             );
             self.open_multi_parts(index, &batch);
-            self.fan_out_epoch_batch(index, batch);
+            self.fan_out_epoch_batch(index, &mut batch);
         }
+        self.keep_for_replay(index, raw_len, batch);
     }
 
     /// Whether `batch` may be fanned out. `false` when the state machine is
@@ -323,7 +331,7 @@ impl SequencerStateMachine {
 
     /// Fan each txn of `batch` out to the scheduler of every participating
     /// vShard this node hosts, then advance the applied epoch.
-    fn fan_out_epoch_batch(&mut self, index: u64, mut batch: EpochBatch) {
+    fn fan_out_epoch_batch(&mut self, index: u64, batch: &mut EpochBatch) {
         let mut fanned_out = 0u64;
         let mut dropped = 0u64;
         // Collected for a single end-of-call diagnostics report,
@@ -340,7 +348,7 @@ impl SequencerStateMachine {
         // epoch targeting a given vShard is stamped with the same count.
         // Shared with the replay path via `compute_vshard_txn_counts` so
         // the two paths can never drift.
-        let vshard_txn_counts = crate::calvin::sequencer::replay::compute_vshard_txn_counts(&batch);
+        let vshard_txn_counts = crate::calvin::sequencer::replay::compute_vshard_txn_counts(batch);
         for txn in &batch.txns {
             // Seed the expected vote-participant count deterministically on
             // EVERY replica (not just the epoch's originating leader), so a
@@ -368,7 +376,7 @@ impl SequencerStateMachine {
                     continue;
                 }
                 // Stamp the per-vShard position count for the vShard this
-                // copy is delivered to.
+                // copy is delivered to. The copy shares the class by pointer.
                 let mut per_vshard = txn.clone();
                 per_vshard.epoch_vshard_txn_count =
                     vshard_txn_counts.get(&vshard).copied().unwrap_or(0);
@@ -564,10 +572,11 @@ mod tests {
             txns: vec![SequencedTxn {
                 epoch: 0,
                 position: 0,
-                tx_class,
+                tx_class: std::sync::Arc::new(tx_class),
                 epoch_system_ms: 1_700_000_000_000,
                 epoch_vshard_txn_count: 1,
                 lock_owner: None,
+                local_plans: None,
             }],
             epoch_system_ms: 1_700_000_000_000,
         };

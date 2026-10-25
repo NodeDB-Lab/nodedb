@@ -194,6 +194,14 @@ impl PlanCache {
         });
     }
 
+    /// Evict every entry. A change that no version set names, such as a
+    /// dropped user-defined CRS a plan resolved, makes any plan stale.
+    pub fn clear(&self) {
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        inner.version_set_index.clear();
+        inner.entries.clear();
+    }
+
     /// Look up the most recently stored `GatewayVersionSet` for a SQL key.
     ///
     /// Used by `execute_sql` for the two-phase cache lookup: check the side

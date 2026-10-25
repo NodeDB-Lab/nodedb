@@ -16,6 +16,7 @@ use crate::control::server::shared::ddl::result::DdlError;
 pub(super) fn enforce_simple_check(
     constraint: &CheckConstraintDef,
     fields: &HashMap<String, nodedb_types::Value>,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> Result<(), DdlError> {
     // Strip NEW. prefixes to get bare column references.
     let bare_expr = strip_new_prefix(&constraint.check_sql);
@@ -35,13 +36,12 @@ pub(super) fn enforce_simple_check(
     // Build a Value::Object from the fields for evaluation.
     let doc = nodedb_types::Value::Object(fields.clone());
 
-    // Evaluate the expression against the document. A division/modulo-by-zero
-    // is neither a PASS nor an ordinary FAIL — it's an evaluation error,
-    // reported under SQLSTATE 22012 rather than folded
-    // into the 23514 (check_violation) the ordinary-failure arm below uses.
-    let result = expr.eval(&doc).map_err(|e| {
+    // Evaluate the expression against the document. An evaluation error is
+    // neither a PASS nor an ordinary FAIL. It keeps its own SQLSTATE rather
+    // than folding into the 23514 (check_violation) of the failure arm below.
+    let result = expr.eval(&doc, crs).map_err(|e| {
         ddl_err(
-            nodedb_types::error::sqlstate::DIVISION_BY_ZERO,
+            crate::control::server::shared::ddl::sqlstate::eval_error_sqlstate(&e),
             &format!(
                 "CHECK constraint '{}' failed to evaluate: {}: {e}",
                 constraint.name, constraint.check_sql

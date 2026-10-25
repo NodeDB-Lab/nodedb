@@ -19,7 +19,7 @@ pub(in crate::data::executor) type RemovedSpatialEntry = (
     u64,
     nodedb_types::BoundingBox,
     String,
-    nodedb_types::geometry::Srid,
+    crate::engine::spatial::TreeSrid,
 );
 
 /// Whether `schema` declares at least one `Geometry` column, i.e. whether

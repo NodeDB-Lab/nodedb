@@ -155,41 +155,60 @@ impl Scheduler {
     /// Scan one window of the committed sequencer log from `from` for the
     /// lane's inputs, and return the next index to scan.
     ///
-    /// A failed read leaves `from` for the next pass. The compaction
-    /// hold-down keeps every index at or past the armed catch-up start.
+    /// The log is read only from the first index the replay cache lacks, and
+    /// each entry decodes once per node. A failed read, or a window the cache
+    /// evicted part of after the read was sized, leaves `from` for the next
+    /// pass. The compaction hold-down keeps every index at or past the armed
+    /// catch-up start.
     fn scan_log_for_lane(&mut self, from: u64) -> u64 {
-        let hi = self
-            .sequencer_state_machine
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .current_committed_index();
-        let Some(hi) = hi.filter(|&hi| hi >= from) else {
-            return from;
-        };
+        // SM-lock scope: bound the window and ask how much of it the cache
+        // holds.
         let window = self.config.catch_up_window.max(1);
-        let end = from.saturating_add(window - 1).min(hi);
-        let entries = {
-            let mr = self.multi_raft.lock().unwrap_or_else(|p| p.into_inner());
-            match mr.read_committed_entries(SEQUENCER_GROUP_ID, from, end) {
-                Ok(entries) => entries,
-                Err(error) => {
-                    tracing::warn!(
-                        vshard = self.vshard_id,
-                        from,
-                        end,
-                        %error,
-                        "calvin backlog lane: failed to read committed sequencer entries"
-                    );
-                    return from;
+        let (end, kept_through) = {
+            let sm = self
+                .sequencer_state_machine
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            let Some(hi) = sm.current_committed_index().filter(|&hi| hi >= from) else {
+                return from;
+            };
+            let end = from.saturating_add(window - 1).min(hi);
+            (end, sm.replay_kept_through(from, end))
+        };
+        // MultiRaft-lock scope: read from the first index the cache lacks.
+        let read_from = kept_through.map_or(Some(from), |kept| {
+            kept.checked_add(1).filter(|&next| next <= end)
+        });
+        let entries = match read_from {
+            Some(read_from) => {
+                let mr = self.multi_raft.lock().unwrap_or_else(|p| p.into_inner());
+                match mr.read_committed_entries(SEQUENCER_GROUP_ID, read_from, end) {
+                    Ok(entries) => entries,
+                    Err(error) => {
+                        tracing::warn!(
+                            vshard = self.vshard_id,
+                            from,
+                            read_from,
+                            end,
+                            %error,
+                            "calvin backlog lane: failed to read committed sequencer entries"
+                        );
+                        return from;
+                    }
                 }
             }
+            None => Vec::new(),
         };
+        // SM-lock scope: project the window for this vShard.
         let inputs = self
             .sequencer_state_machine
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .replay_epochs_for_vshard(&entries, self.vshard_id, 0, u64::MAX);
-        for input in inputs {
+            .replay_window_for_vshard(&entries, self.vshard_id, from, end);
+        let Some(inputs) = inputs else {
+            return from;
+        };
+        for (_, input) in inputs {
             if self.passes_lane(&input) {
                 self.process_scheduler_input(input);
             }
@@ -230,8 +249,9 @@ mod tests {
     fn one_part_header(epoch: u64) -> SequencedTxn {
         let mut txn = make_local_write_txn(epoch, 0);
         txn.epoch_vshard_txn_count = 1;
-        txn.tx_class.plans = Vec::new();
-        txn.tx_class.multi_part = Some(MultiPartPlans {
+        let class = std::sync::Arc::make_mut(&mut txn.tx_class);
+        class.plans = Vec::new();
+        class.multi_part = Some(MultiPartPlans {
             stream: PartStreamId { node: 1, seq: 1 },
             part_count: 1,
             total_tasks: 1,
@@ -270,7 +290,14 @@ mod tests {
         input_tx
             .try_send(SchedulerInput::Txn(Box::new(later)))
             .expect("room on the channel");
-        let plans = plan_wire::encode_batch(&vec![truncate_plan()]).expect("encode");
+        let mut builder = nodedb_cluster::calvin::types::PartTasksBuilder::new();
+        builder
+            .push(
+                &plan_wire::encode(&truncate_plan()).expect("encode"),
+                &[test_coll_vshard()],
+            )
+            .expect("push");
+        let plans = builder.take().expect("encode");
         input_tx
             .try_send(SchedulerInput::TxnPart {
                 txn: TxnIdWire {

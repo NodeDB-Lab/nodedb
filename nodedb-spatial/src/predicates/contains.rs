@@ -16,8 +16,12 @@ use super::edge::{is_collection, point_on_ring_boundary, ring_edges};
 /// ST_Contains(a, b) — does geometry A fully contain geometry B?
 ///
 /// Returns false if any part of B lies outside A, or if B only touches
-/// A's boundary without entering its interior.
+/// A's boundary without entering its interior. EMPTY contains nothing and
+/// is contained by nothing.
 pub fn st_contains(a: &Geometry, b: &Geometry) -> bool {
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
     // Fast path: bbox pre-filter. A GeometryCollection skips it: its bbox is
     // a union whose wrap rule depends on the SRID, and the arms below test
     // each member on its own.

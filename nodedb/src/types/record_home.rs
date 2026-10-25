@@ -14,6 +14,8 @@
 //!   write carries each endpoint's surrogate from the collection home, and
 //!   every replica of each endpoint home binds it on apply.
 //! - An array cell lives on the vShard its tile key routes to.
+//! - A node's labels and label versions live on the key vShard of the node,
+//!   where every label write of the node routes.
 //!
 //! Every collection is collection-homed. Key-homed data is graph data, whose
 //! partition key is the node id.
@@ -40,6 +42,8 @@ pub enum HomedRecord<'a> {
     },
     /// Array cells whose tile keys route to `vshard`.
     ArrayCells { vshard: VShardId },
+    /// The labels and label versions of the graph node `node`.
+    NodeLabels { node: &'a str },
 }
 
 /// The one or two vShards a record lives on.
@@ -60,6 +64,10 @@ impl RecordHomes {
             HomedRecord::Edge { src, dst } => Self::edge(src, dst),
             HomedRecord::ArrayCells { vshard } => Self {
                 owner: vshard,
+                peer: None,
+            },
+            HomedRecord::NodeLabels { node } => Self {
+                owner: VShardId::from_key(node.as_bytes()),
                 peer: None,
             },
             HomedRecord::Bind {
@@ -218,6 +226,23 @@ mod tests {
         let rows_only = bind(false);
         assert!(rows_only.is_single());
         assert_eq!(rows_only.owner(), collection.vshard());
+    }
+
+    #[test]
+    fn node_labels_live_on_the_node_key_home() {
+        let (node, other) = cross_shard_pair();
+        let homes = RecordHomes::of(HomedRecord::NodeLabels { node: &node });
+        assert!(homes.is_single());
+        assert_eq!(homes.owner(), VShardId::from_key(node.as_bytes()));
+        assert_eq!(
+            homes.owner(),
+            RecordHomes::edge(&node, &other).owner(),
+            "a node's labels live where its outgoing edges are owned"
+        );
+        let home: HashSet<u32> = [homes.owner().as_u32()].into();
+        assert!(homes.owned_by(&home));
+        let elsewhere: HashSet<u32> = [VShardId::from_key(other.as_bytes()).as_u32()].into();
+        assert!(!homes.owned_by(&elsewhere));
     }
 
     #[test]

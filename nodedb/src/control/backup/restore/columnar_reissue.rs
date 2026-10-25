@@ -62,22 +62,10 @@ pub fn decode_snapshot_live_rows(
     let mut rows: Vec<Value> = Vec::new();
     let mut surrogates: Vec<Surrogate> = Vec::new();
 
-    // Memtable: non-deleted rows in schema column order → keyed object.
-    // A memtable row that does not read refuses the restore: dropping it
-    // would lose the row from the restored collection.
-    for scanned in engine.scan_memtable_rows_with_surrogates() {
-        let (surrogate, values) = scanned?;
-        let surrogate = surrogate.ok_or_else(|| Error::Storage {
-            engine: "columnar".into(),
-            detail: format!(
-                "restore reissue: memtable row for '{collection}' has no surrogate; \
-                 cannot preserve cross-engine identity"
-            ),
-        })?;
-        rows.push(row_values_to_object(&column_names, values, collection)?);
-        surrogates.push(surrogate);
-    }
-
+    // Rows re-issue in the order the engine appended them: flushed segments
+    // in flush order, then the memtable. A bitemporal collection keeps every
+    // version of a key, and the primary-key index binds the version appended
+    // last, so this order binds each key to its newest version again.
     // Flushed segments: blob index i corresponds to segment_id i + 1 (the
     // export/flush convention). The per-segment delete bitmap lives on the
     // rebuilt engine under that segment_id; the surrogate sidecar is parallel to
@@ -112,6 +100,22 @@ pub fn decode_snapshot_live_rows(
         }
     }
 
+    // Memtable: non-deleted rows in schema column order → keyed object.
+    // A memtable row that does not read refuses the restore: dropping it
+    // would lose the row from the restored collection.
+    for scanned in engine.scan_memtable_rows_with_surrogates() {
+        let (surrogate, values) = scanned?;
+        let surrogate = surrogate.ok_or_else(|| Error::Storage {
+            engine: "columnar".into(),
+            detail: format!(
+                "restore reissue: memtable row for '{collection}' has no surrogate; \
+                 cannot preserve cross-engine identity"
+            ),
+        })?;
+        rows.push(row_values_to_object(&column_names, values, collection)?);
+        surrogates.push(surrogate);
+    }
+
     Ok(DecodedColumnarRows {
         rows,
         surrogates,
@@ -123,7 +127,9 @@ pub fn decode_snapshot_live_rows(
 ///
 /// The payload is the msgpack encoding of `Value::Array(rows)` (array of
 /// per-row field-keyed objects) — the exact shape the columnar insert handler
-/// expects.
+/// expects. The plan's intent is `Restore`: a bitemporal row keeps the
+/// `_ts_system` ordinal it carries, so every restored version keeps the
+/// system time its write stamped and `AS OF` answers as before the backup.
 pub fn build_columnar_insert_plan(
     collection: &str,
     decoded: DecodedColumnarRows,
@@ -142,12 +148,13 @@ pub fn build_columnar_insert_plan(
         collection: nodedb_types::QualifiedCollection::from_stored(collection.to_string()),
         payload,
         format: "msgpack".into(),
-        intent: ColumnarInsertIntent::Insert,
+        intent: ColumnarInsertIntent::Restore,
         on_conflict_updates: Vec::new(),
         surrogates: decoded.surrogates,
         schema_bytes: decoded.schema_bytes,
         provenance: None,
         wal_lsn: None,
+        system_from: None,
         // No predicate here: a restore re-issues rows that were already
         // admitted before the backup was taken. The identity that admitted
         // them is not available during restore.

@@ -25,7 +25,7 @@ pub(super) struct ElementwiseArgs<'a> {
     pub op: ArrayBinaryOp,
     pub attr_idx: u32,
     pub prefix_bits: u8,
-    pub system_as_of: Option<i64>,
+    pub system_time: nodedb_types::SystemTimeScope,
     pub valid_at_ms: Option<i64>,
     pub txn_id: Option<TxnId>,
 }
@@ -41,7 +41,7 @@ impl ClusterArrayExecutor {
             op,
             attr_idx,
             prefix_bits,
-            system_as_of,
+            system_time,
             valid_at_ms,
             txn_id,
         } = args;
@@ -64,7 +64,7 @@ impl ClusterArrayExecutor {
             attr_idx,
             // coord_elementwise stamps each shard's bucket.
             shard_bucket: None,
-            system_as_of,
+            system_time,
             valid_at_ms,
             txn_id: txn_id.map(TxnId::as_u64),
         };
@@ -77,7 +77,7 @@ impl ClusterArrayExecutor {
         note_array_reads(right, &result.read_versions);
         // A temporal read ends with one summary row, as a local elementwise
         // op answers.
-        if system_as_of.is_some() || valid_at_ms.is_some() {
+        if system_time.is_temporal() || valid_at_ms.is_some() {
             let summary = nodedb_types::json_to_msgpack(&serde_json::json!({
                 "truncated_before_horizon": result.truncated_before_horizon
             }))

@@ -16,12 +16,19 @@ use crate::engine::sparse::btree::{SparseEngine, redb_err};
 /// the row's real stored envelope. `valid_from_ms` / `valid_until_ms` carry the
 /// raw envelope sentinels (`i64::MIN` / `i64::MAX` when unbounded) so the
 /// handler can surface them uniformly across engines.
+///
+/// A delete version repeats the body of the live version it closes under an
+/// empty valid interval (`valid_from_ms = valid_until_ms = i64::MIN`), the
+/// convention a bitemporal columnar tombstone follows.
 pub struct VersionedRow {
     pub doc_id: StorageKey,
-    pub system_from_ms: i64,
+    /// The version's system-time ordinal.
+    pub system_from: i64,
     pub valid_from_ms: i64,
     pub valid_until_ms: i64,
     pub body: Vec<u8>,
+    /// The version deletes the document.
+    pub deleted: bool,
 }
 
 /// Versioned document table. Distinct from `super::super::btree::DOCUMENTS`
@@ -48,9 +55,9 @@ impl SparseEngine {
     }
 
     /// Append one version. Always creates a new key; never overwrites an
-    /// earlier version at the same `sys_from_ms`.
+    /// earlier version at the same `sys_from`.
     pub fn versioned_put(&self, p: VersionedPut<'_>) -> crate::Result<()> {
-        let key = versioned_doc_key(p.database_id, p.tenant, p.coll, p.doc_id, p.sys_from_ms);
+        let key = versioned_doc_key(p.database_id, p.tenant, p.coll, p.doc_id, p.sys_from);
         let val = encode_value(TAG_LIVE, p.valid_from_ms, p.valid_until_ms, p.body);
         let txn = self
             .db
@@ -77,7 +84,7 @@ impl SparseEngine {
         txn: &redb::WriteTransaction,
         p: VersionedPut<'_>,
     ) -> crate::Result<()> {
-        let key = versioned_doc_key(p.database_id, p.tenant, p.coll, p.doc_id, p.sys_from_ms);
+        let key = versioned_doc_key(p.database_id, p.tenant, p.coll, p.doc_id, p.sys_from);
         let val = encode_value(TAG_LIVE, p.valid_from_ms, p.valid_until_ms, p.body);
         let mut t = txn
             .open_table(DOCUMENTS_VERSIONED)
@@ -94,9 +101,9 @@ impl SparseEngine {
         tenant: u64,
         coll: &str,
         doc_id: &StorageKey,
-        sys_from_ms: i64,
+        sys_from: i64,
     ) -> crate::Result<()> {
-        let key = versioned_doc_key(database_id, tenant, coll, doc_id, sys_from_ms);
+        let key = versioned_doc_key(database_id, tenant, coll, doc_id, sys_from);
         let val = encode_value(TAG_TOMBSTONE, 0, 0, &[]);
         let txn = self
             .db
@@ -121,9 +128,9 @@ impl SparseEngine {
         tenant: u64,
         coll: &str,
         doc_id: &StorageKey,
-        sys_from_ms: i64,
+        sys_from: i64,
     ) -> crate::Result<()> {
-        let key = versioned_doc_key(database_id, tenant, coll, doc_id, sys_from_ms);
+        let key = versioned_doc_key(database_id, tenant, coll, doc_id, sys_from);
         let val = encode_value(TAG_TOMBSTONE, 0, 0, &[]);
         let mut t = txn
             .open_table(DOCUMENTS_VERSIONED)
@@ -136,7 +143,7 @@ impl SparseEngine {
     /// Physically remove one version's redb entry inside a caller-owned
     /// write transaction. Unlike [`Self::versioned_tombstone_in_txn`] (which
     /// appends a tombstone marker version), this deletes the entry at
-    /// `sys_from_ms` outright. Used by the transaction-rollback path to
+    /// `sys_from` outright. Used by the transaction-rollback path to
     /// undo a `versioned_put_in_txn` that must not survive an aborted
     /// transaction. Removing a non-existent key is a no-op.
     pub fn versioned_remove_in_txn(
@@ -146,9 +153,9 @@ impl SparseEngine {
         tenant: u64,
         coll: &str,
         doc_id: &StorageKey,
-        sys_from_ms: i64,
+        sys_from: i64,
     ) -> crate::Result<()> {
-        let key = versioned_doc_key(database_id, tenant, coll, doc_id, sys_from_ms);
+        let key = versioned_doc_key(database_id, tenant, coll, doc_id, sys_from);
         let mut t = txn
             .open_table(DOCUMENTS_VERSIONED)
             .map_err(|e| redb_err("open table", e))?;
@@ -226,7 +233,7 @@ impl SparseEngine {
         Ok(replaced)
     }
 
-    /// Ceiling read: most recent version at or before `sys_cutoff_ms`.
+    /// Ceiling read: most recent version at or before `sys_cutoff`.
     /// Returns `Ok(None)` when nothing is present, or the newest entry is
     /// a tombstone / GDPR-erased (both hide the row from normal reads).
     pub fn versioned_get_as_of(
@@ -235,11 +242,11 @@ impl SparseEngine {
         tenant: u64,
         coll: &str,
         doc_id: &StorageKey,
-        sys_cutoff_ms: Option<i64>,
+        sys_cutoff: Option<i64>,
         valid_at_ms: Option<i64>,
     ) -> crate::Result<Option<Vec<u8>>> {
         let lo = doc_prefix(database_id, tenant, coll, doc_id);
-        let hi = match sys_cutoff_ms {
+        let hi = match sys_cutoff {
             Some(ms) => versioned_doc_key(database_id, tenant, coll, doc_id, ms),
             None => doc_prefix_end(database_id, tenant, coll, doc_id),
         };
@@ -247,7 +254,7 @@ impl SparseEngine {
         let t = txn
             .open_table(DOCUMENTS_VERSIONED)
             .map_err(|e| redb_err("open table", e))?;
-        let range = match sys_cutoff_ms {
+        let range = match sys_cutoff {
             Some(_) => t
                 .range(lo.as_str()..=hi.as_str())
                 .map_err(|e| redb_err("range", e))?,
@@ -327,16 +334,12 @@ impl SparseEngine {
                     seg,
                 )
             })?;
-            let Ok(sys_from_ms) = suffix.parse::<i64>() else {
+            let Ok(sys_from) = suffix.parse::<i64>() else {
                 continue;
             };
             let bytes = v.value();
             let decoded = decode_value(bytes)?;
-            visit(
-                &doc_id,
-                sys_from_ms,
-                decoded.is_live().then_some(decoded.body),
-            )?;
+            visit(&doc_id, sys_from, decoded.is_live().then_some(decoded.body))?;
         }
         Ok(())
     }
@@ -370,6 +373,30 @@ impl SparseEngine {
         let decoded = decode_value(bytes)?;
         Ok(decoded.is_live().then(|| decoded.body.to_vec()))
     }
+
+    /// The system-time ordinal of the newest stored version of `doc_id`,
+    /// live or not. `None` when the row has no version.
+    pub fn versioned_latest_sys_from(
+        &self,
+        database_id: u64,
+        tenant: u64,
+        coll: &str,
+        doc_id: &StorageKey,
+    ) -> crate::Result<Option<i64>> {
+        let lo = doc_prefix(database_id, tenant, coll, doc_id);
+        let hi = doc_prefix_end(database_id, tenant, coll, doc_id);
+        let txn = self.db.begin_read().map_err(|e| redb_err("read txn", e))?;
+        let t = txn
+            .open_table(DOCUMENTS_VERSIONED)
+            .map_err(|e| redb_err("open table", e))?;
+        let newest = t
+            .range(lo.as_str()..hi.as_str())
+            .map_err(|e| redb_err("range", e))?
+            .next_back()
+            .transpose()
+            .map_err(|e| redb_err("entry", e))?;
+        Ok(newest.and_then(|(key, _value)| super::key::parse_sys_from(key.value())))
+    }
 }
 
 #[cfg(test)]
@@ -393,7 +420,7 @@ mod tests {
             tenant: 1,
             coll,
             doc_id: &key(id),
-            sys_from_ms: sys_from,
+            sys_from,
             valid_from_ms: 0,
             valid_until_ms: i64::MAX,
             body,
@@ -415,7 +442,7 @@ mod tests {
             tenant: 1,
             coll,
             doc_id: &key(id),
-            sys_from_ms: sys_from,
+            sys_from,
             valid_from_ms: valid_from,
             valid_until_ms: valid_until,
             body,
@@ -537,7 +564,7 @@ mod tests {
                     database_id: 1,
                     tenant: 1,
                     coll: "c",
-                    sys_cutoff_ms: None,
+                    sys_cutoff: None,
                     valid_at_ms: None,
                     limit: 100,
                 },
@@ -570,7 +597,7 @@ mod tests {
                     database_id: 1,
                     tenant: 1,
                     coll: "c",
-                    sys_cutoff_ms: None,
+                    sys_cutoff: None,
                     valid_at_ms: None,
                     limit: 100,
                 },
@@ -581,10 +608,10 @@ mod tests {
         // Every version is present (no newest-per-id collapse).
         assert_eq!(all.len(), 4);
         // Ascending by system time globally.
-        let times: Vec<i64> = all.iter().map(|r| r.system_from_ms).collect();
+        let times: Vec<i64> = all.iter().map(|r| r.system_from).collect();
         assert_eq!(times, vec![100, 150, 200, 300]);
         // System-time and body line up per version.
-        let row_of = |r: &VersionedRow| (r.doc_id, r.system_from_ms, r.body.clone());
+        let row_of = |r: &VersionedRow| (r.doc_id, r.system_from, r.body.clone());
         assert_eq!(row_of(&all[0]), (key(1), 100, b"a1".to_vec()));
         assert_eq!(row_of(&all[1]), (key(2), 150, b"b1".to_vec()));
         assert_eq!(row_of(&all[2]), (key(1), 200, b"a2".to_vec()));
@@ -592,7 +619,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_all_skips_tombstoned_versions() {
+    fn scan_all_emits_tombstoned_versions_as_deletes() {
         let (e, _d) = open_temp();
         put(&e, "c", 1, 100, b"a1");
         e.versioned_tombstone(1, 1, "c", &key(1), 200).unwrap();
@@ -603,7 +630,7 @@ mod tests {
                     database_id: 1,
                     tenant: 1,
                     coll: "c",
-                    sys_cutoff_ms: None,
+                    sys_cutoff: None,
                     valid_at_ms: None,
                     limit: 100,
                 },
@@ -611,9 +638,38 @@ mod tests {
                 &crate::engine::sparse::scan_stop::never_stop,
             )
             .unwrap();
-        // The tombstone version is excluded; the two live versions remain.
-        let times: Vec<i64> = all.iter().map(|r| r.system_from_ms).collect();
-        assert_eq!(times, vec![100, 300]);
+        // The tombstone version is a delete row between the live versions.
+        let times: Vec<i64> = all.iter().map(|r| r.system_from).collect();
+        assert_eq!(times, vec![100, 200, 300]);
+        let delete = &all[1];
+        assert!(delete.deleted && !all[0].deleted && !all[2].deleted);
+        assert_eq!(
+            delete.body,
+            b"a1".to_vec(),
+            "the body of the version it closes"
+        );
+        assert_eq!(
+            (delete.valid_from_ms, delete.valid_until_ms),
+            (i64::MIN, i64::MIN),
+            "a delete version has an empty valid interval"
+        );
+
+        // A valid-time point never falls in an empty interval.
+        let at_valid = e
+            .versioned_scan_all(
+                VersionedScanParams {
+                    database_id: 1,
+                    tenant: 1,
+                    coll: "c",
+                    sys_cutoff: None,
+                    valid_at_ms: Some(0),
+                    limit: 100,
+                },
+                &|_: &StorageKey, _: &[u8]| true,
+                &crate::engine::sparse::scan_stop::never_stop,
+            )
+            .unwrap();
+        assert!(at_valid.iter().all(|r| !r.deleted));
     }
 
     #[test]
@@ -636,7 +692,7 @@ mod tests {
                     database_id: 1,
                     tenant: 1,
                     coll: "c",
-                    sys_cutoff_ms: None,
+                    sys_cutoff: None,
                     valid_at_ms: None,
                     limit: 3,
                 },
@@ -676,7 +732,7 @@ mod tests {
                     database_id: 1,
                     tenant: 1,
                     coll: "c",
-                    sys_cutoff_ms: None,
+                    sys_cutoff: None,
                     valid_at_ms: None,
                     limit: 2,
                 },
@@ -709,7 +765,7 @@ mod tests {
                     database_id: 1,
                     tenant: 1,
                     coll: "c",
-                    sys_cutoff_ms: Some(150),
+                    sys_cutoff: Some(150),
                     valid_at_ms: None,
                     limit: 100,
                 },
@@ -724,7 +780,7 @@ mod tests {
                     database_id: 1,
                     tenant: 1,
                     coll: "c",
-                    sys_cutoff_ms: Some(250),
+                    sys_cutoff: Some(250),
                     valid_at_ms: None,
                     limit: 100,
                 },
@@ -760,6 +816,30 @@ mod tests {
             e.versioned_get_as_of(1, 1, "c", &key(1), Some(100), None)
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn latest_sys_from_reads_the_newest_version_live_or_not() {
+        let (e, _d) = open_temp();
+        assert_eq!(
+            e.versioned_latest_sys_from(1, 1, "c", &key(1)).unwrap(),
+            None
+        );
+        put(&e, "c", 1, 100, b"v1");
+        put(&e, "c", 1, 300, b"v2");
+        assert_eq!(
+            e.versioned_latest_sys_from(1, 1, "c", &key(1)).unwrap(),
+            Some(300)
+        );
+        e.versioned_tombstone(1, 1, "c", &key(1), 400).unwrap();
+        assert_eq!(
+            e.versioned_latest_sys_from(1, 1, "c", &key(1)).unwrap(),
+            Some(400)
+        );
+        assert_eq!(
+            e.versioned_latest_sys_from(1, 1, "c", &key(2)).unwrap(),
+            None
         );
     }
 

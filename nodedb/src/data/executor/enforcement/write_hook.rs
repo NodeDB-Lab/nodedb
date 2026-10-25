@@ -197,7 +197,7 @@ pub(in crate::data::executor) fn target_write_set(
                 target.surrogate.as_u32(),
                 target.identity.clone(),
                 target.body.clone(),
-                target.outcome.bitemporal_sys_from_ms,
+                target.outcome.bitemporal_sys_from,
             )
             .in_collection(target.collection.clone())
         })

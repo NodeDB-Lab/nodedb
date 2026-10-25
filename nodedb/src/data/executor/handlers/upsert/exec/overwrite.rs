@@ -77,9 +77,9 @@ impl CoreLoop {
         let MergedUpsert {
             body: merged_body,
             assigned,
-        } = match decode_stored_row(&current_bytes, strict_schema)
-            .and_then(|existing| merge_upsert_body(existing, value, on_conflict_updates))
-        {
+        } = match decode_stored_row(&current_bytes, strict_schema).and_then(|existing| {
+            merge_upsert_body(existing, value, on_conflict_updates, &self.crs_context())
+        }) {
             Ok(merged) => merged,
             Err(e) => return self.response_error(task, e),
         };
@@ -93,12 +93,15 @@ impl CoreLoop {
         let identity_column = self.identity_column(database_id, tid, collection);
         if let Err(e) = rls_write_gate::admit_stored_row(
             rls_write_check,
-            &merged_body,
-            &document_identity,
-            None,
-            &identity_column,
+            rls_write_gate::GatedRow {
+                body: &merged_body,
+                identity: &document_identity,
+                strict_schema: None,
+                identity_column: &identity_column,
+            },
             tid,
             collection,
+            &self.crs_context(),
         ) {
             return self.response_error(task, e);
         }
@@ -276,7 +279,7 @@ impl CoreLoop {
             surrogate.as_u32(),
             document_identity,
             merged_body,
-            outcome.bitemporal_sys_from_ms,
+            outcome.bitemporal_sys_from,
         )];
         // Derived target rows live in a different collection, so each
         // carries its own `Some(collection)` and homes to that

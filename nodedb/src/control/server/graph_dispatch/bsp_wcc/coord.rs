@@ -9,7 +9,7 @@
 //!    set. Reuses `bsp_pagerank::enumerate::enumerate_shards`.
 //! 2. **Contract.** Dispatch ONE `GraphOp::WccSuperstep` per owner node, with
 //!    one fresh cut marker. Every node resolves the same read cut from it and
-//!    reads the graph at it (see `graph_dispatch::run_cut`). Each
+//!    reads the graph at it (see `read_cut::run_marker`). Each
 //!    shard contracts its OWNED nodes into local components and returns
 //!    `node_labels` (`(name, local_component_root_name)`) plus `boundary_edges`
 //!    (`(owned_name, ghost_name)` for every owned→ghost out-edge).
@@ -31,7 +31,7 @@ use crate::engine::graph::algo::result::AlgoResultBatch;
 use crate::types::{DatabaseId, TenantId};
 
 use super::scatter::{WccRound, scatter_wcc_round};
-use crate::control::server::graph_dispatch::run_cut::{agreed_cut, new_cut_marker};
+use crate::control::read_cut::{agreed_cut, new_cut_marker};
 use crate::control::server::graph_dispatch::shard_reads::{ShardReadLog, qualified};
 
 /// Run distributed WCC and return the bare `AlgoResultBatch` payload (the exact
@@ -40,6 +40,9 @@ use crate::control::server::graph_dispatch::shard_reads::{ShardReadLog, qualifie
 ///
 /// Caller guarantees cluster mode (`cluster_routing.is_some()`) and
 /// `algorithm == Wcc`; single-node / other algorithms never enter here.
+///
+/// `scope` is the round's bitemporal cut: a historical round reads at
+/// the scope's pinned ordinal and at its valid time.
 pub async fn run_bsp_wcc(
     state: &SharedState,
     tenant_id: TenantId,
@@ -47,6 +50,7 @@ pub async fn run_bsp_wcc(
     params: AlgoParams,
     deadline_ms: u64,
     linearizable: bool,
+    scope: nodedb_physical::physical_plan::GraphReadScope,
 ) -> crate::Result<Payload> {
     // ── Enumerate shards (one per distinct owner node, local + remote). ──
     let enumeration = enumerate_shards(state)?;
@@ -66,6 +70,8 @@ pub async fn run_bsp_wcc(
             params: &params,
             targets: &targets,
             read_cut_marker: new_cut_marker(state),
+            system_as_of_cap: scope.pinned_ordinal(),
+            valid_at_ms: scope.valid_at_ms,
             deadline_ms,
             linearizable,
         },

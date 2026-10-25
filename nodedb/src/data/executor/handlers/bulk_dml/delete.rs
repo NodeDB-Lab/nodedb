@@ -173,12 +173,15 @@ impl CoreLoop {
                 if gate_policy
                     && let Err(e) = rls_write_gate::admit_stored_row(
                         rls_write_check,
-                        &stored,
-                        &key.to_identity(),
-                        strict_schema.as_ref(),
-                        &identity_column,
+                        rls_write_gate::GatedRow {
+                            body: &stored,
+                            identity: &key.to_identity(),
+                            strict_schema: strict_schema.as_ref(),
+                            identity_column: &identity_column,
+                        },
                         tid,
                         collection,
+                        &self.crs_context(),
                     )
                 {
                     return self.response_error(task, e);
@@ -231,9 +234,14 @@ impl CoreLoop {
         let mut pending_text: Vec<nodedb_types::Surrogate> = Vec::new();
         // One system time closes every matched row of a bitemporal
         // collection, so the statement removes them at one instant.
-        let bitemporal_sys_from_ms = self
-            .is_bitemporal(database_id, tid, collection)
-            .then(|| self.bitemporal_now_ms());
+        let bitemporal_sys_from = if self.is_bitemporal(database_id, tid, collection) {
+            match self.rows_version_ordinal(database_id, tid, collection, &apply_ids) {
+                Ok(ordinal) => Some(ordinal),
+                Err(e) => return self.response_error(task, ErrorCode::from(e)),
+            }
+        } else {
+            None
+        };
         for storage_key in &apply_ids {
             // Capture pre-deletion snapshot if RETURNING was requested, or if
             // the collection is indexed (needed to recompute the removed
@@ -309,7 +317,7 @@ impl CoreLoop {
                     tid,
                     collection,
                     storage_key,
-                    bitemporal_sys_from_ms,
+                    bitemporal_sys_from,
                 },
             ) {
                 Ok(removed) => removed,
@@ -392,7 +400,7 @@ impl CoreLoop {
                         collection,
                         storage_key: *storage_key,
                         deleted_bytes: bytes,
-                        tombstone_sys_from_ms: removed.tombstone_sys_from_ms,
+                        tombstone_sys_from: removed.tombstone_sys_from,
                         strict_schema: strict_schema.as_ref(),
                         declared_primary_key,
                         has_vectors,
@@ -445,7 +453,12 @@ impl CoreLoop {
         // Every matched row committed, so an encode error answers with the
         // rows' entries as well.
         let mut response = if let Some(spec) = returning {
-            match returning_rows::build_rows_payload(spec, rls_filters, &returned_docs) {
+            match returning_rows::build_rows_payload(
+                spec,
+                rls_filters,
+                &returned_docs,
+                &self.crs_context(),
+            ) {
                 Ok(payload) => self.response_with_payload(task, payload),
                 Err(e) => self.response_error(task, ErrorCode::from(e)),
             }

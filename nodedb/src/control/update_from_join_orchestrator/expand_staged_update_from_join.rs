@@ -55,6 +55,7 @@ pub(crate) async fn resolve_and_emit_update_from_join_ops(
                 body,
                 tenant_id.as_u64(),
                 target_collection.as_str(),
+                &crate::control::crs_context::crs_context_for(state),
             )?;
         }
     }

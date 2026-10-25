@@ -450,6 +450,16 @@ impl CrdtState {
     pub fn peer_id(&self) -> u64 {
         self.peer_id
     }
+
+    /// Mint every later operation under `peer_id`. Operations already in the
+    /// document keep the ids they were minted with.
+    pub fn set_peer_id(&mut self, peer_id: u64) -> Result<()> {
+        self.doc
+            .set_peer_id(peer_id)
+            .map_err(|e| CrdtError::Loro(format!("failed to set peer_id {peer_id}: {e}")))?;
+        self.peer_id = peer_id;
+        Ok(())
+    }
 }
 
 impl RowLookup for CrdtState {

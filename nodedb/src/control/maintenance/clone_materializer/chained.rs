@@ -86,7 +86,7 @@ pub(super) async fn materialize_chained_collection(
             source_db_id: origin.source_database,
             source_qualified: &source_qualified,
             cursor: &cursor,
-            system_as_of_ms,
+            system_time: super::document::clone_scope(system_as_of_ms),
             raw_bodies: true,
         };
         let (entries, next_cursor) = scan_page(state, page, None).await?;

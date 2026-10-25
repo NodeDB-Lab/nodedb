@@ -4,12 +4,16 @@
 
 pub mod auth;
 pub mod collection;
+pub mod copy_source;
+pub mod credential;
 pub mod maintenance;
 pub mod types;
 pub mod wrapper;
 
 pub use auth::*;
 pub use collection::*;
+pub use copy_source::*;
+pub use credential::*;
 pub use maintenance::*;
 pub use types::*;
 pub use wrapper::*;

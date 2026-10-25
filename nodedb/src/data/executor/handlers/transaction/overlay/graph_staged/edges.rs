@@ -5,7 +5,7 @@
 use crate::types::{DatabaseId, TenantId};
 
 use super::txn_overlay::GraphTxnOverlay;
-use super::types::GraphCollKey;
+use super::types::{EdgeValidTime, GraphCollKey};
 
 impl GraphTxnOverlay {
     /// Stage an edge put: adds to the pending add-set and clears any
@@ -19,11 +19,49 @@ impl GraphTxnOverlay {
         dst: &str,
         properties: Vec<u8>,
     ) {
+        self.stage_edge_put_valid(
+            coll_key,
+            (src, label, dst),
+            properties,
+            EdgeValidTime::default(),
+        );
+    }
+
+    /// Stage an edge put that names its valid time. A later put of the same
+    /// identity replaces both its properties and its valid time.
+    pub fn stage_edge_put_valid(
+        &mut self,
+        coll_key: GraphCollKey,
+        (src, label, dst): (&str, &str, &str),
+        properties: Vec<u8>,
+        valid: EdgeValidTime,
+    ) {
         let key = (src.to_string(), label.to_string(), dst.to_string());
         self.record_edge_undo(&coll_key, &key);
         let overlay = self.collections.entry(coll_key).or_default();
         overlay.pending_edge_tombstones.remove(&key);
+        if valid == EdgeValidTime::default() {
+            overlay.pending_edge_valid.remove(&key);
+        } else {
+            overlay.pending_edge_valid.insert(key.clone(), valid);
+        }
         overlay.pending_edges.insert(key, properties);
+    }
+
+    /// The valid time the staged put of `(src, label, dst)` names. The
+    /// default when the put names none, or nothing is staged.
+    pub fn staged_edge_valid_time(
+        &self,
+        coll_key: &GraphCollKey,
+        src: &str,
+        label: &str,
+        dst: &str,
+    ) -> EdgeValidTime {
+        let key = (src.to_string(), label.to_string(), dst.to_string());
+        self.collections
+            .get(coll_key)
+            .and_then(|overlay| overlay.pending_edge_valid.get(&key).copied())
+            .unwrap_or_default()
     }
 
     /// Stage an edge delete: adds a tombstone and clears any pending put for
@@ -33,6 +71,7 @@ impl GraphTxnOverlay {
         self.record_edge_undo(&coll_key, &key);
         let overlay = self.collections.entry(coll_key).or_default();
         overlay.pending_edges.remove(&key);
+        overlay.pending_edge_valid.remove(&key);
         overlay.pending_edge_tombstones.insert(key);
     }
 

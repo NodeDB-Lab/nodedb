@@ -119,10 +119,14 @@ fn edge_unit(
             ),
         });
     }
-    let properties = if is_tombstone(value) {
-        None
+    let (properties, valid_time) = if is_tombstone(value) {
+        (None, None)
     } else {
-        Some(EdgeValuePayload::decode(value)?.properties)
+        let payload = EdgeValuePayload::decode(value)?;
+        (
+            Some(payload.properties),
+            Some((payload.valid_from_ms, payload.valid_until_ms)),
+        )
     };
     let src = node_identity(resolved, collection, src_id)?;
     let dst = node_identity(resolved, collection, dst_id)?;
@@ -136,6 +140,7 @@ fn edge_unit(
             dst_surrogate: dst.surrogate.as_u32(),
             system_from,
             properties,
+            valid_time,
         },
         homes: RecordHomes::edge(src_id, dst_id),
         identities: vec![src, dst],

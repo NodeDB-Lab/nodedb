@@ -53,9 +53,9 @@ pub enum RowEffect {
     },
     /// The row is gone.
     Delete {
-        /// The system time of the tombstone of a row on a `bitemporal=true`
-        /// collection.
-        system_from_ms: Option<i64>,
+        /// The system-time ordinal of the tombstone of a row on a
+        /// `bitemporal=true` collection.
+        system_from: Option<i64>,
     },
     /// Replay must not apply the write's own pre-dispatch record: the apply
     /// wrote nothing, or another entry of this write set carries the row's
@@ -82,16 +82,17 @@ pub enum EdgeImage {
 /// at exactly this key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RowVersion {
-    pub sys_from_ms: i64,
+    /// The version's system-time ordinal.
+    pub sys_from: i64,
     pub valid_from_ms: i64,
     pub valid_until_ms: i64,
 }
 
 impl RowVersion {
-    /// The key of a version valid for all time, written at `sys_from_ms`.
-    pub fn open(sys_from_ms: i64) -> Self {
+    /// The key of a version valid for all time, written at `sys_from`.
+    pub fn open(sys_from: i64) -> Self {
         Self {
-            sys_from_ms,
+            sys_from,
             valid_from_ms: i64::MIN,
             valid_until_ms: i64::MAX,
         }
@@ -117,9 +118,7 @@ impl WriteSetEntry {
         Self {
             surrogate,
             identity,
-            effect: RowEffect::Delete {
-                system_from_ms: None,
-            },
+            effect: RowEffect::Delete { system_from: None },
             collection: None,
         }
     }
@@ -155,8 +154,8 @@ impl WriteSetEntry {
     pub fn versioned(mut self, version: Option<RowVersion>) -> Self {
         match &mut self.effect {
             RowEffect::Put { version: slot, .. } => *slot = version,
-            RowEffect::Delete { system_from_ms } => {
-                *system_from_ms = version.map(|v| v.sys_from_ms);
+            RowEffect::Delete { system_from } => {
+                *system_from = version.map(|v| v.sys_from);
             }
             RowEffect::CancelForward | RowEffect::Edge(_) => {}
         }

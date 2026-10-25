@@ -32,6 +32,7 @@ pub(in crate::data::executor) fn admit_kv_row(
     key: &[u8],
     tid: u64,
     collection: &str,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<()> {
     if matches!(
         rls_write_check.decision(),
@@ -49,11 +50,14 @@ pub(in crate::data::executor) fn admit_kv_row(
     // read it. KV rows never take the document identity column.
     rls_write_gate::admit_stored_row(
         rls_write_check,
-        body,
-        &identity,
-        None,
-        nodedb_types::DEFAULT_IDENTITY_COLUMN,
+        rls_write_gate::GatedRow {
+            body,
+            identity: &identity,
+            strict_schema: None,
+            identity_column: nodedb_types::DEFAULT_IDENTITY_COLUMN,
+        },
         tid,
         collection,
+        crs,
     )
 }

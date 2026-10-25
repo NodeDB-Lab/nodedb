@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license = "Apache-2.0"
+authors = ["Biz Impulse Solutions Sdn. Bhd. and the NodeDB contributors"]
 readme = "README.md"
 repository.workspace = true
 homepage.workspace = true
@@ -14,6 +15,7 @@ categories = ["encoding", "data-structures"]
 
 [dependencies]
 nodedb-types = { workspace = true }
+nodedb-spatial = { workspace = true }
 arrow = { workspace = true, features = ["ffi"] }
 thiserror = { workspace = true }
 rust_decimal = { workspace = true }

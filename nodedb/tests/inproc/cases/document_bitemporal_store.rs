@@ -69,7 +69,7 @@ fn bitemporal_multiple_puts_retain_history_via_versioned_get_as_of() {
         .put("c", &key(1), &serde_json::json!({"v": 1}))
         .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(5));
-    let t_mid = wall_ms();
+    let t_mid = now_cut();
     std::thread::sleep(std::time::Duration::from_millis(5));
     engine
         .put("c", &key(1), &serde_json::json!({"v": 2}))
@@ -108,7 +108,7 @@ fn non_bitemporal_collection_uses_legacy_storage() {
                 database_id: 0,
                 tenant: 1,
                 coll: "c",
-                sys_cutoff_ms: None,
+                sys_cutoff: None,
                 valid_at_ms: None,
                 limit: 100,
             },
@@ -125,11 +125,13 @@ fn non_bitemporal_collection_uses_legacy_storage() {
     assert_eq!(got["v"], 1);
 }
 
-fn wall_ms() -> i64 {
-    std::time::SystemTime::now()
+/// The system-time ordinal cut `AS OF SYSTEM TIME <now ms>` reads at.
+fn now_cut() -> i64 {
+    let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+        .unwrap_or(0);
+    nodedb_types::ms_to_ordinal_upper(ms)
 }
 
 fn rmpv_to_json(v: &rmpv::Value) -> serde_json::Value {

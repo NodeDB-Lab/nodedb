@@ -50,15 +50,15 @@ impl IndexPredicate {
     /// already fails closed rather than defaulting to "index everything");
     /// an eval error gets the same fail-closed treatment as an ordinary
     /// `false`/`NULL` result, not a distinct outcome.
-    pub fn evaluate(&self, doc: &Value) -> bool {
-        matches!(self.expr.eval(doc), Ok(Value::Bool(true)))
+    pub fn evaluate(&self, doc: &Value, crs: &nodedb_crs::CrsContext<'_>) -> bool {
+        matches!(self.expr.eval(doc, crs), Ok(Value::Bool(true)))
     }
 
     /// Convenience overload for the document write path, which holds
     /// the decoded document as a `serde_json::Value`. Conversion to
     /// `nodedb_types::Value` uses the shared `json_to_value` helper.
-    pub fn evaluate_json(&self, doc: &serde_json::Value) -> bool {
+    pub fn evaluate_json(&self, doc: &serde_json::Value, crs: &nodedb_crs::CrsContext<'_>) -> bool {
         let v = nodedb_types::conversion::json_to_value(doc.clone());
-        self.evaluate(&v)
+        self.evaluate(&v, crs)
     }
 }

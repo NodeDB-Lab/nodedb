@@ -1,0 +1,12 @@
+# EPSG supplement: EPSG change 2026.081, absent from EPSG v12.029. PROJ 9.8.1
+code	kind	name	area	accuracy_m	datum	proj
+12287	geographic	GDM2020	98.02,0.85,119.61,7.81	1	1471	+proj=longlat +ellps=GRS80 +towgs84=0,0,0 +no_defs
+25314	projected	GDM2020 / Johor Grid	102.44,1.21,104.6,2.95	1	1471	+proj=cass +lat_0=2.04255439166667 +lon_0=103.561069988889 +x_0=0 +y_0=0 +ellps=GRS80 +towgs84=0,0,0 +units=m +no_defs
+25315	projected	GDM2020 / Sembilan and Melaka Grid	101.7,2.03,102.71,3.28	1	1471	+proj=cass +lat_0=2.71211928888889 +lon_0=101.939706794444 +x_0=0 +y_0=0 +ellps=GRS80 +towgs84=0,0,0 +units=m +no_defs
+25316	projected	GDM2020 / Pahang Grid	101.33,2.45,103.67,4.78	1	1471	+proj=cass +lat_0=3.710746625 +lon_0=102.434617275 +x_0=0 +y_0=0 +ellps=GRS80 +towgs84=0,0,0 +units=m +no_defs
+25317	projected	GDM2020 / Selangor Grid	100.76,2.54,101.97,3.87	1	1471	+proj=cass +lat_0=3.68010363888889 +lon_0=101.506805472222 +x_0=0 +y_0=0 +ellps=GRS80 +towgs84=0,0,0 +units=m +no_defs
+25318	projected	GDM2020 / Terengganu Grid	102.38,3.89,103.72,5.9	1	1471	+proj=cass +lat_0=4.94582420833333 +lon_0=102.893616386111 +x_0=0 +y_0=0 +ellps=GRS80 +towgs84=0,0,0 +units=m +no_defs
+25319	projected	GDM2020 / Pinang Grid	100.12,5.12,100.56,5.59	1	1471	+proj=cass +lat_0=5.420888725 +lon_0=100.344658966667 +x_0=0 +y_0=0 +ellps=GRS80 +towgs84=0,0,0 +units=m +no_defs
+25320	projected	GDM2020 / Kedah and Perlis Grid	99.59,5.08,101.12,6.72	1	1471	+proj=cass +lat_0=5.96467151666667 +lon_0=100.636374988889 +x_0=0 +y_0=0 +ellps=GRS80 +towgs84=0,0,0 +units=m +no_defs
+25321	projected	GDM2020 / Perak Grid	100.07,3.66,102,5.92	1	1471	+proj=cass +lat_0=4.859066725 +lon_0=100.815412119444 +x_0=0 +y_0=0 +ellps=GRS80 +towgs84=0,0,0 +units=m +no_defs
+25322	projected	GDM2020 / Kelantan Grid	101.33,4.54,102.67,6.29	1	1471	+proj=cass +lat_0=5.893631975 +lon_0=102.175627286111 +x_0=0 +y_0=0 +ellps=GRS80 +towgs84=0,0,0 +units=m +no_defs

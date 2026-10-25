@@ -38,7 +38,7 @@ use super::sub_record::VersionStamp;
 enum StoredRow {
     /// The one current body of a row with no history.
     Current(Vec<u8>),
-    /// Every `(sys_from_ms, versioned value)` of a bitemporal row.
+    /// Every `(sys_from, versioned value)` of a bitemporal row.
     Versions(Vec<(i64, Vec<u8>)>),
 }
 
@@ -115,13 +115,13 @@ fn group_rows(
         let (db, collection, rest) = split_key(&key, tenant_id)?;
         let (hex, sys) = rest.split_once('\x00').ok_or_else(|| malformed(&key))?;
         let storage_key = StorageKey::parse(hex).ok_or_else(|| malformed(&key))?;
-        let sys_from_ms = sys.parse::<i64>().map_err(|_| malformed(&key))?;
+        let sys_from = sys.parse::<i64>().map_err(|_| malformed(&key))?;
         let rows = grouped.entry((db, collection.to_string())).or_default();
         match rows
             .entry(storage_key)
             .or_insert_with(|| StoredRow::Versions(Vec::new()))
         {
-            StoredRow::Versions(versions) => versions.push((sys_from_ms, value)),
+            StoredRow::Versions(versions) => versions.push((sys_from, value)),
             StoredRow::Current(_) => {
                 return Err(crate::Error::Serialization {
                     format: "backup".into(),
@@ -266,7 +266,7 @@ impl RowBuilder<'_> {
     fn versions(&self, key: StorageKey, versions: &[(i64, Vec<u8>)]) -> crate::Result<PendingRow> {
         // Decode every version first: the identity comes from a live body.
         let mut decoded = Vec::with_capacity(versions.len());
-        for (sys_from_ms, raw) in versions {
+        for (sys_from, raw) in versions {
             let version = decode_value(raw)?;
             let body = match version.tag {
                 TAG_LIVE => Some(body_msgpack(
@@ -280,7 +280,7 @@ impl RowBuilder<'_> {
                     return Err(crate::Error::Serialization {
                         format: "versioned-doc".into(),
                         detail: format!(
-                            "restore: version {sys_from_ms} of row {key} of '{}' carries tag \
+                            "restore: version {sys_from} of row {key} of '{}' carries tag \
                              {tag:#04x}, which no write path records",
                             self.collection
                         ),
@@ -288,7 +288,7 @@ impl RowBuilder<'_> {
                 }
             };
             let stamp = VersionStamp {
-                sys_from_ms: *sys_from_ms,
+                sys_from: *sys_from,
                 valid_from_ms: version.valid_from_ms,
                 valid_until_ms: version.valid_until_ms,
             };

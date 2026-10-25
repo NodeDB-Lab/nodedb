@@ -130,10 +130,12 @@ impl CoreLoop {
             Ok(id) => id,
             Err(e) => return self.calvin_stage_failure(task, epoch, position, vshard_id, e),
         };
-        // Staging reads the epoch's time anchor, so every replica stages the
-        // same images.
+        // Staging reads the epoch's time anchor and the transaction's
+        // ordinal, so every replica stages the same images.
         let prev_epoch_ms = self.epoch_system_ms;
         self.epoch_system_ms = Some(epoch_system_ms);
+        self.apply_scope.calvin_txn_ordinal =
+            Some(nodedb_types::calvin_txn_ordinal(epoch_system_ms, position));
         // A panic while staging drops the staged state like any refusal,
         // instead of unwinding past a half-staged overlay.
         let staged = catch_unwind(AssertUnwindSafe(|| {
@@ -143,6 +145,7 @@ impl CoreLoop {
             }
             Ok::<CalvinReply, ErrorCode>(staging.reply)
         }));
+        self.apply_scope.calvin_txn_ordinal = None;
         self.epoch_system_ms = prev_epoch_ms;
         let reply = match staged {
             Ok(Ok(reply)) => reply,

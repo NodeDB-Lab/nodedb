@@ -77,7 +77,8 @@ pub(super) fn retryable_refusal_reason(error: &crate::Error) -> Option<&str> {
             | ErrorCode::TransactionRollback { .. }
             | ErrorCode::ActiveSqlTransaction { .. }
             | ErrorCode::DependentObjectsExist { .. }
-            | ErrorCode::NodeLabelLimit { .. } => None,
+            | ErrorCode::NodeLabelLimit { .. }
+            | ErrorCode::ProgramLimitExceeded { .. } => None,
         },
         crate::Error::RejectedConstraint { .. }
         | crate::Error::TxnOverlayMemoryExceeded { .. }
@@ -135,6 +136,7 @@ pub(super) fn retryable_refusal_reason(error: &crate::Error) -> Option<&str> {
         | crate::Error::DivisionByZero
         | crate::Error::DataException { .. }
         | crate::Error::MixedSrid { .. }
+        | crate::Error::UnknownSrid { .. }
         | crate::Error::NumericValueOutOfRange { .. }
         | crate::Error::InvalidTextRepresentation { .. }
         | crate::Error::DatatypeMismatch { .. }
@@ -303,6 +305,7 @@ fn is_indeterminate(error: &crate::Error) -> bool {
         | crate::Error::DivisionByZero
         | crate::Error::DataException { .. }
         | crate::Error::MixedSrid { .. }
+        | crate::Error::UnknownSrid { .. }
         | crate::Error::NumericValueOutOfRange { .. }
         | crate::Error::InvalidTextRepresentation { .. }
         | crate::Error::DatatypeMismatch { .. }
@@ -413,7 +416,8 @@ fn is_indeterminate_code(code: &ErrorCode) -> bool {
         | ErrorCode::BadRequest { .. }
         | ErrorCode::ActiveSqlTransaction { .. }
         | ErrorCode::DependentObjectsExist { .. }
-        | ErrorCode::NodeLabelLimit { .. } => false,
+        | ErrorCode::NodeLabelLimit { .. }
+        | ErrorCode::ProgramLimitExceeded { .. } => false,
     }
 }
 

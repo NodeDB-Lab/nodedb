@@ -6,8 +6,10 @@
 //! streaming aggregate accumulators in the `nodedb` crate.
 //! Each function operates on a single raw MessagePack document byte slice and
 //! returns only the scalar value needed by the calling accumulator — no
-//! document bytes are retained after the call returns.
+//! document bytes are retained after the call returns. Geo functions in an
+//! argument expression resolve SRIDs through the `crs` argument.
 
+use nodedb_crs::CrsContext;
 use nodedb_types::Value;
 
 use crate::expr::{EvalError, SqlExpr};
@@ -29,11 +31,11 @@ use crate::value_ops;
 ///   surfaces as SQLSTATE `22012`, exactly like a WHERE/projection expression,
 ///   rather than silently dropping the row from the aggregate.
 #[inline]
-fn eval_expr(doc: &[u8], expr: &SqlExpr) -> Result<Option<Value>, EvalError> {
+fn eval_expr(doc: &[u8], expr: &SqlExpr, crs: &CrsContext<'_>) -> Result<Option<Value>, EvalError> {
     let Ok(doc_val) = nodedb_types::json_msgpack::value_from_msgpack(doc) else {
         return Ok(None);
     };
-    Ok(Some(expr.eval(&doc_val)?))
+    Ok(Some(expr.eval(&doc_val, crs)?))
 }
 
 // ── Public extraction helpers ──────────────────────────────────────────────
@@ -46,9 +48,10 @@ pub fn extract_f64(
     doc: &[u8],
     field: &str,
     expr: Option<&SqlExpr>,
+    crs: &CrsContext<'_>,
 ) -> Result<Option<f64>, EvalError> {
     if let Some(expr) = expr {
-        return Ok(eval_expr(doc, expr)?.and_then(|v| value_ops::value_to_f64(&v, false)));
+        return Ok(eval_expr(doc, expr, crs)?.and_then(|v| value_ops::value_to_f64(&v, false)));
     }
     let Some((start, _end)) = extract_field(doc, 0, field) else {
         return Ok(None);
@@ -69,9 +72,10 @@ pub fn extract_sum_value(
     doc: &[u8],
     field: &str,
     expr: Option<&SqlExpr>,
+    crs: &CrsContext<'_>,
 ) -> Result<Option<Value>, EvalError> {
     if let Some(expr) = expr {
-        return Ok(eval_expr(doc, expr)?.and_then(|v| crate::numeric_sum::sum_input(&v)));
+        return Ok(eval_expr(doc, expr, crs)?.and_then(|v| crate::numeric_sum::sum_input(&v)));
     }
     let Some((start, _end)) = extract_field(doc, 0, field) else {
         return Ok(None);
@@ -88,9 +92,10 @@ pub fn extract_str(
     doc: &[u8],
     field: &str,
     expr: Option<&SqlExpr>,
+    crs: &CrsContext<'_>,
 ) -> Result<Option<String>, EvalError> {
     if let Some(expr) = expr {
-        return Ok(eval_expr(doc, expr)?.map(|v| value_ops::value_to_display_string(&v)));
+        return Ok(eval_expr(doc, expr, crs)?.map(|v| value_ops::value_to_display_string(&v)));
     }
     let Some((start, _end)) = extract_field(doc, 0, field) else {
         return Ok(None);
@@ -104,9 +109,10 @@ pub fn extract_value(
     doc: &[u8],
     field: &str,
     expr: Option<&SqlExpr>,
+    crs: &CrsContext<'_>,
 ) -> Result<Option<Value>, EvalError> {
     if let Some(expr) = expr {
-        return eval_expr(doc, expr);
+        return eval_expr(doc, expr, crs);
     }
     let Some((start, end)) = extract_field(doc, 0, field) else {
         return Ok(None);
@@ -124,9 +130,10 @@ pub fn extract_bytes(
     doc: &[u8],
     field: &str,
     expr: Option<&SqlExpr>,
+    crs: &CrsContext<'_>,
 ) -> Result<Option<Vec<u8>>, EvalError> {
     if let Some(expr) = expr {
-        let Some(val) = eval_expr(doc, expr)? else {
+        let Some(val) = eval_expr(doc, expr, crs)? else {
             return Ok(None);
         };
         return Ok(nodedb_types::json_msgpack::value_to_msgpack(&val).ok());
@@ -144,8 +151,9 @@ pub fn extract_non_null(
     doc: &[u8],
     field: &str,
     expr: Option<&SqlExpr>,
+    crs: &CrsContext<'_>,
 ) -> Result<Option<()>, EvalError> {
-    let Some(v) = extract_value(doc, field, expr)? else {
+    let Some(v) = extract_value(doc, field, expr, crs)? else {
         return Ok(None);
     };
     Ok(if v.is_null() { None } else { Some(()) })

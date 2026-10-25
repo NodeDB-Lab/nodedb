@@ -31,6 +31,7 @@ use tracing::debug;
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::handlers::columnar_mutation_apply::ColumnarDeleteMode;
 use crate::data::executor::handlers::columnar_write::coerce_columnar_row;
 use crate::data::executor::handlers::transaction::undo::UndoEntry;
 use crate::data::executor::task::ExecutionTask;
@@ -48,6 +49,7 @@ impl CoreLoop {
         task: &ExecutionTask,
         collection: &str,
         rows: &[(Value, Vec<Value>)],
+        system_from: Option<i64>,
         rls_write_check: &nodedb_types::RlsWriteCheck,
         undo_log: Option<&mut Vec<UndoEntry>>,
     ) -> Response {
@@ -111,6 +113,7 @@ impl CoreLoop {
                 &schema,
                 task.request.tenant_id.as_u64(),
                 collection,
+                &self.crs_context(),
             ) {
                 return self.response_error(task, error);
             }
@@ -123,6 +126,7 @@ impl CoreLoop {
             &key,
             &schema,
             &rows,
+            system_from,
             undo_log.as_deref_mut(),
         ) {
             Ok(outcome) => outcome,
@@ -162,12 +166,14 @@ impl CoreLoop {
     /// No per-row `admit_columnar_row` call here: a delete has no post-image
     /// to decide, and the Control Plane already decided the pre-image while
     /// resolving the row set (`rls_write_check` carries the verdict, not a
-    /// predicate). Undo capture mirrors `execute_columnar_delete` exactly.
+    /// predicate). Undo capture mirrors `execute_columnar_delete` exactly,
+    /// and so does the close of a bitemporal key at `system_from`.
     pub(in crate::data::executor) fn execute_columnar_resolved_delete(
         &mut self,
         task: &ExecutionTask,
         collection: &str,
         pks: &[Value],
+        system_from: Option<i64>,
         _rls_write_check: &nodedb_types::RlsWriteCheck,
         undo_log: Option<&mut Vec<UndoEntry>>,
     ) -> Response {
@@ -209,18 +215,20 @@ impl CoreLoop {
         }
 
         let mut undo_log = undo_log;
-        let outcome =
-            match self.apply_columnar_delete_pks(&key, &schema, pks, undo_log.as_deref_mut()) {
-                Ok(outcome) => outcome,
-                Err(e) => return self.response_error(task, e),
-            };
+        let outcome = match self.apply_columnar_delete_pks(
+            &key,
+            &schema,
+            pks,
+            ColumnarDeleteMode::Close { system_from },
+            undo_log.as_deref_mut(),
+        ) {
+            Ok(outcome) => outcome,
+            Err(e) => return self.response_error(task, e),
+        };
         let affected = outcome.affected;
 
         if let Some(log) = undo_log {
-            log.push(UndoEntry::ColumnarDelete {
-                collection_key: key,
-                restored: outcome.restored,
-            });
+            log.push(outcome.undo_entry(key));
         }
 
         if affected > 0 {
@@ -239,6 +247,7 @@ impl CoreLoop {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data::executor::handlers::columnar_mutation::ColumnarDml;
     use crate::data::executor::task::ExecutionTask;
     use crate::types::{DatabaseId, TenantId, VShardId};
     use nodedb_types::RlsWriteCheck;
@@ -325,6 +334,7 @@ mod tests {
                 surrogates: &[],
                 schema_bytes: &[],
                 provenance: None,
+                system_from: None,
                 rls_write_check: &RlsWriteCheck::already_decided_elsewhere(),
                 returning: None,
                 rls_filters: &[],
@@ -423,6 +433,7 @@ mod tests {
             &task,
             COLLECTION,
             &rows,
+            None,
             &RlsWriteCheck::decided_earlier_in_request(),
             None,
         );
@@ -444,6 +455,7 @@ mod tests {
             &task,
             COLLECTION,
             &pks,
+            None,
             &RlsWriteCheck::decided_earlier_in_request(),
             None,
         );
@@ -470,6 +482,7 @@ mod tests {
             &task,
             COLLECTION,
             &rows,
+            None,
             &RlsWriteCheck::decided_earlier_in_request(),
             None,
         );
@@ -499,6 +512,7 @@ mod tests {
             &task,
             COLLECTION,
             &pks,
+            None,
             &RlsWriteCheck::decided_earlier_in_request(),
             None,
         );
@@ -534,6 +548,7 @@ mod tests {
             &task,
             COLLECTION,
             &rows,
+            None,
             &RlsWriteCheck::Predicate(owner_policy),
             None,
         );
@@ -575,6 +590,7 @@ mod tests {
                 surrogates: &[],
                 schema_bytes: &schema_bytes,
                 provenance: None,
+                system_from: None,
                 rls_write_check: &RlsWriteCheck::already_decided_elsewhere(),
                 returning: None,
                 rls_filters: &[],
@@ -616,6 +632,7 @@ mod tests {
                 surrogates: &[],
                 schema_bytes: &[],
                 provenance: None,
+                system_from: None,
                 rls_write_check: &RlsWriteCheck::already_decided_elsewhere(),
                 returning: None,
                 rls_filters: &[],
@@ -642,6 +659,7 @@ mod tests {
             &task,
             COLLECTION,
             &rows,
+            None,
             &RlsWriteCheck::decided_earlier_in_request(),
             None,
         );
@@ -668,10 +686,13 @@ mod tests {
         )];
         let resp = h.core.execute_columnar_update(
             &task,
-            COLLECTION,
-            &[],
+            ColumnarDml {
+                collection: COLLECTION,
+                filter_bytes: &[],
+                system_from: None,
+                rls_write_check: &RlsWriteCheck::decided_earlier_in_request(),
+            },
             &updates,
-            &RlsWriteCheck::decided_earlier_in_request(),
             None,
         );
         assert!(is_out_of_range(&resp), "{:?}", resp.error_code);

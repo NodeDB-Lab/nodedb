@@ -31,6 +31,7 @@ impl SystemCatalog {
     pub fn put_surrogate_hwm(&self, hwm: u32) -> crate::Result<()> {
         #[cfg(test)]
         if self
+            .faults
             .fail_next_surrogate_write
             .swap(false, std::sync::atomic::Ordering::SeqCst)
         {
@@ -64,6 +65,7 @@ impl SystemCatalog {
     pub fn put_surrogate_reserve_state(&self, hwm: u32, reserve_index: u64) -> crate::Result<()> {
         #[cfg(test)]
         if self
+            .faults
             .fail_next_surrogate_write
             .swap(false, std::sync::atomic::Ordering::SeqCst)
         {

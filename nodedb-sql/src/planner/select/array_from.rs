@@ -366,6 +366,7 @@ mod tests {
                 name: name.into(),
                 dtype: ArrayAttrType::Float64,
                 nullable: true,
+                meta: Default::default(),
             };
             (name == "img").then(|| ArrayCatalogView {
                 name: "img".into(),

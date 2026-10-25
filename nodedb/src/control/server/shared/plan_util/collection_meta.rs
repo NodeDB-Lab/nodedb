@@ -92,6 +92,8 @@ pub(super) fn meta_collection(op: &MetaOp) -> Option<&str> {
         MetaOp::CreateTenantSnapshot { .. }
         | MetaOp::RestoreTenantSnapshot { .. }
         | MetaOp::PurgeTenant { .. } => None,
+        // Every collection homed on vShards this node left, in every tenant.
+        MetaOp::PurgeDepartedVShards { .. } => None,
         // The continuous-aggregate registry: no row is read or written.
         MetaOp::RegisterContinuousAggregate { .. }
         | MetaOp::UnregisterContinuousAggregate { .. }
@@ -108,6 +110,8 @@ pub(super) fn meta_collection(op: &MetaOp) -> Option<&str> {
         MetaOp::TemporalPurgeArray { .. } | MetaOp::AlterArray { .. } => None,
         // The tenant synonym registry: no collection.
         MetaOp::PutSynonymGroup { .. } | MetaOp::DeleteSynonymGroup { .. } => None,
+        // The catalog-wide user-defined CRS set: no collection.
+        MetaOp::SetCustomCrsSet { .. } => None,
         // Transaction control and version probes name no collection.
         MetaOp::DropTxnOverlay { .. }
         | MetaOp::MarkSavepoint { .. }

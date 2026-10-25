@@ -23,19 +23,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use nodedb_cluster::calvin::sequencer::config::SequencerConfig;
 use nodedb_cluster::calvin::types::{
-    MultiPartPlans, PartStreamId, PlanPart, StreamedPart, TaskChunk, TxClass, VShardParts,
+    MultiPartPlans, PartStreamId, PartTasksBuilder, PlanPart, StreamedPart, TaskChunk, TxClass,
+    VShardParts,
 };
 use nodedb_physical::physical_plan::PhysicalPlan;
 
+use super::edge_slices::SlicedPlans;
 use super::stream::PartStream;
 use crate::Error;
 use crate::control::cluster::calvin::scheduler::driver::core::routing::{
     PlanRouting, plan_vshard_in_database,
 };
 use crate::control::state::SharedState;
-
-/// Bytes a msgpack array header adds to a part's encoded tasks, at most.
-const ARRAY_HEADER_BYTES: usize = 5;
 
 /// The next stream sequence of this process. It starts at the wall clock in
 /// nanoseconds, so a restarted coordinator never reuses a name its earlier
@@ -50,34 +49,34 @@ static NEXT_STREAM_SEQ: LazyLock<AtomicU64> = LazyLock::new(|| {
 });
 
 /// Carry `tx_class`'s plans as parts when one sequencer entry cannot, and
-/// return the parts to stream after the header. Edge batches are first
-/// split by home pair. A class that then fits one entry, or that is already
+/// return the parts to stream after the header. `sliced` holds the class's
+/// decoded plans after edge slicing. Sliced plans replace the class's plan
+/// bytes, encoded once. A class that fits one entry, or that is already
 /// split into parts, streams nothing.
 pub(crate) fn split_into_parts(
     state: &SharedState,
     tx_class: &mut TxClass,
+    sliced: &SlicedPlans,
 ) -> crate::Result<Option<PartStream>> {
     if tx_class.is_multi_part() {
         return Ok(None);
     }
-    // A batch edge op spans the homes of all its edges. Split into one batch
-    // per home pair, it spans at most two, which every part can carry.
-    super::edge_slices::slice_edge_batches(tx_class)?;
+    if sliced.sliced {
+        tx_class.plans = nodedb_physical::physical_plan::wire::encode_batch(&sliced.plans)
+            .map_err(|e| Error::Serialization {
+                format: "msgpack".into(),
+                detail: format!("calvin edge slicing: plan encode: {e}"),
+            })?;
+    }
     let limits = SequencerConfig::default();
     if tx_class.plans.len() <= limits.max_plans_bytes_per_txn
         && tx_class.participating_vshards().len() <= limits.max_participating_vshards_per_txn
     {
         return Ok(None);
     }
-    let plans =
-        nodedb_physical::physical_plan::wire::decode_batch(&tx_class.plans).map_err(|e| {
-            Error::Serialization {
-                format: "msgpack".into(),
-                detail: format!("calvin part split: plan decode: {e}"),
-            }
-        })?;
+    // The one call that encodes a submit's parts.
     let (mut manifest, parts) = plan_parts(
-        &plans,
+        &sliced.plans,
         tx_class.database_id,
         &tx_class.body_plans,
         PartLimits {
@@ -104,7 +103,8 @@ pub(crate) struct PartLimits {
 
 /// Pack `plans` into parts, each within `limits`, in task order, and the
 /// manifest that names them. `body_plans` are the indexes of the tasks a
-/// trigger body buffered. The manifest's stream is left for the caller.
+/// trigger body buffered, sorted and deduplicated. The manifest's stream is
+/// left for the caller.
 pub(crate) fn plan_parts(
     plans: &[PhysicalPlan],
     database_id: crate::types::DatabaseId,
@@ -124,7 +124,7 @@ pub(crate) fn plan_parts(
             format: "msgpack".into(),
             detail: format!("calvin part split: task {task} encode: {e}"),
         })?;
-        packer.add(task, plan, homes, encoded)?;
+        packer.add(task, homes, encoded)?;
     }
     let parts = packer.finish()?;
     let part_count = u32::try_from(parts.len()).map_err(|_| Error::BadRequest {
@@ -144,7 +144,7 @@ pub(crate) fn plan_parts(
         part_count,
         total_tasks,
         user_write: crate::control::planner::calvin::write_class::plans_have_user_write(plans),
-        client_write: (0..total_tasks).any(|task| !body_plans.contains(&task)),
+        client_write: (0..total_tasks).any(|task| body_plans.binary_search(&task).is_err()),
         per_vshard: per_vshard
             .into_iter()
             .map(|(vshard, parts)| VShardParts { vshard, parts })
@@ -174,34 +174,26 @@ fn unroutable(task: u32, reason: &str) -> Error {
 }
 
 /// Packs consecutive tasks into parts.
-struct Packer<'a> {
+struct Packer {
     limits: PartLimits,
     parts: Vec<StreamedPart>,
     first_task: u32,
-    tasks: Vec<&'a PhysicalPlan>,
+    tasks: PartTasksBuilder,
     homes: BTreeSet<u32>,
-    bytes: usize,
 }
 
-impl<'a> Packer<'a> {
+impl Packer {
     fn new(limits: PartLimits) -> Self {
         Self {
             limits,
             parts: Vec::new(),
             first_task: 0,
-            tasks: Vec::new(),
+            tasks: PartTasksBuilder::new(),
             homes: BTreeSet::new(),
-            bytes: ARRAY_HEADER_BYTES,
         }
     }
 
-    fn add(
-        &mut self,
-        task: u32,
-        plan: &'a PhysicalPlan,
-        homes: BTreeSet<u32>,
-        encoded: Vec<u8>,
-    ) -> crate::Result<()> {
+    fn add(&mut self, task: u32, homes: BTreeSet<u32>, encoded: Vec<u8>) -> crate::Result<()> {
         // A task routes to its one home, or to the two homes of an edge.
         if homes.len() > self.limits.max_targets {
             return Err(Error::Internal {
@@ -212,16 +204,20 @@ impl<'a> Packer<'a> {
                 ),
             });
         }
-        if encoded.len().saturating_add(ARRAY_HEADER_BYTES) > self.limits.max_bytes {
+        let task_homes: Vec<u32> = homes.iter().copied().collect();
+        if PartTasksBuilder::new().encoded_len_with(encoded.len(), task_homes.len())
+            > self.limits.max_bytes
+        {
             if !self.tasks.is_empty() {
                 self.close()?;
             }
-            self.push_chunks(task, &homes, &encoded);
+            self.push_chunks(task, &task_homes, &encoded);
             return Ok(());
         }
         let widened = self.homes.union(&homes).count();
         if !self.tasks.is_empty()
-            && (self.bytes.saturating_add(encoded.len()) > self.limits.max_bytes
+            && (self.tasks.encoded_len_with(encoded.len(), task_homes.len())
+                > self.limits.max_bytes
                 || widened > self.limits.max_targets)
         {
             self.close()?;
@@ -229,19 +225,22 @@ impl<'a> Packer<'a> {
         if self.tasks.is_empty() {
             self.first_task = task;
         }
-        self.tasks.push(plan);
+        self.tasks
+            .push(&encoded, &task_homes)
+            .map_err(|e| Error::Internal {
+                detail: format!("calvin part split: task {task}: {e}"),
+            })?;
         self.homes.extend(homes);
-        self.bytes = self.bytes.saturating_add(encoded.len());
         Ok(())
     }
 
     /// Push task `task`'s encoding as a run of chunk parts.
-    fn push_chunks(&mut self, task: u32, homes: &BTreeSet<u32>, encoded: &[u8]) {
+    fn push_chunks(&mut self, task: u32, homes: &[u32], encoded: &[u8]) {
         let total_len = encoded.len() as u64;
         let mut offset = 0u64;
         for bytes in encoded.chunks(self.limits.max_bytes) {
             self.push(
-                homes.iter().copied().collect(),
+                homes.to_vec(),
                 PlanPart {
                     first_task: task,
                     plans: bytes.to_vec(),
@@ -263,7 +262,7 @@ impl<'a> Packer<'a> {
 
     /// Close the open part.
     fn close(&mut self) -> crate::Result<()> {
-        let plans = zerompk::to_msgpack_vec(&self.tasks).map_err(|e| Error::Serialization {
+        let plans = self.tasks.take().map_err(|e| Error::Serialization {
             format: "msgpack".into(),
             detail: format!("calvin part split: part encode: {e}"),
         })?;
@@ -276,8 +275,6 @@ impl<'a> Packer<'a> {
                 chunk: None,
             },
         );
-        self.tasks.clear();
-        self.bytes = ARRAY_HEADER_BYTES;
         Ok(())
     }
 
@@ -296,6 +293,7 @@ impl<'a> Packer<'a> {
 
 #[cfg(test)]
 mod tests {
+    use nodedb_cluster::calvin::types::PartTasks;
     use nodedb_physical::physical_plan::DocumentOp;
     use nodedb_physical::physical_plan::wire as plan_wire;
     use nodedb_types::QualifiedCollection;
@@ -355,13 +353,19 @@ mod tests {
             match part.chunk {
                 None => {
                     assert_eq!(first, decoded_tasks.len(), "parts are consecutive");
-                    let tasks = plan_wire::decode_batch(&part.plans).expect("part decodes");
-                    let want: BTreeSet<u32> = tasks.iter().flat_map(homes).collect();
+                    let tasks = PartTasks::decode(&part.plans).expect("part decodes");
+                    let mut want: BTreeSet<u32> = BTreeSet::new();
+                    for (bytes, named) in tasks.iter() {
+                        let task = plan_wire::decode(bytes).expect("task decodes");
+                        let routed: Vec<u32> = homes(&task).into_iter().collect();
+                        assert_eq!(named, routed.as_slice(), "task homes are its routed homes");
+                        want.extend(named.iter().copied());
+                        decoded_tasks.push(task);
+                    }
                     assert_eq!(
                         streamed.targets.iter().copied().collect::<BTreeSet<u32>>(),
                         want
                     );
-                    decoded_tasks.extend(tasks);
                 }
                 Some(chunk) => {
                     assert_eq!(

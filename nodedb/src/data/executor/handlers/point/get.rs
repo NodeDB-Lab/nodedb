@@ -20,7 +20,8 @@ pub(in crate::data::executor) struct PointGetParams<'a> {
     /// database: the read matches no row.
     pub surrogate: Option<Surrogate>,
     pub rls_filters: &'a [u8],
-    pub system_as_of_ms: Option<i64>,
+    /// System-time ordinal cut (`None` = current).
+    pub system_as_of: Option<i64>,
     pub valid_at_ms: Option<i64>,
 }
 
@@ -36,7 +37,7 @@ impl CoreLoop {
             document_id,
             surrogate,
             rls_filters,
-            system_as_of_ms,
+            system_as_of,
             valid_at_ms,
         } = p;
         // A key unbound in this database names no row here.
@@ -48,7 +49,7 @@ impl CoreLoop {
             core = self.core_id,
             %collection,
             %document_id,
-            ?system_as_of_ms,
+            ?system_as_of,
             ?valid_at_ms,
             "point get"
         );
@@ -66,7 +67,7 @@ impl CoreLoop {
             collection,
         );
 
-        let is_temporal_read = system_as_of_ms.is_some() || valid_at_ms.is_some();
+        let is_temporal_read = system_as_of.is_some() || valid_at_ms.is_some();
 
         // Fetch data from cache or storage. Temporal reads bypass the
         // doc cache (cache holds current state) and read the versioned
@@ -77,7 +78,7 @@ impl CoreLoop {
                 tid,
                 collection,
                 &storage_key,
-                system_as_of_ms,
+                system_as_of,
                 valid_at_ms,
             ) {
                 Ok(Some(data)) => data,
@@ -148,7 +149,11 @@ impl CoreLoop {
                     body_format.as_format_ref(),
                     &identity_column,
                 );
-                if !super::super::rls_eval::rls_check_msgpack_bytes(rls_filters, &gated) {
+                if !super::super::rls_eval::rls_check_msgpack_bytes(
+                    rls_filters,
+                    &gated,
+                    &self.crs_context(),
+                ) {
                     return self.response_with_payload(task, Vec::new());
                 }
             }

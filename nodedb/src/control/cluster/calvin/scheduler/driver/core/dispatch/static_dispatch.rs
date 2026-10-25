@@ -101,7 +101,7 @@ impl Scheduler {
         let epoch = txn.epoch;
         let position = txn.position;
 
-        let plans = match super::super::super::helpers::decode_plans(&txn.tx_class.plans) {
+        let plans = match super::super::super::helpers::decode_plans(txn.plans()) {
             Ok(p) => p,
             Err(e) => {
                 self.reject_plan(txn, txn_id, lock_owner, &e);
@@ -115,11 +115,13 @@ impl Scheduler {
             None => txn_has_non_derived_write(&plans),
         };
         let local_body_plans =
-            self.local_body_plans(&plans, txn.tx_class.database_id, &txn.tx_class.body_plans);
+            self.local_body_plans(&plans, txn.tx_class.database_id, txn.body_plans());
         let client_wrote = match &txn.tx_class.multi_part {
             Some(manifest) => manifest.client_write,
             None => (0..plans.len()).any(|index| {
-                u32::try_from(index).map_or(true, |index| !txn.tx_class.body_plans.contains(&index))
+                u32::try_from(index).map_or(true, |index| {
+                    txn.body_plans().binary_search(&index).is_err()
+                })
             }),
         };
         let mut local =
@@ -183,6 +185,7 @@ impl Scheduler {
     /// Indexes into this vShard's local slice of the plans a trigger body
     /// buffered, from their indexes into the transaction's `plans`. Walks the
     /// same homing `local_calvin_plans` does, so the two slices align.
+    /// `body_plans` is sorted with no repeats, so membership is a binary search.
     fn local_body_plans(
         &self,
         plans: &[PhysicalPlan],
@@ -203,7 +206,7 @@ impl Scheduler {
             if !vshards.iter().any(|v| v.as_u32() == self.vshard_id) {
                 continue;
             }
-            if u32::try_from(index).is_ok_and(|index| body_plans.contains(&index)) {
+            if u32::try_from(index).is_ok_and(|index| body_plans.binary_search(&index).is_ok()) {
                 local_body.push(local_index);
             }
             local_index = local_index.saturating_add(1);

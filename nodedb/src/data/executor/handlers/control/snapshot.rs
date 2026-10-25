@@ -110,6 +110,7 @@ impl CoreLoop {
         task: &ExecutionTask,
         args: RangeScanArgs<'_>,
     ) -> Response {
+        let crs = self.crs_context();
         // Bitemporal collections keep every write on the versioned redb table;
         // their plain INDEXES / DOCUMENTS tables are empty, so the index probe
         // + plain-table fallback below would return ZERO rows. Route them to
@@ -215,6 +216,7 @@ impl CoreLoop {
                         &mut docs,
                         &sort_keys,
                         &decimal_keys,
+                        &crs,
                     ) {
                         return self.response_error(task, ErrorCode::from(e));
                     }

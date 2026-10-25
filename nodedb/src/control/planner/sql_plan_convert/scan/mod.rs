@@ -5,7 +5,6 @@
 //! Split by concern so each file stays under the project's hard size limit.
 
 mod core;
-mod helpers;
 mod join;
 mod join_cost;
 mod recursive;

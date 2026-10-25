@@ -68,11 +68,11 @@ impl CoreLoop {
     }
 }
 
-/// Build a `nodedb_types::Value::Object` from a schema-ordered row. Used
-/// by the ON CONFLICT DO UPDATE path to present `existing` and `EXCLUDED`
-/// rows to `apply_on_conflict_updates` in the same shape the document
-/// upsert path uses, and by the row-level-security write gate to present the
-/// row a statement is about to persist or remove to a policy predicate.
+/// Build a `nodedb_types::Value::Object` from a schema-ordered row, every
+/// cell as stored. Used by the ON CONFLICT DO UPDATE path to present
+/// `existing` and `EXCLUDED` rows to `apply_on_conflict_updates`, and by a
+/// row image that is stored again. A row a user or a policy sees goes
+/// through [`row_values_to_user_object`].
 pub(in crate::data::executor) fn row_values_to_object(
     schema: &ColumnarSchema,
     row: &[Value],
@@ -82,6 +82,32 @@ pub(in crate::data::executor) fn row_values_to_object(
         map.insert(col.name.clone(), val.clone());
     }
     nodedb_types::Value::Object(map)
+}
+
+/// [`row_values_to_object`] with `_ts_system` rendered in milliseconds
+/// (`render_system_ms`). The object a WHERE predicate, a write policy, a
+/// `RETURNING` projection or a scan reads.
+pub(in crate::data::executor) fn row_values_to_user_object(
+    schema: &ColumnarSchema,
+    row: &[Value],
+) -> nodedb_types::Value {
+    let mut map = std::collections::HashMap::with_capacity(schema.columns.len());
+    for (col, val) in schema.columns.iter().zip(row.iter()) {
+        map.insert(col.name.clone(), render_system_ms(&col.name, val));
+    }
+    nodedb_types::Value::Object(map)
+}
+
+/// The cell a user reads for column `column`. A bitemporal columnar row
+/// stores a system-time ordinal in `_ts_system`, and a user reads its
+/// millisecond (`ordinal_to_ms`). Every other cell reads as stored.
+pub(in crate::data::executor) fn render_system_ms(column: &str, cell: &Value) -> Value {
+    match cell {
+        Value::Integer(ordinal) if column == TS_SYSTEM => {
+            Value::Integer(nodedb_types::ordinal_to_ms(*ordinal))
+        }
+        other => other.clone(),
+    }
 }
 
 /// Coerce a `nodedb_types::Value` field to the value `column` stores.
@@ -135,8 +161,10 @@ pub(in crate::data::executor) fn infer_schema_from_value(row: &Value) -> Columna
     let obj = match row {
         Value::Object(m) => m,
         _ => {
-            return ColumnarSchema::new(vec![ColumnDef::required("value", ColumnType::Float64)])
-                .expect("single-column schema");
+            return ColumnarSchema {
+                columns: vec![ColumnDef::required("value", ColumnType::Float64)],
+                version: 1,
+            };
         }
     };
 
@@ -165,7 +193,13 @@ pub(in crate::data::executor) fn infer_schema_from_value(row: &Value) -> Columna
         columns.push(ColumnDef::required("value", ColumnType::Float64));
     }
 
-    ColumnarSchema::new(columns).expect("inferred schema must be valid")
+    // Valid by construction: the names are the keys of one map, the key
+    // column is required, the list is never empty, and no inferred type is a
+    // vector.
+    ColumnarSchema {
+        columns,
+        version: 1,
+    }
 }
 
 /// Prepend the three reserved bitemporal columns (`_ts_system`,
@@ -173,15 +207,30 @@ pub(in crate::data::executor) fn infer_schema_from_value(row: &Value) -> Columna
 /// schema. All three are required Int64; `_ts_system` is engine-stamped
 /// on every write, the valid-time pair is client-provided (or defaults
 /// to the open interval).
+///
+/// A base schema that already lists a reserved column loses it, so the
+/// triple appears once, at 0/1/2. A schema inferred from a row that carries
+/// its temporal columns (a restored version, or a row with client valid
+/// time) lists them. The result is valid by construction: `base` is a valid
+/// schema, the reserved names leave it, and the triple adds three distinct,
+/// non-key, non-null columns.
 pub(in crate::data::executor) fn prepend_bitemporal_columns(
     base: ColumnarSchema,
 ) -> ColumnarSchema {
-    let mut cols = Vec::with_capacity(3 + base.columns.len());
-    cols.push(ColumnDef::required(TS_SYSTEM, ColumnType::Int64));
-    cols.push(ColumnDef::required(TS_VALID_FROM, ColumnType::Int64));
-    cols.push(ColumnDef::required(TS_VALID_UNTIL, ColumnType::Int64));
-    cols.extend(base.columns);
-    ColumnarSchema::new(cols).expect("bitemporal columnar schema must be valid")
+    let reserved = [TS_SYSTEM, TS_VALID_FROM, TS_VALID_UNTIL];
+    let mut columns = Vec::with_capacity(3 + base.columns.len());
+    columns.push(ColumnDef::required(TS_SYSTEM, ColumnType::Int64));
+    columns.push(ColumnDef::required(TS_VALID_FROM, ColumnType::Int64));
+    columns.push(ColumnDef::required(TS_VALID_UNTIL, ColumnType::Int64));
+    columns.extend(
+        base.columns
+            .into_iter()
+            .filter(|column| !reserved.contains(&column.name.as_str())),
+    );
+    ColumnarSchema {
+        columns,
+        version: base.version,
+    }
 }
 
 #[cfg(test)]
@@ -345,5 +394,22 @@ mod tests {
         assert_eq!(column_type(&schema, "emb"), ColumnType::Json);
         assert_eq!(column_type(&schema, "meta"), ColumnType::Json);
         assert_eq!(column_type(&schema, "raw"), ColumnType::Bytes);
+    }
+
+    /// A base schema that already lists the reserved temporal columns keeps
+    /// one copy of each, at 0/1/2, typed Int64.
+    #[test]
+    fn prepend_keeps_one_copy_of_each_reserved_column() {
+        let base = ColumnarSchema::new(vec![
+            ColumnDef::required("id", ColumnType::Int64).with_primary_key(),
+            ColumnDef::nullable(TS_SYSTEM, ColumnType::String),
+            ColumnDef::nullable(TS_VALID_FROM, ColumnType::Int64),
+        ])
+        .expect("valid base");
+        let schema = prepend_bitemporal_columns(base);
+        let names: Vec<&str> = schema.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec![TS_SYSTEM, TS_VALID_FROM, TS_VALID_UNTIL, "id"]);
+        assert_eq!(column_type(&schema, TS_SYSTEM), ColumnType::Int64);
+        assert!(ColumnarSchema::new(schema.columns.clone()).is_ok());
     }
 }

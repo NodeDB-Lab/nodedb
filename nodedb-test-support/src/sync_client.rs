@@ -4,7 +4,9 @@
 //!
 //! Test-only infra for driving the Lite↔Origin sync WebSocket end-to-end:
 //! performs a Trust-mode handshake, then pushes CRDT deltas and reports
-//! back whether the server acked or rejected each one. Not a library-grade
+//! back whether the server acked or rejected each one. Each delta states its
+//! collection's incarnation, learned from the server's `CollectionSchema`
+//! announce as a Lite client learns it. Not a library-grade
 //! client — errors are returned as `String` since this crate is test
 //! infrastructure, not production code.
 
@@ -39,6 +41,8 @@ pub struct SyncTestClient {
     producer_id: u64,
     epoch: u64,
     next_seq: u64,
+    /// The `creation_hlc` of every collection the server announced.
+    incarnations: HashMap<String, Hlc>,
 }
 
 impl SyncTestClient {
@@ -85,7 +89,7 @@ impl SyncTestClient {
             client_version: "test".to_string(),
             lite_id,
             epoch,
-            wire_version: nodedb_types::wire_version::WIRE_FORMAT_VERSION,
+            wire_version: nodedb_types::sync::wire::SYNC_WIRE_VERSION,
         };
         let frame = SyncFrame::try_encode(SyncMessageType::Handshake, &handshake)
             .ok_or_else(|| "failed to encode HandshakeMsg".to_string())?;
@@ -109,6 +113,7 @@ impl SyncTestClient {
             producer_id: ack.producer_id,
             epoch: ack.accepted_epoch,
             next_seq: 1,
+            incarnations: HashMap::new(),
         })
     }
 
@@ -146,6 +151,7 @@ impl SyncTestClient {
         seq: u64,
         delta: Vec<u8>,
     ) -> Result<DeltaOutcome, String> {
+        let collection_incarnation = self.incarnation(collection).await?;
         let push = DeltaPushMsg {
             collection: collection.to_string(),
             document_id: document_id.to_string(),
@@ -159,6 +165,7 @@ impl SyncTestClient {
             seq,
             device_id: 0,
             delta_signature: [0; 32],
+            collection_incarnation,
         };
         let frame = SyncFrame::try_encode(SyncMessageType::DeltaPush, &push)
             .ok_or_else(|| "failed to encode DeltaPushMsg".to_string())?;
@@ -168,7 +175,7 @@ impl SyncTestClient {
             .map_err(|e| format!("failed to send DeltaPush frame: {e}"))?;
 
         loop {
-            let frame = recv_any_frame(&mut self.ws).await?;
+            let frame = self.recv_next_frame().await?;
             match frame.msg_type {
                 SyncMessageType::DeltaAck => {
                     let ack: DeltaAckMsg = frame
@@ -246,7 +253,34 @@ impl SyncTestClient {
     /// `RECV_TIMEOUT`, so callers do not need to wrap this in a timeout to
     /// avoid hanging on a silent server.
     pub async fn recv_next_frame(&mut self) -> Result<SyncFrame, String> {
-        recv_any_frame(&mut self.ws).await
+        let frame = recv_any_frame(&mut self.ws).await?;
+        if frame.msg_type == SyncMessageType::CollectionSchema
+            && let Some(announce) = frame.decode_body::<CollectionSchemaSyncMsg>()
+        {
+            self.incarnations
+                .insert(announce.descriptor.name, announce.creation_hlc);
+        }
+        Ok(frame)
+    }
+
+    /// The incarnation of `collection` the server announced. When it has not
+    /// announced it on this session yet, subscribe to the collection: the
+    /// server sends the announce before the snapshot. The server binds the
+    /// subscription to the session's tenant, not to the shape's.
+    pub async fn incarnation(&mut self, collection: &str) -> Result<Hlc, String> {
+        if let Some(hlc) = self.incarnations.get(collection) {
+            return Ok(*hlc);
+        }
+        self.subscribe_document_shape(&format!("{collection}_incarnation"), collection, 0)
+            .await?;
+        loop {
+            self.recv_next_frame().await.map_err(|e| {
+                format!("no CollectionSchema announce for collection {collection}: {e}")
+            })?;
+            if let Some(hlc) = self.incarnations.get(collection) {
+                return Ok(*hlc);
+            }
+        }
     }
 }
 

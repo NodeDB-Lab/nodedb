@@ -2,7 +2,6 @@
 
 //! Policy resolution dispatch for validation violations.
 
-use crate::CrdtAuthContext;
 use crate::constraint::{Constraint, ConstraintKind};
 use crate::dead_letter::CompensationHint;
 use crate::error::Result;
@@ -10,6 +9,7 @@ use crate::policy::{ConflictPolicy, PolicyResolution, ResolvedAction};
 use crate::row_lookup::RowLookup;
 
 use super::core::Validator;
+use super::incoming::IncomingDelta;
 use super::types::{ProposedChange, ValidationOutcome, Violation};
 
 impl Validator {
@@ -21,10 +21,9 @@ impl Validator {
     /// # Arguments
     ///
     /// * `state` — current CRDT state
-    /// * `peer_id` — source peer ID
     /// * `change` — proposed change
-    /// * `delta_bytes` — raw delta bytes
-    /// * `hlc_timestamp` — Hybrid Logical Clock timestamp of the incoming write
+    /// * `incoming` — source peer ID, auth context, raw delta bytes, and HLC timestamp
+    /// * `crs` — coordinate reference system context
     ///
     /// Returns:
     /// - `Ok(PolicyResolution::AutoResolved(_))` if the policy auto-fixed the violation
@@ -35,13 +34,17 @@ impl Validator {
     pub fn validate_with_policy(
         &mut self,
         state: &impl RowLookup,
-        peer_id: u64,
-        auth: CrdtAuthContext,
         change: &ProposedChange,
-        delta_bytes: Vec<u8>,
-        hlc_timestamp: u64,
+        incoming: IncomingDelta,
+        crs: &nodedb_crs::CrsContext<'_>,
     ) -> Result<PolicyResolution> {
-        match self.validate(state, change) {
+        let IncomingDelta {
+            peer_id,
+            auth,
+            delta_bytes,
+            hlc_timestamp,
+        } = incoming;
+        match self.validate(state, change, crs) {
             ValidationOutcome::Accepted => {
                 // No violation; return synthetic "auto-resolved" to maintain API consistency
                 Ok(PolicyResolution::AutoResolved(
@@ -255,6 +258,7 @@ mod tests {
     use loro::LoroValue;
 
     use super::*;
+    use crate::CrdtAuthContext;
     use crate::constraint::ConstraintSet;
     use crate::state::CrdtState;
 
@@ -294,11 +298,14 @@ mod tests {
         let resolution = validator
             .validate_with_policy(
                 &state,
-                42,
-                CrdtAuthContext::default(),
                 &change,
-                b"delta".to_vec(),
-                now,
+                IncomingDelta {
+                    peer_id: 42,
+                    auth: CrdtAuthContext::default(),
+                    delta_bytes: b"delta".to_vec(),
+                    hlc_timestamp: now,
+                },
+                &nodedb_crs::CrsContext::builtin_only(),
             )
             .unwrap();
 
@@ -350,11 +357,14 @@ mod tests {
         let resolution = validator
             .validate_with_policy(
                 &state,
-                42,
-                CrdtAuthContext::default(),
                 &change,
-                b"delta".to_vec(),
-                now,
+                IncomingDelta {
+                    peer_id: 42,
+                    auth: CrdtAuthContext::default(),
+                    delta_bytes: b"delta".to_vec(),
+                    hlc_timestamp: now,
+                },
+                &nodedb_crs::CrsContext::builtin_only(),
             )
             .unwrap();
 
@@ -395,11 +405,14 @@ mod tests {
         let resolution = validator
             .validate_with_policy(
                 &state,
-                42,
-                CrdtAuthContext::default(),
                 &change,
-                b"delta".to_vec(),
-                now,
+                IncomingDelta {
+                    peer_id: 42,
+                    auth: CrdtAuthContext::default(),
+                    delta_bytes: b"delta".to_vec(),
+                    hlc_timestamp: now,
+                },
+                &nodedb_crs::CrsContext::builtin_only(),
             )
             .unwrap();
 
@@ -443,11 +456,14 @@ mod tests {
         let resolution = validator
             .validate_with_policy(
                 &state,
-                42,
-                CrdtAuthContext::default(),
                 &change,
-                b"delta".to_vec(),
-                now,
+                IncomingDelta {
+                    peer_id: 42,
+                    auth: CrdtAuthContext::default(),
+                    delta_bytes: b"delta".to_vec(),
+                    hlc_timestamp: now,
+                },
+                &nodedb_crs::CrsContext::builtin_only(),
             )
             .unwrap();
 

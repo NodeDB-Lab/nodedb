@@ -5,9 +5,9 @@
 //! `neighbors_out_as_of` / `neighbors_in_as_of` mirror the current-state
 //! `EdgeStore::neighbors_out` / `neighbors_in` but honour:
 //!
-//! - `system_as_of_ms: Option<i64>` — caps visibility to versions with
-//!   `system_from` at or before the given millisecond (via
-//!   [`nodedb_types::ms_to_ordinal_upper`]). `None` means current state.
+//! - `cutoff_ordinal: i64` — caps visibility to versions with
+//!   `system_from` at or below this system-time ordinal. `i64::MAX` reads
+//!   the current state.
 //! - `valid_at_ms: Option<i64>` — each candidate's
 //!   `[valid_from_ms, valid_until_ms)` must contain `valid_at_ms`.
 //!   The Ceiling resolver walks to earlier versions if the latest one
@@ -16,7 +16,7 @@
 use redb::{ReadableDatabase, ReadableTable};
 use std::collections::HashMap;
 
-use nodedb_types::{DatabaseId, TenantId, ms_to_ordinal_upper};
+use nodedb_types::{DatabaseId, TenantId};
 
 use super::super::store::{EDGES, Edge, EdgeStore, REVERSE_EDGES, redb_err};
 use super::{EdgeRef, parse_versioned_edge_key};
@@ -32,7 +32,9 @@ pub struct NeighborsAsOfParams<'a> {
     pub collection: &'a str,
     pub node: &'a str,
     pub label_filter: Option<&'a str>,
-    pub system_as_of_ms: Option<i64>,
+    /// The system-time ordinal visibility caps at. `i64::MAX` reads the
+    /// current state.
+    pub cutoff_ordinal: i64,
     pub valid_at_ms: Option<i64>,
 }
 
@@ -45,10 +47,9 @@ impl EdgeStore {
             collection,
             node: src,
             label_filter,
-            system_as_of_ms,
+            cutoff_ordinal: cutoff,
             valid_at_ms,
         } = params;
-        let cutoff = system_cutoff(system_as_of_ms);
         let prefix = match label_filter {
             Some(label) => format!("{collection}\x00{src}\x00{label}\x00"),
             None => format!("{collection}\x00{src}\x00"),
@@ -116,10 +117,9 @@ impl EdgeStore {
             collection,
             node: dst,
             label_filter,
-            system_as_of_ms,
+            cutoff_ordinal: cutoff,
             valid_at_ms,
         } = params;
-        let cutoff = system_cutoff(system_as_of_ms);
         let prefix = match label_filter {
             Some(label) => format!("{collection}\x00{dst}\x00{label}\x00"),
             None => format!("{collection}\x00{dst}\x00"),
@@ -179,14 +179,5 @@ impl EdgeStore {
             });
         }
         Ok(edges)
-    }
-}
-
-/// Convert user-facing system-time millisecond cutoff to the internal HLC
-/// ordinal upper-bound. `None` → `i64::MAX` (current state).
-fn system_cutoff(system_as_of_ms: Option<i64>) -> i64 {
-    match system_as_of_ms {
-        Some(ms) => ms_to_ordinal_upper(ms),
-        None => i64::MAX,
     }
 }

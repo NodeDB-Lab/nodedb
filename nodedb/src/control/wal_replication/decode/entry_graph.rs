@@ -11,16 +11,19 @@ use super::super::types::ReplicatedWrite;
 use super::graph;
 use crate::bridge::envelope::PhysicalPlan;
 
-/// The edge write `write` carries, rebuilt as a plan, or `None` for any
-/// other write. Every edge write runs as a Calvin transaction
-/// (`planner::calvin::edge_sequencing`), so the propose seams hand it there.
-pub fn edge_write_plan(write: &ReplicatedWrite) -> crate::Result<Option<PhysicalPlan>> {
+/// The edge or label write `write` carries, rebuilt as a plan, or `None`
+/// for any other write. Every edge and label write runs as a Calvin
+/// transaction (`planner::calvin::graph_sequencing`), so the propose seams
+/// hand it there.
+pub fn sequenced_graph_write_plan(write: &ReplicatedWrite) -> crate::Result<Option<PhysicalPlan>> {
     if matches!(
         write,
         ReplicatedWrite::EdgePut { .. }
             | ReplicatedWrite::EdgeDelete { .. }
             | ReplicatedWrite::EdgePutBatch { .. }
             | ReplicatedWrite::EdgeDeleteBatch { .. }
+            | ReplicatedWrite::SetNodeLabels { .. }
+            | ReplicatedWrite::RemoveNodeLabels { .. }
     ) {
         decode_arm(write).map(Some)
     } else {
@@ -38,6 +41,8 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             properties,
             src_surrogate,
             dst_surrogate,
+            valid_from_ms,
+            valid_until_ms,
         } => Ok(graph::edge_put(graph::EdgePutFields {
             collection,
             src_id,
@@ -46,6 +51,8 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             properties,
             src_surrogate: *src_surrogate,
             dst_surrogate: *dst_surrogate,
+            valid_from_ms: *valid_from_ms,
+            valid_until_ms: *valid_until_ms,
         })),
         ReplicatedWrite::EdgeDelete {
             collection,

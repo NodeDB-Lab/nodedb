@@ -14,6 +14,7 @@ pub mod config;
 pub mod quota;
 
 pub mod approx;
+pub mod array_agg;
 pub mod array_cell;
 pub mod array_route;
 pub mod ascii;
@@ -74,6 +75,7 @@ pub mod vector_index_params;
 pub mod vector_index_stats;
 pub mod vector_model;
 pub mod volatility;
+pub mod wall_clock;
 pub mod wire_version;
 pub mod write_version;
 
@@ -154,4 +156,5 @@ pub use vector_index_stats::{
 };
 pub use vector_model::{VectorModelEntry, VectorModelMetadata};
 pub use volatility::Volatility;
+pub use wall_clock::{wall_now_ns, wall_now_ns_i64};
 pub use write_version::{ShardVersion, WriteVersion};

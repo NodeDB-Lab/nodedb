@@ -39,7 +39,7 @@ pub use self::calvin_counters::CalvinCounters;
 pub use self::calvin_cuts::{CalvinCuts, cut_instant_hook};
 pub use self::calvin_local::CalvinLocalState;
 pub use self::fields::SharedState;
-pub use self::init_prod::DataPlaneHandles;
+pub use self::init_prod::{DataPlaneHandles, OpenConfig};
 pub use self::metadata_ddl::MetadataDdlState;
 pub use self::tenant_request::TenantRequestGuard;
 pub use self::tenant_write::{TenantWriteMark, TenantWriteMarks, TenantWriteOrigin};

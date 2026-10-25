@@ -30,6 +30,7 @@ pub(super) fn shape_array_slice(
     projection: Option<&OutputSchema>,
     redaction: Option<RedactionCtx<'_>>,
     sequences: Option<&dyn SequenceAccess>,
+    crs_set: &nodedb_crs::CustomCrsSet,
 ) -> crate::Result<ShapedRows> {
     if payload.is_empty() {
         return Ok(empty_shaped());
@@ -45,7 +46,7 @@ pub(super) fn shape_array_slice(
     let notice = truncated.then(|| TRUNCATED_BEFORE_HORIZON_NOTICE.to_string());
 
     let mut shaped = match rows {
-        Ok(value) => shape_decoded_rows(value, projection, redaction, sequences)?,
+        Ok(value) => shape_decoded_rows(value, projection, redaction, sequences, crs_set)?,
         Err(_) => empty_shaped(),
     };
     shaped.notice = notice;

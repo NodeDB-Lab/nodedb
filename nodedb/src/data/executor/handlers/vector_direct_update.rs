@@ -74,6 +74,7 @@ pub(in crate::data::executor) fn merge_vector_direct_update_row(
     patch: &VectorPayloadPatch<'_>,
     surrogate: Surrogate,
     stored: VectorSidecarRow,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> Result<VectorPlannedRow, ErrorCode> {
     let VectorPayloadPatch {
         database_id: _,
@@ -88,16 +89,19 @@ pub(in crate::data::executor) fn merge_vector_direct_update_row(
         bytes: old_sidecar,
     } = stored;
     let excluded = Value::Object(HashMap::new());
-    let merged = match apply_on_conflict_updates(Value::Object(fields), &excluded, payload_patch)? {
-        Value::Object(map) => map,
-        other => {
-            return Err(ErrorCode::Internal {
-                detail: format!("UPDATE on '{collection}' produced a non-object row: {other:?}"),
-            });
-        }
-    };
+    let merged =
+        match apply_on_conflict_updates(Value::Object(fields), &excluded, payload_patch, crs)? {
+            Value::Object(map) => map,
+            other => {
+                return Err(ErrorCode::Internal {
+                    detail: format!(
+                        "UPDATE on '{collection}' produced a non-object row: {other:?}"
+                    ),
+                });
+            }
+        };
     let image = Value::Object(merged.clone());
-    rls_write_gate::admit_document_value(rls_write_check, &image, tid, collection)?;
+    rls_write_gate::admit_document_value(rls_write_check, &image, tid, collection, crs)?;
     // The vector column never lives in the sidecar.
     let fields: HashMap<String, Value> = merged
         .into_iter()
@@ -265,7 +269,7 @@ impl CoreLoop {
         else {
             return Ok(None);
         };
-        merge_vector_direct_update_row(patch, surrogate, stored).map(Some)
+        merge_vector_direct_update_row(patch, surrogate, stored, &self.crs_context()).map(Some)
     }
 
     /// Rewrite one row. With `new_vector` the old row is removed and a fresh

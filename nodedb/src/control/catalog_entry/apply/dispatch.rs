@@ -12,11 +12,11 @@ use super::outcome::ApplyOutcome;
 
 use super::{
     alert_rule, api_key, array, auth_user, backup_schedule, change_stream, checkpoint, clone_cow,
-    collection, column_stats, consumer_group, continuous_aggregate, custom_type, database,
-    function, index_registry, materialized_view, oidc_provider, owner, permission, procedure,
-    quota, redaction, retention_policy, rls, role, schedule, scope_grant, scope_quota, sequence,
-    streaming_materialized_view, synonym_group, tenant, topic, trigger, user, vector,
-    wal_tombstone,
+    collection, column_stats, consumer_group, continuous_aggregate, credential, custom_type,
+    database, function, index_registry, materialized_view, oidc_provider, owner, permission,
+    procedure, quota, redaction, retention_policy, rls, role, schedule, scope_grant, scope_quota,
+    sequence, spatial_ref_sys, streaming_materialized_view, synonym_group, tenant, topic, trigger,
+    user, vector, wal_tombstone,
 };
 
 /// Apply `entry` to `catalog`.
@@ -423,6 +423,12 @@ fn apply_to_inner(entry: &CatalogEntry, catalog: &SystemCatalog) -> crate::Resul
         // The post-apply writes them.
         CatalogEntry::CommitConsumerOffsets(_) => Ok(()),
         CatalogEntry::PutBackupScheduleMark(mark) => backup_schedule::raise_mark(mark, catalog),
+        CatalogEntry::PutSpatialRefSys(def) => spatial_ref_sys::define(def, catalog),
+        CatalogEntry::DropSpatialRefSys { srid } => spatial_ref_sys::retire(*srid, catalog),
+        CatalogEntry::PutCredential(row) => credential::put(row, catalog),
+        CatalogEntry::DropCredential { tenant_id, name } => {
+            credential::remove(*tenant_id, name, catalog)
+        }
     }
 }
 

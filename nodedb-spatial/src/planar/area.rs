@@ -4,13 +4,14 @@
 
 use nodedb_types::geometry::Geometry;
 
-/// Unsigned area of one ring by the shoelace formula. A ring with fewer than
-/// three vertices encloses nothing. An unclosed ring is closed implicitly.
+/// Signed area of one ring by the shoelace formula, positive
+/// counter-clockwise. A ring with fewer than three vertices encloses
+/// nothing. An unclosed ring is closed implicitly.
 ///
 /// Coordinates are taken relative to the first vertex. Projected eastings and
 /// northings run to hundreds of kilometres, and summing their raw cross
 /// products cancels away the digits a small ring's area lives in.
-pub fn planar_ring_area(ring: &[[f64; 2]]) -> f64 {
+pub fn signed_area(ring: &[[f64; 2]]) -> f64 {
     if ring.len() < 3 {
         return 0.0;
     }
@@ -22,7 +23,12 @@ pub fn planar_ring_area(ring: &[[f64; 2]]) -> f64 {
         let b = rel(ring[(i + 1) % ring.len()]);
         twice += a[0] * b[1] - b[0] * a[1];
     }
-    (twice / 2.0).abs()
+    twice / 2.0
+}
+
+/// Unsigned area of one ring by the shoelace formula.
+pub fn planar_ring_area(ring: &[[f64; 2]]) -> f64 {
+    signed_area(ring).abs()
 }
 
 /// Area of one polygon: exterior ring less every hole, never negative.
@@ -51,9 +57,6 @@ pub fn planar_area(geom: &Geometry) -> f64 {
         | Geometry::LineString { .. }
         | Geometry::MultiPoint { .. }
         | Geometry::MultiLineString { .. } => 0.0,
-        // `Geometry` is `#[non_exhaustive]`. A kind added upstream is not
-        // known to be areal.
-        _ => 0.0,
     }
 }
 

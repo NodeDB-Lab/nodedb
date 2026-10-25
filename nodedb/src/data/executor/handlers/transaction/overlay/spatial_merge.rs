@@ -30,6 +30,7 @@
 use std::collections::HashSet;
 
 use nodedb_physical::physical_plan::SpatialPredicate;
+use nodedb_spatial::Metric;
 use nodedb_types::Surrogate;
 use nodedb_types::columnar::ColumnarSchema;
 use nodedb_types::geometry::SridGeometry;
@@ -37,7 +38,7 @@ use nodedb_types::value::Value;
 
 use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::handlers::columnar_read::convert::row_to_projected_value;
+use crate::data::executor::handlers::columnar_read::convert::row_to_value;
 use crate::data::executor::handlers::spatial_refine::{
     SpatialHit, apply_predicate, extract_geometry, mixed_srid_error, project_doc,
 };
@@ -75,10 +76,7 @@ fn decode_staged_spatial_row(
             detail: format!("staged spatial row does not decode: {e}"),
         })?;
     Ok(match value {
-        Value::Array(row) => match schema {
-            Some(schema) => Some(row_to_projected_value(&row, schema, &[], &[], false)?),
-            None => None,
-        },
+        Value::Array(row) => schema.map(|schema| row_to_value(&row, schema)),
         obj @ Value::Object(_) => Some(obj),
         _ => None,
     })
@@ -93,6 +91,7 @@ impl CoreLoop {
         params: SpatialOverlayMergeParams<'_>,
         results: &mut Vec<SpatialHit>,
     ) -> crate::Result<()> {
+        let crs = self.crs_context();
         let SpatialOverlayMergeParams {
             txn_id,
             coll_key,
@@ -104,6 +103,8 @@ impl CoreLoop {
             attr_filters,
             row_level_filters,
         } = params;
+
+        let metric = Metric::resolve(&crs, query_geom.srid)?;
 
         // Read-your-own-writes refreshes the lease (see the reaper).
         self.touch_overlay(txn_id);
@@ -121,17 +122,17 @@ impl CoreLoop {
         // WHERE-shaped: it fails the whole scan, same as
         // `handlers::spatial`'s direct `matches_value` calls.
         let row_matches = |doc: &Value| -> crate::Result<bool> {
-            let Some(doc_geom) = extract_geometry(doc, field) else {
+            let Some(doc_geom) = extract_geometry(doc, field, &crs)? else {
                 return Ok(false);
             };
             // A staged row in another SRID fails the scan, as a base row does.
-            if !apply_predicate(predicate, query_geom, &doc_geom, distance_meters)
+            if !apply_predicate(predicate, query_geom, &doc_geom, distance_meters, &metric)
                 .map_err(|m| mixed_srid_error(&coll_key.2, field, m))?
             {
                 return Ok(false);
             }
-            Ok(ScanFilter::all_match_value(attr_filters, doc)?
-                && ScanFilter::all_match_value(row_level_filters, doc)?)
+            Ok(ScanFilter::all_match_value(attr_filters, doc, &crs)?
+                && ScanFilter::all_match_value(row_level_filters, doc, &crs)?)
         };
 
         // Surrogates already represented in the base result.

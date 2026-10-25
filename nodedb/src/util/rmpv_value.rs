@@ -7,12 +7,14 @@
 //! a binary blob or a nested map renders the same way on every path.
 //!
 //! Instants cross as the msgpack ext `nodedb_types::write_instant` produces:
-//! `rmpv::Value::Ext(1 | 2, <i64 BE micros>)`. Every other ext type reads as
-//! `Value::Null`, the rule `nodedb_types::value_from_msgpack` applies.
+//! `rmpv::Value::Ext(1 | 2, <i64 BE micros>)`. A geometry crosses as the
+//! geometry ext: `rmpv::Value::Ext(3, <SridGeometry msgpack>)`. Every other
+//! ext type reads as `Value::Null`, the rule
+//! `nodedb_types::value_from_msgpack` applies.
 
 use std::collections::HashMap;
 
-use nodedb_types::json_msgpack::instant_from_ext;
+use nodedb_types::json_msgpack::{EXT_GEOMETRY, geometry_from_ext, instant_from_ext};
 use nodedb_types::{InstantKind, Value};
 
 /// Convert an `rmpv::Value` to a `nodedb_types::Value`.
@@ -20,7 +22,8 @@ use nodedb_types::{InstantKind, Value};
 /// - `Integer` outside `i64` reads as its `u64` bits cast to `i64`.
 /// - A `String` that is not UTF-8 reads as `Value::Bytes` of its raw bytes.
 /// - A map key that is not a string renders through rmpv's `Display`.
-/// - `Ext` reads as an instant for ext types 1 and 2, else `Value::Null`.
+/// - `Ext` reads as an instant for ext types 1 and 2, a geometry for ext
+///   type 3, else `Value::Null`.
 pub fn rmpv_to_value(v: &rmpv::Value) -> Value {
     match v {
         rmpv::Value::Nil => Value::Null,
@@ -54,7 +57,7 @@ pub fn rmpv_to_value(v: &rmpv::Value) -> Value {
         }
         rmpv::Value::Ext(ext_type, payload) => match instant_from_ext(*ext_type, payload) {
             Some((kind, micros)) => kind.from_micros(micros),
-            None => Value::Null,
+            None => geometry_from_ext(*ext_type, payload).map_or(Value::Null, Value::Geometry),
         },
     }
 }
@@ -64,7 +67,8 @@ pub fn rmpv_to_value(v: &rmpv::Value) -> Value {
 /// Mirrors `nodedb_types::value_to_msgpack` variant for variant, so an rmpv
 /// row encodes to the same bytes a `Value` row does:
 ///
-/// - `Uuid`, `Ulid`, `Regex`, `Duration`, `Decimal` and `Geometry` are strings.
+/// - `Uuid`, `Ulid`, `Regex`, `Duration` and `Decimal` are strings.
+/// - `Geometry` is the geometry ext.
 /// - `Set` is an array. `Vector` is an array of `F64`.
 /// - `ArrayCell` is a `{coords, attrs}` map, plus `_ts_system` when versioned.
 /// - `Range` and `Record` have no rmpv form and become `Nil`.
@@ -90,8 +94,8 @@ pub fn value_to_rmpv(v: &Value) -> rmpv::Value {
         Value::NaiveDateTime(dt) => instant_ext(InstantKind::Naive, dt.micros),
         Value::Duration(d) => rmpv::Value::String(d.to_string().into()),
         Value::Decimal(d) => rmpv::Value::String(d.to_string().into()),
-        Value::Geometry(g) => match sonic_rs::to_string(g) {
-            Ok(text) => rmpv::Value::String(text.into()),
+        Value::Geometry(g) => match zerompk::to_msgpack_vec(g) {
+            Ok(payload) => rmpv::Value::Ext(EXT_GEOMETRY, payload),
             Err(_) => rmpv::Value::Nil,
         },
         Value::Range { .. } | Value::Record { .. } => rmpv::Value::Nil,
@@ -160,6 +164,25 @@ mod tests {
         rmpv::encode::write_value(&mut via_rmpv, &value_to_rmpv(&v)).expect("encode");
         let native = nodedb_types::value_to_msgpack(&v).expect("native");
         assert_eq!(via_rmpv, native);
+    }
+
+    #[test]
+    fn geometry_round_trips_as_the_native_ext() {
+        use nodedb_types::geometry::{Geometry, Ordinates, Srid, SridGeometry};
+        let g = SridGeometry::with_ordinates(
+            Srid::WGS84,
+            Geometry::point(1.0, 2.0),
+            Ordinates::new(Some(vec![3.0]), None),
+        )
+        .expect("geometry");
+        let v = Value::Geometry(g);
+        assert_eq!(rmpv_to_value(&value_to_rmpv(&v)), v);
+        let mut via_rmpv = Vec::new();
+        rmpv::encode::write_value(&mut via_rmpv, &value_to_rmpv(&v)).expect("encode");
+        assert_eq!(
+            via_rmpv,
+            nodedb_types::value_to_msgpack(&v).expect("native")
+        );
     }
 
     #[test]

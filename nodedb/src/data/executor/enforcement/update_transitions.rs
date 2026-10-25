@@ -47,6 +47,7 @@ pub fn check_update_transitions(
     old_doc: &serde_json::Value,
     new_doc: &serde_json::Value,
     user_roles: &[String],
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> Result<(), ErrorCode> {
     if !rules.state_constraints.is_empty() {
         state_transition::check_state_transitions(
@@ -63,6 +64,7 @@ pub fn check_update_transitions(
             rules.transition_checks,
             old_doc,
             new_doc,
+            crs,
         )?;
     }
     Ok(())
@@ -94,6 +96,13 @@ impl CoreLoop {
         let new_doc = self
             .decode_stored_document(config, new_bytes)
             .map_err(ErrorCode::from)?;
-        check_update_transitions(collection, rules, &old_doc, &new_doc, user_roles)
+        check_update_transitions(
+            collection,
+            rules,
+            &old_doc,
+            &new_doc,
+            user_roles,
+            &self.crs_context(),
+        )
     }
 }

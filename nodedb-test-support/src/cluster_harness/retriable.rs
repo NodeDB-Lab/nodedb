@@ -49,7 +49,10 @@ where
                 }
                 tokio::time::sleep(step).await;
             }
-            Err(err) => panic!("{desc}: {err}"),
+            Err(err) => match err.as_db_error() {
+                Some(db) => panic!("{desc}: {} {}", db.code().code(), db.message()),
+                None => panic!("{desc}: {err}"),
+            },
         }
     }
 }

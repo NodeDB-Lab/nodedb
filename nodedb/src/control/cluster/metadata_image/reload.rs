@@ -67,6 +67,7 @@ pub(super) async fn reload_registries(
         })?;
     shared.synonym_registry.reload_from_catalog(catalog)?;
     shared.custom_type_registry.reload_from_catalog(catalog)?;
+    catalog.reload_custom_crs_set()?;
     shared.block_cache.clear();
 
     // Event Plane definitions.

@@ -107,6 +107,7 @@ pub(in crate::data::executor) fn merge_vector_upsert_patch(
     patch: &VectorUpsertPatch<'_>,
     stored: Option<VectorSidecarRow>,
     fields: HashMap<String, Value>,
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> Result<VectorPlannedUpsert, ErrorCode> {
     let VectorUpsertPatch {
         database_id: _,
@@ -125,6 +126,7 @@ pub(in crate::data::executor) fn merge_vector_upsert_patch(
         Value::Object(stored),
         &Value::Object(fields),
         on_conflict_updates,
+        crs,
     )? {
         Value::Object(map) => map,
         other => {
@@ -136,7 +138,7 @@ pub(in crate::data::executor) fn merge_vector_upsert_patch(
         }
     };
     let image = Value::Object(merged.clone());
-    rls_write_gate::admit_document_value(rls_write_check, &image, tid, collection)?;
+    rls_write_gate::admit_document_value(rls_write_check, &image, tid, collection, crs)?;
     // The vector column never lives in the sidecar: the proposed row's
     // vector replaces the stored node whatever the patch names, so an
     // assignment to it is dropped from the payload.
@@ -162,7 +164,7 @@ impl CoreLoop {
     ) -> Result<VectorPlannedUpsert, ErrorCode> {
         let stored =
             self.vector_sidecar_row(patch.database_id, patch.tid, patch.collection, surrogate)?;
-        merge_vector_upsert_patch(patch, stored, fields)
+        merge_vector_upsert_patch(patch, stored, fields, &self.crs_context())
     }
 
     /// Handle `VectorOp::DirectInsert` / `DirectInsertIfAbsent` /

@@ -16,9 +16,10 @@ use super::rewrite_engine::{rewrite_columnar, rewrite_document, rewrite_kv, rewr
 
 /// Compute the source-side system-time selection for a clone scan rewrite.
 ///
-/// Snapshot clones read the source at a fixed point-in-time (`effective_ms`),
-/// so they always collapse to an `AsOf` (or the plan's own selection when the
-/// clone carries no ceiling). `AllVersions` (audit log) does not compose with a
+/// Snapshot clones read the source at a fixed point-in-time (`effective_ms`):
+/// the plan's own point-in-time cut when it is at or before `effective_ms`,
+/// else an `AsOf` at `effective_ms`. A clone with no ceiling keeps the plan's
+/// selection. `AllVersions` (audit log) does not compose with a
 /// snapshot clone — the request is rejected with a typed error rather than
 /// silently picking an arbitrary snapshot.
 fn rewrite_system_time(
@@ -32,9 +33,21 @@ fn rewrite_system_time(
                 .into(),
         });
     }
-    match effective_ms {
-        Some(ms) => Ok(SystemTimeScope::AsOf(ms)),
-        None => Ok(plan_scope),
+    let Some(ms) = effective_ms else {
+        return Ok(plan_scope);
+    };
+    // A plan cut at or before the clone's source time is the stricter cut,
+    // and a pinned cut keeps the statement's one read cut.
+    match plan_scope {
+        SystemTimeScope::AsOf(_) | SystemTimeScope::Pinned { .. }
+            if plan_scope.as_of_ms().is_some_and(|plan_ms| plan_ms <= ms) =>
+        {
+            Ok(plan_scope)
+        }
+        SystemTimeScope::Current
+        | SystemTimeScope::AsOf(_)
+        | SystemTimeScope::Pinned { .. }
+        | SystemTimeScope::AllVersions => Ok(SystemTimeScope::AsOf(ms)),
     }
 }
 
@@ -282,6 +295,7 @@ pub(super) fn strip_db_prefix(db_id: DatabaseId, qualified: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use super::rewrite_system_time;
     use crate::control::server::shared::plan_util::extract_collection;
     use nodedb_graph::{Direction, GraphTraversalOptions};
     use nodedb_physical::physical_plan::{
@@ -468,6 +482,7 @@ mod tests {
                     bm25_query: None,
                     bm25_field: None,
                     stage: nodedb_physical::physical_plan::RagStage::Local,
+                    scope: nodedb_physical::physical_plan::GraphReadScope::default(),
                 }),
             ),
         ]
@@ -540,5 +555,30 @@ mod tests {
                 "{name}: post-processed plan must expose its collection"
             );
         }
+    }
+
+    /// A plan cut at or before the clone's source time keeps its cut, pinned
+    /// or not. A later cut, or a live read, reads at the source time.
+    #[test]
+    fn a_stricter_plan_cut_survives_the_clone_ceiling() {
+        let pinned = SystemTimeScope::Pinned {
+            ordinal: nodedb_types::ms_to_ordinal_upper(100),
+            cut_marker: 2,
+        };
+        assert_eq!(rewrite_system_time(Some(200), pinned).unwrap(), pinned);
+        assert_eq!(
+            rewrite_system_time(Some(200), SystemTimeScope::AsOf(150)).unwrap(),
+            SystemTimeScope::AsOf(150)
+        );
+        assert_eq!(
+            rewrite_system_time(Some(50), pinned).unwrap(),
+            SystemTimeScope::AsOf(50)
+        );
+        assert_eq!(
+            rewrite_system_time(Some(50), SystemTimeScope::Current).unwrap(),
+            SystemTimeScope::AsOf(50)
+        );
+        assert_eq!(rewrite_system_time(None, pinned).unwrap(), pinned);
+        assert!(rewrite_system_time(Some(50), SystemTimeScope::AllVersions).is_err());
     }
 }

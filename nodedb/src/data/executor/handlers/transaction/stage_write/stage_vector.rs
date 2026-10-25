@@ -444,10 +444,11 @@ impl CoreLoop {
                     rls_write_check,
                 };
                 let stored = current.map(|row| row.sidecar);
-                fields = match merge_vector_upsert_patch(&patch, stored, fields) {
-                    Ok(planned) => planned.fields,
-                    Err(e) => return self.response_error(task, e),
-                };
+                fields =
+                    match merge_vector_upsert_patch(&patch, stored, fields, &self.crs_context()) {
+                        Ok(planned) => planned.fields,
+                        Err(e) => return self.response_error(task, e),
+                    };
             }
             VectorDirectWriteIntent::Insert
             | VectorDirectWriteIntent::InsertIfAbsent

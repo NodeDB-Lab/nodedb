@@ -15,7 +15,7 @@ use crate::control::state::SharedState;
 use crate::types::DatabaseId;
 
 use super::super::super::result::{DdlError, DdlResult};
-use super::super::graph_ops::rag_fusion::rag_fusion;
+use super::super::graph_ops::rag_fusion::{RagFusionRequest, rag_fusion};
 
 /// Run a parsed `SEARCH <collection> USING FUSION(...)` statement.
 pub async fn search_fusion(
@@ -30,9 +30,13 @@ pub async fn search_fusion(
         state,
         identity,
         database_id,
-        collection,
-        params,
-        linearizable,
+        RagFusionRequest {
+            collection,
+            params,
+            linearizable,
+            // `SEARCH ... USING FUSION` reads the current graph.
+            temporal: nodedb_sql::temporal::TemporalScope::default(),
+        },
     )
     .await
 }

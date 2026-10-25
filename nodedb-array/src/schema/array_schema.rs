@@ -11,12 +11,13 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::attr_spec::AttrSpec;
+use super::attr_meta::AttrMeta;
+use super::attr_spec::{AttrSpec, AttrType};
 use super::cell_order::{CellOrder, TileOrder};
 use super::dim_spec::DimSpec;
 use super::georef::ArrayGeoref;
 use super::validation;
-use crate::error::ArrayResult;
+use crate::error::{ArrayError, ArrayResult};
 
 /// Full array schema.
 #[derive(
@@ -63,34 +64,75 @@ impl ArraySchema {
         self.attrs.iter().find(|a| a.name == name)
     }
 
+    /// This schema with `meta` in place of attr `attr`'s metadata, checked
+    /// against the attr type.
+    pub fn with_attr_meta(mut self, attr: &str, meta: AttrMeta) -> ArrayResult<Self> {
+        let array = self.name.clone();
+        let spec = self
+            .attrs
+            .iter_mut()
+            .find(|a| a.name == attr)
+            .ok_or_else(|| ArrayError::InvalidAttr {
+                array: array.clone(),
+                attr: attr.to_string(),
+                detail: "no such attribute".to_string(),
+            })?;
+        meta.check(spec.dtype)
+            .map_err(|e| ArrayError::InvalidAttrMeta {
+                array,
+                attr: attr.to_string(),
+                detail: e.to_string(),
+            })?;
+        spec.meta = meta;
+        Ok(self)
+    }
+
     /// MessagePack encoding of the schema's *content* fields — the parts
     /// that determine compatibility for cross-array element-wise ops.
-    /// Excludes the array `name` so two structurally-identical schemas
-    /// with different names produce identical bytes (and therefore
-    /// identical `schema_hash`).
-    pub fn content_msgpack(&self) -> Vec<u8> {
-        // Encode tuple of the structural fields. zerompk derives all
-        // cover the inner types.
+    /// Excludes the array `name`, the georef, and every attr's metadata, so
+    /// two structurally identical schemas produce identical bytes (and
+    /// therefore identical `schema_hash`).
+    pub fn content_msgpack(&self) -> ArrayResult<Vec<u8>> {
+        let attrs: Vec<AttrContent<'_>> = self
+            .attrs
+            .iter()
+            .map(|a| AttrContent {
+                name: &a.name,
+                dtype: a.dtype,
+                nullable: a.nullable,
+            })
+            .collect();
         let payload = SchemaContent {
             dims: &self.dims,
-            attrs: &self.attrs,
+            attrs,
             tile_extents: &self.tile_extents,
             cell_order: self.cell_order,
             tile_order: self.tile_order,
         };
-        zerompk::to_msgpack_vec(&payload).unwrap_or_default()
+        zerompk::to_msgpack_vec(&payload).map_err(|e| ArrayError::SchemaEncode {
+            array: self.name.clone(),
+            detail: e.to_string(),
+        })
     }
 }
 
 /// Borrowed view of the `ArraySchema` fields that participate in
-/// content-only hashing (everything except `name`).
+/// content-only hashing.
 #[derive(zerompk::ToMessagePack)]
 struct SchemaContent<'a> {
     dims: &'a Vec<DimSpec>,
-    attrs: &'a Vec<AttrSpec>,
+    attrs: Vec<AttrContent<'a>>,
     tile_extents: &'a Vec<u64>,
     cell_order: CellOrder,
     tile_order: TileOrder,
+}
+
+/// The content of one attr: everything but its metadata.
+#[derive(zerompk::ToMessagePack)]
+struct AttrContent<'a> {
+    name: &'a String,
+    dtype: AttrType,
+    nullable: bool,
 }
 
 #[cfg(test)]
@@ -121,7 +163,7 @@ mod tests {
         let a = mk("alpha");
         let b = mk("beta");
         assert_ne!(a.name, b.name);
-        assert_eq!(a.content_msgpack(), b.content_msgpack());
+        assert_eq!(a.content_msgpack().unwrap(), b.content_msgpack().unwrap());
     }
 
     #[test]
@@ -173,7 +215,7 @@ mod tests {
 
     fn pixel_georef() -> ArrayGeoref {
         ArrayGeoref {
-            srid: nodedb_types::geometry::Srid::Utm47N,
+            srid: nodedb_types::geometry::Srid::new(32647).unwrap(),
             x_dim: 1,
             y_dim: 0,
             transform: Some(super::super::georef::GeoTransform([
@@ -187,7 +229,62 @@ mod tests {
         let plain = raster();
         let geo = raster().with_georef(Some(pixel_georef())).unwrap();
         assert_ne!(plain, geo);
-        assert_eq!(plain.content_msgpack(), geo.content_msgpack());
+        assert_eq!(
+            plain.content_msgpack().unwrap(),
+            geo.content_msgpack().unwrap()
+        );
+    }
+
+    fn landsat_meta() -> AttrMeta {
+        AttrMeta {
+            nodata: Some(0.0),
+            scale: Some(0.0000275),
+            offset: Some(-0.2),
+            units: Some("reflectance".into()),
+        }
+    }
+
+    #[test]
+    fn content_msgpack_ignores_attr_meta() {
+        let plain = raster();
+        let with_meta = raster().with_attr_meta("b1", landsat_meta()).unwrap();
+        assert_ne!(plain, with_meta);
+        assert_eq!(
+            plain.content_msgpack().unwrap(),
+            with_meta.content_msgpack().unwrap()
+        );
+        let dropped = with_meta.with_attr_meta("b1", AttrMeta::default()).unwrap();
+        assert_eq!(dropped, plain);
+    }
+
+    #[test]
+    fn attr_meta_round_trips_and_is_checked() {
+        let with_meta = raster().with_attr_meta("b1", landsat_meta()).unwrap();
+        let bytes = zerompk::to_msgpack_vec(&with_meta).unwrap();
+        let back: ArraySchema = zerompk::from_msgpack(&bytes).unwrap();
+        assert_eq!(back.attrs[0].meta, landsat_meta());
+        let bad = AttrMeta {
+            nodata: Some(-1.0),
+            ..AttrMeta::default()
+        };
+        assert!(matches!(
+            raster().with_attr_meta("b1", bad),
+            Err(ArrayError::InvalidAttrMeta { .. })
+        ));
+        assert!(matches!(
+            raster().with_attr_meta("b9", landsat_meta()),
+            Err(ArrayError::InvalidAttr { .. })
+        ));
+    }
+
+    #[test]
+    fn content_change_changes_the_bytes() {
+        let mut narrowed = raster();
+        narrowed.attrs[0] = AttrSpec::new("b1", AttrType::Int8, true);
+        assert_ne!(
+            raster().content_msgpack().unwrap(),
+            narrowed.content_msgpack().unwrap()
+        );
     }
 
     #[test]

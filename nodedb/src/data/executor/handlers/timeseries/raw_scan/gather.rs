@@ -9,7 +9,7 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::engine::timeseries::columnar_agg::timestamp_range_filter;
 use crate::types::{DatabaseId, TenantId};
 
-use super::partition_scan::scan_partitions_parallel;
+use super::partition_scan::{PartitionScan, scan_partitions_parallel};
 use super::row_emit::{emit_memtable_row, row_admitted_by_policy};
 
 /// Inputs to [`CoreLoop::gather_ts_rows`].
@@ -38,6 +38,7 @@ impl CoreLoop {
         &self,
         p: TsGatherParams<'_>,
     ) -> crate::Result<Vec<rmpv::Value>> {
+        let crs = self.crs_context();
         let TsGatherParams {
             database_id,
             tid,
@@ -107,13 +108,13 @@ impl CoreLoop {
                     rmpv::encode::write_value(&mut buf, &row).map_err(|e| crate::Error::Codec {
                         detail: format!("timeseries row encode: {e}"),
                     })?;
-                    if !ScanFilter::all_match_binary(filter_predicates, &buf)? {
+                    if !ScanFilter::all_match_binary(filter_predicates, &buf, &crs)? {
                         continue;
                     }
                 }
                 // The read policy, after the WHERE predicates and before the
                 // row takes a limit slot.
-                if !row_admitted_by_policy(&row, rls_predicates)? {
+                if !row_admitted_by_policy(&row, rls_predicates, &crs)? {
                     continue;
                 }
                 results.push(row);
@@ -148,12 +149,15 @@ impl CoreLoop {
             if remaining > 0 && !partition_dirs.is_empty() {
                 let partition_rows = scan_partitions_parallel(
                     &partition_dirs,
-                    time_range,
-                    remaining,
-                    filter_predicates,
-                    has_filters,
-                    rls_predicates,
-                    self.segment_keks.ts_segment_kek.as_ref(),
+                    &PartitionScan {
+                        time_range,
+                        limit: remaining,
+                        filter_predicates,
+                        has_filters,
+                        rls_predicates,
+                        kek: self.segment_keks.ts_segment_kek.as_ref(),
+                    },
+                    &crs,
                 )?;
                 results.extend(partition_rows);
                 results.truncate(limit);

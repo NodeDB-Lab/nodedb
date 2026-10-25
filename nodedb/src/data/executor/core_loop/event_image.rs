@@ -141,7 +141,7 @@ mod tests {
     use nodedb_types::value::Value;
 
     use super::*;
-    use crate::data::executor::core_loop::redo_image::StoredRow;
+    use crate::data::executor::core_loop::redo_image::WriteSetRow;
     use crate::data::executor::core_loop::tests::{make_core_with_dir, make_default_task};
     use crate::engine::document::store::{CollectionConfig, RowIdentity};
     use crate::event::bus::{EventConsumerRx, create_event_bus_with_capacity};
@@ -285,7 +285,7 @@ mod tests {
     fn a_corrupt_post_image_refuses_its_write_set_and_stops_the_core() {
         let dir = tempfile::tempdir().expect("tempdir");
         let (mut core, _events) = strict_core(dir.path());
-        let row = || StoredRow {
+        let row = || WriteSetRow {
             database_id: 0,
             tid: TID,
             collection: COLL,

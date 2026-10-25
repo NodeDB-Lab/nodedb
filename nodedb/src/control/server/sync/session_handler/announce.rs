@@ -57,9 +57,10 @@ pub(in crate::control::server::sync) fn build_collection_schema_frame(
 
     let msg = CollectionSchemaSyncMsg {
         descriptor: CollectionDescriptor::from(&stored),
-        // Not correctness-load-bearing: the receive side materializes the
-        // collection create-only and does not consume this timestamp.
-        creation_hlc: nodedb_types::hlc::Hlc::ZERO,
+        // The collection's incarnation. A client states it on every delta it
+        // pushes (`DeltaPushMsg::collection_incarnation`), and Origin refuses
+        // a delta for an incarnation a drop and a same-name create replaced.
+        creation_hlc: stored.incarnation,
     };
 
     SyncFrame::new_msgpack(SyncMessageType::CollectionSchema, &msg)

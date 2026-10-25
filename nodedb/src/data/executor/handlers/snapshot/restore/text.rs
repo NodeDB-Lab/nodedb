@@ -84,7 +84,7 @@ impl CoreLoop {
                     database_id,
                     tenant: tid,
                     coll: collection,
-                    sys_cutoff_ms: None,
+                    sys_cutoff: None,
                     valid_at_ms: None,
                     limit: usize::MAX,
                 },

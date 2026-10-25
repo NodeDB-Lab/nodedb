@@ -2,9 +2,8 @@
 
 //! End-to-end bitemporal graph read path.
 //!
-//! Exercises the edge-store methods that the Data Plane's
-//! `GraphOp::TemporalNeighbors` / `GraphOp::TemporalAlgorithm` handlers
-//! dispatch to: `neighbors_out_as_of`, `neighbors_in_as_of`, and
+//! Exercises the edge-store methods the Data Plane's historical graph
+//! reads dispatch to: `neighbors_out_as_of`, `neighbors_in_as_of`, and
 //! `rebuild_sharded_from_store_as_of`. The wire ops, dispatch match,
 //! and handler are thin wrappers over these calls, so validating the
 //! edge-store surface validates the full round-trip.
@@ -56,7 +55,7 @@ fn neighbors_out_as_of_none_matches_current_state() {
             collection: COLL,
             node: "alice",
             label_filter: Some("KNOWS"),
-            system_as_of_ms: None,
+            cutoff_ordinal: i64::MAX,
             valid_at_ms: None,
         })
         .unwrap();
@@ -84,7 +83,7 @@ fn neighbors_out_as_of_honors_system_cutoff() {
             collection: COLL,
             node: "alice",
             label_filter: Some("KNOWS"),
-            system_as_of_ms: Some(150),
+            cutoff_ordinal: ms_to_ordinal_upper(150),
             valid_at_ms: None,
         })
         .unwrap();
@@ -95,7 +94,7 @@ fn neighbors_out_as_of_honors_system_cutoff() {
             collection: COLL,
             node: "alice",
             label_filter: Some("KNOWS"),
-            system_as_of_ms: Some(250),
+            cutoff_ordinal: ms_to_ordinal_upper(250),
             valid_at_ms: None,
         })
         .unwrap();
@@ -125,7 +124,7 @@ fn neighbors_out_as_of_respects_tombstone_at_cutoff() {
             collection: COLL,
             node: "alice",
             label_filter: Some("KNOWS"),
-            system_as_of_ms: Some(200),
+            cutoff_ordinal: ms_to_ordinal_upper(200),
             valid_at_ms: None,
         })
         .unwrap();
@@ -136,7 +135,7 @@ fn neighbors_out_as_of_respects_tombstone_at_cutoff() {
             collection: COLL,
             node: "alice",
             label_filter: Some("KNOWS"),
-            system_as_of_ms: Some(400),
+            cutoff_ordinal: ms_to_ordinal_upper(400),
             valid_at_ms: None,
         })
         .unwrap();
@@ -179,7 +178,7 @@ fn neighbors_out_as_of_applies_valid_time_predicate() {
             collection: COLL,
             node: "alice",
             label_filter: Some("KNOWS"),
-            system_as_of_ms: Some(10_000),
+            cutoff_ordinal: ms_to_ordinal_upper(10_000),
             valid_at_ms: Some(150),
         })
         .unwrap();
@@ -193,7 +192,7 @@ fn neighbors_out_as_of_applies_valid_time_predicate() {
             collection: COLL,
             node: "alice",
             label_filter: Some("KNOWS"),
-            system_as_of_ms: Some(10_000),
+            cutoff_ordinal: ms_to_ordinal_upper(10_000),
             valid_at_ms: Some(50),
         })
         .unwrap();
@@ -204,7 +203,7 @@ fn neighbors_out_as_of_applies_valid_time_predicate() {
             collection: COLL,
             node: "alice",
             label_filter: Some("KNOWS"),
-            system_as_of_ms: Some(10_000),
+            cutoff_ordinal: ms_to_ordinal_upper(10_000),
             valid_at_ms: Some(250),
         })
         .unwrap();
@@ -226,7 +225,7 @@ fn neighbors_in_as_of_honors_system_cutoff() {
             collection: COLL,
             node: "bob",
             label_filter: Some("KNOWS"),
-            system_as_of_ms: Some(150),
+            cutoff_ordinal: ms_to_ordinal_upper(150),
             valid_at_ms: None,
         })
         .unwrap();
@@ -237,7 +236,7 @@ fn neighbors_in_as_of_honors_system_cutoff() {
             collection: COLL,
             node: "bob",
             label_filter: Some("KNOWS"),
-            system_as_of_ms: Some(250),
+            cutoff_ordinal: ms_to_ordinal_upper(250),
             valid_at_ms: None,
         })
         .unwrap();
@@ -247,11 +246,8 @@ fn neighbors_in_as_of_honors_system_cutoff() {
     assert_eq!(at_250.len(), 2);
 }
 
-/// `TemporalAlgorithm` dispatch rebuilds the shard via
-/// `rebuild_sharded_from_store_as_of(store, ms_to_ordinal_upper(ms))`.
-/// Verify the ordinal conversion + rebuild yields correct per-cutoff
-/// topology — the dispatcher's contract is that it feeds this result to
-/// `run_algo_response` unchanged.
+/// A rebuild at `ms_to_ordinal_upper(ms)` yields the topology live at that
+/// cutoff.
 #[test]
 fn temporal_algorithm_rebuild_matches_expected_topology_at_cutoff() {
     let (store, _dir) = open_store();
@@ -281,9 +277,8 @@ fn temporal_algorithm_rebuild_matches_expected_topology_at_cutoff() {
     assert_eq!(p250.edge_count(), 2, "at 250ms expected 2 edges");
 }
 
-/// Sanity: the two cutoffs produce genuinely different topologies, so
-/// algorithmic results computed on them would also differ — proving the
-/// `TemporalAlgorithm` dispatcher path yields per-cutoff execution.
+/// The two cutoffs produce different topologies, so an algorithm run on
+/// each one reads a different graph.
 #[test]
 fn temporal_algorithm_direction_matters_across_cutoffs() {
     let (store, _dir) = open_store();
@@ -312,7 +307,7 @@ fn temporal_algorithm_direction_matters_across_cutoffs() {
             collection: COLL,
             node: "source",
             label_filter: Some("R"),
-            system_as_of_ms: Some(150),
+            cutoff_ordinal: ms_to_ordinal_upper(150),
             valid_at_ms: None,
         })
         .unwrap();
@@ -323,7 +318,7 @@ fn temporal_algorithm_direction_matters_across_cutoffs() {
             collection: COLL,
             node: "source",
             label_filter: Some("R"),
-            system_as_of_ms: Some(400),
+            cutoff_ordinal: ms_to_ordinal_upper(400),
             valid_at_ms: None,
         })
         .unwrap();
@@ -334,7 +329,7 @@ fn temporal_algorithm_direction_matters_across_cutoffs() {
             collection: COLL,
             node: "sink",
             label_filter: Some("R"),
-            system_as_of_ms: Some(400),
+            cutoff_ordinal: ms_to_ordinal_upper(400),
             valid_at_ms: None,
         })
         .unwrap();

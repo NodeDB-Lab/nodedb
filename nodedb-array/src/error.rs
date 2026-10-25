@@ -41,6 +41,23 @@ pub enum ArrayError {
     #[error("tile-extent vector rejected on '{array}': {detail}")]
     InvalidTileExtents { array: String, detail: String },
 
+    /// An attr's nodata, scale, offset or units does not fit its type.
+    #[error("attribute '{attr}' metadata rejected on '{array}': {detail}")]
+    InvalidAttrMeta {
+        array: String,
+        attr: String,
+        detail: String,
+    },
+
+    /// The schema's content fields failed to encode.
+    #[error("schema of '{array}' failed to encode: {detail}")]
+    SchemaEncode { array: String, detail: String },
+
+    /// An exact aggregate holds more distinct values than its memory budget
+    /// allows. SQLSTATE `54000`.
+    #[error("aggregate exceeds its memory budget: {detail}")]
+    AggregateBudgetExceeded { detail: String },
+
     /// A georef names a missing or ill-typed dim, or carries a degenerate
     /// transform.
     #[error("georef rejected on '{array}': {detail}")]
@@ -159,12 +176,15 @@ impl ArrayError {
             | ArrayError::InvalidAttr { array, .. }
             | ArrayError::InvalidTileExtents { array, .. }
             | ArrayError::InvalidGeoref { array, .. }
+            | ArrayError::InvalidAttrMeta { array, .. }
+            | ArrayError::SchemaEncode { array, .. }
             | ArrayError::CoordArityMismatch { array, .. }
             | ArrayError::CoordOutOfDomain { array, .. }
             | ArrayError::CellTypeMismatch { array, .. }
             | ArrayError::Narrow { array, .. } => array,
             ArrayError::ZoneFrame(e) => e.array(),
             ArrayError::NumericOverflow { .. }
+            | ArrayError::AggregateBudgetExceeded { .. }
             | ArrayError::SegmentCorruption { .. }
             | ArrayError::UnsupportedFormat { .. }
             | ArrayError::UnsupportedSegmentFormat { .. }

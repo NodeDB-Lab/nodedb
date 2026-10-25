@@ -213,11 +213,13 @@ impl SharedState {
             .map(|last| nodedb_types::Lsn::new(last.saturating_add(1)))
     }
 
-    /// Shared HTTP client reused by every outbound emitter. Cloning the
-    /// Arc is cheap — the client itself owns a connection pool, DNS
-    /// resolver, and TLS session cache that every caller benefits from.
+    /// Shared HTTP client reused by every outbound emitter: the egress
+    /// client of [`Self::remote_sources`]. Cloning the Arc is cheap — the
+    /// client itself owns a connection pool, DNS resolver, and TLS session
+    /// cache that every caller benefits from. A caller checks its URL with
+    /// the `[egress]` policy before it sends.
     pub fn http_client(&self) -> &std::sync::Arc<reqwest::Client> {
-        &self.http_client
+        self.remote_sources.http()
     }
 
     /// Cluster-wide version view derived on demand from the live

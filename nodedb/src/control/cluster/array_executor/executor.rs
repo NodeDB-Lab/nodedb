@@ -55,17 +55,19 @@ impl DataPlaneArrayExecutor {
         txn_id: Option<TxnId>,
     ) -> Result<Response> {
         // Array reads have no weaker consistency: a shard read confirms its
-        // group on this node before it reads.
+        // group on this node before it reads. A read pinned to a marked cut
+        // then waits until this node installed the cut
+        // (`read_cut::wait`), so every shard reads one cut.
         if !plan_is_write(&plan) {
+            let deadline = StatementDeadline::of_statement(&self.state);
             let groups = groups_of_vshards(&self.state, [local_vshard_id.as_u32()])
                 .map_err(|e| execution_error("array read confirmation", e))?;
-            confirm_linearizable_read(
-                &self.state,
-                &groups,
-                StatementDeadline::of_statement(&self.state),
-            )
-            .await
-            .map_err(|e| execution_error("array read confirmation", e))?;
+            confirm_linearizable_read(&self.state, &groups, deadline)
+                .await
+                .map_err(|e| execution_error("array read confirmation", e))?;
+            crate::control::read_cut::await_read_cut(&self.state, &plan, deadline)
+                .await
+                .map_err(|e| execution_error("array read cut", e))?;
         }
         let request_id = self.state.next_request_id();
         let request = local_request(request_id, array_id, local_vshard_id, plan, txn_id);

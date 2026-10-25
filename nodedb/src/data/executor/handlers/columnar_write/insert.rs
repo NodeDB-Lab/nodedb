@@ -27,6 +27,9 @@ pub(in crate::data::executor) struct ColumnarInsertParams<'a> {
     pub surrogates: &'a [Surrogate],
     pub schema_bytes: &'a [u8],
     pub provenance: Option<&'a SyncProvenance>,
+    /// System-time ordinal of the first row of a bitemporal insert, from the
+    /// plan or the WAL record (`ColumnarOp::Insert::system_from`).
+    pub system_from: Option<i64>,
     /// Compiled row-level-security WRITE predicate carried by the plan.
     pub rls_write_check: &'a nodedb_types::RlsWriteCheck,
     /// Projection for a `RETURNING` clause, when the statement carried one.
@@ -69,6 +72,7 @@ impl CoreLoop {
             surrogates,
             schema_bytes,
             provenance,
+            system_from,
             rls_write_check,
             returning,
             rls_filters,
@@ -159,6 +163,7 @@ impl CoreLoop {
                 engine_key: &engine_key,
                 schema: &schema,
                 bitemporal,
+                system_from,
                 intent,
                 on_conflict_updates,
                 surrogates,

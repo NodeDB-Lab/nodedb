@@ -209,10 +209,10 @@ impl CoreLoop {
         // entry replaces the unstamped pre-dispatch record. Then one entry per
         // target row this delete debited: the statement's own record names
         // only the removed row.
-        let mut write_set = match (prior.is_some(), outcome.bitemporal_sys_from_ms) {
-            (true, Some(sys_from_ms)) => versioned_point_images(
+        let mut write_set = match (prior.is_some(), outcome.bitemporal_sys_from) {
+            (true, Some(sys_from)) => versioned_point_images(
                 WriteSetEntry::delete(surrogate.as_u32(), document_identity.clone()),
-                sys_from_ms,
+                sys_from,
             ),
             _ => Vec::new(),
         };
@@ -265,7 +265,8 @@ impl CoreLoop {
                     return self.refusal_with_landed_rows(task, code, write_set);
                 }
             };
-            match returning_rows::build_rows_payload(spec, rls_filters, &[doc]) {
+            match returning_rows::build_rows_payload(spec, rls_filters, &[doc], &self.crs_context())
+            {
                 Ok(payload) => self.response_with_payload(task, payload),
                 // The removal committed: the refusal carries its entries.
                 Err(e) => {
@@ -304,7 +305,7 @@ impl CoreLoop {
         let Some(spec) = returning else {
             return self.response_affected(task, 0);
         };
-        match returning_rows::build_rows_payload(spec, rls_filters, &[]) {
+        match returning_rows::build_rows_payload(spec, rls_filters, &[], &self.crs_context()) {
             Ok(payload) => self.response_with_payload(task, payload),
             Err(e) => self.response_error(
                 task,
@@ -354,12 +355,15 @@ impl CoreLoop {
             });
         rls_write_gate::admit_stored_row(
             rls_write_check,
-            &body,
-            &storage_key.to_identity(),
-            strict_schema,
-            &self.identity_column(database_id, tid, collection),
+            rls_write_gate::GatedRow {
+                body: &body,
+                identity: &storage_key.to_identity(),
+                strict_schema,
+                identity_column: &self.identity_column(database_id, tid, collection),
+            },
             tid,
             collection,
+            &self.crs_context(),
         )
     }
 }

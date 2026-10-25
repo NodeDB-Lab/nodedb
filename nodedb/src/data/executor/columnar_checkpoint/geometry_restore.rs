@@ -84,8 +84,14 @@ impl CoreLoop {
         // Every fallible read runs before the spatial maps change, so a
         // refused restore leaves them as the spatial checkpoint loaded them.
         let mut rows = self.restored_flushed_rows(engine, segments, &schema, collection)?;
-        for row in engine.scan_memtable_rows() {
-            rows.push(row?);
+        let memtable_segment_id = engine.memtable_segment_id();
+        for row_idx in 0..engine.memtable().row_count() {
+            let Some(row) = engine.get_memtable_row(row_idx)? else {
+                continue;
+            };
+            if is_current(engine, &row, memtable_segment_id, row_idx)? {
+                rows.push(row);
+            }
         }
         // The checkpoint key carries the stored, database-qualified name.
         let vshard = nodedb_types::CollectionKey::from_qualified_str(*db_id, collection)?.vshard();
@@ -134,6 +140,7 @@ impl CoreLoop {
                 schema_bytes: Vec::new(),
                 provenance: None,
                 wal_lsn: None,
+                system_from: None,
                 // No predicate here: this restore re-derives an index from
                 // rows that are already durable and admits no new write. The
                 // writing identity that admitted those rows is gone.
@@ -183,11 +190,37 @@ impl CoreLoop {
                 if delete_bm.is_some_and(|bm| bm.is_deleted(row_idx as u32)) {
                     continue;
                 }
-                out.push(segment.row(schema, row_idx)?);
+                let row = segment.row(schema, row_idx)?;
+                if is_current(engine, &row, seg_id, row_idx)? {
+                    out.push(row);
+                }
             }
         }
         Ok(out)
     }
+}
+
+/// Whether the live row at `(segment_id, row_idx)` is its key's current
+/// version, the one the R-tree indexes. Every live row of a collection that
+/// is not bitemporal, or has no primary key, is. In a bitemporal collection
+/// only the row its key is bound to is: a superseded version and a tombstone
+/// are history.
+///
+/// `Err` when the row's primary key does not encode.
+fn is_current(
+    engine: &nodedb_columnar::MutationEngine,
+    row: &[nodedb_types::value::Value],
+    segment_id: u64,
+    row_idx: usize,
+) -> crate::Result<bool> {
+    if !engine.schema().is_bitemporal() || engine.pk_col_indices().is_empty() {
+        return Ok(true);
+    }
+    let pk_bytes = engine.encode_pk_from_row(row)?;
+    let bound = engine.pk_index().get(&pk_bytes).copied();
+    Ok(bound.is_some_and(|loc| {
+        loc.segment_id == segment_id && u32::try_from(row_idx).is_ok_and(|r| r == loc.row_index)
+    }))
 }
 
 #[cfg(test)]

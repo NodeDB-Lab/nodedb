@@ -173,7 +173,7 @@ async fn match_across_shards(
     txn_id: Option<crate::types::TxnId>,
 ) -> NativeResponse {
     let crate::bridge::envelope::PhysicalPlan::Graph(
-        nodedb_physical::physical_plan::GraphOp::Match { query, .. },
+        nodedb_physical::physical_plan::GraphOp::Match { query, scope, .. },
     ) = plan
     else {
         return error_to_native(
@@ -205,6 +205,7 @@ async fn match_across_shards(
             txn_id,
             // The native protocol has no read-consistency setting.
             linearizable: true,
+            scope: *scope,
         },
     )
     .await;

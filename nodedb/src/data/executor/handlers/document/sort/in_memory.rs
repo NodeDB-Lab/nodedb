@@ -21,6 +21,7 @@ pub(in crate::data::executor) fn sort_rows(
     rows: &mut [(String, Vec<u8>)],
     sort_keys: &[SortKeySpec],
     decimal_keys: &[bool],
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<()> {
     if sort_keys.is_empty() {
         return Ok(());
@@ -29,7 +30,7 @@ pub(in crate::data::executor) fn sort_rows(
     if all_column_keys(sort_keys) {
         return sort_rows_by_column(rows, sort_keys, decimal_keys);
     }
-    sort_rows_by_expression(rows, sort_keys, decimal_keys)
+    sort_rows_by_expression(rows, sort_keys, decimal_keys, crs)
 }
 
 /// Zero-decode path: every key names a stored field, so ordering is decided
@@ -78,10 +79,11 @@ fn sort_rows_by_expression(
     rows: &mut [(String, Vec<u8>)],
     sort_keys: &[SortKeySpec],
     decimal_keys: &[bool],
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<()> {
     let values: Vec<SortValues> = rows
         .iter()
-        .map(|(_, bytes)| eval_sort_values(bytes, sort_keys))
+        .map(|(_, bytes)| eval_sort_values(bytes, sort_keys, crs))
         .collect::<crate::Result<Vec<_>>>()?;
 
     let mut indices: Vec<usize> = (0..rows.len()).collect();
@@ -186,7 +188,13 @@ mod tests {
     #[test]
     fn sort_by_int_field_asc() {
         let mut rows = rows_with_vals(&[("a", 30), ("b", 10), ("c", 20)]);
-        sort_rows(&mut rows, &[col("val", true)], &[]).expect("sort_rows failed");
+        sort_rows(
+            &mut rows,
+            &[col("val", true)],
+            &[],
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("sort_rows failed");
         let order: Vec<&str> = rows.iter().map(|(id, _)| id.as_str()).collect();
         assert_eq!(order, vec!["b", "c", "a"], "ASC by val: 10, 20, 30");
     }
@@ -207,7 +215,13 @@ mod tests {
             .collect()
         };
         let mut by_column = rows();
-        sort_rows(&mut by_column, &[col("v", true)], &[true]).expect("sort_rows failed");
+        sort_rows(
+            &mut by_column,
+            &[col("v", true)],
+            &[true],
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("sort_rows failed");
         let order: Vec<&str> = by_column.iter().map(|(id, _)| id.as_str()).collect();
         assert_eq!(order, vec!["small", "ten", "mid", "max"]);
 
@@ -222,7 +236,13 @@ mod tests {
             nulls_first: false,
         };
         let mut by_expression = rows();
-        sort_rows(&mut by_expression, &[key, computed], &[true, false]).expect("sort_rows failed");
+        sort_rows(
+            &mut by_expression,
+            &[key, computed],
+            &[true, false],
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("sort_rows failed");
         let order: Vec<&str> = by_expression.iter().map(|(id, _)| id.as_str()).collect();
         assert_eq!(order, vec!["small", "ten", "mid", "max"]);
     }
@@ -230,7 +250,13 @@ mod tests {
     #[test]
     fn sort_by_int_field_desc() {
         let mut rows = rows_with_vals(&[("a", 30), ("b", 10), ("c", 20)]);
-        sort_rows(&mut rows, &[col("val", false)], &[]).expect("sort_rows failed");
+        sort_rows(
+            &mut rows,
+            &[col("val", false)],
+            &[],
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("sort_rows failed");
         let order: Vec<&str> = rows.iter().map(|(id, _)| id.as_str()).collect();
         assert_eq!(order, vec!["a", "c", "b"], "DESC by val: 30, 20, 10");
     }
@@ -242,7 +268,13 @@ mod tests {
             ("b".into(), encode(&serde_json::json!({"name": "alpha"}))),
             ("c".into(), encode(&serde_json::json!({"name": "bravo"}))),
         ];
-        sort_rows(&mut rows, &[col("name", true)], &[]).expect("sort_rows failed");
+        sort_rows(
+            &mut rows,
+            &[col("name", true)],
+            &[],
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("sort_rows failed");
         let order: Vec<&str> = rows.iter().map(|(id, _)| id.as_str()).collect();
         assert_eq!(order, vec!["b", "c", "a"]);
     }
@@ -264,7 +296,13 @@ mod tests {
             ascending: true,
             nulls_first: false,
         };
-        sort_rows(&mut rows, &[key], &[]).expect("sort_rows failed");
+        sort_rows(
+            &mut rows,
+            &[key],
+            &[],
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect("sort_rows failed");
         let order: Vec<&str> = rows.iter().map(|(id, _)| id.as_str()).collect();
         // 100/20 = 5, 100/5 = 20, 100/2 = 50.
         assert_eq!(order, vec!["b", "c", "a"]);
@@ -286,8 +324,13 @@ mod tests {
             ascending: true,
             nulls_first: false,
         };
-        sort_rows(&mut rows, &[key], &[])
-            .expect_err("zero divisor in a sort key must fail the sort");
+        sort_rows(
+            &mut rows,
+            &[key],
+            &[],
+            &nodedb_crs::CrsContext::builtin_only(),
+        )
+        .expect_err("zero divisor in a sort key must fail the sort");
     }
 
     #[test]

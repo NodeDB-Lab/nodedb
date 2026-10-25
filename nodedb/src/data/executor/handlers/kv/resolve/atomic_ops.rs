@@ -55,7 +55,14 @@ impl CoreLoop {
         // gate does. It never changes an integer it accepts.
         let declared = self.declared_columns_of(did, tid, collection);
         let new_bytes = fit_kv_image(&computed, declared)?.unwrap_or(computed);
-        admit_kv_row(rls_write_check, &new_bytes, key, tid, collection)?;
+        admit_kv_row(
+            rls_write_check,
+            &new_bytes,
+            key,
+            tid,
+            collection,
+            &self.crs_context(),
+        )?;
 
         let expire_at_ms = if ttl_ms > 0 {
             expiry_from_ttl(ttl_ms, now_ms)
@@ -112,7 +119,14 @@ impl CoreLoop {
                 fitted,
             ),
         };
-        admit_kv_row(rls_write_check, &new_bytes, key, tid, collection)?;
+        admit_kv_row(
+            rls_write_check,
+            &new_bytes,
+            key,
+            tid,
+            collection,
+            &self.crs_context(),
+        )?;
 
         let response_payload =
             response_codec::encode_json_as_msgpack(&incr_float_reply(new_value, &new_bytes))?;
@@ -161,7 +175,14 @@ impl CoreLoop {
         let write_bytes = if matches {
             let declared = self.declared_columns_of(did, tid, collection);
             let fitted = fit_kv_image(&computed, declared)?.unwrap_or(computed);
-            admit_kv_row(rls_write_check, &fitted, key, tid, collection)?;
+            admit_kv_row(
+                rls_write_check,
+                &fitted,
+                key,
+                tid,
+                collection,
+                &self.crs_context(),
+            )?;
             fitted
         } else {
             computed
@@ -220,7 +241,14 @@ impl CoreLoop {
         // `execute_kv_getset`.
         let declared = self.declared_columns_of(did, tid, collection);
         let write_bytes = fit_kv_image(&computed, declared)?.unwrap_or(computed);
-        admit_kv_row(rls_write_check, &write_bytes, key, tid, collection)?;
+        admit_kv_row(
+            rls_write_check,
+            &write_bytes,
+            key,
+            tid,
+            collection,
+            &self.crs_context(),
+        )?;
 
         let disclosable_old = match &old {
             Some(bytes) => match self.row_passes_rls(bytes, rls_filters) {

@@ -68,7 +68,18 @@ impl SharedState {
                 permission_cache.sources(),
             ),
         );
-        let siem = Arc::new(crate::control::security::siem::SiemExporter::default());
+        // The strict egress policy: a test state reaches no private address.
+        let remote_sources = crate::control::security::egress::RemoteSources::new(Arc::new(
+            crate::control::security::egress::EgressPolicy::strict(),
+        ))
+        .map_err(|e| crate::Error::Config {
+            detail: format!("outbound HTTP client: {e}"),
+        })?;
+        let siem = Arc::new(crate::control::security::siem::SiemExporter::with_client(
+            crate::control::security::siem::SiemConfig::default(),
+            Arc::clone(remote_sources.http()),
+            Arc::clone(remote_sources.egress()),
+        ));
         let shared_audit = {
             let mut log = AuditLog::new(crate::control::security::audit::DEFAULT_FLUSH_BOUND);
             log.set_wal_sink(
@@ -133,7 +144,6 @@ impl SharedState {
             tracker: RequestTracker::new(),
             wal,
             quiesce: crate::bridge::quiesce::CollectionQuiesce::new(),
-            http_client: Arc::new(reqwest::Client::new()),
             credentials: Arc::clone(&test_credentials),
             audit: shared_audit,
             audit_recorder: std::sync::OnceLock::new(),
@@ -313,6 +323,7 @@ impl SharedState {
             cross_shard_metrics: None,
             cross_shard_dedup: std::sync::OnceLock::new(),
             redo_chunks,
+            departure_fence: Default::default(),
             kafka_manager: crate::event::kafka::KafkaManager::new(shutdown.raw_receiver()),
             definition_sync_fanout: std::sync::Arc::new(
                 crate::control::server::sync::definition_fanout::DefinitionSyncFanout::new(),
@@ -396,6 +407,7 @@ impl SharedState {
             gateway: std::sync::OnceLock::new(),
             backup_kek: None,
             backup_storage: None,
+            remote_sources,
             cut_captures: Arc::new(crate::control::backup::cut_capture::CutCaptures::new()),
             backup_schedules: Vec::new(),
             quarantine_registry: Arc::new(crate::storage::quarantine::QuarantineRegistry::new()),

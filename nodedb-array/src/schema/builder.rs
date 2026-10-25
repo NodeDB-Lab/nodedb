@@ -151,7 +151,7 @@ mod tests {
 
     fn georef(transform: Option<[f64; 6]>) -> ArrayGeoref {
         ArrayGeoref {
-            srid: nodedb_types::geometry::Srid::Wgs84,
+            srid: nodedb_types::geometry::Srid::WGS84,
             x_dim: 1,
             y_dim: 0,
             transform: transform.map(super::super::georef::GeoTransform),

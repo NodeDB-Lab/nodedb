@@ -5,7 +5,7 @@
 use nodedb_array::query::slice::{DimRange, Slice};
 use nodedb_array::schema::{ArraySchema, DimType as EngineDimType};
 use nodedb_array::types::domain::DomainBound;
-use nodedb_sql::temporal::{TemporalScope, ValidTime};
+use nodedb_sql::temporal::TemporalScope;
 use nodedb_sql::types_array::{
     ArrayBinaryOpAst, ArrayCoordLiteral, ArrayReducerAst, ArraySliceAst,
 };
@@ -122,6 +122,14 @@ pub(super) fn map_reducer(r: ArrayReducerAst) -> ArrayReducer {
         ArrayReducerAst::Min => ArrayReducer::Min,
         ArrayReducerAst::Max => ArrayReducer::Max,
         ArrayReducerAst::Mean => ArrayReducer::Mean,
+        ArrayReducerAst::Median => ArrayReducer::Median,
+        ArrayReducerAst::Percentile(p) => ArrayReducer::Percentile { p },
+        ArrayReducerAst::StdDevPop => ArrayReducer::StdDevPop,
+        ArrayReducerAst::StdDevSamp => ArrayReducer::StdDevSamp,
+        ArrayReducerAst::VarPop => ArrayReducer::VarPop,
+        ArrayReducerAst::VarSamp => ArrayReducer::VarSamp,
+        ArrayReducerAst::Mode => ArrayReducer::Mode,
+        ArrayReducerAst::Histogram { bins, lo, hi } => ArrayReducer::Histogram { bins, lo, hi },
     }
 }
 
@@ -134,18 +142,17 @@ pub(super) fn map_binary_op(o: ArrayBinaryOpAst) -> ArrayBinaryOp {
     }
 }
 
-/// Resolve a [`TemporalScope`] into the `(system_as_of, valid_at_ms)` pair
-/// expected by `ArrayOp::Aggregate` (and `ClusterArrayOp::Agg`).
+/// Resolve a [`TemporalScope`] into the `(system_time, valid_at_ms)` pair
+/// expected by `ArrayOp::Aggregate` / `ArrayOp::Elementwise` (and their
+/// `ClusterArrayOp` fan-outs).
 ///
-/// Default semantics when neither clause was given: both `None` — the Data
-/// Plane handler treats this as the live-state fast path (equivalent to
-/// `system_as_of = i64::MAX`, no valid-time filter). This avoids allocating
-/// any bitemporal bookkeeping for the overwhelmingly common non-temporal case.
+/// With neither clause: `SystemTimeScope::Current` and no valid-time
+/// filter, the Data Plane's live-state path.
 ///
-/// When `AS OF SYSTEM TIME` is given: `system_as_of = Some(t)`, the DP
-/// handler applies the Ceiling resolver to reconstruct the array's state at
-/// the named system timestamp. `valid_at_ms` remains `None` unless
-/// `AS OF VALID TIME` is also present.
+/// `AS OF SYSTEM TIME` passes its scope through. The statement's cut pin
+/// (`system_cut::pin_statement_cuts`) later turns `AsOf` into `Pinned`, and
+/// every serving node waits for the pinned cut's marker before it reads.
+/// `valid_at_ms` stays `None` unless `AS OF VALID TIME` is also present.
 ///
 /// When `AS OF VALID TIME` is given: `valid_at_ms = Some(v)`. Only the
 /// `ValidTime::At(v)` (point-in-time) form is supported by the array engine;
@@ -158,10 +165,11 @@ pub(super) fn map_binary_op(o: ArrayBinaryOpAst) -> ArrayBinaryOp {
 pub(super) fn resolve_array_temporal(
     temporal: TemporalScope,
     context: &str,
-) -> crate::Result<(Option<i64>, Option<i64>)> {
-    let system_as_of = match temporal.system_time {
-        nodedb_types::SystemTimeScope::Current => None,
-        nodedb_types::SystemTimeScope::AsOf(ms) => Some(ms),
+) -> crate::Result<(nodedb_types::SystemTimeScope, Option<i64>)> {
+    let system_time = match temporal.system_time {
+        scope @ (nodedb_types::SystemTimeScope::Current
+        | nodedb_types::SystemTimeScope::AsOf(_)
+        | nodedb_types::SystemTimeScope::Pinned { .. }) => scope,
         nodedb_types::SystemTimeScope::AllVersions => {
             return Err(crate::Error::PlanError {
                 detail: format!(
@@ -171,19 +179,9 @@ pub(super) fn resolve_array_temporal(
             });
         }
     };
-    let valid_at_ms = match temporal.valid_time {
-        ValidTime::Any => None,
-        ValidTime::At(ms) => Some(ms),
-        ValidTime::Range(lo, _hi) => {
-            return Err(crate::Error::PlanError {
-                detail: format!(
-                    "{context}: AS OF VALID TIME range predicates are not supported on array reads; \
-                     use AS OF VALID TIME <ms> (point-in-time). Got FOR VALID_TIME FROM {lo} ..."
-                ),
-            });
-        }
-    };
-    Ok((system_as_of, valid_at_ms))
+    let valid_at_ms =
+        crate::control::planner::sql_plan_convert::valid_time_point(temporal.valid_time, "array")?;
+    Ok((system_time, valid_at_ms))
 }
 
 /// Resolve a [`TemporalScope`] into the `(system_time, valid_at_ms)` pair
@@ -198,20 +196,9 @@ pub(super) fn resolve_array_temporal(
 /// valid-time point, not an interval, so range predicates are nonsensical.
 pub(super) fn resolve_array_temporal_scope(
     temporal: TemporalScope,
-    context: &str,
 ) -> crate::Result<(nodedb_types::SystemTimeScope, Option<i64>)> {
     let system_time = temporal.system_time; // all three variants pass through
-    let valid_at_ms = match temporal.valid_time {
-        ValidTime::Any => None,
-        ValidTime::At(ms) => Some(ms),
-        ValidTime::Range(lo, _hi) => {
-            return Err(crate::Error::PlanError {
-                detail: format!(
-                    "{context}: AS OF VALID TIME range predicates are not supported on array reads; \
-                     use AS OF VALID TIME <ms> (point-in-time). Got FOR VALID_TIME FROM {lo} ..."
-                ),
-            });
-        }
-    };
+    let valid_at_ms =
+        crate::control::planner::sql_plan_convert::valid_time_point(temporal.valid_time, "array")?;
     Ok((system_time, valid_at_ms))
 }

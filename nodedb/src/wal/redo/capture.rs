@@ -101,11 +101,13 @@ pub struct CapturedEntry {
 pub enum CapturedEffect {
     Put {
         value: Vec<u8>,
-        /// `(sys_from, valid_from, valid_until)`, milliseconds.
+        /// `(sys_from, valid_from, valid_until)`: the system-time ordinal,
+        /// then the valid-time bounds in milliseconds.
         version: Option<(i64, i64, i64)>,
     },
     Delete {
-        system_from_ms: Option<i64>,
+        /// The tombstone's system-time ordinal.
+        system_from: Option<i64>,
     },
     CancelForward,
     EdgePut(EdgePutRedo),
@@ -117,10 +119,10 @@ impl CapturedEntry {
         let effect = match &entry.effect {
             RowEffect::Put { value, version } => CapturedEffect::Put {
                 value: value.clone(),
-                version: version.map(|v| (v.sys_from_ms, v.valid_from_ms, v.valid_until_ms)),
+                version: version.map(|v| (v.sys_from, v.valid_from_ms, v.valid_until_ms)),
             },
-            RowEffect::Delete { system_from_ms } => CapturedEffect::Delete {
-                system_from_ms: *system_from_ms,
+            RowEffect::Delete { system_from } => CapturedEffect::Delete {
+                system_from: *system_from,
             },
             RowEffect::CancelForward => CapturedEffect::CancelForward,
             RowEffect::Edge(EdgeImage::Put(put)) => CapturedEffect::EdgePut(put.clone()),
@@ -140,13 +142,13 @@ impl CapturedEntry {
         let effect = match self.effect {
             CapturedEffect::Put { value, version } => RowEffect::Put {
                 value,
-                version: version.map(|(sys_from_ms, valid_from_ms, valid_until_ms)| RowVersion {
-                    sys_from_ms,
+                version: version.map(|(sys_from, valid_from_ms, valid_until_ms)| RowVersion {
+                    sys_from,
                     valid_from_ms,
                     valid_until_ms,
                 }),
             },
-            CapturedEffect::Delete { system_from_ms } => RowEffect::Delete { system_from_ms },
+            CapturedEffect::Delete { system_from } => RowEffect::Delete { system_from },
             CapturedEffect::CancelForward => RowEffect::CancelForward,
             CapturedEffect::EdgePut(put) => RowEffect::Edge(EdgeImage::Put(put)),
             CapturedEffect::EdgeDelete(delete) => RowEffect::Edge(EdgeImage::Delete(delete)),

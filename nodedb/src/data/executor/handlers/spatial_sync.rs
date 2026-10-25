@@ -32,11 +32,11 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::sync_gate::{SyncAdmit, ack_status_from_admit};
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::document::store::StorageKey;
-use crate::engine::spatial::{RTree, RTreeEntry};
+use crate::engine::spatial::{RTree, RTreeEntry, TreeSrid};
 use crate::types::TenantId;
 use crate::util::fnv1a_hash;
 use nodedb_types::Surrogate;
-use nodedb_types::geometry::{Geometry, SridGeometry};
+use nodedb_types::geometry::SridGeometry;
 use nodedb_types::sync::wire::{AckStatus, SyncProvenance};
 
 /// Parameters for a spatial geometry insert on the Data Plane.
@@ -129,6 +129,16 @@ impl CoreLoop {
             );
         }
 
+        // The geometry's SRID resolves before any write: an SRID no CRS
+        // defines fails the op with nothing stored.
+        let crs = self.crs_context();
+        let resolved = TreeSrid::resolve(geometry.srid, &crs)
+            .and_then(|tree_srid| geometry.bbox(&crs).map(|bbox| (tree_srid, bbox)));
+        let (tree_srid, bbox) = match resolved {
+            Ok(resolved) => resolved,
+            Err(e) => return self.response_error(task, crate::Error::from(e)),
+        };
+
         // ── 1. Serialise + write minimal geometry document to sparse store ──
         let geom_value = geometry_to_value(geometry);
         let mut doc_map = std::collections::HashMap::new();
@@ -197,7 +207,6 @@ impl CoreLoop {
             rtree.delete(entry_id);
         }
 
-        let bbox = geometry.bbox();
         let memory = nodedb_mem::ScopedMemory::new(
             self.governor.clone(),
             db_id,
@@ -207,17 +216,20 @@ impl CoreLoop {
         let rtree = self
             .spatial_indexes
             .entry(spatial_key)
-            .or_insert_with(|| RTree::new(memory, geometry.srid));
+            .or_insert_with(|| RTree::new(memory, tree_srid));
         // The SRID check above admitted this SRID; the stale-entry delete can
         // only empty the tree.
-        if let Err(mismatch) = rtree.bind_srid(geometry.srid) {
+        if let Err(mismatch) = rtree.bind_srid(tree_srid) {
             return self.response_error(
                 task,
                 super::spatial_refine::mixed_srid_error(collection, field, mismatch),
             );
         }
-        rtree.insert(RTreeEntry { id: entry_id, bbox });
-        self.spatial_doc_map.insert(doc_map_key, doc_id);
+        // An EMPTY geometry has no extent: its row is stored, not indexed.
+        if !geometry.is_empty() {
+            rtree.insert(RTreeEntry { id: entry_id, bbox });
+            self.spatial_doc_map.insert(doc_map_key, doc_id);
+        }
 
         // Advance the collection floor for this committed spatial write.
         self.note_collection_write(task, collection);
@@ -329,100 +341,16 @@ impl CoreLoop {
     }
 }
 
-/// Convert a `SridGeometry` into a `nodedb_types::Value` for msgpack
-/// serialisation.
-///
-/// Produces a JSON-compatible nested structure matching what a pgwire INSERT
-/// with a GeoJSON geometry value produces. A non-4326 SRID adds the
-/// GeoJSON `crs` member, so the read path recovers the SRID.
+/// The document field value of a synced geometry: the native geometry,
+/// which the standard-msgpack document stores as the geometry ext (SRID,
+/// Z and M kept).
 ///
 /// Shared with the in-transaction staging path
 /// (`transaction::stage_write::stage_spatial`), which stages the identical
 /// `{field: geometry, "id": surrogate_hex}` document shape as an overlay
 /// `Put` body.
 pub(in crate::data::executor) fn geometry_to_value(geometry: &SridGeometry) -> nodedb_types::Value {
-    use nodedb_types::Value;
-    let mut shape = shape_to_value(&geometry.geometry);
-    if !geometry.srid.is_geographic()
-        && let Value::Object(map) = &mut shape
-    {
-        let mut properties = std::collections::HashMap::new();
-        properties.insert(
-            "name".to_string(),
-            Value::String(format!("EPSG:{}", geometry.srid.code())),
-        );
-        let mut crs = std::collections::HashMap::new();
-        crs.insert("type".to_string(), Value::String("name".to_string()));
-        crs.insert("properties".to_string(), Value::Object(properties));
-        map.insert("crs".to_string(), Value::Object(crs));
-    }
-    shape
-}
-
-/// The GeoJSON object of one shape, as a `Value`.
-fn shape_to_value(geometry: &Geometry) -> nodedb_types::Value {
-    use nodedb_types::Value;
-    use nodedb_types::geometry::Geometry::*;
-
-    match geometry {
-        Point { coordinates } => {
-            let mut m = std::collections::HashMap::new();
-            m.insert("type".to_string(), Value::String("Point".to_string()));
-            m.insert(
-                "coordinates".to_string(),
-                Value::Array(vec![
-                    Value::Float(coordinates[0]),
-                    Value::Float(coordinates[1]),
-                ]),
-            );
-            Value::Object(m)
-        }
-        LineString { coordinates } => {
-            let mut m = std::collections::HashMap::new();
-            m.insert("type".to_string(), Value::String("LineString".to_string()));
-            m.insert(
-                "coordinates".to_string(),
-                Value::Array(
-                    coordinates
-                        .iter()
-                        .map(|c| Value::Array(vec![Value::Float(c[0]), Value::Float(c[1])]))
-                        .collect(),
-                ),
-            );
-            Value::Object(m)
-        }
-        Polygon { coordinates } => {
-            let mut m = std::collections::HashMap::new();
-            m.insert("type".to_string(), Value::String("Polygon".to_string()));
-            m.insert(
-                "coordinates".to_string(),
-                Value::Array(
-                    coordinates
-                        .iter()
-                        .map(|ring| {
-                            Value::Array(
-                                ring.iter()
-                                    .map(|c| {
-                                        Value::Array(vec![Value::Float(c[0]), Value::Float(c[1])])
-                                    })
-                                    .collect(),
-                            )
-                        })
-                        .collect(),
-                ),
-            );
-            Value::Object(m)
-        }
-        // For other geometry types, fall back to JSON serialisation then
-        // parse as Value. These are less common in sync workloads.
-        other => match sonic_rs::to_string(other) {
-            Ok(json) => match sonic_rs::from_str::<serde_json::Value>(&json) {
-                Ok(v) => nodedb_types::conversion::json_to_value(v),
-                Err(_) => Value::Null,
-            },
-            Err(_) => Value::Null,
-        },
-    }
+    nodedb_types::Value::Geometry(geometry.clone())
 }
 
 #[cfg(test)]
@@ -432,6 +360,7 @@ mod tests {
     use super::*;
     use crate::bridge::envelope::Status;
     use crate::data::executor::core_loop::tests::{make_core_with_dir, make_default_task};
+    use nodedb_types::geometry::Geometry;
 
     const TID: u64 = 1;
 

@@ -11,8 +11,8 @@ use super::engine::{MutationEngine, MutationResult};
 impl MutationEngine {
     /// Notify the engine that the memtable was flushed to a new segment.
     ///
-    /// Remaps the PK index entries of the memtable's virtual segment to
-    /// `new_segment_id` and moves the memtable's delete bitmap with them, so
+    /// Remaps the PK index and closed-key entries of the memtable's virtual
+    /// segment to `new_segment_id` and moves the memtable's delete bitmap with them, so
     /// a row tombstoned while in the memtable stays tombstoned in the
     /// segment. The virtual segment id itself never changes: it names the
     /// memtable, not a flushed segment, so no flushed segment can ever share
@@ -28,6 +28,13 @@ impl MutationEngine {
 
         // Remap PK index entries from virtual memtable segment to real segment.
         self.pk_index
+            .remap_segment(self.memtable_segment_id, |old_row| {
+                Some(RowLocation {
+                    segment_id: new_segment_id,
+                    row_index: old_row,
+                })
+            });
+        self.closed_index
             .remap_segment(self.memtable_segment_id, |old_row| {
                 Some(RowLocation {
                     segment_id: new_segment_id,

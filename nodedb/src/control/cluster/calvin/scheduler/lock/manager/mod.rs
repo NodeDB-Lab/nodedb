@@ -27,7 +27,8 @@
 //! - [`wound_wait`]: shared-lock reservations and wound-wait conflict
 //!   resolution.
 //! - [`release`]: lock release and mode-aware FIFO waiter promotion.
-//! - [`try_acquire`]: the non-blocking fast path.
+//! - [`try_acquire`]: the non-blocking fast path and write-admission
+//!   watches.
 //! - [`introspection`]: readiness checks, request contention and test
 //!   counters.
 
@@ -40,4 +41,5 @@ mod types;
 mod wound_wait;
 
 pub use introspection::KeyContention;
+pub use try_acquire::GateProbe;
 pub use types::LockManager;

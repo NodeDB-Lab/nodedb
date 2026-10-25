@@ -331,13 +331,13 @@ fn sub_record(entry: &WriteSetEntry, fallback: &str) -> crate::Result<Option<Red
                 *version,
             )?,
         ),
-        RowEffect::Delete { system_from_ms } => (
+        RowEffect::Delete { system_from } => (
             RecordType::Delete,
             encode_document_delete_record(
                 collection,
                 entry.identity.as_str(),
                 entry.surrogate,
-                *system_from_ms,
+                *system_from,
             )?,
         ),
         RowEffect::CancelForward => return Ok(None),

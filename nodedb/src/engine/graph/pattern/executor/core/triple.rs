@@ -295,6 +295,7 @@ pub(in crate::engine::graph::pattern::executor) mod tests {
             database_id: 0,
             tenant_id: 1,
             collection: Some("col"),
+            document_cut: Default::default(),
         }
     }
 
@@ -924,6 +925,78 @@ pub(in crate::engine::graph::pattern::executor) mod tests {
         assert_eq!(rows[0]["b"], "carol");
     }
 
+    /// A bitemporal node document read at a system-time ordinal cut: two
+    /// versions written in the same millisecond on either side of the cut
+    /// split there, exactly as edge versions split at that ordinal.
+    #[test]
+    fn versioned_node_documents_split_at_an_ordinal_cut_inside_one_millisecond() {
+        use crate::engine::graph::pattern::executor::DocumentCut;
+        use crate::engine::sparse::btree_versioned::VersionedPut;
+
+        let (mut csr, store, _dir) = make_csr(&[("alice", "KNOWS", "carol")]);
+        let (sparse, _sdir) = make_sparse();
+        csr.set_node_surrogate("alice", nodedb_types::Surrogate::new(1));
+        let ms = 1_700_000_000_123_i64;
+        let before = ms * nodedb_types::NANOS_PER_MS + 1;
+        let cut = before + 1;
+        let after = cut + 1;
+        assert_eq!(
+            nodedb_types::ordinal_to_ms(before),
+            nodedb_types::ordinal_to_ms(after),
+            "both versions sit in one millisecond"
+        );
+        let key = nodedb_types::StorageKey::for_surrogate(nodedb_types::Surrogate::new(1));
+        for (sys_from, role) in [(before, "admin"), (after, "user")] {
+            let body = nodedb_types::value_to_msgpack(&obj(&[(
+                "role",
+                nodedb_types::Value::String(role.into()),
+            )]))
+            .unwrap();
+            sparse
+                .versioned_put(VersionedPut {
+                    database_id: 0,
+                    tenant: 1,
+                    coll: "col",
+                    doc_id: &key,
+                    sys_from,
+                    valid_from_ms: i64::MIN,
+                    valid_until_ms: i64::MAX,
+                    body: &body,
+                })
+                .unwrap();
+        }
+
+        let query =
+            parse("MATCH (a)-[:KNOWS]->(b) IN 'col' WHERE a.role = 'admin' RETURN a").unwrap();
+        let admins_at = |system_as_of: Option<i64>| -> usize {
+            let props = PropertyLookup {
+                document_cut: DocumentCut::Versioned {
+                    system_as_of,
+                    valid_at_ms: None,
+                },
+                ..props_for(&sparse, &csr)
+            };
+            execute(
+                &query,
+                MatchExecCtx {
+                    csr: &csr,
+                    edge_store: &store,
+                    frontier_bitmap: None,
+                    is_remote_node: None,
+                    varlen_caps: expansion::VarLenCaps::default(),
+                    props: &props,
+                    overlay: None,
+                },
+            )
+            .unwrap()
+            .rows
+            .len()
+        };
+        assert_eq!(admins_at(Some(cut)), 1, "the version before the cut holds");
+        assert_eq!(admins_at(Some(after)), 0, "the version after the cut holds");
+        assert_eq!(admins_at(None), 0, "the current version is the later one");
+    }
+
     /// A predicate matching no node's stored value returns zero rows (proving
     /// the predicate truly evaluates, not a no-op pass).
     #[test]
@@ -1010,6 +1083,7 @@ pub(in crate::engine::graph::pattern::executor) mod tests {
             database_id: 0,
             tenant_id: 1,
             collection: None,
+            document_cut: Default::default(),
         };
         put_node_doc(
             &sparse,
@@ -1209,6 +1283,7 @@ pub(in crate::engine::graph::pattern::executor) mod tests {
             database_id: 0,
             tenant_id: 1,
             collection: None,
+            document_cut: Default::default(),
         };
         put_node_doc(
             &sparse,

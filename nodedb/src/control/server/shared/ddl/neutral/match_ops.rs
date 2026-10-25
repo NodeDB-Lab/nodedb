@@ -5,8 +5,9 @@
 //!
 //! The handler builds [`DdlResult`](super::super::result::DdlResult) directly
 //! and carries no pgwire types. It is dispatched from the neutral router's typed
-//! `GraphStmt::MatchQuery` arm, but re-parses the raw `sql` with the graph
-//! pattern compiler to build the physical plan.
+//! `GraphStmt::MatchQuery` arm with the statement's body (its `AS OF`
+//! clauses already split off) and compiles it with the graph pattern
+//! compiler to build the physical plan.
 
 use serde_json::{Map, Value as JsonValue};
 
@@ -41,15 +42,18 @@ pub(crate) const MATCH_INCOMPLETE_MESSAGE: &str = "MATCH result incomplete: the 
 ///
 /// Parses the Cypher-style MATCH syntax, serializes the MatchQuery AST,
 /// constructs PhysicalPlan::GraphMatch, and broadcasts to all Data Plane cores.
+/// `temporal` (`AS OF SYSTEM TIME` / `AS OF VALID TIME`) pins the cut every
+/// core and every cross-shard round reads.
 pub async fn match_query(
     state: &SharedState,
     identity: &AuthenticatedIdentity,
     database_id: DatabaseId,
-    sql: &str,
+    body: &str,
+    temporal: &nodedb_sql::temporal::TemporalScope,
     read: graph_dispatch::GraphRead,
 ) -> Result<Vec<DdlResult>, DdlError> {
     // Parse the MATCH query.
-    let query = crate::engine::graph::pattern::compiler::parse(sql)
+    let query = crate::engine::graph::pattern::compiler::parse(body)
         .map_err(|e| DdlError::new("42601", format!("MATCH parse error: {e}")))?;
 
     // Both dispatch shapes below reach the Data Plane without a single plan for
@@ -138,6 +142,10 @@ pub async fn match_query(
         .map_err(|e| DdlError::internal(format!("serialize match query: {e}")))?;
 
     let tenant_id = identity.tenant_id;
+    let scope = graph_dispatch::graph_read_scope(state, temporal)
+        .await
+        .map_err(|e| DdlError::from_error(&e))?;
+    let read = graph_dispatch::GraphRead { scope, ..read };
 
     // A MATCH returns graph topology — node bindings and edge labels — which
     // the result-path column-redaction hook has no stored columns to rewrite.
@@ -166,6 +174,7 @@ pub async fn match_query(
             query: query_bytes,
             frontier_bitmap: None,
             cluster_mode: false,
+            scope,
         });
         return match graph_dispatch::broadcast_match_to_all_cores(
             state,

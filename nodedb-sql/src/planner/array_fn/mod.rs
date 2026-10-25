@@ -14,6 +14,7 @@
 //!   [`try_plan_array_maint_fn`] intercepts these from the constant-
 //!   query path.
 
+mod agg_args;
 mod helpers;
 mod maint_fn;
 mod pushdown;

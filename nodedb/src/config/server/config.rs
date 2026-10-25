@@ -13,6 +13,7 @@ use super::backup_storage::BackupStorageSettings;
 use super::checkpoint::CheckpointSettings;
 use super::cluster::ClusterSettings;
 use super::cold_storage::ColdStorageSettings;
+use super::egress::{CredentialEncryptionSettings, EgressSettings};
 use super::observability::ObservabilityConfig;
 use super::pitr::PitrSettings;
 use super::retention::RetentionSettings;
@@ -73,6 +74,16 @@ pub struct ServerConfig {
     /// The key MUST differ from the WAL key; a matching path triggers a warning.
     #[serde(default)]
     pub backup_encryption: Option<BackupEncryptionSettings>,
+
+    /// Hosts a remote `COPY` source may reach. Absent = strict: `https://`,
+    /// DNS names, global unicast addresses only.
+    #[serde(default)]
+    pub egress: EgressSettings,
+
+    /// The key `CREATE CREDENTIAL` seals secrets under. Absent = `CREATE
+    /// CREDENTIAL` is refused.
+    #[serde(default)]
+    pub credential_encryption: Option<CredentialEncryptionSettings>,
 
     /// Object-store access for `BACKUP DATABASE` and `RESTORE DATABASE`.
     /// Absent = every `file://` URI is refused, and `s3://` URIs use IAM
@@ -185,8 +196,12 @@ impl ServerConfig {
     /// Validate cross-field invariants that serde cannot express. Called
     /// from [`Self::from_file`] so misconfiguration fails startup.
     pub fn validate(&self) -> crate::Result<()> {
+        let egress = self.egress.checked_policy()?;
+        if let Some(ref encryption) = self.encryption {
+            encryption.source()?;
+        }
         if let Some(ref jwt) = self.auth.jwt {
-            jwt.validate()?;
+            jwt.validate(&egress)?;
         }
         super::domain::validate_domain(self)
     }

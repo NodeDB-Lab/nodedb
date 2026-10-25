@@ -494,7 +494,7 @@ mod tests {
         scheduler.config.restage_attempts = 1;
         let txn_id = TxnId::new(24, 0);
         let mut txn = make_local_write_txn(24, 0);
-        txn.tx_class.plans = vec![0xc1];
+        std::sync::Arc::make_mut(&mut txn.tx_class).plans = vec![0xc1];
         scheduler.process_scheduler_input(SchedulerInput::Txn(Box::new(txn)));
         assert_eq!(
             scheduler.pending.get(&txn_id).map(|p| p.commit_state),

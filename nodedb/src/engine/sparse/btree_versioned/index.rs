@@ -65,7 +65,7 @@ impl SparseEngine {
     /// Physically remove one versioned index entry's redb entry inside a
     /// caller-owned write transaction. Unlike
     /// [`Self::versioned_index_tombstone_in_txn`] (which appends a
-    /// tombstone marker), this deletes the entry at `sys_from_ms` outright.
+    /// tombstone marker), this deletes the entry at `sys_from` outright.
     /// Used by the transaction-rollback path to undo a
     /// `versioned_index_put_in_txn` that must not survive an aborted
     /// transaction. Removing a non-existent key is a no-op.
@@ -147,12 +147,12 @@ impl SparseEngine {
         coll: &str,
         field: &str,
         value: &str,
-        sys_cutoff_ms: Option<i64>,
+        sys_cutoff: Option<i64>,
     ) -> crate::Result<Vec<StorageKey>> {
         let lo = format!("{database_id}:{tenant}:{coll}:{field}:{value}:");
         // `:` = 0x3A, next byte `;` = 0x3B gives a clean exclusive bound.
         let hi = format!("{database_id}:{tenant}:{coll}:{field}:{value};");
-        let cutoff_key = sys_cutoff_ms.map(format_sys_from);
+        let cutoff_key = sys_cutoff.map(format_sys_from);
 
         let txn = self.db.begin_read().map_err(|e| redb_err("read txn", e))?;
         let t = txn
@@ -234,7 +234,7 @@ mod tests {
         field: &'a str,
         value: &'a str,
         doc_id: &'a StorageKey,
-        sys_from_ms: i64,
+        sys_from: i64,
     ) -> VersionedIndexEntry<'a> {
         VersionedIndexEntry {
             database_id: 1,
@@ -243,7 +243,7 @@ mod tests {
             field,
             value,
             doc_id,
-            sys_from_ms,
+            sys_from,
         }
     }
 

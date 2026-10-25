@@ -77,6 +77,8 @@ pub async fn tree_children(
             linearizable,
             // A tree aggregate carries no session transaction.
             txn_id: None,
+            // A tree aggregate reads the current tree.
+            read_scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         },
     )
     .await

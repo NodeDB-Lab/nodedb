@@ -11,7 +11,7 @@ use std::sync::Arc;
 use super::core::Value;
 use crate::array_cell::ArrayCell;
 use crate::datetime::{NdbDateTime, NdbDuration};
-use crate::geometry::{Geometry, Srid, SridGeometry};
+use crate::geometry::tagged::msgpack::{SRID_GEOMETRY_FIELDS, read_fields, write_fields};
 
 impl zerompk::ToMessagePack for Value {
     fn write<W: zerompk::Write>(&self, writer: &mut W) -> zerompk::Result<()> {
@@ -80,12 +80,11 @@ impl zerompk::ToMessagePack for Value {
                 writer.write_u8(12)?;
                 writer.write_binary(&d.serialize())
             }
-            // `[13, srid_code_u32, geometry]`.
+            // `[13, srid_code_u32, geometry, z | nil, m | nil]`.
             Value::Geometry(g) => {
-                writer.write_array_len(3)?;
+                writer.write_array_len(1 + SRID_GEOMETRY_FIELDS)?;
                 writer.write_u8(13)?;
-                g.srid.write(writer)?;
-                g.geometry.write(writer)
+                write_fields(g, writer)
             }
             Value::Set(s) => {
                 writer.write_array_len(2)?;
@@ -166,15 +165,14 @@ impl<'a> zerompk::FromMessagePack<'a> for Value {
                 Ok(Value::Decimal(rust_decimal::Decimal::deserialize(buf)))
             }
             13 => {
-                if len != 3 {
+                if len != 1 + SRID_GEOMETRY_FIELDS {
                     return Err(zerompk::Error::ArrayLengthMismatch {
-                        expected: 3,
+                        expected: 1 + SRID_GEOMETRY_FIELDS,
                         actual: len,
                     });
                 }
-                let srid = Srid::read(reader)?;
-                let geometry = Geometry::read(reader)?;
-                Ok(Value::Geometry(SridGeometry::new(srid, geometry)))
+                // A stored SRID is checked for syntax only.
+                Ok(Value::Geometry(read_fields(reader)?))
             }
             14 => Ok(Value::Set(Vec::<Value>::read(reader)?)),
             15 => Ok(Value::Regex(reader.read_string()?.into_owned())),
@@ -223,10 +221,26 @@ impl<'a> zerompk::FromMessagePack<'a> for Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::geometry::{Geometry, Ordinates, Srid, SridGeometry};
+
+    #[test]
+    fn geometry_round_trip_keeps_z_and_m() {
+        let g = SridGeometry::with_ordinates(
+            Srid::WGS84,
+            Geometry::point(1.0, 2.0),
+            Ordinates::new(Some(vec![3.0]), Some(vec![4.0])),
+        )
+        .unwrap();
+        let value = Value::Geometry(g);
+        let bytes = zerompk::to_msgpack_vec(&value).unwrap();
+        let back: Value = zerompk::from_msgpack(&bytes).unwrap();
+        assert_eq!(back, value);
+    }
 
     #[test]
     fn geometry_round_trip_keeps_srid() {
-        for srid in Srid::SUPPORTED {
+        for code in [4326, 32650, 4742, 990_001, 999] {
+            let srid = Srid::new(code).unwrap();
             let value = Value::Geometry(SridGeometry::new(srid, Geometry::point(1.0, 2.0)));
             let bytes = zerompk::to_msgpack_vec(&value).unwrap();
             let back: Value = zerompk::from_msgpack(&bytes).unwrap();

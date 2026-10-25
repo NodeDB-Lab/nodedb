@@ -31,14 +31,29 @@ use super::support::ddl_err;
 const FUSION_VECTOR_TOP_K_CAP: usize = 10_000;
 const FUSION_TOP_CAP: usize = 10_000;
 
+/// One fusion statement.
+pub struct RagFusionRequest {
+    pub collection: String,
+    pub params: FusionParams,
+    pub linearizable: bool,
+    /// `AS OF SYSTEM TIME` / `AS OF VALID TIME`: the graph expansion reads
+    /// the edges at that cut. The vector and text legs read their indexes
+    /// as they stand.
+    pub temporal: nodedb_sql::temporal::TemporalScope,
+}
+
 pub async fn rag_fusion(
     state: &SharedState,
     identity: &AuthenticatedIdentity,
     database_id: DatabaseId,
-    collection: String,
-    params: FusionParams,
-    linearizable: bool,
+    request: RagFusionRequest,
 ) -> Result<Vec<DdlResult>, DdlError> {
+    let RagFusionRequest {
+        collection,
+        params,
+        linearizable,
+        temporal,
+    } = request;
     // Gate on catalog `is_active` (see `support::ensure_collection_active`):
     // a plain `DROP COLLECTION` only flips `is_active=false` without
     // reclaiming edges/CSR, so this read must independently hide the target
@@ -102,6 +117,10 @@ pub async fn rag_fusion(
         None => GraphTraversalOptions::default(),
     };
 
+    let scope = crate::control::server::graph_dispatch::graph_read_scope(state, &temporal)
+        .await
+        .map_err(|e| DdlError::from_error(&e))?;
+
     let plan = PhysicalPlan::Graph(GraphOp::RagFusion {
         collection: nodedb_types::QualifiedCollection::new(database_id, &collection),
         query_vector,
@@ -117,6 +136,7 @@ pub async fn rag_fusion(
         bm25_query: params.bm25_query,
         bm25_field: params.bm25_field,
         stage: nodedb_physical::physical_plan::RagStage::Local,
+        scope,
     });
 
     // Only reached through `shared::ddl::dispatch`, which native/pgwire/HTTP

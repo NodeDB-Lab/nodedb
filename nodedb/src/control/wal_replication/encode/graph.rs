@@ -5,23 +5,30 @@
 use super::super::types::{ReplicatedBatchEdge, ReplicatedWrite};
 use nodedb_physical::physical_plan::BatchEdge;
 
-pub(super) fn edge_put(
-    collection: &str,
-    src_id: &str,
-    label: &str,
-    dst_id: &str,
-    properties: &[u8],
-    src_surrogate: u32,
-    dst_surrogate: u32,
-) -> ReplicatedWrite {
+/// The fields of a `GraphOp::EdgePut`, borrowed from the plan.
+pub(super) struct EdgePutEncode<'a> {
+    pub(super) collection: &'a str,
+    pub(super) src_id: &'a str,
+    pub(super) label: &'a str,
+    pub(super) dst_id: &'a str,
+    pub(super) properties: &'a [u8],
+    pub(super) src_surrogate: u32,
+    pub(super) dst_surrogate: u32,
+    pub(super) valid_from_ms: Option<i64>,
+    pub(super) valid_until_ms: Option<i64>,
+}
+
+pub(super) fn edge_put(f: EdgePutEncode<'_>) -> ReplicatedWrite {
     ReplicatedWrite::EdgePut {
-        collection: collection.to_owned(),
-        src_id: src_id.to_owned(),
-        label: label.to_owned(),
-        dst_id: dst_id.to_owned(),
-        properties: properties.to_vec(),
-        src_surrogate,
-        dst_surrogate,
+        collection: f.collection.to_owned(),
+        src_id: f.src_id.to_owned(),
+        label: f.label.to_owned(),
+        dst_id: f.dst_id.to_owned(),
+        properties: f.properties.to_vec(),
+        src_surrogate: f.src_surrogate,
+        dst_surrogate: f.dst_surrogate,
+        valid_from_ms: f.valid_from_ms,
+        valid_until_ms: f.valid_until_ms,
     }
 }
 
@@ -67,6 +74,8 @@ fn to_replicated_batch_edges(edges: &[BatchEdge]) -> Vec<ReplicatedBatchEdge> {
             dst_id: e.dst_id.clone(),
             src_surrogate: e.src_surrogate.as_u32(),
             dst_surrogate: e.dst_surrogate.as_u32(),
+            valid_from_ms: e.valid_from_ms,
+            valid_until_ms: e.valid_until_ms,
         })
         .collect()
 }

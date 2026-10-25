@@ -22,6 +22,7 @@ use super::super::types::text_field;
 use super::connection_admin;
 use super::core::NodeDbPgHandler;
 use super::sql_split::split_sql_statements;
+use crate::control::server::shared::session::audit_context::AuditScope;
 use crate::control::server::shared::session::{SessionId, TransactionState};
 use crate::control::server::shared::txn_control::{TxnControl, classify as classify_txn_control};
 
@@ -43,23 +44,19 @@ impl NodeDbPgHandler {
         requested: &Format,
     ) -> PgWireResult<Vec<Response>> {
         let statements = split_sql_statements(sql);
-        match statements.len() {
-            0 => Ok(vec![Response::EmptyQuery]),
-            1 => {
-                self.execute_single_sql(identity, session_id, &statements[0], requested)
-                    .await
-            }
-            _ => {
-                let mut all = Vec::new();
-                for stmt in statements {
-                    let mut resp = self
-                        .execute_single_sql(identity, session_id, &stmt, requested)
-                        .await?;
-                    all.append(&mut resp);
-                }
-                Ok(all)
-            }
+        if statements.is_empty() {
+            return Ok(vec![Response::EmptyQuery]);
         }
+        let mut all = Vec::new();
+        for stmt in statements {
+            // Each statement's DDL proposals carry that statement's own text.
+            let _audit = AuditScope::statement(identity, &stmt);
+            let mut resp = self
+                .execute_single_sql(identity, session_id, &stmt, requested)
+                .await?;
+            all.append(&mut resp);
+        }
+        Ok(all)
     }
 
     /// Execute a single (already-split) SQL statement.

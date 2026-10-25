@@ -17,8 +17,8 @@ use nodedb_types::Hlc;
 
 use crate::bridge::envelope::{Payload, PhysicalPlan, Response, Status};
 use crate::control::array_catalog::ArrayCatalogEntry;
-use crate::control::array_catalog::georef::check_same_content;
 use crate::control::array_catalog::retention::check_retention_floor;
+use crate::control::array_catalog::schema_recode::check_same_content;
 use crate::control::catalog_entry::CatalogEntry;
 use crate::control::metadata_proposer::propose_catalog_batch_async;
 use crate::control::security::catalog::SystemCatalog;
@@ -172,7 +172,8 @@ fn entry_for(
                 *audit_retain_ms,
                 *minimum_audit_retain_ms,
             )?;
-            // A georef change keeps every field `schema_hash` covers. Checked
+            // A georef or attr metadata change keeps every field
+            // `schema_hash` covers. Checked
             // against the committed schema, so the kept hash stays true.
             let schema_msgpack = match schema_msgpack {
                 Some(altered) => {
@@ -350,7 +351,7 @@ mod tests {
         let catalog = store.catalog();
         let created = put_raster(catalog);
         let georef = nodedb_array::schema::ArrayGeoref {
-            srid: nodedb_types::geometry::Srid::Utm47N,
+            srid: nodedb_types::geometry::Srid::new(32647).expect("srid"),
             x_dim: 1,
             y_dim: 0,
             transform: Some(nodedb_array::schema::GeoTransform([

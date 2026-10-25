@@ -157,6 +157,26 @@ pub enum MetaOp {
         version_floor: Vec<nodedb_types::ShardVersion>,
     },
 
+    /// Remove this core's data of vShards this node no longer hosts, once
+    /// their new owners serve them: the rows of every collection homed on
+    /// them, the array cells routed to them, the label versions of the nodes
+    /// they home, and every edge version with an endpoint home among them
+    /// and none among `resident`. Collection definitions stay. The purge
+    /// checkpoints every memory-only engine before it answers.
+    ///
+    /// Idempotent: a re-run after a partial purge or a restart removes what
+    /// is left.
+    PurgeDepartedVShards {
+        /// The vShards that left this node.
+        departed: Vec<u32>,
+        /// Every vShard this node still hosts. An edge with an endpoint
+        /// home among them stays.
+        resident: Vec<u32>,
+        /// Every collection homed on `departed`. Each core clears every one
+        /// and reclaims the shared on-disk files of the ones it homes.
+        collections: Vec<super::meta_snapshot::DepartedCollection>,
+    },
+
     /// Purge ALL data for a tenant across every engine and cache.
     ///
     /// Deletes documents, indexes, vectors, graph edges, timeseries,
@@ -481,6 +501,13 @@ pub enum MetaOp {
     ///
     /// Called after the Control Plane has already removed it from the catalog.
     DeleteSynonymGroup { tenant_id: u64, name: String },
+
+    /// Replace this core's user-defined CRS set.
+    ///
+    /// Sent to every core after a committed `CREATE` or `DROP
+    /// SPATIAL_REF_SYS`, and after a metadata image replaced the catalog.
+    /// The set is whole, so a core never holds part of a change.
+    SetCustomCrsSet { set: nodedb_crs::CustomCrsSet },
 
     /// Execute a point write at STATEMENT time by STAGING it into the
     /// per-transaction overlay, instead of buffering it for COMMIT.

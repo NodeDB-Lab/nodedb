@@ -280,6 +280,7 @@ pub fn patch_task_with_mutated_fields(
 pub fn update_new_row(
     old: &HashMap<String, nodedb_types::Value>,
     updates: &[(String, nodedb_physical::physical_plan::UpdateValue)],
+    crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<HashMap<String, nodedb_types::Value>> {
     use nodedb_physical::physical_plan::UpdateValue;
 
@@ -295,7 +296,7 @@ pub fn update_new_row(
                     }
                 })?
             }
-            UpdateValue::Expr(expr) => expr.eval(&old_row).map_err(crate::Error::from)?,
+            UpdateValue::Expr(expr) => expr.eval(&old_row, crs).map_err(crate::Error::from)?,
         };
         new.insert(field.clone(), value);
     }

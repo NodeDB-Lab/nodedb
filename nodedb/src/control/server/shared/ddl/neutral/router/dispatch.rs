@@ -125,12 +125,12 @@ pub async fn try_dispatch(
         }
     };
 
-    // `MATCH` pattern queries parse into `GraphStmt::MatchQuery`. The `match_ops`
-    // handler re-parses the raw `sql` with the graph pattern compiler, so it is
-    // dispatched here from the typed arm with the original SQL (matching the
-    // pgwire `dsl` router's MatchQuery branch). It must precede the general graph
-    // dispatch below, which does not own `MatchQuery`.
-    if let NodedbStatement::Graph(GraphStmt::MatchQuery { .. }) = &stmt {
+    // `MATCH` pattern queries parse into `GraphStmt::MatchQuery`, the body with
+    // its `AS OF` clauses split off. The `match_ops` handler compiles the body
+    // with the graph pattern compiler, so it is dispatched here from the typed
+    // arm. It must precede the general graph dispatch below, which does not
+    // own `MatchQuery`.
+    if let NodedbStatement::Graph(GraphStmt::MatchQuery { body, temporal }) = &stmt {
         // Read-your-own-writes: a MATCH inside an explicit transaction must
         // observe the session's staged edge writes/deletes, so resolve the
         // active `TxnId` (idle sessions → `None`, an autocommit read) and hand
@@ -140,8 +140,12 @@ pub async fn try_dispatch(
         let read = crate::control::server::graph_dispatch::GraphRead {
             txn_id,
             linearizable: txn_ctx.linearizable_reads(),
+            // `match_query` pins the statement's own cut.
+            scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         };
-        return Some(match_ops::match_query(state, identity, database_id, sql, read).await);
+        return Some(
+            match_ops::match_query(state, identity, database_id, body, temporal, read).await,
+        );
     }
 
     // Graph-overlay statements (GRAPH INSERT/DELETE EDGE, GRAPH LABEL/UNLABEL,

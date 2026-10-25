@@ -30,6 +30,13 @@ pub fn check(array: &str, attrs: &[AttrSpec]) -> ArrayResult<()> {
                 detail: "duplicate attribute name".to_string(),
             });
         }
+        a.meta
+            .check(a.dtype)
+            .map_err(|e| ArrayError::InvalidAttrMeta {
+                array: array.to_string(),
+                attr: a.name.clone(),
+                detail: e.to_string(),
+            })?;
     }
     Ok(())
 }
@@ -51,6 +58,21 @@ mod tests {
             AttrSpec::new("v", AttrType::Int64, false),
         ];
         assert!(check("a", &attrs).is_err());
+    }
+
+    #[test]
+    fn rejects_unrepresentable_nodata() {
+        let attrs =
+            vec![
+                AttrSpec::new("b1", AttrType::UInt8, true).with_meta(crate::schema::AttrMeta {
+                    nodata: Some(256.0),
+                    ..crate::schema::AttrMeta::default()
+                }),
+            ];
+        assert!(matches!(
+            check("a", &attrs),
+            Err(ArrayError::InvalidAttrMeta { .. })
+        ));
     }
 
     #[test]

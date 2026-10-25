@@ -16,9 +16,11 @@ impl From<nodedb_query::EvalError> for ErrorCode {
             e @ (nodedb_query::EvalError::VectorDimensionMismatch { .. }
             | nodedb_query::EvalError::ArgumentType { .. }
             | nodedb_query::EvalError::InvalidJsonPath { .. }
-            | nodedb_query::EvalError::UnsupportedSrid { .. }
+            | nodedb_query::EvalError::Crs { .. }
             | nodedb_query::EvalError::MixedSrid { .. }
-            | nodedb_query::EvalError::ProjectionDomain { .. }) => Self::DataException {
+            | nodedb_query::EvalError::Transform { .. }
+            | nodedb_query::EvalError::Geometry { .. }
+            | nodedb_query::EvalError::ArgumentValue { .. }) => Self::DataException {
                 detail: e.to_string(),
             },
             e @ nodedb_query::EvalError::NumericOverflow { .. } => Self::NumericValueOutOfRange {
@@ -164,7 +166,8 @@ impl From<crate::Error> for ErrorCode {
             e @ (crate::Error::OffsetRegression { .. }
             | crate::Error::BackupTenantMismatch { .. }
             | crate::Error::InvalidLimitValue { .. }
-            | crate::Error::MixedSrid { .. }) => Self::DataException {
+            | crate::Error::MixedSrid { .. }
+            | crate::Error::UnknownSrid { .. }) => Self::DataException {
                 detail: e.to_string(),
             },
             // `22003`, as the Control Plane gives it.

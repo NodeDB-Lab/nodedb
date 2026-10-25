@@ -16,8 +16,8 @@
 
 use std::collections::HashMap;
 
-use crate::calvin::sequencer::entry::SequencerEntry;
 use crate::calvin::sequencer::state_machine::SequencerStateMachine;
+use crate::calvin::sequencer::state_machine::replay_entry::ReplayEntry;
 use crate::calvin::types::{EpochBatch, SchedulerInput};
 
 /// Compute the per-vShard count of how many of `batch`'s positions target
@@ -47,7 +47,8 @@ impl SequencerStateMachine {
     ///
     /// The caller (the Calvin scheduler's catch-up drain) passes raw Raft log
     /// entries obtained via `MultiRaft::read_committed_entries`. Each entry is
-    /// decoded as a [`SequencerEntry`] and, if it targets `vshard_id`, converted
+    /// decoded as a [`SequencerEntry`](crate::calvin::sequencer::entry::SequencerEntry)
+    /// through `ReplayEntry::decode` and, if it targets `vshard_id`, converted
     /// into the exact `SchedulerInput` the live fan-out would have delivered:
     ///
     /// * `EpochBatch` (epoch in `[from_epoch, to_epoch]`) → one
@@ -80,157 +81,9 @@ impl SequencerStateMachine {
         to_epoch: u64,
     ) -> Vec<SchedulerInput> {
         let mut result: Vec<SchedulerInput> = Vec::new();
-
         for entry in entries {
-            if entry.data.is_empty() {
-                // No-op entry (newly elected leader heartbeat).
-                continue;
-            }
-            if crate::conf_change::ConfChange::is_conf_change(&entry.data) {
-                // A membership change of the sequencer group, applied by the
-                // Raft layer; it carries no sequencer input.
-                continue;
-            }
-            let seq_entry: SequencerEntry = match zerompk::from_msgpack(&entry.data) {
-                Ok(e) => e,
-                Err(err) => {
-                    tracing::warn!(
-                        raft_index = entry.index,
-                        error = %err,
-                        "calvin replay: failed to decode sequencer entry; skipping"
-                    );
-                    continue;
-                }
-            };
-            match seq_entry {
-                SequencerEntry::EpochBatch { mut batch } => {
-                    if batch.epoch < from_epoch || batch.epoch > to_epoch {
-                        continue;
-                    }
-                    // Re-derive participating_vshards (skipped during serialization)
-                    // exactly as the live apply path does before fan-out. The live
-                    // path skips an entry whose participants cannot be derived and
-                    // files the report, so replay skips it too.
-                    let mut underivable = None;
-                    for txn in &mut batch.txns {
-                        if let Err(err) = txn.tx_class.restore_derived() {
-                            underivable = Some(err);
-                            break;
-                        }
-                    }
-                    if let Some(err) = underivable {
-                        tracing::warn!(
-                            raft_index = entry.index,
-                            epoch = batch.epoch,
-                            error = %err,
-                            "calvin replay: epoch batch carries a transaction with \
-                             underivable participants; skipping"
-                        );
-                        continue;
-                    }
-
-                    // Shared with the live `apply` EpochBatch arm via
-                    // `compute_vshard_txn_counts` so the two paths can never drift.
-                    let vshard_txn_counts = compute_vshard_txn_counts(&batch);
-
-                    for txn in &batch.txns {
-                        let participates = txn
-                            .tx_class
-                            .participating_vshards()
-                            .iter()
-                            .any(|v| v.as_u32() == vshard_id);
-                        if !participates {
-                            continue;
-                        }
-                        // Same stamping as the live fan-out: `epoch_system_ms`
-                        // from the batch (deterministic time anchor) and the
-                        // per-vShard position count for THIS vShard.
-                        let mut per_vshard = txn.clone();
-                        per_vshard.epoch_system_ms = batch.epoch_system_ms;
-                        per_vshard.epoch_vshard_txn_count =
-                            vshard_txn_counts.get(&vshard_id).copied().unwrap_or(0);
-                        result.push(SchedulerInput::Txn(Box::new(per_vshard)));
-                    }
-                }
-                // Re-fan the read reservation exactly as the live `ReserveRead`
-                // arm does, filtered to this vShard.
-                SequencerEntry::ReserveRead { owner, vshard, key } if vshard == vshard_id => {
-                    result.push(SchedulerInput::Reserve { owner, key });
-                }
-                // Re-fan the reservation release exactly as the live
-                // `ReleaseReservation` arm does, filtered to this vShard.
-                SequencerEntry::ReleaseReservation {
-                    owner,
-                    vshard,
-                    reason,
-                } if vshard == vshard_id => {
-                    result.push(SchedulerInput::Release { owner, reason });
-                }
-                // A cut marker reaches every vShard, exactly as the live
-                // `CutMarker` arm fans it out.
-                SequencerEntry::CutMarker {
-                    hlc,
-                    restore_point,
-                    barrier,
-                } => {
-                    result.push(SchedulerInput::CutMarker {
-                        hlc,
-                        restore_point,
-                        barrier: barrier.map(std::sync::Arc::new),
-                    });
-                }
-                // A part reaches the vShards it targets, exactly as the live
-                // `TxnPart` arm fans it out. The scheduler ignores a part of a
-                // transaction it holds no header for.
-                SequencerEntry::TxnPart {
-                    epoch,
-                    position,
-                    index,
-                    first_task,
-                    targets,
-                    plans,
-                    chunk,
-                } if epoch >= from_epoch
-                    && epoch <= to_epoch
-                    && targets.binary_search(&vshard_id).is_ok() =>
-                {
-                    result.push(SchedulerInput::TxnPart {
-                        txn: crate::calvin::types::TxnIdWire { epoch, position },
-                        index,
-                        first_task,
-                        plans: std::sync::Arc::new(plans),
-                        chunk,
-                    });
-                }
-                SequencerEntry::TxnPart { .. } => {}
-                // An abandonment reaches every vShard. The scheduler acts only
-                // on a transaction it holds, which it holds only when it
-                // participates.
-                SequencerEntry::TxnPartsAbandoned { epoch, position }
-                    if epoch >= from_epoch && epoch <= to_epoch =>
-                {
-                    result.push(SchedulerInput::PartsAbandoned {
-                        txn: crate::calvin::types::TxnIdWire { epoch, position },
-                    });
-                }
-                SequencerEntry::TxnPartsAbandoned { .. } => {}
-                // An epoch floor only moves the next epoch the sequencer
-                // proposes. No scheduler input comes from it.
-                SequencerEntry::EpochFloor { .. } => {}
-                // Reservation entries for a different vShard carry nothing for us.
-                SequencerEntry::ReserveRead { .. } => {}
-                SequencerEntry::ReleaseReservation { .. } => {}
-                // Coordinator-side notification signals carry no per-vShard
-                // scheduler input; they are re-derived via live `apply` on every
-                // replica's completion registry, not replayed to a scheduler.
-                SequencerEntry::CompletionAck { .. } => {}
-                SequencerEntry::Vote { .. } => {}
-                SequencerEntry::Verdict { .. } => {}
-                SequencerEntry::AbortVote { .. } => {}
-                SequencerEntry::AbortVerdict { .. } => {}
-            }
+            ReplayEntry::decode(entry).project(vshard_id, from_epoch, to_epoch, &mut result);
         }
-
         result
     }
 }
@@ -239,6 +92,7 @@ impl SequencerStateMachine {
 mod tests {
     use super::*;
     use crate::calvin::CalvinCompletionRegistry;
+    use crate::calvin::sequencer::entry::SequencerEntry;
     use crate::calvin::types::{
         EngineKeySet, EpochBatch, LockKeyWire, ReadWriteSet, ReleaseReason, SequencedTxn,
         SortedVec, TxClass, TxnIdWire,
@@ -300,10 +154,11 @@ mod tests {
             txns: vec![SequencedTxn {
                 epoch: 0,
                 position: 0,
-                tx_class,
+                tx_class: std::sync::Arc::new(tx_class),
                 epoch_system_ms: 1_700_000_000_000,
                 epoch_vshard_txn_count: 1,
                 lock_owner: None,
+                local_plans: None,
             }],
             epoch_system_ms: 1_700_000_000_000,
         };

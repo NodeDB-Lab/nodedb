@@ -6,15 +6,18 @@
 //! No intermediate `serde_json::Value` or `nodedb_types::Value`.
 //! Used ONLY at the outermost pgwire/HTTP layer for client compatibility.
 //!
-//! Instant ext values (fixext8 type 1 / 2) render as ISO 8601 strings.
-//! Every other ext type renders as `null`.
+//! Instant ext values (fixext8 type 1 / 2) render as ISO 8601 strings. A
+//! geometry ext (type 3) renders as GeoJSON. Every other ext type renders as
+//! `null`.
 
 use std::fmt::Write as _;
 
 use super::error::MsgpackResult;
+use super::geometry_ext::geometry_from_ext;
 use super::instant_ext::instant_from_ext;
 use super::reader::{Cursor, base64_encode};
 use crate::datetime::NdbDateTime;
+use crate::geometry::geojson_tree;
 use crate::value::float_text::non_finite_float_text;
 
 /// Transcode raw msgpack bytes to a JSON string without intermediate types.
@@ -171,27 +174,35 @@ fn transcode_value(c: &mut Cursor<'_>, out: &mut String) -> zerompk::Result<()> 
             c.take_n(5)?;
             out.push_str("null");
         }
-        0xD8 => {
-            c.take_n(17)?;
-            out.push_str("null");
-        }
+        0xD8 => transcode_ext(c, out, 16)?,
         0xC7 => {
             let l = c.take()? as usize;
-            c.take_n(1 + l)?;
-            out.push_str("null");
+            transcode_ext(c, out, l)?;
         }
         0xC8 => {
             let l = c.read_u16_be()? as usize;
-            c.take_n(1 + l)?;
-            out.push_str("null");
+            transcode_ext(c, out, l)?;
         }
         0xC9 => {
             let l = c.read_u32_be()? as usize;
-            c.take_n(1 + l)?;
-            out.push_str("null");
+            transcode_ext(c, out, l)?;
         }
 
         _ => return Err(zerompk::Error::InvalidMarker(marker)),
+    }
+    Ok(())
+}
+
+/// An ext value of `len` payload bytes: a geometry renders as GeoJSON,
+/// any other type as `null`.
+fn transcode_ext(c: &mut Cursor<'_>, out: &mut String, len: usize) -> zerompk::Result<()> {
+    let ext_type = c.take()? as i8;
+    let payload = c.take_n(len)?;
+    match geometry_from_ext(ext_type, payload)
+        .and_then(|g| sonic_rs::to_string(&geojson_tree(&g)).ok())
+    {
+        Some(json) => out.push_str(&json),
+        None => out.push_str("null"),
     }
     Ok(())
 }

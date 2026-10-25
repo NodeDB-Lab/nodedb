@@ -79,9 +79,9 @@ pub(in crate::data::executor) struct PointPutOutcome {
     /// System-time key the bitemporal version row (and its versioned index
     /// entries) were appended at. `Some(t)` on the bitemporal branch, `None`
     /// on the plain overwrite branch.
-    pub bitemporal_sys_from_ms: Option<i64>,
+    pub bitemporal_sys_from: Option<i64>,
     /// `(field, value)` pairs whose versioned index entries this op wrote at
-    /// `bitemporal_sys_from_ms`. Empty when not bitemporal / none written.
+    /// `bitemporal_sys_from`. Empty when not bitemporal / none written.
     pub bitemporal_index_tuples: Vec<(String, String)>,
     /// `(field, value)` pairs this op INSERTED into the plain (non-bitemporal)
     /// secondary index. Empty on the bitemporal path (which uses
@@ -196,7 +196,8 @@ pub(in crate::data::executor) fn map_enforcement_error(e: ErrorCode) -> crate::E
         | ErrorCode::TransactionRollback { .. }
         | ErrorCode::ActiveSqlTransaction { .. }
         | ErrorCode::DependentObjectsExist { .. }
-        | ErrorCode::NodeLabelLimit { .. }) => crate::Error::DataPlane(other),
+        | ErrorCode::NodeLabelLimit { .. }
+        | ErrorCode::ProgramLimitExceeded { .. }) => crate::Error::DataPlane(other),
     }
 }
 

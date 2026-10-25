@@ -5,7 +5,9 @@
 //! Wraps one-shot span emission in an always-on owning handle that:
 //!
 //! - Holds the collector endpoint and a shared `reqwest::Client` once,
-//!   so the gateway and executor don't rebuild them per request.
+//!   so the gateway and executor don't rebuild them per request. The
+//!   client is the egress client: the operator puts the collector's host on
+//!   the `[egress]` allow-list, and every address it resolves to is checked.
 //! - Is a no-op when the endpoint is empty (disabled), so call sites
 //!   stay unconditional.
 //! - Spawns the HTTP POST detached so span emission never sits on the
@@ -24,6 +26,13 @@
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use crate::control::security::egress::{
+    EgressClientOptions, EgressError, EgressPolicy, SystemLookup, egress_client,
+};
+
+/// The collector answers a span POST directly: no redirect is followed.
+const MAX_REDIRECTS: usize = 0;
 
 /// Owning wrapper around the OTLP trace-export endpoint + HTTP client.
 ///
@@ -52,6 +61,8 @@ pub struct TraceExporter {
 pub enum TraceExporterError {
     #[error("reqwest client build failed: {0}")]
     ClientBuild(#[from] reqwest::Error),
+    #[error("the endpoint fails the [egress] policy: {0}; put its host on allow_hosts")]
+    Egress(#[from] EgressError),
 }
 
 /// Parameters for [`TraceExporter::emit`].
@@ -68,19 +79,30 @@ pub struct EmitSpanParams {
 
 impl TraceExporter {
     /// Construct an exporter that pushes to `endpoint`
-    /// (e.g. `http://collector:4318`). Fails if the underlying
-    /// `reqwest::Client` cannot be constructed. An empty endpoint is
-    /// rejected — use [`disabled`](Self::disabled) instead so the
-    /// intent stays explicit.
+    /// (e.g. `http://otel-collector:4318`) through `policy`. Fails when the
+    /// endpoint fails the policy or the client cannot be constructed. An
+    /// empty endpoint builds no client: use [`disabled`](Self::disabled)
+    /// so the intent stays explicit.
     pub fn new(
         endpoint: impl Into<String>,
         timeout: Duration,
+        policy: Arc<EgressPolicy>,
     ) -> Result<Arc<Self>, TraceExporterError> {
         let endpoint = endpoint.into();
         let client = if endpoint.is_empty() {
             None
         } else {
-            Some(reqwest::Client::builder().timeout(timeout).build()?)
+            policy.check_url(&endpoint)?;
+            Some(egress_client(
+                policy,
+                Arc::new(SystemLookup),
+                EgressClientOptions {
+                    timeout: Some(timeout),
+                    connect_timeout: timeout,
+                    read_timeout: timeout,
+                    max_redirects: MAX_REDIRECTS,
+                },
+            )?)
         };
         Ok(Arc::new(Self {
             endpoint,
@@ -182,11 +204,37 @@ mod tests {
         });
     }
 
+    fn collector_policy() -> Arc<EgressPolicy> {
+        Arc::new(EgressPolicy::from_parts(true, &["collector".into()], &[]).expect("valid policy"))
+    }
+
     #[test]
     fn endpoint_controls_enabled_flag() {
-        let on = TraceExporter::new("http://collector:4318", Duration::from_secs(1)).unwrap();
-        let off = TraceExporter::new(String::new(), Duration::from_secs(1)).unwrap();
+        let on = TraceExporter::new(
+            "http://collector:4318",
+            Duration::from_secs(1),
+            collector_policy(),
+        )
+        .expect("an allow-listed endpoint");
+        let off = TraceExporter::new(String::new(), Duration::from_secs(1), collector_policy())
+            .expect("an empty endpoint");
         assert!(on.is_enabled());
         assert!(!off.is_enabled());
+    }
+
+    #[test]
+    fn an_endpoint_outside_the_egress_policy_is_refused() {
+        let strict = Arc::new(EgressPolicy::strict());
+        for endpoint in [
+            "http://collector:4318",
+            "https://127.0.0.1:4318",
+            "http://169.254.169.254/latest",
+        ] {
+            let refused = TraceExporter::new(endpoint, Duration::from_secs(1), Arc::clone(&strict));
+            assert!(
+                matches!(refused, Err(TraceExporterError::Egress(_))),
+                "{endpoint}"
+            );
+        }
     }
 }

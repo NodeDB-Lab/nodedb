@@ -20,7 +20,7 @@ use nodedb_query::expr::SqlExpr;
 use nodedb_types::Value;
 use nodedb_types::columnar::ColumnarSchema;
 
-use crate::data::executor::handlers::columnar_read::convert::row_to_projected_value;
+use crate::data::executor::handlers::columnar_read::convert::row_to_value;
 use crate::data::executor::handlers::columnar_write::coerce_columnar_row;
 
 /// The value one assignment writes.
@@ -72,11 +72,13 @@ impl ColumnarAssignments {
     ///
     /// `Err` when an expression fails to evaluate, such as a division by
     /// zero, or when a cell does not meet its declared column, such as a
-    /// value past a `SMALLINT` width (SQLSTATE 22003).
+    /// value past a `SMALLINT` width (SQLSTATE 22003). Geo functions in an
+    /// expression resolve SRIDs through `crs`.
     pub(in crate::data::executor) fn apply(
         &self,
         schema: &ColumnarSchema,
         row: Vec<Value>,
+        crs: &nodedb_crs::CrsContext<'_>,
     ) -> crate::Result<Vec<Value>> {
         // Every value is computed from the pre-image before any cell
         // changes. The evaluation context is built on the first expression.
@@ -88,11 +90,9 @@ impl ColumnarAssignments {
                 AssignedValue::Expr(expr) => {
                     let context = match context {
                         Some(ref context) => context,
-                        None => {
-                            context.insert(row_to_projected_value(&row, schema, &[], &[], false)?)
-                        }
+                        None => context.insert(row_to_value(&row, schema)),
                     };
-                    expr.eval(context)?
+                    expr.eval(context, crs)?
                 }
             };
             values.push((*col_idx, value));

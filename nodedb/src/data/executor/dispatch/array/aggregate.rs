@@ -9,7 +9,9 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use nodedb_array::query::aggregate::{GroupAggregate, aggregate_attr, group_by_dim};
+use nodedb_array::query::aggregate::{
+    AggRead, AggregateResult, GroupAggregate, aggregate_attr, group_by_dim,
+};
 use nodedb_array::query::region::{ArrayRegion, filter_region_owned};
 use nodedb_array::schema::ArraySchema;
 use nodedb_array::segment::TilePayload;
@@ -28,8 +30,9 @@ use crate::types::TxnId;
 use nodedb_physical::physical_plan::ArrayReducer;
 
 use super::aggregate_helpers::{
-    AggCell, agg_result_to_partial, apply_surrogate_filter, coord_to_agg_cell, coord_to_group_key,
-    encode_agg_rows, encode_bitemporal_agg_partial, map_reducer, result_cell, unwrap_sparse,
+    AggCell, AggRow, agg_result_to_partial, apply_surrogate_filter, coord_to_agg_cell,
+    coord_to_group_key, encode_agg_rows, encode_bitemporal_agg_partial, map_reducer, result_rows,
+    unwrap_sparse,
 };
 
 /// Aggregate query parameters bundled to avoid exceeding the 7-argument limit.
@@ -48,6 +51,8 @@ pub(in crate::data::executor) struct AggParams<'a> {
     pub valid_at_ms: Option<i64>,
     /// zerompk-encoded [`ArrayRegion`]. Empty = the whole array.
     pub region_msgpack: &'a [u8],
+    /// Reduce `raw * scale + offset` for an attr with a scale or offset.
+    pub physical: bool,
 }
 
 /// Bundled inputs for [`CoreLoop::collect_agg_tiles`].
@@ -83,6 +88,7 @@ struct AggEmit<'a> {
     /// queries — the signal is meaningless for current-state reads, and
     /// emitting it there would change the long-standing non-temporal row shape.
     emit_horizon: bool,
+    physical: bool,
 }
 
 impl CoreLoop {
@@ -102,6 +108,7 @@ impl CoreLoop {
             system_as_of,
             valid_at_ms,
             region_msgpack,
+            physical,
         } = p;
         if let Err(resp) = self.ensure_array_open(task, array_id) {
             return resp;
@@ -177,6 +184,7 @@ impl CoreLoop {
             return_partial,
             truncated_before_horizon,
             emit_horizon: temporal,
+            physical,
         })
     }
 
@@ -268,13 +276,34 @@ impl CoreLoop {
             return_partial,
             truncated_before_horizon,
             emit_horizon,
+            physical,
         } = e;
 
-        let r = map_reducer(reducer);
+        let r = match map_reducer(reducer) {
+            Ok(r) => r,
+            Err(code) => return self.response_error(task, code),
+        };
         let attr = attr_idx as usize;
+        let Some(spec) = schema.attrs.get(attr) else {
+            return self.response_error(
+                task,
+                ErrorCode::Internal {
+                    detail: format!(
+                        "array '{}' aggregate: attr {attr} of {} attrs",
+                        schema.name,
+                        schema.attrs.len()
+                    ),
+                },
+            );
+        };
+        let read = AggRead {
+            reducer: r,
+            meta: &spec.meta,
+            physical,
+        };
 
         if group_by_dim_idx < 0 {
-            let mut acc = None;
+            let mut acc: Option<AggregateResult> = None;
             for tile in all_tiles {
                 let sparse = match unwrap_sparse(tile) {
                     Ok(s) => s,
@@ -284,18 +313,15 @@ impl CoreLoop {
                     Ok(s) => s,
                     Err(code) => return self.response_error(task, code),
                 };
-                let part = aggregate_attr(&sparse, attr, r);
-                acc = Some(match acc {
-                    Some(prev) => {
-                        nodedb_array::query::aggregate::AggregateResult::merge(prev, part)
-                    }
-                    None => part,
-                });
+                let part = aggregate_attr(&sparse, attr, &read);
+                match acc.as_mut() {
+                    Some(prev) => prev.absorb(part),
+                    None => acc = Some(part),
+                }
             }
+            let result = acc.unwrap_or(AggregateResult::Empty(r));
             if return_partial {
-                let partial = acc
-                    .map(|a| agg_result_to_partial(ArrayAggGroupKey::Scalar, a))
-                    .unwrap_or_else(|| ArrayAggPartial::empty(ArrayAggGroupKey::Scalar));
+                let partial = agg_result_to_partial(ArrayAggGroupKey::Scalar, result);
                 return encode_bitemporal_agg_partial(
                     self,
                     task,
@@ -303,22 +329,17 @@ impl CoreLoop {
                     truncated_before_horizon,
                 );
             }
-            let result = match result_cell(acc) {
-                Ok(cell) => cell,
+            let mut rows = match result_rows(None, result) {
+                Ok(rows) => rows,
                 Err(code) => return self.response_error(task, code),
             };
-            let mut rows: Vec<BTreeMap<&'static str, AggCell>> = Vec::new();
-            let mut row: BTreeMap<&'static str, AggCell> = BTreeMap::new();
-            row.insert("result", result);
-            rows.push(row);
             push_horizon_summary(&mut rows, emit_horizon, truncated_before_horizon);
             return encode_agg_rows(self, task, &rows);
         }
 
         let dim = group_by_dim_idx as usize;
         let mut order: Vec<CoordValue> = Vec::new();
-        let mut by_key: HashMap<CoordValue, nodedb_array::query::aggregate::AggregateResult> =
-            HashMap::new();
+        let mut by_key: HashMap<CoordValue, AggregateResult> = HashMap::new();
         for tile in all_tiles {
             let sparse = match unwrap_sparse(tile) {
                 Ok(s) => s,
@@ -328,10 +349,10 @@ impl CoreLoop {
                 Ok(s) => s,
                 Err(code) => return self.response_error(task, code),
             };
-            let groups: Vec<GroupAggregate> = group_by_dim(&sparse, dim, attr, r);
+            let groups: Vec<GroupAggregate> = group_by_dim(&sparse, dim, attr, &read);
             for g in groups {
                 match by_key.get_mut(&g.key) {
-                    Some(prev) => *prev = prev.merge(g.result),
+                    Some(prev) => prev.absorb(g.result),
                     None => {
                         order.push(g.key.clone());
                         by_key.insert(g.key, g.result);
@@ -352,20 +373,17 @@ impl CoreLoop {
             return encode_bitemporal_agg_partial(self, task, &partials, truncated_before_horizon);
         }
 
-        let mut rows: Vec<BTreeMap<&'static str, AggCell>> = Vec::with_capacity(order.len() + 1);
+        let mut rows: Vec<AggRow> = Vec::with_capacity(order.len() + 1);
         for key in order {
-            let result = match result_cell(by_key.remove(&key)) {
-                Ok(cell) => cell,
-                Err(code) => return self.response_error(task, code),
-            };
             let group = match coord_to_agg_cell(&key) {
                 Ok(cell) => cell,
                 Err(code) => return self.response_error(task, code),
             };
-            let mut row: BTreeMap<&'static str, AggCell> = BTreeMap::new();
-            row.insert("group", group);
-            row.insert("result", result);
-            rows.push(row);
+            let result = by_key.remove(&key).unwrap_or(AggregateResult::Empty(r));
+            match result_rows(Some(group), result) {
+                Ok(group_rows) => rows.extend(group_rows),
+                Err(code) => return self.response_error(task, code),
+            }
         }
         push_horizon_summary(&mut rows, emit_horizon, truncated_before_horizon);
         encode_agg_rows(self, task, &rows)
@@ -376,7 +394,7 @@ impl CoreLoop {
 /// `emit_horizon` is set. No-op otherwise so non-temporal aggregates keep their
 /// long-standing row shape.
 fn push_horizon_summary(
-    rows: &mut Vec<BTreeMap<&'static str, AggCell>>,
+    rows: &mut Vec<AggRow>,
     emit_horizon: bool,
     truncated_before_horizon: bool,
 ) {
@@ -588,9 +606,10 @@ mod tests {
             cell_filter: None,
             return_partial: false,
             shard_bucket: None,
-            system_as_of: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
             valid_at_ms: None,
             region_msgpack: Vec::new(),
+            physical: false,
         });
         assert_eq!(r.status, Status::Ok, "agg failed: {r:?}");
         let rows = decode_agg_rows(r.payload.as_ref());
@@ -623,9 +642,10 @@ mod tests {
             cell_filter: None,
             return_partial: true,
             shard_bucket: None,
-            system_as_of: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
             valid_at_ms: None,
             region_msgpack: Vec::new(),
+            physical: false,
         });
         assert_eq!(r.status, Status::Ok, "agg failed: {r:?}");
 
@@ -677,9 +697,10 @@ mod tests {
             cell_filter: None,
             return_partial: false,
             shard_bucket: None,
-            system_as_of: Some(150),
+            system_time: nodedb_types::SystemTimeScope::AsOf(150),
             valid_at_ms: None,
             region_msgpack: Vec::new(),
+            physical: false,
         });
         assert_eq!(r.status, Status::Ok, "temporal agg failed: {r:?}");
         let rows = decode_agg_rows(r.payload.as_ref());
@@ -710,9 +731,10 @@ mod tests {
             cell_filter: None,
             return_partial: false,
             shard_bucket: None,
-            system_as_of: Some(50),
+            system_time: nodedb_types::SystemTimeScope::AsOf(50),
             valid_at_ms: None,
             region_msgpack: Vec::new(),
+            physical: false,
         });
         assert_eq!(r2.status, Status::Ok, "below-horizon agg failed: {r2:?}");
         let rows2 = decode_agg_rows(r2.payload.as_ref());
@@ -746,9 +768,10 @@ mod tests {
             cell_filter: None,
             return_partial: false,
             shard_bucket: None,
-            system_as_of: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
             valid_at_ms: None,
             region_msgpack: Vec::new(),
+            physical: false,
         });
         assert_eq!(r.status, Status::Ok, "group agg failed: {r:?}");
         let rows = decode_agg_rows(r.payload.as_ref());
@@ -801,9 +824,10 @@ mod tests {
             cell_filter: Some(bm),
             return_partial: false,
             shard_bucket: None,
-            system_as_of: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
             valid_at_ms: None,
             region_msgpack: Vec::new(),
+            physical: false,
         });
         assert_eq!(r.status, Status::Ok, "agg+filter failed: {r:?}");
         let rows = decode_agg_rows(r.payload.as_ref());
@@ -862,9 +886,13 @@ mod tests {
                 cell_filter: None,
                 return_partial: self.return_partial,
                 shard_bucket: None,
-                system_as_of: self.system_as_of,
+                system_time: self.system_as_of.map_or(
+                    nodedb_types::SystemTimeScope::Current,
+                    nodedb_types::SystemTimeScope::AsOf,
+                ),
                 valid_at_ms: None,
                 region_msgpack: zerompk::to_msgpack_vec(self.region).unwrap(),
+                physical: false,
             }
         }
     }

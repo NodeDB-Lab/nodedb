@@ -294,7 +294,7 @@ mod tests {
             TenantId::new(TENANT),
             COLLECTION.to_string(),
         );
-        let stamp = &h.core.ts_replay_stamps.get(&key).expect("stamp").rows;
+        let stamp = &h.core.ts_replay.stamps.get(&key).expect("stamp").rows;
         assert!(
             stamp.skips(42) && !stamp.skips(41),
             "the flushed partition's stamp must name the record's WAL LSN and \
@@ -445,7 +445,7 @@ mod tests {
             .flush_ts_collection(TenantId::new(TENANT), DatabaseId::DEFAULT, COLLECTION, 0)
             .expect("flush");
         assert_eq!(
-            h.core.ts_replay_stamps.get(&key).map(|s| s.rows.clone()),
+            h.core.ts_replay.stamps.get(&key).map(|s| s.rows.clone()),
             Some(crate::types::replay_stamp::ReplayStamp::default())
         );
     }

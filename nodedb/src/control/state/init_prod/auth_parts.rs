@@ -15,7 +15,6 @@ use crate::control::security::ratelimit::config::RateLimitConfig;
 pub(super) struct AuthParts {
     pub(super) metering_config: MeteringConfig,
     pub(super) rate_limit_config: RateLimitConfig,
-    pub(super) http_client: Arc<reqwest::Client>,
     pub(super) siem: Arc<crate::control::security::siem::SiemExporter>,
     pub(super) risk_scorer: crate::control::security::risk::RiskScorer,
     pub(super) escalation: crate::control::security::escalation::EscalationEngine,
@@ -28,6 +27,7 @@ pub(super) struct AuthParts {
 /// Build the auth-configured parts from `auth_config` and the catalog.
 pub(super) fn build(
     auth_config: &crate::config::auth::AuthConfig,
+    remote_sources: &crate::control::security::egress::RemoteSources,
     credentials: &CredentialStore,
     audit: &std::sync::Mutex<crate::control::security::audit::AuditLog>,
 ) -> crate::Result<AuthParts> {
@@ -54,12 +54,25 @@ pub(super) fn build(
     // `[auth.siem]` section; the default leaves `destinations` empty and
     // `webhook_url` blank, so `is_configured()` is false and the export
     // path stays dormant. When it *is* configured the exporter shares the
-    // process-wide HTTP client rather than building its own pool.
+    // process-wide HTTP client rather than building its own pool. That client
+    // is the egress client: the operator puts the SIEM host on the `[egress]`
+    // allow-list, and a webhook URL the policy refuses stops startup.
     let siem_config = auth_config.siem.clone().unwrap_or_default();
-    let http_client = Arc::new(reqwest::Client::new());
+    if !siem_config.webhook_url.is_empty() {
+        remote_sources
+            .egress()
+            .check_url(&siem_config.webhook_url)
+            .map_err(|e| crate::Error::Config {
+                detail: format!(
+                    "auth.siem webhook_url fails the [egress] policy: {e}; put its host on \
+                     allow_hosts"
+                ),
+            })?;
+    }
     let siem = Arc::new(crate::control::security::siem::SiemExporter::with_client(
         siem_config,
-        Arc::clone(&http_client),
+        Arc::clone(remote_sources.http()),
+        Arc::clone(remote_sources.egress()),
     ));
     // Every recorded audit entry reaches the exporter, whichever path recorded it.
     crate::control::security::audit::lock_audit_log(audit).set_export_sink(
@@ -128,7 +141,6 @@ pub(super) fn build(
     Ok(AuthParts {
         metering_config,
         rate_limit_config,
-        http_client,
         siem,
         risk_scorer,
         escalation,

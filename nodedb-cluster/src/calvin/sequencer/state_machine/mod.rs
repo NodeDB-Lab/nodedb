@@ -5,6 +5,8 @@ pub mod core;
 pub mod counters;
 pub mod history;
 pub mod parts;
+pub mod replay_cache;
+pub mod replay_entry;
 pub mod restore;
 pub mod snapshot;
 pub mod undurable;

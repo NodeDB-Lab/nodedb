@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use crate::bridge::dispatch::JournalGroup;
+use crate::bridge::envelope::AppliedEntry;
 use crate::control::server::dispatch_utils::change_events::{
     PendingChanges, extract_write_change_set,
 };
@@ -397,10 +398,9 @@ pub(crate) async fn enqueue_write(
             wal_lsn,
             resolved_now_ms,
             commit_hlc,
-            // A write that applies a data-group entry versions its rows by
-            // the entry's position, which every replica shares.
-            entry_version: wal_append_outcome.change_position.map(|position| {
-                nodedb_types::WriteVersion::logged(position.epoch, position.log_index)
+            // An entry's position versions its rows, its leader's ordinal stamps them.
+            entry_version: wal_append_outcome.change_position.map(|at| {
+                AppliedEntry::logged(at.epoch, at.log_index, wal_append_outcome.system_ordinal)
             }),
             admission,
             journal,

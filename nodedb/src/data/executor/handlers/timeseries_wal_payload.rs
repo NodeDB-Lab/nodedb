@@ -148,6 +148,7 @@ impl CoreLoop {
             provenance,
             surrogates,
             conflict_policy,
+            system_from,
         } = args;
         // Each row whose key already exists is skipped, merged or replaced the
         // way the live insert decided it.
@@ -184,6 +185,7 @@ impl CoreLoop {
                 schema_bytes: Vec::new(),
                 provenance: None,
                 wal_lsn: Some(record_lsn),
+                system_from,
                 rls_write_check: nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
                 returning: None,
                 rls_filters: Vec::new(),
@@ -205,6 +207,7 @@ impl CoreLoop {
                 surrogates: &surrogates,
                 schema_bytes: &[],
                 provenance: provenance.as_ref(),
+                system_from,
                 rls_write_check: &nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
                 // WAL replay reconstructs stored state; there is no client
                 // waiting on a projection, and no identity to gate reads for.

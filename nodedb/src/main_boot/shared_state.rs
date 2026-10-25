@@ -73,7 +73,10 @@ pub(crate) async fn open_and_wire_state(
         },
         Arc::clone(&wal),
         &config.catalog_path(),
-        &config.auth,
+        nodedb::control::state::OpenConfig {
+            auth: &config.auth,
+            egress: Arc::new(config.egress.checked_policy()?),
+        },
         config.tuning.clone(),
         is_cluster,
         Arc::clone(&governor),
