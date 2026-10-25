@@ -138,8 +138,8 @@ aws-config = { version = "1", default-features = false, features = [
 ] }
 
 # JWT / JWKS (EC key support for ES256/ES384)
-p256 = { version = "0.13", features = ["ecdsa"] }
-p384 = { version = "0.13", features = ["ecdsa"] }
+p256 = { version = "0.14", features = ["ecdsa"] }
+p384 = { version = "0.14", features = ["ecdsa"] }
 
 # HTTP client (JWKS fetch)
 reqwest = { version = "0.13", default-features = false, features = [

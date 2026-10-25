@@ -183,14 +183,9 @@ fn verify_rsa_sha256(pkcs1_der: &[u8], message: &[u8], signature: &[u8]) -> bool
 
 /// ES256 (P-256 + SHA-256) verification.
 fn verify_ec_p256(sec1_point: &[u8], message: &[u8], signature: &[u8]) -> bool {
-    use p256::EncodedPoint;
     use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
 
-    let point = match EncodedPoint::from_bytes(sec1_point) {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
-    let vk = match VerifyingKey::from_encoded_point(&point) {
+    let vk = match VerifyingKey::from_sec1_bytes(sec1_point) {
         Ok(k) => k,
         Err(_) => return false,
     };
@@ -206,14 +201,9 @@ fn verify_ec_p256(sec1_point: &[u8], message: &[u8], signature: &[u8]) -> bool {
 
 /// ES384 (P-384 + SHA-384) verification.
 fn verify_ec_p384(sec1_point: &[u8], message: &[u8], signature: &[u8]) -> bool {
-    use p384::EncodedPoint;
     use p384::ecdsa::{Signature, VerifyingKey, signature::Verifier};
 
-    let point = match EncodedPoint::from_bytes(sec1_point) {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
-    let vk = match VerifyingKey::from_encoded_point(&point) {
+    let vk = match VerifyingKey::from_sec1_bytes(sec1_point) {
         Ok(k) => k,
         Err(_) => return false,
     };
@@ -303,6 +293,59 @@ mod tests {
         assert_eq!(key.kid, "ec-key-1");
         assert_eq!(key.algorithm, "ES256");
         assert!(matches!(key.key_type, KeyType::EcP256(_)));
+    }
+
+    const SIGNING_INPUT: &[u8] = b"eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJ0ZXN0In0";
+
+    fn ec_key(key_type: KeyType, algorithm: &str) -> VerificationKey {
+        VerificationKey {
+            kid: "ec-key".into(),
+            algorithm: algorithm.into(),
+            key_type,
+        }
+    }
+
+    #[test]
+    fn es256_signature_round_trip() {
+        use p256::ecdsa::{Signature, SigningKey, signature::Signer};
+
+        let signing = SigningKey::from_slice(&[7u8; 32]).unwrap();
+        let point = signing.verifying_key().to_sec1_point(false);
+        let key = ec_key(KeyType::EcP256(point.as_bytes().to_vec()), "ES256");
+        let signature: Signature = signing.sign(SIGNING_INPUT);
+        let raw = signature.to_bytes();
+
+        assert!(verify_signature(&key, SIGNING_INPUT, &raw));
+        assert!(!verify_signature(&key, b"tampered", &raw));
+        let mut flipped = raw.to_vec();
+        flipped[0] ^= 1;
+        assert!(!verify_signature(&key, SIGNING_INPUT, &flipped));
+        assert!(!verify_signature(&key, SIGNING_INPUT, &raw[..63]));
+    }
+
+    #[test]
+    fn es384_signature_round_trip() {
+        use p384::ecdsa::{Signature, SigningKey, signature::Signer};
+
+        let signing = SigningKey::from_slice(&[9u8; 48]).unwrap();
+        let point = signing.verifying_key().to_sec1_point(false);
+        let key = ec_key(KeyType::EcP384(point.as_bytes().to_vec()), "ES384");
+        let signature: Signature = signing.sign(SIGNING_INPUT);
+        let raw = signature.to_bytes();
+
+        assert!(verify_signature(&key, SIGNING_INPUT, &raw));
+        assert!(!verify_signature(&key, b"tampered", &raw));
+        let mut flipped = raw.to_vec();
+        flipped[0] ^= 1;
+        assert!(!verify_signature(&key, SIGNING_INPUT, &flipped));
+    }
+
+    #[test]
+    fn ec_point_off_the_curve_is_refused() {
+        let mut point = vec![0x04];
+        point.extend_from_slice(&[1u8; 64]);
+        let key = ec_key(KeyType::EcP256(point), "ES256");
+        assert!(!verify_signature(&key, SIGNING_INPUT, &[1u8; 64]));
     }
 
     #[test]
