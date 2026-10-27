@@ -31,6 +31,7 @@ use crate::control::planner::implicit_edges::{
     EdgeUpdateCtx, append_implicit_edge_delete_tasks, append_implicit_edge_update_tasks,
 };
 use crate::control::server::shared::session::StatementDeadline;
+use crate::control::server::shared::session::read_set::ReadSetEntry;
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TenantId, TraceId};
 use nodedb_physical::physical_plan::OllpPredictedEdge;
@@ -151,12 +152,19 @@ pub fn is_edge_recon_plan(plan: &nodedb_physical::physical_plan::PhysicalPlan) -
 /// guard and edges all home on one vShard is a legitimate one-vShard
 /// transaction, and so is a contended single-collection predicate write
 /// routed here by the write-admission gate.
+///
+/// `reads` are the images materialized-sum settlement folded the tasks'
+/// cross-shard balance deltas from. Every attempt carries them unchanged in
+/// its `TxClass`, so a source row that moved after settlement aborts the
+/// transaction. A fresh reconnaissance cannot refresh them: the shipped
+/// deltas stay the ones computed from the settled images.
 pub async fn dispatch_authorized_dependent_edge_recon(
     state: &SharedState,
     authorized: crate::control::server::shared::authorization::AuthorizedTaskSet,
     identity: &crate::control::security::identity::AuthenticatedIdentity,
     tenant_id: TenantId,
     database_id: DatabaseId,
+    reads: &[ReadSetEntry],
 ) -> crate::Result<DependentReconOutcome> {
     let tasks = authorized
         .into_tasks()
@@ -171,6 +179,7 @@ pub async fn dispatch_authorized_dependent_edge_recon(
         tenant_id,
         database_id,
         user_roles,
+        reads,
     )
     .await
 }
@@ -185,7 +194,8 @@ pub(crate) async fn dispatch_dependent_edge_recon(
     database_id: DatabaseId,
     user_roles: Vec<String>,
 ) -> crate::Result<DependentReconOutcome> {
-    dispatch_dependent_edge_recon_inner(state, tasks, None, tenant_id, database_id, user_roles)
+    // The caller settled no materialized sum, so it has no images to carry.
+    dispatch_dependent_edge_recon_inner(state, tasks, None, tenant_id, database_id, user_roles, &[])
         .await
 }
 
@@ -196,11 +206,12 @@ async fn dispatch_dependent_edge_recon_inner(
     tenant_id: TenantId,
     database_id: DatabaseId,
     user_roles: Vec<String>,
+    reads: &[ReadSetEntry],
 ) -> crate::Result<DependentReconOutcome> {
     // A TRUNCATE empties the collection and tombstones its edges on every
     // vShard, in one transaction.
     if let Some(truncated) =
-        super::edge_truncate::dispatch_truncate(state, &tasks, identity, tenant_id).await?
+        super::edge_truncate::dispatch_truncate(state, &tasks, identity, tenant_id, reads).await?
     {
         return Ok(DependentReconOutcome {
             tasks_dispatched: tasks.len() as u64,
@@ -215,6 +226,7 @@ async fn dispatch_dependent_edge_recon_inner(
             identity,
             tenant_id,
             database_id,
+            reads,
         )
         .await?
     {
@@ -238,6 +250,20 @@ async fn dispatch_dependent_edge_recon_inner(
             detail: "dependent-edge recon dispatch invoked without a dependent-predicate task"
                 .to_owned(),
         })?;
+
+    // A request of several predicate writes runs as an implicit transaction,
+    // so each reads the rows the one before it wrote. Recon scans one write.
+    if tasks
+        .iter()
+        .filter(|t| is_dependent_predicate(&t.plan))
+        .count()
+        > 1
+    {
+        return Err(Error::Internal {
+            detail: "dependent-edge recon dispatch invoked with several predicate writes"
+                .to_owned(),
+        });
+    }
 
     let orc = orchestrator.ok_or(Error::SequencerUnavailable)?;
     // Hoisted across the retry loop so both `submit` and `rescan` can borrow them.
@@ -376,6 +402,8 @@ async fn dispatch_dependent_edge_recon_inner(
                     .collect();
             }
 
+            #[cfg(feature = "failpoints")]
+            crate::control::fail_gate::before_recon_submit(state.node_id).await;
             orc.submit_with_retry_via(
                 pred_class,
                 tenant_id,
@@ -400,7 +428,7 @@ async fn dispatch_dependent_edge_recon_inner(
                         tenant_id,
                         dep_collection,
                         &surrogates,
-                        &[],
+                        reads,
                     )
                     .map_err(|e| OllpError::Terminal(Box::new(e)))?;
                     if let Some(class) = tx_class.as_mut() {

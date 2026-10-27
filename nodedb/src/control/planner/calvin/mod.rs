@@ -20,6 +20,7 @@ pub mod read_dependent;
 pub mod reservation;
 pub mod retry_budget;
 pub mod retry_loop;
+pub mod settling_writes;
 pub mod submit;
 pub mod tx_class;
 pub mod txn_predict;
@@ -45,6 +46,7 @@ pub use graph_sequencing::{
 };
 pub use predicate::predicate_class_for_filters;
 pub use retry_loop::{DependentOutcome, DependentRetryArgs, run_dependent_with_retry};
+pub use settling_writes::{refuse_several_settling_writes, ships_balance_delta};
 pub use submit::{
     RoutedAssignment, submit_and_await_calvin, submit_and_await_calvin_until, submit_calvin_routed,
     submit_calvin_routed_assign, submit_calvin_routed_write,

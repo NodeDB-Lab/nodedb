@@ -14,7 +14,7 @@ pub mod task_loop;
 pub(crate) use answer::StatementAnswer;
 pub(crate) use atomic::{AtomicRoute, AtomicStatement, calvin_answer, route_atomic_statement};
 pub(crate) use dispatch::authorize_one_task;
-pub(crate) use edge_recon::{EdgeRecon, try_edge_recon};
+pub(crate) use edge_recon::{EdgeRecon, try_edge_recon, try_multi_shard_predicate_recon};
 pub(crate) use error::StatementError;
 pub(crate) use task_loop::{
     PlannedStatement, StatementExec, run_implicit_statement, run_statement_loop,

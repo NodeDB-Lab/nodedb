@@ -87,6 +87,12 @@ pub fn calvin_route_keeps(plan: &PhysicalPlan, event_source: EventSource, restor
 /// The transaction carries `user_roles`, the roles of the identity that wrote
 /// the write, so every replica judges a role-guarded state transition alike.
 ///
+/// The transaction holds one task and no settlement reads. A write that ships
+/// a materialized-sum balance to another vShard is a multi-shard task set. Under
+/// `Strict` that set takes the group route, which carries the reads. Only
+/// `BestEffortNonAtomic` splits it into single tasks, and that mode performs no
+/// cross-shard OCC.
+///
 /// Returns a boxed future (rather than an `async fn`) to break the async
 /// recursion cycle described in the module docs.
 pub fn route_write_to_calvin<'a>(

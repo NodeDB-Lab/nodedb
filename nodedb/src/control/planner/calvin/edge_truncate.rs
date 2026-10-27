@@ -34,6 +34,7 @@ use crate::control::server::dispatch_utils::{
 use crate::control::server::shared::clone_write::{
     CloneCheckedOutcome, InterceptAndAuthorizeParams, intercept_and_authorize,
 };
+use crate::control::server::shared::session::read_set::ReadSetEntry;
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TenantId, TraceId, VShardId};
 
@@ -56,6 +57,10 @@ pub(super) struct TruncateOutcome {
 /// Calvin transaction when an edge was ever written into it. `None` when
 /// `tasks` holds no TRUNCATE.
 ///
+/// Every other task of the request, such as the settled balance deltas of a
+/// cross-shard materialized sum, joins the transaction, and `reads` guard
+/// them. The transaction then runs even when the collection has no edge.
+///
 /// With `identity`, the TRUNCATE passes the clone-write gate and
 /// authorization. Without it, the caller already authorized it.
 pub(super) async fn dispatch_truncate(
@@ -63,6 +68,7 @@ pub(super) async fn dispatch_truncate(
     tasks: &[PhysicalTask],
     identity: Option<&AuthenticatedIdentity>,
     tenant_id: TenantId,
+    reads: &[ReadSetEntry],
 ) -> crate::Result<Option<TruncateOutcome>> {
     let Some(task) = tasks.iter().find(|task| is_truncate(&task.plan)) else {
         return Ok(None);
@@ -76,6 +82,13 @@ pub(super) async fn dispatch_truncate(
     // stays true or false until the TRUNCATE's outcome.
     let edge_bearing =
         collection_is_edge_bearing(state, task.tenant_id, task.database_id, collection.as_str())?;
+    let others: Vec<PhysicalTask> = tasks
+        .iter()
+        .filter(|other| !is_truncate(&other.plan))
+        .cloned()
+        .collect();
+    // A request that ships balance deltas needs the transaction to carry them.
+    let in_transaction = edge_bearing || !others.is_empty();
 
     // The clone-write gate and authorization of the rows' truncate. The
     // lease holds until the transaction's outcome.
@@ -95,7 +108,7 @@ pub(super) async fn dispatch_truncate(
             })
             .await?
             {
-                CloneCheckedOutcome::Handled(response) if !edge_bearing => {
+                CloneCheckedOutcome::Handled(response) if !in_transaction => {
                     return Ok(Some(TruncateOutcome {
                         apply_result: Some(response),
                     }));
@@ -108,7 +121,7 @@ pub(super) async fn dispatch_truncate(
                         ),
                     });
                 }
-                CloneCheckedOutcome::Proceed(checked) if !edge_bearing => {
+                CloneCheckedOutcome::Proceed(checked) if !in_transaction => {
                     let response =
                         dispatch_authorized_durable_write(state, checked, TraceId::ZERO).await?;
                     crate::control::local_dispatch::reject_data_plane_error(&response)?;
@@ -122,7 +135,7 @@ pub(super) async fn dispatch_truncate(
                 }
             }
         }
-        None if !edge_bearing => {
+        None if !in_transaction => {
             let response = dispatch_rows_plan(state, task).await?;
             crate::control::local_dispatch::reject_data_plane_error(&response)?;
             return Ok(Some(TruncateOutcome {
@@ -132,15 +145,22 @@ pub(super) async fn dispatch_truncate(
         None => (task.clone(), None),
     };
 
-    let edge_shares = edge_share_tasks(&rows_task, &collection);
+    let edge_shares = if edge_bearing {
+        edge_share_tasks(&rows_task, &collection)
+    } else {
+        Vec::new()
+    };
     let edge_shares = match identity {
         Some(identity) => authorize(state, identity, edge_shares)?,
         None => edge_shares,
     };
-    let mut submission = Vec::with_capacity(edge_shares.len() + 1);
+    let mut submission = Vec::with_capacity(edge_shares.len() + others.len() + 1);
     submission.push(rows_task);
     submission.extend(edge_shares);
-    let tx_class = build_static_tx_class(&submission, tenant_id, &[])?;
+    submission.extend(others);
+    let tx_class = build_static_tx_class(&submission, tenant_id, reads)?;
+    #[cfg(feature = "failpoints")]
+    crate::control::fail_gate::before_recon_submit(state.node_id).await;
     let apply_result = submit_calvin_routed(state, tx_class).await?;
     Ok(Some(TruncateOutcome { apply_result }))
 }

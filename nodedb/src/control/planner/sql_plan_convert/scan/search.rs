@@ -182,6 +182,19 @@ fn build_array_prefilter_plan(
     ))
 }
 
+/// Refuse a score alias that would overwrite the field a hybrid hit names its row by.
+/// The hit carries the row under `doc_id`, so an alias of that name hides the row's id.
+fn check_score_alias(alias: Option<&str>) -> crate::Result<()> {
+    match alias {
+        Some("doc_id") => Err(crate::Error::BadRequest {
+            detail: "score alias 'doc_id' names the field a hybrid hit identifies its row by; \
+choose another alias"
+                .to_owned(),
+        }),
+        _ => Ok(()),
+    }
+}
+
 pub(in crate::control::planner::sql_plan_convert) fn convert_hybrid_search(
     p: HybridSearchParams<'_>,
 ) -> crate::Result<Vec<PhysicalTask>> {
@@ -201,6 +214,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_hybrid_search(
         tenant_id,
         database_id,
     } = p;
+    check_score_alias(score_alias)?;
     let collection_key = nodedb_types::CollectionKey::from_bare(database_id, collection);
     let qualified_collection = nodedb_types::QualifiedCollection::new(database_id, collection);
     let vshard = collection_key.vshard();
@@ -251,6 +265,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_hybrid_search_tripl
         tenant_id,
         database_id,
     } = p;
+    check_score_alias(score_alias)?;
     let collection_key = nodedb_types::CollectionKey::from_bare(database_id, collection);
     let qualified_collection = nodedb_types::QualifiedCollection::new(database_id, collection);
     let vshard = collection_key.vshard();

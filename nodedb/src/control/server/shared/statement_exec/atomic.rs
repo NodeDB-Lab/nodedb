@@ -24,7 +24,7 @@ use nodedb_physical::physical_task::PhysicalTask;
 use crate::control::lease::QueryLeaseScope;
 use crate::control::planner::calvin::{
     CrossShardTxnMode, DispatchClass, TxnDispatchPosition, classify_dispatch,
-    dispatch_authorized_tasks_to_calvin, read_vshards_of,
+    dispatch_authorized_tasks_to_calvin, read_vshards_of, refuse_several_settling_writes,
 };
 use crate::control::security::audit::ArcAuditEmitter;
 use crate::control::server::response_shape::calvin_fold::{
@@ -41,7 +41,9 @@ use crate::control::server::shared::write_admission::all_writes_bufferable;
 use crate::control::trigger::statement_txn::in_block;
 
 use super::answer::StatementAnswer;
-use super::edge_recon::{CalvinApplied, EdgeRecon, try_edge_recon};
+use super::edge_recon::{
+    CalvinApplied, EdgeRecon, try_edge_recon, try_multi_shard_predicate_recon,
+};
 use super::error::StatementError;
 use super::task_loop::{PlannedStatement, StatementExec, run_implicit_statement};
 
@@ -95,6 +97,9 @@ pub(crate) async fn route_atomic_statement(
     .map_err(|error| StatementError::Error(crate::Error::from(error)))?;
 
     let in_txn_block = in_block(session);
+    if !in_txn_block {
+        refuse_several_settling_writes(&tasks).map_err(StatementError::Error)?;
+    }
     if !in_txn_block && statement_needs_implicit_txn(state, &tasks) {
         if !all_writes_bufferable(&tasks) {
             return Err(StatementError::Error(unbufferable_joined_statement()));
@@ -112,17 +117,23 @@ pub(crate) async fn route_atomic_statement(
         return Ok(AtomicRoute::Implicit(answer));
     }
 
-    let (tasks, authorized) =
-        match try_edge_recon(state, exec.identity, in_txn_block, tasks, authorized)
-            .await
-            .map_err(StatementError::Error)?
-        {
-            EdgeRecon::Applied(applied) => {
-                meter_applied(exec, &applied);
-                return Ok(AtomicRoute::Calvin(applied));
-            }
-            EdgeRecon::NotFired(tasks, authorized) => (tasks, authorized),
-        };
+    let (tasks, authorized) = match try_edge_recon(
+        state,
+        exec.identity,
+        in_txn_block,
+        tasks,
+        authorized,
+        &sum_target_reads,
+    )
+    .await
+    .map_err(StatementError::Error)?
+    {
+        EdgeRecon::Applied(applied) => {
+            meter_applied(exec, &applied);
+            return Ok(AtomicRoute::Calvin(applied));
+        }
+        EdgeRecon::NotFired(tasks, authorized) => (tasks, authorized),
+    };
 
     // An autocommit statement has no session read set to widen with. The
     // reads to widen with are those materialized-sum settlement stamped.
@@ -141,6 +152,25 @@ pub(crate) async fn route_atomic_statement(
             }
             let cross_shard_mode = session.sessions.cross_shard_txn_mode(session.session_id);
             if !in_txn_block && cross_shard_mode == CrossShardTxnMode::Strict {
+                // A predicate write names the rows it matched only after the
+                // coordinator reads them, so it takes the same route as on
+                // pgwire.
+                let (tasks, authorized) = match try_multi_shard_predicate_recon(
+                    state,
+                    exec.identity,
+                    tasks,
+                    authorized,
+                    &sum_target_reads,
+                )
+                .await
+                .map_err(StatementError::Error)?
+                {
+                    EdgeRecon::Applied(applied) => {
+                        meter_applied(exec, &applied);
+                        return Ok(AtomicRoute::Calvin(applied));
+                    }
+                    EdgeRecon::NotFired(tasks, authorized) => (tasks, authorized),
+                };
                 let plans = tasks.iter().map(|task| task.plan.clone()).collect();
                 let apply_result = dispatch_authorized_tasks_to_calvin(
                     state,

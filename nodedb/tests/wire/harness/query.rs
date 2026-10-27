@@ -116,6 +116,28 @@ impl TestServer {
         }
     }
 
+    /// POST `sql` to the HTTP query route. Returns the status code and the body.
+    pub async fn http_query(&self, sql: &str) -> (u16, String) {
+        let response = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{}/v1/query", self.http_port))
+            .json(&serde_json::json!({ "sql": sql }))
+            .send()
+            .await
+            .unwrap_or_else(|e| panic!("POST /v1/query: {e}"));
+        let status = response.status().as_u16();
+        let body = response.text().await.unwrap_or_default();
+        (status, body)
+    }
+
+    /// [`Self::http_query`] expecting a success status.
+    pub async fn http_exec(&self, sql: &str) {
+        let (status, body) = self.http_query(sql).await;
+        assert!(
+            (200..300).contains(&status),
+            "the request answered {status}: {body}"
+        );
+    }
+
     /// Execute a SQL statement expecting an error containing the given substring.
     pub async fn expect_error(&self, sql: &str, expected_substring: &str) {
         let client = self.client.as_ref();
