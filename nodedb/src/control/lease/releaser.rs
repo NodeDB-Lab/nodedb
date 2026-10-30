@@ -12,12 +12,14 @@
 //! attempt failed, or the node shut down, costs latency only. A descriptor
 //! lease expires at its `expires_at`, and the renewal loop releases an idle
 //! one at expiry. A DDL preparation lease is reclaimed by the metadata leader
-//! once its lease window passed.
+//! once its lease window passed. A drain has no expiry: a drain end that is
+//! never proposed leaves its descriptor drained until a later end or a
+//! restart, so its failure is recorded where it is detected.
 
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
-use nodedb_cluster::DescriptorId;
+use nodedb_cluster::{DescriptorId, DrainOwner};
 use tokio::sync::mpsc;
 
 use crate::control::shutdown::{ShutdownPhase, spawn_loop};
@@ -39,8 +41,14 @@ pub(crate) enum ReleaseRequest {
     /// Release this node's leases on these descriptors that no statement
     /// holds when the release runs.
     UnheldDescriptors(Vec<DescriptorId>),
-    /// Release the DDL preparation lease `token`.
+    /// Abandon the DDL preparation lease `token`: cancel its pending DDL
+    /// record, then release it.
     DdlPrepare { token: u64 },
+    /// End `owner`'s drain on `descriptor_id`.
+    DrainEnd {
+        descriptor_id: DescriptorId,
+        owner: DrainOwner,
+    },
 }
 
 /// The bounded queue of releases synchronous code hands off.
@@ -146,17 +154,33 @@ async fn release_with_retry(shared: &Weak<SharedState>, request: &ReleaseRequest
                 tracing::debug!(?request, attempt, %error, "lease release failed; retrying");
             }
             Err(error) => {
-                tracing::warn!(
-                    ?request,
-                    %error,
-                    "lease release failed on every attempt; the lease ends at its expiry"
-                );
+                give_up(request, &error);
                 return;
             }
         }
         drop(state);
         tokio::time::sleep(backoff).await;
         backoff = backoff.saturating_mul(2);
+    }
+}
+
+/// Record a request every attempt failed to apply. A descriptor lease ends at
+/// its expiry and the metadata leader reclaims a DDL preparation lease, but a
+/// drain has no expiry backstop.
+fn give_up(request: &ReleaseRequest, error: &Error) {
+    match request {
+        ReleaseRequest::UnheldDescriptors(_) => tracing::warn!(
+            ?request,
+            %error,
+            "lease release failed on every attempt; the lease ends at its expiry"
+        ),
+        ReleaseRequest::DdlPrepare { token } => {
+            crate::diag::ddl_cleanup_not_completed(error, "abandon_lease", *token);
+        }
+        ReleaseRequest::DrainEnd {
+            descriptor_id,
+            owner,
+        } => crate::diag::descriptor_drain_not_ended(error, descriptor_id, owner),
     }
 }
 
@@ -168,6 +192,10 @@ async fn release_once(shared: &SharedState, request: &ReleaseRequest) -> Result<
         ReleaseRequest::DdlPrepare { token } => {
             crate::control::metadata_proposer::release_ddl_prepare_token(shared, *token).await
         }
+        ReleaseRequest::DrainEnd {
+            descriptor_id,
+            owner,
+        } => super::end_drain_async(shared, descriptor_id.clone(), owner.clone()).await,
     }
 }
 

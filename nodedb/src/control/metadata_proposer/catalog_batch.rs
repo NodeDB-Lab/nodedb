@@ -6,6 +6,7 @@ use nodedb_cluster::{METADATA_GROUP_ID, MetadataEntry};
 
 use crate::control::catalog_entry::{self, CatalogEntry};
 use crate::control::constraint_install::{ConstraintTarget, constraint_targets};
+use crate::control::lease::DrainHolds;
 use crate::control::security::catalog::SystemCatalog;
 use crate::control::server::shared::session::ddl_buffer;
 use crate::control::state::SharedState;
@@ -117,8 +118,10 @@ async fn propose_replicated(
 ) -> Result<Option<ReplicatedBatch>, Error> {
     let _local_ddl_guard = lock_ddl_preparation_async(shared).await;
     let lease = acquire_ddl_prepare_lease_async(shared, handle).await?;
+    let mut drains = DrainHolds::new(shared);
     let proposed: Result<Option<ReplicatedBatch>, Error> = async {
-        let Some((entries, targets)) = plan_drain_and_stamp(shared, plan).await? else {
+        let Some((entries, targets)) = plan_drain_and_stamp(shared, plan, &mut drains).await?
+        else {
             return Ok::<_, Error>(None);
         };
         let mut wrapped = Vec::with_capacity(entries.len());
@@ -138,81 +141,51 @@ async fn propose_replicated(
         Ok::<_, Error>(Some((log_index, entries, targets)))
     }
     .await;
+    // The applied batch ended its drains. Any failure ends them here: a drain
+    // has no wall-clock expiry. The ends are proposed after the batch, so they
+    // are no-ops when a batch whose outcome was unknown applied after all.
+    match &proposed {
+        Ok(_) => drains.keep(),
+        Err(_) => drains.end().await,
+    }
     lease.release().await;
     proposed
 }
 
 /// Plan, drain, and stamp a batch, and name the collections whose constraint
 /// version the stamped batch changes. The caller holds the DDL preparation
-/// lock and lease. `None` is a plan with no entries.
-///
-/// The batch's apply ends every drain it started. A failure before the batch
-/// is proposed ends them here: a drain has no wall-clock expiry.
+/// lock and lease, and owns every drain recorded in `drains`. `None` is a plan
+/// with no entries.
 async fn plan_drain_and_stamp(
     shared: &SharedState,
     plan: impl FnOnce(&SystemCatalog) -> crate::Result<Vec<CatalogEntry>>,
+    drains: &mut DrainHolds<'_>,
 ) -> Result<Option<(Vec<CatalogEntry>, Vec<ConstraintTarget>)>, Error> {
     let catalog = shared.credentials.catalog();
     let entries = plan(catalog)?;
     if entries.is_empty() {
         return Ok(None);
     }
-    if let Err(error) = drain_batch(shared, &entries).await {
-        return Err(end_batch_drains(shared, &entries, error).await);
-    }
+    drain_batch(shared, &entries, drains).await?;
     let stamped =
-        catalog_entry::descriptor_stamp::stamp_batch(entries.clone(), &shared.hlc_clock, catalog)
-            .and_then(|stamped| {
-                let targets = constraint_targets(catalog, &stamped)?;
-                Ok((stamped, targets))
-            });
-    match stamped {
-        Ok(stamped) => Ok(Some(stamped)),
-        Err(error) => Err(end_batch_drains(shared, &entries, error).await),
-    }
+        catalog_entry::descriptor_stamp::stamp_batch(entries, &shared.hlc_clock, catalog)?;
+    let targets = constraint_targets(catalog, &stamped)?;
+    Ok(Some((stamped, targets)))
 }
 
-/// End the drain of every entry of a batch that failed before it was
-/// proposed. Returns `error`, the failure that stopped the batch.
-///
-/// Every node installed the drains, so each DDL drain ends through the
-/// metadata group.
-async fn end_batch_drains(shared: &SharedState, entries: &[CatalogEntry], error: Error) -> Error {
-    for entry in entries {
-        if let Err(end) = end_replicated_drain(shared, entry).await {
-            tracing::warn!(
-                kind = entry.kind(),
-                error = %end,
-                "metadata batch: the drain of an unapplied entry did not end"
-            );
-        }
-    }
-    error
-}
-
-/// End, through the metadata group, the DDL drain [`drain_batch`] started for
-/// `entry`. Ending a drain that is not active is a no-op on every node.
-async fn end_replicated_drain(shared: &SharedState, entry: &CatalogEntry) -> Result<(), Error> {
-    match crate::control::lease::descriptor_id_and_prior_version(entry, shared) {
-        Some((descriptor_id, prior_version)) if prior_version > 0 => {
-            crate::control::lease::end_drain_async(
-                shared,
-                descriptor_id,
-                nodedb_cluster::DrainOwner::Ddl,
-            )
-            .await
-        }
-        _ => Ok(()),
-    }
-}
-
-/// Drain the prior version of every descriptor the batch changes.
-async fn drain_batch(shared: &SharedState, entries: &[CatalogEntry]) -> Result<(), Error> {
+/// Drain the prior version of every descriptor the batch changes, and record
+/// each drain in `drains`.
+async fn drain_batch(
+    shared: &SharedState,
+    entries: &[CatalogEntry],
+    drains: &mut DrainHolds<'_>,
+) -> Result<(), Error> {
     for entry in entries {
         if let Some((descriptor_id, prior_version)) =
             crate::control::lease::descriptor_id_and_prior_version(entry, shared)
             && prior_version > 0
         {
+            drains.hold(descriptor_id.clone(), nodedb_cluster::DrainOwner::Ddl);
             crate::control::lease::drain_for_ddl_async(
                 shared,
                 descriptor_id,

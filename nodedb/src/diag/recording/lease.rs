@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Capture sites for descriptor leases the renewal loop could not maintain.
+//! Capture sites for descriptor leases, drains and DDL preparation leases
+//! that were not maintained or cleaned up.
 
 use faultbox::{Capture, EventKind, error_chain_of};
 
@@ -29,6 +30,52 @@ pub fn descriptor_lease_not_renewed(
     let _ = Capture::new(
         EventKind::Error,
         "descriptor lease renewal: the lease was neither refreshed nor released",
+    )
+    .error_chain(error_chain_of(err))
+    .domain(&ctx)
+    .with_backtrace()
+    .emit();
+}
+
+/// Report a DDL preparation lease whose failure cleanup (cancel its pending
+/// record, release it) did not apply on any attempt. Called only from the
+/// background lease releaser's give-up arm.
+pub fn ddl_cleanup_not_completed(err: &crate::Error, step: &'static str, token: u64) {
+    let class = error_class(err);
+    let ctx = context::DdlCleanupNotCompleted {
+        step,
+        token,
+        error_class: &class,
+    };
+    let _ = Capture::new(
+        EventKind::Error,
+        "DDL cleanup: a failed DDL's lease was neither cancelled nor released",
+    )
+    .error_chain(error_chain_of(err))
+    .domain(&ctx)
+    .with_backtrace()
+    .emit();
+}
+
+/// Report a descriptor drain whose holder gave up and whose end did not apply
+/// on any attempt. Called only from the background lease releaser's give-up
+/// arm.
+pub fn descriptor_drain_not_ended(
+    err: &crate::Error,
+    descriptor: &nodedb_cluster::DescriptorId,
+    owner: &nodedb_cluster::DrainOwner,
+) {
+    let class = error_class(err);
+    let descriptor = format!("{descriptor:?}");
+    let owner = format!("{owner:?}");
+    let ctx = context::DescriptorDrainNotEnded {
+        descriptor: &descriptor,
+        owner: &owner,
+        error_class: &class,
+    };
+    let _ = Capture::new(
+        EventKind::Error,
+        "descriptor drain: an abandoned drain did not end",
     )
     .error_chain(error_chain_of(err))
     .domain(&ctx)

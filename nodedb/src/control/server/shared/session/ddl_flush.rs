@@ -17,6 +17,7 @@ use nodedb_cluster::{MetadataEntry, PendingDdlObject, encode_entry};
 
 use crate::control::catalog_entry::{self, CatalogEntry};
 use crate::control::constraint_install::{ConstraintTarget, constraint_targets};
+use crate::control::lease::DrainHolds;
 use crate::control::metadata_proposer::{DdlPrepareLease, MetadataRaftHandle};
 use crate::control::security::catalog::SystemCatalog;
 use crate::control::state::SharedState;
@@ -183,8 +184,12 @@ fn committed_before_image(
 /// Reserve `buffered` under a fresh fencing token via `DdlPendingPropose`,
 /// without dispatching any DML. Takes the preparation lock and lease, drains
 /// and stamps the batch, then reserves each stamped statement as a
-/// [`PendingDdlObject`] instead of applying it. A failure releases the lease
-/// before it returns.
+/// [`PendingDdlObject`] instead of applying it.
+///
+/// A failure ends every drain it started, cancels any pending record its
+/// propose left, and releases the lease before it returns. On success the
+/// record owns the drains: its finalize's catalog entries end them, and so
+/// does its cancel.
 async fn propose_pending_buffered<'a>(
     state: &'a SharedState,
     sessions: &SessionStore,
@@ -196,12 +201,14 @@ async fn propose_pending_buffered<'a>(
     let lease =
         crate::control::metadata_proposer::acquire_ddl_prepare_lease_async(state, handle.as_ref())
             .await?;
+    let mut drains = DrainHolds::new(state);
     let reserved = reserve_buffered(
         state,
         sessions,
         session_id,
         handle.as_ref(),
         lease.token(),
+        &mut drains,
         buffered,
     )
     .await;
@@ -210,15 +217,19 @@ async fn propose_pending_buffered<'a>(
             log_index,
             objects,
             constraint_targets,
-        }) => Ok(PendingDdlHandle {
-            token: lease.token(),
-            log_index,
-            lease,
-            objects,
-            constraint_targets,
-        }),
+        }) => {
+            drains.keep();
+            Ok(PendingDdlHandle {
+                token: lease.token(),
+                log_index,
+                lease,
+                objects,
+                constraint_targets,
+            })
+        }
         Err(error) => {
-            lease.release().await;
+            drains.end().await;
+            lease.abandon().await;
             Err(error)
         }
     }
@@ -234,13 +245,15 @@ struct Reserved {
 
 /// Drain, stamp, and reserve `buffered` under the preparation lease `token`.
 /// Returns the reservation's log index, its reserved objects, and the
-/// collections whose constraint version it changes.
+/// collections whose constraint version it changes. Every drain it starts is
+/// recorded in `drains`, for the caller to keep or end.
 async fn reserve_buffered(
     state: &SharedState,
     sessions: &SessionStore,
     session_id: SessionId,
     handle: &dyn MetadataRaftHandle,
     token: u64,
+    drains: &mut DrainHolds<'_>,
     buffered: DdlBuffer,
 ) -> crate::Result<Reserved> {
     // Checked under the preparation lease, which every DDL takes: no other
@@ -262,6 +275,7 @@ async fn reserve_buffered(
             // conflict with itself.
             let own_holds =
                 sessions.own_lease_hold_count(session_id, &descriptor_id, prior_version);
+            drains.hold(descriptor_id.clone(), nodedb_cluster::DrainOwner::Ddl);
             crate::control::lease::drain_for_ddl_async(
                 state,
                 descriptor_id,
@@ -346,7 +360,13 @@ pub(super) async fn finalize_pending(
     } = handle;
     tracing::debug!(token, log_index, "finalizing pending DDL");
     let finalized = finalize_reserved(state, token, &objects).await;
-    lease.release().await;
+    // A finalize whose outcome is unknown can still apply, or never apply and
+    // leave its record. The abandon's cancel follows it in the log, so it is a
+    // no-op after an applied finalize and resolves the record otherwise.
+    match &finalized {
+        Ok(_) => lease.release().await,
+        Err(_) => lease.abandon().await,
+    }
     let (log_index, bears_authorization) = finalized?;
     // A changed constraint set is live on the collection's data log before
     // COMMIT returns, so the first CRDT apply after it is not fenced. The
@@ -725,6 +745,83 @@ mod tests {
                 .is_none(),
             "finalize_pending must release the preparation lease"
         );
+        cluster.shutdown().await;
+    }
+
+    /// A reserved COMMIT that never finalizes leaves nothing behind: its
+    /// pending record is cancelled, the drain its alter started ends, and the
+    /// preparation lease is free again, without a restart.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_unfinalized_commit_cancels_its_record_and_ends_its_drains() {
+        let cluster = test_one_node::boot().await;
+        {
+            let state = &cluster.state;
+            let mut existing =
+                crate::control::security::catalog::StoredCollection::stamped_for_test(
+                    7, "orders", "alice",
+                );
+            existing.descriptor_version = 3;
+            state
+                .credentials
+                .catalog()
+                .put_collection(nodedb_types::DatabaseId::DEFAULT, &existing)
+                .expect("store the collection the commit alters");
+            let mut altered = existing.clone();
+            altered.owner = "bob".into();
+
+            let (sessions, session_id) = test_session();
+            let plan = conn_scope::scoped(async {
+                ddl_buffer::activate();
+                assert!(ddl_buffer::try_buffer(CatalogEntry::PutCollection(
+                    Box::new(altered)
+                )));
+                begin_commit(state, &sessions, session_id).await
+            })
+            .await
+            .expect("begin_commit must succeed");
+            let handle = match plan {
+                DdlCommitPlan::Pending(handle) => handle,
+                DdlCommitPlan::None => panic!("a buffered alter must reserve a pending record"),
+            };
+            let token = handle.token;
+            let descriptor = nodedb_cluster::DescriptorId::new(
+                0,
+                7,
+                nodedb_cluster::DescriptorKind::Collection,
+                "orders",
+            );
+            assert!(state.pending_ddl.contains(token));
+            assert!(
+                state.lease_drain.is_draining(&descriptor, 3),
+                "the reservation drains the altered collection"
+            );
+
+            drop(handle);
+
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let owner_free = state
+                    .metadata_ddl
+                    .owner
+                    .lock()
+                    .expect("owner lock")
+                    .is_none();
+                if !state.pending_ddl.contains(token)
+                    && !state.lease_drain.is_draining(&descriptor, 3)
+                    && owner_free
+                {
+                    break;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "an unfinalized commit left state behind: record={} draining={} lease_held={}",
+                    state.pending_ddl.contains(token),
+                    state.lease_drain.is_draining(&descriptor, 3),
+                    !owner_free
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
         cluster.shutdown().await;
     }
 
