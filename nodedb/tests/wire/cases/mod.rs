@@ -461,6 +461,7 @@ mod trigger_statement_txn;
 mod truncate_engine_conformance;
 mod truncate_engine_conformance_columnar_family;
 mod txn_ddl_commit_registry_sync;
+mod txn_guarded_update_with_other_write;
 mod unbounded_reads;
 mod user_transaction;
 mod vector_dimension_errors;
