@@ -16,6 +16,9 @@ use crash_harness::CrashHarness;
 
 const CHECKPOINT_WAIT: Duration = Duration::from_secs(20);
 
+/// Long enough for several 1-second checkpoint cycles after a restart.
+const POST_RESTART_CHECKPOINT_WAIT: Duration = Duration::from_secs(3);
+
 /// Server env for a harness that must actually produce a checkpoint file
 /// within the test's runtime. A 1-second interval guarantees at least one
 /// flush fires well inside the `CHECKPOINT_WAIT` poll budget below.
@@ -162,6 +165,8 @@ async fn dropped_vector_collection_does_not_resurrect_after_restart() {
     h.reopen();
 
     assert_collection_missing(&h, &format!("SELECT id FROM {COLLECTION}"), COLLECTION).await;
+    // Same rationale as the spatial test below.
+    tokio::time::sleep(POST_RESTART_CHECKPOINT_WAIT).await;
 
     let leaked = any_file_name_contains(&ckpt_root, &needle);
     assert!(
@@ -215,6 +220,10 @@ async fn dropped_spatial_collection_does_not_resurrect_after_restart() {
     h.reopen();
 
     assert_collection_missing(&h, &format!("SELECT id FROM {COLLECTION}"), COLLECTION).await;
+    // Let the 1-second checkpoint cycles run after the restart. A restarted
+    // core that still holds the dropped collection's index writes its files
+    // again on the first cycle, so a check before any cycle proves nothing.
+    tokio::time::sleep(POST_RESTART_CHECKPOINT_WAIT).await;
 
     let leaked = any_file_name_contains(&ckpt_root, COLLECTION);
     assert!(
@@ -223,5 +232,77 @@ async fn dropped_spatial_collection_does_not_resurrect_after_restart() {
          DROP COLLECTION + restart: {leaked:?} (all files under {}: {:?})",
         ckpt_root.display(),
         walk_files(&ckpt_root)
+    );
+}
+
+/// The columnar checkpoint filename's collection part: the name's bytes as
+/// lowercase hex, as the write path encodes it.
+fn hex_name(collection: &str) -> String {
+    collection.bytes().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Same claim, plain columnar engine. The columnar checkpoint is what every
+/// columnar-family collection restores from, `spatial` included, so a file
+/// left behind resurrects the dropped rows and a same-name CREATE inherits
+/// them.
+#[tokio::test(flavor = "multi_thread")]
+async fn dropped_columnar_collection_does_not_resurrect_after_restart() {
+    const COLLECTION: &str = "crashdropcolumnar";
+
+    let mut h = checkpoint_every_second();
+    h.spawn();
+    h.wait_ready();
+
+    h.exec(&format!(
+        "CREATE COLLECTION {COLLECTION} (id TEXT, n INT) WITH (engine='columnar')"
+    ))
+    .await;
+    for id in 0..3 {
+        h.exec(&format!(
+            "INSERT INTO {COLLECTION} (id, n) VALUES ('r{id}', {id})"
+        ))
+        .await;
+    }
+
+    let ckpt_root = h.data_dir().join("columnar-ckpt");
+    let needle = format!("-coll-{}.ckpt", hex_name(COLLECTION));
+    let deadline = Instant::now() + CHECKPOINT_WAIT;
+    while any_file_name_contains(&ckpt_root, &needle).is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "no columnar checkpoint file named '{COLLECTION}' within {CHECKPOINT_WAIT:?}, so the \
+             test can prove nothing about reclaim (files: {:?})",
+            walk_files(&ckpt_root)
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    h.exec(&format!("DROP COLLECTION {COLLECTION} PURGE")).await;
+    h.kill_9();
+    h.reopen();
+
+    assert_collection_missing(&h, &format!("SELECT id FROM {COLLECTION}"), COLLECTION).await;
+    // Same rationale as the spatial test above.
+    tokio::time::sleep(POST_RESTART_CHECKPOINT_WAIT).await;
+    let leaked = any_file_name_contains(&ckpt_root, &needle);
+    assert!(
+        leaked.is_none(),
+        "columnar checkpoint file for dropped collection '{COLLECTION}' is still on disk after \
+         DROP COLLECTION + restart: {leaked:?} (all files under {}: {:?})",
+        ckpt_root.display(),
+        walk_files(&ckpt_root)
+    );
+
+    h.exec(&format!(
+        "CREATE COLLECTION {COLLECTION} (id TEXT, n INT) WITH (engine='columnar')"
+    ))
+    .await;
+    let count = h
+        .query_col_idx(&format!("SELECT COUNT(*) FROM {COLLECTION}"), 0)
+        .await;
+    assert_eq!(
+        count,
+        vec!["0".to_string()],
+        "a same-name CREATE after the drop inherited the dropped collection's rows"
     );
 }

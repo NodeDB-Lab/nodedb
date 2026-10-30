@@ -10,49 +10,62 @@ use crate::data::executor::core_loop::CoreLoop;
 
 impl CoreLoop {
     /// Read the live manifest, or `Ok(None)` when the file is genuinely absent.
-    ///
-    /// A present-but-unreadable, undecodable, or version-mismatched manifest is
-    /// `Err`, not `None`: the manifest is the only record of the LSN the
-    /// generation it names is durable through, and treating corruption as
-    /// "no generation" would let the caller install no floor while the WAL
-    /// below that LSN may already be gone.
+    /// See [`read_columnar_manifest_at`].
     pub(in crate::data::executor) fn read_columnar_manifest(
         &self,
         ckpt_dir: &std::path::Path,
     ) -> Result<Option<ColumnarCheckpointManifest>, CheckpointDecodeError> {
-        let path = ckpt_dir.join(COLUMNAR_CKPT_MANIFEST);
-        if !path.exists() {
-            return Ok(None);
+        read_columnar_manifest_at(ckpt_dir)
+    }
+}
+
+/// Read the live manifest in `ckpt_dir`, or `Ok(None)` when the file is
+/// genuinely absent.
+///
+/// A present-but-unreadable, undecodable, or version-mismatched manifest is
+/// `Err`, not `None`: the manifest is the only record of the LSN the
+/// generation it names is durable through, and treating corruption as
+/// "no generation" would let the caller install no floor while the WAL
+/// below that LSN may already be gone.
+///
+/// A free function because reclaim, which runs against a data dir and not a
+/// live core, resolves the live generation through this same reader, and the
+/// two must never diverge on what "live" means.
+pub(crate) fn read_columnar_manifest_at(
+    ckpt_dir: &std::path::Path,
+) -> Result<Option<ColumnarCheckpointManifest>, CheckpointDecodeError> {
+    let path = ckpt_dir.join(COLUMNAR_CKPT_MANIFEST);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = nodedb_wal::segment::read_checkpoint_framed(&path).map_err(|source| {
+        CheckpointDecodeError::ReadFile {
+            path: path.clone(),
+            source,
         }
-        let bytes = nodedb_wal::segment::read_checkpoint_framed(&path).map_err(|source| {
-            CheckpointDecodeError::ReadFile {
+    })?;
+    let manifest =
+        zerompk::from_msgpack::<ColumnarCheckpointManifest>(&bytes).map_err(|source| {
+            CheckpointDecodeError::MsgpackDecode {
                 path: path.clone(),
                 source,
             }
         })?;
-        let manifest =
-            zerompk::from_msgpack::<ColumnarCheckpointManifest>(&bytes).map_err(|source| {
-                CheckpointDecodeError::MsgpackDecode {
-                    path: path.clone(),
-                    source,
-                }
-            })?;
-        if manifest.format_version != COLUMNAR_CKPT_FORMAT_VERSION {
-            return Err(CheckpointDecodeError::FormatVersion {
-                path: path.clone(),
-                found: manifest.format_version,
-                expected: COLUMNAR_CKPT_FORMAT_VERSION,
-            });
-        }
-        manifest
-            .replay
-            .validate()
-            .map_err(|source| CheckpointDecodeError::InvalidReplayStamp {
-                path: path.clone(),
-                source,
-            })?;
-        Ok(Some(manifest))
+    if manifest.format_version != COLUMNAR_CKPT_FORMAT_VERSION {
+        return Err(CheckpointDecodeError::FormatVersion {
+            path: path.clone(),
+            found: manifest.format_version,
+            expected: COLUMNAR_CKPT_FORMAT_VERSION,
+        });
     }
+    manifest
+        .replay
+        .validate()
+        .map_err(|source| CheckpointDecodeError::InvalidReplayStamp {
+            path: path.clone(),
+            source,
+        })?;
+    Ok(Some(manifest))
 }
 
 /// Wrap a filesystem failure as the columnar engine's typed storage error.
