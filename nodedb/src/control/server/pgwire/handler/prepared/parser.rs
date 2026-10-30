@@ -250,6 +250,8 @@ impl NodeDbQueryParser {
         tenant_id: u64,
         database_id: crate::types::DatabaseId,
     ) -> crate::control::planner::catalog_adapter::OriginCatalog {
+        // Describe plans the statement without executing it: sequence
+        // functions resolve to their type, and no counter advances.
         crate::control::planner::catalog_adapter::OriginCatalog::new(
             Arc::clone(&self.state.credentials),
             self.state.array_catalog.clone(),
@@ -257,6 +259,8 @@ impl NodeDbQueryParser {
             database_id,
             Some(Arc::clone(&self.state.retention_policy_registry)),
         )
+        .with_sequence_registry(Arc::clone(&self.state.sequence_registry))
+        .describing()
     }
 
     /// Infer parameter and result types using the nodedb-sql catalog.

@@ -62,6 +62,10 @@ pub struct OriginCatalog {
     /// `currval` reads only from it, so one session never sees another
     /// session's allocation. `None` for planning with no session behind it.
     pub(super) session_sequences: Option<Arc<crate::control::sequence::SessionSequenceValues>>,
+    /// Plans for a Describe, never for execution: sequence functions check
+    /// their sequence exists and resolve to a typed placeholder, without
+    /// advancing a counter or recording a session value.
+    pub(super) describing: bool,
 }
 
 impl OriginCatalog {
@@ -94,6 +98,7 @@ impl OriginCatalog {
             array_catalog,
             sequence_registry: None,
             session_sequences: None,
+            describing: false,
         }
     }
 
@@ -120,6 +125,7 @@ impl OriginCatalog {
             array_catalog: shared.array_catalog.clone(),
             sequence_registry: Some(Arc::clone(&shared.sequence_registry)),
             session_sequences: None,
+            describing: false,
         }
     }
 
@@ -131,6 +137,14 @@ impl OriginCatalog {
         registry: Arc<crate::control::sequence::SequenceRegistry>,
     ) -> Self {
         self.sequence_registry = Some(registry);
+        self
+    }
+
+    /// Plan for a Describe only. Sequence functions keep their result type and
+    /// their existence check, but advance nothing and record nothing, so
+    /// describing a statement never consumes a value its execution would.
+    pub fn describing(mut self) -> Self {
+        self.describing = true;
         self
     }
 

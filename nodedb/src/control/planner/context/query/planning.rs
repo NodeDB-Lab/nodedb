@@ -99,14 +99,20 @@ impl QueryContext {
         let catalog = if purpose == PlanningPurpose::Metadata {
             // Metadata requests intentionally do not participate in descriptor
             // lease admission; they only need a stable catalog snapshot for
-            // authorization and response shaping.
-            crate::control::planner::catalog_adapter::OriginCatalog::new(
+            // authorization and response shaping. They never execute, so
+            // sequence functions resolve to their type and advance nothing.
+            let catalog = crate::control::planner::catalog_adapter::OriginCatalog::new(
                 Arc::clone(&inputs.credentials),
                 inputs.array_catalog.clone(),
                 tenant_id.as_u64(),
                 database_id,
                 inputs.retention_policy_registry.clone(),
             )
+            .describing();
+            match inputs.sequence_registry() {
+                Some(registry) => catalog.with_sequence_registry(registry),
+                None => catalog,
+            }
         } else {
             inputs.build_adapter(tenant_id.as_u64(), database_id)
         };

@@ -13,10 +13,17 @@ use crate::control::sequence::error_map::{map_sequence_error, undefined_sequence
 
 use super::adapter::OriginCatalog;
 
+/// The value a sequence function takes while describing. Only its type
+/// reaches the client.
+const DESCRIBE_PLACEHOLDER: i64 = 0;
+
 impl OriginCatalog {
     /// Advance `name` and record the value as this session's `currval`.
     pub(super) fn advance_sequence(&self, name: &str) -> Result<i64, SqlError> {
         let registry = self.require_sequence_registry()?;
+        if self.describing {
+            return self.describe_placeholder(registry, name);
+        }
         let database_id = self.database_id.as_u64();
         let value = registry
             .nextval(database_id, self.tenant_id, name)
@@ -32,6 +39,9 @@ impl OriginCatalog {
         // The sequence must exist before its absence from the session map can
         // mean "not yet called in this session" rather than "no such object".
         let registry = self.require_sequence_registry()?;
+        if self.describing {
+            return self.describe_placeholder(registry, name);
+        }
         if !registry.exists(self.database_id.as_u64(), self.tenant_id, name) {
             return Err(undefined_sequence(name));
         }
@@ -49,9 +59,26 @@ impl OriginCatalog {
     /// Position `name` so the next `nextval` returns `value + increment`.
     pub(super) fn position_sequence(&self, name: &str, value: i64) -> Result<i64, SqlError> {
         let registry = self.require_sequence_registry()?;
+        if self.describing {
+            return self.describe_placeholder(registry, name).map(|_| value);
+        }
         registry
             .setval(self.database_id.as_u64(), self.tenant_id, name, value)
             .map_err(|e| map_sequence_error(name, e))
+    }
+
+    /// What a sequence function resolves to while describing: the same type
+    /// as its real value, for a sequence that exists.
+    fn describe_placeholder(
+        &self,
+        registry: &SequenceRegistry,
+        name: &str,
+    ) -> Result<i64, SqlError> {
+        if registry.exists(self.database_id.as_u64(), self.tenant_id, name) {
+            Ok(DESCRIBE_PLACEHOLDER)
+        } else {
+            Err(undefined_sequence(name))
+        }
     }
 
     fn require_sequence_registry(&self) -> Result<&SequenceRegistry, SqlError> {
