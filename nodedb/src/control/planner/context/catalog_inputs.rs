@@ -26,6 +26,16 @@ pub(super) struct CatalogInputs {
 }
 
 impl CatalogInputs {
+    /// The node-wide sequence counters these inputs plan against, if any.
+    pub(super) fn sequence_registry(
+        &self,
+    ) -> Option<Arc<crate::control::sequence::SequenceRegistry>> {
+        match self.shared.as_ref().and_then(|weak| weak.upgrade()) {
+            Some(shared) => Some(Arc::clone(&shared.sequence_registry)),
+            None => self.sequence_registry.clone(),
+        }
+    }
+
     pub(super) fn build_adapter(
         &self,
         tenant_id: u64,

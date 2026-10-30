@@ -161,8 +161,10 @@ pub(super) async fn dispatch_to_data_plane(
 }
 
 /// Dispatch `request`, waiting for freed capacity after each capacity
-/// refusal, until the request's deadline. Returns the last refusal once the
-/// deadline passes.
+/// refusal, until the request's execution deadline. Returns the last refusal
+/// once the deadline passes. A committed write has no execution deadline and
+/// waits until capacity frees: a committed entry that fails for local load
+/// leaves this replica without a write every other replica applied.
 ///
 /// A caller that fans one statement out into more requests than the tenant's
 /// in-flight cap dispatches each through here: the fan-out then advances as
@@ -172,7 +174,9 @@ pub(crate) async fn dispatch_when_capacity_frees(
     request: Request,
     journal: Option<JournalGroup>,
 ) -> crate::Result<()> {
-    let deadline = tokio::time::Instant::from_std(request.deadline);
+    let deadline = request
+        .execution_deadline()
+        .map(tokio::time::Instant::from_std);
     let capacity_freed = match shared.dispatcher.lock() {
         Ok(d) => d.capacity_freed(),
         Err(poisoned) => poisoned.into_inner().capacity_freed(),
@@ -197,8 +201,13 @@ pub(crate) async fn dispatch_when_capacity_frees(
         if !matches!(refusal.error, crate::Error::DispatchCapacity { .. }) {
             return Err(refusal.error);
         }
-        if tokio::time::timeout_at(deadline, freed).await.is_err() {
-            return Err(refusal.error);
+        match deadline {
+            Some(deadline) => {
+                if tokio::time::timeout_at(deadline, freed).await.is_err() {
+                    return Err(refusal.error);
+                }
+            }
+            None => freed.await,
         }
         request = refusal.request;
     }

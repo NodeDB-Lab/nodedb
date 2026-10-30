@@ -24,6 +24,7 @@ pub mod admission;
 pub mod descriptor_lookup;
 pub mod drain;
 pub mod drain_apply;
+mod drain_hold;
 pub mod drain_propose;
 pub mod drain_propose_async;
 pub mod gc;
@@ -47,6 +48,7 @@ pub use descriptor_lookup::{
 };
 pub use drain::{DescriptorDrainTracker, DrainEntry};
 pub use drain_apply::{apply_drain_ends, apply_drain_start};
+pub(crate) use drain_hold::DrainHolds;
 pub use drain_propose_async::{drain_for_ddl_async, drain_for_owner_async, end_drain_async};
 pub use holders::{LeaseHolders, LeaseRevocation, revoke_if_fenced, revoke_on_release};
 pub(super) use leader_wait::propose_and_wait;

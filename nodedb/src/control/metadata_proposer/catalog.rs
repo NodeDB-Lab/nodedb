@@ -9,6 +9,7 @@ use nodedb_cluster::{METADATA_GROUP_ID, MetadataEntry, encode_entry};
 
 use crate::control::catalog_entry::{self, CatalogEntry};
 use crate::control::constraint_install::{ConstraintTarget, constraint_targets};
+use crate::control::lease::DrainHolds;
 use crate::control::propose_outcome::ProposeOutcome;
 use crate::control::state::SharedState;
 use crate::error::Error;
@@ -85,9 +86,10 @@ async fn propose_and_apply_locally(
     let _local_ddl_guard = lock_ddl_preparation_async(shared).await;
 
     let lease = acquire_ddl_prepare_lease_async(shared, handle.as_ref()).await?;
+    let mut drains = DrainHolds::new(shared);
     let proposed = async {
-        let drained = drain_prior_version(shared, entry).await?;
-        let (stamped, targets) = stamp_or_end_drain(shared, entry, drained).await?;
+        drain_prior_version(shared, entry, &mut drains).await?;
+        let (stamped, targets) = stamp(shared, entry)?;
         let log_index = propose_prepared(
             shared,
             handle.as_ref(),
@@ -99,13 +101,20 @@ async fn propose_and_apply_locally(
         Ok::<_, Error>((log_index, targets))
     }
     .await;
+    // The applied entry ended the drain. Any failure ends it here: a drain has
+    // no wall-clock expiry. The end is proposed after the entry, so it is a
+    // no-op when an entry whose outcome was unknown applied after all.
+    match &proposed {
+        Ok(_) => drains.keep(),
+        Err(_) => drains.end().await,
+    }
     lease.release().await;
     let (log_index, targets) = proposed?;
     Ok((ProposeOutcome::Replicated { log_index }, targets))
 }
 
-/// Drain the prior version of the descriptor `entry` changes. Returns the
-/// drained descriptor, whose drain the entry's apply ends.
+/// Drain the prior version of the descriptor `entry` changes, and record the
+/// drain in `drains`. The entry's apply ends it.
 ///
 /// Leases acquired at plan time are refcounted and held through execute; when
 /// the last in-flight query using a descriptor completes, its
@@ -116,18 +125,20 @@ async fn propose_and_apply_locally(
 async fn drain_prior_version(
     shared: &SharedState,
     entry: &CatalogEntry,
-) -> Result<Option<nodedb_cluster::DescriptorId>, Error> {
+    drains: &mut DrainHolds<'_>,
+) -> Result<(), Error> {
     let Some((descriptor_id, prior_version)) =
         crate::control::lease::descriptor_id_and_prior_version(entry, shared)
     else {
-        return Ok(None);
+        return Ok(());
     };
     if prior_version == 0 {
-        return Ok(None);
+        return Ok(());
     }
+    drains.hold(descriptor_id.clone(), nodedb_cluster::DrainOwner::Ddl);
     crate::control::lease::drain_for_ddl_async(
         shared,
-        descriptor_id.clone(),
+        descriptor_id,
         prior_version,
         DEFAULT_DRAIN_TIMEOUT,
         // No transactional lease scope of its own: this is a bare,
@@ -135,13 +146,11 @@ async fn drain_prior_version(
         // alongside a buffered write to the same descriptor.
         0,
     )
-    .await?;
-    Ok(Some(descriptor_id))
+    .await
 }
 
 /// Stamp `entry`, and name the collections whose constraint version the
-/// stamped entry changes. A failure ends the drain of `drained` and returns
-/// the error.
+/// stamped entry changes.
 ///
 /// Freezes the descriptor_version / constraint_version / modification_hlc
 /// HERE, at propose time, so the value is computed exactly once from this
@@ -149,45 +158,15 @@ async fn drain_prior_version(
 /// entry. Every node applies the frozen value without re-deriving it, which
 /// makes replay-from-log on restart and re-delivery during learner catch-up
 /// idempotent.
-async fn stamp_or_end_drain(
+fn stamp(
     shared: &SharedState,
     entry: &CatalogEntry,
-    drained: Option<nodedb_cluster::DescriptorId>,
 ) -> Result<(CatalogEntry, Vec<ConstraintTarget>), Error> {
     let catalog = shared.credentials.catalog();
-    let stamped = catalog_entry::descriptor_stamp::stamp(entry.clone(), &shared.hlc_clock, catalog)
-        .and_then(|stamped| {
-            let targets = constraint_targets(catalog, std::slice::from_ref(&stamped))?;
-            Ok((stamped, targets))
-        });
-    match stamped {
-        Ok(stamped) => Ok(stamped),
-        Err(error) => Err(end_unproposed_drain(shared, drained, error).await),
-    }
-}
-
-/// End the drain a DDL started when it fails before its entry is proposed.
-/// A drain has no wall-clock expiry, and no apply of this entry will end it.
-/// Returns `error`, the failure that stopped the DDL.
-async fn end_unproposed_drain(
-    shared: &SharedState,
-    drained: Option<nodedb_cluster::DescriptorId>,
-    error: Error,
-) -> Error {
-    if let Some(descriptor_id) = drained
-        && let Err(end) = crate::control::lease::end_drain_async(
-            shared,
-            descriptor_id,
-            nodedb_cluster::DrainOwner::Ddl,
-        )
-        .await
-    {
-        tracing::warn!(
-            error = %end,
-            "metadata propose: the drain of a DDL that failed before its propose did not end"
-        );
-    }
-    error
+    let stamped =
+        catalog_entry::descriptor_stamp::stamp(entry.clone(), &shared.hlc_clock, catalog)?;
+    let targets = constraint_targets(catalog, std::slice::from_ref(&stamped))?;
+    Ok((stamped, targets))
 }
 
 /// Wrap `entry` as a `CatalogDdl` metadata entry.

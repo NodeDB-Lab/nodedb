@@ -16,9 +16,11 @@
 //!
 //! This test forces exactly that: a WAL-replay fail point panics the sole
 //! Data Plane core's thread before it signals replay completion, which drops
-//! the `replay_done` sender. `bootstrap/cluster_ready.rs` turns that into
-//! "data plane core exited before signalling WAL replay completion" and fails
-//! the `data-groups-replay` gate, which must fail-stop the whole process.
+//! the `replay_done` sender. `bootstrap/cluster_ready.rs` waits for every
+//! core's replay before any boot step that dispatches to a core, turns the
+//! dropped sender into "data plane core exited before signalling WAL replay
+//! completion", and fails the `data-plane-replay` gate, which must fail-stop
+//! the whole process.
 //! Requires `--features failpoints`.
 
 #![cfg(feature = "failpoints")]
@@ -28,15 +30,10 @@ mod crash_harness;
 use crash_harness::CrashHarness;
 use std::time::Duration;
 
-/// Bound on how long a fail-stopped boot is given to actually exit.
-///
-/// A dead core is not detected directly: the Control Plane notices only when a
-/// dispatch to it stops being answered, and the schema-register barrier that
-/// runs first bounds that wait at `default_deadline_secs` (30s). The exit
-/// therefore lands a few seconds the far side of that barrier, so anything at
-/// or below 30s measures the barrier rather than the fail-stop and reports a
-/// failure the code does not have.
-const BOOT_FAILURE_TIMEOUT: Duration = Duration::from_secs(90);
+/// Bound on how long a fail-stopped boot is given to actually exit. The
+/// replay wait sees the dropped sender at once, so this bounds only the boot
+/// up to that wait and the exit after it.
+const BOOT_FAILURE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// A readiness-gate failure during WAL replay must fail-stop the process
 /// rather than leave it alive with every listener port closed.
@@ -88,15 +85,11 @@ async fn replay_readiness_gate_failure_fails_the_boot() {
         "the server panicked and exited, but without the fail-stop diagnosis — an operator \
          would see a dead process and no stated reason.\nServer output:\n{log}"
     );
-    // The dead core is reported by the schema-register barrier, not by the
-    // replay-done signal: `rehydrate_schema_registry` dispatches to the Data
-    // Plane before `await_cluster_ready` reaches its replay wait. The barrier
-    // fails fast — the dispatcher's dead-core sweep synthesises an error for
-    // every outstanding request rather than letting the deadline expire.
+    // The dead core is reported by the replay wait: no boot step dispatches
+    // to a core before every core signalled its replay.
     assert!(
-        log.contains("core-0 is gone; the request can never be executed"),
-        "the server fail-stopped, but not through the dead-core path this test targets — \
-         the schema-register barrier's dead-core error is missing.\n\
-         Server output:\n{log}"
+        log.contains("data plane core exited before signalling WAL replay completion"),
+        "the server fail-stopped, but not through the replay wait this test targets — its \
+         dead-core error is missing.\nServer output:\n{log}"
     );
 }

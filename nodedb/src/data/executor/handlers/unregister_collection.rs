@@ -373,6 +373,19 @@ impl CoreLoop {
                 },
             )?);
             l1.merge(retry_reclaim(
+                "columnar checkpoints",
+                tid_raw,
+                collection,
+                || {
+                    reclaim::columnar::reclaim_columnar_checkpoints(
+                        &self.data_dir,
+                        db_raw,
+                        tid_raw,
+                        collection,
+                    )
+                },
+            )?);
+            l1.merge(retry_reclaim(
                 "spatial checkpoints",
                 tid_raw,
                 collection,

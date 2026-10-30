@@ -124,4 +124,9 @@ mod manifest;
 mod paths;
 mod write;
 
-pub(crate) use paths::{COLUMNAR_CKPT_MANIFEST, columnar_ckpt_dir, columnar_ckpt_gen_dir};
+#[cfg(test)]
+pub(crate) use format::test_manifest_bytes;
+pub(crate) use manifest::read_columnar_manifest_at;
+pub(crate) use paths::{
+    COLUMNAR_CKPT_MANIFEST, columnar_ckpt_dir, columnar_ckpt_filename, columnar_ckpt_gen_dir,
+};

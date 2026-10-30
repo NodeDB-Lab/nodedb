@@ -25,7 +25,9 @@ pub(super) struct ResponsePhaseInput {
     pub answer: Answer,
     /// The byte budget of the merged response.
     pub max_result_bytes: usize,
-    pub deadline: Instant,
+    /// The instant the caller stops waiting. `None` for a committed write,
+    /// whose core never expires it.
+    pub deadline: Option<Instant>,
     pub dispatch_started: Instant,
     pub tenant_id: TenantId,
     pub database_id: DatabaseId,
@@ -159,7 +161,7 @@ pub(super) async fn collect_classify_and_finish(
             // A producer that stopped after the deadline stopped because the
             // statement ran out of time. Reporting the closure will hand the
             // client an internal error for its own timeout.
-            if std::time::Instant::now() >= deadline {
+            if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
                 return Err(crate::Error::DeadlineExceeded { request_id });
             }
             return Err(crate::Error::Dispatch {

@@ -150,6 +150,21 @@ impl MetadataCommitApplier {
                 );
             }
         }
+        // The reservation drained every descriptor it alters, and only the
+        // finalize's catalog entries would have ended those drains. A drain
+        // has no expiry, so the cancel ends them, on every replica. The
+        // preparation lease serialises DDL, so no other DDL drain exists on
+        // these descriptors.
+        let altered: Vec<_> = record
+            .objects
+            .iter()
+            .filter_map(|object| match object {
+                PendingDdlObject::Alter { entry, .. } => altered_descriptor(entry, &shared),
+                PendingDdlObject::Create { .. } => None,
+            })
+            .map(|descriptor_id| (descriptor_id, nodedb_cluster::DrainOwner::Ddl))
+            .collect();
+        crate::control::lease::apply_drain_ends(&shared, &altered)?;
         let queued = queue_teardowns(
             catalog,
             teardown,
@@ -248,6 +263,21 @@ fn object_entry(object: &PendingDdlObject) -> &MetadataEntry {
             entry.as_ref()
         }
     }
+}
+
+/// The descriptor a reserved alter drained, from its catalog entry.
+fn altered_descriptor(
+    entry: &MetadataEntry,
+    shared: &crate::control::state::SharedState,
+) -> Option<nodedb_cluster::DescriptorId> {
+    let payload = match entry {
+        MetadataEntry::CatalogDdl { payload }
+        | MetadataEntry::CatalogDdlAudited { payload, .. } => payload,
+        _ => return None,
+    };
+    let decoded = catalog_entry::decode(payload).ok()?;
+    crate::control::lease::descriptor_id_and_prior_version(&decoded, shared)
+        .map(|(descriptor_id, _)| descriptor_id)
 }
 
 /// `(database_id, tenant_id, name)` when `entry` is a collection create —

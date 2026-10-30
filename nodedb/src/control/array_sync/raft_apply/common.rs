@@ -17,7 +17,7 @@ use crate::control::server::dispatch_utils::{
     ChangeFeedOwner, SubmitWrite, WalDurability, WriteOrdering, submit_write,
 };
 use crate::control::state::SharedState;
-use crate::types::{DatabaseId, ReadConsistency, RequestId, TenantId, TraceId, VShardId};
+use crate::types::{DatabaseId, ReadConsistency, TenantId, TraceId, VShardId};
 
 /// Identifies a committed Raft entry within the apply loop.
 ///
@@ -258,21 +258,14 @@ pub(super) async fn ensure_array_open(
     let open_request_id = open_request.request_id;
     let mut open_rx = state.tracker.register(open_request_id);
 
-    let dispatch_result = match state.dispatcher.lock() {
-        Ok(mut d) => d.dispatch(open_request),
-        Err(poisoned) => poisoned.into_inner().dispatch(open_request),
-    };
+    // A committed entry waits out a full dispatcher queue rather than failing
+    // for local load. Any other dispatch refusal keeps its own class.
+    crate::control::server::dispatch_utils::dispatch_when_capacity_frees(state, open_request, None)
+        .await?;
 
-    // A dispatch refusal, such as a capacity limit, keeps its own class.
-    dispatch_result?;
-
-    await_data_plane(
-        async move { open_rx.recv().await.ok_or(()) },
-        open_request_id,
-        "OpenArray",
-    )
-    .await
-    .map(|_| ())
+    await_data_plane(async move { open_rx.recv().await.ok_or(()) }, "OpenArray")
+        .await
+        .map(|_| ())
 }
 
 /// Build a `Request` for an array apply/open with default deadline / priority.
@@ -313,24 +306,22 @@ pub(super) fn build_array_request(
     }
 }
 
-/// How long [`await_data_plane`] waits for the Data Plane's response.
-const DATA_PLANE_AWAIT_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Await the Data Plane response to request `request_id`. An error status
-/// becomes [`apply_refusal`]. A timeout is `crate::Error::DeadlineExceeded`
-/// (`57014`). A closed channel is `crate::Error::Internal` with `op_label`.
+/// Await the Data Plane response to a committed array write. An error status
+/// becomes [`apply_refusal`]. A closed channel is `crate::Error::Internal` with
+/// `op_label`.
+///
+/// The wait has no bound. The core never expires a committed write, so a
+/// timeout here would report a write the core still applies as not applied.
 pub(super) async fn await_data_plane(
     rx: impl std::future::Future<Output = Result<Response, ()>>,
-    request_id: RequestId,
     op_label: &str,
 ) -> ProposeResult {
-    match tokio::time::timeout(DATA_PLANE_AWAIT_TIMEOUT, rx).await {
-        Ok(Ok(resp)) if resp.status == Status::Ok => Ok(AppliedWrite::from_response(&resp)),
-        Ok(Ok(resp)) => Err(apply_refusal(op_label, &resp)),
-        Ok(Err(_)) => Err(crate::Error::Internal {
+    match rx.await {
+        Ok(resp) if resp.status == Status::Ok => Ok(AppliedWrite::from_response(&resp)),
+        Ok(resp) => Err(apply_refusal(op_label, &resp)),
+        Err(()) => Err(crate::Error::Internal {
             detail: format!("{op_label}: response channel closed"),
         }),
-        Err(_) => Err(crate::Error::DeadlineExceeded { request_id }),
     }
 }
 
@@ -351,7 +342,7 @@ pub(super) fn apply_refusal(op_label: &str, response: &Response) -> crate::Error
 mod tests {
     use super::*;
     use crate::bridge::envelope::{ErrorCode, Payload};
-    use crate::types::Lsn;
+    use crate::types::{Lsn, RequestId};
 
     fn refusal(code: Option<ErrorCode>) -> Response {
         Response {
@@ -398,39 +389,26 @@ mod tests {
             detail: "not on this engine".into(),
         };
         let response = refusal(Some(code.clone()));
-        let result = await_data_plane(
-            async move { Ok::<_, ()>(response) },
-            RequestId::new(1),
-            "OpenArray",
-        )
-        .await;
+        let result = await_data_plane(async move { Ok::<_, ()>(response) }, "OpenArray").await;
         match result {
             Err(crate::Error::DataPlane(kept)) => assert_eq!(kept, code),
             other => panic!("expected the typed refusal, got {other:?}"),
         }
     }
 
-    /// A local timeout is the typed deadline error, `57014` on pgwire.
+    /// A committed write's answer is awaited however late it arrives.
     #[tokio::test(start_paused = true)]
-    async fn a_local_timeout_is_a_typed_deadline() {
+    async fn a_late_answer_is_awaited() {
+        let mut ok = refusal(None);
+        ok.status = Status::Ok;
         let result = await_data_plane(
-            std::future::pending::<Result<Response, ()>>(),
-            RequestId::new(7),
+            async move {
+                tokio::time::sleep(Duration::from_secs(600)).await;
+                Ok::<_, ()>(ok)
+            },
             "OpenArray",
         )
         .await;
-        let error = match result {
-            Err(error) => error,
-            Ok(_) => panic!("a pending response must time out"),
-        };
-        assert!(
-            matches!(
-                &error,
-                crate::Error::DeadlineExceeded { request_id } if *request_id == RequestId::new(7)
-            ),
-            "expected a typed deadline, got {error:?}"
-        );
-        let (_, state, _) = crate::control::server::pgwire::types::error_to_sqlstate(&error);
-        assert_eq!(state, nodedb_types::error::sqlstate::QUERY_CANCELED.0);
+        assert!(result.is_ok(), "a late answer is the outcome: {result:?}");
     }
 }

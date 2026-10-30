@@ -353,7 +353,9 @@ mod tests {
         assert_eq!(gate.current_phase(), StartupPhase::WalRecovery);
 
         g2.fire();
-        assert_eq!(gate.current_phase(), StartupPhase::ClusterCatalogOpen);
+        // `DataPlaneReplay` has no gate here, so the sequencer passes it and
+        // stops before `RaftMetadataReplay`, whose gate is pending.
+        assert_eq!(gate.current_phase(), StartupPhase::DataPlaneReplay);
 
         g3.fire();
         // After g3 fires, sequencer advances to RaftMetadataReplay and then
@@ -533,6 +535,7 @@ mod tests {
             StartupPhase::Boot => StartupPhase::Boot.next(),
             StartupPhase::WalRecovery => StartupPhase::WalRecovery.next(),
             StartupPhase::ClusterCatalogOpen => StartupPhase::ClusterCatalogOpen.next(),
+            StartupPhase::DataPlaneReplay => StartupPhase::DataPlaneReplay.next(),
             StartupPhase::RaftMetadataReplay => StartupPhase::RaftMetadataReplay.next(),
             StartupPhase::SchemaCacheWarmup => StartupPhase::SchemaCacheWarmup.next(),
             StartupPhase::CatalogSanityCheck => StartupPhase::CatalogSanityCheck.next(),

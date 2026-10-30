@@ -18,6 +18,7 @@
 //! policy whatever happens: a row that cannot be compiled installs as a
 //! restrictive deny-all so it can never widen access.
 
+use nodedb_types::{CollectionKey, CollectionKeyError};
 use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 use tracing::error;
 
@@ -197,6 +198,22 @@ impl StoredRlsPolicy {
                 "deser rls",
                 format!("invalid policy_type_tag {other}"),
             )),
+        }
+    }
+
+    /// The catalog key of the policy's collection: its database and bare name.
+    ///
+    /// A row written before `display_collection` existed carries only the
+    /// qualified `collection`, so the qualifier is stripped from that.
+    pub(crate) fn collection_key(&self) -> Result<CollectionKey<'_>, CollectionKeyError> {
+        let database_id = DatabaseId::new(self.database_id);
+        if self.display_collection.is_empty() {
+            CollectionKey::from_qualified_str(database_id, &self.collection)
+        } else {
+            Ok(CollectionKey::from_bare(
+                database_id,
+                &self.display_collection,
+            ))
         }
     }
 

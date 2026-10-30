@@ -86,6 +86,13 @@ pub async fn run_post_apply_async_side_effects(
     entry: CatalogEntry,
     shared: Arc<SharedState>,
 ) -> crate::Result<()> {
+    // A core drains no request until its WAL replay ends, and each dispatch
+    // below runs its deadline from the moment it is sent. An entry applied
+    // during boot waits for the replay rather than timing out against it.
+    shared
+        .startup
+        .await_phase(crate::control::startup::StartupPhase::DataPlaneReplay)
+        .await?;
     match entry {
         CatalogEntry::PutCollection(stored) => {
             // AWAITED: Register completes before the applied-index watcher

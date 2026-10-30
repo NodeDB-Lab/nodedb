@@ -15,6 +15,7 @@ use crate::control::metadata_proposer::wait::await_metadata_apply;
 use crate::control::state::SharedState;
 use crate::error::Error;
 
+use super::DrainHolds;
 use super::drain_propose::{POLL_INTERVAL, drain_start_entry, drained_or_timed_out, encode_drain};
 
 /// Drain every lease on `id` at `version <= up_to_version` for a `Put*` DDL.
@@ -22,8 +23,8 @@ use super::drain_propose::{POLL_INTERVAL, drain_start_entry, drained_or_timed_ou
 /// The drain is owned by [`DrainOwner::Ddl`], so the apply of the DDL's own
 /// catalog entry ends it and no other owner's drain.
 ///
-/// Returns `Ok(())` once they have drained. Errors on timeout or propose
-/// failure.
+/// Returns `Ok(())` once they have drained, and the caller owns the drain
+/// from then on. Errors on timeout or propose failure, with the drain ended.
 ///
 /// `own_holds` is how many of those refcount units the requesting transaction
 /// holds itself — `0` for a caller with no lease scope of its own. A
@@ -75,12 +76,22 @@ async fn start_drain(
     if up_to_version == 0 {
         return Ok(());
     }
-    propose_drain_async(
+    // `is_draining` has no expiry backstop. The hold owns the drain from
+    // before its start is proposed, so a start whose outcome is unknown, a
+    // timed-out wait, and a cancelled future all end it. Only a drained
+    // return hands the drain to the caller.
+    let mut hold = DrainHolds::new(shared);
+    hold.hold(id.clone(), owner.clone());
+    if let Err(error) = propose_drain_async(
         shared,
         drain_start_entry(shared, &id, &owner, up_to_version, max_wait),
         "drain_start",
     )
-    .await?;
+    .await
+    {
+        hold.end().await;
+        return Err(error);
+    }
 
     let deadline = Instant::now() + max_wait;
     let drained = loop {
@@ -100,19 +111,16 @@ async fn start_drain(
             Err(error) => break Err(error),
         }
     };
-    if let Err(error) = drained {
-        // `is_draining` has no expiry backstop, so this explicit propose is
-        // the only thing that clears the drain after a timeout. Its own
-        // errors are logged and dropped.
-        if let Err(cleanup_err) = end_drain_async(shared, id, owner).await {
-            tracing::warn!(
-                error = %cleanup_err,
-                "descriptor lease drain: cleanup propose failed after timeout"
-            );
+    match drained {
+        Ok(()) => {
+            hold.keep();
+            Ok(())
         }
-        return Err(error);
+        Err(error) => {
+            hold.end().await;
+            Err(error)
+        }
     }
-    Ok(())
 }
 
 /// End `owner`'s drain on `id` on every node, and wait until the end applies

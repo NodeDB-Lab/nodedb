@@ -375,3 +375,126 @@ async fn duplicate_constant_column_names_keep_their_own_cells() {
          display name collapses them to the last value"
     );
 }
+
+/// The same repeated output name through the extended protocol
+/// (Parse/Bind/Execute). Describe announces the columns, and the projection
+/// built from it must keep the planner's per-column lookup keys, or both
+/// columns read the first cell.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn duplicate_constant_column_names_keep_their_own_cells_extended_protocol() {
+    let server = TestServer::start().await;
+    server
+        .exec("CREATE SEQUENCE dup_cell_ext_seq START 1 INCREMENT 1")
+        .await
+        .unwrap();
+
+    let rows = server
+        .client
+        .query(
+            "SELECT nextval('dup_cell_ext_seq'), nextval('dup_cell_ext_seq')",
+            &[],
+        )
+        .await
+        .expect("a prepared from-less projection repeating an output name must run");
+    assert_eq!(rows.len(), 1, "expected exactly one constant row");
+    let cells: (i64, i64) = (rows[0].get(0), rows[0].get(1));
+    assert_eq!(
+        cells,
+        (1, 2),
+        "each duplicate column must keep its own cell over the extended protocol"
+    );
+}
+
+/// A join that projects two columns of one bare name, and a projection that
+/// repeats an aggregate, keep their own cells over the extended protocol.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn duplicate_join_and_aggregate_names_keep_their_own_cells_extended_protocol() {
+    let server = TestServer::start().await;
+    for sql in [
+        "CREATE COLLECTION dup_w (id TEXT PRIMARY KEY, b_id TEXT) WITH (engine='document_strict')",
+        "CREATE COLLECTION dup_b (id TEXT PRIMARY KEY, n INT) WITH (engine='document_strict')",
+        "INSERT INTO dup_b (id, n) VALUES ('b1', 5)",
+        "INSERT INTO dup_b (id, n) VALUES ('b2', 7)",
+        "INSERT INTO dup_w (id, b_id) VALUES ('w1', 'b1')",
+    ] {
+        server.exec(sql).await.unwrap();
+    }
+
+    let rows = server
+        .client
+        .query(
+            "SELECT dup_w.id, dup_b.id FROM dup_w JOIN dup_b ON dup_w.b_id = dup_b.id",
+            &[],
+        )
+        .await
+        .expect("a prepared join repeating a bare column name must run");
+    assert_eq!(rows.len(), 1, "expected one joined row");
+    let ids: (String, String) = (rows[0].get(0), rows[0].get(1));
+    assert_eq!(
+        ids,
+        ("w1".to_string(), "b1".to_string()),
+        "each side of the join keeps its own id cell"
+    );
+
+    let rows = server
+        .client
+        .query("SELECT count(*), sum(n), count(*) FROM dup_b", &[])
+        .await
+        .expect("a prepared projection repeating an aggregate must run");
+    assert_eq!(rows.len(), 1, "expected one aggregate row");
+    let counts: (i64, i64) = (rows[0].get(0), rows[0].get(2));
+    assert_eq!(counts, (2, 2), "both count(*) columns read the count");
+}
+
+/// Describing a statement plans it without executing it: Parse announces a
+/// `nextval` column's type and consumes no value, so the first execution
+/// still gets the sequence's start.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn describing_nextval_consumes_no_value() {
+    let server = TestServer::start().await;
+    server
+        .exec("CREATE SEQUENCE describe_only_seq START 1 INCREMENT 1")
+        .await
+        .unwrap();
+
+    for _ in 0..2 {
+        let statement = server
+            .client
+            .prepare("SELECT nextval('describe_only_seq')")
+            .await
+            .expect("prepare a nextval projection");
+        assert_eq!(
+            statement.columns().len(),
+            1,
+            "Describe announces the nextval column"
+        );
+        assert_eq!(
+            statement.columns()[0].type_(),
+            &tokio_postgres::types::Type::INT8
+        );
+    }
+
+    let rows = server
+        .query_rows("SELECT nextval('describe_only_seq')")
+        .await
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![vec!["1".to_string()]],
+        "describing the statement consumed a sequence value"
+    );
+}
+
+/// Describing a `nextval` of a sequence that does not exist reports the
+/// missing sequence, as executing it does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn describing_nextval_of_a_missing_sequence_is_refused() {
+    let server = TestServer::start().await;
+    let refused = server
+        .client
+        .prepare("SELECT nextval('no_such_describe_seq')")
+        .await;
+    let error = refused.expect_err("Parse of a nextval on a missing sequence must be refused");
+    let code = error.code().map(|c| c.code().to_string());
+    assert_eq!(code.as_deref(), Some("42704"), "{error}");
+}

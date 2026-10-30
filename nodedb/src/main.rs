@@ -158,6 +158,7 @@ async fn server_main() -> anyhow::Result<()> {
         raft_gate,
         schema_gate,
         sanity_gate,
+        data_plane_replay_gate,
         data_groups_gate,
         transport_gate,
         warm_peers_gate,
@@ -282,6 +283,7 @@ async fn server_main() -> anyhow::Result<()> {
         raft_ready_rx,
         replay_done,
         nodedb::bootstrap::cluster_ready::ClusterReadyGates {
+            data_plane_replay_gate,
             raft_gate,
             schema_gate,
             sanity_gate,

@@ -59,7 +59,9 @@ pub use event_image::{strict_row_image_unrendered, timeseries_row_image_undecoda
 pub use held_entry::{apply_panicked, held_entry_debt_not_recorded, redo_entry_malformed};
 pub use index_rebuild::{IndexRebuildTarget, index_rebuild_not_installed};
 pub use ingest::{ilp_invalid_utf8_drop, ilp_line_read_drop};
-pub use lease::descriptor_lease_not_renewed;
+pub use lease::{
+    ddl_cleanup_not_completed, descriptor_drain_not_ended, descriptor_lease_not_renewed,
+};
 pub use outcome_floor::{write_window_held, write_window_leaked};
 pub use quota::{
     quota_row_invalid, quota_row_undecodable, quota_row_write_failed, quota_scope_purge_incomplete,

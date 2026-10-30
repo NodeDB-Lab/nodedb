@@ -40,6 +40,18 @@ pub(crate) struct ColumnarCheckpointManifest {
     pub replay: ReplayStamp,
 }
 
+/// Encode a manifest publishing `generation`, for tests that need a live
+/// generation on disk without driving a whole core through a checkpoint.
+#[cfg(test)]
+pub(crate) fn test_manifest_bytes(generation: u64) -> Vec<u8> {
+    zerompk::to_msgpack_vec(&ColumnarCheckpointManifest {
+        format_version: COLUMNAR_CKPT_FORMAT_VERSION,
+        generation,
+        replay: ReplayStamp::through(0),
+    })
+    .expect("manifest encode is infallible for this fixed struct")
+}
+
 /// One collection's full engine state within a generation.
 #[derive(
     Debug, Clone, Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack,

@@ -76,20 +76,34 @@ fn owner_step(shared: &SharedState, token: u64, deadline: Instant) -> Result<Own
     }
 }
 
-/// Release the preparation lease `token` and await the release's apply here.
-/// The background lease releaser calls it for a lease dropped unreleased.
+/// Abandon the preparation lease `token`: cancel any pending DDL record it
+/// reserved, then release it, and await both applies here. The background
+/// lease releaser calls it for a lease dropped unreleased.
 pub(crate) async fn release_ddl_prepare_token(
     shared: &SharedState,
     token: u64,
 ) -> Result<(), Error> {
     let handle = shared.metadata_raft_handle()?;
-    propose_metadata_and_wait_async(
-        shared,
-        handle.as_ref(),
-        &MetadataEntry::DdlPrepareRelease { token },
-    )
-    .await
-    .map(|_| ())
+    abandon_token(shared, handle.as_ref(), token).await
+}
+
+/// Cancel `token`'s pending DDL record, then release `token`'s lease.
+///
+/// The cancel is proposed even when this node has no record for `token`: a
+/// `DdlPendingPropose` whose outcome its proposer never learned can still
+/// apply, and it applies while `token` owns the lease. Proposed after it, the
+/// cancel applies after it, so the record never outlives the lease. Cancel and
+/// release are both no-ops for a token with nothing to cancel or release.
+pub(super) async fn abandon_token(
+    shared: &SharedState,
+    handle: &dyn MetadataRaftHandle,
+    token: u64,
+) -> Result<(), Error> {
+    propose_metadata_and_wait_async(shared, handle, &MetadataEntry::DdlPendingCancel { token })
+        .await?;
+    propose_metadata_and_wait_async(shared, handle, &MetadataEntry::DdlPrepareRelease { token })
+        .await
+        .map(|_| ())
 }
 
 /// The metadata-Raft-serialized descriptor preparation lease an async
@@ -139,6 +153,23 @@ impl DdlPrepareLease<'_> {
             }
         }
     }
+
+    /// Give the lease up after a failure: cancel any pending DDL record the
+    /// lease reserved, then release it, and wait until both applied here.
+    ///
+    /// For every exit that does not finalize. A failed abandon leaves the
+    /// lease unreleased, so its drop hands it to the background releaser,
+    /// which retries the same two steps.
+    pub(crate) async fn abandon(mut self) {
+        match abandon_token(self.shared, self.handle, self.token).await {
+            Ok(()) => self.released = true,
+            Err(error) => tracing::debug!(
+                token = self.token,
+                %error,
+                "metadata DDL lease abandon failed; the background releaser retries it"
+            ),
+        }
+    }
 }
 
 impl Drop for DdlPrepareLease<'_> {
@@ -158,6 +189,18 @@ pub(crate) async fn acquire_ddl_prepare_lease_async<'a>(
 ) -> Result<DdlPrepareLease<'a>, Error> {
     let token = next_token(shared);
     let deadline = Instant::now() + DDL_PREPARE_WAIT;
+    // The guard owns `token` from before its first propose. An acquire whose
+    // outcome is unknown (a missed deadline, an unanswered leader forward, a
+    // cancelled future) can still apply and make `token` the owner, so every
+    // exit that does not return the lease drops this guard and releases the
+    // token. A release of a token that never owned the lease applies as a
+    // no-op, and it is proposed after every acquire of that token.
+    let lease = DdlPrepareLease {
+        shared,
+        handle,
+        token,
+        released: false,
+    };
 
     loop {
         propose_metadata_and_wait_async(
@@ -172,14 +215,7 @@ pub(crate) async fn acquire_ddl_prepare_lease_async<'a>(
 
         loop {
             match owner_step(shared, token, deadline)? {
-                OwnerStep::Acquired => {
-                    return Ok(DdlPrepareLease {
-                        shared,
-                        handle,
-                        token,
-                        released: false,
-                    });
-                }
+                OwnerStep::Acquired => return Ok(lease),
                 OwnerStep::Retry => break,
                 OwnerStep::Wait => tokio::time::sleep(DDL_PREPARE_POLL).await,
             }
@@ -237,6 +273,42 @@ mod tests {
                 "the background releaser did not release the dropped lease"
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        drop(state);
+        cluster.shutdown().await;
+    }
+
+    /// An acquire cancelled at any point, before or after its propose
+    /// applied, leaves the lease free well before the leader's reclaim
+    /// window: the next acquire gets it at once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cancelled_acquire_never_strands_the_lease() {
+        let cluster = crate::control::cluster::test_one_node::boot().await;
+        let state = Arc::clone(&cluster.state);
+        let handle = state.metadata_raft_handle().expect("metadata raft handle");
+        for cancel_after_us in [0u64, 100, 500, 1_000, 2_000, 5_000, 10_000] {
+            let cancelled = tokio::time::timeout(
+                Duration::from_micros(cancel_after_us),
+                acquire_ddl_prepare_lease_async(&state, handle.as_ref()),
+            )
+            .await;
+            match cancelled {
+                Ok(lease) => lease.expect("acquire").release().await,
+                Err(_elapsed) => {}
+            }
+            let lease = tokio::time::timeout(
+                Duration::from_secs(5),
+                acquire_ddl_prepare_lease_async(&state, handle.as_ref()),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "an acquire cancelled after {cancel_after_us}us left the lease held; the \
+                     next acquire waited for the reclaim"
+                )
+            })
+            .expect("acquire after a cancelled acquire");
+            lease.release().await;
         }
         drop(state);
         cluster.shutdown().await;

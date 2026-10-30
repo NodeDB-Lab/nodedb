@@ -8,6 +8,11 @@
 //! been evicted but before the JSON summary is built, so the handler
 //! picks up per-file byte counts for the `bytes_reclaimed` metric.
 //!
+//! The columnar file is reclaimed for every columnar-family collection
+//! (`columnar`, `timeseries` on columnar, `spatial`): a `spatial` collection's
+//! rows live in the columnar engine, and the columnar restore rebuilds its
+//! R-tree from them.
+//!
 //! Engines whose persistent state is shared-redb (document,
 //! document-strict, FTS, graph edges) or in-memory only (the KV hash
 //! index) are documented inline in the parent handler — no separate
@@ -15,6 +20,7 @@
 //! write per-collection checkpoint or partition files under
 //! `{data_dir}/...`.
 
+pub mod columnar;
 pub mod crdt;
 mod error;
 pub mod sparse_vector;

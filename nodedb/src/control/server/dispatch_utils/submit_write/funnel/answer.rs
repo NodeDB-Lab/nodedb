@@ -11,11 +11,12 @@ use crate::control::server::dispatch_utils::minted::{OwnedReport, OwnedResponse}
 /// A dispatched write's answer, before anyone waits for it.
 pub(super) enum Answer {
     /// The write carries no records. The waiter reads the channel, up to
-    /// `deadline` and under the byte budget. The waiter drops the receiver
-    /// once it stops reading, which removes the request's tracker entry.
+    /// `deadline` when it has one, and under the byte budget. The waiter drops
+    /// the receiver once it stops reading, which removes the request's tracker
+    /// entry.
     Unminted {
         rx: ResponseReceiver,
-        deadline: Instant,
+        deadline: Option<Instant>,
         max_result_bytes: usize,
     },
     /// A spawned task owns the write's records, closes them from the final
@@ -32,11 +33,14 @@ impl Answer {
                 deadline,
                 max_result_bytes,
             } => {
-                let collected = tokio::time::timeout_at(
-                    tokio::time::Instant::from_std(deadline),
-                    collect_bounded_response(&mut rx, max_result_bytes),
-                )
-                .await;
+                let collect = collect_bounded_response(&mut rx, max_result_bytes);
+                let collected = match deadline {
+                    Some(deadline) => {
+                        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), collect)
+                            .await
+                    }
+                    None => Ok(collect.await),
+                };
                 Ok(match collected {
                     Ok(Ok(response)) => OwnedResponse::Answered {
                         response: Box::new(response),

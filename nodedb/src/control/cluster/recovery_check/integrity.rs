@@ -123,13 +123,6 @@ pub fn verify_redb_integrity(catalog: &SystemCatalog) -> Vec<Divergence> {
         .iter()
         .map(|c| (c.database_id.as_u64(), c.tenant_id, c.name.clone()))
         .collect();
-    // These legacy object families do not yet carry a database scope, so keep
-    // their existing tenant/name relationship checks separate from the
-    // database-scoped trigger check.
-    let legacy_collection_keys: HashSet<(u64, String)> = collections
-        .iter()
-        .map(|c| (c.tenant_id, c.name.clone()))
-        .collect();
     let user_names: HashSet<String> = users.iter().map(|u| u.username.clone()).collect();
     let role_names: HashSet<String> = roles.iter().map(|r| r.name.clone()).collect();
     let owner_keys: HashSet<(String, u64, u64, String)> = owners
@@ -230,9 +223,9 @@ pub fn verify_redb_integrity(catalog: &SystemCatalog) -> Vec<Divergence> {
     check_owner_users(&owners, &user_names, &mut violations);
     check_permission_grantees(&permissions, &user_names, &role_names, &mut violations);
     check_trigger_collections(&triggers, &collection_keys, &mut violations);
-    check_rls_collections(&rls, &legacy_collection_keys, &mut violations);
+    check_rls_collections(&rls, &collection_keys, &mut violations);
     check_materialized_view_sources(&materialized_views, &collection_keys, &mut violations);
-    check_change_stream_collections(&change_streams, &legacy_collection_keys, &mut violations);
+    check_change_stream_collections(&change_streams, &collection_keys, &mut violations);
     check_schedule_targets(&schedules, &collection_keys, &mut violations);
 
     violations
@@ -240,9 +233,6 @@ pub fn verify_redb_integrity(catalog: &SystemCatalog) -> Vec<Divergence> {
 
 /// Database-scoped collection keys: `(database_id, tenant_id, name)`.
 type CollectionKeys = HashSet<(u64, u64, String)>;
-/// Collection keys of the object families with no database scope:
-/// `(tenant_id, name)`.
-type LegacyCollectionKeys = HashSet<(u64, String)>;
 /// Owner row keys: `(object_type, database_id, tenant_id, name)`.
 type OwnerKeys = HashSet<(String, u64, u64, String)>;
 
@@ -343,20 +333,25 @@ fn check_trigger_collections(
     }
 }
 
-/// Check 5: every rls_policy.collection exists.
+/// Check 5: every rls_policy.collection exists in the policy's database.
+///
+/// A collection qualifier that does not match the policy's database is a
+/// dangling reference too: it names no collection that database holds.
 fn check_rls_collections(
     rls: &[StoredRlsPolicy],
-    legacy_collection_keys: &LegacyCollectionKeys,
+    collection_keys: &CollectionKeys,
     violations: &mut Vec<Divergence>,
 ) {
     for p in rls {
-        let key = (p.tenant_id, p.collection.clone());
-        if !legacy_collection_keys.contains(&key) {
+        let found = p.collection_key().is_ok_and(|key| {
+            collection_keys.contains(&(p.database_id, p.tenant_id, key.name().to_owned()))
+        });
+        if !found {
             violations.push(Divergence::new(DivergenceKind::DanglingReference {
                 from_kind: "rls_policy",
-                from_key: format!("{}:{}", p.tenant_id, p.name),
+                from_key: format!("{}:{}:{}", p.database_id, p.tenant_id, p.name),
                 to_kind: "collection",
-                to_key: format!("{}:{}", p.tenant_id, p.collection),
+                to_key: format!("{}:{}:{}", p.database_id, p.tenant_id, p.collection),
             }));
         }
     }
@@ -392,20 +387,21 @@ fn check_materialized_view_sources(
 /// tenant.
 fn check_change_stream_collections(
     change_streams: &[ChangeStreamDef],
-    legacy_collection_keys: &LegacyCollectionKeys,
+    collection_keys: &CollectionKeys,
     violations: &mut Vec<Divergence>,
 ) {
     for cs in change_streams {
         if cs.collection == "*" {
             continue;
         }
-        let key = (cs.tenant_id, cs.collection.clone());
-        if !legacy_collection_keys.contains(&key) {
+        let database_id = cs.database_id.as_u64();
+        let key = (database_id, cs.tenant_id, cs.collection.clone());
+        if !collection_keys.contains(&key) {
             violations.push(Divergence::new(DivergenceKind::DanglingReference {
                 from_kind: "change_stream",
-                from_key: format!("{}:{}", cs.tenant_id, cs.name),
+                from_key: format!("{database_id}:{}:{}", cs.tenant_id, cs.name),
                 to_kind: "collection",
-                to_key: format!("{}:{}", cs.tenant_id, cs.collection),
+                to_key: format!("{database_id}:{}:{}", cs.tenant_id, cs.collection),
             }));
         }
     }
@@ -505,6 +501,67 @@ mod tests {
                 } if from_key == "55:1:audit_orders" && to_key == "55:1:orders"
             )
         }));
+    }
+
+    fn rls_policy(database_id: u64, collection: &str, display_collection: &str) -> StoredRlsPolicy {
+        StoredRlsPolicy {
+            tenant_id: 1,
+            database_id,
+            collection: collection.into(),
+            display_collection: display_collection.into(),
+            name: "own_rows".into(),
+            policy_type_tag: 0,
+            predicate_text: String::new(),
+            mode_tag: 0,
+            on_deny_json: "\"Silent\"".into(),
+            enabled: true,
+            created_by: "owner".into(),
+            created_at: 0,
+        }
+    }
+
+    fn rls_violations(policy: &StoredRlsPolicy) -> Vec<Divergence> {
+        let directory = tempfile::tempdir().expect("create integrity catalog directory");
+        let store = CredentialStore::open(&directory.path().join("system.redb"))
+            .expect("open integrity catalog");
+        let catalog = store.catalog();
+        let database_id = DatabaseId::new(1024);
+        let mut collection = StoredCollection::stamped_for_test(1, "pat", "owner");
+        collection.database_id = database_id;
+        catalog
+            .put_collection(database_id, &collection)
+            .expect("store named database collection");
+        catalog.put_rls_policy(policy).expect("store rls policy");
+        verify_redb_integrity(catalog)
+            .into_iter()
+            .filter(|violation| {
+                matches!(
+                    &violation.kind,
+                    DivergenceKind::DanglingReference {
+                        from_kind: "rls_policy",
+                        ..
+                    }
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rls_policy_on_a_named_database_collection_is_not_dangling() {
+        let violations = rls_violations(&rls_policy(1024, "1024/pat", "pat"));
+        assert!(violations.is_empty(), "{violations:?}");
+    }
+
+    #[test]
+    fn rls_policy_row_without_display_name_resolves_its_qualified_name() {
+        let violations = rls_violations(&rls_policy(1024, "1024/pat", ""));
+        assert!(violations.is_empty(), "{violations:?}");
+    }
+
+    #[test]
+    fn rls_policy_qualified_for_another_database_is_dangling() {
+        let violations = rls_violations(&rls_policy(1024, "2048/pat", ""));
+        assert_eq!(violations.len(), 1, "{violations:?}");
     }
 
     #[test]

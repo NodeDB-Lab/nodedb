@@ -14,6 +14,7 @@ pub(crate) struct StartupGates {
     pub(crate) raft_gate: ReadyGate,
     pub(crate) schema_gate: ReadyGate,
     pub(crate) sanity_gate: ReadyGate,
+    pub(crate) data_plane_replay_gate: ReadyGate,
     pub(crate) data_groups_gate: ReadyGate,
     pub(crate) transport_gate: ReadyGate,
     pub(crate) warm_peers_gate: ReadyGate,
@@ -29,6 +30,8 @@ pub(crate) fn register_startup_gates(startup_seq: &StartupSequencer) -> StartupG
     let wal_gate = startup_seq.register_gate(StartupPhase::WalRecovery, "wal");
     let catalog_gate =
         startup_seq.register_gate(StartupPhase::ClusterCatalogOpen, "cluster-catalog");
+    let data_plane_replay_gate =
+        startup_seq.register_gate(StartupPhase::DataPlaneReplay, "data-plane-replay");
     let raft_gate =
         startup_seq.register_gate(StartupPhase::RaftMetadataReplay, "raft-metadata-replay");
     let schema_gate =
@@ -50,6 +53,7 @@ pub(crate) fn register_startup_gates(startup_seq: &StartupSequencer) -> StartupG
         raft_gate,
         schema_gate,
         sanity_gate,
+        data_plane_replay_gate,
         data_groups_gate,
         transport_gate,
         warm_peers_gate,

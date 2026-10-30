@@ -36,8 +36,9 @@ pub(crate) struct OwnedWait {
     /// The key a final refusal's abort marker carries, `0` when this write's
     /// refusals are never final.
     pub final_refusal_key: u64,
-    /// The instant the caller stops waiting.
-    pub deadline: Instant,
+    /// The instant the caller stops waiting. `None` waits for the final
+    /// response: a committed write, whose core never expires it.
+    pub deadline: Option<Instant>,
     pub collect: Collect,
     /// Where the final response goes when it arrives after the caller
     /// stopped waiting.
@@ -125,11 +126,15 @@ async fn wait_and_close(
             let _ = late.send(response);
         }
     };
-    let until = tokio::time::Instant::from_std(deadline);
     let collected = match collect {
         Collect::Merged { max_result_bytes } => {
-            tokio::time::timeout_at(until, collect_bounded_response(&mut rx, max_result_bytes))
-                .await
+            let collect = collect_bounded_response(&mut rx, max_result_bytes);
+            match deadline {
+                Some(deadline) => {
+                    tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), collect).await
+                }
+                None => Ok(collect.await),
+            }
         }
     };
     match collected {
@@ -226,7 +231,7 @@ mod tests {
             wal: Arc::clone(wal),
             owner: owner(),
             final_refusal_key: 0,
-            deadline,
+            deadline: Some(deadline),
             collect: Collect::Merged {
                 max_result_bytes: 1 << 20,
             },
@@ -262,6 +267,37 @@ mod tests {
         assert!(tracker.complete(ok));
         let late = late_rx.await.expect("the late response is forwarded");
         assert_eq!(late.status, Status::Ok);
+    }
+
+    /// A committed write carries no deadline: its core never expires it, so
+    /// the wait reports the answer that arrives, however late, and never
+    /// `DeadlineExceeded`.
+    #[tokio::test]
+    async fn a_committed_write_waits_for_its_answer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal = Arc::new(WalManager::open_for_testing(&dir.path().join("wal")).expect("wal"));
+        let floor = OutcomeFloor::new();
+        let tracker = RequestTracker::new();
+        let rx = tracker.register(RequestId::new(4));
+        let (minted, _lsn) = minted_record(&wal, &floor);
+        let report = spawn_owned_wait(
+            OwnedWait {
+                deadline: None,
+                ..wait(&wal, Instant::now())
+            },
+            rx,
+            minted,
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let mut ok = refusal(4);
+        ok.status = Status::Ok;
+        ok.error_code = None;
+        assert!(tracker.complete(ok));
+        let outcome = report.recv().await.expect("report");
+        assert!(
+            matches!(&outcome, OwnedResponse::Answered { response, .. } if response.status == Status::Ok),
+            "a committed write reports its real answer"
+        );
     }
 
     /// The caller future is dropped while it waits. The task still closes

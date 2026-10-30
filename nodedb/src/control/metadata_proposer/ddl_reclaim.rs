@@ -11,14 +11,12 @@
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use nodedb_cluster::MetadataEntry;
-
 use crate::control::shutdown::{ShutdownPhase, spawn_loop};
 use crate::control::state::SharedState;
 use crate::error::Error;
 
 use super::ddl_owner::{current_owner, reclaim_cause};
-use super::ddl_prepare::propose_metadata_and_wait_async;
+use super::ddl_prepare::abandon_token;
 use super::handle::MetadataRaftHandle;
 
 /// How often the leader checks the lease owner.
@@ -86,22 +84,18 @@ async fn reclaim_if_due(shared: &Weak<SharedState>) -> bool {
     true
 }
 
-/// Cancel `token`'s pending DDL record, when it has one, then release its
-/// lease, and await both applies here.
+/// Cancel `token`'s pending DDL record, then release its lease, and await
+/// both applies here.
 ///
-/// The cancel goes first, so a pending record never outlives its lease. Both
-/// entries are idempotent, and the release applies only while `token` still
-/// owns the lease, so a reclaim that races the owner's own release is a no-op.
+/// The cancel goes first, so a pending record never outlives its lease. It is
+/// proposed even when this node holds no record: the stuck owner's own
+/// `DdlPendingPropose` can still be in flight. Both entries are idempotent, and
+/// the release applies only while `token` still owns the lease, so a reclaim
+/// that races the owner's own release is a no-op.
 pub(crate) async fn reclaim_ddl_prepare_lease(
     shared: &SharedState,
     handle: &dyn MetadataRaftHandle,
     token: u64,
 ) -> Result<(), Error> {
-    if shared.pending_ddl.contains(token) {
-        propose_metadata_and_wait_async(shared, handle, &MetadataEntry::DdlPendingCancel { token })
-            .await?;
-    }
-    propose_metadata_and_wait_async(shared, handle, &MetadataEntry::DdlPrepareRelease { token })
-        .await
-        .map(|_| ())
+    abandon_token(shared, handle, token).await
 }
