@@ -170,6 +170,7 @@ pub(crate) async fn enqueue_write(
     // rather than failing: a committed entry that fails for local load leaves
     // this replica without a write every other replica applied.
     let waits_for_capacity = matches!(ordering, WriteOrdering::AlreadyOrdered);
+    let collect_until = (!waits_for_capacity).then_some(deadline);
     // A committed entry carries the rows its proposer resolved. Resolving it
     // again here will let this replica accept other lines than its peers.
     if waits_for_capacity && crate::control::write_resolve::is_unresolved_ingest(&plan) {
@@ -459,7 +460,7 @@ pub(crate) async fn enqueue_write(
                 wal: Arc::clone(&shared.wal),
                 owner,
                 final_refusal_key,
-                deadline,
+                deadline: collect_until,
                 collect: Collect::Merged { max_result_bytes },
                 late: late_tx,
             },
@@ -468,7 +469,7 @@ pub(crate) async fn enqueue_write(
         )),
         None => Answer::Unminted {
             rx: dispatch_outcome.rx,
-            deadline,
+            deadline: collect_until,
             max_result_bytes,
         },
     };
@@ -479,7 +480,7 @@ pub(crate) async fn enqueue_write(
         request_id: dispatch_outcome.request_id,
         answer,
         max_result_bytes,
-        deadline,
+        deadline: collect_until,
         dispatch_started: dispatch_outcome.dispatch_started,
         tenant_id,
         database_id,

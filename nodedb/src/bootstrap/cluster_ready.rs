@@ -16,6 +16,7 @@ use crate::control::state::SharedState;
 
 /// All readiness gates passed to [`await_cluster_ready`].
 pub struct ClusterReadyGates {
+    pub data_plane_replay_gate: ReadyGate,
     pub raft_gate: ReadyGate,
     pub schema_gate: ReadyGate,
     pub sanity_gate: ReadyGate,
@@ -37,6 +38,7 @@ pub async fn await_cluster_ready(
     data_group_recovery_timeout: DataGroupRecoveryTimeout,
 ) -> anyhow::Result<()> {
     let ClusterReadyGates {
+        data_plane_replay_gate,
         raft_gate,
         schema_gate,
         sanity_gate,
@@ -46,6 +48,13 @@ pub async fn await_cluster_ready(
         health_loop_gate,
         gateway_enable_gate,
     } = gates;
+    // Every boot step below that dispatches to a Data Plane core waits for
+    // its WAL replay first: a core drains no request until its replay ends,
+    // and a request's deadline runs from its dispatch. Metadata post-apply
+    // hooks wait on the phase this fires (`DataPlaneReplay`).
+    await_data_plane_replay(data_plane_replay_done, &data_plane_replay_gate).await?;
+    data_plane_replay_gate.fire();
+
     // Boot-time readiness gate: wait until the metadata raft group has
     // applied its first entry on this node before opening any
     // client-facing listener. This eliminates the restart-window race
@@ -112,46 +121,6 @@ pub async fn await_cluster_ready(
         ));
     }
     sanity_gate.fire();
-
-    // Wait for every Data Plane core to finish `replay_all_wal` before opening
-    // the client gateway. Each core rebuilds its in-memory indexes (HNSW, etc.)
-    // from the WAL on its own thread; `/healthz` must not report ready until
-    // that is done, or a just-restarted node would serve queries against
-    // half-rebuilt indexes (e.g. an empty vector search). A dropped sender
-    // means a core panicked during open/replay, and a signalled error means
-    // its replay stopped short of the WAL — fail closed on both, exactly as
-    // the raft-readiness gate does, rather than open the gateway on a broken
-    // core.
-    const REPLAY_READY_TIMEOUT: Duration = Duration::from_secs(300);
-    let replay_wait = async {
-        for rx in data_plane_replay_done {
-            rx.await
-                .map_err(|_| {
-                    anyhow::anyhow!(
-                        "data plane core exited before signalling WAL replay completion"
-                    )
-                })?
-                .map_err(|e| anyhow::anyhow!("data plane core WAL replay failed: {e}"))?;
-        }
-        Ok::<_, anyhow::Error>(())
-    };
-    match tokio::time::timeout(REPLAY_READY_TIMEOUT, replay_wait).await {
-        Ok(Ok(())) => {
-            info!("all data plane cores completed WAL replay");
-        }
-        Ok(Err(e)) => {
-            data_groups_gate.fail(format!("data plane WAL replay failed: {e}"));
-            return Err(e);
-        }
-        Err(_) => {
-            data_groups_gate.fail(format!(
-                "data plane WAL replay did not complete within {REPLAY_READY_TIMEOUT:?}"
-            ));
-            return Err(anyhow::anyhow!(
-                "data plane WAL replay timeout after {REPLAY_READY_TIMEOUT:?}"
-            ));
-        }
-    }
 
     // WAL replay only rebuilds what the NodeDB WAL holds. Writes to
     // replicable collections are durable as entries in their data group's
@@ -310,6 +279,39 @@ pub async fn await_cluster_ready(
     }
     gateway_enable_gate.fire();
 
+    Ok(())
+}
+
+/// Wait for every Data Plane core to finish its WAL replay, and fail `gate`
+/// when one does not.
+///
+/// Each core rebuilds its in-memory indexes (HNSW, etc.) from the WAL on its
+/// own thread before it enters its event loop. A dropped sender means a core
+/// panicked during open or replay, and a signalled error means its replay
+/// stopped short of the WAL. Both fail closed. The wait has no time bound: a
+/// replay ends in one of those signals, and its length grows with the WAL
+/// tail, so a fixed bound refuses every boot of a node whose tail outgrew it.
+async fn await_data_plane_replay(
+    replay_done: Vec<tokio::sync::oneshot::Receiver<crate::Result<()>>>,
+    gate: &ReadyGate,
+) -> anyhow::Result<()> {
+    for rx in replay_done {
+        let replayed = match rx.await {
+            Ok(replayed) => replayed,
+            Err(_) => {
+                let reason = "data plane core exited before signalling WAL replay completion";
+                gate.fail(reason);
+                return Err(anyhow::anyhow!(reason));
+            }
+        };
+        if let Err(error) = replayed {
+            gate.fail(format!("data plane WAL replay failed: {error}"));
+            return Err(anyhow::anyhow!(
+                "data plane core WAL replay failed: {error}"
+            ));
+        }
+    }
+    info!("all data plane cores completed WAL replay");
     Ok(())
 }
 

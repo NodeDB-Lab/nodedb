@@ -107,6 +107,8 @@ pub async fn start(
 
     let (sequencer, _gate) = StartupSequencer::new();
     let gates = nodedb::bootstrap::cluster_ready::ClusterReadyGates {
+        data_plane_replay_gate: sequencer
+            .register_gate(StartupPhase::DataPlaneReplay, "data-plane-replay"),
         raft_gate: sequencer.register_gate(StartupPhase::RaftMetadataReplay, "raft"),
         schema_gate: sequencer.register_gate(StartupPhase::SchemaCacheWarmup, "schema"),
         sanity_gate: sequencer.register_gate(StartupPhase::CatalogSanityCheck, "sanity"),

@@ -15,7 +15,7 @@ use std::fmt;
 
 /// Total number of phases. Kept in sync with the enum below by
 /// the `phase_order_matches_u8` unit test.
-pub const PHASE_COUNT: usize = 13;
+pub const PHASE_COUNT: usize = 14;
 
 /// Startup phase. Ordered — use `Ord` / `PartialOrd` to compare.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -27,38 +27,42 @@ pub enum StartupPhase {
     WalRecovery = 1,
     /// `SystemCatalog` (redb) opened, credential store loaded.
     ClusterCatalogOpen = 2,
+    /// Every Data Plane core finished its WAL replay and drains its request
+    /// ring. A request sent to a core before this waits in the ring, so boot
+    /// work that dispatches to the cores waits for this phase first.
+    DataPlaneReplay = 3,
     /// Metadata raft group's committed log has been applied up
     /// to the last-observed index. `MetadataCache.applied_index`
     /// is current.
-    RaftMetadataReplay = 3,
+    RaftMetadataReplay = 4,
     /// Post-apply hooks rebuilt every in-memory registry
     /// (triggers, streams, schedules, permissions, etc.) from
     /// the now-fresh redb state.
-    SchemaCacheWarmup = 4,
+    SchemaCacheWarmup = 5,
     /// Applied-index gate, redb cross-table integrity, and
     /// in-memory registry ⇔ redb verification have all run
     /// without raising unrepairable divergences. See
     /// `control::cluster::recovery_check`.
-    CatalogSanityCheck = 5,
+    CatalogSanityCheck = 6,
     /// All data raft groups (vShards hosting data) have caught
     /// up to their committed watermark.
-    DataGroupsReplay = 6,
+    DataGroupsReplay = 7,
     /// Listener sockets bound (pgwire / HTTP / ILP / RESP /
     /// native). Not yet accepting requests.
-    TransportBind = 7,
+    TransportBind = 8,
     /// Parallel dials completed against every known peer so
     /// the QUIC peer cache is hot before any replicated
     /// request fires.
-    WarmPeers = 8,
+    WarmPeers = 9,
     /// Health monitor running.
-    HealthLoopStart = 9,
+    HealthLoopStart = 10,
     /// Cluster readiness completed: the node holds its first authorization
     /// lease and its gateway is installed. Listener accept loops may process
     /// requests once they exist. The client protocols do not listen yet.
-    GatewayEnable = 10,
+    GatewayEnable = 11,
     /// The client protocols listen and every HTTP route answers. The final
     /// phase: the node is ready, and `/healthz` reports `ok`.
-    Serving = 11,
+    Serving = 12,
     /// Terminal state — entered via [`StartupSequencer::fail`] or
     /// when a [`ReadyGate`] is dropped without firing. All
     /// [`StartupGate::await_phase`] waiters wake with an error.
@@ -66,7 +70,7 @@ pub enum StartupPhase {
     /// [`StartupSequencer::fail`]: super::startup_sequencer::StartupSequencer::fail
     /// [`ReadyGate`]: super::gate::ReadyGate
     /// [`StartupGate::await_phase`]: super::gate::StartupGate::await_phase
-    Failed = 12,
+    Failed = 13,
 }
 
 impl StartupPhase {
@@ -77,6 +81,7 @@ impl StartupPhase {
             Self::Boot => "boot",
             Self::WalRecovery => "wal_recovery",
             Self::ClusterCatalogOpen => "cluster_catalog_open",
+            Self::DataPlaneReplay => "data_plane_replay",
             Self::RaftMetadataReplay => "raft_metadata_replay",
             Self::SchemaCacheWarmup => "schema_cache_warmup",
             Self::CatalogSanityCheck => "catalog_sanity_check",
@@ -95,7 +100,8 @@ impl StartupPhase {
         match self {
             Self::Boot => Some(Self::WalRecovery),
             Self::WalRecovery => Some(Self::ClusterCatalogOpen),
-            Self::ClusterCatalogOpen => Some(Self::RaftMetadataReplay),
+            Self::ClusterCatalogOpen => Some(Self::DataPlaneReplay),
+            Self::DataPlaneReplay => Some(Self::RaftMetadataReplay),
             Self::RaftMetadataReplay => Some(Self::SchemaCacheWarmup),
             Self::SchemaCacheWarmup => Some(Self::CatalogSanityCheck),
             Self::CatalogSanityCheck => Some(Self::DataGroupsReplay),
@@ -116,16 +122,17 @@ impl StartupPhase {
             0 => Some(Self::Boot),
             1 => Some(Self::WalRecovery),
             2 => Some(Self::ClusterCatalogOpen),
-            3 => Some(Self::RaftMetadataReplay),
-            4 => Some(Self::SchemaCacheWarmup),
-            5 => Some(Self::CatalogSanityCheck),
-            6 => Some(Self::DataGroupsReplay),
-            7 => Some(Self::TransportBind),
-            8 => Some(Self::WarmPeers),
-            9 => Some(Self::HealthLoopStart),
-            10 => Some(Self::GatewayEnable),
-            11 => Some(Self::Serving),
-            12 => Some(Self::Failed),
+            3 => Some(Self::DataPlaneReplay),
+            4 => Some(Self::RaftMetadataReplay),
+            5 => Some(Self::SchemaCacheWarmup),
+            6 => Some(Self::CatalogSanityCheck),
+            7 => Some(Self::DataGroupsReplay),
+            8 => Some(Self::TransportBind),
+            9 => Some(Self::WarmPeers),
+            10 => Some(Self::HealthLoopStart),
+            11 => Some(Self::GatewayEnable),
+            12 => Some(Self::Serving),
+            13 => Some(Self::Failed),
             _ => None,
         }
     }
@@ -154,6 +161,7 @@ mod tests {
             StartupPhase::Boot,
             StartupPhase::WalRecovery,
             StartupPhase::ClusterCatalogOpen,
+            StartupPhase::DataPlaneReplay,
             StartupPhase::RaftMetadataReplay,
             StartupPhase::SchemaCacheWarmup,
             StartupPhase::CatalogSanityCheck,
