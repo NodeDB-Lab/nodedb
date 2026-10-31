@@ -150,9 +150,8 @@ fn an_equality_with_no_index_on_any_column_plans_a_scan() {
 
 #[test]
 fn a_computed_item_with_an_order_by_plans_a_scan() {
-    let plan = plan_one(
-        "SELECT id, created_at AS ts FROM turns WHERE session_id = 's1' ORDER BY ts DESC",
-    );
+    let plan =
+        plan_one("SELECT id, created_at AS ts FROM turns WHERE session_id = 's1' ORDER BY ts DESC");
     assert!(
         lookup_of(plan).is_none(),
         "a sort key can name a value only the computed tail holds"
