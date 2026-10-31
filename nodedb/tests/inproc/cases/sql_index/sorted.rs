@@ -74,9 +74,7 @@ async fn descending_limit_returns_the_newest_rows_in_order() {
     seed_strict(&server).await;
 
     let rows = server
-        .query_text(
-            "SELECT id FROM sorted_turns WHERE session_id = 's1' ORDER BY seq DESC LIMIT 3",
-        )
+        .query_text("SELECT id FROM sorted_turns WHERE session_id = 's1' ORDER BY seq DESC LIMIT 3")
         .await
         .unwrap();
     assert_eq!(rows, vec!["a8", "a7", "a6"]);
@@ -164,9 +162,7 @@ async fn rows_written_after_the_index_exists_sort_with_the_committed_rows() {
         .unwrap();
 
     let rows = server
-        .query_text(
-            "SELECT id FROM sorted_turns WHERE session_id = 's1' ORDER BY seq DESC LIMIT 2",
-        )
+        .query_text("SELECT id FROM sorted_turns WHERE session_id = 's1' ORDER BY seq DESC LIMIT 2")
         .await
         .unwrap();
     assert_eq!(rows, vec!["a9", "a7"]);
@@ -186,9 +182,7 @@ async fn a_transaction_sees_its_own_staged_row_in_order() {
         .await
         .unwrap();
     let rows = server
-        .query_text(
-            "SELECT id FROM sorted_turns WHERE session_id = 's1' ORDER BY seq DESC LIMIT 2",
-        )
+        .query_text("SELECT id FROM sorted_turns WHERE session_id = 's1' ORDER BY seq DESC LIMIT 2")
         .await
         .unwrap();
     server.exec("ROLLBACK").await.unwrap();
@@ -198,10 +192,7 @@ async fn a_transaction_sees_its_own_staged_row_in_order() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_schemaless_collection_orders_through_the_index() {
     let server = TestServer::start().await;
-    server
-        .exec("CREATE COLLECTION sorted_docs")
-        .await
-        .unwrap();
+    server.exec("CREATE COLLECTION sorted_docs").await.unwrap();
     server
         .exec("CREATE INDEX ON sorted_docs(kind)")
         .await

@@ -50,11 +50,10 @@ impl GroupMountSpec {
     /// disk: call it off the async threads.
     pub fn open(self) -> Result<OpenedGroup> {
         let group_id = self.config.group_id;
-        let storage = StagedLogStorage::open(group_id, &self.storage_path, self.drive_signal).map_err(|e| {
-            ClusterError::Transport {
+        let storage = StagedLogStorage::open(group_id, &self.storage_path, self.drive_signal)
+            .map_err(|e| ClusterError::Transport {
                 detail: format!("failed to open raft storage for group {group_id}: {e}"),
-            }
-        })?;
+            })?;
         let mut node = RaftNode::new(self.config, storage);
         if let Some(ceiling) = self.compaction_ceiling {
             node.set_compaction_ceiling(ceiling);
