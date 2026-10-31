@@ -82,6 +82,9 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
                     self.do_tick().await;
                     self.loop_metrics.observe(started.elapsed());
                 }
+                _ = self.drive_signal.notified() => {
+                    self.do_drive().await;
+                }
                 _ = self.reconcile_notify.notified() => {
                     if *shutdown.borrow() {
                         break;
