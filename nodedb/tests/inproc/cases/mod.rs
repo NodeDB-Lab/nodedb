@@ -9,6 +9,7 @@ mod snapshot_rt_common;
 #[path = "../../support/mod.rs"]
 mod support;
 
+mod agent_memory_reads;
 mod alert_rule_replication_apply;
 mod array_auto_flush_visibility;
 mod array_cluster_sync;
