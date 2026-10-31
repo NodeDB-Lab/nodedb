@@ -19,12 +19,18 @@ pub(crate) fn try_document_index_lookup(
     params: &ScanParams,
     engine: EngineType,
 ) -> Option<SqlPlan> {
-    // Sort / window functions still force a full scan because the
-    // IndexedFetch handler does not yet order rows or evaluate window
-    // aggregates. DISTINCT is safe on the index path: the handler
+    // Window functions still force a full scan because the IndexedFetch
+    // handler does not evaluate window aggregates. The handler orders the
+    // matched rows itself. DISTINCT is safe on the index path: the handler
     // emits each matched doc exactly once and any further dedup is a
     // cheap Control-Plane pass on the scan-shaped response.
-    if !params.sort_keys.is_empty() || !params.window_functions.is_empty() {
+    if !params.window_functions.is_empty() {
+        return None;
+    }
+    // A computed SELECT item runs in a tail over the fetched rows, so a sort
+    // key can name a value only the tail holds. The handler orders by stored
+    // fields, so that shape scans.
+    if !params.sort_keys.is_empty() && computed_tail::needs_computed_tail(&params.projection) {
         return None;
     }
     // The versioned index answers the current state and a system-time
@@ -71,10 +77,15 @@ pub(crate) fn try_document_index_lookup(
         })
         .collect();
 
-    for (i, f) in params.filters.iter().enumerate() {
-        let Some((field, value, residual)) = extract_equality_with_residual(&f.expr) else {
-            continue;
-        };
+    // Every equality conjunct is a candidate: the first one with a Ready
+    // index drives the lookup, and the other conjuncts become the residual.
+    // A leading equality on an unindexed column must not hide an indexed one.
+    let candidates = params.filters.iter().enumerate().flat_map(|(i, f)| {
+        equality_candidates(&f.expr)
+            .into_iter()
+            .map(move |(field, value, residual)| (i, field, value, residual))
+    });
+    for (i, field, value, residual) in candidates {
         let canonical = canonical_index_field(&field);
         let Some(idx) = params.indexes.iter().find(|i| {
             i.state == IndexState::Ready
@@ -136,52 +147,53 @@ pub(crate) fn try_document_index_lookup(
     None
 }
 
-/// Pull `(column_name, equality_value, residual_expr)` out of a filter
-/// expression if it contains a column-equals-literal predicate that can
-/// drive an index lookup. Returns `None` if no usable equality is
-/// present. The returned residual is the rest of the conjunction with
-/// the equality removed — `None` when the filter was a bare equality.
-fn extract_equality_with_residual(
-    expr: &FilterExpr,
-) -> Option<(String, SqlValue, Option<SqlExpr>)> {
+/// Every `(column_name, equality_value, residual_expr)` a filter offers as an
+/// index lookup: one per column-equals-literal conjunct. The residual is the
+/// rest of the conjunction with that equality removed, in the original order
+/// — `None` when the filter was a bare equality. Empty when the filter holds
+/// no usable equality.
+fn equality_candidates(expr: &FilterExpr) -> Vec<(String, SqlValue, Option<SqlExpr>)> {
     match expr {
         FilterExpr::Comparison {
             field,
             op: CompareOp::Eq,
             value,
-        } => Some((field.clone(), value.clone(), None)),
-        FilterExpr::Expr(sql_expr) => {
-            let (col, lit, residual) = split_equality_from_expr(sql_expr)?;
-            Some((col, lit, residual))
-        }
-        _ => None,
+        } => vec![(field.clone(), value.clone(), None)],
+        FilterExpr::Expr(sql_expr) => equalities_from_expr(sql_expr),
+        _ => Vec::new(),
     }
 }
 
-/// Return `(column, literal, residual_expr)` for an equality found
-/// anywhere in a right-leaning AND conjunction tree, or `None` if no
-/// bare column-equals-literal predicate exists. The residual preserves
-/// every sibling conjunct in their original order; `None` means the
-/// expression was a bare equality with nothing left behind.
-fn split_equality_from_expr(expr: &SqlExpr) -> Option<(String, SqlValue, Option<SqlExpr>)> {
-    // Gather the conjuncts of a top-level AND chain left-to-right.
+/// The equalities of an `AND` conjunction tree, each with the residual of its
+/// sibling conjuncts. Non-equality conjuncts offer none.
+fn equalities_from_expr(expr: &SqlExpr) -> Vec<(String, SqlValue, Option<SqlExpr>)> {
     let mut conjuncts: Vec<SqlExpr> = Vec::new();
     flatten_and(expr, &mut conjuncts);
 
-    // Find the first conjunct that is a bare column-equals-literal.
-    let eq_idx = conjuncts.iter().position(is_column_eq_literal)?;
-    let eq = conjuncts.remove(eq_idx);
-    let (col, lit) = match eq {
-        SqlExpr::BinaryOp { left, op, right } => match (*left, op, *right) {
-            (SqlExpr::Column { name, .. }, BinaryOp::Eq, SqlExpr::Literal(v)) => (name, v),
-            (SqlExpr::Literal(v), BinaryOp::Eq, SqlExpr::Column { name, .. }) => (name, v),
-            _ => return None,
-        },
-        _ => return None,
-    };
-
-    let residual = rebuild_and(conjuncts);
-    Some((col, lit, residual))
+    (0..conjuncts.len())
+        .filter(|&i| is_column_eq_literal(&conjuncts[i]))
+        .filter_map(|i| {
+            let (col, lit) = match &conjuncts[i] {
+                SqlExpr::BinaryOp { left, op, right } => {
+                    match (left.as_ref(), op, right.as_ref()) {
+                        (SqlExpr::Column { name, .. }, BinaryOp::Eq, SqlExpr::Literal(v))
+                        | (SqlExpr::Literal(v), BinaryOp::Eq, SqlExpr::Column { name, .. }) => {
+                            (name.clone(), v.clone())
+                        }
+                        _ => return None,
+                    }
+                }
+                _ => return None,
+            };
+            let siblings = conjuncts
+                .iter()
+                .enumerate()
+                .filter(|&(j, _)| j != i)
+                .map(|(_, c)| c.clone())
+                .collect();
+            Some((col, lit, rebuild_and(siblings)))
+        })
+        .collect()
 }
 
 /// Append every leaf of a right-leaning `AND` tree to `out`. Non-AND

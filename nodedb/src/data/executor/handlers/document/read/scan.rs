@@ -329,29 +329,15 @@ impl CoreLoop {
                     windowed
                 } else if sort_keys.is_empty() {
                     filtered
-                } else if filtered.len() <= self.query_tuning.sort_run_size {
-                    let mut v = filtered;
-                    // Propagate the typed error: a zero divisor in a sort key
-                    // is a `22012` statement failure, not an internal fault.
-                    if let Err(e) = sort::sort_rows(&mut v, sort_keys, &decimal_keys, &crs) {
-                        return self.response_error(task, e);
-                    }
-                    v
                 } else {
-                    match self.external_sort(
+                    match self.sort_document_rows(
                         filtered,
                         sort_keys,
                         &decimal_keys,
                         limit.saturating_add(offset),
                     ) {
-                        Ok(merged) => merged,
-                        Err(e) => {
-                            warn!(core = self.core_id, error = %e, "external sort failed");
-                            // Same typed propagation as the in-memory path: a
-                            // sort-key evaluation failure keeps its SQLSTATE
-                            // rather than degrading to a generic internal error.
-                            return self.response_error(task, e);
-                        }
+                        Ok(sorted) => sorted,
+                        Err(e) => return self.response_error(task, e),
                     }
                 };
 

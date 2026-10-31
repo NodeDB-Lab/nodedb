@@ -802,6 +802,7 @@ mod tests {
             projection: Vec::new(),
             limit: 0,
             offset: 0,
+            sort_keys: Vec::new(),
             system_time: nodedb_types::SystemTimeScope::Current,
         })
     }

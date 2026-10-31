@@ -102,6 +102,7 @@ fn bitmap_hint_to_plan(hint: &BitmapHint, database_id: DatabaseId) -> Option<Box
         // past the cut. The fetch is bounded by the scan byte budget alone.
         limit: usize::MAX,
         offset: 0,
+        sort_keys: Vec::new(),
         // The bitmap reads the versioned index at the side's cutoff, so it
         // holds the rows the side reads.
         system_time: hint.system_time,

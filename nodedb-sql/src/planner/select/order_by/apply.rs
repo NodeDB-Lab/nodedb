@@ -201,6 +201,15 @@ pub(in crate::planner::select) fn apply_order_by(
             window_functions: window_functions.clone(),
             temporal: *temporal,
         }),
+        // An index lookup carries its own sort keys: its handler orders the
+        // matched rows before the row bound cuts them. Wrapping it in a tail
+        // would sort and cut a second time.
+        SqlPlan::DocumentIndexLookup(lookup) => {
+            Ok(SqlPlan::DocumentIndexLookup(DocumentIndexLookupPlan {
+                sort_keys,
+                ..lookup.clone()
+            }))
+        }
         // ORDER BY applied to a GROUP BY result: stash the sort keys
         // on the Aggregate plan; the executor sorts the finalized
         // group rows before returning. Without this branch the sort

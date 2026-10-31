@@ -97,6 +97,7 @@ pub(super) async fn rewrite_document(
             projection,
             limit,
             offset,
+            sort_keys,
             system_time,
         } if ctx.is_target(collection) => Ok(SourceRewrite::task(PhysicalPlan::Document(
             DocumentOp::IndexedFetch {
@@ -107,6 +108,7 @@ pub(super) async fn rewrite_document(
                 projection: projection.clone(),
                 limit: *limit,
                 offset: *offset,
+                sort_keys: sort_keys.clone(),
                 system_time: ctx.system_time(*system_time)?,
             },
         ))),
