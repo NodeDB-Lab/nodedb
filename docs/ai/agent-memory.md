@@ -89,8 +89,16 @@ WHERE id = $fact_id;
 Current task state — plans, intermediate results, tool outputs. Uses the KV engine with TTL for automatic expiry when the task is done.
 
 ```sql
--- Create a KV collection for working memory
-CREATE COLLECTION working_memory TYPE kv;
+-- Create a KV collection for working memory. The primary key is the hash key.
+CREATE COLLECTION working_memory (
+    key TEXT PRIMARY KEY,
+    goal TEXT,
+    steps TEXT,
+    current_step INT,
+    status TEXT,
+    artifact TEXT,
+    ttl INT
+) WITH (engine='kv');
 
 -- Store current plan (expires in 1 hour)
 INSERT INTO working_memory {

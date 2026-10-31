@@ -63,6 +63,18 @@ enum HitShape {
     None,
 }
 
+/// Whether `plan` emits vector or hybrid search hits, which need their
+/// document body and primary key resolved before any relational operator
+/// reads them.
+pub(in crate::control::server::exchange::resolve) fn emits_search_hits(
+    plan: &PhysicalPlan,
+) -> bool {
+    matches!(
+        classify_hit_shape(plan),
+        HitShape::Vector | HitShape::Hybrid
+    )
+}
+
 /// Classify a resolved `PostProcess` child by the row shape its engine emits.
 fn classify_hit_shape(plan: &PhysicalPlan) -> HitShape {
     if is_cluster_array_read(plan) {
@@ -151,7 +163,7 @@ pub(crate) fn provider_scan_of_rows(rows: Vec<u8>, sources: Vec<GatheredSource>)
 }
 
 /// Rows of a materialized child, or a resolution the caller returns as-is.
-pub(super) enum ChildRows {
+pub(in crate::control::server::exchange::resolve) enum ChildRows {
     /// The child's rows, flattened to the bare relational row shape a
     /// `ProviderScan{provider: None}` consumes, and the requirements of the
     /// child they came from.
@@ -172,7 +184,7 @@ pub(super) enum ChildRows {
 /// flattens hit-shaped payloads (vector / hybrid) to columned rows with the
 /// surrogate resolved to the user PK. An in-transaction read records the
 /// child's base collection in `captures` at its observed read-version.
-pub(super) async fn materialize_child_rows(
+pub(in crate::control::server::exchange::resolve) async fn materialize_child_rows(
     state: &SharedState,
     ctx: ReadScope,
     captures: &mut Vec<DistributedReadCapture>,

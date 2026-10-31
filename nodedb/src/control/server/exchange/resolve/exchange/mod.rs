@@ -30,3 +30,4 @@ mod txn_source_arm;
 
 pub use entry::{Resolved, resolve_and_materialize, resolve_exchange_in_plan};
 pub(crate) use post_process_arm::provider_scan_of_rows;
+pub(super) use post_process_arm::{ChildRows, emits_search_hits, materialize_child_rows};

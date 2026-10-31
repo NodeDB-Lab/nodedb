@@ -20,7 +20,7 @@ const VECTOR_KEYWORD: &str = "VECTOR";
 pub fn try_rewrite_search_using_vector(sql: &str) -> Option<String> {
     let trimmed = sql.trim_end_matches(|c: char| c == ';' || c.is_whitespace());
     let leading = trimmed.len() - trimmed.trim_start().len();
-    let (select, consumed) = parse_search_clause(&trimmed[leading..])?;
+    let (select, consumed) = parse_search_clause(&trimmed[leading..], "*")?;
     // A top-level `SEARCH` clause owns the whole statement; anything past the
     // closing paren is not part of the DSL form and must not be rewritten.
     if !trimmed[leading + consumed..].trim().is_empty() {
@@ -47,7 +47,8 @@ pub fn try_rewrite_nested_search_using_vector(sql: &str) -> Option<String> {
         let after_open = open + 1;
         let inner = &sql[after_open..];
         let leading = inner.len() - inner.trim_start().len();
-        let Some((select, consumed)) = parse_search_clause(&inner[leading..]) else {
+        let projection = in_operand(&sql[..open]).unwrap_or("*");
+        let Some((select, consumed)) = parse_search_clause(&inner[leading..], projection) else {
             continue;
         };
         out.push_str(&sql[copied..after_open]);
@@ -61,11 +62,40 @@ pub fn try_rewrite_nested_search_using_vector(sql: &str) -> Option<String> {
     Some(out)
 }
 
+/// The column on the left of an `IN` (or `NOT IN`) that ends `before`, or
+/// `None` when the parenthesis is not an `IN` operand's list. A bare
+/// `col IN (SEARCH ...)` selects that column from the matches, so the list
+/// holds the values the operand compares against.
+fn in_operand(before: &str) -> Option<&str> {
+    let head = trailing_word(before, "IN")?;
+    let head = trailing_word(head, "NOT").unwrap_or(head);
+    let head = head.trim_end();
+    let start = head
+        .char_indices()
+        .rev()
+        .take_while(|&(_, c)| is_ident_char(c))
+        .last()
+        .map(|(i, _)| i)?;
+    Some(&head[start..]).filter(|c| !c.starts_with(|d: char| d.is_ascii_digit()))
+}
+
+/// `text` without its last word when that word is `word` (case-insensitive,
+/// whole word); `None` otherwise.
+fn trailing_word<'a>(text: &'a str, word: &str) -> Option<&'a str> {
+    let text = text.trim_end();
+    let at = text.len().checked_sub(word.len())?;
+    if !text.is_char_boundary(at) || !text[at..].eq_ignore_ascii_case(word) {
+        return None;
+    }
+    let head = &text[..at];
+    (!head.ends_with(is_ident_char)).then_some(head)
+}
+
 /// Parse a `SEARCH <coll> USING VECTOR(...)` clause at the start of `input`.
 ///
 /// Returns the canonical `SELECT` and the number of bytes consumed (through
 /// the clause's closing paren).
-fn parse_search_clause(input: &str) -> Option<(String, usize)> {
+fn parse_search_clause(input: &str, projection: &str) -> Option<(String, usize)> {
     let after_search = keyword_rest(input, SEARCH_KEYWORD)?;
     let (collection, rest) = take_identifier(after_search.trim_start())?;
     let after_using = keyword_rest(rest, USING_KEYWORD)?;
@@ -77,7 +107,7 @@ fn parse_search_clause(input: &str) -> Option<(String, usize)> {
         Some(name) => format!("vector_distance({name}, {vector_expr})"),
         None => format!("vector_distance({vector_expr})"),
     };
-    let select = format!("SELECT * FROM {collection} ORDER BY {order_by} LIMIT {limit}");
+    let select = format!("SELECT {projection} FROM {collection} ORDER BY {order_by} LIMIT {limit}");
     let consumed = input.len() - after_vector.len() + consumed_args;
     Some((select, consumed))
 }
@@ -277,6 +307,32 @@ mod tests {
             out,
             "SELECT * FROM (SELECT * FROM docs ORDER BY vector_distance(emb, ARRAY[0.1]) LIMIT 2) s WHERE s.id = 'a1'"
         );
+    }
+
+    #[test]
+    fn a_bare_search_after_in_selects_the_compared_column() {
+        let out = try_rewrite_nested_search_using_vector(
+            "SELECT fact FROM facts WHERE agent_id = 'a1' AND id IN (SEARCH facts USING VECTOR(embedding, ARRAY[0.1], 3))",
+        )
+        .unwrap();
+        assert!(
+            out.ends_with("id IN (SELECT id FROM facts ORDER BY vector_distance(embedding, ARRAY[0.1]) LIMIT 3)"),
+            "got: {out}"
+        );
+        let out = try_rewrite_nested_search_using_vector(
+            "SELECT 1 FROM t WHERE t.k NOT IN (SEARCH f USING VECTOR(e, ARRAY[0.1], 1))",
+        )
+        .unwrap();
+        assert!(out.contains("t.k NOT IN (SELECT k FROM f"), "got: {out}");
+    }
+
+    #[test]
+    fn a_join_keeps_the_star_projection() {
+        let out = try_rewrite_nested_search_using_vector(
+            "SELECT 1 FROM a JOIN (SEARCH f USING VECTOR(e, ARRAY[0.1], 1)) b ON a.id = b.id",
+        )
+        .unwrap();
+        assert!(out.contains("JOIN (SELECT * FROM f"), "got: {out}");
     }
 
     #[test]

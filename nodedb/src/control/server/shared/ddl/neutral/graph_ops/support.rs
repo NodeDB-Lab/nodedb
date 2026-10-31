@@ -69,3 +69,24 @@ pub(crate) fn ensure_collection_active(
         _ => Err(ddl_err("42P01", format!("collection '{name}' not found"))),
     }
 }
+
+/// Gate an edge collection a `MATCH ... IN c` reads. Edge writes accept a
+/// collection that has no catalog row, so a collection made only by
+/// `GRAPH INSERT EDGE` reads like any other. A collection that exists and is
+/// soft-dropped stays hidden until UNDROP or a hard purge.
+pub(crate) fn ensure_edge_collection_readable(
+    state: &SharedState,
+    database_id: DatabaseId,
+    tenant_id: u64,
+    name: &str,
+) -> Result<(), DdlError> {
+    let catalog = state.credentials.catalog();
+    match catalog.get_collection(database_id, tenant_id, name) {
+        Ok(Some(c)) if !c.is_active => Err(ddl_err(
+            "42P01",
+            format!("collection '{name}' is deactivated"),
+        )),
+        Ok(_) => Ok(()),
+        Err(e) => Err(DdlError::internal(format!("collection catalog read: {e}"))),
+    }
+}

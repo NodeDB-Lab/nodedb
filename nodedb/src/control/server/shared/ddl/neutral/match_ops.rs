@@ -80,15 +80,16 @@ pub async fn match_query(
     }
 
     // If the query targets a named collection via `IN '<collection>'`, gate
-    // on catalog `is_active` (see `graph_ops::support::ensure_collection_active`,
-    // shared with `SHOW GRAPH STATS` and `GRAPH RAG FUSION`): a plain
+    // on catalog `is_active` (see `graph_ops::support::ensure_edge_collection_readable`):
+    // a collection with no catalog row reads as an edge collection, since edge
+    // writes create it implicitly. A plain
     // `DROP COLLECTION` (no PURGE) only flips `is_active=false` in the
     // catalog and does not reclaim edges/CSR, so reads must independently
     // hide it until UNDROP or a hard purge. This mirrors base-engine
     // `SELECT ... FROM c` behavior on a soft-dropped collection
     // (not-found/deactivated).
     if let Some(ref name) = query.collection {
-        super::graph_ops::support::ensure_collection_active(
+        super::graph_ops::support::ensure_edge_collection_readable(
             state,
             database_id,
             identity.tenant_id.as_u64(),

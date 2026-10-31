@@ -111,6 +111,15 @@ impl CoreLoop {
         options.max_visited.min(self.graph_tuning.max_visited)
     }
 
+    /// Whether this core homes `node`'s vShard. A cross-shard edge is stored
+    /// on both endpoints' cores, so a read gathered from every core takes a
+    /// node's edges from its home core only.
+    fn owns_graph_node(&self, node: &str) -> bool {
+        crate::types::VShardId::from_key(node.as_bytes()).as_u32() as usize
+            % self.redo_apply.num_cores
+            == self.core_id
+    }
+
     /// The transaction's staged edge writes, for a live read. A historical
     /// read sees committed versions only. Read-your-own-writes refreshes the
     /// overlay lease (see the overlay reaper).
@@ -221,6 +230,7 @@ impl CoreLoop {
         // refresh the overlay lease.
         let overlay = self.live_overlay(task, scope);
         let neighbors = match overlay {
+            _ if !self.owns_graph_node(node_id) => Vec::new(),
             Some(overlay) => merge_graph_txn_overlay_neighbors(
                 overlay,
                 &graph_txn_merge::StagedHopScope {
@@ -356,7 +366,11 @@ impl CoreLoop {
             // No predicate, no properties and no staged writes: each row is
             // the durable edge as the CSR returns it.
             graph_edge_predicate::HopPasses::Unoriented => {
-                for raw_src in args.node_ids {
+                for raw_src in args
+                    .node_ids
+                    .iter()
+                    .filter(|node| self.owns_graph_node(node))
+                {
                     for (label, node) in durable(raw_src, args.direction) {
                         if out.len() >= cap {
                             return Err(neighbor_rows_over_cap(cap));
@@ -373,7 +387,11 @@ impl CoreLoop {
             collection: args.collection,
             edge_labels: &labels,
         };
-        for raw_src in args.node_ids {
+        for raw_src in args
+            .node_ids
+            .iter()
+            .filter(|node| self.owns_graph_node(node))
+        {
             for &pass in passes {
                 let durable_rows = durable(raw_src, pass.direction());
                 let neighbors: Vec<graph_txn_merge::StagedNeighbor<'_>> = match overlay {
@@ -534,6 +552,57 @@ mod tests {
                 scope: &GraphReadScope::default(),
             },
         )
+    }
+
+    /// A cross-shard edge sits on both endpoints' cores. Each node's edges
+    /// come from its home core only, so a read gathered from every core
+    /// returns each edge once.
+    #[test]
+    fn a_core_answers_neighbors_only_for_the_nodes_it_homes() {
+        let mut h = harness();
+        h.core.set_num_cores(2);
+        let on_core = |parity: usize| {
+            (0..)
+                .map(|i| format!("n{i}"))
+                .find(|n| VShardId::from_key(n.as_bytes()).as_u32() as usize % 2 == parity)
+                .unwrap_or_default()
+        };
+        let (home, peer) = (on_core(0), on_core(1));
+        let put = h.core.execute_edge_put(
+            &task(10),
+            EdgePutParams {
+                tid: 1,
+                collection: "knows",
+                src_id: &home,
+                label: "KNOWS",
+                dst_id: &peer,
+                properties: &[],
+                src_surrogate: Surrogate::new(1),
+                dst_surrogate: Surrogate::new(2),
+                valid_from_ms: None,
+                valid_until_ms: None,
+            },
+        );
+        assert_eq!(put.status, Status::Ok, "{:?}", put.error_code);
+        let rows = |node: &str, direction| {
+            let resp = h.core.execute_graph_neighbors(
+                &task(20),
+                1,
+                GraphNeighborsArgs {
+                    node_id: node,
+                    edge_labels: &[],
+                    direction,
+                    collection: Some("knows"),
+                    scope: &GraphReadScope::default(),
+                },
+            );
+            assert_eq!(resp.status, Status::Ok, "{:?}", resp.error_code);
+            extract_msgpack_elements(resp.payload.as_ref())
+                .expect("rows")
+                .len()
+        };
+        assert_eq!(rows(&home, Direction::Out), 1, "the home core answers");
+        assert_eq!(rows(&peer, Direction::In), 0, "the peer's home answers");
     }
 
     /// A hop within its cap answers every row in one terminal frame.

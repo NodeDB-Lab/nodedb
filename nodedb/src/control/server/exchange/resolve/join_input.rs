@@ -15,7 +15,9 @@ use crate::control::server::exchange::gather_outcome::GatherOutcome;
 
 use super::array_read_rows::is_cluster_array_read;
 use super::capture::DistributedReadCapture;
-use super::exchange::provider_scan_of_rows;
+use super::exchange::{
+    ChildRows, emits_search_hits, materialize_child_rows, provider_scan_of_rows,
+};
 use crate::control::server::shared::authorization::gathered_sources;
 
 /// Resolve a `HashJoin` input slot.
@@ -45,6 +47,16 @@ pub(super) async fn resolve_join_input(
     };
 
     match *boxed {
+        // Search hits carry a surrogate and a stored body: the join reads
+        // them as rows only after the body's columns and the primary key are
+        // resolved, as every other consumer of a search result does.
+        PhysicalPlan::Query(QueryOp::Exchange(ExchangeOp {
+            child,
+            mode: ExchangeMode::Broadcast | ExchangeMode::Gather { .. },
+        })) if emits_search_hits(&child) => {
+            Box::pin(search_hits_input(state, scope, captures, *child)).await
+        }
+
         PhysicalPlan::Query(QueryOp::Exchange(ExchangeOp {
             child,
             mode: ExchangeMode::Broadcast,
@@ -132,6 +144,25 @@ pub(super) async fn resolve_join_input(
         // Already resolved (ProviderScan{None, ..} or any other plan):
         // pass through.
         other => Ok(Some(Box::new(other))),
+    }
+}
+
+/// The rows of a search-hit join input, inlined as a `ProviderScan`. Kept out
+/// of [`resolve_join_input`] so that function's frame stays small: the
+/// resolution recurses once per nested join input.
+async fn search_hits_input(
+    state: &SharedState,
+    scope: ReadScope,
+    captures: &mut Vec<DistributedReadCapture>,
+    child: PhysicalPlan,
+) -> crate::Result<Option<Box<PhysicalPlan>>> {
+    match Box::pin(materialize_child_rows(state, scope, captures, child)).await? {
+        ChildRows::Rows { rows, sources } => {
+            Ok(Some(Box::new(provider_scan_of_rows(rows, sources))))
+        }
+        ChildRows::Passthrough(_) => Err(crate::Error::Internal {
+            detail: "a search join input resolved to a root result".into(),
+        }),
     }
 }
 
