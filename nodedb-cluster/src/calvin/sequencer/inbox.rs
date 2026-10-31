@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 use tracing::warn;
 
 use crate::calvin::completion::{AssignmentReceiver, CalvinCompletionRegistry};
@@ -76,6 +76,9 @@ pub struct Inbox {
     tenant_quota: usize,
     max_dependent_read_bytes: usize,
     max_dependent_read_passives: usize,
+    /// Notified on every successful submit, so the sequencer mints an epoch
+    /// for a queued transaction without waiting out the rest of its period.
+    arrivals: Arc<Notify>,
 }
 
 /// The receiving half of the sequencer inbox.
@@ -96,6 +99,8 @@ pub struct InboxReceiver {
     pending: Option<AdmittedTx>,
     /// The leader's queue of streamed parts, shared with every sender.
     parts: Arc<PartsIntake>,
+    /// Notified by every sender after a successful submit.
+    arrivals: Arc<Notify>,
 }
 
 impl Inbox {
@@ -214,6 +219,7 @@ impl Inbox {
         match self.tx.try_send(admitted) {
             Ok(()) => {
                 self.depth_counter.fetch_add(1, Ordering::Relaxed);
+                self.arrivals.notify_one();
                 Ok((seq, registered))
             }
             Err(e) => {
@@ -348,6 +354,11 @@ impl InboxReceiver {
         Arc::clone(&self.parts)
     }
 
+    /// The signal every successful submit notifies.
+    pub fn arrivals(&self) -> Arc<Notify> {
+        Arc::clone(&self.arrivals)
+    }
+
     /// Approximate current depth (items queued).
     pub fn depth(&self) -> u64 {
         self.depth_counter.load(Ordering::Relaxed)
@@ -375,6 +386,7 @@ pub fn new_inbox(capacity: usize, config: &SequencerConfig) -> (Inbox, InboxRece
     let depth_counter = Arc::new(AtomicU64::new(0));
     let tenant_in_flight: Arc<Mutex<BTreeMap<u64, u64>>> = Arc::new(Mutex::new(BTreeMap::new()));
     let parts = Arc::new(PartsIntake::new(config));
+    let arrivals = Arc::new(Notify::new());
 
     let inbox = Inbox {
         tx,
@@ -387,6 +399,7 @@ pub fn new_inbox(capacity: usize, config: &SequencerConfig) -> (Inbox, InboxRece
         tenant_quota: config.tenant_inbox_quota,
         max_dependent_read_bytes: config.max_dependent_read_bytes_per_txn,
         max_dependent_read_passives: config.max_dependent_read_passives_per_txn,
+        arrivals: Arc::clone(&arrivals),
     };
     let receiver = InboxReceiver {
         rx,
@@ -395,6 +408,7 @@ pub fn new_inbox(capacity: usize, config: &SequencerConfig) -> (Inbox, InboxRece
         tenant_in_flight,
         pending: None,
         parts,
+        arrivals,
     };
     (inbox, receiver)
 }
@@ -466,6 +480,35 @@ mod tests {
         let drained = rx.drain_into_capped(&mut out, 100, usize::MAX);
         assert_eq!(drained, 1);
         assert_eq!(out[0].inbox_seq, 0);
+    }
+
+    #[tokio::test]
+    async fn a_submit_notifies_the_arrival_signal() {
+        let (inbox, rx) = new_inbox(10, &default_config());
+        let arrivals = rx.arrivals();
+        inbox.submit(make_tx_class()).expect("submit");
+        tokio::time::timeout(std::time::Duration::from_secs(1), arrivals.notified())
+            .await
+            .expect("a successful submit must wake the sequencer");
+    }
+
+    #[tokio::test]
+    async fn a_refused_submit_does_not_notify_the_arrival_signal() {
+        let config = SequencerConfig {
+            inbox_capacity: 1,
+            tenant_inbox_quota: 10,
+            ..default_config()
+        };
+        let (inbox, rx) = new_inbox(1, &config);
+        let arrivals = rx.arrivals();
+        inbox.submit(make_tx_class()).expect("first submit");
+        arrivals.notified().await;
+        inbox
+            .submit(make_tx_class())
+            .expect_err("the inbox is full");
+        let woken =
+            tokio::time::timeout(std::time::Duration::from_millis(50), arrivals.notified()).await;
+        assert!(woken.is_err(), "a refused submit queued nothing to mint");
     }
 
     #[test]
