@@ -71,6 +71,7 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
             // Construction-time builder, before `run()` and any join kick — a
             // fresh `Notify` has no pending permit, so this loses nothing.
             reconcile_notify: tokio::sync::Notify::new(),
+            drive_signal: self.drive_signal,
             metadata_cache: self.metadata_cache,
             lease_holder_liveness: self.lease_holder_liveness,
         }

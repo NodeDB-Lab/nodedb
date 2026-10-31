@@ -18,13 +18,13 @@
 
 use std::collections::VecDeque;
 use std::path::Path;
-use std::sync::{Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use nodedb_raft::message::LogEntry;
 use nodedb_raft::state::HardState;
 use nodedb_raft::storage::LogStorage;
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 use tracing::{error, warn};
 
 use crate::raft_storage::RedbLogStorage;
@@ -75,12 +75,16 @@ pub struct GroupDisk {
     progress: Mutex<DiskProgress>,
     progressed: Condvar,
     progress_tx: watch::Sender<DiskProgress>,
+    /// Woken after each batch the writer makes durable, so the Raft loop
+    /// counts the new durable entries at once instead of at its next tick.
+    wake: Arc<Notify>,
 }
 
 impl GroupDisk {
-    /// Open `group_id`'s redb log at `path`. Blocks on disk: call it off the
-    /// async threads.
-    pub(super) fn open(group_id: u64, path: &Path) -> crate::Result<Self> {
+    /// Open `group_id`'s redb log at `path`. `wake` is notified after each
+    /// batch the writer makes durable. Blocks on disk: call it off the async
+    /// threads.
+    pub(super) fn open(group_id: u64, path: &Path, wake: Arc<Notify>) -> crate::Result<Self> {
         let storage = RedbLogStorage::open(path)?;
         Ok(Self {
             group_id,
@@ -90,6 +94,7 @@ impl GroupDisk {
             progress: Mutex::new(DiskProgress::default()),
             progressed: Condvar::new(),
             progress_tx: watch::Sender::new(DiskProgress::default()),
+            wake,
         })
     }
 
@@ -228,6 +233,7 @@ impl GroupDisk {
         progress.stable = stable;
         self.progress_tx.send_replace(*progress);
         self.progressed.notify_all();
+        self.wake.notify_one();
     }
 
     fn apply(&self, op: &StorageOp) -> nodedb_raft::error::Result<()> {

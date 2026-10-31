@@ -16,6 +16,7 @@ use std::thread::JoinHandle;
 use nodedb_raft::message::LogEntry;
 use nodedb_raft::state::HardState;
 use nodedb_raft::storage::LogStorage;
+use tokio::sync::Notify;
 use tracing::error;
 
 use super::ticket::DurabilityTicket;
@@ -30,10 +31,11 @@ pub struct StagedLogStorage {
 }
 
 impl StagedLogStorage {
-    /// Open `group_id`'s log at `path` and start its writer thread. Blocks
-    /// on disk: call it off the async threads.
-    pub fn open(group_id: u64, path: &Path) -> crate::Result<Self> {
-        let disk = Arc::new(GroupDisk::open(group_id, path)?);
+    /// Open `group_id`'s log at `path` and start its writer thread. `wake` is
+    /// notified each time the writer makes a batch durable. Blocks on disk:
+    /// call it off the async threads.
+    pub fn open(group_id: u64, path: &Path, wake: Arc<Notify>) -> crate::Result<Self> {
+        let disk = Arc::new(GroupDisk::open(group_id, path, wake)?);
         let snapshot = disk.storage().snapshot_metadata();
         disk.set_restored_stable(snapshot);
         let writer = {
@@ -167,7 +169,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("group-7.redb");
         {
-            let mut storage = StagedLogStorage::open(7, &path).expect("open");
+            let mut storage = StagedLogStorage::open(7, &path, Arc::default()).expect("open");
             storage
                 .append(&[entry(1, 1), entry(2, 1), entry(3, 1)])
                 .expect("stage");
@@ -184,7 +186,7 @@ mod tests {
             assert_eq!(storage.stable_through(), Some((3, 2)));
             assert!(storage.ticket().is_none(), "nothing is left to write");
         }
-        let storage = StagedLogStorage::open(7, &path).expect("reopen");
+        let storage = StagedLogStorage::open(7, &path, Arc::default()).expect("reopen");
         let entries = storage.load_entries_after(0).expect("load");
         let terms: Vec<(u64, u64)> = entries.iter().map(|e| (e.index, e.term)).collect();
         assert_eq!(terms, vec![(1, 1), (2, 1), (3, 2)]);
@@ -198,11 +200,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("group-8.redb");
         {
-            let mut storage = StagedLogStorage::open(8, &path).expect("open");
+            let mut storage = StagedLogStorage::open(8, &path, Arc::default()).expect("open");
             storage.append(&[entry(1, 1)]).expect("stage");
             storage.save_applied_index(1).expect("stage");
         }
-        let storage = StagedLogStorage::open(8, &path).expect("reopen");
+        let storage = StagedLogStorage::open(8, &path, Arc::default()).expect("reopen");
         assert_eq!(storage.load_entries_after(0).expect("load").len(), 1);
         assert_eq!(storage.load_applied_index().expect("load"), 1);
     }

@@ -297,6 +297,10 @@ pub struct RaftLoop<A: CommitApplier, P: PlanExecutor = NoopPlanExecutor> {
     /// tick. Fired from [`super::join`] on the success path; consumed by
     /// an extra `select!` arm in [`Self::run`].
     pub(super) reconcile_notify: tokio::sync::Notify,
+    /// Notified when a group's disk makes a batch durable. `run_ticks`
+    /// drives the groups on it, so a proposal commits and applies as soon as
+    /// its entry is durable instead of at the next tick.
+    pub(super) drive_signal: Arc<tokio::sync::Notify>,
 
     /// Optional handle to the metadata group's `MetadataCache` (the same
     /// `Arc` the `CacheApplier` writes into). When set, the leader's
@@ -315,6 +319,7 @@ impl<A: CommitApplier> RaftLoop<A> {
         applier: A,
     ) -> Self {
         let node_id = multi_raft.node_id();
+        let drive_signal = multi_raft.drive_signal();
         let group_watchers = Arc::new(GroupAppliedWatchers::new());
         multi_raft.set_applied_watchers(Arc::clone(&group_watchers));
         // Share the transport's epoch state rather than making a second one:
@@ -363,6 +368,7 @@ impl<A: CommitApplier> RaftLoop<A> {
             tick_count: std::sync::atomic::AtomicU64::new(0),
             tick_state: Arc::new(super::tick_state::TickState::new()),
             reconcile_notify: tokio::sync::Notify::new(),
+            drive_signal,
             metadata_cache: None,
             lease_holder_liveness: Arc::new(crate::lease_liveness::LeaseHolderLiveness::new()),
         }
