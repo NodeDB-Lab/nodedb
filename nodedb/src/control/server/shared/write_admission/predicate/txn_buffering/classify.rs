@@ -670,6 +670,7 @@ mod tests {
                 projection: Vec::new(),
                 limit: 0,
                 offset: 0,
+                sort_keys: Vec::new(),
                 system_time: SystemTimeScope::Current,
             }),
             PhysicalPlan::Document(DocumentOp::DropIndex {

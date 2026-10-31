@@ -228,6 +228,7 @@ pub(in crate::control::planner::sql_plan_convert) struct DocumentIndexLookupArgs
     pub value: &'a SqlValue,
     pub filters: &'a [Filter],
     pub projection: &'a [nodedb_sql::types::Projection],
+    pub sort_keys: &'a [nodedb_sql::types::SortKey],
     pub limit: Option<usize>,
     pub offset: usize,
     pub tenant_id: TenantId,
@@ -246,6 +247,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_document_index_look
         value,
         filters,
         projection,
+        sort_keys,
         limit,
         offset,
         tenant_id,
@@ -284,6 +286,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_document_index_look
         // No LIMIT fetches every matching row under the byte budget.
         limit: limit.unwrap_or(usize::MAX),
         offset,
+        sort_keys: convert_sort_keys(sort_keys),
         system_time,
     });
     Ok(vec![PhysicalTask {

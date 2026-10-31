@@ -12,9 +12,13 @@ use nodedb_types::StorageKey;
 use tracing::{debug, warn};
 
 use crate::bridge::envelope::{ErrorCode, Response};
+use nodedb_physical::physical_plan::SortKeySpec;
+
+use super::sort;
 use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::filter_match::matches_with_resolved_schema;
+use crate::data::executor::row_shape::inject_row_identity;
 use crate::data::executor::task::ExecutionTask;
 
 /// Parameters for `execute_document_indexed_fetch`.
@@ -37,6 +41,9 @@ pub(in crate::data::executor) struct IndexedFetchParams<'a> {
     pub projection: &'a [String],
     pub limit: usize,
     pub offset: usize,
+    /// ORDER BY terms over the rows that pass the residual. `offset` and
+    /// `limit` count rows after the sort.
+    pub sort_keys: &'a [SortKeySpec],
     /// System-time ordinal cut of the read. `None` for the current state.
     pub system_as_of: Option<i64>,
     /// True for a current read and a transaction snapshot read: the
@@ -140,7 +147,11 @@ impl CoreLoop {
     /// body — committed or staged — so a row matching the indexed term but
     /// failing the leftover conjuncts is excluded like a base scan would.
     /// Projection is not yet applied here; the planner falls back to a full
-    /// scan for cases this handler doesn't cover (sort/distinct/window).
+    /// scan for cases this handler doesn't cover (window functions).
+    ///
+    /// With `sort_keys`, every row that passes the residual is gathered and
+    /// ordered, and `offset` and `limit` then cut the ordered rows. Each row
+    /// carries its identity, as a scan row does, so a key can name it.
     pub(in crate::data::executor) fn execute_document_indexed_fetch(
         &mut self,
         task: &ExecutionTask,
@@ -155,6 +166,7 @@ impl CoreLoop {
             projection: _projection,
             limit,
             offset,
+            sort_keys,
             system_as_of,
             merge_overlay,
         } = params;
@@ -271,13 +283,14 @@ impl CoreLoop {
         // residual runs on every candidate before either applies. A no-LIMIT
         // fetch (`limit == usize::MAX`) is bounded by the per-query byte
         // budget below, never by a row cap.
-        let unbounded = limit == usize::MAX;
+        let sorted = !sort_keys.is_empty();
+        let unbounded = limit == usize::MAX || sorted;
         let mut skipped = 0usize;
         let mut total_bytes = 0usize;
         let mut rows: Vec<(String, Vec<u8>)> = Vec::new();
         let crs = self.crs_context();
         for doc_id in doc_ids.iter() {
-            if rows.len() >= limit {
+            if !sorted && rows.len() >= limit {
                 break;
             }
             // A doc ID the overlay merge added or superseded above has no
@@ -323,7 +336,7 @@ impl CoreLoop {
                             return self.response_error(task, ErrorCode::from(e));
                         }
                     }
-                    if skipped < offset {
+                    if !sorted && skipped < offset {
                         skipped += 1;
                         continue;
                     }
@@ -349,6 +362,11 @@ impl CoreLoop {
                     } else {
                         bytes
                     };
+                    let payload = if sorted {
+                        inject_row_identity(&payload, doc_id, &identity_column).into_owned()
+                    } else {
+                        payload
+                    };
                     let doc_id = doc_id.to_string();
                     total_bytes = total_bytes
                         .saturating_add(doc_id.len())
@@ -371,6 +389,20 @@ impl CoreLoop {
                     return self.response_error(task, ErrorCode::from(e));
                 }
             }
+        }
+
+        if sorted {
+            let decimal_keys = sort::decimal_sort_keys(sort_keys, strict_schema.as_ref());
+            let ordered = match self.sort_document_rows(
+                rows,
+                sort_keys,
+                &decimal_keys,
+                limit.saturating_add(offset),
+            ) {
+                Ok(ordered) => ordered,
+                Err(e) => return self.response_error(task, ErrorCode::from(e)),
+            };
+            rows = ordered.into_iter().skip(offset).take(limit).collect();
         }
 
         match super::super::super::response_codec::encode_raw_document_rows(&rows) {

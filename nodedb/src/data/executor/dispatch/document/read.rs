@@ -99,6 +99,7 @@ impl CoreLoop {
                 projection,
                 limit,
                 offset,
+                sort_keys,
                 system_time,
             } => {
                 let Some(system_as_of) = point_cut(system_time) else {
@@ -115,6 +116,7 @@ impl CoreLoop {
                         projection,
                         limit: *limit,
                         offset: *offset,
+                        sort_keys,
                         system_as_of,
                         merge_overlay: system_time.merges_txn_overlay(),
                     },

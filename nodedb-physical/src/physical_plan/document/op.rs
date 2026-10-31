@@ -313,8 +313,9 @@ pub enum DocumentOp {
     /// equality predicate on an indexed field.
     ///
     /// `filters` is the residual predicate left after the indexed equality,
-    /// applied to every fetched body. Sort / distinct / window functions
-    /// fall back to a full scan upstream — never reach this variant.
+    /// applied to every fetched body. `sort_keys` order the rows that pass it,
+    /// before `offset` and `limit` apply. Window functions fall back to a full
+    /// scan upstream — never reach this variant.
     IndexedFetch {
         collection: QualifiedCollection,
         /// Indexed field path (e.g. `$.email`).
@@ -328,6 +329,8 @@ pub enum DocumentOp {
         projection: Vec<String>,
         limit: usize,
         offset: usize,
+        /// ORDER BY terms. Empty returns rows in index order.
+        sort_keys: Vec<crate::physical_plan::SortKeySpec>,
         /// System-time scope on a bitemporal collection: `Current` reads the
         /// current state, and a point-in-time scope reads at its cut. The
         /// versioned index answers at the cut and each row is read at its
