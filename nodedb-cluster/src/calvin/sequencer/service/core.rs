@@ -168,6 +168,11 @@ impl SequencerService {
     pub async fn run(&mut self, mut shutdown: tokio::sync::watch::Receiver<bool>) {
         let mut interval = tokio::time::interval(self.config.epoch_duration);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // A submit after an idle period ticks at once, so a lone transaction
+        // does not wait for the next period. A submit within one period of the
+        // last tick waits for the regular tick, so a burst fills one epoch.
+        let arrivals = self.inbox_receiver.arrivals();
+        let mut last_tick = Instant::now();
         info!(
             node_id = self.node_id,
             "sequencer service starting; epoch seed is derived on the first leader tick \
@@ -184,6 +189,14 @@ impl SequencerService {
             tokio::select! {
                 _ = interval.tick() => {
                     self.tick();
+                    last_tick = Instant::now();
+                }
+                _ = arrivals.notified() => {
+                    if last_tick.elapsed() >= self.config.epoch_duration {
+                        self.tick();
+                        last_tick = Instant::now();
+                        interval.reset();
+                    }
                 }
                 verdict = async {
                     match verdict_rx.as_mut() {
