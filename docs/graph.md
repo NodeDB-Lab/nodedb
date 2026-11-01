@@ -315,7 +315,9 @@ GRAPH RAG FUSION ON entities
 | `RRF_K`           | Weighting constants `(vector_k, graph_k)` for RRF scoring                                                            |
 | `MAX_VISITED`     | Memory budget cap — BFS stops early if exceeded                                                                      |
 
-The response includes a truncation flag if the memory budget forced early termination.
+The statement returns one row per fused hit, in rank order, with the columns `node_id`, `rrf_score`, `vector_rank`, `vector_distance` and `hop_distance`. `vector_rank` and `vector_distance` are NULL for a node found only by expansion. `hop_distance` is 0 for a seed node.
+
+When the memory budget stops the walk early, or the walk reaches nodes with no identity binding, the server sends a pgwire NOTICE that says so.
 
 ### Step-by-Step Pattern (Application-Level)
 

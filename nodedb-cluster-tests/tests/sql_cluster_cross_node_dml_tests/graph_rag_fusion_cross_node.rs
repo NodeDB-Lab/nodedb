@@ -12,7 +12,8 @@
 //! - the native `GraphRagFusion` opcode (two-source).
 //!
 //! Results compare exactly: node, RRF score, vector rank and distance, hop
-//! distance, and the metadata counts. Only the watermark differs by design.
+//! distance. The run metadata travels as a notice, which these tests do not
+//! read.
 
 use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
@@ -93,9 +94,12 @@ fn query_array() -> String {
 /// A fusion whose walk hits its visit cap: the admitted nodes must match.
 const CAPPED: usize = 3;
 
+/// The same walk without the cap.
+const UNCAPPED: usize = 4;
+
 /// The SQL fusions compared: two-source over one label and over every label,
 /// three-source with BM25, and a two-source walk cut by `MAX_VISITED`
-/// (entry [`CAPPED`]).
+/// (entry [`CAPPED`]) and the same walk uncapped (entry [`UNCAPPED`]).
 fn fusion_sql() -> Vec<String> {
     let q = query_array();
     vec![
@@ -115,6 +119,10 @@ fn fusion_sql() -> Vec<String> {
         format!(
             "GRAPH RAG FUSION ON {COLL} QUERY {q} VECTOR_FIELD 'embedding' VECTOR_TOP_K 3 \
              EXPANSION_DEPTH 4 MAX_VISITED 7 FINAL_TOP_K 30 RRF_K (60.0, 10.0)"
+        ),
+        format!(
+            "GRAPH RAG FUSION ON {COLL} QUERY {q} VECTOR_FIELD 'embedding' VECTOR_TOP_K 3 \
+             EXPANSION_DEPTH 4 FINAL_TOP_K 30 RRF_K (60.0, 10.0)"
         ),
     ]
 }
@@ -142,20 +150,65 @@ fn normalize(value: serde_json::Value) -> serde_json::Value {
     }
 }
 
-/// The single `result` cell of a pgwire fusion answer.
+/// One hit as a JSON object from named text cells. A NULL cell is `null`, and
+/// the score and distance columns are floats, the rank columns integers.
+fn hit_from_cells(cells: impl Iterator<Item = (String, Option<String>)>) -> serde_json::Value {
+    let mut hit = serde_json::Map::new();
+    for (name, cell) in cells {
+        let value = match cell {
+            None => serde_json::Value::Null,
+            Some(text) if name == "node_id" => serde_json::Value::from(text),
+            Some(text) if name == "rrf_score" || name == "vector_distance" => text
+                .parse::<f64>()
+                .map(serde_json::Value::from)
+                .unwrap_or_else(|_| serde_json::Value::from(text)),
+            Some(text) => text
+                .parse::<i64>()
+                .map(serde_json::Value::from)
+                .unwrap_or_else(|_| serde_json::Value::from(text)),
+        };
+        hit.insert(name, value);
+    }
+    serde_json::Value::Object(hit)
+}
+
+/// The hits of a pgwire fusion answer, one JSON object per row.
 async fn pgwire_fusion(client: &tokio_postgres::Client, sql: &str) -> serde_json::Value {
     let msgs = client
         .simple_query(sql)
         .await
         .unwrap_or_else(|e| panic!("{sql}: {e}"));
-    let cell = msgs
+    let hits: Vec<serde_json::Value> = msgs
         .iter()
-        .find_map(|m| match m {
-            tokio_postgres::SimpleQueryMessage::Row(row) => row.get(0).map(str::to_owned),
+        .filter_map(|m| match m {
+            tokio_postgres::SimpleQueryMessage::Row(row) => {
+                Some(hit_from_cells(row.columns().iter().enumerate().map(
+                    |(i, c)| (c.name().to_string(), row.get(i).map(str::to_owned)),
+                )))
+            }
             _ => None,
         })
-        .unwrap_or_else(|| panic!("{sql}: no result row"));
-    normalize(serde_json::Value::String(cell))
+        .collect();
+    assert!(!hits.is_empty(), "{sql}: no result row");
+    serde_json::Value::Array(hits)
+}
+
+/// The hits of a native SQL fusion answer, one JSON object per row.
+fn native_fusion(response: &nodedb_types::QueryResult) -> serde_json::Value {
+    let hits: Vec<serde_json::Value> = response
+        .rows
+        .iter()
+        .map(|row| {
+            hit_from_cells(response.columns.iter().cloned().zip(row.iter().map(|cell| {
+                match serde_json::Value::from(cell.clone()) {
+                    serde_json::Value::Null => None,
+                    serde_json::Value::String(text) => Some(text),
+                    other => Some(other.to_string()),
+                }
+            })))
+        })
+        .collect();
+    serde_json::Value::Array(hits)
 }
 
 fn native_rows(response: &NativeResponse) -> serde_json::Value {
@@ -297,16 +350,17 @@ async fn rag_fusion_across_shards_matches_a_single_node() {
     for statement in &sql {
         let answer = pgwire_fusion(&reference.client, statement).await;
         assert!(
-            answer["results"].as_array().is_some_and(|r| !r.is_empty()),
+            answer.as_array().is_some_and(|r| !r.is_empty()),
             "the reference fusion returns results: {answer}"
         );
         expected_sql.push(answer);
     }
-    assert_eq!(
-        expected_sql[CAPPED]["metadata"]["truncated"],
-        serde_json::Value::Bool(true),
-        "the capped reference fusion hits its visit cap: {}",
-        expected_sql[CAPPED]
+    let hit_count = |idx: usize| expected_sql[idx].as_array().map_or(0, Vec::len);
+    assert!(
+        hit_count(CAPPED) < hit_count(UNCAPPED),
+        "the visit cap cuts the walk: {} hits capped, {} uncapped",
+        hit_count(CAPPED),
+        hit_count(UNCAPPED)
     );
     let mut single = native_session(reference.native_port).await;
     let expected_opcode =
@@ -324,14 +378,8 @@ async fn rag_fusion_across_shards_matches_a_single_node() {
                 .query(statement)
                 .await
                 .unwrap_or_else(|e| panic!("node {idx}: native `{statement}`: {e}"));
-            let cell = native
-                .rows
-                .first()
-                .and_then(|row| row.first())
-                .cloned()
-                .unwrap_or_else(|| panic!("node {idx}: native `{statement}` returned no row"));
             assert_eq!(
-                &normalize(serde_json::Value::from(cell)),
+                &native_fusion(&native),
                 expected,
                 "node {idx}: native SQL `{statement}` must equal the single-node fusion"
             );

@@ -35,6 +35,7 @@ use super::super::schema::OutputSchema;
 use super::super::types::{PlanKind, ShapedRows};
 use super::super::walk::apply_walk_wrap;
 use super::array_slice::shape_array_slice;
+use super::graph_rag::shape_graph_rag;
 use super::kernel::{empty_shaped, shape_decoded_rows, single_result_row};
 
 /// Outcome of materialized response shaping.
@@ -76,6 +77,7 @@ pub async fn shape_response_materialized(
             return Ok(ShapeOutcome::Passthrough);
         }
         PlanKind::ArraySlice
+        | PlanKind::GraphRag
         | PlanKind::ReturningRows
         | PlanKind::SingleDocument
         | PlanKind::MultiRow => {}
@@ -144,6 +146,9 @@ fn shape_translated(
         PlanKind::ArraySlice => {
             shape_array_slice(translated, projection, redaction, sequences, crs_set)?
         }
+        PlanKind::GraphRag => {
+            shape_graph_rag(translated, projection, redaction, sequences, crs_set)?
+        }
         // `RETURNING` rows are held to the columns already announced to the
         // client, when any were — see `super::returning`.
         PlanKind::ReturningRows => {
@@ -188,6 +193,9 @@ pub fn shape_payload_no_plan(
             ShapeOutcome::Passthrough
         }
         PlanKind::ArraySlice => ShapeOutcome::Rows(shape_array_slice(
+            payload, projection, redaction, sequences, crs_set,
+        )?),
+        PlanKind::GraphRag => ShapeOutcome::Rows(shape_graph_rag(
             payload, projection, redaction, sequences, crs_set,
         )?),
         PlanKind::ReturningRows => ShapeOutcome::Rows(shape_returning_rows(

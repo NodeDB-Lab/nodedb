@@ -225,16 +225,29 @@ async fn rag_fusion_as_of_expands_the_graph_before_the_change() {
              VECTOR_TOP_K 1 EXPANSION_DEPTH 1 EDGE_LABEL 'rel' FINAL_TOP_K 10 {as_of}"
         )
     };
-    let before = server
-        .query_text(&fusion(format!("AS OF SYSTEM TIME {cut}")))
-        .await
-        .expect("historical fusion")
-        .join("");
-    assert!(has(&before, "n2") && !has(&before, "n3"), "{before}");
-    let now = server
-        .query_text(&fusion(String::new()))
-        .await
-        .expect("current fusion")
-        .join("");
-    assert!(!has(&now, "n2") && has(&now, "n3"), "{now}");
+    let node_ids = |hits: &[serde_json::Value]| -> Vec<String> {
+        hits.iter()
+            .filter_map(|hit| hit["node_id"].as_str().map(str::to_owned))
+            .collect()
+    };
+    let before = node_ids(
+        &server
+            .fusion_hits(&fusion(format!("AS OF SYSTEM TIME {cut}")))
+            .await
+            .expect("historical fusion"),
+    );
+    assert!(
+        before.contains(&"n2".to_string()) && !before.contains(&"n3".to_string()),
+        "{before:?}"
+    );
+    let now = node_ids(
+        &server
+            .fusion_hits(&fusion(String::new()))
+            .await
+            .expect("current fusion"),
+    );
+    assert!(
+        !now.contains(&"n2".to_string()) && now.contains(&"n3".to_string()),
+        "{now:?}"
+    );
 }

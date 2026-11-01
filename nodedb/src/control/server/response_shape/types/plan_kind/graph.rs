@@ -15,7 +15,6 @@ pub(super) fn describe_graph(op: &GraphOp) -> PlanKind {
         | GraphOp::NeighborsMulti { .. }
         | GraphOp::Path { .. }
         | GraphOp::Subgraph { .. }
-        | GraphOp::RagFusion { .. }
         | GraphOp::Algo { .. }
         | GraphOp::Match { .. }
         | GraphOp::MatchContinuation { .. }
@@ -25,6 +24,8 @@ pub(super) fn describe_graph(op: &GraphOp) -> PlanKind {
         | GraphOp::TemporalNeighbors { .. }
         | GraphOp::Stats { .. }
         | GraphOp::NodePresenceRead { .. } => PlanKind::MultiRow,
+
+        GraphOp::RagFusion { .. } => PlanKind::GraphRag,
 
         GraphOp::EdgePut { .. } | GraphOp::EdgePutBatch { .. } => PlanKind::DmlResult("INSERT"),
 

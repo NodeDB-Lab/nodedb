@@ -11,6 +11,10 @@ pub enum PlanKind {
     /// Array slice result — decoded via `ArraySliceResponse` to surface the
     /// `truncated_before_horizon` flag as a pgwire NOTICE when set.
     ArraySlice,
+    /// GraphRAG fusion result — decoded via `GraphRagResponse` into one row
+    /// per fused hit, with the run's `metadata` surfaced as a pgwire NOTICE
+    /// when the run was truncated or reached unaddressable nodes.
+    GraphRag,
     /// Opaque execution result: DDL, maintenance, an internal stage, or a
     /// function-call payload its dispatcher reads directly. pgwire renders a
     /// bare `OK` tag. Never a client-facing row-count DML.

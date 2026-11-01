@@ -163,6 +163,7 @@ pub fn calvin_task_outcome(
         }
         PlanKind::Execution
         | PlanKind::ArraySlice
+        | PlanKind::GraphRag
         | PlanKind::ReturningRows
         | PlanKind::SingleDocument
         | PlanKind::MultiRow => match calvin_tag_for_plan(plan) {

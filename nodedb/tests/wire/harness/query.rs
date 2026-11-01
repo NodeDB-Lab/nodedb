@@ -83,6 +83,39 @@ impl TestServer {
         }
     }
 
+    /// Run a `GRAPH RAG FUSION` statement and return each hit as a JSON
+    /// object. A NULL column is `null`. Every column but `node_id` that reads
+    /// as a number is a JSON number, and `node_id` stays a string.
+    pub async fn fusion_hits(&self, sql: &str) -> Result<Vec<serde_json::Value>, String> {
+        let client = self.client.as_ref();
+        let msgs = client
+            .simple_query(sql)
+            .await
+            .map_err(|e| pg_error_detail(&e))?;
+        let mut hits = Vec::new();
+        for msg in msgs {
+            let tokio_postgres::SimpleQueryMessage::Row(row) = msg else {
+                continue;
+            };
+            let mut hit = serde_json::Map::new();
+            for (i, column) in row.columns().iter().enumerate() {
+                let name = column.name();
+                let value = match row.get(i) {
+                    None => serde_json::Value::Null,
+                    Some(text) if name == "node_id" => serde_json::Value::from(text),
+                    Some(text) => text
+                        .parse::<i64>()
+                        .map(serde_json::Value::from)
+                        .or_else(|_| text.parse::<f64>().map(serde_json::Value::from))
+                        .unwrap_or_else(|_| serde_json::Value::from(text)),
+                };
+                hit.insert(name.to_string(), value);
+            }
+            hits.push(serde_json::Value::Object(hit));
+        }
+        Ok(hits)
+    }
+
     /// Execute a SQL statement, returning every row as a Vec of its column
     /// values (in projection order). Column count is taken from the first
     /// row received.
