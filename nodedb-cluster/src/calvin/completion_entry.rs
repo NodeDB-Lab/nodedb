@@ -11,6 +11,9 @@ use super::completion_waiter::CompletionWaiter;
 
 pub(crate) struct PendingCompletion {
     pub(crate) expected_participants: usize,
+    /// The vShards the sequenced transaction touches, ascending. Empty until
+    /// `seed_participants` runs.
+    pub(crate) participants: Vec<u32>,
     pub(crate) acked_vshards: BTreeSet<u32>,
     /// The apply result each acked participant's `CompletionAck` carried,
     /// by vShard. A participant whose ack carried none has no entry.
@@ -57,6 +60,7 @@ impl PendingCompletion {
     pub(crate) fn new(created: Instant) -> Self {
         Self {
             expected_participants: 0,
+            participants: Vec::new(),
             acked_vshards: BTreeSet::new(),
             ack_results: BTreeMap::new(),
             completion_tx: None,

@@ -77,6 +77,16 @@ impl CalvinCompletionRegistry {
         entry.expected_participants = entry.expected_participants.max(expected);
     }
 
+    /// Record the vShards `txn` touches, from the replicated `EpochBatch` that
+    /// sequenced it. A verdict reaches only these vShards' schedulers.
+    pub fn seed_participants(&self, txn: TxnId, vshards: impl IntoIterator<Item = u32>) {
+        let mut participants: Vec<u32> = vshards.into_iter().collect();
+        participants.sort_unstable();
+        participants.dedup();
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        inner.sequenced_entry_mut(txn).participants = participants;
+    }
+
     /// Record one participant vshard's durable commit vote for `txn`, tallied
     /// from a replicated `Vote` / `AbortVote` (last write wins per `vshard`,
     /// deterministic across retries). On the transition to a complete tally it
@@ -159,7 +169,7 @@ impl CalvinCompletionRegistry {
     pub fn note_verdict(&self, txn: TxnId, verdict: VerdictOutcome) {
         let commit = verdict.is_commit();
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        {
+        let participants = {
             let entry = inner.entry_mut(txn);
             let differs = entry
                 .verdict
@@ -180,18 +190,29 @@ impl CalvinCompletionRegistry {
                 Some(false) => {}
                 None => entry.verdict = Some(verdict),
             }
-        }
+            entry.participants.clone()
+        };
 
-        // Broadcast the push to every locally registered scheduler. Each filters
-        // by its own parked `(epoch, position)`; a drop on a full/closed channel
-        // is backstopped by the scheduler's probe/stall re-probe.
+        // Push to the schedulers of the vShards the transaction touches. A
+        // transaction whose participants are not seeded reaches every locally
+        // registered scheduler, and each filters by its own parked
+        // `(epoch, position)`. A drop on a full/closed channel is backstopped
+        // by the scheduler's probe/stall re-probe.
         let signal = VerdictSignal {
             epoch: txn.epoch,
             position: txn.position,
             commit,
         };
-        for tx in inner.verdict_signal_senders.values() {
-            let _ = tx.try_send(signal);
+        if participants.is_empty() {
+            for tx in inner.verdict_signal_senders.values() {
+                let _ = tx.try_send(signal);
+            }
+        } else {
+            for vshard in &participants {
+                if let Some(tx) = inner.verdict_signal_senders.get(vshard) {
+                    let _ = tx.try_send(signal);
+                }
+            }
         }
         // A waiter fires here when every ack is in already.
         inner.settle(txn);
@@ -595,6 +616,25 @@ mod tests {
                 commit: true,
             }
         );
+    }
+
+    #[tokio::test]
+    async fn note_verdict_reaches_only_the_vshards_the_txn_touches() {
+        let reg = CalvinCompletionRegistry::new_detached();
+        let (tx1, mut rx1) = mpsc::channel(8);
+        let (tx2, mut rx2) = mpsc::channel(8);
+        let (tx3, mut rx3) = mpsc::channel(8);
+        reg.register_verdict_signal_sender(1, tx1);
+        reg.register_verdict_signal_sender(2, tx2);
+        reg.register_verdict_signal_sender(3, tx3);
+
+        let txn = TxnId::new(52, 0);
+        reg.seed_participants(txn, [2, 1, 9]);
+        reg.note_verdict(txn, VerdictOutcome::Commit);
+
+        assert!(rx1.try_recv().expect("push to vshard 1").commit);
+        assert!(rx2.try_recv().expect("push to vshard 2").commit);
+        assert!(rx3.try_recv().is_err(), "vshard 3 does not take part");
     }
 
     #[tokio::test]

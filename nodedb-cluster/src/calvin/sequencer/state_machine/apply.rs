@@ -363,10 +363,12 @@ impl SequencerStateMachine {
             // EVERY replica (not just the epoch's originating leader), so a
             // post-failover sequencer leader can still detect vote
             // completeness and aggregate the verdict.
-            self.completion_registry.seed_expected(
-                crate::calvin::TxnId::new(batch.epoch, txn.position),
-                txn.tx_class.participating_vshards().len(),
-            );
+            let id = crate::calvin::TxnId::new(batch.epoch, txn.position);
+            let participants = txn.tx_class.participating_vshards();
+            self.completion_registry
+                .seed_expected(id, participants.len());
+            self.completion_registry
+                .seed_participants(id, participants.iter().map(|vshard| vshard.as_u32()));
         }
 
         let epoch_system_ms = batch.epoch_system_ms;
