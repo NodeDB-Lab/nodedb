@@ -4,12 +4,14 @@
 //!
 //! A search with a residual row filter (`rls_filters`: the statement's
 //! `WHERE` conjuncts and any read policy) ranks more candidates than it
-//! returns. The Control Plane evaluates the filter over the attached bodies
-//! and keeps the `top_k` nearest survivors. A fixed over-fetch returns fewer
-//! than `top_k` rows whenever the nearest candidates fail the filter. The
-//! window therefore doubles until `top_k` candidates pass the filter or the
-//! index holds no further candidate, so the filter narrows the candidates
-//! before the top-k cut.
+//! returns. The filter runs over the attached bodies and keeps the `top_k`
+//! nearest survivors. A fixed over-fetch returns fewer than `top_k` rows
+//! whenever the nearest candidates fail the filter. The window therefore
+//! widens until `top_k` candidates pass the filter or the index holds no
+//! further candidate, so the filter narrows the candidates before the top-k
+//! cut.
+
+use std::collections::HashMap;
 
 use nodedb_query::scan_filter::ScanFilter;
 
@@ -54,10 +56,12 @@ pub(super) struct WindowHits {
 impl CoreLoop {
     /// Rank `fetch_k` candidates and attach their bodies.
     ///
-    /// With a non-empty `residual`, the window doubles until `top_k` hits
+    /// With a non-empty `residual`, the window widens until `top_k` hits
     /// pass it or the index returns fewer candidates than the window asked
-    /// for. A hit passes when the Control Plane will keep it: it has a body
-    /// and every filter matches that body. The hits are not filtered here.
+    /// for. A hit passes when it has a body and every filter matches that
+    /// body. The next width follows the pass rate seen so far, and a hit
+    /// already ranked keeps the body it was given, so a widening ranks each
+    /// candidate's body once.
     pub(super) fn rank_window(
         &self,
         window: &SearchWindow<'_>,
@@ -73,6 +77,7 @@ impl CoreLoop {
             Some(_) => window.collection.len(),
         };
         let crs = self.crs_context();
+        let mut ranked_before: HashMap<u32, VectorSearchHit> = HashMap::new();
         loop {
             let ef = effective_ef(window.ef_search, fetch_k);
             let ranked = match (window.cut, window.bitmap) {
@@ -100,26 +105,69 @@ impl CoreLoop {
             }
             .map_err(crate::Error::from)?;
             let exhausted = ranked.len() < fetch_k || fetch_k >= live;
-            let hits = ranked
-                .iter()
-                .map(|r| build_search_hit(Some(window.collection), r.id, r.distance))
-                .map(|hit| {
-                    self.attach_body(
+            let mut hits = Vec::with_capacity(ranked.len());
+            for r in &ranked {
+                let hit = match ranked_before.remove(&r.id) {
+                    Some(hit) => hit,
+                    None => self.attach_body(
                         bodies.database_id,
                         bodies.tid,
                         bodies.collection,
                         bodies.attach,
                         bodies.at,
-                        hit,
-                    )
-                })
-                .collect::<crate::Result<Vec<_>>>()?;
-            if residual.is_empty() || exhausted || passing(&hits, residual, &crs) >= top_k {
+                        build_search_hit(Some(window.collection), r.id, r.distance),
+                    )?,
+                };
+                hits.push(hit);
+            }
+            if residual.is_empty() || exhausted {
                 return Ok(WindowHits { hits, fetch_k });
             }
-            fetch_k = fetch_k.saturating_mul(2);
+            let passed = passing(&hits, residual, &crs);
+            if passed >= top_k {
+                return Ok(WindowHits { hits, fetch_k });
+            }
+            fetch_k = wider_window(fetch_k, hits.len(), passed, top_k);
+            ranked_before = ranked.iter().map(|r| r.id).zip(hits).collect();
         }
     }
+}
+
+/// The width of the next window: the one at which the pass rate seen so far
+/// yields `top_k` hits, with half again as much headroom. A window that
+/// passed nothing doubles. Growth is at most eightfold per step and always
+/// at least one candidate.
+fn wider_window(fetch_k: usize, ranked: usize, passed: usize, top_k: usize) -> usize {
+    let grown = if passed == 0 {
+        fetch_k.saturating_mul(2)
+    } else {
+        ranked
+            .saturating_mul(top_k)
+            .div_ceil(passed)
+            .saturating_mul(3)
+            / 2
+    };
+    grown
+        .min(fetch_k.saturating_mul(8))
+        .max(fetch_k.saturating_add(1))
+}
+
+/// Keep the hits whose body passes `residual`, nearest first, cut to `top_k`.
+/// The Control Plane applies the same filter and cut to the merged hits of
+/// every core, so a core that drops its failing hits sends it no fewer rows
+/// than it keeps.
+pub(super) fn keep_passing(
+    hits: &mut Vec<VectorSearchHit>,
+    residual: &[ScanFilter],
+    crs: &nodedb_crs::CrsContext<'_>,
+    top_k: usize,
+) {
+    hits.retain(|hit| {
+        hit.body
+            .as_deref()
+            .is_some_and(|body| ScanFilter::all_match_binary(residual, body, crs).unwrap_or(false))
+    });
+    hits.truncate(top_k);
 }
 
 /// Hits the Control Plane keeps under `residual`. A filter that fails to

@@ -347,10 +347,9 @@ impl CoreLoop {
             None => None,
         };
 
-        // The residual filter is evaluated at the Control-Plane response
-        // boundary (`response_translate::vector`): the Data Plane attaches
-        // each body so the Control Plane runs the predicate without a second
-        // round-trip, then truncates to `top_k`. The slow path (no
+        // The residual filter runs over each attached body. The Control Plane
+        // applies it again to the merged hits at the response boundary
+        // (`response_translate::vector`), the security boundary. The slow path (no
         // `skip_payload_fetch`) also attaches bodies: the response translator
         // flattens their fields into the hit for column projection. The
         // pure-vector fast path fetches no body.
@@ -408,9 +407,20 @@ impl CoreLoop {
                 }
             }
         }
-        // With a residual filter the Control Plane makes the top-k cut, so
-        // the whole window travels.
-        let truncate_to = if residual.is_empty() { top_k } else { fetch_k };
+        // A residual filter keeps its passing hits and the nearest `top_k` of
+        // them here, outside a transaction. Inside one, the staged rows merge
+        // in first and the Control Plane applies the filter to the union.
+        let truncate_to = if residual.is_empty() || overlay_txn.is_some() {
+            if residual.is_empty() { top_k } else { fetch_k }
+        } else {
+            super::vector_search_window::keep_passing(
+                &mut hits,
+                &residual,
+                &self.crs_context(),
+                top_k,
+            );
+            top_k
+        };
         // Read-your-own-writes for vector search: fold this transaction's
         // staged vector inserts into the base HNSW/IVF result before
         // truncation, so a vector inserted earlier in the same transaction
