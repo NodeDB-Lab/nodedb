@@ -148,6 +148,7 @@ impl SequencerService {
                     rejected = rejected_count,
                     "sequencer proposed epoch batch"
                 );
+                self.last_proposed_index = log_index;
                 self.advance_epoch(epoch + 1);
             }
             Err(e) => {

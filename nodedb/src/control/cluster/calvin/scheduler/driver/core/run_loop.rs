@@ -55,16 +55,22 @@ impl Scheduler {
             // Register for the capacity wake BEFORE the re-send pass. A
             // response routed after a refusal but before this point is
             // covered by the pass itself. One routed after it wakes the arm.
+            // Registration takes the lock every scheduler shares, so a pass
+            // with nothing deferred does not register.
             let capacity_notified = capacity_freed.notified();
             tokio::pin!(capacity_notified);
-            capacity_notified.as_mut().enable();
-            if self.resends_deferred() {
+            let watching_capacity = self.resends_deferred();
+            if watching_capacity {
+                capacity_notified.as_mut().enable();
                 self.redispatch_deferred();
             }
             // Registered before the hold check below, for the same reason.
             let cut_changed = shared.calvin.cut_barriers.notified();
             tokio::pin!(cut_changed);
-            cut_changed.as_mut().enable();
+            let watching_cut = !self.cut_holds.is_empty();
+            if watching_cut {
+                cut_changed.as_mut().enable();
+            }
 
             // Every pass reads the role first: a promotion stages held txns,
             // a demotion stops staging.
@@ -94,6 +100,14 @@ impl Scheduler {
             let read_timeout_at = self
                 .next_read_timeout_due()
                 .map(tokio::time::Instant::from_std);
+
+            // A deferred request or a cut hold that arose during this pass
+            // has no registered wake yet: run the pass again to register.
+            if (!watching_capacity && self.resends_deferred())
+                || (!watching_cut && !self.cut_holds.is_empty())
+            {
+                continue;
+            }
 
             tokio::select! {
                 biased;

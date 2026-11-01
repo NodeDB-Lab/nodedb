@@ -22,7 +22,7 @@
 
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tracing::{debug, info, warn};
 
@@ -38,6 +38,10 @@ use crate::calvin::sequencer::state_machine::SequencerStateMachine;
 use crate::calvin::{CalvinCompletionRegistry, TxnId, VerdictOutcome};
 use crate::error::ClusterError;
 use crate::multi_raft::MultiRaft;
+
+/// How often a submit that arrived during an in-flight epoch checks whether
+/// the pipeline has drained.
+const DEFERRED_TICK_POLL: Duration = Duration::from_micros(250);
 
 use crate::calvin::sequencer::metrics::SequencerMetrics;
 
@@ -90,6 +94,10 @@ pub struct SequencerService {
     /// again. On leader failover, `inbox_receiver` is dropped (in-flight
     /// submissions are not in the log and will be retried).
     pub(super) current_epoch: Option<super::epoch_seed::EpochCursor>,
+    /// The Raft log index of the last epoch batch this leader proposed, or `0`
+    /// before the first. The epoch pipeline is idle once the sequencer group
+    /// has applied it.
+    pub(super) last_proposed_index: u64,
     /// The `epoch_system_ms` this service last minted, or `None` before its
     /// first mint. A proposed batch applies later, so the next mint reads
     /// this as well as the state machine's applied instant.
@@ -151,6 +159,7 @@ impl SequencerService {
             next_reservation_position: RESERVATION_POSITION_BAND,
             reservation_epoch: 0,
             current_epoch: None,
+            last_proposed_index: 0,
             last_minted_ms: None,
             state_machine,
             halt_reported: false,
@@ -168,11 +177,13 @@ impl SequencerService {
     pub async fn run(&mut self, mut shutdown: tokio::sync::watch::Receiver<bool>) {
         let mut interval = tokio::time::interval(self.config.epoch_duration);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        // A submit after an idle period ticks at once, so a lone transaction
-        // does not wait for the next period. A submit within one period of the
-        // last tick waits for the regular tick, so a burst fills one epoch.
+        // A submit ticks at once when no earlier epoch is still being
+        // replicated, so a lone transaction does not wait for the next period.
+        // Submits that arrive while an epoch is in flight queue, and the tick
+        // that follows its apply takes them as one epoch: a burst batches
+        // while the previous epoch commits, as in group commit.
         let arrivals = self.inbox_receiver.arrivals();
-        let mut last_tick = Instant::now();
+        let mut deferred = false;
         info!(
             node_id = self.node_id,
             "sequencer service starting; epoch seed is derived on the first leader tick \
@@ -189,13 +200,28 @@ impl SequencerService {
             tokio::select! {
                 _ = interval.tick() => {
                     self.tick();
-                    last_tick = Instant::now();
+                    deferred = false;
                 }
                 _ = arrivals.notified() => {
-                    if last_tick.elapsed() >= self.config.epoch_duration {
+                    if self.epoch_pipeline_idle() {
                         self.tick();
-                        last_tick = Instant::now();
                         interval.reset();
+                        deferred = false;
+                    } else {
+                        deferred = true;
+                    }
+                }
+                _ = async {
+                    if deferred {
+                        tokio::time::sleep(DEFERRED_TICK_POLL).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
+                    if self.epoch_pipeline_idle() {
+                        self.tick();
+                        interval.reset();
+                        deferred = false;
                     }
                 }
                 verdict = async {
@@ -227,6 +253,15 @@ impl SequencerService {
                 }
             }
         }
+    }
+
+    /// Whether every epoch batch this leader proposed has been applied, so a
+    /// new tick starts a fresh epoch rather than queueing behind one still
+    /// replicating.
+    fn epoch_pipeline_idle(&self) -> bool {
+        let mr = self.multi_raft.lock().unwrap_or_else(|p| p.into_inner());
+        mr.last_applied(SEQUENCER_GROUP_ID)
+            .is_none_or(|applied| applied >= self.last_proposed_index)
     }
 
     /// Execute one epoch tick.
