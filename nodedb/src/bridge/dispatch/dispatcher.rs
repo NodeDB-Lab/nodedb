@@ -127,6 +127,10 @@ pub struct Dispatcher {
     /// in-flight slot wakes all waiters once per call.
     pub(super) capacity_freed: Arc<Notify>,
 
+    /// A Data Plane core pushed a response. The response poller sleeps on it
+    /// between polls, so a response is routed as soon as it arrives.
+    pub(super) response_arrived: Arc<Notify>,
+
     /// The node's outcome floor. Every ring push carries its current value.
     pub(super) outcome_floor: Arc<OutcomeFloor>,
 
@@ -154,10 +158,15 @@ impl Dispatcher {
     ) -> (Self, Vec<CoreChannelDataSide>) {
         let mut cores = Vec::with_capacity(num_cores);
         let mut data_sides = Vec::with_capacity(num_cores);
+        let response_arrived = Arc::new(Notify::new());
 
         for _ in 0..num_cores {
             let (req_tx, req_rx) = RingBuffer::channel::<BridgeRequest>(queue_capacity);
-            let (resp_tx, resp_rx) = RingBuffer::channel::<BridgeResponse>(queue_capacity);
+            let arrived = Arc::clone(&response_arrived);
+            let (resp_tx, resp_rx) = RingBuffer::channel_with_push_hook::<BridgeResponse>(
+                queue_capacity,
+                Arc::new(move || arrived.notify_one()),
+            );
 
             cores.push(CoreChannel {
                 request_tx: req_tx,
@@ -189,12 +198,20 @@ impl Dispatcher {
                 priority_resolver,
                 data_plane_draining: false,
                 capacity_freed: Arc::new(Notify::new()),
+                response_arrived,
                 outcome_floor: OutcomeFloor::new(),
                 dispatched_lsns: DispatchedLsns::default(),
                 capacity_metrics: Arc::new(DispatchCapacityMetrics::new()),
             },
             data_sides,
         )
+    }
+
+    /// The signal fired whenever a Data Plane core pushes a response. It
+    /// keeps one permit when nothing waits, so a response pushed between two
+    /// polls still wakes the next wait.
+    pub fn response_arrivals(&self) -> Arc<Notify> {
+        Arc::clone(&self.response_arrived)
     }
 
     /// The signal fired whenever the dispatcher frees at least one in-flight

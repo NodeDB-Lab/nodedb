@@ -58,7 +58,14 @@ struct Shared<T> {
 
     /// Shared metrics counters.
     metrics: BridgeMetrics,
+
+    /// Called by the producer after each push. A consumer that sleeps between
+    /// polls wakes from it, so a pushed value waits no longer than the wake.
+    push_hook: Option<PushHook>,
 }
+
+/// A wake the producer runs after each push.
+pub type PushHook = Arc<dyn Fn() + Send + Sync>;
 
 // SAFETY: The SPSC protocol ensures that producer and consumer never access
 // the same slot concurrently. The producer writes slots[tail & mask] and the
@@ -117,6 +124,19 @@ pub struct RingBuffer;
 
 impl RingBuffer {
     pub fn channel<T>(capacity: usize) -> (Producer<T>, Consumer<T>) {
+        Self::build(capacity, None)
+    }
+
+    /// Like [`Self::channel`], with `hook` run by the producer after every
+    /// successful push.
+    pub fn channel_with_push_hook<T>(
+        capacity: usize,
+        hook: PushHook,
+    ) -> (Producer<T>, Consumer<T>) {
+        Self::build(capacity, Some(hook))
+    }
+
+    fn build<T>(capacity: usize, push_hook: Option<PushHook>) -> (Producer<T>, Consumer<T>) {
         assert!(capacity > 0, "ring buffer capacity must be > 0");
 
         let capacity = capacity.next_power_of_two();
@@ -135,6 +155,7 @@ impl RingBuffer {
             mask,
             disconnected: AtomicBool::new(false),
             metrics: BridgeMetrics::new(),
+            push_hook,
         });
 
         let producer = Producer {
@@ -191,6 +212,9 @@ impl<T> Producer<T> {
             .store(tail.wrapping_add(1), Ordering::Release);
 
         self.shared.metrics.record_push();
+        if let Some(hook) = &self.shared.push_hook {
+            hook();
+        }
         Ok(())
     }
 
