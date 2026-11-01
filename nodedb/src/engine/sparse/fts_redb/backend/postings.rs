@@ -8,14 +8,14 @@
 use nodedb_fts::IndexScope;
 use nodedb_fts::posting::Posting;
 use nodedb_types::Surrogate;
-use redb::ReadableDatabase;
+use redb::{ReadableDatabase, ReadableTable};
 
 use super::core::RedbFtsBackend;
 use super::posting_rows;
 use super::shared::redb_err;
-use crate::engine::sparse::fts_redb::keys::KeyOwner;
+use crate::engine::sparse::fts_redb::keys::{KeyOwner, doc_key};
 use crate::engine::sparse::fts_redb::scan;
-use crate::engine::sparse::fts_redb::tables::POSTINGS;
+use crate::engine::sparse::fts_redb::tables::{DOC_LENGTHS, POSTINGS};
 
 pub(super) fn read(
     backend: &RedbFtsBackend,
@@ -34,6 +34,25 @@ pub(super) fn read(
     posting_rows::read_list(&table, database_id, tid, index, term)
 }
 
+/// The posting list of `term` with the token count of each posting's
+/// document, read from the posting rows alone.
+pub(super) fn read_with_lengths(
+    backend: &RedbFtsBackend,
+    database_id: u64,
+    tid: u64,
+    index: IndexScope<'_>,
+    term: &str,
+) -> crate::Result<Vec<(Posting, u32)>> {
+    let read_txn = backend
+        .db
+        .begin_read()
+        .map_err(|e| redb_err("read txn", e))?;
+    let table = read_txn
+        .open_table(POSTINGS)
+        .map_err(|e| redb_err("open postings", e))?;
+    posting_rows::read_list_with_lengths(&table, database_id, tid, index, term)
+}
+
 /// The number of documents holding a posting under `term`.
 pub(super) fn doc_count(
     backend: &RedbFtsBackend,
@@ -50,6 +69,25 @@ pub(super) fn doc_count(
         .open_table(POSTINGS)
         .map_err(|e| redb_err("open postings", e))?;
     posting_rows::count(&table, database_id, tid, index, term)
+}
+
+/// The token count a row records for `posting`'s document: the length the
+/// index holds, or the term frequency, the tightest length the posting
+/// proves, when the index holds none.
+fn length_of(
+    lengths: &impl ReadableTable<scan::DocKeyDef, &'static [u8]>,
+    database_id: u64,
+    tid: u64,
+    index: IndexScope<'_>,
+    posting: &Posting,
+) -> crate::Result<u32> {
+    let Some(value) = lengths
+        .get(doc_key(database_id, tid, index, posting.doc_id))
+        .map_err(|e| redb_err("get doc_length", e))?
+    else {
+        return Ok(posting.term_freq);
+    };
+    zerompk::from_msgpack::<u32>(value.value()).map_err(|e| redb_err("deserialize doc_length", e))
 }
 
 /// Run `apply` on the POSTINGS table in one committed write transaction.
@@ -71,6 +109,32 @@ fn with_postings<R>(
     Ok(out)
 }
 
+/// Run `apply` on the POSTINGS table and the DOC_LENGTHS table in one
+/// committed write transaction.
+fn with_postings_and_lengths<R>(
+    backend: &RedbFtsBackend,
+    apply: impl FnOnce(
+        &mut posting_rows::PostingTable<'_>,
+        &redb::Table<'_, scan::DocKeyDef, &'static [u8]>,
+    ) -> crate::Result<R>,
+) -> crate::Result<R> {
+    let write_txn = backend
+        .db
+        .begin_write()
+        .map_err(|e| redb_err("write txn", e))?;
+    let out = {
+        let lengths = write_txn
+            .open_table(DOC_LENGTHS)
+            .map_err(|e| redb_err("open doc_lengths", e))?;
+        let mut table = write_txn
+            .open_table(POSTINGS)
+            .map_err(|e| redb_err("open postings", e))?;
+        apply(&mut table, &lengths)?
+    };
+    write_txn.commit().map_err(|e| redb_err("commit", e))?;
+    Ok(out)
+}
+
 pub(super) fn write(
     backend: &RedbFtsBackend,
     database_id: u64,
@@ -79,8 +143,12 @@ pub(super) fn write(
     term: &str,
     postings: &[Posting],
 ) -> crate::Result<()> {
-    with_postings(backend, |table| {
-        posting_rows::replace_list(table, database_id, tid, index, term, postings)
+    with_postings_and_lengths(backend, |table, lengths| {
+        let doc_lens = postings
+            .iter()
+            .map(|posting| length_of(lengths, database_id, tid, index, posting))
+            .collect::<crate::Result<Vec<u32>>>()?;
+        posting_rows::replace_list(table, database_id, tid, index, term, postings, &doc_lens)
     })
 }
 
@@ -104,8 +172,9 @@ pub(super) fn upsert_one(
     term: &str,
     posting: &Posting,
 ) -> crate::Result<()> {
-    with_postings(backend, |table| {
-        posting_rows::put(table, database_id, tid, index, term, posting)
+    with_postings_and_lengths(backend, |table, lengths| {
+        let doc_len = length_of(lengths, database_id, tid, index, posting)?;
+        posting_rows::put(table, database_id, tid, index, term, posting, doc_len)
     })
 }
 
@@ -218,13 +287,39 @@ mod tests {
         assert_eq!(added.surrogate, 201);
         assert_eq!(
             added.value,
-            posting_rows::encode(&posting(201, 1)).unwrap(),
+            posting_rows::encode(&posting(201, 1), 1).unwrap(),
             "the new row holds exactly one posting"
         );
         assert_eq!(
             backend.read_postings(DB, T, DOCS, "common").unwrap().len(),
             201
         );
+    }
+
+    /// A row carries the token count of its document, so a posting list reads
+    /// back with lengths and no second table. A document with no recorded
+    /// length reads back with its term frequency.
+    #[test]
+    fn a_row_carries_its_document_length() {
+        let (backend, _dir) = open_temp();
+        backend
+            .write_doc_length(DB, T, DOCS, Surrogate::new(1), 7)
+            .unwrap();
+        backend
+            .upsert_posting(DB, T, DOCS, "t", &posting(1, 2))
+            .unwrap();
+        backend
+            .upsert_posting(DB, T, DOCS, "t", &posting(2, 3))
+            .unwrap();
+
+        let list = backend
+            .read_postings_with_lengths(DB, T, DOCS, "t")
+            .unwrap();
+        let rows: Vec<(u32, Option<u32>)> = list
+            .iter()
+            .map(|(p, len)| (p.doc_id.as_u32(), *len))
+            .collect();
+        assert_eq!(rows, vec![(1, Some(7)), (2, Some(3))]);
     }
 
     #[test]

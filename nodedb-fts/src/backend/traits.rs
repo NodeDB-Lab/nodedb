@@ -42,6 +42,25 @@ pub trait FtsBackend {
         term: &str,
     ) -> Result<Vec<Posting>, Self::Error>;
 
+    /// Read the posting list for a term with the recorded token count of each
+    /// posting's document. The count is `None` for a document with no
+    /// recorded length.
+    ///
+    /// The default reads the lengths separately. A backend that keeps the
+    /// length with each posting overrides it with one read.
+    fn read_postings_with_lengths(
+        &self,
+        database_id: u64,
+        tid: u64,
+        index: IndexScope<'_>,
+        term: &str,
+    ) -> Result<Vec<(Posting, Option<u32>)>, Self::Error> {
+        let postings = self.read_postings(database_id, tid, index, term)?;
+        let doc_ids: Vec<Surrogate> = postings.iter().map(|p| p.doc_id).collect();
+        let lengths = self.read_doc_lengths(database_id, tid, index, &doc_ids)?;
+        Ok(postings.into_iter().zip(lengths).collect())
+    }
+
     /// Write/replace the posting list for a term in an index.
     fn write_postings(
         &self,

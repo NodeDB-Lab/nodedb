@@ -221,7 +221,15 @@ impl InvertedIndex {
                 term_freq: freq,
                 positions,
             };
-            posting_rows::put(&mut postings_table, database_id, t, index, term, &posting)?;
+            posting_rows::put(
+                &mut postings_table,
+                database_id,
+                t,
+                index,
+                term,
+                &posting,
+                doc_len,
+            )?;
         }
         drop(postings_table);
 
@@ -398,7 +406,7 @@ mod tests {
             term_freq: 1,
             positions: vec![0],
         };
-        assert_eq!(value, &posting_rows::encode(&expected).unwrap());
+        assert_eq!(value, &posting_rows::encode(&expected, 1).unwrap());
 
         // A re-index of one document rewrites only its own row.
         idx.index_document(DB, T, "docs", Surrogate::new(7), &body("bravo bravo"))

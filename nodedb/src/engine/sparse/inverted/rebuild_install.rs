@@ -265,9 +265,15 @@ fn write_rebuilt_scope(
             .map_err(|e| inverted_err("rebuild open postings", e))?;
         // The collection's rows were cleared first, so each posting is one
         // fresh row.
+        let lengths: std::collections::HashMap<u32, u32> =
+            scope.doc_lengths.iter().copied().collect();
         for (term, list) in &scope.postings {
             for posting in list {
-                posting_rows::put(&mut table, db, t, index, term, posting)?;
+                let doc_len = lengths
+                    .get(&posting.doc_id.as_u32())
+                    .copied()
+                    .unwrap_or(posting.term_freq);
+                posting_rows::put(&mut table, db, t, index, term, posting, doc_len)?;
             }
         }
     }

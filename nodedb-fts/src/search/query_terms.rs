@@ -10,7 +10,7 @@
 
 use std::collections::HashSet;
 
-use nodedb_types::{Surrogate, SurrogateBitmap};
+use nodedb_types::SurrogateBitmap;
 
 use crate::backend::FtsBackend;
 use crate::block::{CompactPosting, into_blocks};
@@ -230,10 +230,10 @@ impl<B: FtsBackend> FtsIndex<B> {
             }
             let postings = self
                 .backend
-                .read_postings(database_id, tid, index, text)
+                .read_postings_with_lengths(database_id, tid, index, text)
                 .map_err(FtsIndexError::backend)?;
             if !postings.is_empty() {
-                let compact = self.compact_postings(database_id, tid, index, &postings)?;
+                let compact = self.compact_postings(database_id, tid, index, postings)?;
                 *term = TermBlocks::from_blocks(into_blocks(compact));
             }
         }
@@ -241,21 +241,16 @@ impl<B: FtsBackend> FtsIndex<B> {
     }
 
     /// Backend postings as compact postings, each with the fieldnorm of its
-    /// document's recorded length. Lengths are read in one batch.
+    /// document's recorded length.
     fn compact_postings(
         &self,
         database_id: u64,
         tid: u64,
         index: IndexScope<'_>,
-        postings: &[Posting],
+        postings: Vec<(Posting, Option<u32>)>,
     ) -> Result<Vec<CompactPosting>, FtsIndexError<B::Error>> {
-        let doc_ids: Vec<Surrogate> = postings.iter().map(|p| p.doc_id).collect();
-        let lengths = self
-            .backend
-            .read_doc_lengths(database_id, tid, index, &doc_ids)
-            .map_err(FtsIndexError::backend)?;
         let mut compact = Vec::with_capacity(postings.len());
-        for (posting, length) in postings.iter().zip(lengths) {
+        for (posting, length) in postings {
             let doc_len = match length {
                 Some(len) => len,
                 // A posting outlives no length in a consistent index. The
@@ -269,7 +264,7 @@ impl<B: FtsBackend> FtsIndex<B> {
                 doc_id: posting.doc_id,
                 term_freq: posting.term_freq,
                 fieldnorm: smallfloat::encode(doc_len),
-                positions: posting.positions.clone(),
+                positions: posting.positions,
             });
         }
         Ok(compact)
