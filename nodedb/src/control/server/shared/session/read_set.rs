@@ -767,6 +767,7 @@ mod tests {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, collection),
             path: path.to_string(),
             value: value.to_string(),
+            also: Vec::new(),
             filters: Vec::new(),
             projection: Vec::new(),
             limit: 0,

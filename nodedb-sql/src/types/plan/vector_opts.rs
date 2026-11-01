@@ -15,6 +15,18 @@ pub struct ArrayPrefilter {
     pub slice: types_array::ArraySliceAst,
 }
 
+/// Secondary-index prefilter for `SqlPlan::VectorSearch`: an equality on an
+/// indexed field. The index lookup runs first and its rows' surrogates form
+/// a bitmap that gates the candidate set, so the search ranks only matching
+/// rows and decodes no other body.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndexPrefilter {
+    /// Canonical index field path (`$.agent_id`).
+    pub field: String,
+    /// The literal to look up, lowercased for a case-insensitive index.
+    pub value: crate::types::SqlValue,
+}
+
 /// Knobs the vector planner exposes via SQL.
 ///
 /// All fields default to `None` / sensible defaults, in which case the

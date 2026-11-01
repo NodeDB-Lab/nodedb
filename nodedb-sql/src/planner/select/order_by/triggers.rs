@@ -216,6 +216,7 @@ pub(super) fn try_extract_sort_search(
                     _ => Vec::new(),
                 },
                 array_prefilter,
+                index_prefilter: None,
                 ann_options,
                 // Projection analysis and payload-filter peeling require
                 // catalog access; the caller (`plan_query`) fills these

@@ -28,7 +28,13 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_vector_search(
             p.tenant_id,
             p.ctx,
         )?)),
-        None => None,
+        None => p.index_prefilter.map(|pref| {
+            Box::new(build_index_prefilter_plan(
+                pref,
+                p.ctx.database_id,
+                p.collection,
+            ))
+        }),
     };
     let ann_options = p.ann_options.to_runtime();
     let filter_bitmap = match p.pk_prefilter {
@@ -126,6 +132,21 @@ fn sql_atom_to_value_atom(a: &nodedb_sql::types::SqlPayloadAtom) -> nodedb_types
             high_inclusive: *high_inclusive,
         },
     }
+}
+
+/// Lower an `IndexPrefilter` into the `DocumentOp::IndexLookup` sub-plan
+/// that the vector search handler runs as its `inline_prefilter_plan`. The
+/// lookup returns the rows whose indexed field equals the literal.
+fn build_index_prefilter_plan(
+    prefilter: &nodedb_sql::types::IndexPrefilter,
+    database_id: crate::types::DatabaseId,
+    collection: &str,
+) -> PhysicalPlan {
+    PhysicalPlan::Document(DocumentOp::IndexLookup {
+        collection: nodedb_types::QualifiedCollection::new(database_id, collection),
+        path: prefilter.field.clone(),
+        value: super::super::value::sql_value_to_string(&prefilter.value),
+    })
 }
 
 /// Lower an `ArrayPrefilter` (array name + slice AST) into the

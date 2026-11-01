@@ -100,6 +100,9 @@ pub(super) struct VectorSearchParams<'a> {
     pub metric: &'a DistanceMetric,
     pub filters: &'a [Filter],
     pub array_prefilter: Option<&'a nodedb_sql::types::ArrayPrefilter>,
+    /// Equality on a secondary-indexed field, lowered to an index-lookup
+    /// sub-plan whose surrogates gate the candidate set.
+    pub index_prefilter: Option<&'a nodedb_sql::types::IndexPrefilter>,
     pub ann_options: &'a nodedb_sql::types::VectorAnnOptions,
     pub tenant_id: TenantId,
     pub ctx: &'a ConvertContext,

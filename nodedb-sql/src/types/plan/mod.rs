@@ -24,12 +24,12 @@ pub use row_types::{KvInsertIntent, VectorPrimaryInsertIntent, VectorPrimaryRow,
 pub use variants::{
     AlterArrayPlan, ArrayAggPlan, ArrayElementwisePlan, ArraySlicePlan, CreateArrayPlan,
     CreateIndexPlan, CtePlan, DeleteArrayPlan, DocumentIndexLookupPlan, DropIndexPlan,
-    HybridSearchPlan, HybridSearchTriplePlan, InsertArrayPlan, InsertPlan, KvInsertPlan,
-    LateralLoopPlan, LateralTopKPlan, MergePlan, RangeScanPlan, RecursiveScanPlan,
+    HybridSearchPlan, HybridSearchTriplePlan, IndexProbe, InsertArrayPlan, InsertPlan,
+    KvInsertPlan, LateralLoopPlan, LateralTopKPlan, MergePlan, RangeScanPlan, RecursiveScanPlan,
     RecursiveValuePlan, TextScoreColumn, TextSearchPlan, TextSearchShape, TimeseriesAggOutput,
     TimeseriesIngestPlan, TimeseriesScanPlan, UpsertPlan, VectorPrimaryDeletePlan,
     VectorPrimaryInsertPlan, VectorPrimaryTruncatePlan, VectorPrimaryUpdatePlan,
 };
 pub use variants::{DistanceMetric, SqlPlan, TIMESERIES_BUCKET_KEY};
-pub use vector_opts::{ArrayPrefilter, VectorAnnOptions, VectorQuantization};
+pub use vector_opts::{ArrayPrefilter, IndexPrefilter, VectorAnnOptions, VectorQuantization};
 pub use volatility_scan::expr_is_volatile;

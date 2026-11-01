@@ -56,10 +56,11 @@ pub use columnar::{ColumnarInsertIntent, ColumnarOp};
 pub use crdt::{CrdtOp, CrdtWriteVerb};
 pub use document::{
     BalancedDef, DeclaredColumn, DocumentOp, DocumentPageSource, DocumentResolveOutcome,
-    DocumentResolvedMutation, EnforcementOptions, GeneratedColumnSpec, MaterializedSumBinding,
-    OllpPredictedEdge, PeriodLockConfig, QuerySource, RedoSumTargets, RegisteredIndex,
-    RegisteredIndexState, ResolvedSumTarget, ReturningColumns, ReturningItem, ReturningSpec,
-    RowSource, StorageMode, SumTargetKey, TimeseriesSchema, UpdateValue, resolved_sum_surrogate,
+    DocumentResolvedMutation, EnforcementOptions, GeneratedColumnSpec, IndexProbe,
+    MaterializedSumBinding, OllpPredictedEdge, PeriodLockConfig, QuerySource, RedoSumTargets,
+    RegisteredIndex, RegisteredIndexState, ResolvedSumTarget, ReturningColumns, ReturningItem,
+    ReturningSpec, RowSource, StorageMode, SumTargetKey, TimeseriesSchema, UpdateValue,
+    resolved_sum_surrogate,
 };
 pub use exchange::{ExchangeMode, ExchangeOp};
 pub use gathered_source::GatheredSource;

@@ -41,6 +41,12 @@ pub(crate) fn run_bitmap_subplan(
     if sub_response.payload.is_empty() {
         return Ok(SurrogateBitmap::new());
     }
+    if matches!(
+        sub_plan,
+        PhysicalPlan::Document(DocumentOp::IndexLookup { .. })
+    ) {
+        return surrogates_of_index_lookup(&sub_response.payload);
+    }
     let docs = crate::data::executor::response_codec::decode_response_to_docs(&sub_response)
         .ok_or_else(|| {
             crate::Error::DataPlane(ErrorCode::Internal {
@@ -48,6 +54,28 @@ pub(crate) fn run_bitmap_subplan(
             })
         })?;
     Ok(collect_surrogates(&docs))
+}
+
+/// The surrogates an `IndexLookup` response names. The payload is a JSON
+/// array of row ids, each the 8-char lowercase hex of a surrogate. An id of
+/// any other shape is an error: skipping it would drop a matching row from
+/// the candidate set.
+fn surrogates_of_index_lookup(payload: &[u8]) -> crate::Result<SurrogateBitmap> {
+    let ids: Vec<String> = sonic_rs::from_slice(payload).map_err(|e| {
+        crate::Error::DataPlane(ErrorCode::Internal {
+            detail: format!("index lookup prefilter returned an undecodable id list: {e}"),
+        })
+    })?;
+    let mut bitmap = SurrogateBitmap::new();
+    for id in &ids {
+        let surrogate = u32::from_str_radix(id, 16).map_err(|_| {
+            crate::Error::DataPlane(ErrorCode::Internal {
+                detail: format!("index lookup prefilter returned a non-surrogate row id '{id}'"),
+            })
+        })?;
+        bitmap.insert(nodedb_types::Surrogate::new(surrogate));
+    }
+    Ok(bitmap)
 }
 
 /// Build a `DocumentOp::Scan` physical plan with a surrogate prefilter injected.

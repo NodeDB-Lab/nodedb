@@ -329,6 +329,7 @@ fn plan_vector_from_where(
         metric: metric_from_func_name(name),
         filters: extra_filter_to_filters(extra_filters, table)?,
         array_prefilter: None,
+        index_prefilter: None,
         ann_options,
         // Vector-primary skip-payload-fetch and payload-filter peeling are
         // applied uniformly by the post-pass in `entry::plan_query` after

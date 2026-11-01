@@ -226,6 +226,8 @@ pub(in crate::control::planner::sql_plan_convert) struct DocumentIndexLookupArgs
     pub collection: &'a str,
     pub field: &'a str,
     pub value: &'a SqlValue,
+    /// Further indexed equalities whose ids the fetch intersects.
+    pub also: &'a [nodedb_sql::types::IndexProbe],
     pub filters: &'a [Filter],
     pub projection: &'a [nodedb_sql::types::Projection],
     pub sort_keys: &'a [nodedb_sql::types::SortKey],
@@ -245,6 +247,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_document_index_look
         collection,
         field,
         value,
+        also,
         filters,
         projection,
         sort_keys,
@@ -281,6 +284,13 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_document_index_look
         collection: qualified_collection,
         path: field.into(),
         value: sql_value_to_string(value),
+        also: also
+            .iter()
+            .map(|probe| nodedb_physical::physical_plan::IndexProbe {
+                path: probe.field.clone(),
+                value: sql_value_to_string(&probe.value),
+            })
+            .collect(),
         filters: filter_bytes,
         projection: proj_names,
         // No LIMIT fetches every matching row under the byte budget.

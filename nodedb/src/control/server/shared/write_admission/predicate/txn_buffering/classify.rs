@@ -666,6 +666,7 @@ mod tests {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 path: "$.f".into(),
                 value: "v".into(),
+                also: Vec::new(),
                 filters: Vec::new(),
                 projection: Vec::new(),
                 limit: 0,

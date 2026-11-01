@@ -7,6 +7,15 @@ use crate::types::filter::Filter;
 use crate::types::query::{EngineType, Projection, SortKey, WindowSpec};
 use crate::types_expr::SqlValue;
 
+/// An equality on an indexed field.
+#[derive(Debug, Clone)]
+pub struct IndexProbe {
+    /// Indexed field path.
+    pub field: String,
+    /// Equality value, lowercased for a COLLATE NOCASE index.
+    pub value: SqlValue,
+}
+
 /// Payload of [`SqlPlan::DocumentIndexLookup`](crate::types::SqlPlan::DocumentIndexLookup).
 #[derive(Debug, Clone)]
 pub struct DocumentIndexLookupPlan {
@@ -17,6 +26,9 @@ pub struct DocumentIndexLookupPlan {
     pub field: String,
     /// Equality value from the WHERE clause.
     pub value: SqlValue,
+    /// Further indexed equalities of the WHERE. The executor keeps the ids
+    /// every index holds. Each also stays in `filters`.
+    pub also: Vec<IndexProbe>,
     /// Remaining filters after extracting the equality used for lookup.
     pub filters: Vec<Filter>,
     pub projection: Vec<Projection>,

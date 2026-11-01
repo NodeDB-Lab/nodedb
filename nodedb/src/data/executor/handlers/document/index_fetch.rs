@@ -12,7 +12,7 @@ use nodedb_types::StorageKey;
 use tracing::{debug, warn};
 
 use crate::bridge::envelope::{ErrorCode, Response};
-use nodedb_physical::physical_plan::SortKeySpec;
+use nodedb_physical::physical_plan::{IndexProbe, SortKeySpec};
 
 use super::sort;
 use crate::bridge::scan_filter::ScanFilter;
@@ -37,6 +37,9 @@ pub(in crate::data::executor) struct IndexedFetchParams<'a> {
     pub collection: &'a str,
     pub path: &'a str,
     pub value: &'a str,
+    /// Further indexed equalities. A row stays only when every index holds
+    /// it, so a wide index never costs a body decode per row.
+    pub also: &'a [IndexProbe],
     pub filters: &'a [u8],
     pub projection: &'a [String],
     pub limit: usize,
@@ -162,6 +165,7 @@ impl CoreLoop {
             collection,
             path,
             value,
+            also,
             filters,
             projection: _projection,
             limit,
@@ -196,6 +200,27 @@ impl CoreLoop {
             Ok(ids) => ids,
             Err(e) => return self.response_error(task, ErrorCode::from(e)),
         };
+        // The committed index entries of each further equality narrow the
+        // ids before any body is read. A staged write is not in those
+        // entries, and the overlay merge below adds it back from its staged
+        // body, which the residual then checks.
+        for probe in also {
+            let probed = self.sparse.versioned_index_lookup_as_of(
+                database_id,
+                tid,
+                collection,
+                &probe.path,
+                &probe.value,
+                as_of,
+            );
+            match probed {
+                Ok(ids) => {
+                    let shared: std::collections::HashSet<StorageKey> = ids.into_iter().collect();
+                    doc_ids.retain(|id| shared.contains(id));
+                }
+                Err(e) => return self.response_error(task, ErrorCode::from(e)),
+            }
+        }
 
         // Strict collections store Binary Tuple bytes; the response codec
         // expects msgpack maps. Decode-then-encode here so cross-engine

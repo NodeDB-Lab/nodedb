@@ -10,8 +10,8 @@ use crate::temporal::TemporalScope;
 use crate::types::SqlPlan;
 use crate::types::filter::Filter;
 use crate::types::plan::{
-    ArrayPrefilter, MergePlanClause, TextScoreColumn, TextSearchShape, TimeseriesAggOutput,
-    VectorAnnOptions, VectorPrimaryInsertIntent, VectorPrimaryRow, WriteRoute,
+    ArrayPrefilter, IndexPrefilter, IndexProbe, MergePlanClause, TextScoreColumn, TextSearchShape,
+    TimeseriesAggOutput, VectorAnnOptions, VectorPrimaryInsertIntent, VectorPrimaryRow, WriteRoute,
 };
 use crate::types::query::{
     AggregateExpr, EngineType, JoinType, Projection, SortKey, SpatialPredicate, WindowSpec,
@@ -57,6 +57,7 @@ pub struct DocumentIndexLookupVisitArgs<'a> {
     pub engine: EngineType,
     pub field: &'a str,
     pub value: &'a SqlValue,
+    pub also: &'a [IndexProbe],
     pub filters: &'a [Filter],
     pub projection: &'a [Projection],
     pub sort_keys: &'a [SortKey],
@@ -161,6 +162,8 @@ pub struct VectorSearchVisitArgs<'a> {
     pub metric: DistanceMetric,
     pub filters: &'a [Filter],
     pub array_prefilter: Option<&'a ArrayPrefilter>,
+    /// Equality on a secondary-indexed field the search ranks among.
+    pub index_prefilter: Option<&'a IndexPrefilter>,
     pub ann_options: &'a VectorAnnOptions,
     pub skip_payload_fetch: bool,
     pub payload_filters: &'a [SqlPayloadAtom],

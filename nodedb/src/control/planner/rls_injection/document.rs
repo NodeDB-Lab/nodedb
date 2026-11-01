@@ -649,6 +649,7 @@ mod tests {
             ),
             path: "$.email".into(),
             value: "a@b.c".into(),
+            also: Vec::new(),
             filters: Vec::new(),
             projection: Vec::new(),
             limit: 0,

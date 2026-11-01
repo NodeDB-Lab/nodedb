@@ -96,6 +96,7 @@ fn bitmap_hint_to_plan(hint: &BitmapHint, database_id: DatabaseId) -> Option<Box
         collection,
         path: hint.field.clone(),
         value: value_str,
+        also: Vec::new(),
         filters: Vec::new(),
         projection: Vec::new(),
         // The bitmap must hold every matching row, or the join drops rows

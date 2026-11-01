@@ -4,6 +4,7 @@ use nodedb_types::{
     QualifiedCollection, RlsWriteCheck, Surrogate, SurrogateBitmap, SystemTimeScope,
 };
 
+use super::index_probe::IndexProbe;
 use super::merge_types::MergeClauseOp;
 use super::ollp_edge::OllpPredictedEdge;
 use super::row_source::RowSource;
@@ -323,6 +324,10 @@ pub enum DocumentOp {
         /// Equality lookup value. COLLATE NOCASE rewrites normalize to
         /// lowercase before emission, so the handler does not need to.
         value: String,
+        /// Further indexed equalities of the same WHERE. The handler keeps
+        /// the ids every index holds before it decodes a body. Each equality
+        /// also stays in `filters`.
+        also: Vec<IndexProbe>,
         /// Remaining post-filters (serialized `Vec<ScanFilter>`).
         filters: Vec<u8>,
         /// Column names to include in each row (empty = all fields).

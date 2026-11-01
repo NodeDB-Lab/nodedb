@@ -6,6 +6,7 @@
 mod derived_join;
 #[cfg(test)]
 mod fixtures;
+mod index_prefilter;
 #[cfg(test)]
 mod join_columns;
 mod payload;

@@ -23,7 +23,7 @@ pub use array::{
 pub use cte::CtePlan;
 pub use hybrid::{HybridSearchPlan, HybridSearchTriplePlan};
 pub use index_ddl::{CreateIndexPlan, DropIndexPlan};
-pub use index_reads::{DocumentIndexLookupPlan, RangeScanPlan};
+pub use index_reads::{DocumentIndexLookupPlan, IndexProbe, RangeScanPlan};
 pub use lateral::{LateralLoopPlan, LateralTopKPlan};
 pub use merge::MergePlan;
 pub use plan::{DistanceMetric, SqlPlan};
