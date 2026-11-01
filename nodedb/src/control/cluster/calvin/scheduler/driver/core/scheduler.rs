@@ -53,6 +53,13 @@ pub struct Scheduler {
     /// the catch-up read of the sequencer log.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) multi_raft:
         Arc<Mutex<MultiRaft>>,
+    /// The data groups' leadership, read each pass without the `MultiRaft`
+    /// lock.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) leader_board:
+        nodedb_cluster::multi_raft::LeaderBoard,
+    /// The routing table `multi_raft` shares, for the vShard-to-group lookup.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) routing:
+        Arc<std::sync::RwLock<nodedb_cluster::routing::RoutingTable>>,
     /// This node's role in the vShard's data group. See [`super::role`].
     pub(in crate::control::cluster::calvin::scheduler::driver::core) role: super::role::StageGate,
     /// Hands sequencer entries to the sequencer group, locally on its leader
@@ -295,11 +302,17 @@ impl Scheduler {
         // Taken after this vShard's lock table is registered: every write the
         // gate admitted with no table, or with a retired one, is earlier.
         let start_fence = shared.calvin.admission_tickets.start_fence(vshard_id);
+        let (leader_board, routing) = {
+            let mr = multi_raft.lock().unwrap_or_else(|p| p.into_inner());
+            (mr.leader_board(), mr.routing())
+        };
         let scheduler = Self {
             vshard_id,
             receiver,
             shared,
             multi_raft,
+            leader_board,
+            routing,
             role: super::role::StageGate::fenced(start_fence),
             sequencer_proposer,
             owed: OwedEntries::new(),

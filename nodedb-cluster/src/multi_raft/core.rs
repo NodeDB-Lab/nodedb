@@ -29,6 +29,8 @@ pub struct MultiRaft {
     /// Each group's storage stages its writes. The group's own writer thread
     /// makes them durable, never under this struct's lock.
     pub(super) groups: HashMap<u64, RaftNode<StagedLogStorage>>,
+    /// Each mounted group's leadership, readable without this struct's lock.
+    pub(super) leader_board: super::leader_board::LeaderBoard,
     /// Routing table (vShard → group mapping).
     ///
     /// This is the SAME `Arc<RwLock<RoutingTable>>` held by
@@ -134,6 +136,7 @@ impl MultiRaft {
         Self {
             node_id,
             groups: HashMap::new(),
+            leader_board: Default::default(),
             routing,
             election_timeout_min: Duration::from_secs(2),
             election_timeout_max: Duration::from_secs(5),
@@ -151,6 +154,12 @@ impl MultiRaft {
             sequencer_cut_floor_ms: 0,
             drive_signal: Arc::new(tokio::sync::Notify::new()),
         }
+    }
+
+    /// Each mounted group's leadership. A reader holds this handle and reads
+    /// it without taking this struct's lock.
+    pub fn leader_board(&self) -> super::leader_board::LeaderBoard {
+        self.leader_board.clone()
     }
 
     /// The signal the groups' disks notify when a batch becomes durable.

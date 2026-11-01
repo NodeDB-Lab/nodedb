@@ -30,6 +30,7 @@ pub use message::{
     LogEntry, PreVoteRequest, PreVoteResponse, RequestVoteRequest, RequestVoteResponse,
     TimeoutNowRequest,
 };
+pub use node::leader_mark::{LeaderMark, Leadership};
 pub use node::{RaftNode, ReadIndexProbe, ReadIndexStatus, Ready, StalenessVerdict};
 pub use snapshot_framing::{
     SNAPSHOT_FORMAT_VERSION, SNAPSHOT_MAGIC, SnapshotEngineId, SnapshotFramingError,

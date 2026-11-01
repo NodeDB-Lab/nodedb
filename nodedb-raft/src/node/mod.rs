@@ -35,6 +35,7 @@ pub mod durability;
 mod election;
 mod internal;
 pub mod leader_lease;
+pub mod leader_mark;
 pub mod membership;
 pub mod ordinal_floor;
 pub mod peer_contact;

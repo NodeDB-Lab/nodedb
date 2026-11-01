@@ -125,6 +125,7 @@ impl MultiRaft {
         {
             node.set_replica_state(requirement(group_id, self.sequencer_first_available()));
         }
+        self.leader_board.mount(group_id, node.leader_mark());
         self.groups.insert(group_id, node);
         self.apply_gates.mount(group_id);
         info!(

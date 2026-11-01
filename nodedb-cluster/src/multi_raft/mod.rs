@@ -20,6 +20,8 @@
 //!   (`commit_index_for`, `ready_learners`, etc.) driven by the tick loop.
 //! - [`membership_sync`]: set a group's voters and learners from routing
 //!   after a snapshot install.
+//! - [`leader_board`]: each mounted group's leadership, read without the
+//!   `MultiRaft` lock.
 //! - [`read_index`]: leadership confirmation for linearizable reads.
 //! - [`ordinal_floor`]: each group's system-time floor, read and raised by
 //!   the floor exchange.
@@ -29,6 +31,7 @@
 pub mod conf_change;
 pub mod conf_change_gate;
 pub mod core;
+pub mod leader_board;
 pub mod membership;
 pub mod membership_sync;
 pub mod mount;
@@ -41,6 +44,7 @@ pub mod sequencer_cut_floor;
 pub mod status;
 
 pub use core::{MultiRaft, MultiRaftReady, SnapshotRequirement};
+pub use leader_board::LeaderBoard;
 pub use mount::{GroupMountSpec, OpenedGroup};
 pub use ordinal_floor::{FloorAnswer, FloorRound};
 pub use peer_contact::PeerAckSample;
