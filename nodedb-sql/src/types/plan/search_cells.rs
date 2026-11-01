@@ -29,7 +29,6 @@ impl SqlPlan {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::temporal::TemporalScope;
     use crate::types::*;
 
