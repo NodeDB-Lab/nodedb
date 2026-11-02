@@ -529,6 +529,7 @@ mod tests {
             .save_hard_state(&HardState {
                 current_term: 1,
                 voted_for: 0,
+                ordinal_floor: 0,
             })
             .expect("save hard state");
         let mut node = RaftNode::new(test_config(2, vec![1, 3]), storage);

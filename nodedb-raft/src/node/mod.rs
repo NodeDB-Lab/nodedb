@@ -15,6 +15,8 @@
 //!   index without a quorum round, and the vote refusal that makes it safe.
 //! - [`membership`]: Dynamic configuration changes — add/remove voters,
 //!   add/remove/promote learners.
+//! - [`ordinal_floor`]: The group's system-time floor, the highest read cut
+//!   any leader closed, held durably in the hard state.
 //! - [`quorum_contact`]: Check-quorum — tracking when a majority last
 //!   answered the leader, and stepping down when none has.
 //! - [`read_index`]: Confirming leadership against a quorum before serving a
@@ -34,6 +36,7 @@ mod election;
 mod internal;
 pub mod leader_lease;
 pub mod membership;
+pub mod ordinal_floor;
 pub mod peer_contact;
 pub mod quorum_contact;
 pub mod read_index;

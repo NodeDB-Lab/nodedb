@@ -18,6 +18,11 @@ pub struct HardState {
     pub current_term: u64,
     /// Candidate that received vote in current term (0 = none).
     pub voted_for: u64,
+    /// The highest system-time read cut this node holds for the group: a
+    /// cut a leader closed and raised on a quorum, or a value a new leader
+    /// gathered from one. A leader of the group stamps no write at or below
+    /// the floor it gathered. Durable, so a restart keeps it.
+    pub ordinal_floor: i64,
 }
 
 impl HardState {
@@ -25,6 +30,7 @@ impl HardState {
         Self {
             current_term: 0,
             voted_for: 0,
+            ordinal_floor: 0,
         }
     }
 }
@@ -385,6 +391,7 @@ mod tests {
         let hs = HardState::new();
         assert_eq!(hs.current_term, 0);
         assert_eq!(hs.voted_for, 0);
+        assert_eq!(hs.ordinal_floor, 0);
     }
 
     #[test]
