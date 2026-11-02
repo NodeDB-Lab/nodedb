@@ -21,11 +21,11 @@ use nodedb_cluster::{NexarTransport, RoutingTable};
 use crate::control::cluster::array_cluster_helpers::{
     cluster_err, coord_err, encode_err, encode_row_array, finalize_agg_partials,
 };
-use crate::control::server::shared::session::pending_shard_reads::{ShardObservation, ShardReads};
+use crate::control::server::shared::session::pending_shard_reads::ShardReads;
 use crate::control::server::shared::session::read_set::EngineTag;
 use crate::control::state::SharedState;
 use crate::data::executor::response_codec;
-use crate::types::{TxnId, VShardId};
+use crate::types::TxnId;
 use nodedb_physical::physical_plan::ClusterArrayOp;
 use zerompk;
 
@@ -283,7 +283,7 @@ impl ClusterArrayExecutor {
             .coord_slice(req, limit, system_time)
             .await
             .map_err(coord_err)?;
-        note_array_reads(array_id, &result.read_versions);
+        note_array_reads(array_id, &result.read_vshards);
 
         // Encode rows into the structured `ArraySliceResponse` — identical to
         // the shape that `dispatch_array_slice` emits for single-node requests.
@@ -341,7 +341,7 @@ impl ClusterArrayExecutor {
             physical,
         };
         let agg = coordinator.coord_agg(req).await.map_err(coord_err)?;
-        note_array_reads(array_id, &agg.read_versions);
+        note_array_reads(array_id, &agg.read_vshards);
 
         // Decode the reducer so we know which field to finalize.
         let reducer: nodedb_physical::physical_plan::ArrayReducer =
@@ -356,7 +356,7 @@ impl ClusterArrayExecutor {
         // only. This ensures payload_to_response → decode_payload_to_json emits
         // the same JSON structure for both single-node and cluster agg queries —
         // including the below-horizon signal, which must not be silently dropped.
-        let emit_horizon = system_time.is_temporal() || valid_at_ms.is_some();
+        let emit_horizon = system_time.is_historical() || valid_at_ms.is_some();
         let rows = finalize_agg_partials(
             &agg.partials,
             &reducer,
@@ -440,27 +440,19 @@ impl ClusterArrayExecutor {
     }
 }
 
-/// Note every vShard a cluster array read covered, at the version its shard
-/// leg reported, for the running request's transaction read-set. A leg that
-/// matched no row reports its vShard too. The request's protocol records the
-/// note when the request ends (`session::pending_shard_reads::record_pending`), so
-/// commit validation checks the read on each covered vShard: inside the
-/// Calvin barrier, or against each vShard's leader on a local commit.
-pub(super) fn note_array_reads(
-    array_id: &nodedb_array::types::ArrayId,
-    read_versions: &[nodedb_types::ShardVersion],
-) {
+/// Note every vShard a cluster array read covered, for the running request's
+/// transaction read-set. A leg that matched no row reports its vShard too.
+/// The request's protocol records the note when the request ends
+/// (`session::pending_shard_reads::record_pending`), so the commit enlists
+/// each covered vShard and its apply validates the read there.
+pub(super) fn note_array_reads(array_id: &nodedb_array::types::ArrayId, read_vshards: &[u32]) {
     crate::control::server::shared::session::pending_shard_reads::note(ShardReads {
         engine: EngineTag::ClusterArray,
         tenant_id: array_id.tenant_id,
         database_id: array_id.database_id,
         collection: Some(array_id.name.clone()),
-        shards: read_versions
+        shards: crate::types::ReadShards::from_wire(read_vshards)
             .iter()
-            .map(|shard| ShardObservation {
-                vshard: VShardId::new(shard.vshard),
-                version: shard.version,
-            })
             .collect(),
     });
 }

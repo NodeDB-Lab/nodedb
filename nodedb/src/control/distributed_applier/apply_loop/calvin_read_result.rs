@@ -139,7 +139,7 @@ fn fold_barrier_event(
         pos.group_id,
         pos.log_index,
         pos.applied_key,
-        Ok(AppliedWrite::unversioned(Vec::new())),
+        Ok(AppliedWrite::new(Vec::new())),
     );
     EntryOutcome::Applied {
         durable: saved,
@@ -323,6 +323,7 @@ mod tests {
             log_index,
             applied_key: 0,
             commit_hlc: 0,
+            system_ordinal: None,
         }
     }
 

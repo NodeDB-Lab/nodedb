@@ -173,7 +173,7 @@ impl ProposalGate {
         let result = match prior {
             PriorApply::Outcome(Ok(applied)) => Ok(applied.clone()),
             PriorApply::Outcome(Err(code)) => Err(crate::Error::DataPlane(code.clone())),
-            PriorApply::NoOutcome => Ok(AppliedWrite::unversioned(Vec::new())),
+            PriorApply::NoOutcome => Ok(AppliedWrite::new(Vec::new())),
         };
         tracing::debug!(
             group_id,
@@ -265,7 +265,7 @@ mod tests {
             true,
             EntryOutcome::Applied {
                 durable: true,
-                result: Some(Ok(AppliedWrite::unversioned(Vec::new()))),
+                result: Some(Ok(AppliedWrite::new(Vec::new()))),
             },
         );
         assert_eq!(step, Settlement::Settles(PrefixStep::Record(true)));

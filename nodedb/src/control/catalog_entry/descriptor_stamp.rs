@@ -25,8 +25,8 @@
 //! A fenced delete (`PurgeCollection` and the `Delete*` of every stored type
 //! with an incarnation clock) freezes the target row's incarnation instead.
 //! `PutSynonymGroup`, `PutVectorIndexParams`, `CreateTopicIfAbsent`,
-//! `PutChangeStream`, `PutConsumerGroupIfAbsent`,
-//! `MigrateConsumerGroupStream`, and `PutArray` stamp only `modification_hlc`. See
+//! `PutChangeStream`, `PutConsumerGroupIfAbsent`, and `PutArray` stamp only
+//! `modification_hlc`. See
 //! [`super::incarnation`].
 //! `CloneDatabase` stamps the fresh incarnation its shadow collections take.
 //! The match is exhaustive on [`CatalogEntry`], so a new variant is a compile
@@ -229,7 +229,6 @@ pub fn stamp(
         | CatalogEntry::CreateTopicIfAbsent(_)
         | CatalogEntry::PutChangeStream(_)
         | CatalogEntry::PutConsumerGroupIfAbsent(_)
-        | CatalogEntry::MigrateConsumerGroupStream { .. }
         | CatalogEntry::PutArray(_)) => {
             super::incarnation::stamp::stamp_put(entry, clock, catalog, hlc)?
         }

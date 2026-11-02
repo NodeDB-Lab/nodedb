@@ -88,6 +88,10 @@ impl Scheduler {
             plans,
             injected_reads,
             epoch_system_ms: txn.epoch_system_ms,
+            // The participant validates its slice of the read set at the
+            // transaction's snapshot, as a static stage does.
+            versioned_reads: txn.tx_class.versioned_reads.as_slice().to_vec(),
+            snapshot_ordinal: txn.tx_class.snapshot_ordinal,
         });
 
         // A stage writes no WAL record, so no committed LSN rides on it.

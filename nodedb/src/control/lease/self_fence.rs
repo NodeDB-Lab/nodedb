@@ -88,10 +88,6 @@ mod tests {
         fn leader_lease_term(&self, _group_id: u64) -> Option<u64> {
             None
         }
-
-        fn lease_read_index(&self, _group_id: u64) -> Option<u64> {
-            None
-        }
     }
 
     fn fenced_state() -> (Arc<SharedState>, Arc<ContactAgeGate>, tempfile::TempDir) {

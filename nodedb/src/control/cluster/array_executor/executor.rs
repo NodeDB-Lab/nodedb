@@ -65,7 +65,7 @@ impl DataPlaneArrayExecutor {
             confirm_linearizable_read(&self.state, &groups, deadline)
                 .await
                 .map_err(|e| execution_error("array read confirmation", e))?;
-            crate::control::read_cut::await_read_cut(&self.state, &plan, deadline)
+            crate::control::read_cut::await_read_cut(&self.state, &plan, &groups, deadline)
                 .await
                 .map_err(|e| execution_error("array read cut", e))?;
         }
@@ -140,7 +140,7 @@ fn local_request(
         wal_lsn: None,
         resolved_now_ms: None,
         commit_hlc: None,
-        entry_version: None,
+        system_ordinal: None,
         admission: crate::bridge::envelope::Admission::Exempt(
             crate::bridge::envelope::ExemptReason::AlreadyOrdered,
         ),

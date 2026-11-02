@@ -189,7 +189,6 @@ pub fn validate(
         | CatalogEntry::CreateTopicIfAbsent(_)
         | CatalogEntry::PutChangeStream(_)
         | CatalogEntry::PutConsumerGroupIfAbsent(_)
-        | CatalogEntry::MigrateConsumerGroupStream { .. }
         | CatalogEntry::PutArray(_) => super::incarnation::fence::check_superseded(entry, catalog),
         CatalogEntry::CloneDatabase {
             target_descriptor,
@@ -234,7 +233,7 @@ fn validate_one<T: zerompk::ToMessagePack>(
         return Ok(ValidationOutcome::AlreadyApplied);
     }
     // A regressed version is a stale replay only if its clock is not ahead.
-    // Legacy records predating HLC stamping share the ZERO clock.
+    // Records the HLC stamp has not set share the ZERO clock.
     if carried < prior && incoming_hlc <= current_hlc {
         return Ok(ValidationOutcome::AlreadyApplied);
     }
@@ -347,7 +346,7 @@ mod tests {
         let (store, _tmp) = make_catalog();
         let catalog = store.catalog();
         seed_prior(catalog, "orders", 3);
-        // Compat mode / unstamped entry: version 0 is never validated.
+        // An unstamped entry carries version 0, which is never validated.
         assert!(matches!(
             validate(&collection_with_version("orders", 0), catalog),
             Ok(ValidationOutcome::Apply)

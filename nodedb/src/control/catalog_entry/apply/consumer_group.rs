@@ -45,26 +45,6 @@ pub fn delete(
         .map(|_| ())
 }
 
-/// Apply a `MigrateConsumerGroupStream` entry. Writing the canonical key and
-/// removing the legacy keys share one transaction, so a replay is a no-op.
-pub fn migrate_stream(
-    def: &ConsumerGroupDef,
-    legacy_stream: &str,
-    catalog: &SystemCatalog,
-) -> crate::Result<()> {
-    catalog
-        .migrate_consumer_group_stream(def, legacy_stream)
-        .map_err(|e| {
-            catalog_err(
-                &format!(
-                    "migrate_consumer_group '{}' from '{legacy_stream}'",
-                    def.name
-                ),
-                e,
-            )
-        })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -75,7 +55,6 @@ mod tests {
     const TENANT: u64 = 7;
     const GROUP: &str = "readers";
     const STREAM: &str = "topic:orders";
-    const LEGACY: &str = "orders";
 
     fn open_catalog() -> (tempfile::TempDir, SystemCatalog) {
         let dir = tempfile::tempdir().unwrap();
@@ -144,27 +123,6 @@ mod tests {
     }
 
     #[test]
-    fn migrate_consumer_group_stream_roundtrips_through_codec() {
-        let legacy = ConsumerGroupDef {
-            stream_name: LEGACY.to_string(),
-            ..sample()
-        };
-        let entry = CatalogEntry::MigrateConsumerGroupStream {
-            def: Box::new(legacy),
-            legacy_stream: LEGACY.to_string(),
-        };
-        let decoded = decode(&encode(&entry).unwrap()).unwrap();
-        match decoded {
-            CatalogEntry::MigrateConsumerGroupStream { def, legacy_stream } => {
-                assert_eq!(def.name, GROUP);
-                assert_eq!(def.stream_name, LEGACY);
-                assert_eq!(legacy_stream, LEGACY);
-            }
-            other => panic!("unexpected variant: {}", other.kind()),
-        }
-    }
-
-    #[test]
     fn apply_writes_and_removes_the_consumer_group_row() {
         let (_dir, catalog) = open_catalog();
         apply::apply_to(
@@ -199,23 +157,6 @@ mod tests {
             "a re-delivered create must not overwrite the original definition"
         );
         assert_eq!(stored[0].created_at, 1_000);
-    }
-
-    #[test]
-    fn apply_migrate_rekeys_the_group_onto_its_canonical_stream() {
-        let (_dir, catalog) = open_catalog();
-        let legacy = ConsumerGroupDef {
-            stream_name: LEGACY.to_string(),
-            ..sample()
-        };
-        put_if_absent(&legacy, &catalog).expect("seed legacy row");
-
-        migrate_stream(&legacy, LEGACY, &catalog).expect("apply migrate");
-
-        let stored = catalog.load_all_consumer_groups().unwrap();
-        assert_eq!(stored.len(), 1, "the legacy row is removed: {stored:?}");
-        assert_eq!(stored[0].stream_name, STREAM);
-        assert_eq!(stored[0].name, GROUP);
     }
 
     #[test]

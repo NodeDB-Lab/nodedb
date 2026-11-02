@@ -154,6 +154,8 @@ pub(super) async fn build_raft_loop(
         .with_reserve_read(hooks.reserve_read)
         .with_release_reservation(hooks.release_reservation)
         .with_data_propose_gate(hooks.data_propose_gate)
+        // A health ping this node answers exchanges oldest-snapshot reports.
+        .with_snapshot_board(Arc::clone(shared.read_cut.board()))
         .with_auth_lease(lease_service)
         .with_data_dir(data_dir.to_path_buf())
         .with_snapshot_chunk_bytes(snapshot_chunk_bytes)

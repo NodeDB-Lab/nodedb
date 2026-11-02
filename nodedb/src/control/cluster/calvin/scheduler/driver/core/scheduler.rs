@@ -188,8 +188,8 @@ pub struct Scheduler {
         mpsc::Receiver<VerdictSignal>,
     /// Requests the bridge dispatcher refused at capacity, in refusal order.
     /// Each txn stays in flight and holds its locks until its request is
-    /// re-sent. Holds at most one step per in-flight txn, plus one
-    /// write-version record per committed txn.
+    /// re-sent. Holds at most one awaited step per in-flight txn, plus the
+    /// discards it issued.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) deferred: DeferredQueue,
     /// The bridge dispatcher's capacity-freed signal, cloned once at
     /// construction. The run loop waits on it while requests are deferred.
@@ -386,13 +386,12 @@ impl Scheduler {
     }
 
     /// Publish an advanced fully-applied watermark to the metrics gauge and the
-    /// shared cross-shard snapshot anchor.
+    /// shared applied-epoch counter.
     ///
-    /// `BEGIN` reads `CalvinLocalState::last_applied_epoch` to anchor a
-    /// session's cross-shard snapshot version, so it MUST reflect the
-    /// FULLY-applied epoch — never an epoch that has only some of its positions
-    /// committed, which lets a session anchor on a torn epoch. `fetch_max`
-    /// keeps it monotonic across all per-vShard schedulers writing the counter.
+    /// `CalvinLocalState::last_applied_epoch` MUST reflect the FULLY-applied
+    /// epoch, never an epoch that has only some of its positions committed.
+    /// `fetch_max` keeps it monotonic across all per-vShard schedulers writing
+    /// the counter.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn publish_watermark(
         &mut self,
         watermark: u64,

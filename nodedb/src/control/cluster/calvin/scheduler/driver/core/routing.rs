@@ -626,6 +626,7 @@ mod tests {
             updates: Vec::new(),
             system_from: None,
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         assert_eq!(vshards_of(&update), vec![want]);
 
@@ -634,6 +635,7 @@ mod tests {
             filters: Vec::new(),
             system_from: None,
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         assert_eq!(vshards_of(&delete), vec![want]);
     }
@@ -724,6 +726,7 @@ mod tests {
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
             resolved_sum_targets: Vec::new(),
             declared_primary_key: None,
+            target_system_time: nodedb_types::SystemTimeScope::Current,
         });
         assert!(matches!(plan_vshard(&plan), PlanRouting::Unroutable(_)));
     }
@@ -771,6 +774,7 @@ mod tests {
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
             resolved_sum_targets: Vec::new(),
             declared_primary_key: None,
+            target_system_time: nodedb_types::SystemTimeScope::Current,
         });
         assert!(matches!(plan_vshard(&plan), PlanRouting::Unroutable(_)));
     }

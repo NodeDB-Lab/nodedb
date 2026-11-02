@@ -49,7 +49,7 @@ pub(super) fn apply_surrogate_bind(
         group_id,
         log_index,
         applied_key,
-        result.map(AppliedWrite::unversioned),
+        result.map(AppliedWrite::new),
     );
     EntryOutcome::Applied {
         durable,

@@ -58,19 +58,19 @@ impl DataPlaneArrayExecutor {
         // A temporal read ends with the `{"truncated_before_horizon": bool}`
         // summary row. The coordinator ORs the flag and appends one summary
         // row for the whole fan-out.
-        let truncated_before_horizon = if req.system_time.is_temporal() || req.valid_at_ms.is_some()
-        {
-            let summary = rows.pop().ok_or_else(|| ClusterError::Codec {
-                detail: "exec_elementwise: temporal answer has no summary row".into(),
-            })?;
-            horizon_flag(&summary)?
-        } else {
-            false
-        };
+        let truncated_before_horizon =
+            if req.system_time.is_historical() || req.valid_at_ms.is_some() {
+                let summary = rows.pop().ok_or_else(|| ClusterError::Codec {
+                    detail: "exec_elementwise: temporal answer has no summary row".into(),
+                })?;
+                horizon_flag(&summary)?
+            } else {
+                false
+            };
         Ok(ArrayElementwiseExec {
             rows,
             truncated_before_horizon,
-            read_versions: resp.read_versions.to_wire(),
+            read_vshards: resp.read_vshards.to_wire(),
         })
     }
 }

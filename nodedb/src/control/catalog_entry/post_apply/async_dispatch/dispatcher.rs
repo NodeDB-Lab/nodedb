@@ -427,7 +427,6 @@ pub async fn run_post_apply_async_side_effects(
         | CatalogEntry::DeleteTopicWithConsumerGroups { .. }
         | CatalogEntry::PutConsumerGroupIfAbsent(_)
         | CatalogEntry::DeleteConsumerGroup { .. }
-        | CatalogEntry::MigrateConsumerGroupStream { .. }
         // Offset advance happens in `sync.rs`.
         | CatalogEntry::CommitConsumerOffsets(_)
         // A backup schedule mark is its catalog row alone.

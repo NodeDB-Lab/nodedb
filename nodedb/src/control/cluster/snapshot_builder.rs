@@ -36,7 +36,7 @@ use crate::control::backup::snapshot_keys::{
 };
 use crate::control::cluster::calvin_snapshot::{await_calvin_cut, capture_calvin_cut};
 use crate::control::cluster::snapshot_builder_filter::{
-    bind_in_group, push_group_edges, push_group_node_labels,
+    bind_in_group, push_group_edges, push_group_index_sections, push_group_node_labels,
 };
 use crate::control::cluster::snapshot_cut::settled_cut;
 use crate::control::security::catalog::SystemCatalog;
@@ -162,7 +162,7 @@ impl DataPlaneSnapshotBuilder {
         )
         .await?;
 
-        let snap: TenantDataSnapshot =
+        let mut snap: TenantDataSnapshot =
             zerompk::from_msgpack(&bytes).map_err(|e| Error::Internal {
                 detail: format!(
                     "snapshot build: decode tenant {tenant_id} snapshot of database {}: {e}",
@@ -182,16 +182,9 @@ impl DataPlaneSnapshotBuilder {
         let in_group_db_scoped =
             |key: &str| extract_db_scoped_collection(key, tenant_id).is_some_and(in_group);
 
-        for (k, v) in snap.documents {
-            if in_group_db_tenant_scoped(&k) {
-                merged.documents.push((k, v));
-            }
-        }
-        for (k, v) in snap.indexes {
-            if in_group_db_tenant_scoped(&k) {
-                merged.indexes.push((k, v));
-            }
-        }
+        // Multi-vector membership and every index's history travel with the
+        // index they describe.
+        push_group_index_sections(&mut snap, &in_group_db_tenant_scoped, merged);
         for (k, v) in snap.documents_versioned {
             if in_group_db_tenant_scoped(&k) {
                 merged.documents_versioned.push((k, v));
@@ -207,9 +200,15 @@ impl DataPlaneSnapshotBuilder {
                 merged.vectors.push((k, v));
             }
         }
+
         for (k, v) in snap.timeseries {
             if in_group_db_tenant_scoped(&k) {
                 merged.timeseries.push((k, v));
+            }
+        }
+        for (k, v) in snap.ts_series_catalogs {
+            if in_group_db_tenant_scoped(&k) {
+                merged.ts_series_catalogs.push((k, v));
             }
         }
         // kv_tables / flushed_ts_segments / columnar_engines: db-scoped keys.

@@ -74,6 +74,7 @@ pub fn classify(error: &crate::Error) -> ApplyFailureClass {
         | crate::Error::ConflictRetry { .. }
         | crate::Error::CalvinSerializationConflict
         | crate::Error::CalvinParticipantError
+        | crate::Error::TxnSnapshotTooOld { .. }
         | crate::Error::RejectedPrevalidation { .. }
         | crate::Error::RetryableRefusal { .. }
         | crate::Error::AppendOnlyViolation { .. }
@@ -175,7 +176,6 @@ pub fn classify(error: &crate::Error) -> ApplyFailureClass {
         | crate::Error::SessionTokenExpired
         | crate::Error::SessionKilledByAdmin
         | crate::Error::SessionUserDropped
-        | crate::Error::OidcProviderTenantUnbound
         | crate::Error::OidcProviderTenantUnavailable { .. }
         | crate::Error::ExternalRoleUndefined { .. }
         | crate::Error::OidcNoDefaultDatabase { .. }

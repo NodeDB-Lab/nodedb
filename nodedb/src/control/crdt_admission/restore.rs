@@ -164,7 +164,7 @@ mod tests {
                             actual: [0; 32],
                         }))
                     } else {
-                        Ok((Vec::new(), crate::types::ReadVersions::new()))
+                        Ok(Vec::new())
                     }
                 })
             })

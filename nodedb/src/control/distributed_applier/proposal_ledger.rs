@@ -42,7 +42,7 @@
 //!
 //! The ledger also keeps the outcome of every proposal this process applied,
 //! so the waiter of a skipped copy receives what the first copy's waiter
-//! received: the same payload and write version, or the same refusal. A key
+//! received: the same payload, or the same refusal. A key
 //! recovered from the WAL has no outcome: no waiter from before the restart
 //! survives it.
 
@@ -99,7 +99,7 @@ impl ProposalLedger {
     }
 
     /// The prior apply of `proposal_key`, if any. Key `0` is the "no key"
-    /// sentinel of a legacy or synthetic entry and never matches.
+    /// sentinel of a synthetic entry and never matches.
     pub fn prior(&self, proposal_key: u64) -> Option<PriorApply<'_>> {
         if proposal_key == 0 {
             return None;
@@ -135,13 +135,7 @@ mod tests {
     use crate::wal::manager::NO_APPLY_KEY;
 
     fn applied(payload: &[u8]) -> AppliedWrite {
-        AppliedWrite {
-            payload: payload.to_vec(),
-            write_versions: crate::types::ReadVersions::single(
-                VShardId::new(1),
-                nodedb_types::WriteVersion::logged(0, 9),
-            ),
-        }
+        AppliedWrite::new(payload.to_vec())
     }
 
     #[test]

@@ -132,7 +132,7 @@ fn concluded(
         .err()
         .is_none_or(RedoChunkError::is_refusal);
     let result = applied
-        .map(|()| AppliedWrite::unversioned(Vec::new()))
+        .map(|()| AppliedWrite::new(Vec::new()))
         .map_err(crate::Error::from);
     let outcome = EntryOutcome::Applied {
         durable,
@@ -322,6 +322,7 @@ mod tests {
             log_index,
             applied_key: 1_000 + log_index,
             commit_hlc: 0,
+            system_ordinal: None,
         }
     }
 
@@ -350,6 +351,7 @@ mod tests {
             event_source: ReplicatedEventSource::User,
             origin: RedoOrigin::Commit,
             calvin: None,
+            snapshot_ordinal: None,
         };
         match decode_transaction_redo(&write).expect("decode") {
             DecodedTransactionRedo::Chunked(chunked) => chunked,
@@ -362,6 +364,7 @@ mod tests {
             tenant_id: TenantId::new(1),
             database_id: DatabaseId::DEFAULT,
             vshard_id: VShardId::new(2),
+            system_ordinal: None,
         }
     }
 

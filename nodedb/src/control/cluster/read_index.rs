@@ -59,14 +59,6 @@ pub trait RaftReadGate: Send + Sync {
     /// fences work a previous leaseholder started.
     fn leader_lease_term(&self, group_id: u64) -> Option<u64>;
 
-    /// The index a read of `group_id` can be served at under this node's
-    /// valid leader lease: the commit index, `None` when it holds no lease.
-    /// Local state only, so this does not block.
-    ///
-    /// The read is linearizable once this node has applied the group through
-    /// the index.
-    fn lease_read_index(&self, group_id: u64) -> Option<u64>;
-
     /// A read index for `group_id` on any node: confirmed here when this node
     /// leads the group, asked of the leader otherwise.
     ///
@@ -74,6 +66,22 @@ pub trait RaftReadGate: Send + Sync {
     /// state holds every entry committed before the call. A gate whose node
     /// always leads its groups answers with [`Self::confirm_leader`].
     async fn read_index(&self, group_id: u64, timeout: Duration) -> Result<u64, ReadIndexRefusal> {
+        self.confirm_leader(group_id, timeout).await
+    }
+
+    /// A read index for `group_id` taken after its leader closed the read
+    /// cut `cut`: the leader folded `cut` into its ordinal clock and every
+    /// write it reserved at or below `cut` applied there.
+    ///
+    /// The caller closes `cut` on this node first, so a node that leads the
+    /// group takes the index with no further close. A gate whose node always
+    /// leads its groups answers with [`Self::confirm_leader`].
+    async fn cut_read_index(
+        &self,
+        group_id: u64,
+        timeout: Duration,
+        _cut: i64,
+    ) -> Result<u64, ReadIndexRefusal> {
         self.confirm_leader(group_id, timeout).await
     }
 }
@@ -170,7 +178,23 @@ impl RaftReadGate for MultiRaftReadGate {
             return Err(ReadIndexRefusal::NotLeader);
         };
         raft_loop
-            .read_index_via_leader(group_id, timeout)
+            .read_index_via_leader(group_id, timeout, None)
+            .await
+            .map_err(refusal_of)
+    }
+
+    async fn cut_read_index(
+        &self,
+        group_id: u64,
+        timeout: Duration,
+        cut: i64,
+    ) -> Result<u64, ReadIndexRefusal> {
+        let Some(raft_loop) = self.raft_loop.upgrade() else {
+            // The loop is gone: the node is shutting down.
+            return Err(ReadIndexRefusal::NotLeader);
+        };
+        raft_loop
+            .read_index_via_leader(group_id, timeout, Some(cut))
             .await
             .map_err(refusal_of)
     }
@@ -195,12 +219,5 @@ impl RaftReadGate for MultiRaftReadGate {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .lease_term(group_id)
-    }
-
-    fn lease_read_index(&self, group_id: u64) -> Option<u64> {
-        self.multi_raft
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .lease_read_index(group_id)
     }
 }

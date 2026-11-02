@@ -190,8 +190,6 @@ pub fn split_by_core(
     // Exhaustive destructure: a new section fails to compile here instead of
     // being dropped from the install.
     let TenantDataSnapshot {
-        documents,
-        indexes,
         edges,
         vectors,
         kv_tables,
@@ -199,6 +197,7 @@ pub fn split_by_core(
         crdt_constraints,
         timeseries,
         flushed_ts_segments,
+        ts_series_catalogs,
         columnar_engines,
         vector_params,
         index_configs,
@@ -217,6 +216,9 @@ pub fn split_by_core(
         documents_versioned,
         indexes_versioned,
         vector_multi_documents,
+        vector_versions,
+        sparse_vectors,
+        spatial_indexes,
         arrays,
         // The install waits on the floor before it splits; no core reads it.
         metadata_floor: _,
@@ -234,10 +236,6 @@ pub fn split_by_core(
             .collect(),
     };
 
-    s.keyed("documents", documents, db_tenant_scoped, |t| {
-        &mut t.documents
-    })?;
-    s.keyed("indexes", indexes, db_tenant_scoped, |t| &mut t.indexes)?;
     s.keyed(
         "documents_versioned",
         documents_versioned,
@@ -260,6 +258,15 @@ pub fn split_by_core(
             .vector_multi_documents
             .push((key, documents));
     }
+    s.keyed("vector_versions", vector_versions, db_tenant_scoped, |t| {
+        &mut t.vector_versions
+    })?;
+    s.keyed("sparse_vectors", sparse_vectors, db_tenant_scoped, |t| {
+        &mut t.sparse_vectors
+    })?;
+    s.keyed("spatial_indexes", spatial_indexes, db_tenant_scoped, |t| {
+        &mut t.spatial_indexes
+    })?;
     s.keyed("vector_params", vector_params, db_tenant_scoped, |t| {
         &mut t.vector_params
     })?;
@@ -269,6 +276,13 @@ pub fn split_by_core(
     s.keyed("timeseries", timeseries, db_tenant_scoped, |t| {
         &mut t.timeseries
     })?;
+    // A catalog goes to the core its collection's rows go to.
+    s.keyed(
+        "ts_series_catalogs",
+        ts_series_catalogs,
+        db_tenant_scoped,
+        |t| &mut t.ts_series_catalogs,
+    )?;
     s.keyed("kv_tables", kv_tables, db_scoped, |t| &mut t.kv_tables)?;
     s.keyed("columnar_engines", columnar_engines, db_scoped, |t| {
         &mut t.columnar_engines
@@ -416,11 +430,11 @@ mod tests {
         let mut snap = TenantDataSnapshot::default();
         for name in &names {
             for doc in 0..3 {
-                snap.documents
-                    .push((format!("0:1:{name}:doc{doc}"), b"v".to_vec()));
+                snap.documents_versioned
+                    .push((format!("0:1:{name}:doc{doc}\x00{:020}", 1), b"v".to_vec()));
             }
-            snap.indexes
-                .push((format!("0:1:{name}:f:x:doc0"), Vec::new()));
+            snap.indexes_versioned
+                .push((format!("0:1:{name}:f:x:doc0\x00{:020}", 1), Vec::new()));
             snap.kv_tables.push((format!("0:1:{name}"), b"kv".to_vec()));
             snap.vectors
                 .push((format!("0:1:{name}:emb"), b"vec".to_vec()));
@@ -439,12 +453,12 @@ mod tests {
 
         let mut documents = 0;
         for (core, share) in shares.per_core.iter().enumerate() {
-            for (key, _) in &share.documents {
+            for (key, _) in &share.documents_versioned {
                 let (_, coll) = db_tenant_scoped(key).unwrap();
                 assert_eq!(home(0, coll), core, "document {key} on core {core}");
                 documents += 1;
             }
-            for (key, _) in &share.indexes {
+            for (key, _) in &share.indexes_versioned {
                 assert_eq!(home(0, db_tenant_scoped(key).unwrap().1), core);
             }
             for (key, _) in &share.kv_tables {
@@ -468,13 +482,16 @@ mod tests {
         let db = 1025;
         let stored = QualifiedCollection::new(DatabaseId::new(db), "orders");
         let snap = TenantDataSnapshot {
-            documents: vec![(format!("{db}:1:{}:doc0", stored.as_str()), b"v".to_vec())],
+            documents_versioned: vec![(
+                format!("{db}:1:{}:doc0\x00{:020}", stored.as_str(), 1),
+                b"v".to_vec(),
+            )],
             kv_tables: vec![(format!("{db}:1:{}", stored.as_str()), b"kv".to_vec())],
             ..Default::default()
         };
         let shares = split_by_core(GROUP, snap, &cores()).unwrap();
         let core = home(db, "orders");
-        assert_eq!(shares.per_core[core].documents.len(), 1);
+        assert_eq!(shares.per_core[core].documents_versioned.len(), 1);
         assert_eq!(shares.per_core[core].kv_tables.len(), 1);
     }
 
@@ -540,7 +557,7 @@ mod tests {
     #[test]
     fn an_unroutable_key_fails_the_split() {
         let snap = TenantDataSnapshot {
-            documents: vec![("not-a-scoped-key".into(), b"v".to_vec())],
+            documents_versioned: vec![("not-a-scoped-key".into(), b"v".to_vec())],
             ..Default::default()
         };
         let err = split_by_core(GROUP, snap, &cores())
@@ -549,7 +566,7 @@ mod tests {
         assert!(matches!(
             err,
             SnapshotInstallError::UnroutableKey {
-                section: "documents",
+                section: "documents_versioned",
                 ..
             }
         ));

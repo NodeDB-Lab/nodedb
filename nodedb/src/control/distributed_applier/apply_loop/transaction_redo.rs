@@ -63,6 +63,7 @@ pub(super) fn prepare_transaction_redo_entry<'a>(
         tenant_id: TenantId::new(entry.tenant_id),
         database_id: DatabaseId::new(entry.database_id),
         vshard_id: VShardId::new(entry.vshard_id),
+        system_ordinal: entry.carried_system_ordinal(),
     };
     match decoded {
         DecodedTransactionRedo::Inline(payload) => {
@@ -109,7 +110,7 @@ pub(super) fn conclude_installed_copy<'a>(
         pos.group_id,
         pos.log_index,
         pos.applied_key,
-        Ok(AppliedWrite::unversioned(Vec::new())),
+        Ok(AppliedWrite::new(Vec::new())),
     );
     drop(stream);
     Prepared::Concluded(EntryOutcome::Applied {

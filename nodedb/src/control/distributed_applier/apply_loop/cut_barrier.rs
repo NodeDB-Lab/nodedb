@@ -192,7 +192,9 @@ fn finish_barrier(
         group_id,
         log_index,
         applied_key,
-        Ok(crate::control::distributed_applier::AppliedWrite::unversioned(Vec::new())),
+        Ok(crate::control::distributed_applier::AppliedWrite::new(
+            Vec::new(),
+        )),
     );
     FinishedApply {
         group_id,

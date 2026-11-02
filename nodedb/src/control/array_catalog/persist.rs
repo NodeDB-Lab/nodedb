@@ -163,14 +163,14 @@ mod tests {
 
         let reg = load_all(&cat).unwrap();
         assert_eq!(reg.len(), 2);
-        assert_eq!(reg.lookup_by_name("a"), Some(entry("a")));
-        assert_eq!(reg.lookup_by_name("b"), Some(entry("b")));
+        assert_eq!(reg.lookup_by_id(&entry("a").array_id), Some(entry("a")));
+        assert_eq!(reg.lookup_by_id(&entry("b").array_id), Some(entry("b")));
 
         remove(&cat, &entry("a").array_id).unwrap();
         let reg = load_all(&cat).unwrap();
         assert_eq!(reg.len(), 1);
-        assert!(reg.lookup_by_name("a").is_none());
-        assert!(reg.lookup_by_name("b").is_some());
+        assert!(reg.lookup_by_id(&entry("a").array_id).is_none());
+        assert!(reg.lookup_by_id(&entry("b").array_id).is_some());
     }
 
     #[test]

@@ -89,7 +89,7 @@ pub(super) async fn apply_fenced(
     // Every replica gives the write the source this node dispatches it
     // with.
     .with_event_source(workflow.event_source);
-    let (payload, write_versions) = workflow
+    let payload = workflow
         .propose(crate::control::wal_replication::propose_replicated_entry(
             workflow.state,
             raw,
@@ -100,7 +100,6 @@ pub(super) async fn apply_fenced(
     // This node's apply of the entry recorded its commit HLC.
     Ok(CrdtAdmissionOutcome {
         payload,
-        write_versions,
         trimmed_ops: 0,
     })
 }

@@ -288,9 +288,7 @@ fn install_async_proposer(
                             e
                         }
                     })
-                    // Carry out the versions the apply side stamped: the
-                    // entry's log position on every vShard the write touched.
-                    .map(|applied| (applied.payload, applied.write_versions));
+                    .map(|applied| applied.payload);
                     let applied = applied?;
                     // A write to a vShard homing a permission-tree source is
                     // acknowledged only once every lease holder covers it, or its

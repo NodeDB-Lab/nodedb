@@ -311,12 +311,6 @@ mod tests {
     use tokio::sync::{Barrier, Notify};
 
     use super::*;
-    use crate::types::ReadVersions;
-
-    /// The versions a test proposer answers proposal `key` with.
-    fn applied_at(key: u64) -> ReadVersions {
-        ReadVersions::single(VShardId::new(0), nodedb_types::WriteVersion::logged(0, key))
-    }
 
     fn test_deadline() -> tokio::time::Instant {
         tokio::time::Instant::now() + std::time::Duration::from_secs(30)
@@ -536,7 +530,7 @@ mod tests {
             let maximum = Arc::clone(&maximum);
             let release = Arc::clone(&release);
             let entered = Arc::clone(&entered);
-            Arc::new(move |_vshard, key, data, _deadline| {
+            Arc::new(move |_vshard, _key, data, _deadline| {
                 let active = Arc::clone(&active);
                 let maximum = Arc::clone(&maximum);
                 let release = Arc::clone(&release);
@@ -547,7 +541,7 @@ mod tests {
                     entered.notify_one();
                     release.notified().await;
                     active.fetch_sub(1, Ordering::SeqCst);
-                    Ok((data, applied_at(key)))
+                    Ok(data)
                 })
             })
         };
@@ -568,13 +562,13 @@ mod tests {
         release.notify_one();
         assert_eq!(
             first.await.expect("first joins").expect("first success"),
-            (vec![1], applied_at(11))
+            vec![1]
         );
         entered.notified().await;
         release.notify_one();
         assert_eq!(
             second.await.expect("second joins").expect("second success"),
-            (vec![2], applied_at(12))
+            vec![2]
         );
         assert_eq!(maximum.load(Ordering::SeqCst), 1);
     }
@@ -588,7 +582,7 @@ mod tests {
                 let proposed = Arc::clone(&proposed);
                 Box::pin(async move {
                     proposed.lock().expect("proposed log").push(key);
-                    Ok((data, applied_at(key)))
+                    Ok(data)
                 })
             })
         };
@@ -669,11 +663,11 @@ mod tests {
                 .await
                 .expect("second joins")
                 .expect("second proposes"),
-            (vec![22], applied_at(22))
+            vec![22]
         );
         assert_eq!(
             third.await.expect("third joins").expect("third proposes"),
-            (vec![23], applied_at(23))
+            vec![23]
         );
         assert_eq!(
             *proposed.lock().expect("proposed log"),
@@ -707,7 +701,7 @@ mod tests {
                                 detail: format!("test apply gate closed: {e}"),
                             })?
                             .forget();
-                        Ok((data, applied_at(key)))
+                        Ok(data)
                     }),
                 })
             })
@@ -755,11 +749,8 @@ mod tests {
             first.await.expect("first joins").expect("first applies"),
             second.await.expect("second joins").expect("second applies"),
         ];
-        results.sort_by_key(|(_, versions)| versions.of(VShardId::new(0)));
-        assert_eq!(
-            results,
-            vec![(vec![1], applied_at(11)), (vec![2], applied_at(12))]
-        );
+        results.sort();
+        assert_eq!(results, vec![vec![1], vec![2]]);
         assert_eq!(sequencer.slots[5].capacity.available_permits(), 4);
     }
 

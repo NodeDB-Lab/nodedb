@@ -126,6 +126,7 @@ pub(crate) async fn apply_array_cell_write(
             resolved_now_ms,
             apply_key: applied_key,
             commit_hlc,
+            system_ordinal: pos.system_ordinal,
             op_label: "array cell write",
             group_id,
             log_index,

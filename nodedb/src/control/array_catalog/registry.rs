@@ -3,8 +3,8 @@
 //! In-memory registry of all arrays, mirrored to the system catalog.
 //!
 //! The registry is keyed by the full [`ArrayId`].  A name is only unique
-//! within its tenant/database scope; never use a bare name to address catalog
-//! state outside the legacy default-database compatibility methods. All public methods return
+//! within its tenant/database scope, so a bare name never addresses catalog
+//! state. All public methods return
 //! cloned [`ArrayCatalogEntry`] values — the handle is an `Arc<RwLock>`
 //! shared between Control and the Data Plane, and callers must not
 //! hold the internal lock across engine calls.
@@ -60,8 +60,9 @@ impl ArrayCatalog {
         self.lookup_by_id(&ArrayId::in_database(tenant_id, database_id, name))
     }
 
-    /// Legacy decoder/lookup for pre-database catalog callers. It is exactly
-    /// the DEFAULT database namespace and must not be used by production paths.
+    /// The DEFAULT-database array named `name`, under any tenant. Test
+    /// harnesses use it. A production path addresses an array by its
+    /// [`ArrayId`].
     pub fn lookup_by_name(&self, name: &str) -> Option<ArrayCatalogEntry> {
         self.entries
             .iter()
@@ -81,16 +82,6 @@ impl ArrayCatalog {
     ) -> Option<ArrayCatalogEntry> {
         self.entries
             .remove(&ArrayId::in_database(tenant_id, database_id, name))
-    }
-
-    /// Legacy DEFAULT-database removal retained for old persisted callers.
-    pub fn unregister(&mut self, name: &str) -> Option<ArrayCatalogEntry> {
-        let id = self
-            .entries
-            .keys()
-            .find(|id| id.database_id == nodedb_types::DatabaseId::DEFAULT && id.name == name)
-            .cloned()?;
-        self.entries.remove(&id)
     }
 
     pub fn all_entries(&self) -> Vec<ArrayCatalogEntry> {
@@ -132,7 +123,6 @@ mod tests {
         let e = entry("genomes");
         cat.register(e.clone()).unwrap();
 
-        assert_eq!(cat.lookup_by_name("genomes"), Some(e.clone()));
         assert_eq!(cat.lookup_by_id(&e.array_id), Some(e.clone()));
         assert_eq!(cat.all_entries(), vec![e]);
         assert_eq!(cat.len(), 1);
@@ -167,9 +157,10 @@ mod tests {
         let mut cat = ArrayCatalog::new();
         let e = entry("x");
         cat.register(e.clone()).unwrap();
-        let removed = cat.unregister("x").expect("existed");
+        let removed = cat
+            .unregister_in_database(TenantId::new(1), nodedb_types::DatabaseId::DEFAULT, "x")
+            .expect("existed");
         assert_eq!(removed.array_id, e.array_id);
-        assert!(cat.lookup_by_name("x").is_none());
         assert!(cat.lookup_by_id(&e.array_id).is_none());
     }
 }

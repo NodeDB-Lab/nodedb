@@ -258,7 +258,7 @@ mod tests {
                             .expect("fences lock")
                             .push(expected_frontier_digest);
                     }
-                    Ok((Vec::new(), crate::types::ReadVersions::new()))
+                    Ok(Vec::new())
                 })
             });
         crate::control::vshard_admission::install_async_raft_proposer(
@@ -359,7 +359,7 @@ mod tests {
                         }
                         other => panic!("unexpected replicated write: {other:?}"),
                     }
-                    Ok((Vec::new(), crate::types::ReadVersions::new()))
+                    Ok(Vec::new())
                 })
             });
         crate::control::vshard_admission::install_async_raft_proposer(
@@ -410,7 +410,7 @@ mod tests {
                             actual: [0; 32],
                         }))
                     } else {
-                        Ok((Vec::new(), crate::types::ReadVersions::new()))
+                        Ok(Vec::new())
                     }
                 })
             });
@@ -615,7 +615,7 @@ mod tests {
         let raw: Arc<crate::control::wal_replication::AsyncRaftProposer> =
             Arc::new(move |_shard, _key, _bytes, _deadline| {
                 count.fetch_add(1, Ordering::SeqCst);
-                Box::pin(async { Ok((Vec::new(), crate::types::ReadVersions::new())) })
+                Box::pin(async { Ok(Vec::new()) })
             });
         crate::control::vshard_admission::install_async_raft_proposer(
             &state,
@@ -655,9 +655,7 @@ mod tests {
         let raw: Arc<crate::control::wal_replication::AsyncRaftProposer> =
             Arc::new(move |_shard, _key, _bytes, _deadline| {
                 count.fetch_add(1, Ordering::SeqCst);
-                Box::pin(std::future::pending::<
-                    crate::Result<(Vec<u8>, crate::types::ReadVersions)>,
-                >())
+                Box::pin(std::future::pending::<crate::Result<Vec<u8>>>())
             });
         crate::control::vshard_admission::install_async_raft_proposer(
             &state,

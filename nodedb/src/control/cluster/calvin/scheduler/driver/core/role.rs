@@ -144,6 +144,11 @@ impl Scheduler {
         if self.role.term_start.is_some_and(|start| applied >= start)
             && self.start_fence_passed(leadership.group_id, applied)
         {
+            // The apply loop pushes a redo's install report before the
+            // applied index passes the redo. Each report at or below
+            // `applied` already waits in the inbox. Handling them first
+            // completes their txns, so promotion stages none of them again.
+            self.drain_inbox();
             self.promote();
         }
     }
@@ -351,7 +356,7 @@ mod tests {
         elect_data_group_leader, lead_data_group, step_down_from_data_group,
     };
     use crate::control::cluster::calvin::scheduler::driver::core::test_support::{
-        build_test_scheduler_with_data_side, make_validate_only_txn, staged_response,
+        build_test_scheduler_with_data_side, make_validate_only_txn, redo_applied, staged_response,
         test_coll_vshard,
     };
 
@@ -461,6 +466,47 @@ mod tests {
             Some(CommitState::Staged)
         );
         assert_eq!(staged_requests(&mut data_side), vec![(3, 0)]);
+    }
+
+    /// A redo of an earlier term reports its install before the applied
+    /// index passes the term start. The new leader handles that report
+    /// before it stages, so the txn's position is applied and nothing stages.
+    #[tokio::test]
+    async fn a_new_leader_stages_no_txn_whose_install_report_waits() {
+        let (mut scheduler, _dir, mut data_side) = scheduler();
+        let group_id = elect_data_group_leader(&scheduler);
+        let txn_id = TxnId::new(3, 0);
+        scheduler.process_scheduler_input(SchedulerInput::Txn(Box::new(validate_only_on(3, 1))));
+        scheduler.refresh_role();
+        assert!(staged_requests(&mut data_side).is_empty());
+
+        let inbox = Arc::clone(scheduler.inbox.inbox());
+        inbox
+            .push(
+                txn_id.epoch,
+                txn_id.position,
+                redo_applied(staged_response(Status::Ok, None)),
+            )
+            .await;
+        let term_start = scheduler
+            .multi_raft
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .term_start_index(group_id)
+            .expect("the elected node names its term start");
+        scheduler
+            .shared
+            .applied_index_watcher(group_id)
+            .bump(term_start);
+        scheduler.refresh_role();
+
+        assert!(scheduler.role.is_leader(), "the gate opens");
+        assert!(
+            staged_requests(&mut data_side).is_empty(),
+            "the applied txn stages nothing"
+        );
+        assert!(!scheduler.pending.contains_key(&txn_id));
+        assert!(scheduler.applied.is_applied(3, 0));
     }
 
     /// A write the gate admitted with no lock table holds the stage gate

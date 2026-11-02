@@ -338,7 +338,6 @@ pub(crate) fn invalidate_gateway_cache_for_entry(entry: &CatalogEntry, shared: &
         | CatalogEntry::DeleteTopicWithConsumerGroups { .. }
         | CatalogEntry::PutConsumerGroupIfAbsent(_)
         | CatalogEntry::DeleteConsumerGroup { .. }
-        | CatalogEntry::MigrateConsumerGroupStream { .. }
         | CatalogEntry::CommitConsumerOffsets(_) => {
             // no-op: topics and consumer groups are Event Plane delivery
             // identities and never enter a query plan.
@@ -489,6 +488,7 @@ mod tests {
             key: vec![],
             rls_filters: vec![],
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }));
         cache.insert(key.clone(), plan);
         key

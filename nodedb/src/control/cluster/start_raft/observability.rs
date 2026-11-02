@@ -357,13 +357,17 @@ fn start_health_monitor(
         ping_interval: std::time::Duration::from_secs(transport_tuning.health_ping_interval_secs),
         failure_threshold: transport_tuning.health_failure_threshold,
     };
-    let health_monitor = Arc::new(nodedb_cluster::HealthMonitor::new(
-        handle.node_id,
-        handle.transport.clone(),
-        handle.topology.clone(),
-        handle.catalog.clone(),
-        health_config,
-    ));
+    let health_monitor = Arc::new(
+        nodedb_cluster::HealthMonitor::new(
+            handle.node_id,
+            handle.transport.clone(),
+            handle.topology.clone(),
+            handle.catalog.clone(),
+            health_config,
+        )
+        // Every ping this node sends carries its oldest-snapshot report.
+        .with_snapshot_board(Arc::clone(shared.read_cut.board())),
+    );
     shared
         .loop_metrics_registry
         .register(health_monitor.loop_metrics());

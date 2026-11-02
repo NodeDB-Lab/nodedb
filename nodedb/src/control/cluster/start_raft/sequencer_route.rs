@@ -56,13 +56,13 @@ pub(super) fn routed_write(state: &Weak<SharedState>, data: Vec<u8>) -> Proposed
     ProposedWrite { at: None, applied }
 }
 
-/// The apply result a routed write's answer stands for: its payload and
-/// written version, or its typed Data-Plane verdict.
+/// The apply result a routed write's answer stands for: its payload, or its
+/// typed Data-Plane verdict.
 fn applied_result(
     response: &Response,
 ) -> crate::Result<crate::control::wal_replication::AppliedOutput> {
     if response.status == Status::Ok {
-        return Ok((response.payload.to_vec(), response.read_versions.clone()));
+        return Ok(response.payload.to_vec());
     }
     match response.error_code.as_deref() {
         Some(code) => Err(crate::Error::DataPlane(code.clone())),
@@ -80,16 +80,10 @@ mod tests {
     use crate::bridge::envelope::ErrorCode;
 
     #[test]
-    fn an_ok_answer_carries_its_payload_and_version() {
+    fn an_ok_answer_carries_its_payload() {
         let mut response = bare_ok_response(RequestId::new(1));
         response.payload = crate::bridge::envelope::Payload::from_vec(vec![7]);
-        let version = nodedb_types::WriteVersion::logged(2, 9);
-        response
-            .read_versions
-            .note(crate::types::VShardId::new(4), version);
-        let (payload, versions) = applied_result(&response).expect("ok");
-        assert_eq!(payload, vec![7]);
-        assert_eq!(versions.of(crate::types::VShardId::new(4)), Some(version));
+        assert_eq!(applied_result(&response).expect("ok"), vec![7]);
     }
 
     #[test]

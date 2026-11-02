@@ -86,12 +86,12 @@ pub(crate) fn apply_array_schema(
     }
 
     // A schema import touches the registries, not a Data-Plane collection, so it
-    // publishes no per-collection write-version.
+    // answers an empty payload.
     tracker.complete(
         group_id,
         log_index,
         applied_key,
-        Ok(AppliedWrite::unversioned(Vec::new())),
+        Ok(AppliedWrite::new(Vec::new())),
     );
     true
 }

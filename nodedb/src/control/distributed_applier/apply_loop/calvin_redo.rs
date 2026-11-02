@@ -178,7 +178,7 @@ impl CalvinClaim {
             watermark_lsn: Lsn::ZERO,
             error_code: Some(Box::new(ErrorCode::NotFound)),
             stage_vote: None,
-            read_versions: crate::types::ReadVersions::new(),
+            read_vshards: crate::types::ReadShards::new(),
             write_set: Vec::new(),
         };
         self.applied(state, reply)
@@ -195,11 +195,11 @@ impl CalvinClaim {
         state
             .redo_chunks
             .drop_calvin_position(self.vshard_id, self.epoch, self.position);
-        // The install recorded the slice's write versions.
+        // The slice's stamped redo installed on this node.
         state
             .calvin
             .counters
-            .write_versions_recorded
+            .redo_installs
             .fetch_add(1, Ordering::Relaxed);
         CalvinApplyEvent::RedoApplied {
             reply,
@@ -320,7 +320,7 @@ mod tests {
                 watermark_lsn: Lsn::ZERO,
                 error_code: None,
                 stage_vote: None,
-                read_versions: crate::types::ReadVersions::new(),
+                read_vshards: crate::types::ReadShards::new(),
                 write_set: Vec::new(),
             },
         })

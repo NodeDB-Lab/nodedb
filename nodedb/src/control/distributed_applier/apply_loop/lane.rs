@@ -345,11 +345,9 @@ impl Lane {
                         self.group_id,
                         front.log_index,
                         front.proposal_key,
-                        Ok(
-                            crate::control::distributed_applier::AppliedWrite::unversioned(
-                                Vec::new(),
-                            ),
-                        ),
+                        Ok(crate::control::distributed_applier::AppliedWrite::new(
+                            Vec::new(),
+                        )),
                     );
                     PrefixStep::Neutral
                 }
@@ -723,6 +721,7 @@ mod tests {
                 user_roles: Vec::new(),
             },
             collections: vec!["orders".into()],
+            incarnation_names: Vec::new(),
             sum_targets: Vec::new(),
             identities: Vec::new(),
             event_source: crate::event::EventSource::User,
@@ -734,6 +733,8 @@ mod tests {
                 user_write,
                 returning: false,
             }),
+            reads: Vec::new(),
+            snapshot_ordinal: None,
         };
         let mut entry = crate::control::wal_replication::encode::transaction_redo_entry(
             crate::types::TenantId::new(4),

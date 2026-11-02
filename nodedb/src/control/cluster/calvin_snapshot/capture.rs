@@ -71,6 +71,8 @@ pub async fn await_calvin_cut(
         hlc,
         restore_point: 0,
         barrier: None,
+        // A snapshot build reads no cut of its own.
+        floor: 0,
     })
     .map_err(|error| Error::Internal {
         detail: format!("snapshot build: group {group_id}: encode the Calvin cut marker: {error}"),

@@ -24,7 +24,7 @@ pub fn create_if_absent(def: &TopicDef, shared: &SharedState) {
 }
 
 /// Tear down an applied topic: its registration, its CDC buffer, and every
-/// consumer group attached to either its canonical or its legacy stream name.
+/// consumer group attached to its `topic:<name>` stream.
 pub fn delete_with_consumer_groups(
     database_id: u64,
     tenant_id: u64,
@@ -39,24 +39,20 @@ pub fn delete_with_consumer_groups(
     shared
         .cdc_router
         .remove_buffer(database_id, tenant_id, &buffer_key);
-    // A group can still be keyed by the bare topic name on a node that never
-    // ran the migration. Both identities are cleared, or a recreated topic
-    // inherits the stale cursor.
-    for stream in [buffer_key.as_str(), name] {
-        for def in shared
+    // Every group's cursor is cleared, or a recreated topic inherits it.
+    for def in shared
+        .group_registry
+        .list_for_stream(database_id, tenant_id, &buffer_key)
+    {
+        shared
             .group_registry
-            .list_for_stream(database_id, tenant_id, stream)
-        {
-            shared
-                .group_registry
-                .unregister(database_id, tenant_id, stream, &def.name);
-            super::consumer_group::forget_offsets(
-                database_id,
-                tenant_id,
-                stream,
-                &def.name,
-                shared,
-            );
-        }
+            .unregister(database_id, tenant_id, &buffer_key, &def.name);
+        super::consumer_group::forget_offsets(
+            database_id,
+            tenant_id,
+            &buffer_key,
+            &def.name,
+            shared,
+        );
     }
 }

@@ -264,6 +264,9 @@ impl Scheduler {
             // participant can check, at apply, whether its slice of the reads was
             // still current. Empty for pure-write / autocommit transactions.
             versioned_reads: txn.tx_class.versioned_reads.as_slice().to_vec(),
+            // The snapshot those reads ran at. A read is current while no
+            // version of what it observed is newer than this ordinal.
+            snapshot_ordinal: txn.tx_class.snapshot_ordinal,
             body_plans,
         });
 

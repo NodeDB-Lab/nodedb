@@ -196,11 +196,7 @@ async fn run_catchup_cycle(shared: &SharedState) -> CatchupResult {
             max_lsn = max_lsn.max(record.header.lsn);
             continue;
         };
-        if decoded
-            .kind
-            .as_deref()
-            .is_some_and(|kind| kind != "timeseries")
-        {
+        if decoded.kind != "timeseries" {
             max_lsn = max_lsn.max(record.header.lsn);
             continue;
         }
@@ -259,6 +255,9 @@ async fn run_catchup_cycle(shared: &SharedState) -> CatchupResult {
                     .default_timestamp_ms
                     .and_then(|ms| u64::try_from(ms).ok()),
                 minted: Some(minted),
+                // The rows take the ordinal the record carries, the one its
+                // first apply stamped.
+                system_ordinal: record.system_ordinal(),
             },
         )
         .await
@@ -339,6 +338,7 @@ mod tests {
             rows: Vec::new(),
             rejected: 0,
             first_rejection: None,
+            carried_system: false,
         };
         let payload = batch.to_bytes().expect("encode batch");
         let redispatched =
