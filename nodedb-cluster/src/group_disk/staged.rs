@@ -177,6 +177,7 @@ mod tests {
                 .save_hard_state(&HardState {
                     current_term: 2,
                     voted_for: 5,
+                    ordinal_floor: 0,
                 })
                 .expect("stage");
             let ticket = storage.ticket().expect("writes are staged");

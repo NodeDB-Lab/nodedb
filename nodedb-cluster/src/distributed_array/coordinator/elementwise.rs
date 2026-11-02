@@ -10,7 +10,7 @@
 
 use crate::error::{ClusterError, Result};
 
-use super::super::merge::merge_read_versions;
+use super::super::merge::merge_read_vshards;
 use super::super::scatter::{ArrayCoordError, FanOutPartitionedParams, fan_out_partitioned};
 use super::super::wire::{ArrayShardElementwiseReq, ArrayShardElementwiseResp};
 use super::read::{ArrayCoordinator, decode_resps, shard_bucket};
@@ -22,8 +22,8 @@ pub struct CoordElementwiseResult {
     pub rows: Vec<Vec<u8>>,
     /// OR of every shard's below-horizon signal.
     pub truncated_before_horizon: bool,
-    /// The write versions every shard leg observed, one per vShard.
-    pub read_versions: Vec<nodedb_types::ShardVersion>,
+    /// The vShards every shard leg read.
+    pub read_vshards: Vec<u32>,
 }
 
 impl ArrayCoordinator {
@@ -67,7 +67,7 @@ impl ArrayCoordinator {
         let resps = decode_resps::<ArrayShardElementwiseResp>(&raw)?;
         Ok(CoordElementwiseResult {
             truncated_before_horizon: resps.iter().any(|r| r.truncated_before_horizon),
-            read_versions: merge_read_versions(resps.iter().map(|r| r.read_versions.as_slice())),
+            read_vshards: merge_read_vshards(resps.iter().map(|r| r.read_vshards.as_slice())),
             rows: resps.into_iter().flat_map(|r| r.rows_msgpack).collect(),
         })
     }
@@ -100,7 +100,7 @@ mod tests {
                 rows_msgpack: vec![bucket.bucket.to_be_bytes().to_vec()],
                 // One shard reports its cutoff below the horizon.
                 truncated_before_horizon: bucket.bucket == 2,
-                read_versions: Vec::new(),
+                read_vshards: Vec::new(),
             };
             Ok(VShardEnvelope::new(
                 VShardMessageType::ArrayShardElementwiseResp,

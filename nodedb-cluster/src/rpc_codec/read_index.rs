@@ -19,6 +19,10 @@ pub struct ReadIndexRequest {
     pub group_id: u64,
     /// How long the leader may wait for a quorum to confirm it.
     pub timeout_ms: u64,
+    /// The read cut the leader closes before it takes the index: it folds
+    /// the ordinal into its clock and waits until every write it reserved
+    /// at or below the ordinal applied. `None` takes a plain read index.
+    pub cut: Option<i64>,
 }
 
 /// The leader's answer to a [`ReadIndexRequest`].
@@ -99,11 +103,13 @@ mod tests {
         let rpc = roundtrip(RaftRpc::ReadIndexRequest(ReadIndexRequest {
             group_id: 7,
             timeout_ms: 750,
+            cut: Some(1_234),
         }));
         match rpc {
             RaftRpc::ReadIndexRequest(req) => {
                 assert_eq!(req.group_id, 7);
                 assert_eq!(req.timeout_ms, 750);
+                assert_eq!(req.cut, Some(1_234));
             }
             other => panic!("decoded the wrong variant: {other:?}"),
         }

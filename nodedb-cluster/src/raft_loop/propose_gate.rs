@@ -17,7 +17,7 @@
 //! host returns the stamped bytes, and the leader proposes those in place of
 //! the bytes the proposer sent.
 
-use crate::error::Result;
+use crate::error::{ClusterError, Result};
 use crate::forward::PlanExecutor;
 
 use super::loop_core::{CommitApplier, RaftLoop};
@@ -55,11 +55,16 @@ pub trait DataProposeGate: Send + Sync + 'static {
     ///   sequencer.
     /// - `Err(ClusterError::Calvin(CalvinError::AdmissionTimedOut))`: the
     ///   keys stayed held until `deadline`. Nothing is proposed.
+    ///
+    /// `ordinal_floor` is the group's floor this leader gathered: every
+    /// system-time ordinal the entry stamps lies above it, so no write lands
+    /// at or below a read cut an earlier leader closed.
     async fn admit(
         &self,
         vshard_id: u32,
         entry: &[u8],
         deadline: tokio::time::Instant,
+        ordinal_floor: i64,
     ) -> Result<Admitted>;
 }
 
@@ -78,11 +83,13 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
         data: &[u8],
         deadline: tokio::time::Instant,
     ) -> Result<(u64, u64)> {
-        let Admitted { hold, entry } = match &self.data_propose_gate {
-            Some(gate) if self.leads_group_of(vshard_id) => {
-                gate.admit(vshard_id, data, deadline).await?
+        let Admitted { hold, entry } = match (&self.data_propose_gate, self.led_group_of(vshard_id))
+        {
+            (Some(gate), Some(group_id)) => {
+                let floor = self.admission_floor(group_id, deadline).await?;
+                gate.admit(vshard_id, data, deadline, floor).await?
             }
-            Some(_) | None => Admitted::default(),
+            (Some(_) | None, _) => Admitted::default(),
         };
         let entry = entry.unwrap_or_else(|| data.to_vec());
         let (group_id, log_index) = self.propose(vshard_id, entry)?;
@@ -92,14 +99,37 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
         Ok((group_id, log_index))
     }
 
-    /// Whether this node leads the data group that owns `vshard_id`.
-    fn leads_group_of(&self, vshard_id: u32) -> bool {
+    /// The data group that owns `vshard_id`, when this node leads it.
+    fn led_group_of(&self, vshard_id: u32) -> Option<u64> {
         let mr = self.multi_raft.lock().unwrap_or_else(|p| p.into_inner());
         let group_id = mr
             .routing()
             .read()
             .unwrap_or_else(|p| p.into_inner())
-            .group_for_vshard(vshard_id);
-        group_id.is_ok_and(|group_id| mr.is_group_leader(group_id))
+            .group_for_vshard(vshard_id)
+            .ok()?;
+        mr.is_group_leader(group_id).then_some(group_id)
+    }
+
+    /// The ordinal floor a write this leader admits to `group_id` stamps
+    /// above, gathered once per leadership term (see `super::ordinal_floor`).
+    /// A leader that lost the group meanwhile refuses with `NotLeader`, the
+    /// refusal a propose to a non-leader answers, so the proposer forwards.
+    async fn admission_floor(&self, group_id: u64, deadline: tokio::time::Instant) -> Result<i64> {
+        let timeout = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match self.gathered_ordinal_floor(group_id, timeout).await {
+            Err(ClusterError::ReadIndexNotLeader { .. }) => {
+                let (leader, term) = self
+                    .multi_raft
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .group_leader_at_term(group_id);
+                Err(ClusterError::Raft(nodedb_raft::RaftError::NotLeader {
+                    leader_hint: (leader != 0).then_some(leader),
+                    term,
+                }))
+            }
+            other => other,
+        }
     }
 }

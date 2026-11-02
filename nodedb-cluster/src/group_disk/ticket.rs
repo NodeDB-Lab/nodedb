@@ -126,6 +126,7 @@ mod tests {
         disk.stage(StorageOp::HardState(HardState {
             current_term: 2,
             voted_for: 5,
+            ordinal_floor: 0,
         }));
         disk.stage(StorageOp::AppliedIndex(4));
         let mark = disk.staged_through();

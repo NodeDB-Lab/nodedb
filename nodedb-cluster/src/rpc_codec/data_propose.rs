@@ -28,7 +28,11 @@ pub enum ProposeTarget {
     },
     /// The Calvin sequencer group. The bytes are a msgpack-encoded
     /// `SequencerEntry`.
-    Sequencer,
+    ///
+    /// `cut_floor` is the floor a cut marker carries, `0` for any other
+    /// entry. The leader records it as it appends the entry
+    /// (`MultiRaft::propose_to_sequencer`).
+    Sequencer { cut_floor: i64 },
 }
 
 /// The budget a forward carries for `deadline`: the milliseconds left now.
@@ -309,8 +313,8 @@ mod tests {
 
     #[test]
     fn sequencer_target_survives_the_wire() {
-        let req = roundtrip(ProposeTarget::Sequencer);
-        assert_eq!(req.target, ProposeTarget::Sequencer);
+        let req = roundtrip(ProposeTarget::Sequencer { cut_floor: 42 });
+        assert_eq!(req.target, ProposeTarget::Sequencer { cut_floor: 42 });
         assert_eq!(req.bytes, vec![1, 2, 3]);
     }
 

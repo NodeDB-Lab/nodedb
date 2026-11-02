@@ -631,6 +631,7 @@ mod tests {
         let pong = RaftRpc::Pong(PongResponse {
             responder_id: 1,
             topology_version: 2,
+            oldest_snapshot: crate::snapshot_board::NO_SNAPSHOT_REPORT,
         });
         assert!(matches!(
             classify(1, Ok(Ok(pong))),

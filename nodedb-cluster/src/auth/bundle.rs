@@ -150,7 +150,7 @@ mod tests {
         let secret = [0xB4u8; 32];
         let token_hash = [0xC5u8; 32];
         let mut sealed = seal_bundle(b"payload".to_vec(), &secret, &token_hash).unwrap();
-        sealed.version = WireVersion::V1;
+        sealed.version = WireVersion(WireVersion::CURRENT.0 + 1);
         assert!(matches!(
             open_bundle(&sealed, &secret, &token_hash).unwrap_err(),
             BundleError::VersionMismatch { .. }

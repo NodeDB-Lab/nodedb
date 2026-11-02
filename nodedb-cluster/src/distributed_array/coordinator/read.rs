@@ -12,7 +12,7 @@ use crate::circuit_breaker::CircuitBreaker;
 use crate::error::{ClusterError, Result};
 
 use super::super::merge::{
-    ArrayAggPartial, any_truncated_before_horizon_agg, merge_read_versions, merge_slice_rows,
+    ArrayAggPartial, any_truncated_before_horizon_agg, merge_read_vshards, merge_slice_rows,
     merge_slice_rows_sorted, reduce_agg_partials,
 };
 use super::super::routing::shard_bucket_for_vshard;
@@ -52,8 +52,8 @@ pub struct ArrayCoordParams {
 pub struct CoordSliceResult {
     pub rows: Vec<Vec<u8>>,
     pub truncated_before_horizon: bool,
-    /// The write versions every shard leg observed, one per vShard.
-    pub read_versions: Vec<nodedb_types::ShardVersion>,
+    /// The vShards every shard leg read.
+    pub read_vshards: Vec<u32>,
 }
 
 /// Result of a coordinated aggregate fan-out.
@@ -67,8 +67,8 @@ pub struct CoordSliceResult {
 pub struct CoordAggResult {
     pub partials: Vec<ArrayAggPartial>,
     pub truncated_before_horizon: bool,
-    /// The write versions every shard leg observed, one per vShard.
-    pub read_versions: Vec<nodedb_types::ShardVersion>,
+    /// The vShards every shard leg read.
+    pub read_vshards: Vec<u32>,
 }
 
 /// The bucket filter for a read sent to vShard `shard_id`. `None` when
@@ -206,7 +206,7 @@ impl ArrayCoordinator {
         Ok(CoordSliceResult {
             rows,
             truncated_before_horizon,
-            read_versions: merge_read_versions(resps.iter().map(|r| r.read_versions.as_slice())),
+            read_vshards: merge_read_vshards(resps.iter().map(|r| r.read_vshards.as_slice())),
         })
     }
 
@@ -253,7 +253,7 @@ impl ArrayCoordinator {
         Ok(CoordAggResult {
             partials: reduce_agg_partials(&resps),
             truncated_before_horizon: any_truncated_before_horizon_agg(&resps),
-            read_versions: merge_read_versions(resps.iter().map(|r| r.read_versions.as_slice())),
+            read_vshards: merge_read_vshards(resps.iter().map(|r| r.read_vshards.as_slice())),
         })
     }
 
@@ -335,12 +335,9 @@ mod tests {
 
     use super::*;
 
-    /// The version a mock shard leg reports for its vShard.
-    fn leg_versions(vshard: u32) -> Vec<nodedb_types::ShardVersion> {
-        vec![nodedb_types::ShardVersion {
-            vshard,
-            version: nodedb_types::WriteVersion::logged(1, u64::from(vshard) + 100),
-        }]
+    /// The vShards a mock shard leg reports: its own.
+    fn leg_vshards(vshard: u32) -> Vec<u32> {
+        vec![vshard]
     }
 
     /// Mock dispatch that returns a pre-serialised `ArrayShardSliceResp`.
@@ -357,7 +354,7 @@ mod tests {
                 rows_msgpack: self.rows.clone(),
                 truncated: false,
                 truncated_before_horizon: false,
-                read_versions: leg_versions(req.vshard_id),
+                read_vshards: leg_vshards(req.vshard_id),
             };
             let payload = zerompk::to_msgpack_vec(&resp).unwrap();
             Ok(VShardEnvelope::new(
@@ -382,7 +379,7 @@ mod tests {
                 shard_id: req.vshard_id,
                 partials: self.partials.clone(),
                 truncated_before_horizon: false,
-                read_versions: leg_versions(req.vshard_id),
+                read_vshards: leg_vshards(req.vshard_id),
             };
             let payload = zerompk::to_msgpack_vec(&resp).unwrap();
             Ok(VShardEnvelope::new(
@@ -445,15 +442,10 @@ mod tests {
             .expect("coord_slice should succeed");
         assert_eq!(result.rows.len(), 6);
         assert!(!result.truncated_before_horizon);
-        let mut versions = result.read_versions;
-        versions.sort();
         assert_eq!(
-            versions,
-            [0, 1, 2]
-                .into_iter()
-                .flat_map(leg_versions)
-                .collect::<Vec<_>>(),
-            "the merge keeps every shard leg's version"
+            result.read_vshards,
+            vec![0, 1, 2],
+            "the merge keeps every shard leg's vShard"
         );
     }
 
@@ -554,7 +546,7 @@ mod tests {
                     shard_id: req.vshard_id,
                     partials,
                     truncated_before_horizon: false,
-                    read_versions: Vec::new(),
+                    read_vshards: Vec::new(),
                 };
                 let payload = zerompk::to_msgpack_vec(&resp).unwrap();
                 Ok(VShardEnvelope::new(
@@ -621,7 +613,7 @@ mod tests {
                     shard_id: req.vshard_id,
                     partials,
                     truncated_before_horizon: below,
-                    read_versions: Vec::new(),
+                    read_vshards: Vec::new(),
                 };
                 let payload = zerompk::to_msgpack_vec(&resp).unwrap();
                 Ok(VShardEnvelope::new(
@@ -698,7 +690,7 @@ mod tests {
                 rows_msgpack: rows,
                 truncated: false,
                 truncated_before_horizon: false,
-                read_versions: Vec::new(),
+                read_vshards: Vec::new(),
             };
             let payload = zerompk::to_msgpack_vec(&resp).unwrap();
             Ok(VShardEnvelope::new(

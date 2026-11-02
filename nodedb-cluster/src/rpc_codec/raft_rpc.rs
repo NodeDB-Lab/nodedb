@@ -25,6 +25,7 @@ use super::frame_refusal::FrameRefusal;
 use super::header::HEADER_SIZE;
 use super::leader_status::{LeaderStatusRequest, LeaderStatusResponse};
 use super::metadata::{MetadataProposeRequest, MetadataProposeResponse};
+use super::ordinal_floor::{OrdinalFloorRequest, OrdinalFloorResponse};
 use super::read_index::{ReadIndexRequest, ReadIndexResponse};
 use super::request_refusal::RequestRefusal;
 use super::reservation::{
@@ -39,8 +40,8 @@ use super::surrogate::{AssignSurrogateRequest, AssignSurrogateResponse};
 use super::vshard::VShardRefusal;
 use super::{
     auth_lease, calvin_parts, calvin_submit, cluster_mgmt, data_propose, execute, frame_refusal,
-    leader_status, metadata, raft_msgs, read_index, request_refusal, reservation, shuffle,
-    surrogate, vshard,
+    leader_status, metadata, ordinal_floor, raft_msgs, read_index, request_refusal, reservation,
+    shuffle, surrogate, vshard,
 };
 use crate::error::{ClusterError, Result};
 use crate::wire_version::{unwrap_bytes_versioned, wrap_bytes_versioned};
@@ -71,7 +72,7 @@ pub enum RaftRpc {
     // Topology broadcast
     TopologyUpdate(TopologyUpdate),
     TopologyAck(TopologyAck),
-    // Discriminants 13/14 (ForwardRequest/ForwardResponse) are retired.
+    // Discriminants 13/14 are unassigned.
     // VShardEnvelope
     VShardEnvelope(Vec<u8>),
     // Metadata-group proposal forwarding (group 0)
@@ -166,6 +167,10 @@ pub enum RaftRpc {
     // the receiver answers from its own Raft state, with no quorum round.
     LeaderStatusRequest(LeaderStatusRequest),
     LeaderStatusResponse(LeaderStatusResponse),
+    // Ordinal floor exchange. A group's leader sends its system-time floor;
+    // a voter at its term raises its own and answers the floor it holds.
+    OrdinalFloorRequest(OrdinalFloorRequest),
+    OrdinalFloorResponse(OrdinalFloorResponse),
     // Authorization lease renewal and the writer-side barrier, both answered
     // by the metadata group leader.
     AuthLeaseRenewRequest(AuthLeaseRenewRequest),
@@ -254,6 +259,8 @@ pub fn encode(rpc: &RaftRpc, epoch: &crate::cluster_epoch::ClusterEpochState) ->
         RaftRpc::ReadIndexResponse(m) => read_index::encode_read_index_resp(m, &mut out),
         RaftRpc::LeaderStatusRequest(m) => leader_status::encode_leader_status_req(m, &mut out),
         RaftRpc::LeaderStatusResponse(m) => leader_status::encode_leader_status_resp(m, &mut out),
+        RaftRpc::OrdinalFloorRequest(m) => ordinal_floor::encode_ordinal_floor_req(m, &mut out),
+        RaftRpc::OrdinalFloorResponse(m) => ordinal_floor::encode_ordinal_floor_resp(m, &mut out),
         RaftRpc::AuthLeaseRenewRequest(m) => auth_lease::encode_renew_req(m, &mut out),
         RaftRpc::AuthLeaseRenewResponse(m) => auth_lease::encode_renew_resp(m, &mut out),
         RaftRpc::AuthBarrierRequest(m) => auth_lease::encode_barrier_req(m, &mut out),
@@ -266,7 +273,7 @@ pub fn encode(rpc: &RaftRpc, epoch: &crate::cluster_epoch::ClusterEpochState) ->
     Ok(out)
 }
 
-/// Encode a [`RaftRpc`] and wrap the framed bytes in a v2 versioned envelope.
+/// Encode a [`RaftRpc`] and wrap the framed bytes in a versioned envelope.
 ///
 /// The outer envelope allows peers to detect and reject incompatible future
 /// wire versions rather than silently misinterpreting them.
@@ -282,12 +289,8 @@ pub fn versioned_encode(
 
 /// Decode a versioned-envelope-wrapped [`RaftRpc`] frame.
 ///
-/// Accepts both v2 versioned envelopes and raw v1 (pre-versioning) frames;
-/// rejects envelopes with unsupported future version numbers.
-///
-/// The v1 fallback preserves wire compat with peers running pre-versioning
-/// cluster code: if the bytes do not match the `fixarray(2)` envelope shape,
-/// they are passed directly to [`decode`] as-is.
+/// Accepts only an envelope at the current wire version. Raw frames
+/// without an envelope and envelopes of any other version are rejected.
 pub fn versioned_decode(
     data: &[u8],
     epoch: &crate::cluster_epoch::ClusterEpochState,
@@ -318,15 +321,6 @@ pub fn decode(data: &[u8], epoch: &crate::cluster_epoch::ClusterEpochState) -> R
         RPC_PONG => cluster_mgmt::decode_pong(payload),
         RPC_TOPOLOGY_UPDATE => cluster_mgmt::decode_topology_update(payload),
         RPC_TOPOLOGY_ACK => cluster_mgmt::decode_topology_ack(payload),
-        // Discriminants 13/14 (ForwardRequest/ForwardResponse) are retired.
-        // A node receiving these has a peer still running an older version.
-        // Return a typed error so the operator sees a clear message.
-        RPC_FORWARD_REQ | RPC_FORWARD_RESP => Err(ClusterError::Codec {
-            detail: format!(
-                "rpc_type {rpc_type} is a retired wire variant (ForwardRequest/ForwardResponse, \
-                 retired); upgrade all cluster nodes to remove this peer"
-            ),
-        }),
         RPC_VSHARD_ENVELOPE => vshard::decode_vshard_envelope(payload),
         RPC_METADATA_PROPOSE_REQ => metadata::decode_metadata_propose_req(payload),
         RPC_METADATA_PROPOSE_RESP => metadata::decode_metadata_propose_resp(payload),
@@ -362,6 +356,8 @@ pub fn decode(data: &[u8], epoch: &crate::cluster_epoch::ClusterEpochState) -> R
         RPC_READ_INDEX_RESP => read_index::decode_read_index_resp(payload),
         RPC_LEADER_STATUS_REQ => leader_status::decode_leader_status_req(payload),
         RPC_LEADER_STATUS_RESP => leader_status::decode_leader_status_resp(payload),
+        RPC_ORDINAL_FLOOR_REQ => ordinal_floor::decode_ordinal_floor_req(payload),
+        RPC_ORDINAL_FLOOR_RESP => ordinal_floor::decode_ordinal_floor_resp(payload),
         RPC_AUTH_LEASE_RENEW_REQ => auth_lease::decode_renew_req(payload),
         RPC_AUTH_LEASE_RENEW_RESP => auth_lease::decode_renew_resp(payload),
         RPC_AUTH_BARRIER_REQ => auth_lease::decode_barrier_req(payload),
@@ -412,7 +408,7 @@ mod tests {
         });
         let mut encoded =
             encode(&rpc, &crate::cluster_epoch::ClusterEpochState::default()).unwrap();
-        encoded[0] = 99;
+        encoded[0] = 2;
         let err = decode(
             &encoded,
             &crate::cluster_epoch::ClusterEpochState::default(),
@@ -426,10 +422,10 @@ mod tests {
 
     #[test]
     fn truncated_frame_rejected() {
-        // Version byte 3 (RPC_FRAME_VERSION) passes version check; then header
-        // size check fires because we only have 3 bytes total.
+        // Version byte 1 (RPC_FRAME_VERSION) passes the version check. The header
+        // size check then fires because the frame holds 3 bytes.
         let err = decode(
-            &[3, 2, 3],
+            &[1, 2, 3],
             &crate::cluster_epoch::ClusterEpochState::default(),
         )
         .unwrap_err();
@@ -457,7 +453,7 @@ mod tests {
     fn payload_too_large_rejected() {
         use super::super::header::MAX_RPC_PAYLOAD_SIZE;
         let mut frame = vec![0u8; HEADER_SIZE];
-        frame[0] = 3u8; // RPC_FRAME_VERSION
+        frame[0] = 1u8; // RPC_FRAME_VERSION
         frame[1] = RPC_APPEND_ENTRIES_REQ;
         let huge: u32 = MAX_RPC_PAYLOAD_SIZE + 1;
         frame[2..6].copy_from_slice(&huge.to_le_bytes());

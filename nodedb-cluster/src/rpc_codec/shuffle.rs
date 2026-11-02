@@ -125,12 +125,12 @@ pub struct ShuffleProduceRequest {
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct ShuffleProduceResponse {
     pub error: Option<TypedClusterError>,
-    /// The read versions the producer's local scan observed, one per vShard
-    /// read. Empty for a failed produce. The coordinator folds them across
-    /// producers for cross-shard OCC read validation of an in-transaction
-    /// distributed aggregate. Mirrors
-    /// [`ExecuteResponse::read_versions`](super::execute::ExecuteResponse::read_versions).
-    pub read_versions: Vec<nodedb_types::ShardVersion>,
+    /// The vShards the producer's local scan read. Empty for a failed
+    /// produce. The coordinator folds them across
+    /// producers and homes an in-transaction distributed aggregate's
+    /// read-set entries on their vShards. Mirrors
+    /// [`ExecuteResponse::read_vshards`](super::execute::ExecuteResponse::read_vshards).
+    pub read_vshards: Vec<u32>,
 }
 
 /// One `(left_key, right_key)` equi-join pair of a [`ShuffleConsumeRequest`]'s
@@ -637,18 +637,15 @@ mod tests {
 
     #[test]
     fn roundtrip_shuffle_produce_response_clean() {
-        let read_versions = vec![nodedb_types::ShardVersion {
-            vshard: 9,
-            version: nodedb_types::WriteVersion::logged(1, 0xABCD_1234),
-        }];
+        let read_vshards = vec![9];
         let decoded = roundtrip_produce_resp(ShuffleProduceResponse {
             error: None,
-            read_versions: read_versions.clone(),
+            read_vshards: read_vshards.clone(),
         });
         assert!(decoded.error.is_none());
         assert_eq!(
-            decoded.read_versions, read_versions,
-            "producer read versions roundtrip on the produce reply"
+            decoded.read_vshards, read_vshards,
+            "producer read vShards roundtrip on the produce reply"
         );
     }
 
@@ -659,11 +656,11 @@ mod tests {
                 code: 0x55,
                 message: "produce scan failed".into(),
             }),
-            read_versions: Vec::new(),
+            read_vshards: Vec::new(),
         });
         assert!(
-            decoded.read_versions.is_empty(),
-            "a failed produce carries no read versions"
+            decoded.read_vshards.is_empty(),
+            "a failed produce carries no read vShards"
         );
         match decoded.error {
             Some(TypedClusterError::Internal { code, message }) => {

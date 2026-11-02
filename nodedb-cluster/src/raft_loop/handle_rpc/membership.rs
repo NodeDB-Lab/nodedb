@@ -64,7 +64,12 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
             let topo = self.topology.read().unwrap_or_else(|p| p.into_inner());
             topo.version()
         };
-        Ok(health::handle_ping(self.node_id, topo_version, &req))
+        Ok(health::handle_ping(
+            self.node_id,
+            topo_version,
+            &self.snapshot_board,
+            &req,
+        ))
     }
 
     // Topology broadcast.

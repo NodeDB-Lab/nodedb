@@ -140,6 +140,7 @@ mod tests {
             &RaftRpc::Ping(PingRequest {
                 sender_id: 7,
                 topology_version: 1,
+                oldest_snapshot: crate::snapshot_board::NO_SNAPSHOT_REPORT,
             }),
             7,
             &enrollment_cert,

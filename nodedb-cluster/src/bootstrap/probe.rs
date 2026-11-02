@@ -193,6 +193,7 @@ async fn ping_probe(
     let rpc = RaftRpc::Ping(PingRequest {
         sender_id: self_node_id,
         topology_version: 0,
+        oldest_snapshot: crate::snapshot_board::NO_SNAPSHOT_REPORT,
     });
     match transport.send_rpc_to_addr(addr, rpc).await {
         Ok(RaftRpc::Pong(_)) => Ok(()),

@@ -79,6 +79,8 @@ pub struct SequencerStateMachine {
     ///
     /// Bounded by the number of hosted vShards.
     pub(super) catch_up_from: Mutex<HashMap<u32, CatchUpRange>>,
+    /// Wakes a vShard's scheduler to drain its armed catch-up at once.
+    pub(super) catch_up_wakes: super::catch_up_wake::CatchUpWakes,
     /// Set once an already-consumed epoch was proposed again. While set, no
     /// further `EpochBatch` is applied: this replica's epoch sequence and the
     /// proposing leader's have diverged, and fanning out under a colliding
@@ -148,6 +150,7 @@ impl SequencerStateMachine {
             last_committed_index: NOT_YET_APPLIED,
             vshard_senders,
             catch_up_from: Mutex::new(HashMap::new()),
+            catch_up_wakes: super::catch_up_wake::CatchUpWakes::default(),
             halted: false,
             unrecoverable_hook: None,
             restore_point_hook: None,
@@ -307,22 +310,35 @@ impl SequencerStateMachine {
         let Some(sender) = self.vshard_senders.get(&vshard) else {
             return Delivery::NotHosted;
         };
-        let mut map = self.catch_up_from.lock().unwrap_or_else(|p| p.into_inner());
-        if map.contains_key(&vshard) {
-            widen(&mut map, vshard, index);
-            return Delivery::Deferred;
-        }
-        match sender.try_send(input) {
-            Ok(()) => Delivery::Sent,
-            Err(mpsc::error::TrySendError::Full(_)) => {
+        let delivery = {
+            let mut map = self.catch_up_from.lock().unwrap_or_else(|p| p.into_inner());
+            if map.contains_key(&vshard) {
                 widen(&mut map, vshard, index);
-                Delivery::DroppedFull
+                Delivery::Deferred
+            } else {
+                match sender.try_send(input) {
+                    Ok(()) => Delivery::Sent,
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        widen(&mut map, vshard, index);
+                        Delivery::DroppedFull
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        widen(&mut map, vshard, index);
+                        Delivery::DroppedClosed
+                    }
+                }
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                widen(&mut map, vshard, index);
-                Delivery::DroppedClosed
-            }
+        };
+        // An input the replay owes reaches the scheduler at its next drain.
+        if delivery != Delivery::Sent {
+            self.catch_up_wakes.wake(vshard);
         }
+        delivery
+    }
+
+    /// The wake `vshard`'s scheduler drains its armed catch-up on.
+    pub fn catch_up_wake(&self, vshard: u32) -> Arc<tokio::sync::Notify> {
+        self.catch_up_wakes.handle(vshard)
     }
 
     /// Take (remove and return) the catch-up-from Raft index for `vshard`.

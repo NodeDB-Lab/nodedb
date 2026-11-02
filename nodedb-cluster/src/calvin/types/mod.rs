@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 pub mod cut_barrier;
+pub mod incarnation;
 pub mod lock_wire;
 pub mod multi_part;
 pub mod part_tasks;
@@ -12,6 +13,7 @@ pub mod transaction;
 pub mod tx_class_setters;
 
 pub use cut_barrier::{CutBarrierWire, CutCaptureWire};
+pub use incarnation::{CalvinIncarnation, IncarnationKind};
 pub use lock_wire::{LockKeyWire, ReleaseReason, TxnIdWire};
 pub use multi_part::{
     MultiPartPlans, PartStreamId, PlanPart, StreamedPart, TaskChunk, VShardParts,
@@ -26,4 +28,4 @@ pub use primitives::{
 pub use read_write_set::ReadWriteSet;
 pub use scheduler_input::SchedulerInput;
 pub use sequencer::{EpochBatch, LocalPlans, SequencedTxn};
-pub use transaction::{CalvinIncarnation, TxClass};
+pub use transaction::TxClass;

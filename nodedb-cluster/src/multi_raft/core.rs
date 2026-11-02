@@ -72,6 +72,10 @@ pub struct MultiRaft {
     /// Decides whether a data group mounted here takes a snapshot before any
     /// log entry. `None` requires none.
     pub(super) snapshot_requirement: Option<SnapshotRequirement>,
+    /// The highest cut floor, in epoch milliseconds, of any cut marker this
+    /// node appended to its sequencer log. `0` for none. See
+    /// [`super::sequencer_cut_floor`].
+    pub(super) sequencer_cut_floor_ms: i64,
 }
 
 /// What this node's replica of a data group needs before it takes log
@@ -140,6 +144,7 @@ impl MultiRaft {
             metadata_clock: None,
             applied_watchers: None,
             snapshot_requirement: None,
+            sequencer_cut_floor_ms: 0,
         }
     }
 

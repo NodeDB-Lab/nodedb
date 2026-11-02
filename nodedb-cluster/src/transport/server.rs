@@ -73,9 +73,9 @@ impl ChunkSink for QuicChunkSink<'_> {
         payload: Vec<u8>,
         watermark_lsn: u64,
         // The `ExecuteStream` wire chunk only carries `watermark_lsn`. The
-        // read versions reach the coordinator on the shuffle produce reply,
+        // read vShards reach the coordinator on the shuffle produce reply,
         // not on this streaming path.
-        _read_versions: Vec<nodedb_types::ShardVersion>,
+        _read_vshards: Vec<u32>,
     ) -> Result<()> {
         let rpc = RaftRpc::ExecuteStreamChunk(ExecuteStreamChunk {
             payload,
@@ -402,6 +402,7 @@ mod tests {
         let pong = RaftRpc::Pong(crate::rpc_codec::PongResponse {
             responder_id: 1,
             topology_version: 3,
+            oldest_snapshot: crate::snapshot_board::NO_SNAPSHOT_REPORT,
         });
         assert!(matches!(reply_for(Ok(pong)), RaftRpc::Pong(_)));
     }

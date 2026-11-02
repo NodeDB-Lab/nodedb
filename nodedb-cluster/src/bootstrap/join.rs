@@ -581,7 +581,7 @@ mod tests {
             ) -> crate::rpc_codec::ShuffleProduceResponse {
                 crate::rpc_codec::ShuffleProduceResponse {
                     error: None,
-                    read_versions: Vec::new(),
+                    read_vshards: Vec::new(),
                 }
             }
 

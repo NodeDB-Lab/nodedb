@@ -26,7 +26,10 @@ impl RaftRpc {
             // Reads of the peer's state.
             | RaftRpc::Ping(_)
             | RaftRpc::ReadIndexRequest(_)
-            | RaftRpc::LeaderStatusRequest(_) => true,
+            | RaftRpc::LeaderStatusRequest(_)
+            // A voter raises its floor to the maximum of the two, so a
+            // repeat leaves the same floor and answers it.
+            | RaftRpc::OrdinalFloorRequest(_) => true,
             // A second copy starts a second election.
             RaftRpc::TimeoutNowRequest(_)
             // The receiver takes a chunk only at its next expected offset,
@@ -79,6 +82,7 @@ impl RaftRpc {
             | RaftRpc::DataProposeResponse(_)
             | RaftRpc::ReadIndexResponse(_)
             | RaftRpc::LeaderStatusResponse(_)
+            | RaftRpc::OrdinalFloorResponse(_)
             | RaftRpc::AuthLeaseRenewResponse(_)
             | RaftRpc::AuthBarrierResponse(_)
             | RaftRpc::VShardRefusal(_)
@@ -110,6 +114,7 @@ mod tests {
         let ping = RaftRpc::Ping(PingRequest {
             sender_id: 1,
             topology_version: 0,
+            oldest_snapshot: crate::snapshot_board::NO_SNAPSHOT_REPORT,
         });
         assert!(ping.resend_safe());
     }

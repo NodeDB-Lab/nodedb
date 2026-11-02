@@ -30,6 +30,7 @@ mod leadership_transfer;
 mod lease_gc;
 pub mod loop_core;
 mod membership_convergence;
+mod ordinal_floor;
 mod placement_reconcile;
 pub mod proposals;
 pub mod propose_gate;

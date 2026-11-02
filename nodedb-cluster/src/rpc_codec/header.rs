@@ -21,14 +21,14 @@ use crate::error::{ClusterError, Result};
 pub const HEADER_SIZE: usize = 18;
 
 /// Wire-version byte stamped on every outbound frame and required on every inbound frame.
-const RPC_FRAME_VERSION: u8 = 3;
+const RPC_FRAME_VERSION: u8 = 1;
 
 /// Maximum RPC message payload size (64 MiB). Distinct from WAL's MAX_RPC_PAYLOAD_SIZE.
 ///
 /// Prevents degenerate allocations from corrupt frames.
 pub const MAX_RPC_PAYLOAD_SIZE: u32 = 64 * 1024 * 1024;
 
-/// Write a framed v3 header + payload into `out`.
+/// Write a framed header + payload into `out`.
 ///
 /// `rpc_type` is the discriminant byte; `payload` is the already-serialized
 /// body.
@@ -165,8 +165,8 @@ pub fn frame_size(header: &[u8; HEADER_SIZE]) -> Result<usize> {
 mod tests {
     use super::*;
 
-    /// Build a frame with the given version byte and a 10-byte (old short) header shape.
-    /// Used to test rejection of non-current version bytes.
+    /// Build a frame with the given version byte and a 10-byte header with no epoch.
+    /// Tests use it to check that a non-current version byte is rejected.
     fn make_short_frame(version: u8, payload: &[u8]) -> Vec<u8> {
         let mut out = Vec::with_capacity(10 + payload.len());
         let payload_len = payload.len() as u32;
@@ -219,23 +219,6 @@ mod tests {
                 assert_eq!(supported_max, RPC_FRAME_VERSION);
             }
             other => panic!("expected UnsupportedWireVersion, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parse_frame_rejects_v1_v2() {
-        for version in [1u8, 2u8] {
-            let payload = b"old";
-            let frame = make_short_frame(version, payload);
-            let err = parse_frame(&frame, &ClusterEpochState::default())
-                .expect_err(&format!("v{version} must be rejected"));
-            assert!(
-                matches!(
-                    err,
-                    ClusterError::UnsupportedWireVersion { got, .. } if got == version
-                ),
-                "expected UnsupportedWireVersion for v{version}, got {err:?}"
-            );
         }
     }
 

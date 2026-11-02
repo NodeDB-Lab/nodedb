@@ -83,10 +83,8 @@ pub fn negotiate(
 )]
 pub struct VersionHandshake {
     pub range: (u16, u16),
-    /// Optional capability bitmask for forward-compatible feature advertisement.
-    /// Unknown bits are ignored by the receiver.  Defaults to `0` (no extra
-    /// capabilities) so older peers that do not set this field remain compatible.
-    #[serde(default)]
+    /// Capability bitmask for feature advertisement. `0` means no extra
+    /// capabilities.
     pub capabilities: u64,
     /// Sender's `nodedb_types::wire_version::WIRE_BUILD_ID`. Compared for
     /// exact equality by the receiver — see `handshake_io::perform_version_handshake_server`.

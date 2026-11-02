@@ -158,9 +158,8 @@ impl CacheApplier {
     /// Extend this applier with live topology/routing handles. When
     /// set, committed `TopologyChange` and `RoutingChange` entries
     /// mutate the handles in place in addition to the in-memory
-    /// history log kept in `MetadataCache`. Backward-compatible:
-    /// existing callers that don't attach handles see no behaviour
-    /// change.
+    /// history log kept in `MetadataCache`. Optional: a caller that
+    /// attaches no handles sees no behaviour change.
     pub fn with_live_state(
         mut self,
         topology: Arc<RwLock<ClusterTopology>>,
@@ -173,8 +172,8 @@ impl CacheApplier {
 
     /// Attach a migration state table so that committed
     /// `MigrationCheckpoint` and `MigrationAbort` entries are
-    /// durably persisted. Backward-compatible: existing callers that
-    /// don't manage migrations can omit this.
+    /// durably persisted. Optional: a caller that manages no migrations
+    /// omits this.
     pub fn with_migration_state(mut self, migration_state: SharedMigrationStateTable) -> Self {
         self.migration_state = Some(migration_state);
         self
@@ -184,8 +183,7 @@ impl CacheApplier {
     /// `JoinTokenTransition` entries are reflected into the shared
     /// mirror immediately after apply. The same `Arc` must be passed to
     /// `RaftBackedTokenStore::new` so both sides share the same table.
-    /// Backward-compatible: existing callers that don't use join tokens
-    /// omit this.
+    /// Optional: a caller that uses no join tokens omits this.
     pub fn with_token_state(mut self, token_state: SharedTokenStateMirror) -> Self {
         self.token_state = Some(token_state);
         self

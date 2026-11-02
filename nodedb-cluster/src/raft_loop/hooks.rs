@@ -240,9 +240,9 @@ pub trait ShuffleProducer: Send + Sync + 'static {
     /// Run the local scan fragment, hash-partition its rows, and fan them out to
     /// the part-owners. Returns a [`ShuffleProduceResponse`] whose `error` is
     /// `None` on a clean produce or `Some(err)` on a terminal scan failure (after
-    /// every part has been `End`ed with the error), and whose `read_versions`
-    /// carry the read versions the local scan observed (empty on failure) for
-    /// the coordinator's cross-shard OCC read validation.
+    /// every part has been `End`ed with the error), and whose `read_vshards`
+    /// carry the vShards the local scan read (empty on failure). The
+    /// coordinator homes the read's read-set entries on them.
     async fn on_shuffle_produce(
         &self,
         req: crate::rpc_codec::ShuffleProduceRequest,

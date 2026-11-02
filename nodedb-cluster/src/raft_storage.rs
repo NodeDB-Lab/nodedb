@@ -8,7 +8,7 @@
 //! Layout:
 //! - `ENTRIES` table: key = log index (u64 big-endian), value = MessagePack LogEntry
 //! - `META` table: key = name (&str), value = MessagePack-encoded metadata
-//!   - "hard_state" → HardState { current_term, voted_for }
+//!   - "hard_state" → HardState { current_term, voted_for, ordinal_floor }
 //!   - "snapshot_index" → u64
 //!   - "snapshot_term" → u64
 //!   - "applied_index" → u64
@@ -541,6 +541,7 @@ mod tests {
         let hs = HardState {
             current_term: 7,
             voted_for: 3,
+            ordinal_floor: 1_234,
         };
         s.save_hard_state(&hs).unwrap();
         let loaded = s.load_hard_state().unwrap();
@@ -641,6 +642,7 @@ mod tests {
             s.save_hard_state(&HardState {
                 current_term: 3,
                 voted_for: 1,
+                ordinal_floor: 0,
             })
             .unwrap();
         }

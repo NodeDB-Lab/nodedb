@@ -11,6 +11,7 @@ use crate::calvin::TxnId;
 use crate::calvin::sequencer::entry::SequencerEntry;
 use crate::calvin::sequencer::validator::validate_batch_with_assignments;
 use crate::calvin::types::EpochBatch;
+use crate::error::ClusterError;
 
 use super::core::SequencerService;
 
@@ -129,7 +130,7 @@ impl SequencerService {
         let entry = SequencerEntry::EpochBatch { batch };
         let _replicate_span =
             tracing::info_span!("sequencer_replicate", epoch, txns_count).entered();
-        match self.propose_entry(&entry) {
+        match self.propose_epoch_batch(entry) {
             Ok(log_index) => {
                 // Open each stream before its submitter learns the
                 // assignment, so its first offer finds the stream.
@@ -164,6 +165,35 @@ impl SequencerService {
     }
 }
 
+impl SequencerService {
+    /// Append the epoch batch `entry` to the sequencer log under the
+    /// `MultiRaft` lock.
+    ///
+    /// A cut marker appended after the batch's instant was minted can carry
+    /// a floor at or above it (`MultiRaft::propose_to_sequencer`). The batch
+    /// then carries the instant one millisecond above that floor. The check
+    /// and the append share one lock hold, so no marker enters the log
+    /// between them.
+    fn propose_epoch_batch(&mut self, mut entry: SequencerEntry) -> Result<u64, ClusterError> {
+        let encode = |entry: &SequencerEntry| {
+            zerompk::to_msgpack_vec(entry).map_err(|e| ClusterError::Codec {
+                detail: format!("sequencer encode: {e}"),
+            })
+        };
+        let mut bytes = encode(&entry)?;
+        let mut mr = self.multi_raft.lock().unwrap_or_else(|p| p.into_inner());
+        let floor_ms = mr.sequencer_cut_floor_ms();
+        if let SequencerEntry::EpochBatch { batch } = &mut entry
+            && batch.epoch_system_ms <= floor_ms
+        {
+            batch.epoch_system_ms = floor_ms.saturating_add(1);
+            self.last_minted_ms = self.last_minted_ms.max(Some(batch.epoch_system_ms));
+            bytes = encode(&entry)?;
+        }
+        mr.propose_to_sequencer(bytes, 0)
+    }
+}
+
 /// The epoch instant a mint carries: the wall clock, raised strictly above
 /// `floor`, the highest instant minted or applied before it.
 fn monotonic_epoch_ms(wall_ms: i64, floor: Option<i64>) -> i64 {
@@ -175,7 +205,76 @@ fn monotonic_epoch_ms(wall_ms: i64, floor: Option<i64>) -> i64 {
 
 #[cfg(test)]
 mod tests {
+    use super::super::core::tests::{elect, make_harness};
     use super::monotonic_epoch_ms;
+    use crate::calvin::sequencer::entry::SequencerEntry;
+    use crate::calvin::types::EpochBatch;
+
+    fn cut_marker(hlc: u64, floor: i64) -> Vec<u8> {
+        zerompk::to_msgpack_vec(&SequencerEntry::CutMarker {
+            hlc,
+            restore_point: 0,
+            barrier: None,
+            floor,
+        })
+        .expect("encode")
+    }
+
+    /// A closed read cut whose floor leads the leader's clock. The leader
+    /// appended the marker after it minted the next epoch's instant. The
+    /// epoch it appends after the marker still carries a later instant.
+    #[test]
+    fn an_epoch_appended_after_a_cut_marker_stamps_above_its_floor() {
+        let mut harness = make_harness();
+        elect(&harness.multi_raft);
+        let floor_ms = 2_000_000_000_000;
+        let floor = nodedb_types::ms_to_ordinal_upper(floor_ms) - 3;
+        // Minted before the marker reached the log, from a slow clock.
+        let minted = harness.service.next_epoch_system_ms(1_600_000_000_000);
+        harness
+            .multi_raft
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .propose_to_sequencer(cut_marker(7, floor), floor)
+            .expect("append the marker");
+        harness
+            .service
+            .propose_epoch_batch(SequencerEntry::EpochBatch {
+                batch: EpochBatch {
+                    epoch: 0,
+                    txns: Vec::new(),
+                    epoch_system_ms: minted,
+                },
+            })
+            .expect("append the epoch");
+        assert_eq!(harness.service.last_minted_ms, Some(floor_ms + 1));
+        assert!(
+            nodedb_types::calvin_txn_ordinal(floor_ms + 1, 0) > floor,
+            "every version of the epoch lies above the closed cut"
+        );
+        // The next mint stays above it.
+        assert!(harness.service.next_epoch_system_ms(1_600_000_000_000) > floor_ms + 1);
+    }
+
+    /// A new leader never saw the marker appended: it applied it. Applying
+    /// the marker raises the applied instant, and the leader mints above it.
+    #[test]
+    fn a_new_leader_mints_above_an_applied_cut_floor() {
+        let mut successor = make_harness();
+        let floor_ms = 2_100_000_000_000;
+        successor
+            .state_machine
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .apply(
+                1,
+                &cut_marker(9, nodedb_types::ms_to_ordinal_upper(floor_ms)),
+            );
+        assert_eq!(
+            successor.service.next_epoch_system_ms(1_600_000_000_000),
+            floor_ms + 1
+        );
+    }
 
     #[test]
     fn the_first_mint_takes_the_wall_clock() {

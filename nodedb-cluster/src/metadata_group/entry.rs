@@ -52,10 +52,9 @@ pub enum MetadataEntry {
     /// authenticated user, HLC at commit, descriptor versions before
     /// + after, and the raw SQL — exactly what J.4 requires.
     ///
-    /// Carries its own payload so legacy proposers (internal lease
-    /// and descriptor-drain flows that have no SQL text) can keep
-    /// using the plain `CatalogDdl` variant without synthesizing
-    /// fake audit context.
+    /// Carries its own payload so proposers with no SQL text (internal
+    /// lease and descriptor-drain flows) use the plain `CatalogDdl`
+    /// variant without synthesizing fake audit context.
     CatalogDdlAudited {
         payload: Vec<u8>,
         /// Authenticated user id at propose time.

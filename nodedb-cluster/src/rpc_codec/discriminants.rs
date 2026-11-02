@@ -18,10 +18,6 @@ pub const RPC_PING: u8 = 9;
 pub const RPC_PONG: u8 = 10;
 pub const RPC_TOPOLOGY_UPDATE: u8 = 11;
 pub const RPC_TOPOLOGY_ACK: u8 = 12;
-/// Reserved, do not reuse. Number 13 belongs to a retired SQL-string forwarding request.
-pub const RPC_FORWARD_REQ: u8 = 13;
-/// Reserved, do not reuse. Number 14 belongs to a retired SQL-string forwarding response.
-pub const RPC_FORWARD_RESP: u8 = 14;
 pub const RPC_VSHARD_ENVELOPE: u8 = 15;
 pub const RPC_METADATA_PROPOSE_REQ: u8 = 16;
 pub const RPC_METADATA_PROPOSE_RESP: u8 = 17;
@@ -166,6 +162,12 @@ pub const RPC_FRAME_REFUSAL: u8 = 58;
 /// The answer to a request whose handler failed. It carries the typed
 /// reason, so the sender learns the peer is up and refused this request.
 pub const RPC_REQUEST_REFUSAL: u8 = 59;
+/// Ordinal floor exchange: a group's leader sends its system-time floor to
+/// every voter in `RPC_ORDINAL_FLOOR_REQ`. A voter at the leader's term
+/// raises its floor, makes it durable, and answers the floor it holds in one
+/// `RPC_ORDINAL_FLOOR_RESP`.
+pub const RPC_ORDINAL_FLOOR_REQ: u8 = 60;
+pub const RPC_ORDINAL_FLOOR_RESP: u8 = 61;
 
 // VShardMessageType discriminants for distributed array ops (u16, range 80-93).
 // These mirror `crate::wire::VShardMessageType` repr values and are declared

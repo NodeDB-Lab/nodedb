@@ -4,13 +4,19 @@
 
 use crate::error::CalvinError;
 
+use super::incarnation::CalvinIncarnation;
 use super::lock_wire::TxnIdWire;
-use super::transaction::{CalvinIncarnation, TxClass};
+use super::transaction::TxClass;
 
 impl TxClass {
     /// Set the lock-table owner id propagated to `SequencedTxn.lock_owner`.
     pub fn set_lock_owner(&mut self, owner: Option<TxnIdWire>) {
         self.lock_owner = owner;
+    }
+
+    /// Set the snapshot ordinal every read of the transaction observed.
+    pub fn set_snapshot_ordinal(&mut self, snapshot_ordinal: Option<i64>) {
+        self.snapshot_ordinal = snapshot_ordinal;
     }
 
     /// Set the WAL event-source code the transaction's writes carry.
