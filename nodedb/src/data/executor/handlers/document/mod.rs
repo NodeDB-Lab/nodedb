@@ -11,6 +11,7 @@ pub mod index_backfill_versions;
 pub mod index_fetch;
 mod index_fetch_narrow;
 pub mod index_maintenance;
+mod index_probe;
 pub mod read;
 pub mod resolve;
 pub mod sort;

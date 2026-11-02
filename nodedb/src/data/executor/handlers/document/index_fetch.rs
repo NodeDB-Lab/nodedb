@@ -58,9 +58,7 @@ pub(in crate::data::executor) struct IndexedFetchParams<'a> {
 impl CoreLoop {
     /// Execute a secondary index lookup: find all doc IDs where `path = value`.
     ///
-    /// Delegates to `DocumentEngine::index_lookup`, which reads the
-    /// versioned index at the current state. Returns a JSON array of
-    /// document IDs as the payload.
+    /// Returns a JSON array of document IDs as the payload.
     pub(in crate::data::executor) fn execute_document_index_lookup(
         &mut self,
         task: &ExecutionTask,
@@ -69,6 +67,56 @@ impl CoreLoop {
         path: &str,
         value: &str,
     ) -> Response {
+        match self.index_lookup_keys(task, tid, collection, path, value) {
+            Ok(doc_ids) => {
+                let doc_ids: Vec<String> = doc_ids.iter().map(|k| k.to_string()).collect();
+                let payload = serde_json::json!(doc_ids);
+                match sonic_rs::to_vec(&payload) {
+                    Ok(bytes) => self.response_with_payload(task, bytes),
+                    Err(e) => self.response_error(
+                        task,
+                        ErrorCode::Internal {
+                            detail: format!("index lookup encode: {e}"),
+                        },
+                    ),
+                }
+            }
+            Err(e) => self.response_error(task, e),
+        }
+    }
+
+    /// The rows whose indexed `path` equals `value`, as a surrogate bitmap.
+    /// The rows are the ones `execute_document_index_lookup` names, without
+    /// the encoded id list between the index and the bitmap.
+    pub(in crate::data::executor) fn index_lookup_surrogates(
+        &mut self,
+        task: &ExecutionTask,
+        collection: &str,
+        path: &str,
+        value: &str,
+    ) -> crate::Result<nodedb_types::SurrogateBitmap> {
+        let tid = task.request.tenant_id.as_u64();
+        let keys = self.index_lookup_keys(task, tid, collection, path, value)?;
+        let mut bitmap = nodedb_types::SurrogateBitmap::new();
+        for key in &keys {
+            bitmap.insert(key.surrogate());
+        }
+        Ok(bitmap)
+    }
+
+    /// Doc IDs where `path = value`, with the rows a transaction staged
+    /// merged in.
+    ///
+    /// Delegates to `DocumentEngine::index_lookup`, which reads the
+    /// versioned index at the current state.
+    fn index_lookup_keys(
+        &mut self,
+        task: &ExecutionTask,
+        tid: u64,
+        collection: &str,
+        path: &str,
+        value: &str,
+    ) -> crate::Result<Vec<StorageKey>> {
         debug!(
             core = self.core_id,
             %collection,
@@ -82,58 +130,34 @@ impl CoreLoop {
             task.request.database_id.as_u64(),
             tid,
         );
-        match doc_engine.index_lookup(collection, path, value, None) {
-            Ok(mut doc_ids) => {
-                if let Some(txn_id) = task.request.txn_id {
-                    let config_key = (
-                        task.request.database_id,
-                        crate::types::TenantId::new(tid),
-                        collection.to_string(),
-                    );
-                    let (is_array, case_insensitive) = self.index_path_flags(&config_key, path);
-                    let coll_key = (
-                        task.request.database_id,
-                        crate::types::TenantId::new(tid),
-                        collection.to_string(),
-                    );
-                    if let Err(e) = self.merge_overlay_into_index_lookup(
-                        super::super::transaction::overlay::IndexOverlayMergeParams {
-                            txn_id,
-                            coll_key: &coll_key,
-                            path,
-                            value,
-                            is_array,
-                            case_insensitive,
-                            // `DocumentOp::IndexLookup` carries no residual
-                            // filters at all (it returns bare doc IDs, used by
-                            // bitmap-producer callers) — the empty slice makes
-                            // the merge's residual re-check a no-op, so this
-                            // call site can never actually observe `Err` —
-                            // handled uniformly with the other call site
-                            // anyway rather than assuming that invariant.
-                            residual: &[],
-                            strict_schema: None,
-                        },
-                        &mut doc_ids,
-                        &|body| self.decode_indexed_body(&config_key, body),
-                    ) {
-                        return self.response_error(task, e);
-                    }
-                }
-                let doc_ids: Vec<String> = doc_ids.iter().map(|k| k.to_string()).collect();
-                let payload = serde_json::json!(doc_ids);
-                match sonic_rs::to_vec(&payload) {
-                    Ok(bytes) => self.response_with_payload(task, bytes),
-                    Err(e) => self.response_error(
-                        task,
-                        ErrorCode::Internal {
-                            detail: format!("index lookup encode: {e}"),
-                        },
-                    ),
-                }
-            }
-            Err(e) => self.response_error(task, ErrorCode::from(e)),
+        let mut doc_ids = doc_engine.index_lookup(collection, path, value, None)?;
+        if let Some(txn_id) = task.request.txn_id {
+            let coll_key = (
+                task.request.database_id,
+                crate::types::TenantId::new(tid),
+                collection.to_string(),
+            );
+            let (is_array, case_insensitive) = self.index_path_flags(&coll_key, path);
+            self.merge_overlay_into_index_lookup(
+                super::super::transaction::overlay::IndexOverlayMergeParams {
+                    txn_id,
+                    coll_key: &coll_key,
+                    path,
+                    value,
+                    is_array,
+                    case_insensitive,
+                    // `DocumentOp::IndexLookup` carries no residual
+                    // filters at all (it returns bare doc IDs, used by
+                    // bitmap-producer callers) — the empty slice makes
+                    // the merge's residual re-check a no-op.
+                    residual: &[],
+                    strict_schema: None,
+                },
+                &mut doc_ids,
+                &|body| self.decode_indexed_body(&coll_key, body),
+            )?;
         }
+        Ok(doc_ids)
     }
 
     /// Execute a SELECT rewritten as a secondary-index fetch.
@@ -189,39 +213,18 @@ impl CoreLoop {
         // A read at a cut answers from the versioned index at that cut: a row
         // matches when its newest entry at or before the cut is live.
         let as_of = system_as_of;
-        let looked_up = self.sparse.versioned_index_lookup_as_of(
+        let mut doc_ids = match self.probe_index_ids(&super::index_probe::IndexProbes {
             database_id,
             tid,
             collection,
             path,
             value,
+            also,
             as_of,
-        );
-        let mut doc_ids: Vec<StorageKey> = match looked_up {
+        }) {
             Ok(ids) => ids,
-            Err(e) => return self.response_error(task, ErrorCode::from(e)),
+            Err(e) => return self.response_error(task, e),
         };
-        // The committed index entries of each further equality narrow the
-        // ids before any body is read. A staged write is not in those
-        // entries, and the overlay merge below adds it back from its staged
-        // body, which the residual then checks.
-        for probe in also {
-            let probed = self.sparse.versioned_index_lookup_as_of(
-                database_id,
-                tid,
-                collection,
-                &probe.path,
-                &probe.value,
-                as_of,
-            );
-            match probed {
-                Ok(ids) => {
-                    let shared: std::collections::HashSet<StorageKey> = ids.into_iter().collect();
-                    doc_ids.retain(|id| shared.contains(id));
-                }
-                Err(e) => return self.response_error(task, ErrorCode::from(e)),
-            }
-        }
 
         // Strict collections store Binary Tuple bytes; the response codec
         // expects msgpack maps. Decode-then-encode here so cross-engine
