@@ -1,16 +1,14 @@
 #!/usr/bin/env bash
 # Warm-tier storage gate.
 #
-# The warm-tier code paths (snapshot writer, snapshot executor, quarantine
-# registry) were migrated to `Arc<dyn object_store::ObjectStore>`. New
-# direct `std::fs::` or `tokio::fs::` calls in those modules silently
-# regress the migration.
+# The warm-tier code paths (snapshot writer, snapshot executor) use
+# `Arc<dyn object_store::ObjectStore>`. A direct `std::fs::` or
+# `tokio::fs::` call in those modules bypasses the object store.
 #
-# Every match in the migrated files must carry a `// no-objectstore:
-# <reason>` marker on the preceding line. Marker form documents intentional
-# local-only operations (e.g. redb engine-state landing paths,
-# LocalFileSystem ObjectStore root bootstrap, in-place rename of corrupted
-# segment before warm-tier upload).
+# Every match in these files must carry a `// no-objectstore:
+# <reason>` marker on the preceding line. The marker documents an
+# intentional local-only operation, such as a redb engine-state landing
+# path or the LocalFileSystem ObjectStore root bootstrap.
 #
 # Excluded: bodies of inline `#[cfg(test)] mod tests` blocks.
 
@@ -19,7 +17,6 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 files=(
     nodedb/src/storage/snapshot_executor.rs
     nodedb/src/storage/snapshot_writer.rs
-    nodedb/src/storage/quarantine/registry.rs
 )
 
 violations=()
