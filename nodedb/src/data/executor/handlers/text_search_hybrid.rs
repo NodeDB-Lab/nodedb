@@ -40,6 +40,8 @@ pub(in crate::data::executor) struct HybridSearchParams<'a> {
     pub filter_bitmap: Option<&'a nodedb_types::SurrogateBitmap>,
     pub rls_filters: &'a [u8],
     pub score_alias: Option<&'a str>,
+    /// The system time both legs read at.
+    pub system_time: nodedb_types::SystemTimeScope,
 }
 
 impl CoreLoop {
@@ -68,8 +70,13 @@ impl CoreLoop {
             filter_bitmap,
             rls_filters,
             score_alias,
+            system_time,
         } = params;
         let tenant_id = TenantId::new(tid);
+        let cut = match super::search_cut::SearchCut::of(system_time) {
+            Ok(cut) => cut,
+            Err(e) => return self.response_error(task, e),
+        };
         debug!(
             core = self.core_id,
             tid,
@@ -100,7 +107,7 @@ impl CoreLoop {
         // The rows the residual filters and RLS admit restrict both legs
         // before fusion, so the fused top-k counts only admitted rows.
         let eligible = match TextRowGate::new(filters, rls_filters, self.crs_context())
-            .and_then(|gate| self.text_eligible_rows(task, tid, collection, &gate))
+            .and_then(|gate| self.text_eligible_rows(task, tid, collection, &gate, cut))
         {
             Ok(eligible) => combine_eligible(filter_bitmap, eligible),
             Err(e) => return self.response_error(task, e),
@@ -135,6 +142,7 @@ impl CoreLoop {
                     fetch_k,
                     ef,
                     filter_bitmap,
+                    cut.at,
                 ) {
                     Ok(results) => results,
                     Err(code) => return self.response_error(task, code),
@@ -156,6 +164,7 @@ impl CoreLoop {
                 mode: QueryMode::from(mode),
                 prefilter: filter_bitmap,
             },
+            cut,
         ) {
             Ok(results) => results,
             Err(e) => return self.response_error(task, e),
@@ -188,7 +197,7 @@ impl CoreLoop {
         // vector/FTS overlay merges). Outside a transaction the committed-only
         // construction below runs unchanged.
         let (mut vector_ranked, mut text_ranked): super::hybrid_overlay::HybridRankedLegs =
-            if let Some(txn_id) = task.request.txn_id {
+            if let Some(txn_id) = task.request.txn_id.filter(|_| cut.merge_overlay) {
                 match self.hybrid_ranked_with_overlay(
                     super::hybrid_overlay::HybridOverlayParams {
                         txn_id,

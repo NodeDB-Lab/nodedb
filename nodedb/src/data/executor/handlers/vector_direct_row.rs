@@ -212,8 +212,11 @@ impl CoreLoop {
             "vector_direct::sidecar_delete",
             |detail: String| ErrorCode::Internal { detail }
         );
+        let sys_from = self
+            .row_version_ordinal(database_id, tid, collection, &key)
+            .map_err(ErrorCode::from)?;
         self.sparse
-            .delete(database_id, tid, collection, &key)
+            .delete(database_id, tid, collection, &key, sys_from)
             .map_err(ErrorCode::from)?;
         self.doc_cache
             .invalidate(database_id, tid, collection, &key);
@@ -221,7 +224,9 @@ impl CoreLoop {
             if let Some(row) = &sidecar {
                 coll.payload.delete_row(node_id, &row.fields);
             }
-            coll.delete(node_id);
+            // The node ends with the row's tombstone: a read at an earlier
+            // cut still finds the vector.
+            coll.end_at(node_id, sys_from);
         }
         Ok(Some(sidecar.unwrap_or_else(|| VectorSidecarRow {
             bytes: Vec::new(),
@@ -247,21 +252,33 @@ impl CoreLoop {
             sidecar,
         } = row;
         let database_id = index_key.0.as_u64();
+        let key = StorageKey::for_surrogate(surrogate);
+        // The node starts at the row version's system time, so a read at an
+        // earlier cut does not see it.
+        let sys_from = self
+            .row_version_ordinal(database_id, tid, collection, &key)
+            .map_err(ErrorCode::from)?;
         let Some(coll) = self.vector_collections.get_mut(index_key) else {
             return Err(ErrorCode::Internal {
                 detail: format!("vector index for '{collection}' vanished during a direct write"),
             });
         };
+        let displaced = coll.local_for_surrogate(surrogate);
         let node_id = coll
-            .insert_with_surrogate(vector.to_vec(), surrogate)
+            .insert_at(vector.to_vec(), surrogate, sys_from)
             .map_err(|e| ErrorCode::from(crate::Error::from(e)))?;
         coll.payload.insert_row(node_id, fields);
 
-        let key = StorageKey::for_surrogate(surrogate);
-        if let Err(e) = self.sparse.put(database_id, tid, collection, &key, sidecar) {
+        let written = self
+            .sparse
+            .put(database_id, tid, collection, &key, sidecar, sys_from);
+        if let Err(e) = written {
             if let Some(coll) = self.vector_collections.get_mut(index_key) {
                 coll.payload.delete_row(node_id, fields);
                 coll.delete(node_id);
+                if let Some(displaced) = displaced {
+                    coll.undelete_bound(displaced, surrogate);
+                }
             }
             return Err(ErrorCode::Internal {
                 detail: format!("vector-primary payload sparse write failed: {e}"),
@@ -274,7 +291,7 @@ impl CoreLoop {
 
     /// Bookkeeping every completed direct write runs once: seal a full growing
     /// segment or train an IVF-PQ collection at its threshold, mark the checkpoint dirty, and record each
-    /// touched surrogate's write version for cross-shard OCC validation.
+    /// touched surrogate's write.
     pub(in crate::data::executor) fn finish_vector_direct_write(
         &mut self,
         task: &ExecutionTask,

@@ -38,6 +38,8 @@ pub(in crate::data::executor) struct TextSearchParams<'a> {
     /// RLS filters (`Vec<ScanFilter>`), applied before ranking.
     pub rls_filters: &'a [u8],
     pub scores: &'a [TextScoreSpec],
+    /// The system time the search reads at.
+    pub system_time: nodedb_types::SystemTimeScope,
 }
 
 /// Parameters for the internal [`CoreLoop::hydrate_text_hits`] helper.
@@ -61,6 +63,9 @@ pub(in crate::data::executor) struct HydrateTextHitsParams<'a> {
     pub txn_id: Option<TxnId>,
     /// Score columns injected into each hydrated row.
     pub scores: &'a ScoreColumns<'a>,
+    /// The system-time ordinal a read at a cut hydrates each row's version
+    /// at. `None` hydrates the current version.
+    pub at: Option<i64>,
 }
 
 impl CoreLoop {
@@ -117,15 +122,16 @@ impl CoreLoop {
         p: &TextSearchParams<'_>,
     ) -> crate::Result<Vec<DocumentRow>> {
         let tenant_id = TenantId::new(p.tid);
+        let cut = super::search_cut::SearchCut::of(p.system_time)?;
         let Some(index) = self.text_index(task, p.tid, p.collection, p.field)? else {
             return Ok(Vec::new());
         };
         let gate = TextRowGate::new(p.filters, p.rls_filters, self.crs_context())?;
         let eligible = combine_eligible(
             p.prefilter,
-            self.text_eligible_rows(task, p.tid, p.collection, &gate)?,
+            self.text_eligible_rows(task, p.tid, p.collection, &gate, cut)?,
         );
-        let staged = self.text_staged_view(task, p.tid, index)?;
+        let staged = self.text_staged_view(task, p.tid, index, cut)?;
         let hits = self.inverted.search_staged(
             task.request.database_id.as_u64(),
             tenant_id,
@@ -141,15 +147,16 @@ impl CoreLoop {
         )?;
 
         let scores =
-            self.text_score_columns(task, p.tid, p.collection, p.scores, eligible.as_ref())?;
+            self.text_score_columns(task, p.tid, p.collection, p.scores, eligible.as_ref(), cut)?;
         self.hydrate_text_hits(
             hits.iter().map(|r| (r.doc_id, r.score, r.fuzzy)),
             HydrateTextHitsParams {
                 database_id: task.request.database_id.as_u64(),
                 tid: p.tid,
                 collection: p.collection,
-                txn_id: task.request.txn_id,
+                txn_id: task.request.txn_id.filter(|_| cut.merge_overlay),
                 scores: &scores,
+                at: cut.at,
             },
         )
     }
@@ -189,6 +196,7 @@ impl CoreLoop {
             collection,
             txn_id,
             scores,
+            at,
         } = params;
         // Read-your-own-writes for the projection step: a matched surrogate
         // the transaction staged has no body in base storage yet, so its
@@ -209,9 +217,18 @@ impl CoreLoop {
         let mut surrogates: Vec<Surrogate> = Vec::new();
         for (surrogate, score, fuzzy) in hits {
             let storage_key = nodedb_types::StorageKey::for_surrogate(surrogate);
-            let bytes_opt = self.overlay_or_base_body(txn_id, &coll_key, &storage_key, || {
-                self.current_row_body(database_id, tid, collection, &storage_key)
-            })?;
+            let bytes_opt =
+                self.overlay_or_base_body(txn_id, &coll_key, &storage_key, || match at {
+                    None => self.current_row_body(database_id, tid, collection, &storage_key),
+                    Some(ordinal) => self.sparse.versioned_get_as_of(
+                        database_id,
+                        tid,
+                        collection,
+                        &storage_key,
+                        Some(ordinal),
+                        None,
+                    ),
+                })?;
             // A surrogate with no body was indexed for FTS without a document
             // write (FtsIndex frames synced from Lite). Its row is the
             // surrogate-derived key alone. Under a filter or RLS gate such a

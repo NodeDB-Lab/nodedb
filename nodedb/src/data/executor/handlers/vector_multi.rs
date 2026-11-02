@@ -34,6 +34,8 @@ pub(in crate::data::executor) struct MultiVectorScoreSearchParams<'a> {
     pub top_k: usize,
     pub ef_search: usize,
     pub mode_str: &'a str,
+    /// The system time the search reads at.
+    pub system_time: nodedb_types::SystemTimeScope,
 }
 
 impl CoreLoop {
@@ -94,6 +96,8 @@ impl CoreLoop {
 
         // A committed-redo install seals once the whole record landed.
         let defer_seal = self.recording_redo_undo();
+        // The document's prior vectors end at this write's system time.
+        let ordinal = self.bitemporal_ordinal();
         let coll =
             match self.get_or_create_vector_index(database_id, tid, collection, dim, field_name) {
                 Ok(coll) => coll,
@@ -105,11 +109,9 @@ impl CoreLoop {
             .map(|i| &vectors_flat[i * dim..(i + 1) * dim])
             .collect();
 
-        // Delete old multi-vector entries for this doc if they exist (upsert).
-        coll.delete_multi_vector(document_surrogate);
-
-        // Insert all vectors with shared surrogate.
-        let ids = match coll.insert_multi_vector(&vector_slices, document_surrogate) {
+        // The document's old vectors end at `ordinal` and the new ones start
+        // there (upsert).
+        let ids = match coll.insert_multi_vector_at(&vector_slices, document_surrogate, ordinal) {
             Ok(ids) => ids,
             Err(e) => return self.response_error(task, crate::Error::from(e)),
         };
@@ -119,9 +121,8 @@ impl CoreLoop {
         }
 
         self.checkpoint_coordinator.mark_dirty("vector", ids.len());
-        // Record this write's version keyed by the shared document surrogate
-        // so cross-shard OCC read-set validation (predicate reads always
-        // record the collection floor) sees this insert.
+        // Record this write keyed by the shared document surrogate, so the
+        // newest-ordinal cache commit validation reads holds this insert.
         self.note_surrogate_write(task, tid, collection, document_surrogate.as_u32());
 
         match super::super::response_codec::encode_count("inserted_vectors", ids.len()) {
@@ -151,15 +152,16 @@ impl CoreLoop {
 
         let database_id = task.request.database_id.as_u64();
         let index_key = CoreLoop::vector_index_key(database_id, tid, collection, field_name);
+        let ordinal = self.bitemporal_ordinal();
         let Some(coll) = self.vector_collections.get_mut(&index_key) else {
             return self.response_ok(task);
         };
 
-        let deleted = coll.delete_multi_vector(document_surrogate);
+        let deleted = coll.end_multi_vector_at(document_surrogate, ordinal);
         if deleted > 0 {
             self.checkpoint_coordinator.mark_dirty("vector", deleted);
-            // Record this write's version keyed by the shared document
-            // surrogate so cross-shard OCC read-set validation sees this
+            // Record this write keyed by the shared document surrogate, so
+            // the newest-ordinal cache commit validation reads holds this
             // delete.
             self.note_surrogate_write(task, tid, collection, document_surrogate.as_u32());
         }
@@ -186,7 +188,12 @@ impl CoreLoop {
             top_k,
             ef_search,
             mode_str,
+            system_time,
         } = params;
+        let cut = match super::search_cut::SearchCut::of(system_time) {
+            Ok(cut) => cut,
+            Err(e) => return self.response_error(task, e),
+        };
         debug!(
             core = self.core_id,
             %collection, %field_name, top_k, %mode_str,
@@ -212,8 +219,23 @@ impl CoreLoop {
         let Some(coll) = self.vector_collections.get(&index_key) else {
             return self.response_error(task, ErrorCode::NotFound);
         };
+        // Inside a transaction block the documents the block's staged row
+        // writes will end are hidden, as a single vector search hides a
+        // staged delete. A historical read sees committed rows only.
+        let hides = match task.request.txn_id.filter(|_| cut.merge_overlay) {
+            Some(txn_id) => match self.staged_multi_vector_hides(
+                txn_id,
+                task.request.database_id,
+                crate::types::TenantId::new(tid),
+                collection,
+            ) {
+                Ok(hides) => hides,
+                Err(e) => return self.response_error(task, e),
+            },
+            None => super::transaction::overlay::MultiVectorHides::default(),
+        };
 
-        if coll.is_empty() {
+        if coll.is_empty() && cut.at.is_none() {
             return super::vector_search::empty_hits_response(self, task);
         }
 
@@ -227,7 +249,15 @@ impl CoreLoop {
             over_fetch.saturating_mul(2).max(64)
         };
 
-        let candidates = match coll.search(query_vector, over_fetch, ef) {
+        // A read at a cut ranks every document's vectors of the version
+        // visible there.
+        let searched = match cut.at {
+            Some(at) => {
+                coll.search_at(query_vector, over_fetch, ef, coll.params().metric, None, at)
+            }
+            None => coll.search(query_vector, over_fetch, ef),
+        };
+        let candidates = match searched {
             Ok(candidates) => candidates,
             Err(e) => return self.response_error(task, crate::Error::from(e)),
         };
@@ -249,6 +279,7 @@ impl CoreLoop {
 
         let mut scored_docs: Vec<(Surrogate, f32)> = doc_scores
             .iter()
+            .filter(|(s, _)| hides.keeps(**s))
             .map(|(s, scores)| (*s, mode.aggregate(scores)))
             .collect();
         scored_docs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -282,8 +313,6 @@ mod tests {
         Admission, ExemptReason, PhysicalPlan, Priority, Request, Status,
     };
     use crate::data::executor::core_loop::CoreLoop;
-    use crate::data::executor::core_loop::write_index::tests::local;
-    use crate::data::executor::core_loop::write_index::{CollKey, KeyRepr, WriteKey};
     use crate::types::{DatabaseId, Lsn, ReadConsistency, RequestId, TenantId, TraceId, VShardId};
     use nodedb_bridge::buffer::RingBuffer;
     use std::time::{Duration, Instant};
@@ -340,6 +369,7 @@ mod tests {
                 ann_options: Default::default(),
                 skip_payload_fetch: false,
                 payload_filters: Vec::new(),
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             deadline: Instant::now() + Duration::from_secs(5),
             priority: Priority::Normal,
@@ -354,13 +384,13 @@ mod tests {
             wal_lsn: Some(Lsn::new(lsn)),
             resolved_now_ms: None,
             commit_hlc: None,
-            entry_version: None,
+            system_ordinal: None,
             admission: Admission::Exempt(ExemptReason::Read),
         })
     }
 
     #[test]
-    fn multi_vector_insert_populates_write_version_index_surrogate_and_floor() {
+    fn multi_vector_insert_notes_its_write() {
         let mut h = make_core();
         let task = make_task_with_lsn(31);
         let document_surrogate = Surrogate::new(9);
@@ -377,29 +407,10 @@ mod tests {
         });
         assert_eq!(response.status, Status::Ok);
 
-        let key = WriteKey {
-            vshard: VShardId::new(0),
-            db: DatabaseId::DEFAULT,
-            tenant: TenantId::new(1),
-            collection: Box::from("chunks"),
-            key: KeyRepr::Surrogate(document_surrogate.as_u32()),
-        };
         assert_eq!(
-            h.core.write_index.key_version(&key),
-            Some(local(31)),
-            "multi-vector insert must populate the per-key (surrogate) write-version index"
-        );
-
-        let coll_key = CollKey {
-            vshard: VShardId::new(0),
-            db: DatabaseId::DEFAULT,
-            tenant: TenantId::new(1),
-            collection: Box::from("chunks"),
-        };
-        assert_eq!(
-            h.core.write_index.collection_version(&coll_key),
-            Some(local(31)),
-            "multi-vector insert must advance the collection write version"
+            h.core.watermark,
+            Lsn::new(31),
+            "multi-vector insert must note its write"
         );
     }
 

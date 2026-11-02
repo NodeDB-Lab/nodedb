@@ -53,9 +53,10 @@ impl CoreLoop {
         let index_key = CoreLoop::vector_index_key(database_id, tid, collection, "");
         // A committed-redo install seals once the whole record landed.
         let defer_seal = self.recording_redo_undo();
+        let ordinal = self.bitemporal_ordinal();
         match self.get_or_create_vector_index(database_id, tid, collection, dim, "") {
             Ok(collection_ref) => {
-                if let Err(e) = collection_ref.insert_batch_with_surrogates(vectors, surrogates) {
+                if let Err(e) = collection_ref.insert_batch_at(vectors, surrogates, ordinal) {
                     return self.response_error(task, crate::Error::from(e));
                 }
                 if !defer_seal {
@@ -63,9 +64,8 @@ impl CoreLoop {
                 }
                 self.checkpoint_coordinator
                     .mark_dirty("vector", vectors.len());
-                // Record this write's version so cross-shard OCC read-set
-                // validation sees this batch: per surrogate, a superset of the
-                // collection floor. An empty batch records the floor only.
+                // Record this write per surrogate, so the newest-ordinal cache
+                // commit validation reads holds this batch.
                 for s in surrogates {
                     self.note_surrogate_write(task, tid, collection, s.as_u32());
                 }
@@ -89,10 +89,11 @@ impl CoreLoop {
         vector_id: u32,
     ) -> Response {
         debug!(core = self.core_id, %collection, vector_id, "vector delete");
-        // Resolve the actual index key. Legacy `CREATE VECTOR INDEX` uses
-        // an empty field segment; vector-primary collections use
-        // `"{collection}:{field}"`. Try the legacy key first, then scan
-        // for any field-suffixed key under the same (tenant, collection).
+        // Resolve the actual index key. An index on the unnamed vector field
+        // (and data synced from NodeDB-Lite) keys on the bare collection.
+        // A named field keys on `"{collection}:{field}"`. Try the bare key
+        // first, then scan for a field-suffixed key under the same
+        // (database, tenant, collection).
         let database_id = task.request.database_id.as_u64();
         let tenant = TenantId::new(tid);
         let db = DatabaseId::new(database_id);
@@ -158,15 +159,18 @@ impl CoreLoop {
             }
         }
 
+        // The node ends at the delete's system time: a read at an earlier
+        // cut still finds it.
+        let ordinal = self.bitemporal_ordinal();
         let Some(collection_ref) = self.vector_collections.get_mut(&index_key) else {
             return self.response_error(task, ErrorCode::NotFound);
         };
-        if collection_ref.delete(vector_id) {
+        if collection_ref.end_at(vector_id, ordinal) {
             self.checkpoint_coordinator.mark_dirty("vector", 1);
             // `vector_id` is the internal HNSW node id, not the cross-engine
             // surrogate — recording it as a `KeyRepr::Surrogate` would be a
-            // wrong identity in a different key space. Floor-only: a
-            // predicate reader validates against the collection floor.
+            // wrong identity in a different key space. The write records its
+            // collection only.
             self.note_collection_write(task, collection);
             self.response_ok(task)
         } else {
@@ -182,8 +186,6 @@ mod tests {
         Admission, ExemptReason, PhysicalPlan, Priority, Request, Status,
     };
     use crate::data::executor::core_loop::CoreLoop;
-    use crate::data::executor::core_loop::write_index::tests::local;
-    use crate::data::executor::core_loop::write_index::{CollKey, KeyRepr, WriteKey};
     use crate::types::{Lsn, ReadConsistency, RequestId, TraceId, VShardId};
     use nodedb_bridge::buffer::RingBuffer;
     use nodedb_physical::physical_plan::VectorOp;
@@ -241,6 +243,7 @@ mod tests {
                 ann_options: Default::default(),
                 skip_payload_fetch: false,
                 payload_filters: Vec::new(),
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             deadline: Instant::now() + Duration::from_secs(5),
             priority: Priority::Normal,
@@ -255,7 +258,7 @@ mod tests {
             wal_lsn: Some(Lsn::new(lsn)),
             resolved_now_ms: None,
             commit_hlc: None,
-            entry_version: None,
+            system_ordinal: None,
             admission: Admission::Exempt(ExemptReason::Read),
         })
     }
@@ -310,10 +313,10 @@ mod tests {
     }
 
     #[test]
-    fn vector_delete_populates_collection_floor_only_not_vector_id_as_surrogate() {
+    fn vector_delete_notes_its_write() {
         let mut h = make_core();
         // Insert directly against the engine (bypassing the insert handler)
-        // so the only write-version record under test is the delete's.
+        // so the only write note under test is the delete's.
         let surrogate = Surrogate::new(500);
         let vector_id = {
             let coll = h
@@ -331,32 +334,10 @@ mod tests {
         let response = h.core.execute_vector_delete(&task, 1, "docs", vector_id);
         assert_eq!(response.status, Status::Ok);
 
-        let coll_key = CollKey {
-            vshard: VShardId::new(0),
-            db: DatabaseId::DEFAULT,
-            tenant: TenantId::new(1),
-            collection: Box::from("docs"),
-        };
         assert_eq!(
-            h.core.write_index.collection_version(&coll_key),
-            Some(local(51)),
-            "vector delete must advance the collection write version"
-        );
-
-        // BRIGHT-LINE: `vector_id` (the internal HNSW node id) must never be
-        // recorded as a `KeyRepr::Surrogate` — that is a different key space
-        // from the cross-engine surrogate.
-        let would_be_key = WriteKey {
-            vshard: VShardId::new(0),
-            db: DatabaseId::DEFAULT,
-            tenant: TenantId::new(1),
-            collection: Box::from("docs"),
-            key: KeyRepr::Surrogate(vector_id),
-        };
-        assert_eq!(
-            h.core.write_index.key_version(&would_be_key),
-            None,
-            "vector delete must not record vector_id as a surrogate key"
+            h.core.watermark,
+            Lsn::new(51),
+            "vector delete must note its write"
         );
     }
 }

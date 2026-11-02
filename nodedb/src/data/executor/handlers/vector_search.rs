@@ -76,7 +76,9 @@ pub(super) fn surrogate_bitmap_to_global_ids(
 }
 
 /// Search one vector leg of a fused query (hybrid, triple): the whole index,
-/// or only the rows whose surrogates are in `filter_bitmap`.
+/// or only the rows whose surrogates are in `filter_bitmap`. `at` is the
+/// system-time ordinal a read at a cut ranks the nodes visible at; `None`
+/// ranks the live nodes.
 ///
 /// The surrogate filter is translated to the index's node ids before the
 /// search. A query of the wrong width is the caller's data error (`22000`)
@@ -88,12 +90,26 @@ pub(super) fn search_vector_leg(
     fetch_k: usize,
     ef: usize,
     filter_bitmap: Option<&nodedb_types::SurrogateBitmap>,
+    at: Option<i64>,
 ) -> Result<Vec<crate::engine::vector::hnsw::SearchResult>, ErrorCode> {
     if index.dim() != query_vector.len() {
         return Err(super::vector::dimension_mismatch(
             index.dim(),
             query_vector.len(),
         ));
+    }
+    if let Some(at) = at {
+        let allow = filter_bitmap.map(|bm| index.nodes_at(bm.iter(), at));
+        return index
+            .search_at(
+                query_vector,
+                fetch_k,
+                ef,
+                index.params().metric,
+                allow.as_ref(),
+                at,
+            )
+            .map_err(|e| ErrorCode::from(crate::Error::from(e)));
     }
     if index.is_empty() {
         return Ok(Vec::new());
@@ -167,6 +183,8 @@ pub(in crate::data::executor) struct VectorSearchParams<'a> {
     /// bitmap with the HNSW candidate set before walking. Empty = no
     /// payload pre-filter.
     pub payload_filters: &'a [nodedb_types::PayloadAtom],
+    /// The system time the search reads at.
+    pub system_time: nodedb_types::SystemTimeScope,
 }
 
 /// Parameters for multi-vector search (all named fields, RRF fusion).
@@ -180,6 +198,8 @@ pub(in crate::data::executor) struct VectorMultiSearchParams<'a> {
     pub filter_bitmap: Option<&'a nodedb_types::SurrogateBitmap>,
     /// RLS post-candidate filters (evaluated per-candidate after RRF fusion).
     pub rls_filters: &'a [u8],
+    /// The system time every field's search reads at.
+    pub system_time: nodedb_types::SystemTimeScope,
 }
 
 /// Maximum allowed ef_search value. Prevents DoS via unbounded beam width.

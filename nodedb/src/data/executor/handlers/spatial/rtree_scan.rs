@@ -18,8 +18,11 @@ use nodedb_physical::physical_plan::SpatialPredicate;
 use nodedb_spatial::Metric;
 use nodedb_types::SurrogateBitmap;
 
+use super::cut_rows::CandidateBodies;
 use super::full_scan::SpatialFullScanParams;
 use super::prefilter::prefilter_admits;
+use crate::data::executor::handlers::search_cut::SearchCut;
+use nodedb_spatial::CutCandidate;
 
 /// Parameters for [`CoreLoop::execute_spatial_scan`].
 pub(in crate::data::executor) struct SpatialScanParams<'a> {
@@ -35,6 +38,8 @@ pub(in crate::data::executor) struct SpatialScanParams<'a> {
     pub projection: &'a [String],
     pub rls_filters: &'a [u8],
     pub prefilter: Option<&'a SurrogateBitmap>,
+    /// The system-time scope the read sees.
+    pub system_time: nodedb_types::SystemTimeScope,
 }
 
 impl CoreLoop {
@@ -62,6 +67,7 @@ impl CoreLoop {
             projection,
             rls_filters,
             prefilter,
+            system_time,
         } = params;
         debug!(
             core = self.core_id,
@@ -70,6 +76,11 @@ impl CoreLoop {
             predicate = ?predicate,
             "spatial scan"
         );
+
+        let cut = match SearchCut::of(system_time) {
+            Ok(cut) => cut,
+            Err(e) => return self.response_error(task, e),
+        };
 
         // Scan-quiesce gate.
         let _scan_guard = match self.acquire_scan_guard(task, tid, collection) {
@@ -148,6 +159,7 @@ impl CoreLoop {
                 attr_filters: &attr_filters,
                 rls_filters: &row_level_filters,
                 prefilter,
+                cut,
             });
         }
 
@@ -163,139 +175,78 @@ impl CoreLoop {
             }
         };
 
-        // 4. R-tree range search → candidate entry IDs.
-        let candidates = rtree.search(&search_bbox);
+        // 4. R-tree range search → the candidates' document ids. A read at a
+        // cut finds the live entries inserted at or below the cut and the
+        // ended entries visible there. The reverse map keys a candidate per
+        // engine: a document collection's row by its hex surrogate (see
+        // `apply_point_put_spatial`), a columnar-family row by its user `id`
+        // (see `index_columnar_geometry_columns`).
+        let doc_map_id = |entry_id: u64| {
+            self.spatial_doc_map
+                .get(&(
+                    db_id,
+                    tid_id,
+                    collection.to_string(),
+                    field.to_string(),
+                    entry_id,
+                ))
+                .cloned()
+        };
+        let candidates: Vec<String> = match cut.at {
+            None => rtree
+                .search(&search_bbox)
+                .into_iter()
+                .filter_map(|entry| doc_map_id(entry.id))
+                .collect(),
+            Some(at) => rtree
+                .search_at(&search_bbox, at)
+                .into_iter()
+                .filter_map(|candidate| match candidate {
+                    CutCandidate::Live(entry_id) => doc_map_id(entry_id),
+                    CutCandidate::Ended(ended) => Some(ended.document_id.clone()),
+                })
+                .collect(),
+        };
         debug!(
             core = self.core_id,
             candidates = candidates.len(),
             "spatial R-tree candidates"
         );
 
-        // Candidate documents are fetched per-candidate in an ENGINE-AWARE way
-        // below. `spatial_doc_map` keys candidates differently per engine:
-        //   * Document collections (schemaless/strict) keep their rows in the
-        //     sparse engine keyed by the hex surrogate, and the doc-map records
-        //     that same hex surrogate (see `apply_point_put_spatial`).
-        //   * The `spatial` / columnar-family engine keeps its rows in columnar
-        //     keyed by the user `id` column, and the doc-map records that user
-        //     id (see `index_columnar_geometry_columns`).
-        // The refinement fetch below tries sparse first (the document-collection
-        // case) and, on a miss, resolves the candidate from a columnar id → doc
-        // map built once via `scan_collection` (the columnar-family case). This
-        // mirrors `scan_collection`'s own presence-based (columnar → sparse)
-        // routing and is correct regardless of which engine backs the row.
-        let database_id = db_id.as_u64();
-        let body_format = self.sparse_body_format(db_id, tid_id, collection);
-        let identity_column = self.identity_column(database_id, tid, collection);
+        let identity_column = self.identity_column(db_id.as_u64(), tid, collection);
+        let mut bodies = CandidateBodies {
+            database_id: db_id.as_u64(),
+            tid,
+            collection,
+            at: cut.at,
+            columnar: None,
+        };
 
-        // Lazily-built columnar id → document map, populated on the first
-        // candidate that is absent from the sparse store (i.e. a columnar-family
-        // collection). Never built for pure document collections.
-        let mut columnar_docs: Option<std::collections::HashMap<String, Vec<u8>>> = None;
-
-        // 5. Exact predicate refinement.
+        // 5. Exact predicate refinement on each candidate's body at the
+        // read's cut.
         let mut results = Vec::new();
-
-        for entry in &candidates {
+        for doc_id in &candidates {
             if results.len() >= limit {
                 break;
             }
-
-            let doc_id = match self.spatial_doc_map.get(&(
-                db_id,
-                tid_id,
-                collection.to_string(),
-                field.to_string(),
-                entry.id,
-            )) {
-                Some(id) => id.clone(),
-                None => continue,
-            };
-
-            // The doc-map id is the hex surrogate for a document-collection
-            // row, and a columnar-family user `id` otherwise — the latter
-            // never parses as a storage key, so it falls through exactly
-            // where a sparse miss on a parsed key would.
-            let storage_key = nodedb_types::StorageKey::parse(&doc_id);
-
             // Prefilter: skip candidates not in the surrogate bitmap before
-            // any geometry evaluation. The doc_id is a hex-encoded surrogate.
+            // any geometry evaluation.
             if let Some(bitmap) = prefilter
-                && !prefilter_admits(bitmap, &doc_id)
+                && !prefilter_admits(bitmap, doc_id)
             {
                 continue;
             }
-
-            // Fetch the candidate's document in an engine-aware way. A sparse
-            // hit is the document-collection case (doc-map id is the hex
-            // surrogate). A sparse miss means the row lives in columnar under
-            // the user `id` column (the `spatial` / columnar-family case), so it
-            // is resolved from the columnar id → doc map. Both forms normalise
-            // to standard msgpack maps that `decode_document_value` and
-            // `extract_geometry` read identically.
-            let sparse_result = match storage_key {
-                // At its current version, so a bitemporal collection resolves.
-                Some(key) => self.current_row_body(database_id, tid, collection, &key),
-                None => Ok(None),
+            // A candidate with no version the read sees is no row of it. A
+            // body that does not read fails the scan: skipped, it would read
+            // as "no row matched the geometry".
+            let doc_mp = match self.spatial_candidate_body(&mut bodies, doc_id) {
+                Ok(Some(doc_mp)) => doc_mp,
+                Ok(None) => continue,
+                Err(e) => return self.response_error(task, e),
             };
-            let doc = match sparse_result {
-                Ok(Some(raw)) => {
-                    // `sparse_result` is only `Ok(Some(_))` when `storage_key`
-                    // resolved to a key above.
-                    let Some(key) = storage_key else {
-                        return self.response_error(
-                            task,
-                            ErrorCode::Internal {
-                                detail: "spatial scan: sparse hit with no storage key".into(),
-                            },
-                        );
-                    };
-                    let (_, doc_mp) = crate::data::executor::scan_normalize::sparse_row_to_doc(
-                        &key,
-                        &raw,
-                        body_format.as_format_ref(),
-                        &identity_column,
-                    );
-                    // A candidate skipped here silently drops out of the
-                    // spatial result set, which reads as "no row matched the
-                    // geometry" rather than "a row could not be read".
-                    match doc_format::decode_document_value(&doc_mp) {
-                        Ok(d) => d,
-                        Err(e) => return self.response_error(task, e),
-                    }
-                }
-                Ok(None) => {
-                    // Columnar-family (e.g. `engine='spatial'`) collection: the
-                    // doc-map id is the user `id` column and the row lives in
-                    // columnar, not sparse. Build the id → document map once and
-                    // reuse it across every remaining candidate.
-                    if columnar_docs.is_none() {
-                        match self.scan_collection(database_id, tid, collection, usize::MAX) {
-                            Ok(rows) => {
-                                columnar_docs = Some(rows.into_iter().collect());
-                            }
-                            Err(e) => {
-                                return self.response_error(task, ErrorCode::from(e));
-                            }
-                        }
-                    }
-                    let Some(doc_mp) = columnar_docs.as_ref().and_then(|m| m.get(&doc_id)) else {
-                        continue;
-                    };
-                    match doc_format::decode_document_value(doc_mp) {
-                        Ok(d) => d,
-                        Err(e) => return self.response_error(task, e),
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        err = %e,
-                        %doc_id,
-                        %collection,
-                        "sparse get failed during spatial candidate hydration; skipping row"
-                    );
-                    continue;
-                }
+            let doc = match doc_format::decode_document_value(&doc_mp) {
+                Ok(d) => d,
+                Err(e) => return self.response_error(task, e),
             };
 
             let doc_geom = match extract_geometry(&doc, field, &crs) {
@@ -329,12 +280,14 @@ impl CoreLoop {
             }
 
             results.push(SpatialHit::new(
-                &doc_id,
-                project_doc(&doc, &doc_id, projection, &identity_column),
+                doc_id,
+                project_doc(&doc, doc_id, projection, &identity_column),
             ));
         }
 
-        if let Some(txn_id) = task.request.txn_id
+        // The issuing transaction's staged writes merge into a current read
+        // and a read at its own snapshot.
+        if let Some(txn_id) = task.request.txn_id.filter(|_| cut.merge_overlay)
             && let Err(e) = self.merge_overlay_into_spatial_scan(
                 SpatialOverlayMergeParams {
                     txn_id,
@@ -414,7 +367,7 @@ mod tests {
             wal_lsn: None,
             resolved_now_ms: None,
             commit_hlc: None,
-            entry_version: None,
+            system_ordinal: None,
             admission: crate::bridge::envelope::Admission::Exempt(
                 crate::bridge::envelope::ExemptReason::Read,
             ),
@@ -443,7 +396,14 @@ mod tests {
         let msgpack = nodedb_types::json_to_msgpack(&geojson).unwrap();
 
         core.sparse
-            .put(0, tid, collection, &storage_key, &msgpack)
+            .put(
+                0,
+                tid,
+                collection,
+                &storage_key,
+                &msgpack,
+                core.bitemporal_ordinal(),
+            )
             .unwrap();
 
         // Manually populate the R-tree and the doc-map.
@@ -504,6 +464,7 @@ mod tests {
             projection: Vec::new(),
             rls_filters: Vec::new(),
             prefilter: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         })
     }
 
@@ -543,6 +504,7 @@ mod tests {
             projection: &[],
             rls_filters: &[],
             prefilter: Some(&empty_bitmap),
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         assert_eq!(resp.status, Status::Ok);
         let decoded: Vec<nodedb_types::Value> =
@@ -575,6 +537,7 @@ mod tests {
             projection: &[],
             rls_filters: &[],
             prefilter: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         assert_eq!(resp.status, Status::Error);
     }

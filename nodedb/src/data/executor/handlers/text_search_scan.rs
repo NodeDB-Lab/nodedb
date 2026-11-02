@@ -38,6 +38,8 @@ pub(in crate::data::executor) struct PhraseSearchParams<'a> {
     /// RLS filters (`Vec<ScanFilter>`), applied before ranking.
     pub rls_filters: &'a [u8],
     pub scores: &'a [TextScoreSpec],
+    /// The system time the search reads at.
+    pub system_time: nodedb_types::SystemTimeScope,
 }
 
 /// Parameters for [`CoreLoop::execute_bm25_score_scan`].
@@ -51,6 +53,8 @@ pub(in crate::data::executor) struct ScoreScanParams<'a> {
     pub scores: &'a [TextScoreSpec],
     /// The query's LIMIT, and the score order it keeps, pushed into the scan.
     pub bound: Option<&'a ScoreScanBound>,
+    /// The system time the scan reads at.
+    pub system_time: nodedb_types::SystemTimeScope,
 }
 
 impl CoreLoop {
@@ -95,15 +99,16 @@ impl CoreLoop {
     ) -> crate::Result<Vec<DocumentRow>> {
         let tenant_id = TenantId::new(p.tid);
         let database_id = task.request.database_id.as_u64();
+        let cut = super::search_cut::SearchCut::of(p.system_time)?;
         let Some(index) = self.text_index(task, p.tid, p.collection, p.field)? else {
             return Ok(Vec::new());
         };
         let gate = TextRowGate::new(p.filters, p.rls_filters, self.crs_context())?;
         let eligible = combine_eligible(
             p.prefilter,
-            self.text_eligible_rows(task, p.tid, p.collection, &gate)?,
+            self.text_eligible_rows(task, p.tid, p.collection, &gate, cut)?,
         );
-        let staged = self.text_staged_view(task, p.tid, index)?;
+        let staged = self.text_staged_view(task, p.tid, index, cut)?;
         // The phrase is analyzed once, with the collection's analyzer. Both
         // the indexed and the staged match read this token sequence.
         let phrase = self.analyze_phrase(database_id, tenant_id, p.collection, p.terms)?;
@@ -139,15 +144,16 @@ impl CoreLoop {
         }
 
         let scores =
-            self.text_score_columns(task, p.tid, p.collection, p.scores, eligible.as_ref())?;
+            self.text_score_columns(task, p.tid, p.collection, p.scores, eligible.as_ref(), cut)?;
         self.hydrate_text_hits(
             hits,
             HydrateTextHitsParams {
                 database_id,
                 tid: p.tid,
                 collection: p.collection,
-                txn_id: task.request.txn_id,
+                txn_id: task.request.txn_id.filter(|_| cut.merge_overlay),
                 scores: &scores,
+                at: cut.at,
             },
         )
     }
@@ -196,10 +202,11 @@ impl CoreLoop {
     ) -> crate::Result<Vec<DocumentRow>> {
         let database_id = task.request.database_id;
         let tenant = TenantId::new(p.tid);
+        let cut = super::search_cut::SearchCut::of(p.system_time)?;
         let gate = TextRowGate::new(p.filters, p.rls_filters, self.crs_context())?;
-        let eligible = self.text_eligible_rows(task, p.tid, p.collection, &gate)?;
+        let eligible = self.text_eligible_rows(task, p.tid, p.collection, &gate, cut)?;
         let columns =
-            self.text_score_columns(task, p.tid, p.collection, p.scores, eligible.as_ref())?;
+            self.text_score_columns(task, p.tid, p.collection, p.scores, eligible.as_ref(), cut)?;
         let mut sink = ScoreScanSink::new(&columns, p.bound);
         if sink.is_full() {
             return sink.finish();
@@ -210,7 +217,7 @@ impl CoreLoop {
         let format = self.sparse_body_format(database_id, tenant, p.collection);
         let identity_column = self.identity_column(database_id.as_u64(), p.tid, p.collection);
         let coll_key = (database_id, tenant, p.collection.to_string());
-        let overlay = match task.request.txn_id {
+        let overlay = match task.request.txn_id.filter(|_| cut.merge_overlay) {
             Some(txn_id) => {
                 // Read-your-own-writes refreshes the lease (see the reaper).
                 self.touch_overlay(txn_id);
@@ -238,16 +245,52 @@ impl CoreLoop {
         };
 
         let mut stopped = false;
+        // A row the transaction staged is emitted from its staged body.
+        let staged_row = |key: &StorageKey| {
+            overlay.is_some_and(|o| o.get(&coll_key, key.surrogate().as_u32()).is_some())
+        };
         if overlay.is_none_or(|o| o.base_visible(&coll_key)) {
-            self.for_each_current_row(database_id.as_u64(), p.tid, p.collection, |key, bytes| {
-                // A row the transaction staged is emitted from its staged body.
-                if overlay.is_some_and(|o| o.get(&coll_key, key.surrogate().as_u32()).is_some()) {
-                    return Ok(ControlFlow::Continue(()));
+            match cut.at {
+                None => {
+                    self.for_each_current_row(
+                        database_id.as_u64(),
+                        p.tid,
+                        p.collection,
+                        |key, bytes| {
+                            if staged_row(key) {
+                                return Ok(ControlFlow::Continue(()));
+                            }
+                            let flow = emit(key, bytes)?;
+                            stopped = flow.is_break();
+                            Ok(flow)
+                        },
+                    )?;
                 }
-                let flow = emit(key, bytes)?;
-                stopped = flow.is_break();
-                Ok(flow)
-            })?;
+                // A read at a cut scores each row's version visible there.
+                Some(at) => {
+                    let rows = self.sparse.versioned_scan_as_of(
+                        crate::engine::sparse::btree_versioned::VersionedScanParams {
+                            database_id: database_id.as_u64(),
+                            tenant: p.tid,
+                            coll: p.collection,
+                            sys_cutoff: Some(at),
+                            valid_at_ms: None,
+                            limit: usize::MAX,
+                        },
+                        &|_, _| true,
+                        &|| false,
+                    )?;
+                    for (key, bytes) in &rows {
+                        if staged_row(key) {
+                            continue;
+                        }
+                        if emit(key, bytes)?.is_break() {
+                            stopped = true;
+                            break;
+                        }
+                    }
+                }
+            }
         }
         if let Some(overlay) = overlay
             && !stopped

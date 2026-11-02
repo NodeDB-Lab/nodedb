@@ -33,6 +33,8 @@ pub(in crate::data::executor) struct RagExportParams<'a> {
     pub final_top_k: usize,
     /// The BM25 leg of a three-source fusion. `None` for two sources.
     pub bm25: Option<Bm25Leg<'a>>,
+    /// The cut both legs read at.
+    pub scope: &'a nodedb_physical::physical_plan::GraphReadScope,
 }
 
 /// Bundled arguments for [`CoreLoop::execute_rag_bindings`].
@@ -62,14 +64,18 @@ impl CoreLoop {
             vector_field,
             final_top_k,
             bm25,
+            scope,
         } = params;
         let hits = match self.vector_leg_hits(
             task,
-            tenant_id,
-            collection,
-            query_vector,
-            vector_top_k,
-            vector_field,
+            &super::graph_rag::VectorLeg {
+                tenant_id,
+                collection,
+                query_vector,
+                vector_top_k,
+                vector_field,
+                scope,
+            },
         ) {
             Ok(hits) => hits,
             Err(response) => return response,
@@ -81,6 +87,7 @@ impl CoreLoop {
                 collection,
                 leg,
                 final_top_k,
+                scope,
             ) {
                 Ok(text) => text,
                 Err(response) => return response,

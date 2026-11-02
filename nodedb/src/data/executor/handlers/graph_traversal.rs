@@ -172,17 +172,17 @@ impl CoreLoop {
         }
     }
 
-    /// The transaction's staged edge writes as a walk delta, for a live
-    /// read. A historical read sees committed versions only, so it gets
-    /// none. Read-your-own-writes refreshes the overlay lease (see the
-    /// overlay reaper).
+    /// The transaction's staged edge writes as a walk delta, for a live read
+    /// and a transaction snapshot read. A historical read sees committed
+    /// versions only, so it gets none. Read-your-own-writes refreshes the
+    /// overlay lease (see the overlay reaper).
     pub(in crate::data::executor) fn live_overlay_delta(
         &self,
         task: &ExecutionTask,
         tid: u64,
         scope: &GraphReadScope,
     ) -> Option<crate::engine::graph::csr::GraphOverlayDelta> {
-        if !scope.is_live() {
+        if !scope.merges_txn_overlay() {
             return None;
         }
         let txn_id = task.request.txn_id?;

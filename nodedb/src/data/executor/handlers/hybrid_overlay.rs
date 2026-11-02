@@ -65,11 +65,12 @@ impl CoreLoop {
         tid: u64,
         index: Option<IndexScope<'_>>,
         params: FtsSearchParams<'_>,
+        cut: super::search_cut::SearchCut,
     ) -> crate::Result<Vec<TextSearchResult>> {
         let Some(index) = index else {
             return Ok(Vec::new());
         };
-        let staged = self.text_staged_view(task, tid, index)?;
+        let staged = self.text_staged_view(task, tid, index, cut)?;
         self.inverted.search_staged(
             task.request.database_id.as_u64(),
             TenantId::new(tid),

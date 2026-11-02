@@ -311,10 +311,13 @@ impl CoreLoop {
         coll.payload.delete_row(node_id, &old);
         coll.payload.insert_row(node_id, &row.fields);
         let key = StorageKey::for_surrogate(row.surrogate);
-        if let Err(e) = self
-            .sparse
-            .put(database_id, tid, collection, &key, &row.sidecar)
-        {
+        let written = self
+            .row_version_ordinal(database_id, tid, collection, &key)
+            .and_then(|sys_from| {
+                self.sparse
+                    .put(database_id, tid, collection, &key, &row.sidecar, sys_from)
+            });
+        if let Err(e) = written {
             // Put the bitmap entries back so the index still describes the
             // sidecar that is actually stored.
             if let Some(coll) = self.vector_collections.get_mut(index_key) {

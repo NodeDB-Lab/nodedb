@@ -109,11 +109,11 @@ impl CoreLoop {
             query: bm25_query,
             field: bm25_field,
         };
-        let text_results = match self.bm25_leg_hits(task, tid_typed, collection, bm25, final_top_k)
-        {
-            Ok(results) => results,
-            Err(resp) => return resp,
-        };
+        let text_results =
+            match self.bm25_leg_hits(task, tid_typed, collection, bm25, final_top_k, scope) {
+                Ok(results) => results,
+                Err(resp) => return resp,
+            };
 
         // Graph expansion seeded directly by the vector hits' surrogates.
         let expansion = match self.expand_graph(GraphExpansionParams {
@@ -190,14 +190,25 @@ impl CoreLoop {
         collection: &str,
         bm25: Bm25Leg<'_>,
         final_top_k: usize,
+        scope: &nodedb_physical::physical_plan::GraphReadScope,
     ) -> Result<Vec<(Surrogate, f32)>, Response> {
         let index = match self.text_index(task, tenant_id.as_u64(), collection, Some(bm25.field)) {
             Ok(Some(index)) => index,
             Ok(None) => return Ok(Vec::new()),
             Err(e) => return Err(self.response_error(task, e)),
         };
+        // The leg ranks the text versions visible at the fusion's cut, the
+        // current index for a live scope. It reads no staged write.
+        let cut = super::search_cut::SearchCut {
+            at: scope.pinned_ordinal(),
+            merge_overlay: false,
+        };
+        let staged = match self.text_staged_view(task, tenant_id.as_u64(), index, cut) {
+            Ok(staged) => staged,
+            Err(e) => return Err(self.response_error(task, e)),
+        };
         let fetch_k = final_top_k.saturating_mul(3).max(20);
-        match self.inverted.search(
+        match self.inverted.search_staged(
             task.request.database_id.as_u64(),
             tenant_id,
             index,
@@ -208,6 +219,7 @@ impl CoreLoop {
                 mode: QueryMode::And,
                 prefilter: None,
             },
+            staged.as_ref(),
         ) {
             Ok(results) => Ok(results.iter().map(|r| (r.doc_id, r.score)).collect()),
             Err(e) => Err(self.response_error(task, e)),

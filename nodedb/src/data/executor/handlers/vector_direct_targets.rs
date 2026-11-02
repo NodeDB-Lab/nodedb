@@ -10,7 +10,6 @@
 
 use nodedb_physical::physical_plan::VectorWriteTargets;
 use nodedb_types::{StorageKey, Surrogate};
-use redb::{ReadableDatabase, ReadableTable};
 
 use crate::bridge::envelope::ErrorCode;
 use crate::bridge::scan_filter::ScanFilter;
@@ -105,45 +104,26 @@ impl CoreLoop {
         filters: &[ScanFilter],
     ) -> Result<Vec<Surrogate>, ErrorCode> {
         let crs = self.crs_context();
-        let prefix = crate::engine::sparse::btree::coll_prefix(database_id, tid, collection);
-        let end = format!("{prefix}\u{ffff}");
-        let storage_err = |what: &str, e: &dyn std::fmt::Display| ErrorCode::Internal {
-            detail: format!("vector-primary sidecar scan on '{collection}': {what}: {e}"),
-        };
-
-        let read_txn = self
-            .sparse
-            .db()
-            .begin_read()
-            .map_err(|e| storage_err("read txn", &e))?;
-        let table = read_txn
-            .open_table(crate::engine::sparse::btree::DOCUMENTS)
-            .map_err(|e| storage_err("open table", &e))?;
-        let range = table
-            .range(prefix.as_str()..end.as_str())
-            .map_err(|e| storage_err("range", &e))?;
         let identity_column = self.identity_column(database_id, tid, collection);
-
+        // The filter error is held and returned once the scan ends.
+        let mut matched: Result<(), ErrorCode> = Ok(());
         let mut out = Vec::new();
-        for entry in range {
-            let (key_guard, value_guard) = entry.map_err(|e| storage_err("iterate", &e))?;
-            let full_key = key_guard.value();
-            let Some(rest) = full_key.strip_prefix(&prefix) else {
-                continue;
-            };
-            let key = StorageKey::parse(rest).ok_or_else(|| {
-                ErrorCode::from(crate::engine::sparse::btree::invalid_storage_key_err(
-                    crate::engine::sparse::btree::KeyedTable::Documents,
-                    collection,
-                    rest,
-                ))
+        self.sparse
+            .scan_documents_while(database_id, tid, collection, |key, body| {
+                match vector_sidecar_matches(key, body, filters, &identity_column, &crs) {
+                    Ok(true) => out.push(key.surrogate()),
+                    Ok(false) => {}
+                    Err(e) => {
+                        matched = Err(e);
+                        return Ok(std::ops::ControlFlow::Break(()));
+                    }
+                }
+                Ok(std::ops::ControlFlow::Continue(()))
+            })
+            .map_err(|e| ErrorCode::Internal {
+                detail: format!("vector-primary sidecar scan on '{collection}': {e}"),
             })?;
-            if !vector_sidecar_matches(&key, value_guard.value(), filters, &identity_column, &crs)?
-            {
-                continue;
-            }
-            out.push(key.surrogate());
-        }
+        matched?;
         Ok(out)
     }
 }

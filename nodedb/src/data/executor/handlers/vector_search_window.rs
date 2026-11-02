@@ -25,8 +25,12 @@ pub(super) struct SearchWindow<'a> {
     pub query_vector: &'a [f32],
     pub ef_search: usize,
     pub metric: DistanceMetric,
-    /// Serialized candidate bitmap in the index's node-id space.
+    /// Serialized candidate bitmap in the index's node-id space. A current
+    /// search reads it.
     pub bitmap: Option<&'a [u8]>,
+    /// The system-time ordinal a search at a cut reads, with its candidate
+    /// node ids at the cut. `None` ranks the live nodes.
+    pub cut: Option<(i64, Option<&'a roaring::RoaringBitmap>)>,
 }
 
 /// Where the bodies of ranked candidates are read from.
@@ -36,6 +40,9 @@ pub(super) struct BodySource<'a> {
     pub collection: &'a str,
     /// Attach each candidate's body to its hit.
     pub attach: bool,
+    /// The system-time ordinal the bodies are read at. `None` reads the
+    /// current version.
+    pub at: Option<i64>,
 }
 
 /// The ranked hits and the window width that produced them.
@@ -59,19 +66,32 @@ impl CoreLoop {
         top_k: usize,
         mut fetch_k: usize,
     ) -> crate::Result<WindowHits> {
-        let live = window.collection.live_count();
+        // A search at a cut can read ended nodes, so every node held bounds
+        // its window.
+        let live = match window.cut {
+            None => window.collection.live_count(),
+            Some(_) => window.collection.len(),
+        };
         let crs = self.crs_context();
         loop {
             let ef = effective_ef(window.ef_search, fetch_k);
-            let ranked = match window.bitmap {
-                Some(bitmap) => window.collection.search_with_bitmap_bytes_and_metric(
+            let ranked = match (window.cut, window.bitmap) {
+                (Some((at, allow)), _) => window.collection.search_at(
+                    window.query_vector,
+                    fetch_k,
+                    ef,
+                    window.metric,
+                    allow,
+                    at,
+                ),
+                (None, Some(bitmap)) => window.collection.search_with_bitmap_bytes_and_metric(
                     window.query_vector,
                     fetch_k,
                     ef,
                     bitmap,
                     window.metric,
                 ),
-                None => window.collection.search_with_metric(
+                (None, None) => window.collection.search_with_metric(
                     window.query_vector,
                     fetch_k,
                     ef,
@@ -89,6 +109,7 @@ impl CoreLoop {
                         bodies.tid,
                         bodies.collection,
                         bodies.attach,
+                        bodies.at,
                         hit,
                     )
                 })

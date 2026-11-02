@@ -53,6 +53,34 @@ pub(in crate::data::executor) struct HybridSearchTripleParams<'a> {
     pub filter_bitmap: Option<&'a nodedb_types::SurrogateBitmap>,
     pub rls_filters: &'a [u8],
     pub score_alias: Option<&'a str>,
+    /// The system time every leg reads at.
+    pub system_time: nodedb_types::SystemTimeScope,
+}
+
+/// The cut the graph leg of a triple search at `system_time` walks: the
+/// live graph, the graph at a pinned cut, or a transaction's snapshot. The
+/// Control Plane waits for a cut's marker before the search runs.
+pub(in crate::data::executor) fn graph_leg_scope(
+    system_time: nodedb_types::SystemTimeScope,
+) -> nodedb_physical::physical_plan::GraphReadScope {
+    use nodedb_physical::physical_plan::{GraphReadScope, GraphSystemCut};
+    use nodedb_types::SystemTimeScope;
+    let system = match system_time {
+        SystemTimeScope::TxnSnapshot { ordinal, .. } => GraphSystemCut::TxnSnapshot(ordinal),
+        SystemTimeScope::AsOf(_) | SystemTimeScope::Pinned { .. } => {
+            match system_time.as_of_ordinal() {
+                Some(ordinal) => GraphSystemCut::AtOrdinal(ordinal),
+                None => GraphSystemCut::Live,
+            }
+        }
+        // `AS OF SYSTEM TIME NULL` is refused before any leg runs.
+        SystemTimeScope::Current | SystemTimeScope::AllVersions => GraphSystemCut::Live,
+    };
+    GraphReadScope {
+        system,
+        valid_at_ms: None,
+        cut_marker: 0,
+    }
 }
 
 impl CoreLoop {
@@ -84,8 +112,14 @@ impl CoreLoop {
             filter_bitmap,
             rls_filters,
             score_alias,
+            system_time,
         } = params;
         let tenant_id = crate::types::TenantId::new(tid);
+        let cut = match super::search_cut::SearchCut::of(system_time) {
+            Ok(cut) => cut,
+            Err(e) => return self.response_error(task, e),
+        };
+        let graph_scope = graph_leg_scope(system_time);
         debug!(
             core = self.core_id,
             tid,
@@ -107,7 +141,7 @@ impl CoreLoop {
         // The rows the residual filters and RLS admit restrict every leg
         // before fusion, so the fused top-k counts only admitted rows.
         let eligible = match TextRowGate::new(filters, rls_filters, self.crs_context())
-            .and_then(|gate| self.text_eligible_rows(task, tid, collection, &gate))
+            .and_then(|gate| self.text_eligible_rows(task, tid, collection, &gate, cut))
         {
             Ok(eligible) => combine_eligible(filter_bitmap, eligible),
             Err(e) => return self.response_error(task, e),
@@ -142,6 +176,7 @@ impl CoreLoop {
                     fetch_k,
                     ef,
                     filter_bitmap,
+                    cut.at,
                 ) {
                     Ok(results) => results,
                     Err(code) => return self.response_error(task, code),
@@ -163,6 +198,7 @@ impl CoreLoop {
                 mode: QueryMode::from(mode),
                 prefilter: filter_bitmap,
             },
+            cut,
         ) {
             Ok(results) => results,
             Err(e) => return self.response_error(task, e),
@@ -182,8 +218,8 @@ impl CoreLoop {
             max_visited: self.query_tuning.bfs_memory_budget_bytes
                 / self.query_tuning.bfs_bytes_per_node,
             collection,
-            // A hybrid search walks the current graph.
-            scope: &nodedb_physical::physical_plan::GraphReadScope::default(),
+            // The walk reads the graph at the search's cut.
+            scope: &graph_scope,
         }) {
             Ok(expansion) => expansion,
             Err(e) => return self.response_error(task, e),
@@ -197,7 +233,7 @@ impl CoreLoop {
         // concern and is not folded in here. Outside a transaction the
         // committed-only construction below runs unchanged.
         let (mut vector_ranked, mut text_ranked): super::hybrid_overlay::HybridRankedLegs =
-            if let Some(txn_id) = task.request.txn_id {
+            if let Some(txn_id) = task.request.txn_id.filter(|_| cut.merge_overlay) {
                 match self.hybrid_ranked_with_overlay(
                     super::hybrid_overlay::HybridOverlayParams {
                         txn_id,
