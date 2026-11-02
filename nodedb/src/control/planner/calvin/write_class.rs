@@ -609,6 +609,7 @@ mod tests {
             dst_surrogate: Surrogate::new(2),
             valid_from_ms: None,
             valid_until_ms: None,
+            properties: Vec::new(),
         };
         let plan = PhysicalPlan::Graph(GraphOp::EdgePutBatch { edges: vec![edge] });
         assert!(
@@ -628,6 +629,7 @@ mod tests {
             dst_surrogate: Surrogate::new(2),
             valid_from_ms: None,
             valid_until_ms: None,
+            properties: Vec::new(),
         };
         let plan = PhysicalPlan::Graph(GraphOp::EdgeDeleteBatch { edges: vec![edge] });
         assert!(

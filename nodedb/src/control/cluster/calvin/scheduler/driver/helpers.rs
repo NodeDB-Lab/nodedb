@@ -353,6 +353,7 @@ mod tests {
                 dst_surrogate: Surrogate::new(leaf_surrogate(i)),
                 valid_from_ms: None,
                 valid_until_ms: None,
+                properties: Vec::new(),
             })
             .collect();
         PhysicalPlan::Graph(GraphOp::EdgePutBatch { edges })

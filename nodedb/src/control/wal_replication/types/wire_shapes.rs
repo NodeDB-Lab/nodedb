@@ -31,6 +31,10 @@ pub struct ReplicatedBatchEdge {
     pub valid_from_ms: Option<i64>,
     /// `UNTIL <until>` of a put. `None` leaves the valid time open.
     pub valid_until_ms: Option<i64>,
+    /// MessagePack image of a put's properties. Empty for an edge with none.
+    /// A delete carries it empty.
+    #[serde(default)]
+    pub properties: Vec<u8>,
 }
 
 /// The fields of one `ApplyBalanceDelta`, borrowed from the plan or the wire

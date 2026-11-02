@@ -270,6 +270,7 @@ pub async fn create_graph_index(
             dst_surrogate: *dst_surrogate,
             valid_from_ms: None,
             valid_until_ms: None,
+            properties: Vec::new(),
         });
         total_edges += 1;
     }

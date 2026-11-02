@@ -31,4 +31,7 @@ pub struct BatchEdge {
     /// Exclusive end of the edge's valid time. `None` leaves it open. A
     /// delete ignores it.
     pub valid_until_ms: Option<i64>,
+    /// MessagePack image of the edge's properties. Empty for an edge with
+    /// none. A delete ignores it.
+    pub properties: Vec<u8>,
 }

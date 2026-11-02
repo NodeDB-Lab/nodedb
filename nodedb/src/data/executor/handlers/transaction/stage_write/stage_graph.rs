@@ -275,7 +275,7 @@ impl CoreLoop {
     ) -> Response {
         let incoming_bytes: usize = edges
             .iter()
-            .map(|e| e.src_id.len() + e.label.len() + e.dst_id.len())
+            .map(|e| e.src_id.len() + e.label.len() + e.dst_id.len() + e.properties.len())
             .sum();
         if let Err(e) = self.stage_graph_capped(incoming_bytes) {
             return self.response_error(task, e);
@@ -287,7 +287,7 @@ impl CoreLoop {
             overlay.stage_edge_put_valid(
                 coll_key,
                 (&edge.src_id, &edge.label, &edge.dst_id),
-                Vec::new(),
+                edge.properties.clone(),
                 crate::data::executor::handlers::transaction::overlay::EdgeValidTime {
                     valid_from_ms: edge.valid_from_ms,
                     valid_until_ms: edge.valid_until_ms,

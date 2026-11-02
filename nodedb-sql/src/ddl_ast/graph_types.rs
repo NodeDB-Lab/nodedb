@@ -27,3 +27,18 @@ pub enum GraphProperties {
     /// expected to already be a JSON document.
     Quoted(String),
 }
+
+/// One edge of a `GRAPH INSERT EDGE` statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphEdgeSpec {
+    pub src: String,
+    pub dst: String,
+    pub label: String,
+    pub properties: GraphProperties,
+    /// `VALID_TIME <from>`: start of the edge's valid time, ms since
+    /// epoch. `None` takes the write's wall time.
+    pub valid_from_ms: Option<i64>,
+    /// `UNTIL <until>`: exclusive end of the edge's valid time. `None`
+    /// leaves it open.
+    pub valid_until_ms: Option<i64>,
+}

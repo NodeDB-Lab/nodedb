@@ -167,22 +167,16 @@ mod tests {
     fn parse_graph_insert_edge_keyword_shaped_ids() {
         let stmt = parsed("GRAPH INSERT EDGE IN 'myedges' FROM 'TO' TO 'FROM' TYPE 'LABEL'");
         match stmt {
-            NodedbStatement::Graph(GraphStmt::GraphInsertEdge {
-                collection,
-                src,
-                dst,
-                label,
-                properties,
-                valid_from_ms,
-                valid_until_ms,
-            }) => {
-                assert_eq!(valid_from_ms, None);
-                assert_eq!(valid_until_ms, None);
+            NodedbStatement::Graph(GraphStmt::GraphInsertEdge { collection, edges }) => {
                 assert_eq!(collection, "myedges");
-                assert_eq!(src, "TO");
-                assert_eq!(dst, "FROM");
-                assert_eq!(label, "LABEL");
-                assert_eq!(properties, GraphProperties::None);
+                assert_eq!(edges.len(), 1);
+                let edge = &edges[0];
+                assert_eq!(edge.valid_from_ms, None);
+                assert_eq!(edge.valid_until_ms, None);
+                assert_eq!(edge.src, "TO");
+                assert_eq!(edge.dst, "FROM");
+                assert_eq!(edge.label, "LABEL");
+                assert_eq!(edge.properties, GraphProperties::None);
             }
             other => panic!("expected GraphInsertEdge, got {other:?}"),
         }
@@ -227,13 +221,9 @@ mod tests {
             "GRAPH INSERT EDGE IN 'edges' FROM 'a' TO 'b' TYPE 'l' PROPERTIES { note: '} DEPTH 999' }",
         );
         match stmt {
-            NodedbStatement::Graph(GraphStmt::GraphInsertEdge {
-                collection,
-                properties,
-                ..
-            }) => {
+            NodedbStatement::Graph(GraphStmt::GraphInsertEdge { collection, edges }) => {
                 assert_eq!(collection, "edges");
-                match properties {
+                match edges[0].properties.clone() {
                     GraphProperties::Object(s) => assert!(s.contains("} DEPTH 999")),
                     other => panic!("expected Object properties, got {other:?}"),
                 }
@@ -840,13 +830,9 @@ mod tests {
             "GRAPH INSERT EDGE IN 'e' FROM 'a' TO 'b' TYPE 'l' \
              VALID_TIME '2024-01-01T00:00:00Z' UNTIL 1704153600000",
         ) {
-            NodedbStatement::Graph(GraphStmt::GraphInsertEdge {
-                valid_from_ms,
-                valid_until_ms,
-                ..
-            }) => {
-                assert_eq!(valid_from_ms, Some(1_704_067_200_000));
-                assert_eq!(valid_until_ms, Some(1_704_153_600_000));
+            NodedbStatement::Graph(GraphStmt::GraphInsertEdge { edges, .. }) => {
+                assert_eq!(edges[0].valid_from_ms, Some(1_704_067_200_000));
+                assert_eq!(edges[0].valid_until_ms, Some(1_704_153_600_000));
             }
             other => panic!("expected GraphInsertEdge, got {other:?}"),
         }
@@ -862,5 +848,43 @@ mod tests {
         let error =
             parse_error("GRAPH INSERT EDGE IN 'e' FROM 'a' TO 'b' TYPE 'l' VALID_TIME 'soon'");
         assert!(error.contains("VALID_TIME"), "{error}");
+    }
+
+    #[test]
+    fn insert_edge_takes_several_edges_in_one_statement() {
+        match parsed(
+            "GRAPH INSERT EDGE IN 'e' \
+             FROM 'a' TO 'b' TYPE 'l1' PROPERTIES { w: 1 } \
+             FROM 'c' TO 'd' TYPE 'l2' VALID_TIME 5 UNTIL 9, \
+             TYPE 'l3' TO 'f' FROM 'e'",
+        ) {
+            NodedbStatement::Graph(GraphStmt::GraphInsertEdge { collection, edges }) => {
+                assert_eq!(collection, "e");
+                assert_eq!(edges.len(), 3);
+                assert_eq!((edges[0].src.as_str(), edges[0].dst.as_str()), ("a", "b"));
+                assert!(matches!(edges[0].properties, GraphProperties::Object(_)));
+                assert_eq!(edges[1].label, "l2");
+                assert_eq!(edges[1].valid_from_ms, Some(5));
+                assert_eq!(edges[1].valid_until_ms, Some(9));
+                assert_eq!(edges[1].properties, GraphProperties::None);
+                assert_eq!(edges[2].label, "l3");
+                assert_eq!((edges[2].src.as_str(), edges[2].dst.as_str()), ("e", "f"));
+            }
+            other => panic!("expected GraphInsertEdge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn insert_edge_refuses_an_incomplete_later_edge() {
+        let error =
+            parse_error("GRAPH INSERT EDGE IN 'e' FROM 'a' TO 'b' TYPE 'l' FROM 'c' TYPE 'l'");
+        assert!(error.contains("requires TO <node>"), "{error}");
+        let error = parse_error("GRAPH INSERT EDGE IN 'e' FROM 'a' TO 'b' TYPE 'l' TYPE 'm'");
+        assert!(error.contains("requires FROM <node>"), "{error}");
+        let error = parse_error(
+            "GRAPH INSERT EDGE IN 'e' FROM 'a' TO 'b' TYPE 'l' FROM 'c' TO 'd' TYPE 'l' \
+             VALID_TIME 5 UNTIL 5",
+        );
+        assert!(error.contains("UNTIL must be after VALID_TIME"), "{error}");
     }
 }

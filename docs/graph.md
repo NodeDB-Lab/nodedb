@@ -55,6 +55,18 @@ GRAPH INSERT EDGE IN 'edges' FROM 'users:alice' TO 'users:bob' TYPE 'KNOWS'
 
 The `IN '<collection>'` clause is **required** — edges are overlays on a named document collection, not a global namespace. Statements without `IN` fail to parse.
 
+#### Several edges in one statement
+
+A clause an edge already has starts the next edge. Each edge takes its own `PROPERTIES`, `VALID_TIME` and `UNTIL`.
+
+```sql
+GRAPH INSERT EDGE IN 'edges'
+  FROM 'users:alice' TO 'users:bob'   TYPE 'KNOWS' PROPERTIES { since: 2020 },
+  FROM 'users:alice' TO 'users:carol' TYPE 'KNOWS' PROPERTIES { since: 2021 };
+```
+
+The statement binds its endpoints in one exchange and writes every edge as one unit. When the edges home on more than one vShard, that unit is one Calvin transaction, so a bulk load costs one commit chain per statement instead of one per edge. The command tag reports the number of edges written. An edge that is missing `FROM`, `TO` or `TYPE` refuses the whole statement.
+
 ### Delete Edge
 
 ```sql

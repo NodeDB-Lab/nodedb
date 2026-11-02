@@ -141,6 +141,7 @@ mod graph_dsl_argument_validation;
 mod graph_dsl_handlers;
 mod graph_dsl_label_sets;
 mod graph_edge_predicate;
+mod graph_insert_edges_batch;
 mod graph_match_authorization;
 mod graph_rag_fusion;
 mod graph_rag_fusion_naming;

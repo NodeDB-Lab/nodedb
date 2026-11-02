@@ -478,6 +478,7 @@ mod tests {
             dst_surrogate: Surrogate::new(2),
             valid_from_ms: None,
             valid_until_ms: None,
+            properties: Vec::new(),
         };
 
         // Two edges over the same endpoint pair: the union must dedupe.
