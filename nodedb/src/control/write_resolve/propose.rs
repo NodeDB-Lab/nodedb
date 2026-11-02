@@ -47,7 +47,7 @@ pub(super) async fn propose_resolved(
     let deadline = crate::control::server::shared::session::StatementDeadline::of_statement(state)
         .tokio_instant();
     match propose_replicated_entry(state, proposer, entry, deadline).await {
-        Ok((payload, write_versions)) => {
+        Ok(payload) => {
             let request_id =
                 RequestId::new(state.request_id_counter.fetch_add(1, Ordering::Relaxed));
             let response = Response {
@@ -60,7 +60,8 @@ pub(super) async fn propose_resolved(
                 watermark_lsn: crate::types::Lsn::ZERO,
                 error_code: None,
                 stage_vote: None,
-                read_versions: write_versions,
+                // A write scans no vShard a read-set entry names.
+                read_vshards: crate::types::ReadShards::new(),
                 write_set: Vec::new(),
             };
             Ok(ProposeOutcome::Applied(response))

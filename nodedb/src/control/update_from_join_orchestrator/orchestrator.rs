@@ -81,12 +81,24 @@ pub async fn run_authorized_update_from_join(
         // Unresolved on the way in — resolved below before dispatch.
         resolved_sum_targets: _,
         declared_primary_key,
+        target_system_time,
     }) = task.plan
     else {
         return Err(crate::Error::BadRequest {
             detail: "authorized task is not unresolved autocommit UPDATE ... FROM".into(),
         });
     };
+    // An autocommit UPDATE ... FROM matches the current target rows. A block's
+    // UPDATE ... FROM stages through the transaction expander instead.
+    if target_system_time != nodedb_types::SystemTimeScope::Current {
+        return Err(crate::Error::Internal {
+            detail: format!(
+                "autocommit UPDATE ... FROM into '{}' carries the target scope {target_system_time:?}; \
+                 a transaction block's UPDATE ... FROM stages, it never orchestrates as autocommit",
+                target_collection.as_str()
+            ),
+        });
+    }
     run_update_from_join(
         state,
         UpdateFromJoinArgs {
@@ -183,6 +195,7 @@ pub(crate) async fn run_update_from_join(
             rls_write_check: nodedb_types::RlsWriteCheck::decided_earlier_in_request(),
             resolved_sum_targets,
             declared_primary_key: args.declared_primary_key.map(str::to_string),
+            target_system_time: nodedb_types::SystemTimeScope::Current,
         });
 
         // Join-map now built from the shipped rows, so this lands correctly
@@ -246,6 +259,7 @@ async fn resolve_matched_rows(
             // Folds no delta, so needs no resolution of its own.
             resolved_sum_targets: Vec::new(),
             declared_primary_key: args.declared_primary_key.map(str::to_string),
+            target_system_time: nodedb_types::SystemTimeScope::Current,
         },
     )));
     let resp = dispatch_local(

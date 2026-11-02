@@ -192,7 +192,7 @@ async fn run_insert_select(
         watermark_lsn: max_lsn,
         error_code: None,
         stage_vote: None,
-        read_versions: crate::types::ReadVersions::new(),
+        read_vshards: crate::types::ReadShards::new(),
         write_set: Vec::new(),
     })
 }

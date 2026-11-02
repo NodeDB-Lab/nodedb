@@ -353,17 +353,20 @@ impl SystemMetrics {
         }
     }
 
-    /// Emit `nodedb_segments_quarantined_total{engine,collection}` counters and
-    /// `nodedb_segments_quarantined_active{engine,collection}` gauges from a
-    /// live registry snapshot.
+    /// Emit `nodedb_segments_quarantined_total` counters and
+    /// `nodedb_segments_quarantined_active` gauges from a live registry
+    /// snapshot.
     ///
-    /// Called from the `/metrics` HTTP handler which has direct access to
-    /// `SharedState::quarantine_registry`. The `SystemMetrics` struct does not
-    /// hold a quarantine counter to avoid requiring a notification path between
-    /// the registry and the metrics store — the registry is the source of truth.
+    /// Labels are `engine`, `database_id`, `tenant_id`, and `collection`. A
+    /// Raft snapshot chunk has no collection, so its scope labels are empty.
+    /// The registry is the source of truth, so `SystemMetrics` holds no
+    /// quarantine counter of its own.
     pub fn prometheus_segment_quarantine_active(
         out: &mut String,
-        active_counts: &std::collections::HashMap<(String, String), u64>,
+        active_counts: &std::collections::HashMap<
+            crate::storage::quarantine::QuarantineCountKey,
+            u64,
+        >,
     ) {
         use std::fmt::Write as _;
         if active_counts.is_empty() {
@@ -371,26 +374,41 @@ impl SystemMetrics {
         }
         let mut pairs: Vec<_> = active_counts.iter().collect();
         pairs.sort_by(|a, b| a.0.cmp(b.0));
+        let series: Vec<(String, u64)> = pairs
+            .into_iter()
+            .map(|(key, count)| {
+                let (database_id, tenant_id, collection) = match &key.scope {
+                    Some(scope) => (
+                        scope.database_id.to_string(),
+                        scope.tenant_id.to_string(),
+                        scope.collection.as_str(),
+                    ),
+                    None => (String::new(), String::new(), ""),
+                };
+                let labels = format!(
+                    r#"engine="{}",database_id="{database_id}",tenant_id="{tenant_id}",collection="{collection}""#,
+                    key.engine
+                );
+                (labels, *count)
+            })
+            .collect();
         let _ = out.write_str(
             "# HELP nodedb_segments_quarantined_active Currently-quarantined segment count per engine and collection\n\
              # TYPE nodedb_segments_quarantined_active gauge\n",
         );
-        for ((engine, collection), count) in &pairs {
+        for (labels, count) in &series {
             let _ = writeln!(
                 out,
-                r#"nodedb_segments_quarantined_active{{engine="{engine}",collection="{collection}"}} {count}"#
+                "nodedb_segments_quarantined_active{{{labels}}} {count}"
             );
         }
-        // Emit total (same value per process run — quarantines are permanent within a run).
+        // Quarantine is permanent within a run, so the total equals the active count.
         let _ = out.write_str(
             "# HELP nodedb_segments_quarantined_total Cumulative segments quarantined due to repeated CRC failures\n\
              # TYPE nodedb_segments_quarantined_total counter\n",
         );
-        for ((engine, collection), count) in pairs {
-            let _ = writeln!(
-                out,
-                r#"nodedb_segments_quarantined_total{{engine="{engine}",collection="{collection}"}} {count}"#
-            );
+        for (labels, count) in &series {
+            let _ = writeln!(out, "nodedb_segments_quarantined_total{{{labels}}} {count}");
         }
     }
 }

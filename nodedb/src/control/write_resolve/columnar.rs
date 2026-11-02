@@ -32,18 +32,22 @@ pub struct ColumnarWriteResolver {
 /// Exhaustive over `ColumnarOp` — a new op fails to compile here.
 pub(super) fn resolver_for_columnar_op(op: &ColumnarOp) -> Option<Box<dyn EngineWriteResolver>> {
     let (collection, filters, updates, is_update, rls_write_check) = match op {
+        // The resolve reads the current state. A block's predicate write
+        // stages and is never resolved here.
         ColumnarOp::Update {
             collection,
             filters,
             updates,
             system_from: _,
             rls_write_check,
+            system_time: _,
         } => (collection, filters, Some(updates), true, rls_write_check),
         ColumnarOp::Delete {
             collection,
             filters,
             system_from: _,
             rls_write_check,
+            system_time: _,
         } => (collection, filters, None, false, rls_write_check),
         ColumnarOp::Insert { .. }
         | ColumnarOp::Scan { .. }

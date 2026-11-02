@@ -95,12 +95,24 @@ pub async fn run_authorized_merge(
         // produces the join keys this is filled from.
         resolved_sum_targets: _,
         declared_primary_key,
+        target_system_time,
     }) = task.plan
     else {
         return Err(crate::Error::BadRequest {
             detail: "authorized task is not an unresolved autocommit MERGE".into(),
         });
     };
+    // An autocommit MERGE matches the current target rows. A block's
+    // MERGE stages through the transaction expander instead.
+    if target_system_time != nodedb_types::SystemTimeScope::Current {
+        return Err(crate::Error::Internal {
+            detail: format!(
+                "autocommit MERGE into '{}' carries the target scope {target_system_time:?}; \
+                 a transaction block's MERGE stages, it never orchestrates as autocommit",
+                target_collection.as_str()
+            ),
+        });
+    }
     run_merge(
         state,
         MergeArgs {
@@ -355,6 +367,7 @@ fn merge_plan(
         // Empty on RESOLVE (writes nothing); APPLY carries the resolution.
         resolved_sum_targets,
         declared_primary_key: args.declared_primary_key.map(str::to_string),
+        target_system_time: nodedb_types::SystemTimeScope::Current,
     };
     if resolve_only {
         PhysicalPlan::Document(DocumentOp::ResolveWrite(Box::new(merge)))

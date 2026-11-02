@@ -189,7 +189,8 @@ fn decode_msgpack_to_value_map(bytes: &[u8], row_id: &str) -> Option<HashMap<Str
         inject_row_identity(&mut map, row_id);
         return Some(map);
     }
-    // JSON fallback (legacy data).
+    // A schemaless body can be JSON: the document encoder stores JSON when
+    // MessagePack encoding fails.
     if let Ok(serde_json::Value::Object(map)) = sonic_rs::from_slice::<serde_json::Value>(bytes) {
         let mut fields: HashMap<String, Value> =
             map.into_iter().map(|(k, v)| (k, Value::from(v))).collect();

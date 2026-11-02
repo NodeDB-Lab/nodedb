@@ -221,7 +221,7 @@ mod tests {
             watermark_lsn: Lsn::ZERO,
             error_code: None,
             stage_vote: None,
-            read_versions: crate::types::ReadVersions::new(),
+            read_vshards: crate::types::ReadShards::new(),
             write_set: Vec::new(),
         }
     }
@@ -236,7 +236,7 @@ mod tests {
             watermark_lsn: Lsn::ZERO,
             error_code: None,
             stage_vote: None,
-            read_versions: crate::types::ReadVersions::new(),
+            read_vshards: crate::types::ReadShards::new(),
             write_set: Vec::new(),
         }
     }
