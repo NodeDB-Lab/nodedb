@@ -119,10 +119,7 @@ impl KvEngine {
     /// checkpoint find and name it again.
     fn name_collection(&mut self, database_id: u64, tenant_id: u64, collection: &str) -> u64 {
         let tkey = table_key(database_id, tenant_id, collection);
-        self.hash_to_tenant.entry(tkey).or_insert(tenant_id);
-        self.hash_to_collection
-            .entry(tkey)
-            .or_insert_with(|| collection.to_string());
+        self.register_table_identity(tkey, database_id, tenant_id, collection);
         tkey
     }
 }

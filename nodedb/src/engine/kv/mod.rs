@@ -14,6 +14,7 @@ pub mod entry;
 pub mod expiry_wheel;
 mod hash_helpers;
 pub mod hash_table;
+pub mod history;
 pub mod index;
 pub mod scan;
 pub mod slab;
@@ -25,7 +26,8 @@ pub use batch_put::KvBatchPutParams;
 pub use clock::current_ms;
 pub use counter_refit::fitted_counter_f64;
 pub use engine::{
-    KvEngine, KvEntryImage, KvKeyRef, RestoreCompositeIndexParams, RestoreFieldIndexParams,
+    DueExpiry, KvEngine, KvEntryImage, KvHistoryOverlap, KvKeyRef, KvVersionRow, KvVersionedScan,
+    KvWriteScope, KvWriteScopeGuard, RestoreCompositeIndexParams, RestoreFieldIndexParams,
 };
 pub use engine_atomic::{
     AtomicError, AtomicImageGate, AtomicKeyCtx, CasResult, GetSetResult, IncrStep, Incremented,

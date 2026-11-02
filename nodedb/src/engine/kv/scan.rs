@@ -237,7 +237,13 @@ mod tests {
     fn scan_basic() {
         let mut t = KvHashTable::new(16, 0.75, 4, 64);
         for i in 0..5u8 {
-            t.put(&[i], &[i * 10], NO_EXPIRY, Surrogate::new(u32::from(i) + 1));
+            t.put(
+                &[i],
+                &[i * 10],
+                NO_EXPIRY,
+                Surrogate::new(u32::from(i) + 1),
+                1,
+            );
         }
 
         let (entries, next) = t.scan(0, 100, 0, None);
@@ -249,7 +255,13 @@ mod tests {
     fn scan_with_count_limit() {
         let mut t = KvHashTable::new(16, 0.75, 4, 64);
         for i in 0..10u8 {
-            t.put(&[i], &[i * 10], NO_EXPIRY, Surrogate::new(u32::from(i) + 1));
+            t.put(
+                &[i],
+                &[i * 10],
+                NO_EXPIRY,
+                Surrogate::new(u32::from(i) + 1),
+                1,
+            );
         }
 
         let (entries, next) = t.scan(0, 3, 0, None);
@@ -264,8 +276,8 @@ mod tests {
     #[test]
     fn scan_skips_expired() {
         let mut t = KvHashTable::new(16, 0.75, 4, 64);
-        t.put(b"alive", b"v", NO_EXPIRY, Surrogate::new(1));
-        t.put(b"dead", b"v", 500, Surrogate::new(2)); // Expires at 500.
+        t.put(b"alive", b"v", NO_EXPIRY, Surrogate::new(1), 1);
+        t.put(b"dead", b"v", 500, Surrogate::new(2), 1); // Expires at 500.
 
         let (entries, _) = t.scan(0, 100, 1000, None);
         assert_eq!(entries.len(), 1);

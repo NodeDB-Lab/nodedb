@@ -189,6 +189,7 @@ impl KvEngine {
 
         let has_indexes = self.indexes.get(&tkey).is_some_and(|idx| !idx.is_empty());
         let old_expire = old_meta.and_then(|m| m.has_ttl.then_some(m.expire_at_ms));
+        let ordinal = self.write_ordinal();
 
         // Cancel old expiry (before mutating the table).
         if let Some(old_ms) = old_expire {
@@ -198,11 +199,12 @@ impl KvEngine {
 
         // Fetch-or-create the table, bumping its write epoch — the single
         // chokepoint the aggregate result cache reads to detect this write.
-        let table = self.table_for_write_or_create(tkey, tenant_id, collection);
+        let table = self.table_for_write_or_create(tkey, database_id, tenant_id, collection);
         let old = match identity {
-            RowIdentity::Bind(surrogate) => table.put(key, value, expire_at, surrogate),
-            RowIdentity::KeepExisting => table.rewrite(key, value, expire_at),
+            RowIdentity::Bind(surrogate) => table.put(key, value, expire_at, surrogate, ordinal),
+            RowIdentity::KeepExisting => table.rewrite(key, value, expire_at, ordinal),
         };
+        self.recharge_table(tkey);
 
         // Schedule new expiry.
         if expire_at != NO_EXPIRY {
@@ -247,16 +249,20 @@ impl KvEngine {
         old
     }
 
-    /// DELETE: remove key(s). Returns count of keys actually deleted.
+    /// DELETE: remove key(s) at the current write ordinal. Returns count of
+    /// keys actually deleted. Each removed version stays readable at an
+    /// earlier ordinal. The removal is expiry-blind, so `_now_ms` does not
+    /// decide it.
     pub fn delete(
         &mut self,
         database_id: u64,
         tenant_id: u64,
         collection: &str,
         keys: &[Vec<u8>],
-        now_ms: u64,
+        _now_ms: u64,
     ) -> usize {
         let tkey = table_key(database_id, tenant_id, collection);
+        let ordinal = self.write_ordinal();
         // Bump first (only touches `write_epochs`) so the subsequent `tables`
         // borrow stays disjoint from the `indexes` / `expiry` / `sorted_indexes`
         // accesses interleaved with it below.
@@ -292,7 +298,7 @@ impl KvEngine {
                 None
             };
 
-            if table.delete(key, now_ms) {
+            if table.delete(key, ordinal) {
                 count += 1;
 
                 // Clean up secondary indexes.
@@ -312,6 +318,7 @@ impl KvEngine {
                 }
             }
         }
+        self.recharge_table(tkey);
         count
     }
 
@@ -361,6 +368,7 @@ impl KvEngine {
         expire_at: u64,
     ) -> bool {
         let tkey = table_key(database_id, tenant_id, collection);
+        let ordinal = self.write_ordinal();
         self.bump_write_epoch(tkey);
         let table = match self.tables.get_mut(&tkey) {
             Some(t) => t,
@@ -375,13 +383,13 @@ impl KvEngine {
             self.expiry.cancel(&composite, meta.expire_at_ms);
         }
 
-        if table.set_expire(key, expire_at) {
+        let found = table.set_expire(key, expire_at, ordinal);
+        if found {
             let composite = expiry_key(database_id, tenant_id, collection, key);
             self.expiry.insert(composite, expire_at);
-            true
-        } else {
-            false
         }
+        self.recharge_table(tkey);
+        found
     }
 
     /// PERSIST: remove TTL from a key. Returns true if the key was found.
@@ -393,6 +401,7 @@ impl KvEngine {
         key: &[u8],
     ) -> bool {
         let tkey = table_key(database_id, tenant_id, collection);
+        let ordinal = self.write_ordinal();
         self.bump_write_epoch(tkey);
         let table = match self.tables.get_mut(&tkey) {
             Some(t) => t,
@@ -406,7 +415,9 @@ impl KvEngine {
             self.expiry.cancel(&composite, meta.expire_at_ms);
         }
 
-        table.persist(key)
+        let found = table.persist(key, ordinal);
+        self.recharge_table(tkey);
+        found
     }
 }
 

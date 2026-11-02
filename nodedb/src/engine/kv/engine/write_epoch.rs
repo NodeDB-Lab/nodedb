@@ -51,14 +51,12 @@ impl KvEngine {
     pub(in crate::engine::kv) fn table_for_write_or_create(
         &mut self,
         tkey: u64,
+        database_id: u64,
         tenant_id: u64,
         collection: &str,
     ) -> &mut KvHashTable {
         self.bump_write_epoch(tkey);
-        self.hash_to_tenant.entry(tkey).or_insert(tenant_id);
-        self.hash_to_collection
-            .entry(tkey)
-            .or_insert_with(|| collection.to_string());
+        self.register_table_identity(tkey, database_id, tenant_id, collection);
         let default_capacity = self.default_capacity;
         let load_factor_threshold = self.load_factor_threshold;
         let rehash_batch_size = self.rehash_batch_size;

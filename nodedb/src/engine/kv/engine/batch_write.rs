@@ -23,9 +23,11 @@ impl KvEngine {
             now_ms,
             surrogates,
         } = params;
-        let mut new_count = 0;
+        // One apply scope: every row of the batch stamps one ordinal.
+        let guard = self.open_write_scope(None);
+        let mut written = Ok(0);
         for ((key, value), &surrogate) in entries.iter().zip(surrogates) {
-            let old = self.put(KvPutParams {
+            let put = self.put(KvPutParams {
                 database_id,
                 tenant_id,
                 collection,
@@ -34,12 +36,13 @@ impl KvEngine {
                 ttl_ms,
                 now_ms,
                 surrogate,
-            })?;
-            if old.is_none() {
-                new_count += 1;
+            });
+            if !count_new_row(&mut written, put) {
+                break;
             }
         }
-        Ok(new_count)
+        self.close_write_scope(guard);
+        written
     }
 
     /// BATCH PUT installing an already-resolved absolute expiry instant on
@@ -65,9 +68,11 @@ impl KvEngine {
             now_ms,
             surrogates,
         } = params;
-        let mut new_count = 0;
+        // One apply scope: every row of the batch stamps one ordinal.
+        let guard = self.open_write_scope(None);
+        let mut written = Ok(0);
         for ((key, value), &surrogate) in entries.iter().zip(surrogates) {
-            let old = self.put_with_absolute_expiry(
+            let put = self.put_with_absolute_expiry(
                 KvPutParams {
                     database_id,
                     tenant_id,
@@ -79,12 +84,36 @@ impl KvEngine {
                     surrogate,
                 },
                 expire_at_ms,
-            )?;
-            if old.is_none() {
-                new_count += 1;
+            );
+            if !count_new_row(&mut written, put) {
+                break;
             }
         }
-        Ok(new_count)
+        self.close_write_scope(guard);
+        written
+    }
+}
+
+/// Fold one row's put into the batch's running result: count a new row, or
+/// keep the refusal. Returns whether the batch continues.
+fn count_new_row(
+    written: &mut Result<usize, UnboundKvWrite>,
+    put: Result<Option<Vec<u8>>, UnboundKvWrite>,
+) -> bool {
+    match put {
+        Err(refusal) => {
+            *written = Err(refusal);
+            false
+        }
+        Ok(old) => match written {
+            Ok(count) => {
+                if old.is_none() {
+                    *count += 1;
+                }
+                true
+            }
+            Err(_) => false,
+        },
     }
 }
 

@@ -8,10 +8,9 @@
 use super::engine::KvEngine;
 use super::engine_helpers::{extract_all_field_values_from_msgpack, parse_expiry_key, table_key};
 
-/// A key that was reaped by the expiry wheel.
+/// A key a TTL reap ended.
 ///
-/// Returned by [`KvEngine::tick_expiry`] so the caller can produce WAL
-/// tombstones and CDC/keyspace notification events.
+/// Returned by [`KvEngine::reap_due`].
 #[derive(Debug, Clone)]
 pub struct ExpiredKey {
     pub database_id: u64,
@@ -45,15 +44,9 @@ pub struct KvStats {
 }
 
 impl KvEngine {
-    // -----------------------------------------------------------------------
-    // Expiry wheel tick — called from the TPC event loop
-    // -----------------------------------------------------------------------
-
-    /// Advance the expiry wheel and reap expired keys.
-    ///
-    /// Call this from the TPC core's event loop at the configured tick interval.
-    /// Returns a list of `(tenant_id, collection, key)` for each reaped key,
-    /// enabling the caller to produce WAL tombstones and CDC/keyspace events.
+    /// Reap the key `composite_key` names when it still holds the expiry
+    /// `expire_at_ms`. `None` when it holds another expiry or none, or its
+    /// table is gone.
     ///
     /// A reap is a delete, so it maintains the row's secondary, composite, and
     /// sorted index entries exactly as [`KvEngine::delete`] does. Reaping the
@@ -64,67 +57,68 @@ impl KvEngine {
     /// content verbatim, so it would survive a restart.
     ///
     /// [`KvEngine::delete`]: KvEngine::delete
-    pub fn tick_expiry(&mut self, now_ms: u64) -> Vec<ExpiredKey> {
-        let batch = self.expiry.tick(now_ms);
-        let mut reaped = Vec::new();
+    pub(in crate::engine::kv) fn reap_composite(
+        &mut self,
+        composite_key: &[u8],
+        expire_at_ms: u64,
+    ) -> Option<ExpiredKey> {
+        // A reap ends the version at its expiry instant: the last ordinal
+        // of the expiry millisecond, raised above the version's own ordinal
+        // (`VersionStamp`). The instant is the one the write's record
+        // carries, so every replica and every replay ends the version at the
+        // same ordinal, whenever its reap runs. The reaped value stays
+        // readable at every earlier ordinal.
+        let ordinal = reap_ordinal(expire_at_ms);
+        let (did, tid, collection, key) = parse_expiry_key(composite_key)?;
+        let tkey = table_key(did, tid, &collection);
 
-        for (composite_key, expire_at_ms) in &batch.expired {
-            let Some((did, tid, collection, key)) = parse_expiry_key(composite_key) else {
-                continue;
-            };
-            let tkey = table_key(did, tid, &collection);
+        // Zero-index fast path: the common index-less TTL collection pays
+        // nothing beyond the reap itself.
+        let has_indexes = self.indexes.get(&tkey).is_some_and(|s| !s.is_empty());
+        let has_sorted = self.sorted_indexes.has_indexes(tkey);
 
-            // Zero-index fast path: the common index-less TTL collection pays
-            // nothing beyond the reap itself.
-            let has_indexes = self.indexes.get(&tkey).is_some_and(|s| !s.is_empty());
-            let has_sorted = self.sorted_indexes.has_indexes(tkey);
+        // Read the indexed field values BEFORE the reap frees the value they
+        // live in, and own them so the table borrow ends here — the reap and
+        // the index update below both need `&mut self`. Expiry-blind by
+        // necessity: the row is expired by definition at this point.
+        let old_fields: Option<Vec<(String, Vec<u8>)>> = if has_indexes {
+            self.tables
+                .get(&tkey)
+                .and_then(|t| t.get_ignoring_expiry(&key))
+                .map(extract_all_field_values_from_msgpack)
+        } else {
+            None
+        };
 
-            // Read the indexed field values BEFORE the reap frees the value they
-            // live in, and own them so the table borrow ends here — the reap and
-            // the index update below both need `&mut self`. Expiry-blind by
-            // necessity: the row is expired by definition at this point.
-            let old_fields: Option<Vec<(String, Vec<u8>)>> = if has_indexes {
-                self.tables
-                    .get(&tkey)
-                    .and_then(|t| t.get_ignoring_expiry(&key))
-                    .map(extract_all_field_values_from_msgpack)
-            } else {
-                None
-            };
+        let table = self.table_mut_for_write(tkey)?;
+        // A mismatched `expire_at_ms` means the TTL was replaced after this
+        // reap was scheduled — the row is still live, so nothing to clean up.
+        if !table.reap_expired(&key, expire_at_ms, ordinal) {
+            return None;
+        }
+        self.observe_ordinal(ordinal);
+        self.recharge_table(tkey);
 
-            let Some(table) = self.table_mut_for_write(tkey) else {
-                continue;
-            };
-            // A mismatched `expire_at_ms` means the TTL was replaced after this
-            // wheel entry was scheduled — the row is still live, so nothing to
-            // clean up.
-            if !table.reap_expired(&key, *expire_at_ms) {
-                continue;
-            }
-
-            if let Some(fields) = &old_fields
-                && let Some(idx_set) = self.indexes.get_mut(&tkey)
-            {
-                let refs: Vec<(&str, &[u8])> = fields
-                    .iter()
-                    .map(|(k, v)| (k.as_str(), v.as_slice()))
-                    .collect();
-                idx_set.on_delete(&key, &refs);
-            }
-
-            if has_sorted {
-                self.sorted_indexes.on_delete(tkey, &key);
-            }
-
-            reaped.push(ExpiredKey {
-                database_id: did,
-                tenant_id: tid,
-                collection,
-                key,
-            });
+        if let Some(fields) = &old_fields
+            && let Some(idx_set) = self.indexes.get_mut(&tkey)
+        {
+            let refs: Vec<(&str, &[u8])> = fields
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_slice()))
+                .collect();
+            idx_set.on_delete(&key, &refs);
         }
 
-        reaped
+        if has_sorted {
+            self.sorted_indexes.on_delete(tkey, &key);
+        }
+
+        Some(ExpiredKey {
+            database_id: did,
+            tenant_id: tid,
+            collection,
+            key,
+        })
     }
 
     /// Number of entries tracked in the expiry wheel.
@@ -141,26 +135,31 @@ impl KvEngine {
     // Truncate
     // -----------------------------------------------------------------------
 
-    /// Truncate: delete all entries in a KV collection. Returns count deleted.
+    /// Truncate: delete all entries in a KV collection at the current write
+    /// ordinal. Returns count deleted. Every removed row stays readable at an
+    /// earlier ordinal until a purge passes the truncate.
     pub fn truncate(&mut self, database_id: u64, tenant_id: u64, collection: &str) -> usize {
         let tkey = table_key(database_id, tenant_id, collection);
-        let count = self.tables.get(&tkey).map(|t| t.len()).unwrap_or(0);
+        let ordinal = self.write_ordinal();
 
-        // Remove the hash table entirely, bumping its write epoch so a
-        // cached aggregate result computed before the truncate is a miss.
+        // Bump the write epoch so a cached aggregate result computed before
+        // the truncate is a miss.
         self.bump_write_epoch(tkey);
-        self.tables.remove(&tkey);
-        // Remove all indexes.
-        self.indexes.remove(&tkey);
-        // Sorted indexes live in their own manager rather than in the
-        // `KvIndexSet` above, so dropping that set leaves them behind. A
-        // stranded sorted index is not merely a leak: `rank` / `top_k` return
-        // their tree entries verbatim without re-checking the table, so a
-        // truncated collection would keep serving ranked keys for rows that no
-        // longer exist. Purging matches what removing the `KvIndexSet` does for
-        // the secondary indexes — the registrations go with the rows.
+        let count = self
+            .tables
+            .get_mut(&tkey)
+            .map_or(0, |table| table.retire_all(ordinal));
+        self.recharge_table(tkey);
+        // The rows leave every secondary and sorted index. The registrations
+        // stay: TRUNCATE drops no index, so a later write files into them
+        // and a rolled-back TRUNCATE refills them as it reinstates each row.
+        // A sorted index answers `rank` / `top_k` from its tree alone, so a
+        // tree left full would keep ranking removed rows.
+        if let Some(idx_set) = self.indexes.get_mut(&tkey) {
+            idx_set.clear_entries();
+        }
         self.sorted_indexes
-            .purge_collection(database_id, tenant_id, collection);
+            .clear_collection(database_id, tenant_id, collection);
         // Note: expiry wheel entries for this collection will be no-ops
         // when they fire (key won't be found in the hash table).
 
@@ -236,6 +235,12 @@ impl KvEngine {
             expiry_backlog: self.expiry.backlog(),
         }
     }
+}
+
+/// The ordinal a reap of a version that expires at `expire_at_ms` ends it
+/// at: the last ordinal of the expiry millisecond.
+pub(super) fn reap_ordinal(expire_at_ms: u64) -> i64 {
+    nodedb_types::ms_to_ordinal_upper(i64::try_from(expire_at_ms).unwrap_or(i64::MAX))
 }
 
 #[cfg(test)]

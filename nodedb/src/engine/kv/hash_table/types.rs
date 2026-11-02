@@ -8,6 +8,7 @@ use nodedb_types::Surrogate;
 
 use super::super::entry::KvEntry;
 use super::super::hash_helpers::{extract_value_from, read_value_from};
+use super::super::history::KvHistory;
 use super::super::slab::SlabAllocator;
 
 /// Metadata about a KV entry, returned by [`KvHashTable::get_entry_meta`].
@@ -39,13 +40,9 @@ pub struct KvExportEntry {
     /// Stable global row identity. Never `Surrogate::ZERO`: every entry is
     /// bound.
     pub surrogate: Surrogate,
+    /// System-time ordinal of the write that set the row's value.
+    pub sys_from: i64,
 }
-
-/// One KV row of a tenant snapshot's KV section:
-/// `(key, value, expire_at_ms, surrogate)`. `expire_at_ms` is `0` for a row
-/// with no TTL. `surrogate` is the row's bound identity in the source
-/// database.
-pub type KvSnapshotRow = (Vec<u8>, Vec<u8>, u64, u32);
 
 /// Robin Hood hash table with incremental rehash.
 ///
@@ -81,6 +78,13 @@ pub struct KvHashTable {
     /// to translate a surrogate back to its user-facing primary key
     /// (e.g. when emitting bitmap-join results).
     pub(super) surrogate_to_key: HashMap<u32, Vec<u8>>,
+
+    /// Ended versions of every key, for reads at a past system-time ordinal.
+    pub(super) history: KvHistory,
+
+    /// Sum of [`KvEntry::mem_size`] over every live entry, primary and
+    /// rehash source. Maintained by every insert, overwrite, and removal.
+    pub(super) entry_bytes: usize,
 }
 
 impl KvHashTable {
@@ -106,7 +110,14 @@ impl KvHashTable {
             overflow: SlabAllocator::new(),
             inline_threshold,
             surrogate_to_key: HashMap::new(),
+            history: KvHistory::default(),
+            entry_bytes: 0,
         }
+    }
+
+    /// Ended versions of every key in this table.
+    pub fn history(&self) -> &KvHistory {
+        &self.history
     }
 
     /// Look up the primary key bytes for a stable surrogate identity.
@@ -132,22 +143,6 @@ impl KvHashTable {
         self.len == 0
     }
 
-    /// Export every live entry as a tenant-snapshot row, [`KvSnapshotRow`].
-    /// Each row carries its bound surrogate, so a snapshot install keeps the
-    /// row's cross-engine identity.
-    pub fn export_entries(&self) -> Vec<KvSnapshotRow> {
-        self.live_entries()
-            .map(|entry| {
-                (
-                    entry.key.clone(),
-                    extract_value_from(&entry.value, &self.overflow),
-                    entry.expire_at_ms,
-                    entry.surrogate.as_u32(),
-                )
-            })
-            .collect()
-    }
-
     /// Export all entries INCLUDING each row's stable cross-engine surrogate.
     ///
     /// The surrogate is read straight off the entry rather than reversed out of
@@ -160,6 +155,7 @@ impl KvHashTable {
                 value: extract_value_from(&entry.value, &self.overflow),
                 expire_at_ms: entry.expire_at_ms,
                 surrogate: entry.surrogate,
+                sys_from: entry.sys_from,
             })
             .collect()
     }
@@ -171,7 +167,7 @@ impl KvHashTable {
     /// `slots` alone would silently omit them. Migration `take()`s the entry
     /// out of the source before inserting it into the primary, so an entry is
     /// never present in both and this yields each live entry exactly once.
-    fn live_entries(&self) -> impl Iterator<Item = &KvEntry> {
+    pub(crate) fn live_entries(&self) -> impl Iterator<Item = &KvEntry> {
         self.slots
             .iter()
             .flatten()
@@ -213,7 +209,8 @@ impl KvHashTable {
         read_value_from(entry, &self.overflow)
     }
 
-    /// Approximate memory usage in bytes.
+    /// Approximate memory usage in bytes: slot arrays, overflow pool, live
+    /// entries, and ended versions. O(1).
     pub fn mem_usage(&self) -> usize {
         let slot_size = std::mem::size_of::<Option<KvEntry>>();
         let primary = self.capacity * slot_size;
@@ -223,13 +220,6 @@ impl KvHashTable {
             .map(|s| s.len() * slot_size)
             .unwrap_or(0);
         let overflow = self.overflow.capacity();
-        // Entry heap allocations (keys + inline values).
-        let entry_heap: usize = self
-            .slots
-            .iter()
-            .filter_map(|s| s.as_ref())
-            .map(|e| e.mem_size())
-            .sum();
-        primary + rehash + overflow + entry_heap
+        primary + rehash + overflow + self.entry_bytes + self.history.bytes()
     }
 }

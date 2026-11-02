@@ -34,6 +34,9 @@ pub struct KvEntry {
     /// Never `Surrogate::ZERO`: `KvEngine` refuses an unbound write, so every
     /// stored entry is bound.
     pub surrogate: Surrogate,
+    /// System-time ordinal of the write that set this value and expiry. A
+    /// read at ordinal `S` sees this entry only when `sys_from <= S`.
+    pub sys_from: i64,
 }
 
 impl KvEntry {
@@ -59,8 +62,9 @@ impl KvEntry {
 
     /// Approximate memory usage in bytes (for budget accounting).
     pub fn mem_size(&self) -> usize {
-        // Fixed overhead: hash(8) + expire(8) + enum discriminant(8) + vec overhead(24) + surrogate(4) + pad(4)
-        let fixed = 56;
+        // Fixed overhead: hash(8) + expire(8) + enum discriminant(8) + vec overhead(24)
+        // + surrogate(4) + pad(4) + sys_from(8).
+        let fixed = 64;
         let key_size = self.key.len();
         let value_size = match &self.value {
             KvValue::Inline(data) => data.len(),
@@ -100,6 +104,7 @@ mod tests {
             value,
             expire_at_ms,
             surrogate: Surrogate::new(1),
+            sys_from: 1,
         }
     }
 
@@ -153,7 +158,7 @@ mod tests {
     fn mem_size_is_reasonable() {
         let entry = entry(1, b"key", KvValue::Inline(b"val".to_vec()), NO_EXPIRY);
         let size = entry.mem_size();
-        // 56 fixed + 3 key + 3 value = 62
-        assert_eq!(size, 62);
+        // 64 fixed + 3 key + 3 value = 70
+        assert_eq!(size, 70);
     }
 }

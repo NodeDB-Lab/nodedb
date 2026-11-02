@@ -6,7 +6,6 @@ use super::KvEngine;
 use crate::engine::kv::engine_helpers::table_key;
 use crate::engine::kv::entry::NO_EXPIRY;
 use crate::engine::kv::hash_table::{EntryMeta, KvExportEntry};
-use crate::engine::kv::{KvPutParams, UnboundKvWrite};
 
 /// One key of one KV collection.
 #[derive(Debug, Clone, Copy)]
@@ -17,15 +16,18 @@ pub struct KvKeyRef<'a> {
     pub key: &'a [u8],
 }
 
-/// A key's complete stored state: its value, its absolute expiry, and the
-/// surrogate bound to it. A rollback reinstalls it exactly, so the key keeps
-/// its TTL instant and its identity.
+/// A key's complete stored live version: its value, its absolute expiry,
+/// the surrogate bound to it, and the ordinal that set it. A rollback
+/// reinstalls it exactly, so the key keeps its TTL instant, its identity,
+/// and its place in system time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KvEntryImage {
     pub value: Vec<u8>,
     /// Absolute expiry instant in ms since epoch, [`NO_EXPIRY`] for none.
     pub expire_at_ms: u64,
     pub surrogate: Surrogate,
+    /// System-time ordinal of the write that set the version.
+    pub sys_from: i64,
 }
 
 impl KvEngine {
@@ -137,66 +139,29 @@ impl KvEngine {
         key: &[u8],
         now_ms: u64,
     ) -> Option<KvEntryImage> {
+        self.stored_image(database_id, tenant_id, collection, key)
+            .filter(|image| image.expire_at_ms == NO_EXPIRY || image.expire_at_ms > now_ms)
+    }
+
+    /// The live version `key` stores, expired or not. `None` when the key
+    /// holds no live version. A rollback captures this before a write, so
+    /// it reinstalls an entry the expiry wheel has not reaped yet.
+    pub fn stored_image(
+        &self,
+        database_id: u64,
+        tenant_id: u64,
+        collection: &str,
+        key: &[u8],
+    ) -> Option<KvEntryImage> {
         let tkey = table_key(database_id, tenant_id, collection);
         let table = self.tables.get(&tkey)?;
-        let (value, surrogate) = table.get_with_surrogate(key, now_ms)?;
-        let expire_at_ms = table
-            .get_entry_meta(key)
-            .map_or(NO_EXPIRY, |meta| meta.expire_at_ms);
+        let entry = table.find_entry(key)?;
         Some(KvEntryImage {
-            value: value.to_vec(),
-            expire_at_ms,
-            surrogate,
+            value: table.read_value(entry).to_vec(),
+            expire_at_ms: entry.expire_at_ms,
+            surrogate: entry.surrogate,
+            sys_from: entry.sys_from,
         })
-    }
-
-    /// Reinstall `image` under `key`: the value, the absolute expiry instant
-    /// and the surrogate it held, with every index maintained. An image with
-    /// no bound surrogate is refused and nothing is written.
-    pub fn restore_entry_image(
-        &mut self,
-        target: KvKeyRef<'_>,
-        image: &KvEntryImage,
-        now_ms: u64,
-    ) -> Result<(), UnboundKvWrite> {
-        self.put_with_absolute_expiry(
-            KvPutParams {
-                database_id: target.database_id,
-                tenant_id: target.tenant_id,
-                collection: target.collection,
-                key: target.key,
-                value: &image.value,
-                ttl_ms: 0,
-                now_ms,
-                surrogate: image.surrogate,
-            },
-            image.expire_at_ms,
-        )?;
-        Ok(())
-    }
-
-    /// Put `key` back to `image`, or remove it when `image` is `None`: the
-    /// key was absent before.
-    pub fn reinstate_entry(
-        &mut self,
-        target: KvKeyRef<'_>,
-        image: Option<&KvEntryImage>,
-        now_ms: u64,
-    ) -> Result<(), UnboundKvWrite> {
-        match image {
-            Some(image) => self.restore_entry_image(target, image, now_ms),
-            None => {
-                let key = [target.key.to_vec()];
-                self.delete(
-                    target.database_id,
-                    target.tenant_id,
-                    target.collection,
-                    &key,
-                    now_ms,
-                );
-                Ok(())
-            }
-        }
     }
 
     /// Every live row of a collection with its complete stored state.

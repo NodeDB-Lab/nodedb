@@ -125,6 +125,31 @@ impl SortedIndexManager {
         removed
     }
 
+    /// Empty every sorted index belonging to `(tenant_id, collection)` and
+    /// keep each registration. A TRUNCATE removes the rows, never the
+    /// indexes: a later write files into them, and a rolled-back TRUNCATE
+    /// refills them as it reinstates each row. Returns the number of
+    /// indexes emptied.
+    pub fn clear_collection(
+        &mut self,
+        database_id: u64,
+        tenant_id: u64,
+        collection: &str,
+    ) -> usize {
+        let tbl_key = super::super::engine_helpers::table_key(database_id, tenant_id, collection);
+        let Some(idx_keys) = self.collection_indexes.get(&tbl_key) else {
+            return 0;
+        };
+        let mut cleared = 0;
+        for idx_key in idx_keys {
+            if let Some(idx) = self.indexes.get_mut(idx_key) {
+                idx.tree = super::tree::OrderStatTree::new();
+                cleared += 1;
+            }
+        }
+        cleared
+    }
+
     /// Drop a sorted index. Returns `true` if it existed.
     pub fn drop(&mut self, database_id: u64, tenant_id: u64, index_name: &str) -> bool {
         let idx_key = index_key(database_id, tenant_id, index_name);

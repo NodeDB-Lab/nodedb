@@ -51,10 +51,7 @@ impl KvEngine {
         // identity from its hashed table key — an unnamed collection cannot be
         // given a checkpoint file, so its registration would be dropped from the
         // checkpoint while the WAL record carrying it was truncated away.
-        self.hash_to_tenant.entry(tkey).or_insert(tenant_id);
-        self.hash_to_collection
-            .entry(tkey)
-            .or_insert_with(|| collection.to_string());
+        self.register_table_identity(tkey, database_id, tenant_id, collection);
 
         // Every stored row counts, an expired one awaiting its reap included:
         // a `PERSIST` can still bring it back.

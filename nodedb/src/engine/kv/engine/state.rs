@@ -1,10 +1,16 @@
-//! KvEngine struct definition, construction, and memory-budget checks.
+//! KvEngine struct definition and construction.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+
+use nodedb_types::{DatabaseId, OrdinalClock};
 
 use crate::engine::kv::expiry_wheel::ExpiryWheel;
 use crate::engine::kv::hash_table::KvHashTable;
 use crate::engine::kv::index::KvIndexSet;
+
+use super::memory::KvMemory;
+use super::write_scope::KvWriteScope;
 
 /// Result of a KV SCAN operation: `(entries, next_cursor_bytes)`.
 ///
@@ -24,19 +30,31 @@ pub struct KvEngine {
     /// Reverse mapping: hash → tenant_id. Enables tenant purge without
     /// reversing the FxHash. Maintained in sync with `tables`.
     pub(crate) hash_to_tenant: HashMap<u64, u64>,
+    /// Reverse mapping: hash → database. The memory governor charges each
+    /// table under this database. Maintained in sync with `hash_to_tenant`.
+    pub(in crate::engine::kv) hash_to_database: HashMap<u64, DatabaseId>,
     /// Reverse mapping: hash → collection name. Enables snapshot export
     /// to include human-readable collection names (FxHash is not reversible).
     pub(crate) hash_to_collection: HashMap<u64, String>,
     /// Shared expiry wheel across all collections on this core.
     pub(in crate::engine::kv) expiry: ExpiryWheel,
+    /// Expired entries the wheel handed out and no reap applied yet, as
+    /// `(composite key, expire_at_ms)`. A core never reaps on its own: the
+    /// data group's leader proposes each one, and every replica's apply
+    /// removes it (`expiry_due`).
+    pub(in crate::engine::kv) due: std::collections::BTreeSet<(Vec<u8>, u64)>,
     /// Default tuning parameters for new collections.
     pub(in crate::engine::kv) default_capacity: usize,
     pub(in crate::engine::kv) load_factor_threshold: f32,
     pub(in crate::engine::kv) rehash_batch_size: usize,
     pub(in crate::engine::kv) inline_threshold: usize,
-    /// Memory budget in bytes (0 = unlimited). When total_mem_usage() exceeds
-    /// this, new PUTs are rejected with a retriable error.
-    memory_budget_bytes: usize,
+    /// Governor charges for every table's resident bytes, history included.
+    pub(in crate::engine::kv) memory: KvMemory,
+    /// The system-time clock a write draws its ordinal from when no apply
+    /// scope fixes one. The Data Plane core shares its clock here.
+    pub(in crate::engine::kv) clock: Arc<OrdinalClock>,
+    /// The apply scope the current write belongs to. See `write_scope.rs`.
+    pub(in crate::engine::kv) write_scope: KvWriteScope,
     /// Sorted index manager: order-statistic trees for leaderboard-style queries.
     pub(in crate::engine::kv) sorted_indexes: crate::engine::kv::sorted_index::SortedIndexManager,
     /// Per-table write epoch, bumped on every row mutation. Key: same
@@ -61,13 +79,17 @@ impl KvEngine {
             tables: HashMap::new(),
             indexes: HashMap::new(),
             hash_to_tenant: HashMap::new(),
+            hash_to_database: HashMap::new(),
             hash_to_collection: HashMap::new(),
             expiry: ExpiryWheel::new(now_ms, expiry_tick_ms, expiry_reap_budget),
+            due: std::collections::BTreeSet::new(),
             default_capacity,
             load_factor_threshold,
             rehash_batch_size,
             inline_threshold,
-            memory_budget_bytes: 0, // 0 = unlimited (set via set_memory_budget).
+            memory: KvMemory::default(),
+            clock: Arc::new(OrdinalClock::new()),
+            write_scope: KvWriteScope::Closed,
             sorted_indexes: crate::engine::kv::sorted_index::SortedIndexManager::new(),
             write_epochs: HashMap::new(),
         }
@@ -86,16 +108,21 @@ impl KvEngine {
         )
     }
 
-    /// Set the memory budget in bytes. 0 = unlimited.
-    pub fn set_memory_budget(&mut self, budget_bytes: usize) {
-        self.memory_budget_bytes = budget_bytes;
-    }
-
-    /// Check if the memory budget is exceeded.
-    ///
-    /// Returns `true` if the budget is set and current usage exceeds it.
-    /// Used by PUT handlers to reject new writes with a retriable error.
-    pub fn is_over_budget(&self) -> bool {
-        self.memory_budget_bytes > 0 && self.total_mem_usage() > self.memory_budget_bytes
+    /// Record `tkey`'s database, tenant and collection name in the reverse
+    /// maps. The first registration of a table key wins.
+    pub(in crate::engine::kv) fn register_table_identity(
+        &mut self,
+        tkey: u64,
+        database_id: u64,
+        tenant_id: u64,
+        collection: &str,
+    ) {
+        self.hash_to_database
+            .entry(tkey)
+            .or_insert(DatabaseId::new(database_id));
+        self.hash_to_tenant.entry(tkey).or_insert(tenant_id);
+        self.hash_to_collection
+            .entry(tkey)
+            .or_insert_with(|| collection.to_string());
     }
 }
