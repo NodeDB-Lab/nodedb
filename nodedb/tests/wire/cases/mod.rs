@@ -364,6 +364,7 @@ mod sql_sparse_search_filter_window;
 mod sql_spatial_index_ddl;
 mod sql_state_transition_by_role;
 mod sql_state_transition_forms;
+mod sql_strict_indexed_sort_narrow;
 mod sql_subquery_from;
 mod sql_subquery_text_spatial_composition;
 mod sql_synonym_group;

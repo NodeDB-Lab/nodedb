@@ -75,6 +75,19 @@ pub(super) fn validate_deterministic(expr: &SqlExpr) -> Result<(), ExprParseErro
     }
 }
 
+/// The columns `expr` reads, each once, in first-seen order.
+pub fn referenced_columns(expr: &SqlExpr) -> Vec<String> {
+    let mut deps = Vec::new();
+    collect_columns(expr, &mut deps);
+    let mut seen = Vec::with_capacity(deps.len());
+    for column in deps {
+        if !seen.contains(&column) {
+            seen.push(column);
+        }
+    }
+    seen
+}
+
 pub(super) fn collect_columns(expr: &SqlExpr, deps: &mut Vec<String>) {
     match expr {
         SqlExpr::Column(name) => deps.push(name.clone()),

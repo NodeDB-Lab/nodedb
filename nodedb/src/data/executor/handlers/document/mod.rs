@@ -9,6 +9,7 @@ pub mod apply_balance_delta;
 pub mod history_charge;
 pub mod index_backfill_versions;
 pub mod index_fetch;
+mod index_fetch_narrow;
 pub mod index_maintenance;
 pub mod read;
 pub mod resolve;

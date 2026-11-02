@@ -16,8 +16,8 @@ pub(crate) use declared::{
     coerce_declared, coerce_declared_body, coerce_declared_doc, coerce_declared_row,
 };
 pub(crate) use decode::{
-    binary_tuple_to_json, binary_tuple_to_msgpack, binary_tuple_to_row_value,
-    binary_tuple_to_value, undecodable_strict_row,
+    binary_tuple_columns_to_msgpack, binary_tuple_to_json, binary_tuple_to_msgpack,
+    binary_tuple_to_row_value, binary_tuple_to_value, undecodable_strict_row,
 };
 pub(super) use encode::{
     bytes_to_binary_tuple, bytes_to_binary_tuple_bitemporal, value_to_binary_tuple,

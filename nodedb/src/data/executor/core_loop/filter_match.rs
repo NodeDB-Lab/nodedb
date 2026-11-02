@@ -97,7 +97,11 @@ pub(in crate::data::executor) fn matches_with_resolved_schema(
 ) -> Result<bool, EvalError> {
     let decoded;
     let stored: &[u8] = match strict_schema {
-        Some(schema) => match strict_format::binary_tuple_to_msgpack(body, schema) {
+        Some(schema) => match strict_format::binary_tuple_columns_to_msgpack(
+            body,
+            schema,
+            &ScanFilter::referenced_fields(filters),
+        ) {
             Some(msgpack) => {
                 decoded = msgpack;
                 &decoded

@@ -2,8 +2,8 @@
 
 //! Strict document decoding: Binary Tuple → Value/msgpack/JSON.
 
-use nodedb_types::columnar::StrictSchema;
 use nodedb_types::columnar::schema::is_reserved_bitemporal_column;
+use nodedb_types::columnar::{SchemaOps, StrictSchema};
 use nodedb_types::value::Value;
 
 use super::coerce::value_to_json;
@@ -17,9 +17,7 @@ pub fn binary_tuple_to_value(tuple_bytes: &[u8], schema: &StrictSchema) -> Optio
     // Binary tuples start with a u32 LE schema version — the low byte (first byte)
     // of any realistic version is well below 0x80. This catches the common case
     // where data is already stored as msgpack.
-    if let Some(&first) = tuple_bytes.first()
-        && ((0x80..=0x8F).contains(&first) || first == 0xDE || first == 0xDF)
-    {
+    if looks_like_msgpack_map(tuple_bytes) {
         return None;
     }
 
@@ -63,6 +61,49 @@ pub fn binary_tuple_to_value(tuple_bytes: &[u8], schema: &StrictSchema) -> Optio
     }
 
     Some(Value::Object(map))
+}
+
+/// Whether `bytes` start like a msgpack map (fixmap 0x80-0x8F, map16 0xDE,
+/// map32 0xDF) rather than a Binary Tuple, whose first byte is the low byte of
+/// a schema version.
+fn looks_like_msgpack_map(bytes: &[u8]) -> bool {
+    bytes
+        .first()
+        .is_some_and(|&first| (0x80..=0x8F).contains(&first) || first == 0xDE || first == 0xDF)
+}
+
+/// Decode only `columns` of a Binary Tuple to a msgpack map. A name the schema
+/// does not declare is left out. A tuple written under an older schema version
+/// takes the full decode, which fills the defaults of later columns.
+pub fn binary_tuple_columns_to_msgpack(
+    tuple_bytes: &[u8],
+    schema: &StrictSchema,
+    columns: &[String],
+) -> Option<Vec<u8>> {
+    let decoder = nodedb_strict::TupleDecoder::new(schema);
+    let current = !looks_like_msgpack_map(tuple_bytes)
+        && decoder.schema_version(tuple_bytes).ok()? == schema.version;
+    let mut map = std::collections::HashMap::with_capacity(columns.len());
+    if current {
+        for column in columns {
+            if schema.column(column).is_some() {
+                map.insert(
+                    column.clone(),
+                    decoder.extract_by_name(tuple_bytes, column).ok()?,
+                );
+            }
+        }
+    } else {
+        let Value::Object(mut full) = binary_tuple_to_value(tuple_bytes, schema)? else {
+            return None;
+        };
+        for column in columns {
+            if let Some(value) = full.remove(column) {
+                map.insert(column.clone(), value);
+            }
+        }
+    }
+    nodedb_types::value_to_msgpack(&Value::Object(map)).ok()
 }
 
 /// Decode a Binary Tuple to standard msgpack bytes.

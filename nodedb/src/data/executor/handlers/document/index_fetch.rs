@@ -14,6 +14,7 @@ use tracing::{debug, warn};
 use crate::bridge::envelope::{ErrorCode, Response};
 use nodedb_physical::physical_plan::{IndexProbe, SortKeySpec};
 
+use super::index_fetch_narrow::NarrowSort;
 use super::sort;
 use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
@@ -313,6 +314,12 @@ impl CoreLoop {
         let mut skipped = 0usize;
         let mut total_bytes = 0usize;
         let mut rows: Vec<(String, Vec<u8>)> = Vec::new();
+        // A sorted fetch over a strict collection sorts narrow rows and
+        // converts only the rows it keeps (see `NarrowSort`).
+        let mut narrow = match (&strict_schema, sorted) {
+            (Some(schema), true) => Some(NarrowSort::new(schema, collection, sort_keys)),
+            _ => None,
+        };
         let crs = self.crs_context();
         for doc_id in doc_ids.iter() {
             if !sorted && rows.len() >= limit {
@@ -365,7 +372,12 @@ impl CoreLoop {
                         skipped += 1;
                         continue;
                     }
-                    let payload = if let Some(ref schema) = strict_schema {
+                    let payload = if let Some(narrow) = narrow.as_mut() {
+                        match narrow.narrow_row(doc_id, bytes, &identity_column) {
+                            Ok(row) => row,
+                            Err(code) => return self.response_error(task, code),
+                        }
+                    } else if let Some(ref schema) = strict_schema {
                         // A body that does not decode under its schema is an
                         // error, never passed on as if it were msgpack.
                         match super::super::super::strict_format::binary_tuple_to_msgpack(
@@ -387,7 +399,7 @@ impl CoreLoop {
                     } else {
                         bytes
                     };
-                    let payload = if sorted {
+                    let payload = if sorted && narrow.is_none() {
                         inject_row_identity(&payload, doc_id, &identity_column).into_owned()
                     } else {
                         payload
@@ -427,7 +439,15 @@ impl CoreLoop {
                 Ok(ordered) => ordered,
                 Err(e) => return self.response_error(task, ErrorCode::from(e)),
             };
-            rows = ordered.into_iter().skip(offset).take(limit).collect();
+            let kept: Vec<(String, Vec<u8>)> =
+                ordered.into_iter().skip(offset).take(limit).collect();
+            rows = match narrow {
+                Some(narrow) => match narrow.full_rows(kept, &identity_column) {
+                    Ok(full) => full,
+                    Err(code) => return self.response_error(task, code),
+                },
+                None => kept,
+            };
         }
 
         match super::super::super::response_codec::encode_raw_document_rows(&rows) {
