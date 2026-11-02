@@ -30,8 +30,8 @@ pub struct MemtableSnapshot {
     pub timestamp_idx: usize,
     /// Column data, one entry per schema column, same order.
     pub columns: Vec<ColumnSnapshot>,
-    /// Symbol dictionaries for tag columns (only columns whose `ColumnType` is
-    /// `Symbol` carry a dictionary; keyed by column index in the schema).
+    /// Dictionaries of the `Symbol` and `Text` columns, keyed by column
+    /// index in the schema. No other column type carries one.
     pub symbol_dicts: Vec<(usize, SymbolDictionary)>,
     /// Per-series row counts (`SeriesId` is a `u64` type alias — always serde-able).
     pub series_row_counts: Vec<(SeriesId, u64)>,

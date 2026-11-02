@@ -46,8 +46,7 @@ impl ColumnarMemtable {
                 ColumnData::Timestamp(_) => *schema_type,
                 ColumnData::Float64(_) => ColumnType::Float64,
                 ColumnData::Int64(_) => ColumnType::Int64,
-                ColumnData::Symbol(_) => ColumnType::Symbol,
-                ColumnData::DictEncoded { .. } => ColumnType::Symbol,
+                ColumnData::Symbol(_) | ColumnData::DictEncoded { .. } => *schema_type,
             };
             let mut empty = ColumnData::new(col_type);
             std::mem::swap(col, &mut empty);
@@ -57,7 +56,7 @@ impl ColumnarMemtable {
         let drained_dicts = std::mem::take(&mut self.symbol_dicts);
         // Reinitialize symbol dicts.
         for (i, (_, ty)) in self.schema.columns.iter().enumerate() {
-            if *ty == ColumnType::Symbol {
+            if ty.is_dictionary() {
                 self.symbol_dicts.insert(i, SymbolDictionary::new());
             }
         }
@@ -131,7 +130,8 @@ impl ColumnarMemtable {
                     ..
                 } => ids.capacity() * 4 + valid.capacity() + dictionary.len() * 32,
             })
-            .sum();
+            .sum::<usize>()
+            + super::table::dictionary_string_bytes(&self.symbol_dicts);
         self.recount_series(known);
     }
 
@@ -185,7 +185,8 @@ impl ColumnarMemtable {
                     ..
                 } => ids.capacity() * 4 + valid.capacity() + dictionary.len() * 32,
             })
-            .sum();
+            .sum::<usize>()
+            + super::table::dictionary_string_bytes(&self.symbol_dicts);
         self.recount_series(known);
     }
 }

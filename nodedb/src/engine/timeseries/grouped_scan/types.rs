@@ -116,7 +116,7 @@ pub(super) fn resolve_schema(
                         ColumnType::Float64 | ColumnType::Int64 | ColumnType::Timestamp(_) => {
                             AggColInfo::Numeric(idx)
                         }
-                        ColumnType::Symbol => AggColInfo::Skip,
+                        ColumnType::Symbol | ColumnType::Text => AggColInfo::Skip,
                     }
                 }
             } else if op == "count" {

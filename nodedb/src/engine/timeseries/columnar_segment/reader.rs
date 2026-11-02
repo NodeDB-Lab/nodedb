@@ -9,7 +9,7 @@ use nodedb_types::timeseries::{PartitionMeta, SymbolDictionary};
 use nodedb_wal::crypto::WalEncryptionKey;
 
 use super::super::columnar_memtable::{ColumnData, ColumnType, ColumnarSchema};
-use super::codec::{decode_column, legacy_default_codec};
+use super::codec::decode_column;
 use super::encrypt::{decrypt_file, is_encrypted};
 use super::error::SegmentError;
 use super::mmap::{BackingStore, ColumnMmap, advise_sequential};
@@ -33,6 +33,27 @@ impl ColumnarSegmentReader {
             .map_err(|e| SegmentError::Io(format!("read {}: {e}", meta_path.display())))?;
         let plaintext = decrypt_segment_file(kek, &raw)?;
         sonic_rs::from_slice(&plaintext).map_err(|e| SegmentError::Io(format!("parse meta: {e}")))
+    }
+
+    /// The codec the partition meta records for `col_name`.
+    ///
+    /// The writer records a codec for every column it writes. A meta that
+    /// does not read, or that names no codec for the column, is an error.
+    fn stored_codec(
+        partition_dir: &Path,
+        col_name: &str,
+        kek: Option<&WalEncryptionKey>,
+    ) -> Result<ResolvedColumnCodec, SegmentError> {
+        Self::read_meta(partition_dir, kek)?
+            .column_stats
+            .get(col_name)
+            .map(|stats| stats.codec)
+            .ok_or_else(|| {
+                SegmentError::Corrupt(format!(
+                    "partition {} meta records no codec for column '{col_name}'",
+                    partition_dir.display()
+                ))
+            })
     }
 
     /// Read the schema from a partition directory.
@@ -73,12 +94,10 @@ impl ColumnarSegmentReader {
             .map_err(|e| SegmentError::Io(format!("read {}: {e}", col_path.display())))?;
         let data = decrypt_segment_file(kek, &raw)?;
 
-        let codec = codec.unwrap_or_else(|| {
-            Self::read_meta(partition_dir, kek)
-                .ok()
-                .and_then(|meta| meta.column_stats.get(col_name).map(|s| s.codec))
-                .unwrap_or_else(|| legacy_default_codec(col_type))
-        });
+        let codec = match codec {
+            Some(codec) => codec,
+            None => Self::stored_codec(partition_dir, col_name, kek)?,
+        };
 
         decode_column(&data, col_type, codec)
     }
@@ -92,12 +111,10 @@ impl ColumnarSegmentReader {
         raw_bytes: &[u8],
         kek: Option<&WalEncryptionKey>,
     ) -> Result<ColumnData, SegmentError> {
-        let codec = codec.unwrap_or_else(|| {
-            Self::read_meta(partition_dir, kek)
-                .ok()
-                .and_then(|meta| meta.column_stats.get(col_name).map(|s| s.codec))
-                .unwrap_or_else(|| legacy_default_codec(col_type))
-        });
+        let codec = match codec {
+            Some(codec) => codec,
+            None => Self::stored_codec(partition_dir, col_name, kek)?,
+        };
         decode_column(raw_bytes, col_type, codec)
     }
 
@@ -116,17 +133,31 @@ impl ColumnarSegmentReader {
     }
 
     /// Read specific columns by name (projection pushdown).
+    ///
+    /// Each column decodes with the codec the meta's column stats record,
+    /// else the codec `schema.json` records for it in the same writer pass.
+    /// A re-encoded backup partition carries no meta. A column neither file
+    /// names a codec for is an error.
     pub fn read_columns(
         partition_dir: &Path,
         requested: &[(String, ColumnType)],
         kek: Option<&WalEncryptionKey>,
     ) -> Result<Vec<ColumnData>, SegmentError> {
         let meta = Self::read_meta(partition_dir, kek).ok();
+        let schema = Self::read_schema(partition_dir, kek).ok();
         let mut result = Vec::with_capacity(requested.len());
         for (name, ty) in requested {
             let codec = meta
                 .as_ref()
-                .and_then(|m| m.column_stats.get(name).map(|s| s.codec));
+                .and_then(|m| m.column_stats.get(name).map(|s| s.codec))
+                .or_else(|| {
+                    let schema = schema.as_ref()?;
+                    let index = schema
+                        .columns
+                        .iter()
+                        .position(|(column, _)| column == name)?;
+                    schema.codec(index).try_resolve().ok()
+                });
             result.push(Self::read_column_with_codec(
                 partition_dir,
                 name,
@@ -163,12 +194,10 @@ impl ColumnarSegmentReader {
         kek: Option<&WalEncryptionKey>,
     ) -> Result<(ColumnData, Vec<(usize, usize)>), SegmentError> {
         let raw = Self::read_column_raw(partition_dir, col_name, kek)?;
-        let codec = codec.unwrap_or_else(|| {
-            Self::read_meta(partition_dir, kek)
-                .ok()
-                .and_then(|meta| meta.column_stats.get(col_name).map(|s| s.codec))
-                .unwrap_or_else(|| legacy_default_codec(col_type))
-        });
+        let codec = match codec {
+            Some(codec) => codec,
+            None => Self::stored_codec(partition_dir, col_name, kek)?,
+        };
 
         let is_fastlanes = matches!(codec, ResolvedColumnCodec::FastLanesLz4);
 
@@ -238,7 +267,7 @@ impl ColumnarSegmentReader {
                     .collect();
                 ColumnData::Float64(f64_vals)
             }
-            ColumnType::Symbol => {
+            ColumnType::Symbol | ColumnType::Text => {
                 let u32_vals: Vec<u32> = all_values.iter().map(|&v| v as u32).collect();
                 ColumnData::Symbol(u32_vals)
             }
@@ -322,25 +351,18 @@ impl ColumnarSegmentReader {
             .collect())
     }
 
-    /// Read the sparse primary index for a partition.
+    /// Read the sparse primary index for a partition. The writer writes one
+    /// for every partition, so a missing file is an error.
     pub fn read_sparse_index(
         partition_dir: &Path,
         kek: Option<&WalEncryptionKey>,
-    ) -> Result<Option<super::super::sparse_index::SparseIndex>, SegmentError> {
+    ) -> Result<super::super::sparse_index::SparseIndex, SegmentError> {
         let idx_path = partition_dir.join("sparse_index.bin");
-        match std::fs::read(&idx_path) {
-            Ok(raw) => {
-                let data = decrypt_segment_file(kek, &raw)?;
-                let idx = super::super::sparse_index::SparseIndex::from_bytes(&data)
-                    .map_err(|e| SegmentError::Corrupt(format!("sparse index: {e}")))?;
-                Ok(Some(idx))
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(SegmentError::Io(format!(
-                "read {}: {e}",
-                idx_path.display()
-            ))),
-        }
+        let raw = std::fs::read(&idx_path)
+            .map_err(|e| SegmentError::Io(format!("read {}: {e}", idx_path.display())))?;
+        let data = decrypt_segment_file(kek, &raw)?;
+        super::super::sparse_index::SparseIndex::from_bytes(&data)
+            .map_err(|e| SegmentError::Corrupt(format!("sparse index: {e}")))
     }
 
     /// Get the row count from partition metadata without reading any column data.
@@ -528,9 +550,7 @@ mod tests {
             .unwrap();
 
         let part_dir = tmp.path().join("ts-range");
-        let sparse = ColumnarSegmentReader::read_sparse_index(&part_dir, None)
-            .unwrap()
-            .unwrap();
+        let sparse = ColumnarSegmentReader::read_sparse_index(&part_dir, None).unwrap();
 
         assert_eq!(sparse.block_count(), 5);
 
@@ -575,9 +595,7 @@ mod tests {
             .unwrap();
 
         let part_dir = tmp.path().join("ts-pred");
-        let sparse = ColumnarSegmentReader::read_sparse_index(&part_dir, None)
-            .unwrap()
-            .unwrap();
+        let sparse = ColumnarSegmentReader::read_sparse_index(&part_dir, None).unwrap();
 
         use crate::engine::timeseries::sparse_index::BlockPredicate;
         let preds = vec![BlockPredicate::GreaterThan {
@@ -643,10 +661,12 @@ mod tests {
         assert!(might2);
     }
 
+    /// The writer writes a sparse index for every partition. A partition
+    /// without one is refused, never read as unindexed.
     #[test]
-    fn legacy_partition_no_sparse_index() {
+    fn a_partition_without_a_sparse_index_is_refused() {
         let tmp = TempDir::new().unwrap();
-        let part_dir = tmp.path().join("ts-legacy");
+        let part_dir = tmp.path().join("ts-no-index");
         std::fs::create_dir_all(&part_dir).unwrap();
         std::fs::write(
             part_dir.join("partition.meta"),
@@ -661,13 +681,35 @@ mod tests {
                 last_flushed_wal_lsn: 0,
                 column_stats: std::collections::HashMap::new(),
                 max_system_ts: 0,
+                ended_at: None,
             })
             .unwrap(),
         )
         .unwrap();
 
-        let sparse = ColumnarSegmentReader::read_sparse_index(&part_dir, None).unwrap();
-        assert!(sparse.is_none());
+        assert!(matches!(
+            ColumnarSegmentReader::read_sparse_index(&part_dir, None),
+            Err(SegmentError::Io(_))
+        ));
+    }
+
+    /// A meta that records no codec for a column refuses the read instead of
+    /// guessing a default codec.
+    #[test]
+    fn a_column_the_meta_names_no_codec_for_is_refused() {
+        let (tmp, drain) = build_simple_drain();
+        let writer = ColumnarSegmentWriter::new(tmp.path());
+        let mut meta = writer
+            .write_partition("ts-no-codec", &drain.view(), 86_400_000, 0, None)
+            .unwrap();
+        let part_dir = tmp.path().join("ts-no-codec");
+        meta.column_stats.clear();
+        super::super::writer::write_partition_meta(&part_dir, &meta, None).unwrap();
+
+        assert!(matches!(
+            ColumnarSegmentReader::read_column(&part_dir, "value", ColumnType::Float64, None),
+            Err(SegmentError::Corrupt(_))
+        ));
     }
 
     #[test]

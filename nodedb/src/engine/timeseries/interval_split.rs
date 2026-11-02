@@ -86,15 +86,7 @@ pub fn gather_bucket(
     };
     let min_ts = timestamps.iter().copied().min().unwrap_or(view.min_ts);
     let max_ts = timestamps.iter().copied().max().unwrap_or(view.max_ts);
-    let max_system_ts = view
-        .schema
-        .ts_system_idx()
-        .and_then(|idx| columns.get(idx))
-        .map(|col| match col {
-            ColumnData::Timestamp(v) | ColumnData::Int64(v) => v.iter().copied().max().unwrap_or(0),
-            _ => 0,
-        })
-        .unwrap_or(0);
+    let max_system_ts = super::columnar_memtable::max_system_ts_of(view.schema, &columns);
     Ok(ColumnarDrainResult {
         columns,
         schema: view.schema.clone(),

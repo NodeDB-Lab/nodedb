@@ -61,6 +61,7 @@ mod tests {
                 last_flushed_wal_lsn: 0,
                 column_stats: std::collections::HashMap::new(),
                 max_system_ts: 0,
+                ended_at: None,
             },
             dir_name: "ts-a".to_string(),
         };

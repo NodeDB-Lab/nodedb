@@ -7,16 +7,6 @@ use nodedb_codec::{ColumnCodec, ColumnStatistics, ColumnTypeHint, ResolvedColumn
 use super::super::columnar_memtable::{ColumnData, ColumnType, NULL_SYMBOL_ID};
 use super::error::SegmentError;
 
-/// Legacy default codecs for partitions written before V2 codec metadata.
-pub(super) fn legacy_default_codec(col_type: ColumnType) -> ResolvedColumnCodec {
-    match col_type {
-        ColumnType::Timestamp(_) => ResolvedColumnCodec::Gorilla,
-        ColumnType::Float64 => ResolvedColumnCodec::Gorilla,
-        ColumnType::Int64 => ResolvedColumnCodec::Raw,
-        ColumnType::Symbol => ResolvedColumnCodec::Raw,
-    }
-}
-
 /// Encode a single column using the appropriate codec pipeline.
 ///
 /// Resolves `Auto` to a concrete codec via data-aware detection before
@@ -70,7 +60,8 @@ pub(super) fn encode_column(
             let stats = ColumnStatistics::from_i64(values, codec, encoded.len() as u64);
             Ok((encoded, codec, stats))
         }
-        ColumnType::Symbol => {
+        // A text column stores dictionary ids exactly as a symbol column does.
+        ColumnType::Symbol | ColumnType::Text => {
             let values = col_data.as_symbols();
             let codec = if requested_codec == ColumnCodec::Auto {
                 nodedb_codec::detect_codec(requested_codec, ColumnTypeHint::Symbol)
@@ -121,7 +112,7 @@ pub(super) fn decode_column(
                 .map_err(map_err)?;
             Ok(ColumnData::Int64(values))
         }
-        ColumnType::Symbol => {
+        ColumnType::Symbol | ColumnType::Text => {
             let raw = nodedb_codec::decode_bytes_pipeline(data, codec.into_column_codec())
                 .map_err(map_err)?;
             let ids: Vec<u32> = raw

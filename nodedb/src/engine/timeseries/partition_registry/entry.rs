@@ -12,6 +12,30 @@ pub struct PartitionEntry {
     pub dir_name: String,
 }
 
+/// The registry handle of a partition: the `min_ts` it was filed under,
+/// then its directory name. Directory names are unique in a collection, so
+/// two partitions that share a `min_ts` (late or duplicate-timestamp ingest,
+/// or an ended partition a restore installs beside a live one) never share
+/// a key, and one never replaces the other. Keys order by time first, so a
+/// walk over the registry visits partitions in time order.
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub struct PartitionKey {
+    pub min_ts: i64,
+    pub dir_name: String,
+}
+
+impl PartitionKey {
+    /// The key `entry` files under when it joins a registry.
+    pub fn of(entry: &PartitionEntry) -> Self {
+        Self {
+            min_ts: entry.meta.min_ts,
+            dir_name: entry.dir_name.clone(),
+        }
+    }
+}
+
 /// Format a partition directory name from start/end timestamps.
 ///
 /// Uses `YYYYMMDD-HHmmss` format (no colons, cross-platform safe).

@@ -16,6 +16,15 @@ mod tests {
 
     const MILLIS: ColumnType = ColumnType::Timestamp(TimeKind::Millis);
 
+    /// The key of the partition filed under `min_ts`.
+    fn key_at(registry: &PartitionRegistry, min_ts: i64) -> PartitionKey {
+        registry
+            .iter()
+            .find(|(key, _)| key.min_ts == min_ts)
+            .map(|(key, _)| key.clone())
+            .expect("a partition filed under min_ts")
+    }
+
     fn test_memtable_config() -> ColumnarMemtableConfig {
         ColumnarMemtableConfig {
             max_memory_bytes: 10 * 1024 * 1024,
@@ -121,25 +130,23 @@ mod tests {
             ("ts-3d-part", 2000, 3 * 86_400_000),
             ("ts-1w-part", 3000, 7 * 86_400_000),
         ];
-        for &(name, start, interval) in partition_specs {
+        for &(name, _, interval) in partition_specs {
             let meta = ColumnarSegmentReader::read_meta(&tmp.path().join(name), None).unwrap();
             // Verify the segment was written with the correct interval.
             assert!(
                 meta.size_bytes > 0,
                 "partition {name} (interval={interval}ms) should have non-zero size"
             );
-            registry.import(vec![(
-                start,
-                PartitionEntry {
-                    meta,
-                    dir_name: name.to_string(),
-                },
-            )]);
+            let entry = PartitionEntry {
+                meta,
+                dir_name: name.to_string(),
+            };
+            registry.import(vec![(PartitionKey::of(&entry), entry)]);
         }
 
         // Query spanning all three partitions.
         let range = TimeRange::new(1000, 3099);
-        let matching = registry.query_partitions(&range);
+        let matching = registry.query_partitions(&range, nodedb_columnar::VersionCut::Current);
         assert_eq!(matching.len(), 3, "all 3 partitions should match the range");
 
         // Read and verify data from each.
@@ -166,7 +173,7 @@ mod tests {
         // Create 1d partitions.
         for d in 1..=3 {
             registry.get_or_create_partition(d * day_ms);
-            registry.seal_partition(d * day_ms);
+            registry.seal_partition(&key_at(&registry, d * day_ms));
         }
         assert_eq!(registry.sealed_count(), 3);
 
@@ -179,7 +186,7 @@ mod tests {
 
         // Old 1d + new 3d partitions all queryable.
         let range = TimeRange::new(0, 100 * day_ms);
-        let all = registry.query_partitions(&range);
+        let all = registry.query_partitions(&range, nodedb_columnar::VersionCut::Current);
         assert_eq!(all.len(), 4);
     }
 
@@ -350,7 +357,7 @@ mod tests {
         for d in 0..365 {
             let start = d * day_ms;
             let (_, _) = registry.get_or_create_partition(start);
-            if let Some(entry) = registry.get_mut(start) {
+            if let Some(entry) = registry.get_mut(&key_at(&registry, start)) {
                 entry.meta.max_ts = start + day_ms - 1;
                 entry.meta.state = PartitionState::Sealed;
             }
@@ -360,7 +367,10 @@ mod tests {
         // Query 1 hour from day 100.
         let query_start = 100 * day_ms + 12 * 3_600_000; // day 100, noon
         let query_end = query_start + 3_600_000; // +1 hour
-        let matching = registry.query_partitions(&TimeRange::new(query_start, query_end));
+        let matching = registry.query_partitions(
+            &TimeRange::new(query_start, query_end),
+            nodedb_columnar::VersionCut::Current,
+        );
 
         // Should match exactly 1 partition (day 100), not 365.
         assert_eq!(
@@ -383,8 +393,8 @@ mod tests {
         for d in 1..=5 {
             registry.get_or_create_partition(d * day_ms);
         }
-        registry.seal_partition(day_ms);
-        registry.seal_partition(2 * day_ms);
+        registry.seal_partition(&key_at(&registry, day_ms));
+        registry.seal_partition(&key_at(&registry, 2 * day_ms));
 
         // Export.
         let exported = registry.export();
@@ -440,7 +450,7 @@ mod tests {
                 .write_partition(&dir_name, &drain.view(), 86_400_000, 0, None)
                 .unwrap();
 
-            if let Some(e) = registry.get_mut(start) {
+            if let Some(e) = registry.get_mut(&key_at(&registry, start)) {
                 e.meta.row_count = 50;
                 e.meta.max_ts = start + 49;
             }
@@ -459,7 +469,7 @@ mod tests {
         // Step 3: Seal partitions, persist, crash, recover.
         let mut registry = recovered;
         for d in 1..=3 {
-            registry.seal_partition(d * day_ms);
+            registry.seal_partition(&key_at(&registry, d * day_ms));
         }
         registry
             .persist(tmp.path(), "partition_manifest.json")
@@ -470,7 +480,7 @@ mod tests {
 
         // Step 4: Start merge, "crash" mid-merge (state = Merging).
         let mut registry = recovered;
-        if let Some(entry) = registry.get_mut(day_ms) {
+        if let Some(entry) = registry.get_mut(&key_at(&registry, day_ms)) {
             entry.meta.state = PartitionState::Merging;
         }
         registry
@@ -499,9 +509,10 @@ mod tests {
             last_flushed_wal_lsn: 100,
             column_stats: std::collections::HashMap::new(),
             max_system_ts: 0,
+            ended_at: None,
         };
         for start in [day_ms, 2 * day_ms, 3 * day_ms] {
-            registry.mark_deleted(start);
+            registry.mark_deleted(&key_at(&registry, start));
         }
         registry.insert_partition(PartitionEntry {
             meta: merged_meta,

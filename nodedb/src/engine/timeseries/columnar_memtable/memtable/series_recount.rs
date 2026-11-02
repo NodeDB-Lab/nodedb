@@ -2,14 +2,13 @@
 
 //! Rebuild a memtable's per-series row counts from the rows it holds.
 //!
-//! A row stores no series id. Ingest derives the id from the row's tags: the
-//! measurement and every tag the row carries form a [`SeriesKey`], and the
-//! collection's series catalog maps the key to its id. A recount derives the
-//! key the same way. The tag columns are the columns the known keys name,
-//! and a row carries a tag where its cell is not null. A string field is a
-//! symbol column too, but no key names it, so it is never taken for a tag.
+//! Every row stores its series id in `_ts_series`, so the recount reads it.
+//! A schema without that column derives each row's key as ingest does
+//! (`ilp_ingest::row_series_key`): the measurement and every non-NULL
+//! `Symbol` cell the row stores. A `Text` field never joins the key. The
+//! measurement is the one the known keys carry.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use nodedb_types::timeseries::{SeriesId, SeriesKey};
 
@@ -25,33 +24,39 @@ impl ColumnarMemtable {
     /// Rebuild the per-series counts from the rows held now.
     ///
     /// `known` is each series the rows can belong to with its catalog key: the
-    /// series this memtable counted before rows left it. A row whose tags
-    /// match no known key counts under the id its key hashes to, so the
-    /// number of series stays exact.
+    /// series this memtable counted before rows left it. It serves only a
+    /// schema without `_ts_series`. A row whose key matches no known key
+    /// counts under the id its key hashes to, so the number of series stays
+    /// exact.
     pub fn recount_series(&mut self, known: &[(SeriesId, SeriesKey)]) {
-        let tag_names: HashSet<&str> = known
-            .iter()
-            .flat_map(|(_, key)| key.tags.iter().map(|(name, _)| name.as_str()))
-            .collect();
-        let tag_columns: Vec<(usize, &str)> = self
+        let mut counts: HashMap<SeriesId, u64> = HashMap::new();
+        let rows = self.row_count as usize;
+        if let Some(ColumnData::Int64(ids)) = self
+            .schema
+            .ts_series_idx()
+            .and_then(|idx| self.columns.get(idx))
+        {
+            for &id in ids.iter().take(rows) {
+                *counts
+                    .entry(SeriesId::from_ne_bytes(id.to_ne_bytes()))
+                    .or_insert(0) += 1;
+            }
+            self.series_row_counts = counts;
+            return;
+        }
+        let symbol_columns: Vec<(usize, &str)> = self
             .schema
             .columns
             .iter()
             .enumerate()
-            .filter(|(_, (name, ty))| {
-                *ty == ColumnType::Symbol && tag_names.contains(name.as_str())
-            })
+            .filter(|(_, (_, ty))| *ty == ColumnType::Symbol)
             .map(|(index, (name, _))| (index, name.as_str()))
             .collect();
-        let by_tags: HashMap<&[(String, String)], SeriesId> = known
-            .iter()
-            .map(|(id, key)| (key.tags.as_slice(), *id))
-            .collect();
+        let by_key: HashMap<&SeriesKey, SeriesId> =
+            known.iter().map(|(id, key)| (key, *id)).collect();
         let metric = known.first().map_or("", |(_, key)| key.metric.as_str());
-
-        let mut counts: HashMap<SeriesId, u64> = HashMap::new();
-        for row in 0..self.row_count as usize {
-            let tags: Vec<(String, String)> = tag_columns
+        for row in 0..rows {
+            let tags: Vec<(String, String)> = symbol_columns
                 .iter()
                 .filter_map(|&(column, name)| {
                     self.tag_value(column, row)
@@ -59,8 +64,8 @@ impl ColumnarMemtable {
                 })
                 .collect();
             let key = SeriesKey::new(metric, tags);
-            let id = by_tags
-                .get(&key.tags.as_slice())
+            let id = by_key
+                .get(&key)
                 .copied()
                 .unwrap_or_else(|| key.to_series_id(0));
             *counts.entry(id).or_insert(0) += 1;
@@ -108,8 +113,12 @@ mod tests {
             columns: vec![
                 ("ts".into(), ColumnType::Timestamp(TimeKind::Millis)),
                 ("host".into(), ColumnType::Symbol),
-                ("note".into(), ColumnType::Symbol),
+                ("note".into(), ColumnType::Text),
                 ("value".into(), ColumnType::Float64),
+                (
+                    nodedb_types::columnar::schema::TS_SERIES.into(),
+                    ColumnType::Int64,
+                ),
             ],
             timestamp_idx: 0,
             codecs: Vec::new(),
@@ -132,15 +141,44 @@ mod tests {
                     ColumnValue::Symbol(host.into()),
                     ColumnValue::Symbol(note.into()),
                     ColumnValue::Float64(1.0),
+                    ColumnValue::Int64(0),
                 ],
             )
             .expect("ingest");
         }
         assert_eq!(mt.series_count(), 2);
         mt.recount_series(&known);
-        assert_eq!(mt.series_count(), 2, "a string field is not a tag");
+        assert_eq!(mt.series_count(), 2, "the stored series ids are counted");
         let mut ids = mt.series_ids();
         ids.sort_unstable();
         assert_eq!(ids, vec![11, 22]);
+    }
+
+    /// Without `_ts_series`, the key is the measurement and the `Symbol`
+    /// cells. A `Text` field with a distinct value per row adds no series.
+    #[test]
+    fn a_recount_without_series_ids_keys_on_symbol_cells_only() {
+        let mut no_ids = schema();
+        no_ids
+            .columns
+            .retain(|(name, _)| name != nodedb_types::columnar::schema::TS_SERIES);
+        let mut mt = ColumnarMemtable::new(no_ids, ColumnarMemtableConfig::default());
+        let known = vec![(11, key("a")), (22, key("b"))];
+        for (series, host, note) in [(11, "a", "x"), (22, "b", "y"), (11, "a", "z")] {
+            mt.ingest_row(
+                series,
+                &[
+                    ColumnValue::Timestamp(1_000),
+                    ColumnValue::Symbol(host.into()),
+                    ColumnValue::Symbol(note.into()),
+                    ColumnValue::Float64(1.0),
+                ],
+            )
+            .expect("ingest");
+        }
+        mt.recount_series(&known);
+        let mut ids = mt.series_ids();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![11, 22], "the note field adds no series");
     }
 }

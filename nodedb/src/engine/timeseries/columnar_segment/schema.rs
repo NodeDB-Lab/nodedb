@@ -21,14 +21,16 @@ pub(super) struct SchemaEntry {
     pub(super) name: String,
     #[serde(rename = "type")]
     pub(super) col_type: String,
-    /// Codec used for this column. Absent in legacy schemas (defaults to Auto).
+    /// Codec used for this column. Absent when the schema records no codec
+    /// for the column, which reads as `Auto`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) codec: Option<ColumnCodec>,
     /// Marks the collection's designated time column. A schema may hold more
     /// than one timestamp column — only one of them partitions and orders the
     /// collection, and which one cannot be recovered by scanning types.
-    /// Absent in schemas written before the marker existed; those were always
-    /// produced by inference, which places the designated column first.
+    /// The writer omits the key for every column but the designated one.
+    /// A schema whose marked column is not a time column reads its first
+    /// time column as the designated one.
     #[serde(default, skip_serializing_if = "is_false")]
     pub(super) time_key: bool,
 }
@@ -37,15 +39,8 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
-/// Schema JSON format — V2 is an array of objects, V1 is an array of tuples.
-#[derive(serde::Deserialize)]
-#[serde(untagged)]
-pub(super) enum SchemaJson {
-    /// V2: array of `{ name, type, codec }` objects.
-    V2(Vec<SchemaEntry>),
-    /// V1 (legacy): array of `[name, type]` tuples.
-    V1(Vec<(String, String)>),
-}
+/// Schema JSON format: an array of `{ name, type, codec, time_key }` objects.
+pub(super) type SchemaJson = Vec<SchemaEntry>;
 
 pub(super) fn schema_to_json(schema: &ColumnarSchema) -> Vec<SchemaEntry> {
     schema
@@ -60,6 +55,7 @@ pub(super) fn schema_to_json(schema: &ColumnarSchema) -> Vec<SchemaEntry> {
                 ColumnType::Float64 => "float64",
                 ColumnType::Int64 => "int64",
                 ColumnType::Symbol => "symbol",
+                ColumnType::Text => "text",
             };
             let codec = schema.codecs.get(i).copied();
             SchemaEntry {
@@ -72,52 +68,33 @@ pub(super) fn schema_to_json(schema: &ColumnarSchema) -> Vec<SchemaEntry> {
         .collect()
 }
 
-/// Position of the first timestamp column — the designation an unmarked
-/// (pre-marker) schema carries implicitly, since those were written by
-/// inference, which always emits the designated column first.
+/// Position of the first timestamp column. A schema with no marked time
+/// column designates it.
 fn first_timestamp_idx(columns: &[(String, ColumnType)]) -> usize {
     columns.iter().position(|(_, ty)| ty.is_time()).unwrap_or(0)
 }
 
-pub(super) fn schema_from_parsed(json: &SchemaJson) -> Result<ColumnarSchema, SegmentError> {
-    match json {
-        SchemaJson::V2(entries) => {
-            let mut columns = Vec::with_capacity(entries.len());
-            let mut codecs = Vec::with_capacity(entries.len());
-            let mut marked_idx = None;
+/// Rebuild a schema from its JSON entries.
+pub(super) fn schema_from_parsed(entries: &[SchemaEntry]) -> Result<ColumnarSchema, SegmentError> {
+    let mut columns = Vec::with_capacity(entries.len());
+    let mut codecs = Vec::with_capacity(entries.len());
+    let mut marked_idx = None;
 
-            for (i, entry) in entries.iter().enumerate() {
-                let ty = parse_column_type(&entry.col_type)?;
-                if entry.time_key && ty.is_time() {
-                    marked_idx = Some(i);
-                }
-                columns.push((entry.name.clone(), ty));
-                codecs.push(entry.codec.unwrap_or(ColumnCodec::Auto));
-            }
-
-            let timestamp_idx = marked_idx.unwrap_or_else(|| first_timestamp_idx(&columns));
-            Ok(ColumnarSchema {
-                columns,
-                timestamp_idx,
-                codecs,
-            })
+    for (i, entry) in entries.iter().enumerate() {
+        let ty = parse_column_type(&entry.col_type)?;
+        if entry.time_key && ty.is_time() {
+            marked_idx = Some(i);
         }
-        SchemaJson::V1(tuples) => {
-            let mut columns = Vec::with_capacity(tuples.len());
-
-            for (name, ty_str) in tuples.iter() {
-                let ty = parse_column_type(ty_str)?;
-                columns.push((name.clone(), ty));
-            }
-
-            let timestamp_idx = first_timestamp_idx(&columns);
-            Ok(ColumnarSchema {
-                codecs: vec![ColumnCodec::Auto; columns.len()],
-                columns,
-                timestamp_idx,
-            })
-        }
+        columns.push((entry.name.clone(), ty));
+        codecs.push(entry.codec.unwrap_or(ColumnCodec::Auto));
     }
+
+    let timestamp_idx = marked_idx.unwrap_or_else(|| first_timestamp_idx(&columns));
+    Ok(ColumnarSchema {
+        columns,
+        timestamp_idx,
+        codecs,
+    })
 }
 
 fn parse_column_type(ty_str: &str) -> Result<ColumnType, SegmentError> {
@@ -128,6 +105,7 @@ fn parse_column_type(ty_str: &str) -> Result<ColumnType, SegmentError> {
         "float64" => Ok(ColumnType::Float64),
         "int64" => Ok(ColumnType::Int64),
         "symbol" => Ok(ColumnType::Symbol),
+        "text" => Ok(ColumnType::Text),
         other => Err(SegmentError::Corrupt(format!(
             "unknown column type: {other}"
         ))),
@@ -139,17 +117,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn schema_v2_roundtrip() {
+    fn schema_roundtrip() {
         let schema = ColumnarSchema {
             columns: vec![
                 ("timestamp".into(), ColumnType::Timestamp(TimeKind::Millis)),
                 ("cpu".into(), ColumnType::Float64),
                 ("host".into(), ColumnType::Symbol),
+                ("msg".into(), ColumnType::Text),
             ],
             timestamp_idx: 0,
             codecs: vec![
                 ColumnCodec::DoubleDelta,
                 ColumnCodec::Gorilla,
+                ColumnCodec::Raw,
                 ColumnCodec::Raw,
             ],
         };
@@ -189,20 +169,6 @@ mod tests {
         let parsed: SchemaJson = sonic_rs::from_slice(&json).unwrap();
         let recovered = schema_from_parsed(&parsed).unwrap();
         assert_eq!(recovered.columns, schema.columns);
-        assert_eq!(recovered.timestamp_idx, 0);
-    }
-
-    /// A V1 tuple schema names its time column `timestamp` and reads back as
-    /// `Millis`.
-    #[test]
-    fn v1_schema_time_column_is_millis() {
-        let json = br#"[["timestamp","timestamp"],["value","float64"]]"#;
-        let parsed: SchemaJson = sonic_rs::from_slice(json).unwrap();
-        let recovered = schema_from_parsed(&parsed).unwrap();
-        assert_eq!(
-            recovered.columns[0].1,
-            ColumnType::Timestamp(TimeKind::Millis)
-        );
         assert_eq!(recovered.timestamp_idx, 0);
     }
 }

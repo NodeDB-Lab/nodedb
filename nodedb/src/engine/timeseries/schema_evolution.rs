@@ -103,7 +103,7 @@ fn null_column(ty: ColumnType, rows: usize) -> ColumnData {
         ColumnType::Timestamp(_) => ColumnData::Timestamp(vec![0; rows]),
         ColumnType::Float64 => ColumnData::Float64(vec![f64::NAN; rows]),
         ColumnType::Int64 => ColumnData::Int64(vec![0; rows]),
-        ColumnType::Symbol => ColumnData::Symbol(vec![u32::MAX; rows]), // sentinel
+        ColumnType::Symbol | ColumnType::Text => ColumnData::Symbol(vec![u32::MAX; rows]), // sentinel
     }
 }
 

@@ -10,6 +10,7 @@ pub mod partial;
 pub mod persist;
 pub mod refresh;
 pub mod rollup;
+pub mod snapshot;
 #[cfg(test)]
 pub mod test_support;
 pub mod watermark;
@@ -22,5 +23,5 @@ pub use image::{
 };
 pub use manager::{AggKey, AggregateInfo, ContinuousAggregateManager};
 pub use partial::{ColumnLayout, ColumnPartial, GroupCell, PartialAggregate};
-pub use refresh::RefreshSource;
+pub use refresh::{RefreshSource, RowCut};
 pub use watermark::WatermarkState;

@@ -149,6 +149,16 @@ impl CaggImage {
                 })
                 .collect(),
             orphans: &self.orphans,
+            raw_dropped_through: self.raw_dropped_through,
+            rewritten: {
+                let mut rewritten: Vec<(&str, i64)> = self
+                    .rewritten
+                    .iter()
+                    .map(|(name, ordinal)| (name.as_str(), *ordinal))
+                    .collect();
+                rewritten.sort_unstable();
+                rewritten
+            },
         }
     }
 }

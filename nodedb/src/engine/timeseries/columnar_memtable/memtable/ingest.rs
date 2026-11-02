@@ -60,13 +60,31 @@ impl ColumnarMemtable {
                     }
                     row_bytes += 8;
                 }
+                // `_ts_series` stores the row's series id, whatever value
+                // the row named: the id is the catalog's, never the line's.
+                (_, ColumnType::Int64)
+                    if col_name.as_str() == nodedb_types::columnar::schema::TS_SERIES =>
+                {
+                    if let ColumnData::Int64(ref mut v) = self.columns[i] {
+                        v.push(i64::from_ne_bytes(series_id.to_ne_bytes()));
+                    }
+                    row_bytes += 8;
+                }
                 (ColumnValue::Int64(n), ColumnType::Int64) => {
                     if let ColumnData::Int64(ref mut v) = self.columns[i] {
                         v.push(*n);
                     }
                     row_bytes += 8;
                 }
-                (ColumnValue::Symbol(s), ColumnType::Symbol) => {
+                (ColumnValue::Symbol(s), ColumnType::Symbol | ColumnType::Text) => {
+                    // A tag column is held to the cardinality cap. A text
+                    // field is not: its cap is the dictionary id space, which
+                    // stops short of the NULL id.
+                    let cap = if *col_type == ColumnType::Symbol {
+                        max_card
+                    } else {
+                        NULL_SYMBOL_ID
+                    };
                     let dict =
                         self.symbol_dicts
                             .get_mut(&i)
@@ -75,17 +93,27 @@ impl ColumnarMemtable {
                                     "internal error: symbol dict missing for column {i}"
                                 ),
                             })?;
-                    match dict.resolve(s, max_card) {
+                    let known = dict.len();
+                    match dict.resolve(s, cap) {
                         Some(sym_id) => {
                             if let ColumnData::Symbol(ref mut v) = self.columns[i] {
                                 v.push(sym_id);
                             }
+                            // A new dictionary entry holds the string's bytes.
+                            if dict.len() > known {
+                                row_bytes += s.len();
+                            }
                         }
                         None => {
                             self.rollback_partial_row(i);
+                            let limit = if *col_type == ColumnType::Symbol {
+                                "tag cardinality"
+                            } else {
+                                "text dictionary"
+                            };
                             return Err(crate::Error::BadRequest {
                                 detail: format!(
-                                    "tag cardinality limit ({max_card}) exceeded for column '{col_name}'"
+                                    "{limit} limit ({cap}) exceeded for column '{col_name}'"
                                 ),
                             });
                         }
@@ -93,7 +121,7 @@ impl ColumnarMemtable {
                     row_bytes += 4;
                 }
                 // A NULL symbol takes no dictionary entry.
-                (ColumnValue::Null, ColumnType::Symbol) => {
+                (ColumnValue::Null, ColumnType::Symbol | ColumnType::Text) => {
                     if let ColumnData::Symbol(ref mut v) = self.columns[i] {
                         v.push(NULL_SYMBOL_ID);
                     }

@@ -14,7 +14,8 @@
 //! applied index never passes a cut the image does not hold.
 //!
 //! The file is a format-version byte followed by MessagePack:
-//! `[[entries...], [orphan cuts...]]`, each entry
+//! `[[entries...], [orphan cuts...], raw_dropped_through, [[name,
+//! rewritten_at]...]]`, each entry
 //! `[def, watermark_ts, rows_aggregated, last_refresh_ms, time_kind,
 //! folded, buckets, cut]`, and each `cut`
 //! `[pending_ids, pending, completed, last_slot, parked_rows,
@@ -35,8 +36,8 @@ use crate::engine::timeseries::columnar_memtable::TimeKind;
 /// it.
 pub const CAGG_IMAGE_FILE: &str = "cagg.state";
 /// Format version byte.
-pub const CAGG_IMAGE_FORMAT_VERSION: u8 = 2;
-const IMAGE_FIELDS: usize = 2;
+pub const CAGG_IMAGE_FORMAT_VERSION: u8 = 1;
+const IMAGE_FIELDS: usize = 4;
 const ENTRY_FIELDS: usize = 8;
 const CUT_FIELDS: usize = 7;
 
@@ -58,6 +59,13 @@ pub struct CaggImageEntry {
 pub struct CaggImage {
     pub entries: Vec<CaggImageEntry>,
     pub orphans: Vec<OrphanCut>,
+    /// The newest time-key value of a root partition retention removed,
+    /// `None` when retention removed none. Raw rows at or below it can be
+    /// gone, so only the tiers hold them.
+    pub raw_dropped_through: Option<i64>,
+    /// Each aggregate's newest rewrite ordinal: the system time of its
+    /// last refresh cut or bucket retention pass.
+    pub rewritten: Vec<(String, i64)>,
 }
 
 /// One aggregate's state borrowed from the manager for encoding.
@@ -79,6 +87,10 @@ pub struct CaggImageEntryView<'a> {
 pub struct CaggImageView<'a> {
     pub entries: Vec<CaggImageEntryView<'a>>,
     pub orphans: &'a [OrphanCut],
+    /// See [`CaggImage::raw_dropped_through`].
+    pub raw_dropped_through: Option<i64>,
+    /// See [`CaggImage::rewritten`]. Sorted by name.
+    pub rewritten: Vec<(&'a str, i64)>,
 }
 
 fn sorted_buckets(buckets: &Buckets) -> Vec<&PartialAggregate> {
@@ -162,6 +174,13 @@ impl zerompk::ToMessagePack for CaggImageView<'_> {
         for orphan in self.orphans {
             orphan.write(writer)?;
         }
+        self.raw_dropped_through.write(writer)?;
+        writer.write_array_len(self.rewritten.len())?;
+        for (name, ordinal) in &self.rewritten {
+            writer.write_array_len(2)?;
+            writer.write_string(name)?;
+            writer.write_i64(*ordinal)?;
+        }
         Ok(())
     }
 }
@@ -193,7 +212,21 @@ impl<'a> zerompk::FromMessagePack<'a> for CaggImage {
             });
         }
         let orphans = Vec::<OrphanCut>::read(reader)?;
-        Ok(Self { entries, orphans })
+        let raw_dropped_through = Option::<i64>::read(reader)?;
+        let count = reader.read_array_len()?;
+        let mut rewritten = Vec::with_capacity(count.min(1024));
+        for _ in 0..count {
+            reader.check_array_len(2)?;
+            let name = String::read(reader)?;
+            let ordinal = reader.read_i64()?;
+            rewritten.push((name, ordinal));
+        }
+        Ok(Self {
+            entries,
+            orphans,
+            raw_dropped_through,
+            rewritten,
+        })
     }
 }
 
@@ -305,11 +338,15 @@ mod tests {
                 cut: Some(&cut),
             }],
             orphans: &orphans,
+            raw_dropped_through: Some(42),
+            rewritten: vec![("by_host", 7)],
         };
         let bytes = encode_image(&view).expect("encode");
         let image = decode_image(&bytes).expect("decode");
         assert_eq!(image.entries.len(), 1);
         assert_eq!(image.orphans, orphans);
+        assert_eq!(image.raw_dropped_through, Some(42));
+        assert_eq!(image.rewritten, vec![("by_host".to_string(), 7)]);
         let entry = &image.entries[0];
         assert_eq!(entry.def, def);
         assert_eq!(entry.folded, vec!["p1".to_string(), "p2".to_string()]);
