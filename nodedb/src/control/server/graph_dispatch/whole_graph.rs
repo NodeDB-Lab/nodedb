@@ -71,7 +71,7 @@ pub async fn scatter_to_graph_owners(
                 .await?;
         // This node holds every vShard, so the read observed all of them.
         let mut reads = ShardReadLog::new();
-        reads.note(0..VShardId::COUNT, &node.read_versions);
+        reads.note(0..VShardId::COUNT);
         reads.publish(tenant_id, database_id, collection);
         return Ok(vec![Payload::from_vec(node.payload)]);
     }
@@ -106,7 +106,7 @@ pub async fn scatter_to_graph_owners(
     let mut payloads = Vec::new();
     for leg in join_all(legs).await {
         let (owned_vshards, read) = leg?;
-        reads.note(owned_vshards, &read.read_versions);
+        reads.note(owned_vshards);
         payloads.push(read.payload);
     }
     reads.publish(tenant_id, database_id, collection);

@@ -37,6 +37,7 @@ pub(in crate::control::server::resp) async fn handle_get(
         key: key.to_vec(),
         rls_filters: Vec::new(),
         surrogate_ceiling: None,
+        system_time: nodedb_types::SystemTimeScope::Current,
     });
 
     match dispatch_kv(state, session, plan).await {
@@ -116,6 +117,7 @@ pub(in crate::control::server::resp) async fn handle_set(
             key: key.clone(),
             rls_filters: Vec::new(),
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         match dispatch_kv(state, session, check).await {
             Ok(resp) => {
@@ -206,6 +208,7 @@ pub(in crate::control::server::resp) async fn handle_exists(
             key: key.clone(),
             rls_filters: Vec::new(),
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         match dispatch_kv(state, session, plan).await {
             Ok(resp) if resp.status == Status::Ok && !resp.payload.is_empty() => count += 1,

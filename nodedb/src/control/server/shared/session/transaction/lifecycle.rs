@@ -33,18 +33,14 @@ impl SessionStore {
 
     /// BEGIN — enter a transaction block.
     ///
-    /// Captures the last globally-applied Calvin `snapshot_epoch` as the
-    /// cross-shard version anchor. Commit validates each read by the write
-    /// version it observed, so BEGIN captures no WAL position.
-    pub fn begin(
-        &self,
-        addr: impl Into<SessionId>,
-        snapshot_epoch: u64,
-    ) -> Result<(), &'static str> {
+    /// The block's snapshot is taken at its first statement
+    /// ([`super::super::txn_snapshot::ensure_txn_snapshot`]), so BEGIN takes
+    /// none.
+    pub fn begin(&self, addr: impl Into<SessionId>) -> Result<(), &'static str> {
         self.write_session(addr, |session| match session.tx_state {
             TransactionState::Idle => {
                 session.tx_state = TransactionState::InBlock;
-                session.tx_snapshot_epoch = Some(snapshot_epoch);
+                session.tx_snapshot = None;
                 session.tx_read_set.clear();
                 session.tx_reservation_vshards.clear();
                 session.tx_reservation_owner = None;
@@ -72,9 +68,37 @@ impl SessionStore {
             .unwrap_or(false)
     }
 
-    /// Get the cross-shard snapshot epoch for the current transaction.
-    pub fn snapshot_epoch(&self, addr: impl Into<SessionId>) -> Option<u64> {
-        self.read_session(addr, |s| s.tx_snapshot_epoch)?
+    /// The snapshot the current transaction block reads at. `None` outside
+    /// a block and before the block's first statement.
+    pub fn tx_snapshot(
+        &self,
+        addr: impl Into<SessionId>,
+    ) -> Option<super::super::txn_snapshot::TxnSnapshotCut> {
+        self.read_session(addr, |s| s.tx_snapshot.as_ref().map(|held| held.cut))?
+    }
+
+    /// Install `cut` as the block's snapshot unless the block holds one, and
+    /// return the snapshot the block reads at. `None` when the connection is
+    /// not inside an open transaction block.
+    ///
+    /// `registration` keeps the cut in the node's active-snapshot registry
+    /// for as long as the block holds it. A cut the block does not install
+    /// drops its registration at once.
+    pub fn install_tx_snapshot(
+        &self,
+        addr: impl Into<SessionId>,
+        cut: super::super::txn_snapshot::TxnSnapshotCut,
+        registration: Option<crate::control::read_cut::SnapshotGuard>,
+    ) -> Option<super::super::txn_snapshot::TxnSnapshotCut> {
+        self.write_session(addr, |session| {
+            if session.tx_state != TransactionState::InBlock {
+                return None;
+            }
+            let held = session
+                .tx_snapshot
+                .get_or_insert(super::super::txn_snapshot::HeldTxnSnapshot { cut, registration });
+            Some(held.cut)
+        })?
     }
 
     /// Current transaction's overlay id, for stamping a `StageWrite` task
@@ -108,7 +132,7 @@ impl SessionStore {
             session.tx_body_tasks.clear();
             session.tx_ts_preview_rejected.clear();
             session.tx_state = TransactionState::Idle;
-            session.tx_snapshot_epoch = None;
+            session.tx_snapshot = None;
             session.tx_id = None;
             session.tx_vshards.clear();
             session.tx_reservation_vshards.clear();
@@ -138,7 +162,7 @@ impl SessionStore {
                 session.tx_ts_preview_rejected.clear();
                 session.pending_publishes.clear();
                 session.tx_state = TransactionState::Idle;
-                session.tx_snapshot_epoch = None;
+                session.tx_snapshot = None;
                 session.tx_id = None;
                 session.tx_vshards.clear();
                 session.tx_read_set.clear();
@@ -193,13 +217,13 @@ mod tests {
 
         assert_eq!(store.transaction_state(addr), TransactionState::Idle);
 
-        store.begin(addr, 0).unwrap();
+        store.begin(addr).unwrap();
         assert_eq!(store.transaction_state(addr), TransactionState::InBlock);
 
         store.commit(addr).unwrap();
         assert_eq!(store.transaction_state(addr), TransactionState::Idle);
 
-        store.begin(addr, 0).unwrap();
+        store.begin(addr).unwrap();
         store.fail_transaction(addr);
         assert_eq!(store.transaction_state(addr), TransactionState::Failed);
 
@@ -212,7 +236,7 @@ mod tests {
         let store = SessionStore::new();
         let addr: std::net::SocketAddr = "127.0.0.1:6012".parse().expect("address");
         store.ensure_session(addr);
-        store.begin(addr, 0).expect("begin");
+        store.begin(addr).expect("begin");
 
         let scope = Arc::new(QueryLeaseScope::empty());
         assert!(store.buffer_write(addr, task()));

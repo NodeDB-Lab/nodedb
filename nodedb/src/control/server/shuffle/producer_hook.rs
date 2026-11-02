@@ -56,8 +56,8 @@ impl RegistryShuffleProducer {
     }
 
     /// Run the produce, returning a [`ShuffleProduceResponse`] whose `error` is a
-    /// terminal error (or `None` on clean produce) and whose `read_versions` are
-    /// the read versions the local scan observed (empty on failure).
+    /// terminal error (or `None` on clean produce) and whose `read_vshards` are
+    /// the vShards the local scan read (empty on failure).
     ///
     /// Factored out of the trait method so the trait impl stays a thin shim and
     /// every early-exit error path is `?`-propagated here, then mapped to the
@@ -71,7 +71,7 @@ impl RegistryShuffleProducer {
                     message: "shuffle produce requires a cluster transport (single-node mode)"
                         .into(),
                 }),
-                read_versions: Vec::new(),
+                read_vshards: Vec::new(),
             };
         };
 
@@ -130,12 +130,10 @@ impl RegistryShuffleProducer {
         // (validation reject, decode, deadline, or data-plane stream error).
         let scan_outcome = executor.execute_plan_streaming(exec_req, &mut sink).await;
 
-        // Capture the read versions the scan observed BEFORE `finish` consumes
-        // the sink. On a clean produce they are the scanned collection's
-        // versions at read time: the comparand the coordinator folds across
-        // producers for cross-shard OCC read validation of an in-transaction
-        // distributed aggregate.
-        let observed_read_versions = sink.observed_read_versions().to_wire();
+        // Capture the vShards the scan read BEFORE `finish` consumes the sink.
+        // The coordinator folds them across producers and homes the
+        // aggregate's read-set entries on them.
+        let observed_read_vshards = sink.observed_read_vshards().to_wire();
 
         // Finalize the fan-out: flush residuals (clean path) and `End` EVERY part
         // for this side — with the scan error if any — so each receiver's barrier
@@ -149,21 +147,21 @@ impl RegistryShuffleProducer {
                     code: 0,
                     message: format!("shuffle produce fan-out finalize failed: {e}"),
                 })),
-                read_versions: Vec::new(),
+                read_vshards: Vec::new(),
             };
         }
 
-        // On a failed scan the read versions are meaningless: report none
+        // On a failed scan the read vShards are meaningless: report none
         // (mirroring `ExecuteResponse::err`). On a clean produce report what
         // the scan observed.
-        let read_versions = if scan_outcome.is_none() {
-            observed_read_versions
+        let read_vshards = if scan_outcome.is_none() {
+            observed_read_vshards
         } else {
             Vec::new()
         };
         ShuffleProduceResponse {
             error: scan_outcome,
-            read_versions,
+            read_vshards,
         }
     }
 }

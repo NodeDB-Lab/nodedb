@@ -113,10 +113,13 @@ pub(super) fn kv_change_meta(op: &KvOp) -> Vec<WriteChangeMeta> {
         ],
         // Reports one event per mutation, naming every collection/key touched — can
         // span two collections (a resolved `TransferItem`).
+        // A TTL reap reports no change: its apply can be a no-op, and an
+        // expiry was never a row change event.
         KvOp::ResolvedWrite { mutations, .. } => mutations
             .iter()
-            .map(|mutation| {
+            .filter_map(|mutation| {
                 let operation = match mutation {
+                    KvResolvedMutation::Reap { .. } => return None,
                     KvResolvedMutation::Delete { .. } => ChangeOperation::Delete,
                     // Precondition: absent row = insert, present row = update.
                     KvResolvedMutation::Put { precondition, .. } => match precondition {
@@ -127,11 +130,11 @@ pub(super) fn kv_change_meta(op: &KvOp) -> Vec<WriteChangeMeta> {
                     | KvResolvedMutation::Expire { .. }
                     | KvResolvedMutation::Persist { .. } => ChangeOperation::Update,
                 };
-                (
+                Some((
                     mutation.collection().to_string(),
                     kv_identity(mutation.key()),
                     operation,
-                )
+                ))
             })
             .collect(),
         // Reads, catalog-only ops, and the read-only resolve probe: no row

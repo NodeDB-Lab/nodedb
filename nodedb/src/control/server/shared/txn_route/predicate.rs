@@ -103,19 +103,21 @@ async fn matched_rows(
     ctx: &TxnTaskContext<'_>,
     task: &PhysicalTask,
 ) -> crate::Result<Vec<(Surrogate, Vec<u8>)>> {
-    let (collection, filters, declared_primary_key) = match &task.plan {
+    let (collection, filters, declared_primary_key, system_time) = match &task.plan {
         PhysicalPlan::Document(DocumentOp::BulkUpdate {
             collection,
             filters,
             declared_primary_key,
+            system_time,
             ..
         })
         | PhysicalPlan::Document(DocumentOp::BulkDelete {
             collection,
             filters,
             declared_primary_key,
+            system_time,
             ..
-        }) => (collection, filters, declared_primary_key),
+        }) => (collection, filters, declared_primary_key, system_time),
         _ => {
             return Err(crate::Error::Internal {
                 detail: "the predicate probe was handed a write that is not a predicate write"
@@ -134,6 +136,8 @@ async fn matched_rows(
             rls_write_check: RlsWriteCheck::NoPolicyApplies,
             resolved_sum_targets: Vec::new(),
             declared_primary_key: declared_primary_key.clone(),
+            // The write's own match scope: the block's snapshot.
+            system_time: *system_time,
         })));
     let txn_id = ctx.txn.sessions.tx_id(ctx.txn.session_id);
     let response = dispatch_local(

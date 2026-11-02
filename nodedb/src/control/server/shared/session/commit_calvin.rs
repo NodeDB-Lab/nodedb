@@ -13,9 +13,14 @@
 //! bitemporal stamp and a `TransactionRedo` WAL record, while remaining
 //! non-atomic ACROSS vShards (no global vote binds them; a failure on one vShard
 //! does not roll back another).
+//!
+//! Both modes carry the transaction's reads and snapshot ordinal. In strict
+//! mode the one transaction carries them. In best-effort mode every group
+//! carries all of them, so each group commits only while every read still
+//! holds.
 
 use crate::control::planner::calvin::{
-    CrossShardTxnMode, TxnDispatchPosition, TxnProvenance, build_single_vshard_tx_class,
+    CrossShardTxnMode, TxnDispatchPosition, TxnProvenance, TxnReads, build_single_vshard_tx_class,
     dispatch_strict_atomic_tasks_to_calvin, submit_calvin_routed,
 };
 use crate::control::server::shared::session::read_set::ReadSetEntry;
@@ -32,6 +37,9 @@ pub(super) struct CalvinCommit<'a> {
     pub buffered: &'a [PhysicalTask],
     pub tenant_id: crate::types::TenantId,
     pub reads: &'a [ReadSetEntry],
+    /// The ordinal every participant validates `reads` and the written keys
+    /// at. `None` for a transaction with no snapshot and no read.
+    pub snapshot_ordinal: Option<i64>,
     pub event_source: crate::event::EventSource,
     /// The messages the transaction's trigger bodies published. One
     /// participant's redo record carries them.
@@ -106,6 +114,7 @@ async fn submit_commit_calvin(
         buffered,
         tenant_id,
         reads,
+        snapshot_ordinal,
         event_source,
         publishes,
         applied_key,
@@ -140,7 +149,10 @@ async fn submit_commit_calvin(
                 buffered,
                 tenant_id,
                 TxnDispatchPosition::CommitFlush,
-                reads,
+                TxnReads {
+                    entries: reads,
+                    snapshot_ordinal,
+                },
                 reservation_owner,
                 TxnProvenance {
                     event_source,
@@ -202,9 +214,9 @@ async fn submit_commit_calvin(
                 } else {
                     event_source
                 };
-                // Empty read-set: best-effort performs no cross-shard OCC, so
-                // each group carries no versioned reads — matching the
-                // single-vShard submit `route_write_to_calvin` uses.
+                // Every group carries the whole read set: its reads' vShards
+                // join it as participants, and each validates the reads homed
+                // on it before the group installs.
                 // A timeseries ingest resolves to its rows here, before it is
                 // sequenced: every replica resolves a sequenced group on its own.
                 let tasks =
@@ -213,10 +225,11 @@ async fn submit_commit_calvin(
                         Ok(resolved) => resolved.unwrap_or(tasks),
                         Err(e) => return Err(AbortReason::Dispatch(e)),
                     };
-                let mut tx_class = match build_single_vshard_tx_class(&tasks, tenant_id, &[]) {
+                let mut tx_class = match build_single_vshard_tx_class(&tasks, tenant_id, reads) {
                     Ok(tc) => tc,
                     Err(e) => return Err(AbortReason::Dispatch(e)),
                 };
+                tx_class.snapshot_ordinal = snapshot_ordinal;
                 // Each per-vShard group acquires under `R` too, so it self-upgrades
                 // its slice of the session's shared reservations.
                 tx_class.set_lock_owner(reservation_owner);

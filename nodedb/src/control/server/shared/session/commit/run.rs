@@ -8,7 +8,6 @@ use nodedb_cluster::calvin::types::ReleaseReason;
 
 use crate::control::planner::calvin::read_vshards_of;
 use crate::control::security::identity::AuthenticatedIdentity;
-use crate::control::server::shared::plan_util::extract_collection;
 use crate::control::state::SharedState;
 
 use super::super::commit_fence;
@@ -17,12 +16,11 @@ use super::super::ddl_compensate;
 use super::super::ddl_flush::{self, DdlCommitPlan};
 use super::super::outcome::{AbortReason, CommitOutcome, TxnDataPlane};
 use super::super::overlay_drop::drop_txn_overlay;
+use super::super::read_set::read_snapshot_ordinal;
 use super::super::reservation_release;
 use super::super::store::SessionStore;
 use super::buffered_dispatch::BufferedCommit;
 use super::metering::{meter_committed_buffered_writes, resolve_buffered_write_scopes};
-use super::read_split::SplitReads;
-use super::read_validation::stale_read_abort;
 use super::restart_identity::restart_truncated_identities;
 use super::single_shard::commit_publishes;
 
@@ -83,22 +81,13 @@ pub async fn run_commit(
     dp: &impl TxnDataPlane,
 ) -> CommitOutcome {
     // A cross-shard read made earlier in the same request as this COMMIT is
-    // still pending in the connection scope. It joins the read-set before
-    // validation.
+    // still pending in the connection scope. It joins the read-set first.
     super::super::pending_shard_reads::record_pending(sessions, session_id);
     let read_set = sessions.take_read_set(session_id);
     // The engine side effects this transaction's index DDL deferred. They run
     // once its catalog entries landed, below. An abort before then drops them
     // with the buffer.
     let deferred_effects = super::super::ddl_buffer::drain_effects();
-    // Collections this transaction wrote itself. A read of a collection the
-    // same transaction has written is a read-your-own-write, not a
-    // serialization conflict — reading uncommitted own state (served from the
-    // staging overlay, which reports no watermark) must not abort the commit.
-    // The read-set is collection-granular, so exclusion is too.
-    let written_collections = sessions.buffered_collections(session_id, |plan| {
-        extract_collection(plan).map(String::from)
-    });
     // Peek the buffered write tasks WITHOUT draining them or leaving the block.
     // The session stays `InBlock` through classification and dispatch; the
     // buffered batch is flushed to Calvin as the COMMIT finalization (see
@@ -113,13 +102,12 @@ pub async fn run_commit(
     // its redo record, and the Event Plane delivers them from there.
     let publishes = sessions.take_pending_publishes(session_id);
     let tenant_id = identity.tenant_id;
-    // The interactive-COMMIT read-set widens dispatch classification: a txn that
-    // writes shard X but read shard Y participates in {X, Y} and must route
-    // through Calvin with Y as a participant. Autocommit has no session read-set.
-    // A single node checks its homed cross-shard reads itself: they enlist no
-    // Calvin participant (`read_split`).
-    let split_reads = SplitReads::of(state, &read_set);
-    let read_vshards = match read_vshards_of(split_reads.enlisted()) {
+    // The read-set widens dispatch classification: a transaction that writes
+    // vShard X and read vShard Y participates in {X, Y} and routes through
+    // Calvin with Y as a participant. A homed cross-shard read enlists its
+    // home the same way, on a single node too. Each participant's apply
+    // validates the reads homed on it.
+    let read_vshards = match read_vshards_of(&read_set) {
         Ok(vshards) => vshards,
         Err(error) => {
             reservation_release::release_and_rollback(state, sessions, session_id).await;
@@ -155,15 +143,9 @@ pub async fn run_commit(
     // branch below, not hoisted here: only the buffered-DML branch dispatches
     // anything afterward that can fail in a way compensation will undo.
     if buffered.is_empty() {
-        // Read-only interactive transaction: no writes to classify, but it can
-        // still serialization-conflict against concurrent writers. Each read
-        // is checked on its vShard's leader. Classifying an empty buffer will
-        // misread a lone cross-shard READ as `MultiShard` and wrongly reject it.
-        if let Some(outcome) =
-            stale_read_abort(state, sessions, session_id, &read_set, &written_collections).await
-        {
-            return outcome;
-        }
+        // Read-only interactive transaction: every read ran at the block's one
+        // snapshot, so the reads are consistent with each other and the
+        // transaction commits without validation.
         // No buffered DML for this DDL to race, so finalize it here,
         // symmetrically with the buffered branch below.
         let ddl_compensation = match begin_ddl(state, sessions, session_id).await {
@@ -204,6 +186,19 @@ pub async fn run_commit(
         // buffered DML: a crash after this point leaves a real, cataloged,
         // empty, droppable collection rather than rows durable in a
         // collection with no catalog row anywhere.
+        // The snapshot the apply validates the reads and the written keys at.
+        let snapshot_ordinal = match read_snapshot_ordinal(
+            sessions.tx_snapshot(session_id).map(|cut| cut.ordinal),
+            &read_set,
+        ) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                reservation_release::release_and_rollback(state, sessions, session_id).await;
+                return CommitOutcome::Aborted {
+                    reason: AbortReason::Dispatch(error),
+                };
+            }
+        };
         let ddl_compensation = match begin_ddl(state, sessions, session_id).await {
             Ok(result) => result,
             Err(error) => {
@@ -221,8 +216,7 @@ pub async fn run_commit(
             dp,
             buffered: &buffered,
             read_set: &read_set,
-            split_reads: &split_reads,
-            written_collections: &written_collections,
+            snapshot_ordinal,
             ts_preview: &ts_preview,
         };
         if let Some(outcome) = dispatch
@@ -404,4 +398,124 @@ pub async fn run_commit(
     // Flush NOTIFY messages buffered during this transaction.
     sessions.flush_pending_notifies(session_id, identity.tenant_id, &state.notify_bus);
     CommitOutcome::Committed
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::Future;
+    use std::pin::Pin;
+
+    use super::*;
+    use crate::bridge::envelope::Response;
+    use crate::control::planner::calvin::{DispatchClass, classify_dispatch};
+    use crate::control::security::identity::{DatabaseSet, Role};
+    use crate::control::server::shared::session::read_set::{EngineTag, ReadKey, ReadSetEntry};
+    use crate::types::{DatabaseId, TenantId, VShardId};
+    use nodedb_physical::physical_task::PhysicalTask;
+
+    /// A Data Plane a read-only commit never reaches.
+    struct UnreachedDp;
+
+    impl TxnDataPlane for UnreachedDp {
+        fn dispatch_no_wal<'a>(
+            &'a self,
+            _task: PhysicalTask,
+        ) -> Pin<Box<dyn Future<Output = crate::Result<Response>> + Send + 'a>> {
+            Box::pin(async {
+                Err(crate::Error::Internal {
+                    detail: "a read-only commit dispatches nothing".into(),
+                })
+            })
+        }
+
+        fn event_source(&self) -> crate::event::EventSource {
+            crate::event::EventSource::User
+        }
+    }
+
+    fn identity() -> AuthenticatedIdentity {
+        AuthenticatedIdentity::new_internal_service(
+            0,
+            "_commit_test",
+            TenantId::new(1),
+            vec![Role::Superuser],
+            true,
+            None,
+            DatabaseSet::All,
+        )
+    }
+
+    fn homed_read(home: u32) -> ReadSetEntry {
+        ReadSetEntry {
+            engine: EngineTag::Graph,
+            database_id: DatabaseId::DEFAULT,
+            tenant_id: TenantId::new(1),
+            collection: String::new(),
+            key: ReadKey::Predicate,
+            observed_at: None,
+            home: Some(VShardId::new(home)),
+        }
+    }
+
+    /// A read-only block read one snapshot, so its COMMIT validates nothing
+    /// and dispatches nothing: no leader is asked about any read.
+    #[tokio::test]
+    async fn a_read_only_commit_skips_validation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal = std::sync::Arc::new(
+            crate::wal::WalManager::open_for_testing(&dir.path().join("test.wal")).expect("wal"),
+        );
+        let (dispatcher, _data_sides) = crate::bridge::dispatch::Dispatcher::new(1, 64);
+        let state = SharedState::new(dispatcher, wal).expect("state");
+        let sessions = SessionStore::new();
+        let addr: std::net::SocketAddr = "127.0.0.1:5320".parse().expect("addr");
+        sessions.ensure_session(addr);
+        sessions.begin(addr).expect("begin");
+        let id = SessionId::from(&addr);
+        sessions.record_read_entries(id, vec![homed_read(3), homed_read(9)]);
+
+        let outcome = run_commit(&sessions, id, &identity(), &state, &UnreachedDp).await;
+        assert!(
+            matches!(outcome, CommitOutcome::Committed),
+            "a read-only block commits without validation"
+        );
+        assert!(!sessions.is_in_transaction_block(addr));
+    }
+
+    /// A homed read enlists its home vShard: a write on one vShard and a
+    /// homed read on another commit as one multi-participant transaction,
+    /// on a single node too.
+    #[test]
+    fn a_homed_read_enlists_its_vshard() {
+        let write = PhysicalTask {
+            tenant_id: TenantId::new(1),
+            vshard_id: VShardId::new(3),
+            database_id: DatabaseId::DEFAULT,
+            plan: crate::bridge::envelope::PhysicalPlan::Kv(
+                nodedb_physical::physical_plan::KvOp::Put {
+                    collection: nodedb_types::QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+                    key: b"k".to_vec(),
+                    value: b"v".to_vec(),
+                    ttl_ms: 0,
+                    surrogate: nodedb_types::Surrogate::new(1),
+                    returning: None,
+                    rls_filters: Vec::new(),
+                    provenance: None,
+                },
+            ),
+            post_set_op: nodedb_physical::physical_task::PostSetOp::None,
+            txn_id: None,
+        };
+        let reads = [homed_read(9)];
+        let read_vshards = read_vshards_of(&reads).expect("read vShards");
+        assert!(read_vshards.contains(&9));
+        match classify_dispatch(std::slice::from_ref(&write), &read_vshards) {
+            DispatchClass::MultiShard { vshards } => {
+                assert!(vshards.contains(&3) && vshards.contains(&9));
+            }
+            DispatchClass::SingleShard { .. } => {
+                panic!("a homed read on another vShard must enlist it")
+            }
+        }
+    }
 }

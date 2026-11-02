@@ -46,6 +46,7 @@ pub async fn dispatch_authorized_to_data_plane(
                 wal_lsn: None,
                 resolved_now_ms: None,
                 minted: None,
+                system_ordinal: None,
             },
             change_feed: ChangeFeedOwner::LocalApply,
             read_route: ReadRoute::Owned,
@@ -187,6 +188,7 @@ pub(crate) async fn dispatch_to_data_plane_with_source(
                 wal_lsn: None,
                 resolved_now_ms: None,
                 minted: None,
+                system_ordinal: None,
             },
             // Trusted internal plumbing: reads, maintenance, and node-local
             // state. It publishes no change event.
@@ -201,7 +203,7 @@ pub(crate) async fn dispatch_to_data_plane_with_source(
 ///
 /// Used by autocommit write endpoints that call `wal_append_if_write` and then
 /// dispatch: the returned LSN is stamped onto the `Request` so the Data Plane
-/// records the committed per-key / per-collection write version. The write's
+/// notes the committed write as applied. The write's
 /// identity and LSN travel in a [`WriteDispatch`] to keep the argument list
 /// short; `wal_lsn` is `None` when the write was WAL-bypassed (e.g.
 /// `timeseries` `wal=false`). `resolved_now_ms` carries the wall-clock instant
@@ -222,6 +224,7 @@ pub(crate) async fn dispatch_trusted_internal_write_to_data_plane(
         wal_lsn,
         resolved_now_ms,
         minted,
+        system_ordinal,
     } = write;
     dispatch_to_data_plane_inner(
         shared,
@@ -241,6 +244,7 @@ pub(crate) async fn dispatch_trusted_internal_write_to_data_plane(
                 wal_lsn,
                 resolved_now_ms,
                 minted,
+                system_ordinal,
             },
             change_feed: ChangeFeedOwner::LocalApply,
             read_route: ReadRoute::Owned,
@@ -267,6 +271,7 @@ pub(crate) async fn dispatch_replayed_write_to_data_plane(
         wal_lsn,
         resolved_now_ms,
         minted,
+        system_ordinal,
     } = write;
     dispatch_to_data_plane_inner(
         shared,
@@ -284,6 +289,7 @@ pub(crate) async fn dispatch_replayed_write_to_data_plane(
                 wal_lsn,
                 resolved_now_ms,
                 minted,
+                system_ordinal,
             },
             read_route: ReadRoute::Owned,
             change_feed: ChangeFeedOwner::Unowned,
@@ -592,7 +598,7 @@ mod tests {
                             watermark_lsn: Lsn::ZERO,
                             error_code: None,
                             stage_vote: None,
-                            read_versions: crate::types::ReadVersions::new(),
+                            read_vshards: crate::types::ReadShards::new(),
                             write_set: Vec::new(),
                         },
                     })
@@ -735,6 +741,7 @@ mod tests {
             wal_lsn: Some(lsn),
             resolved_now_ms: None,
             minted: Some(minted),
+            system_ordinal: None,
         }
     }
 
@@ -771,7 +778,7 @@ mod tests {
                             watermark_lsn: Lsn::ZERO,
                             error_code: code.clone().map(Box::new),
                             stage_vote: None,
-                            read_versions: crate::types::ReadVersions::new(),
+                            read_vshards: crate::types::ReadShards::new(),
                             write_set: Vec::new(),
                         },
                     })

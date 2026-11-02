@@ -47,6 +47,7 @@ pub(crate) async fn build_search(
         filters: Vec::new(),
         rls_filters: Vec::new(),
         scores: Vec::new(),
+        system_time: nodedb_types::SystemTimeScope::Current,
     }))
 }
 
@@ -92,6 +93,7 @@ pub(crate) async fn build_hybrid_search(
         // Native-protocol path: the wire schema does not carry a
         // SELECT-style alias. Falls back to the executor's default name.
         score_alias: None,
+        system_time: nodedb_types::SystemTimeScope::Current,
     }))
 }
 

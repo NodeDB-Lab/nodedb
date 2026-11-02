@@ -20,7 +20,6 @@ use crate::control::lease::QueryLeaseScope;
 use crate::event::cdc::CdcOffset;
 use crate::types::{DatabaseId, TenantId, TxnId, VShardId};
 
-use super::own_writes::OwnWriteKey;
 use nodedb_physical::physical_task::PhysicalTask;
 
 /// One entry on the transaction's savepoint stack.
@@ -148,11 +147,10 @@ pub struct ConnSession {
     /// rejected a line has an entry. COMMIT compares these counts with its
     /// authoritative resolve.
     pub tx_ts_preview_rejected: BTreeMap<usize, u64>,
-    /// Snapshot epoch captured at BEGIN: the last globally-applied Calvin epoch,
-    /// read from `CalvinLocalState::last_applied_epoch`. The cross-shard-valid
-    /// version anchor for the transaction (0 in single-node / no-Calvin). `None`
-    /// outside a transaction block.
-    pub tx_snapshot_epoch: Option<u64>,
+    /// The snapshot every read of the transaction block reads at, taken at
+    /// the block's first statement, not at `BEGIN`. `None` outside a block
+    /// and before the block's first statement.
+    pub tx_snapshot: Option<super::txn_snapshot::HeldTxnSnapshot>,
     /// Identity of the current session transaction block, minted on `BEGIN`
     /// and cleared on `COMMIT`/`ROLLBACK`. Keys the per-transaction staging
     /// overlay. `None` outside a transaction block.
@@ -164,11 +162,11 @@ pub struct ConnSession {
     /// mark/rewind must fan over ALL of them. Ordered (BTree) for deterministic
     /// teardown. Empty until the first staged write.
     pub tx_vshards: BTreeSet<VShardId>,
-    /// Read-set: versioned, predicate-aware entries for write conflict
-    /// detection, captured on the shared read seam by every transport. At
-    /// COMMIT, each entry is checked — if the entry's collection has a current
-    /// version past `read_version` on its vShard, a concurrent write occurred
-    /// and the transaction is rejected with SERIALIZATION_FAILURE.
+    /// Read-set: predicate-aware entries for conflict detection, captured on
+    /// the shared read seam by every transport. The COMMIT's apply validates
+    /// them at the transaction's snapshot: a committed version of anything an
+    /// entry names above the snapshot rejects the transaction with
+    /// SERIALIZATION_FAILURE.
     pub tx_read_set: Vec<super::read_set::ReadSetEntry>,
     /// Distinct vShards this transaction took a SHARED read reservation on. A
     /// hot-key read reserves under the transaction's single `tx_reservation_owner`
@@ -239,14 +237,6 @@ pub struct ConnSession {
     /// is idle-eligible only when this is zero — a legitimately long-running
     /// statement (in flight) must never be idle-killed.
     pub in_flight: AtomicU32,
-    /// Highest committed write version this session holds for each
-    /// `(database, tenant, collection, vShard)` it has written. It floors a
-    /// later transaction's captured read version at the session's own prior
-    /// committed writes, so a read never aborts on the session's own write. A
-    /// concurrent write by another session has a higher version and still
-    /// aborts. It persists for the life of the session, so a prior autocommit
-    /// write floors a later transaction's read too.
-    pub own_write_versions: HashMap<OwnWriteKey, nodedb_types::WriteVersion>,
     /// Database- and tenant-scoped connection slots this session holds.
     ///
     /// pgwire takes them during the startup handshake, once the bound database
@@ -270,7 +260,7 @@ pub(super) fn default_parameters() -> HashMap<String, String> {
     parameters.insert("TimeZone".into(), "UTC".into());
     parameters.insert(
         "default_transaction_isolation".into(),
-        "read committed".into(),
+        "serializable".into(),
     );
     parameters.insert("default_transaction_read_only".into(), "off".into());
     parameters.insert("extra_float_digits".into(), "1".into());
@@ -285,7 +275,7 @@ pub(super) fn default_parameters() -> HashMap<String, String> {
     parameters.insert("integer_datetimes".into(), "on".into());
     parameters.insert("search_path".into(), "public".into());
     parameters.insert("statement_timeout".into(), "0".into());
-    parameters.insert("transaction_isolation".into(), "read committed".into());
+    parameters.insert("transaction_isolation".into(), "serializable".into());
     parameters.insert("transaction_read_only".into(), "off".into());
     // Version info (PostgreSQL compatibility — tools like psql check this).
     parameters.insert(
@@ -316,7 +306,7 @@ impl ConnSession {
             tx_lease_scopes: Vec::new(),
             tx_body_tasks: BTreeSet::new(),
             tx_ts_preview_rejected: BTreeMap::new(),
-            tx_snapshot_epoch: None,
+            tx_snapshot: None,
             tx_id: None,
             tx_vshards: BTreeSet::new(),
             tx_read_set: Vec::new(),
@@ -338,7 +328,6 @@ impl ConnSession {
             sequence_values: Arc::new(crate::control::sequence::SessionSequenceValues::new()),
             last_activity_ms: AtomicU64::new(now_unix_ms()),
             in_flight: AtomicU32::new(0),
-            own_write_versions: HashMap::new(),
             admission_permit: None,
         }
     }

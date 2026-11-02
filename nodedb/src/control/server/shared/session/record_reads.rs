@@ -6,11 +6,10 @@
 //! decision once the response returns: a distributed read that materialized on
 //! the coordinator (a gathered `HashJoin`, a multi-collection gather, or a
 //! shuffle JOIN) records ONE read-set entry per per-collection capture — each
-//! from its own single-collection scan plan and REAL observed read-version, so
-//! the commit-time OCC validator re-homes and revalidates each collection's
-//! vshard independently — while every other read records a single
-//! collection-scoped entry from the executed plan and the versions its cores
-//! reported. When captures are present the default single-collection entry is
+//! from its own single-collection scan plan, so the commit enlists and
+//! validates each collection's vShard independently — while every other read
+//! records a single collection-scoped entry from the executed plan and the
+//! vShards its cores reported. When captures are present the default single-collection entry is
 //! SKIPPED, because a `HashJoin` plan collapses to the left collection via
 //! `extract_collection` and would miss the build side entirely. This module
 //! hosts that decision so all transports funnel through one implementation
@@ -19,7 +18,7 @@
 use crate::bridge::envelope::PhysicalPlan;
 use crate::control::server::exchange::DistributedReadCapture;
 use crate::control::state::SharedState;
-use crate::types::{ReadVersions, TenantId};
+use crate::types::{ReadShards, TenantId};
 
 use super::connection::SessionId;
 use super::read_set::{ReadCapture, record_read_set};
@@ -27,13 +26,14 @@ use super::store::SessionStore;
 
 /// The observed reads produced by one dispatched response.
 ///
-/// `plan` / `read_versions` / `found` describe the plain single-collection
-/// observation (used when `distributed_reads` is empty).
+/// `plan` / `read_vshards` / `found` describe the plain single-collection
+/// observation (used when `distributed_reads` is empty). `read_vshards`
+/// names the vShards the read's cores reported.
 /// `distributed_reads`, when non-empty, carries the per-collection captures of a
 /// distributed gather/shuffle read and takes precedence over the plain fields.
 pub struct ResponseReads<'a> {
     pub plan: &'a PhysicalPlan,
-    pub read_versions: &'a ReadVersions,
+    pub read_vshards: &'a ReadShards,
     pub found: bool,
     pub distributed_reads: &'a [DistributedReadCapture],
 }
@@ -42,9 +42,9 @@ pub struct ResponseReads<'a> {
 ///
 /// Protocol-neutral: pgwire and native direct-ops both call this after a read
 /// returns. With distributed captures present, records one entry per capture
-/// from its own scan plan and read-version; otherwise records the single plain
-/// entry. Delegates every entry to [`record_read_set`], which still applies the
-/// session's own-write floor and drops the entry outside a transaction block.
+/// from its own scan plan; otherwise records the single plain entry. Delegates
+/// every entry to [`record_read_set`], which drops the entry outside a
+/// transaction block.
 pub async fn record_reads_for_response(
     state: &SharedState,
     sessions: &SessionStore,
@@ -61,7 +61,7 @@ pub async fn record_reads_for_response(
                 tenant_id,
                 ReadCapture {
                     plan: &cap.scan_plan,
-                    read_versions: &cap.read_versions,
+                    read_vshards: &cap.read_vshards,
                     found: false,
                 },
             )
@@ -75,7 +75,7 @@ pub async fn record_reads_for_response(
             tenant_id,
             ReadCapture {
                 plan: reads.plan,
-                read_versions: reads.read_versions,
+                read_vshards: reads.read_vshards,
                 found: reads.found,
             },
         )

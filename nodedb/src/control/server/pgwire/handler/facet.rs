@@ -46,6 +46,7 @@ pub(super) async fn execute_facet_counts_sql(
         build_filter_bytes(&parsed.filter)?
     };
 
+    let (system_time, txn_id) = facet_read_scope(handler, session_id).await?;
     let task = PhysicalTask {
         tenant_id,
         vshard_id: vshard,
@@ -55,9 +56,10 @@ pub(super) async fn execute_facet_counts_sql(
             filters: filter_bytes,
             fields: parsed.fields,
             limit_per_facet: parsed.limit_per_facet,
+            system_time,
         }),
         post_set_op: PostSetOp::None,
-        txn_id: None,
+        txn_id,
     };
 
     let resp = handler
@@ -109,6 +111,7 @@ pub(super) async fn execute_search_with_facets_sql(
         build_filter_bytes(&filter_text)?
     };
 
+    let (system_time, txn_id) = facet_read_scope(handler, session_id).await?;
     let facet_task = PhysicalTask {
         tenant_id,
         vshard_id: vshard,
@@ -118,9 +121,10 @@ pub(super) async fn execute_search_with_facets_sql(
             filters: filter_bytes,
             fields: parsed.facets,
             limit_per_facet: 0, // All values.
+            system_time,
         }),
         post_set_op: PostSetOp::None,
-        txn_id: None,
+        txn_id,
     };
 
     let facet_resp = handler
@@ -174,6 +178,34 @@ struct SearchWithFacetsArgs {
 
 /// Parse `SELECT FACET_COUNTS(collection => 'name', filter => 'pred', fields => ['a','b'])`.
 /// Whether the session's reads must be linearizable.
+/// The scope and transaction a facet count reads in. Inside a transaction
+/// block it reads the block's snapshot with the block's staged writes, as
+/// every other read of the block does. Outside one it reads the current
+/// state.
+async fn facet_read_scope(
+    handler: &NodeDbPgHandler,
+    session_id: SessionId,
+) -> PgWireResult<(nodedb_types::SystemTimeScope, Option<crate::types::TxnId>)> {
+    let snapshot = crate::control::server::shared::session::ensure_txn_snapshot(
+        &handler.sessions,
+        session_id,
+        &handler.state,
+    )
+    .await
+    .map_err(|error| {
+        let (severity, code, message) = error_to_sqlstate(&error);
+        PgWireError::UserError(Box::new(ErrorInfo::new(
+            severity.to_owned(),
+            code.to_owned(),
+            message,
+        )))
+    })?;
+    Ok(match snapshot {
+        Some(snapshot) => (snapshot.scope(), handler.sessions.tx_id(session_id)),
+        None => (nodedb_types::SystemTimeScope::Current, None),
+    })
+}
+
 fn strong_read(handler: &NodeDbPgHandler, session_id: SessionId) -> bool {
     handler
         .sessions

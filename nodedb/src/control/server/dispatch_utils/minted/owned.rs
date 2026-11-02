@@ -43,6 +43,9 @@ pub(crate) struct OwnedWait {
     /// Where the final response goes when it arrives after the caller
     /// stopped waiting.
     pub late: Option<oneshot::Sender<Response>>,
+    /// The write's ordinal reservation, held until the task ends: the final
+    /// response arrived, or the channel closed without one.
+    pub reservation: Option<crate::control::read_cut::OrdinalReservation>,
 }
 
 /// What the owned task reports to the caller.
@@ -120,7 +123,10 @@ async fn wait_and_close(
         deadline,
         collect,
         late,
+        reservation,
     } = wait;
+    // Released when the task ends, after the write's final response.
+    let _reservation = reservation;
     let forward = |final_response: Option<Response>| {
         if let (Some(late), Some(response)) = (late, final_response) {
             let _ = late.send(response);
@@ -221,7 +227,7 @@ mod tests {
                 detail: "duplicate key".into(),
             })),
             stage_vote: None,
-            read_versions: crate::types::ReadVersions::new(),
+            read_vshards: crate::types::ReadShards::new(),
             write_set: Vec::new(),
         }
     }
@@ -236,6 +242,45 @@ mod tests {
                 max_result_bytes: 1 << 20,
             },
             late: None,
+            reservation: None,
+        }
+    }
+
+    /// A write's ordinal reservation stays open past the caller's deadline,
+    /// until the final response arrives, and releases then.
+    #[tokio::test]
+    async fn the_reservation_releases_at_the_final_response() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal = Arc::new(WalManager::open_for_testing(&dir.path().join("wal")).expect("wal"));
+        let floor = OutcomeFloor::new();
+        let tracker = RequestTracker::new();
+        let rx = tracker.register(RequestId::new(5));
+        let (minted, _lsn) = minted_record(&wal, &floor);
+        let reservations = crate::control::read_cut::OrdinalReservations::new();
+        let (ordinal, reservation) = reservations.reserve_with(|| Some(7));
+        let report = spawn_owned_wait(
+            OwnedWait {
+                reservation,
+                ..wait(&wal, Instant::now() + Duration::from_millis(20))
+            },
+            rx,
+            minted,
+        );
+        let outcome = report.recv().await.expect("report");
+        assert!(matches!(outcome, OwnedResponse::DeadlineExceeded));
+        assert!(
+            reservations.blocking(ordinal.expect("drawn")).is_some(),
+            "the write has not applied yet"
+        );
+
+        let mut ok = refusal(5);
+        ok.status = Status::Ok;
+        ok.error_code = None;
+        assert!(tracker.complete(ok));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while reservations.blocking(7).is_some() {
+            assert!(Instant::now() < deadline, "the reservation never released");
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
     }
 

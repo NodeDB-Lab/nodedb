@@ -29,6 +29,7 @@ pub(crate) async fn build_point_get(
             key: doc_id.into_bytes(),
             rls_filters: Vec::new(),
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         })),
         Some(CollectionType::Columnar(ColumnarProfile::Timeseries { .. })) => {
             Err(crate::Error::BadRequest {
@@ -225,6 +226,7 @@ fn edge_bearing_key_delete(
         // Filled in by the materialized-sum resolution pass.
         resolved_sum_targets: Vec::new(),
         declared_primary_key,
+        system_time: nodedb_types::SystemTimeScope::Current,
     }))
 }
 

@@ -5,4 +5,4 @@ pub mod modes;
 pub mod tokens;
 
 pub use self::classify::{TxnControl, classify};
-pub use self::modes::{IsolationLevel, TxnModes, unsupported_isolation_message};
+pub use self::modes::{IsolationLevel, TxnModes};

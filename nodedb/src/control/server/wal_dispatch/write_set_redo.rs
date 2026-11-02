@@ -369,6 +369,7 @@ fn entry_vshard(entry: &WriteSetEntry, target: &WriteSetTarget<'_>) -> crate::Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bridge::envelope::RowVersion;
     use crate::wal::manager::{NO_APPLY_KEY, WalManager};
     use nodedb_physical::physical_plan::ReturningSpec;
     use nodedb_types::sync::wire::SyncProvenance;
@@ -457,6 +458,7 @@ mod tests {
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
             resolved_sum_targets: Vec::new(),
             declared_primary_key: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         assert_eq!(plan_post_apply_redo(&plan).as_deref(), Some("docs"));
     }
@@ -483,8 +485,13 @@ mod tests {
         let wal = open_wal(dir.path());
         let origin = put_forward(&wal);
         let entries = vec![
-            WriteSetEntry::put(9, RowIdentity::from_user_key("order-1"), vec![1, 2, 3]),
-            WriteSetEntry::delete(10, RowIdentity::for_surrogate(Surrogate::new(10))),
+            WriteSetEntry::put(
+                9,
+                RowIdentity::from_user_key("order-1"),
+                vec![1, 2, 3],
+                crate::bridge::envelope::RowVersion::open(30),
+            ),
+            WriteSetEntry::delete(10, RowIdentity::for_surrogate(Surrogate::new(10)), 31),
         ];
         append_group_parts(appender(&wal), docs_target(forward(origin)), &entries)
             .expect("append")
@@ -494,22 +501,29 @@ mod tests {
         assert_eq!(parts.len(), 1);
         let (_, part) = &parts[0];
         assert_eq!(part.group, WriteGroup::part_of(origin.as_u64(), 1, 1));
-        let (collection, document_id, value, _prov, surrogate) =
-            zerompk::from_msgpack::<(String, String, Vec<u8>, Option<SyncProvenance>, u32)>(
-                &part.ops[0].payload,
-            )
-            .expect("decode put");
+        type StampedPut = (
+            String,
+            String,
+            Vec<u8>,
+            Option<SyncProvenance>,
+            u32,
+            i64,
+            i64,
+            i64,
+        );
+        let (collection, document_id, value, _prov, surrogate, _, _, _) =
+            zerompk::from_msgpack::<StampedPut>(&part.ops[0].payload).expect("decode put");
         assert_eq!(
             (collection.as_str(), document_id.as_str(), value, surrogate),
             ("docs", "order-1", vec![1, 2, 3], 9),
             "a declared key journals verbatim"
         );
-        let (_, document_id, _prov, surrogate) =
-            zerompk::from_msgpack::<(String, String, Option<SyncProvenance>, u32)>(
+        let (_, document_id, _prov, surrogate, sys_from) =
+            zerompk::from_msgpack::<(String, String, Option<SyncProvenance>, u32, i64)>(
                 &part.ops[1].payload,
             )
             .expect("decode delete");
-        assert_eq!((document_id.as_str(), surrogate), ("10", 10));
+        assert_eq!((document_id.as_str(), surrogate, sys_from), ("10", 10, 31));
     }
 
     /// An empty write set closes its group with one part with no rows.
@@ -587,9 +601,19 @@ mod tests {
         let origin = put_forward(&wal);
         let target = docs_target(forward(origin));
         let entries = vec![
-            WriteSetEntry::put(1, RowIdentity::from_user_key("a"), vec![1; 8]),
-            WriteSetEntry::put(2, RowIdentity::from_user_key("t"), vec![2; 8])
-                .in_collection("totals".to_string()),
+            WriteSetEntry::put(
+                1,
+                RowIdentity::from_user_key("a"),
+                vec![1; 8],
+                RowVersion::open(1),
+            ),
+            WriteSetEntry::put(
+                2,
+                RowIdentity::from_user_key("t"),
+                vec![2; 8],
+                RowVersion::open(1),
+            )
+            .in_collection("totals".to_string()),
         ];
         let parts = plan_group_parts(&target, &entries, wal.max_payload()).expect("plan");
         let count = parts.count().expect("count");
@@ -618,6 +642,7 @@ mod tests {
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             resolved_sum_targets: Vec::new(),
             declared_primary_key: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         let appended = append_group_origin(WalAppendRequest {
             wal: appender(&wal),
@@ -696,9 +721,19 @@ mod tests {
         let origin = put_forward(&wal);
         let target_collection = "totals";
         let entries = vec![
-            WriteSetEntry::put(1, RowIdentity::from_user_key("a"), vec![1]),
-            WriteSetEntry::put(2, RowIdentity::from_user_key("t"), vec![2])
-                .in_collection(target_collection.to_string()),
+            WriteSetEntry::put(
+                1,
+                RowIdentity::from_user_key("a"),
+                vec![1],
+                RowVersion::open(1),
+            ),
+            WriteSetEntry::put(
+                2,
+                RowIdentity::from_user_key("t"),
+                vec![2],
+                RowVersion::open(1),
+            )
+            .in_collection(target_collection.to_string()),
         ];
         let expected =
             nodedb_types::CollectionKey::from_qualified_str(DatabaseId::DEFAULT, target_collection)
@@ -740,10 +775,13 @@ mod tests {
         let wal = open_wal(dir.path());
         let origin = put_forward(&wal);
         let entries = vec![
-            WriteSetEntry::put(9, RowIdentity::from_user_key("r"), vec![1])
-                .versioned(Some(crate::bridge::envelope::RowVersion::open(1_000))),
-            WriteSetEntry::delete(10, RowIdentity::from_user_key("s"))
-                .versioned(Some(crate::bridge::envelope::RowVersion::open(2_000))),
+            WriteSetEntry::put(
+                9,
+                RowIdentity::from_user_key("r"),
+                vec![1],
+                RowVersion::open(1_000),
+            ),
+            WriteSetEntry::delete(10, RowIdentity::from_user_key("s"), 2_000),
         ];
         append_group_parts(appender(&wal), docs_target(forward(origin)), &entries).expect("append");
 
@@ -781,8 +819,12 @@ mod tests {
         let wal = open_wal(dir.path());
         let origin = put_forward(&wal);
         let entries = vec![
-            WriteSetEntry::put(9, RowIdentity::from_user_key("r"), vec![7])
-                .versioned(Some(crate::bridge::envelope::RowVersion::open(5))),
+            WriteSetEntry::put(
+                9,
+                RowIdentity::from_user_key("r"),
+                vec![7],
+                RowVersion::open(5),
+            ),
             WriteSetEntry::cancel_forward(9, RowIdentity::from_user_key("r")),
         ];
         let last = append_group_parts(appender(&wal), docs_target(forward(origin)), &entries)

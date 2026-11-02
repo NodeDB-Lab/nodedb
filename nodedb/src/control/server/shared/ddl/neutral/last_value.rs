@@ -9,7 +9,9 @@
 //! ```
 //!
 //! These dispatch `MetaOp::QueryLastValues` / `QueryLastValue` to the Data Plane
-//! and return results as protocol-neutral rows.
+//! and return results as protocol-neutral rows. Inside a transaction block
+//! both read at the block's snapshot, so a value committed after it stays
+//! invisible to the block.
 
 use std::time::Duration;
 
@@ -18,12 +20,25 @@ use serde_json::{Map, Value as JsonValue};
 use crate::bridge::envelope::PhysicalPlan;
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::response_shape::types::{DdlColType, ShapedRows};
-use crate::control::server::shared::session::StatementDeadline;
+use crate::control::server::shared::session::{DmlTxnCtx, StatementDeadline};
 use crate::control::state::SharedState;
 use crate::types::DatabaseId;
 use nodedb_physical::physical_plan::MetaOp;
 
 use super::super::result::{DdlError, DdlResult};
+
+/// The system time a last-value read of `txn_ctx`'s statement reads at:
+/// the block's snapshot inside a transaction block, else the current state.
+async fn read_scope(
+    state: &SharedState,
+    txn_ctx: &DmlTxnCtx<'_>,
+) -> Result<nodedb_types::SystemTimeScope, DdlError> {
+    let snapshot = txn_ctx
+        .txn_snapshot(state)
+        .await
+        .map_err(|e| DdlError::from_error_in_context("transaction snapshot", &e))?;
+    Ok(snapshot.map_or(nodedb_types::SystemTimeScope::Current, |cut| cut.scope()))
+}
 
 /// `SELECT LAST_VALUES('<collection>')` — returns all cached last values.
 pub async fn query_last_values(
@@ -31,9 +46,11 @@ pub async fn query_last_values(
     identity: &AuthenticatedIdentity,
     database_id: DatabaseId,
     collection: &str,
+    txn_ctx: &DmlTxnCtx<'_>,
 ) -> Result<Vec<DdlResult>, DdlError> {
     let plan = PhysicalPlan::Meta(MetaOp::QueryLastValues {
         collection: nodedb_types::QualifiedCollection::new(database_id, collection),
+        system_time: read_scope(state, txn_ctx).await?,
     });
 
     // Only reached through `shared::ddl::dispatch`, which native/pgwire/HTTP
@@ -102,10 +119,12 @@ pub async fn query_last_value(
     database_id: DatabaseId,
     collection: &str,
     series_id: u64,
+    txn_ctx: &DmlTxnCtx<'_>,
 ) -> Result<Vec<DdlResult>, DdlError> {
     let plan = PhysicalPlan::Meta(MetaOp::QueryLastValue {
         collection: nodedb_types::QualifiedCollection::new(database_id, collection),
         series_id,
+        system_time: read_scope(state, txn_ctx).await?,
     });
 
     // Only reached through `shared::ddl::dispatch`, which native/pgwire/HTTP

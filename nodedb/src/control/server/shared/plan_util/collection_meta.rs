@@ -67,7 +67,7 @@ pub(super) fn meta_collection(op: &MetaOp) -> Option<&str> {
         | MetaOp::TemporalPurgeDocumentStrict { collection, .. }
         | MetaOp::TemporalPurgeColumnar { collection, .. }
         | MetaOp::TemporalPurgeCrdt { collection, .. }
-        | MetaOp::QueryLastValues { collection }
+        | MetaOp::QueryLastValues { collection, .. }
         | MetaOp::QueryLastValue { collection, .. }
         | MetaOp::RebuildIndex { collection, .. } => Some(collection.as_str()),
         // The staged plan is the write verbatim.
@@ -94,6 +94,10 @@ pub(super) fn meta_collection(op: &MetaOp) -> Option<&str> {
         | MetaOp::PurgeTenant { .. } => None,
         // Every collection homed on vShards this node left, in every tenant.
         MetaOp::PurgeDepartedVShards { .. } => None,
+        // Every collection's history on the core, in every tenant.
+        MetaOp::PurgeVersionsBelow { .. } => None,
+        // Every KV collection's due expiries on the core, in every tenant.
+        MetaOp::KvDueExpiries { .. } => None,
         // The continuous-aggregate registry: no row is read or written.
         MetaOp::RegisterContinuousAggregate { .. }
         | MetaOp::UnregisterContinuousAggregate { .. }
@@ -112,13 +116,12 @@ pub(super) fn meta_collection(op: &MetaOp) -> Option<&str> {
         MetaOp::PutSynonymGroup { .. } | MetaOp::DeleteSynonymGroup { .. } => None,
         // The catalog-wide user-defined CRS set: no collection.
         MetaOp::SetCustomCrsSet { .. } => None,
-        // Transaction control and version probes name no collection.
+        // Transaction control names no collection.
         MetaOp::DropTxnOverlay { .. }
         | MetaOp::MarkSavepoint { .. }
         | MetaOp::RollbackToSavepoint { .. }
         | MetaOp::CalvinDrop { .. }
-        | MetaOp::CalvinResolve { .. }
-        | MetaOp::HomeVersions { .. } => None,
+        | MetaOp::CalvinResolve { .. } => None,
     }
 }
 
@@ -181,6 +184,7 @@ mod tests {
             limit: None,
             offset: 0,
             distinct: false,
+            system_time: nodedb_types::SystemTimeScope::Current,
         })
     }
 
@@ -196,6 +200,7 @@ mod tests {
             lateral_alias: "l".into(),
             projection: Vec::new(),
             left_join: false,
+            inner_system_time: nodedb_types::SystemTimeScope::Current,
         })
     }
 
@@ -210,6 +215,7 @@ mod tests {
             projection: Vec::new(),
             left_join: false,
             outer_row_cap: 0,
+            inner_system_time: nodedb_types::SystemTimeScope::Current,
         })
     }
 
@@ -228,6 +234,7 @@ mod tests {
                     right_rls_filters: Vec::new(),
                     left_input: None,
                     right_input: None,
+                    system_time: nodedb_types::SystemTimeScope::Current,
                 }),
                 PhysicalPlan::Query(QueryOp::RecursiveScan {
                     collection: docs(),
@@ -237,6 +244,7 @@ mod tests {
                     max_iterations: 1,
                     distinct: false,
                     limit: 0,
+                    system_time: nodedb_types::SystemTimeScope::Current,
                 }),
             ],
             docs().as_str(),
@@ -299,10 +307,14 @@ mod tests {
                     collection: docs(),
                     cutoff_system_ms: 0,
                 }),
-                PhysicalPlan::Meta(MetaOp::QueryLastValues { collection: docs() }),
+                PhysicalPlan::Meta(MetaOp::QueryLastValues {
+                    collection: docs(),
+                    system_time: nodedb_types::SystemTimeScope::Current,
+                }),
                 PhysicalPlan::Meta(MetaOp::QueryLastValue {
                     collection: docs(),
                     series_id: 7,
+                    system_time: nodedb_types::SystemTimeScope::Current,
                 }),
                 PhysicalPlan::Meta(MetaOp::RebuildIndex {
                     collection: docs(),

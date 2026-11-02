@@ -19,6 +19,7 @@ use crate::types::TxnId;
 use nodedb_physical::physical_plan::{KvOp, PhysicalPlan};
 use nodedb_physical::physical_task::PhysicalTask;
 
+use super::copy_source::{clone_source_view, copy_source_key};
 use super::probes::{
     ProbeTarget, RawTarget, dispatch_data_plane_raw, fetch_kv_source_value, probe_kv_key_in_target,
 };
@@ -138,35 +139,38 @@ pub(super) async fn intercept_kv_clone_write(
     }
 
     let kv_key_str = String::from_utf8_lossy(&kv_key).into_owned();
-    // A key this transaction already tombstoned is gone from the clone: the
-    // FieldSet finds no row, as the committed tombstone will make it find.
+    // A key this transaction tombstoned, or a committed tombstone, is gone
+    // from the clone: the FieldSet finds no row, and the source row is never
+    // copied back.
     let qualified =
         crate::control::planner::sql_plan_convert::convert::db_qualified(db_id, coll_name);
     if buffered_clone_suppressions(&qualified)
         .kv_keys
         .contains(&kv_key_str)
+        || catalog
+            .is_kv_clone_tombstoned(&qualified, &kv_key_str)
+            .map_err(|e| write_err(format!("clone kv write: tombstone lookup: {e}")))?
     {
         return Ok(KvCloneStep::Passthrough);
     }
 
-    // Fetch source KV row and copy it up to target.
-    let source_db_id = origin.source_database;
-    let source_coll = origin.source_collection.as_str();
-    let source_coll_qualified =
-        crate::control::planner::sql_plan_convert::convert::db_qualified(source_db_id, source_coll);
-
-    let source_value = fetch_kv_source_value(
+    // Fetch the source version the clone reads, and copy it up to target.
+    let source_coll_qualified = crate::control::planner::sql_plan_convert::convert::db_qualified(
+        origin.source_database,
+        origin.source_collection.as_str(),
+    );
+    let view = clone_source_view(
         state,
-        identity,
         tenant_id,
-        source_db_id,
+        origin,
+        desc.bitemporal,
         &source_coll_qualified,
-        &kv_key,
-    )
-    .await
-    .map_err(|e| write_err(format!("clone kv copyup fetch: {e}")))?;
+    );
+    let source = copy_source_key(state, identity, view, &kv_key)
+        .await
+        .map_err(|e| write_err(format!("clone kv copyup fetch: {e}")))?;
 
-    let Some(source_value) = source_value else {
+    let Some(source) = source else {
         // Row absent in source — let normal FieldSet run (no-op or error from DP).
         return Ok(KvCloneStep::Passthrough);
     };
@@ -176,8 +180,7 @@ pub(super) async fn intercept_kv_clone_write(
         tenant_id,
         target_db_id: db_id,
         target_collection: coll_name,
-        kv_key,
-        source_value_bytes: source_value,
+        source,
     })
     .await
     .map_err(|e| write_err(format!("clone kv copyup: {e}")))?;
@@ -281,18 +284,29 @@ async fn intercept_kv_clone_delete(
     // source row (if any) must always be hidden in this clone after the user
     // has issued a DELETE. `source_only_hidden` counts keys the tombstone
     // alone removed from this clone's view: absent from the target but present
-    // in the source, and not already tombstoned by this transaction. A key in
-    // neither target nor source removed nothing.
+    // in the source, and not already tombstoned by this transaction or a
+    // committed delete. A key in neither target nor source removed nothing.
     let mut keys_in_target: Vec<Vec<u8>> = Vec::new();
     let mut source_only_hidden = 0u64;
-    let source_db_id = origin.source_database;
     let source_coll_qualified = crate::control::planner::sql_plan_convert::convert::db_qualified(
-        source_db_id,
+        origin.source_database,
         origin.source_collection.as_str(),
+    );
+    let view = clone_source_view(
+        state,
+        tenant_id,
+        origin,
+        desc.bitemporal,
+        &source_coll_qualified,
     );
     let qualified =
         crate::control::planner::sql_plan_convert::convert::db_qualified(db_id, coll_name);
-    let already_hidden = buffered_clone_suppressions(&qualified).kv_keys;
+    let mut already_hidden = buffered_clone_suppressions(&qualified).kv_keys;
+    already_hidden.extend(
+        catalog
+            .list_kv_clone_tombstones(&qualified)
+            .map_err(|e| write_err(format!("clone kv delete: tombstone list: {e}")))?,
+    );
     for key in keys {
         let key_str = String::from_utf8_lossy(key).into_owned();
         let key_in_target = probe_kv_key_in_target(
@@ -310,16 +324,9 @@ async fn intercept_kv_clone_delete(
         .map_err(|e| write_err(format!("clone kv delete probe: {e}")))?;
 
         if !key_in_target && !already_hidden.contains(&key_str) {
-            let source_value = fetch_kv_source_value(
-                state,
-                identity,
-                tenant_id,
-                source_db_id,
-                &source_coll_qualified,
-                key,
-            )
-            .await
-            .map_err(|e| write_err(format!("clone kv delete source probe: {e}")))?;
+            let source_value = fetch_kv_source_value(state, identity, view, key)
+                .await
+                .map_err(|e| write_err(format!("clone kv delete source probe: {e}")))?;
             if source_value.is_some() {
                 source_only_hidden += 1;
             }

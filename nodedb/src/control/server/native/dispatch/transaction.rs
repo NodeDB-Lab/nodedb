@@ -63,6 +63,7 @@ impl TxnDataPlane for NativeTxnDp<'_> {
                     // `dispatch_task_no_wal`'s equivalent limitation.
                     resolved_now_ms: None,
                     minted: None,
+                    system_ordinal: None,
                 },
             )
             .await
@@ -75,8 +76,7 @@ impl TxnDataPlane for NativeTxnDp<'_> {
 }
 
 /// Handle `BEGIN` / `START TRANSACTION` and `OpCode::Begin`. A refused
-/// isolation level or `DEFERRABLE` fails with SQLSTATE 0A000 before the
-/// block opens, with the message pgwire sends. An access mode is stored the
+/// `DEFERRABLE` fails with SQLSTATE 0A000 before the block opens, with the message pgwire sends. An access mode is stored the
 /// way `SET TRANSACTION` stores it.
 pub(crate) fn handle_begin(ctx: &DispatchCtx<'_>, seq: u64, modes: &TxnModes) -> NativeResponse {
     if let Some(message) = modes.refusal("BEGIN") {
@@ -86,7 +86,7 @@ pub(crate) fn handle_begin(ctx: &DispatchCtx<'_>, seq: u64, modes: &TxnModes) ->
     // session. `SessionStore::begin` no-ops when the peer has no entry, so
     // the session must exist first.
     ctx.sessions.ensure_session(*ctx.peer_addr);
-    match lifecycle::run_begin(ctx.sessions, ctx.peer_addr.into(), ctx.state) {
+    match lifecycle::run_begin(ctx.sessions, ctx.peer_addr.into()) {
         Ok(()) => {
             if let Some(access) = modes.access {
                 ctx.sessions.set_parameter(

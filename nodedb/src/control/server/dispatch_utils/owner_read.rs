@@ -34,7 +34,7 @@ use crate::control::gateway::live_leaders::resolve_live_decision;
 use crate::control::security::identity::{Permission, required_permission};
 use crate::control::server::payload_merge::merge_msgpack_arrays;
 use crate::control::state::SharedState;
-use crate::types::{DatabaseId, Lsn, ReadVersions, RequestId, TenantId, TraceId, TxnId, VShardId};
+use crate::types::{DatabaseId, Lsn, ReadShards, RequestId, TenantId, TraceId, TxnId, VShardId};
 
 /// Where one read runs.
 pub(crate) struct OwnedReadScope {
@@ -181,7 +181,7 @@ pub(crate) fn owner_response(
             Status::Error,
             Vec::new(),
             watermark_lsn,
-            outcome.read_versions,
+            outcome.read_vshards,
             Some(ErrorCode::NotFound),
         ));
     }
@@ -195,7 +195,7 @@ pub(crate) fn owner_response(
         Status::Ok,
         payload,
         watermark_lsn,
-        outcome.read_versions,
+        outcome.read_vshards,
         None,
     ))
 }
@@ -251,7 +251,7 @@ pub(crate) fn ok_payload_response(payload: Payload) -> Response {
         Status::Ok,
         payload.to_vec(),
         Lsn::ZERO,
-        ReadVersions::new(),
+        ReadShards::new(),
         None,
     )
 }
@@ -263,7 +263,7 @@ pub(crate) fn not_found_response() -> Response {
         Status::Error,
         Vec::new(),
         Lsn::ZERO,
-        ReadVersions::new(),
+        ReadShards::new(),
         Some(ErrorCode::NotFound),
     )
 }
@@ -272,7 +272,7 @@ fn response(
     status: Status,
     payload: Vec<u8>,
     watermark_lsn: Lsn,
-    read_versions: ReadVersions,
+    read_vshards: ReadShards,
     error_code: Option<ErrorCode>,
 ) -> Response {
     Response {
@@ -284,7 +284,7 @@ fn response(
         watermark_lsn,
         error_code: error_code.map(Box::new),
         stage_vote: None,
-        read_versions,
+        read_vshards,
         write_set: Vec::new(),
     }
 }
@@ -298,34 +298,25 @@ mod tests {
         GatewayOutcome {
             payloads: Vec::new(),
             shard_watermarks: vec![(VShardId::new(3), Lsn::new(7))],
-            read_versions: ReadVersions::single(
-                VShardId::new(3),
-                nodedb_types::WriteVersion::logged(1, 40),
-            ),
+            read_vshards: ReadShards::single(VShardId::new(3)),
             not_found,
         }
     }
 
     /// A remote read that found no row answers like a local miss, with the
-    /// version it observed for the read-set.
+    /// vShard it read for the read-set.
     #[test]
-    fn an_owner_miss_keeps_its_verdict_and_its_version() {
+    fn an_owner_miss_keeps_its_verdict_and_its_vshard() {
         let response = owner_response(Ok(outcome(true))).expect("an owner miss answers");
         assert_eq!(response.status, Status::Error);
         assert_eq!(response.error_code.as_deref(), Some(&ErrorCode::NotFound));
-        assert_eq!(
-            response.read_versions.of(VShardId::new(3)),
-            Some(nodedb_types::WriteVersion::logged(1, 40))
-        );
+        assert!(response.read_vshards.contains(VShardId::new(3)));
     }
 
     #[test]
-    fn an_owner_answer_keeps_its_version() {
+    fn an_owner_answer_keeps_its_vshard() {
         let response = owner_response(Ok(outcome(false))).expect("an owner answer");
         assert_eq!(response.status, Status::Ok);
-        assert_eq!(
-            response.read_versions.of(VShardId::new(3)),
-            Some(nodedb_types::WriteVersion::logged(1, 40))
-        );
+        assert!(response.read_vshards.contains(VShardId::new(3)));
     }
 }

@@ -254,6 +254,17 @@ pub(crate) fn encode_kv_expire(
     )
 }
 
+/// Encode a `kv_reap` WAL payload: `("kv_reap", collection, key,
+/// expire_at_ms)`. Replay reaps the key only while it still holds exactly
+/// this expiry, as the live apply did at the same point in log order.
+pub(crate) fn encode_kv_reap(
+    collection: &str,
+    key: &[u8],
+    expire_at_ms: u64,
+) -> crate::Result<Vec<u8>> {
+    encode("reap", &("kv_reap", collection, key, expire_at_ms))
+}
+
 /// Encode a `kv_persist` WAL payload: `("kv_persist", collection, key)`.
 pub(crate) fn encode_kv_persist(collection: &str, key: &[u8]) -> crate::Result<Vec<u8>> {
     encode("persist", &("kv_persist", collection, key))

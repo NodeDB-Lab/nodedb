@@ -131,6 +131,15 @@ pub async fn try_dispatch(
     // arm. It must precede the general graph dispatch below, which does not
     // own `MatchQuery`.
     if let NodedbStatement::Graph(GraphStmt::MatchQuery { body, temporal }) = &stmt {
+        // A MATCH inside a transaction block reads the block's snapshot.
+        let temporal = match crate::control::server::graph_dispatch::block_graph_temporal(
+            state, txn_ctx, *temporal,
+        )
+        .await
+        {
+            Ok(temporal) => temporal,
+            Err(e) => return Some(Err(DdlError::from_error(&e))),
+        };
         // Read-your-own-writes: a MATCH inside an explicit transaction must
         // observe the session's staged edge writes/deletes, so resolve the
         // active `TxnId` (idle sessions → `None`, an autocommit read) and hand
@@ -144,7 +153,7 @@ pub async fn try_dispatch(
             scope: nodedb_physical::physical_plan::GraphReadScope::default(),
         };
         return Some(
-            match_ops::match_query(state, identity, database_id, body, temporal, read).await,
+            match_ops::match_query(state, identity, database_id, body, &temporal, read).await,
         );
     }
 

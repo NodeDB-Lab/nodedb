@@ -4,8 +4,8 @@
 //!
 //! Outside a transaction block a read asks the index's registered tree.
 //! Inside one it becomes `KvOp::SortedIndexTxnRead`. The Data Plane answers
-//! that from a transaction-local tree over the collection's base rows and the
-//! transaction's staged writes. An index this transaction created has no tree
+//! that from a transaction-local tree over the collection's base rows at the
+//! block's snapshot and the transaction's staged writes. An index this transaction created has no tree
 //! before COMMIT, so its definition travels with the read. The definition
 //! comes from the index build that the transaction deferred to COMMIT.
 
@@ -14,7 +14,7 @@ use nodedb_types::QualifiedCollection;
 
 use crate::control::server::shared::session::ddl_buffer;
 use crate::control::server::shared::session::ddl_effect::DeferredDdlEffect;
-use crate::control::server::shared::session::{DmlTxnCtx, TransactionState};
+use crate::control::server::shared::session::{DmlTxnCtx, TransactionState, TxnSnapshotCut};
 use crate::types::{DatabaseId, TenantId, TxnId};
 
 /// One sorted-index read: the plan and the transaction whose overlay it reads.
@@ -31,6 +31,9 @@ pub(super) struct ReadScope<'a> {
     /// The collection the index covers, resolved by the read gate.
     pub collection: &'a str,
     pub index_name: &'a str,
+    /// The block snapshot the read ranks inside a block, `None` otherwise
+    /// (`DmlTxnCtx::txn_snapshot`).
+    pub snapshot: Option<TxnSnapshotCut>,
 }
 
 /// The plan for `read`.
@@ -48,20 +51,33 @@ pub(super) fn plan_read(scope: &ReadScope<'_>, read: SortedIndexRead) -> SortedR
             index_name: scope.index_name.to_string(),
             pending: pending_definition(scope.tenant_id, scope.database_id, scope.index_name),
             read,
+            // A system transaction's block reads the current rows with its
+            // staged writes.
+            system_time: scope.snapshot.map_or(
+                nodedb_types::SystemTimeScope::Current,
+                TxnSnapshotCut::scope,
+            ),
         }),
         txn_id: txn_ctx.sessions.tx_id(txn_ctx.session_id),
     }
 }
 
-/// The read outside a transaction block, against the registered tree.
+/// The read outside a transaction block, against the registered tree, at
+/// the newest version of every row.
 fn autocommit_op(index_name: &str, read: SortedIndexRead) -> KvOp {
     let index_name = index_name.to_string();
+    let system_time = nodedb_types::SystemTimeScope::Current;
     match read {
         SortedIndexRead::Rank { primary_key } => KvOp::SortedIndexRank {
             index_name,
             primary_key,
+            system_time,
         },
-        SortedIndexRead::TopK { k } => KvOp::SortedIndexTopK { index_name, k },
+        SortedIndexRead::TopK { k } => KvOp::SortedIndexTopK {
+            index_name,
+            k,
+            system_time,
+        },
         SortedIndexRead::Range {
             score_min,
             score_max,
@@ -69,11 +85,16 @@ fn autocommit_op(index_name: &str, read: SortedIndexRead) -> KvOp {
             index_name,
             score_min,
             score_max,
+            system_time,
         },
-        SortedIndexRead::Count => KvOp::SortedIndexCount { index_name },
+        SortedIndexRead::Count => KvOp::SortedIndexCount {
+            index_name,
+            system_time,
+        },
         SortedIndexRead::Score { primary_key } => KvOp::SortedIndexScore {
             index_name,
             primary_key,
+            system_time,
         },
     }
 }

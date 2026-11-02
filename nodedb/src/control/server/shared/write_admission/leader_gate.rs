@@ -23,13 +23,17 @@
 //! clock once the entry holds its keys. A later write to the same keys is
 //! admitted only after this one lands, so it reserves a later run. Every
 //! replica folds each applied stamp into its clock, so a new leader stamps
-//! above every entry it applied. Every replica installs the stamp the entry
+//! above every entry it applied. The clock also folds the group's ordinal
+//! floor, which a leader gathers from a quorum before its first write, so a
+//! new leader stamps above every read cut an earlier leader closed, whatever
+//! its own clock reads. Every replica installs the stamp the entry
 //! carries, so a version has one system time on every replica.
 
 use std::sync::{Arc, Weak};
 
 use nodedb_cluster::{Admitted, CalvinError, ClusterError, DataProposeGate, ProposeHold};
 
+use crate::control::read_cut::OrdinalReservation;
 use crate::control::state::SharedState;
 use crate::control::wal_replication::decode::decode_parsed_entry;
 use crate::control::wal_replication::{ReplicatedEntry, ReplicatedWrite};
@@ -64,6 +68,7 @@ impl DataProposeGate for LeaderWriteGate {
         vshard_id: u32,
         entry: &[u8],
         deadline: tokio::time::Instant,
+        ordinal_floor: i64,
     ) -> nodedb_cluster::Result<Admitted> {
         // A node that is shutting down proposes nothing its gate must order.
         let Some(state) = self.state.upgrade() else {
@@ -103,7 +108,20 @@ impl DataProposeGate for LeaderWriteGate {
             };
         // Stamped once the entry holds its keys. A refusal past this point
         // drops `hold`, which frees them.
-        let entry = stamp_system_ordinal(&state, &mut entry).map_err(gate_error)?;
+        let (entry, reservation) =
+            stamp_system_ordinal(&state, &mut entry, ordinal_floor).map_err(gate_error)?;
+        // The reservation rides the hold: it stays open until this node
+        // starts the entry's apply, where the apply's own reservation takes
+        // over (`read_cut::reservations`). A propose that fails drops it.
+        let hold = match reservation {
+            Some(reservation) => Some(Box::new(ReservedHold {
+                keys: hold,
+                state: Arc::clone(&state),
+                vshard,
+                reservation,
+            }) as Box<dyn ProposeHold>),
+            None => hold,
+        };
         Ok(Admitted { hold, entry })
     }
 }
@@ -115,15 +133,55 @@ impl DataProposeGate for LeaderWriteGate {
 ///
 /// The leader's stamp replaces any stamp the bytes carry, so a re-proposal
 /// to a new leader stamps from the new leader's clock.
+///
+/// The run is drawn under the reservation registry's lock, and the returned
+/// reservation stays open until the write applied here.
 fn stamp_system_ordinal(
     state: &SharedState,
     entry: &mut ReplicatedEntry,
-) -> crate::Result<Option<Vec<u8>>> {
+    ordinal_floor: i64,
+) -> crate::Result<(Option<Vec<u8>>, Option<OrdinalReservation>)> {
     let Some(span) = entry.write.system_ordinal_span() else {
-        return Ok(None);
+        return Ok((None, None));
     };
-    entry.system_ordinal = state.wal.ordinal_clock().reserve(span);
-    entry.encode().map(Some)
+    let clock = state.wal.ordinal_clock();
+    // The group's floor names every read cut an earlier leader closed. The
+    // clock folds it first, so the run reserved below lies above each one.
+    clock.update_from_remote(ordinal_floor);
+    // A TTL reap ends its version at its expiry instant: the run, and every
+    // later write of the key, lies above it.
+    clock.update_from_remote(entry.write.ordinal_floor());
+    let (ordinal, reservation) = state.read_cut.reservations.reserve(|| clock.reserve(span));
+    entry.system_ordinal = ordinal;
+    Ok((Some(entry.encode()?), Some(reservation)))
+}
+
+/// An admitted entry's keys, if it holds any, and its ordinal reservation.
+/// On landing the keys go to their hold, and the reservation stays open
+/// until this node starts the entry's apply (`AdmissionHolds`).
+struct ReservedHold {
+    keys: Option<Box<dyn ProposeHold>>,
+    state: Arc<SharedState>,
+    vshard: VShardId,
+    reservation: OrdinalReservation,
+}
+
+impl ProposeHold for ReservedHold {
+    fn landed(self: Box<Self>, group_id: u64, log_index: u64) {
+        let ReservedHold {
+            keys,
+            state,
+            vshard,
+            reservation,
+        } = *self;
+        if let Some(keys) = keys {
+            keys.landed(group_id, log_index);
+        }
+        state
+            .calvin
+            .admission_holds
+            .hold_reservation(group_id, log_index, vshard, reservation);
+    }
 }
 
 /// An admitted entry's keys, held until the entry lands in the log.
@@ -202,7 +260,7 @@ pub(crate) fn admit_entry(
     entry: &ReplicatedEntry,
 ) -> crate::Result<WriteAdmission> {
     let database_id = crate::types::DatabaseId::new(entry.database_id);
-    match entry_scope(&entry.write, database_id) {
+    match entry_scope(&entry.write, &entry.incarnations, database_id) {
         EntryScope::Exempt => Ok(WriteAdmission::ExemptRead),
         EntryScope::Collections(collections) => Ok(admit_collections(state, vshard, &collections)),
         EntryScope::Plan => {
@@ -230,8 +288,13 @@ pub(crate) fn admit_entry(
     }
 }
 
-/// The lock scope of `write`, an entry of `database_id`.
-fn entry_scope(write: &ReplicatedWrite, database_id: crate::types::DatabaseId) -> EntryScope {
+/// The lock scope of `write`, an entry of `database_id` that names
+/// `incarnations`.
+fn entry_scope(
+    write: &ReplicatedWrite,
+    incarnations: &[crate::control::wal_replication::CollectionIncarnation],
+    database_id: crate::types::DatabaseId,
+) -> EntryScope {
     match write {
         // Calvin bookkeeping, a backup cut, a topic message, a surrogate
         // binding and an array schema write no row.
@@ -243,16 +306,18 @@ fn entry_scope(write: &ReplicatedWrite, database_id: crate::types::DatabaseId) -
         | ReplicatedWrite::ArraySchema { .. } => EntryScope::Exempt,
         // A Calvin transaction's redo carries its sequencer stamp, and its
         // scheduler holds its locks. A session transaction's redo writes
-        // every collection it names.
-        ReplicatedWrite::TransactionRedo {
-            collections,
-            calvin,
-            ..
-        } => {
+        // every collection and array it names. Each lock takes the name its
+        // writers lock: a collection's plan name, an array's qualified name.
+        ReplicatedWrite::TransactionRedo { calvin, .. } => {
             if calvin.is_some() {
                 EntryScope::Exempt
             } else {
-                EntryScope::Collections(collections.clone())
+                EntryScope::Collections(
+                    incarnations
+                        .iter()
+                        .map(|named| named.collection.clone())
+                        .collect(),
+                )
             }
         }
         // A redo chunk and an abandon write no row: the stream's final entry

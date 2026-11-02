@@ -353,6 +353,7 @@ async fn handle_scan(cmd: &RespCommand, session: &RespSession, state: &SharedSta
         match_pattern,
         sort_keys: Vec::new(),
         surrogate_ceiling: None,
+        system_time: nodedb_types::SystemTimeScope::Current,
     });
 
     match dispatch_kv(state, session, plan).await {
@@ -392,6 +393,7 @@ async fn handle_keys(cmd: &RespCommand, session: &RespSession, state: &SharedSta
         match_pattern: Some(pattern.to_string()),
         sort_keys: Vec::new(),
         surrogate_ceiling: None,
+        system_time: nodedb_types::SystemTimeScope::Current,
     });
 
     match dispatch_kv(state, session, plan).await {
@@ -424,6 +426,7 @@ async fn handle_dbsize(session: &RespSession, state: &SharedState) -> RespValue 
         match_pattern: None,
         sort_keys: Vec::new(),
         surrogate_ceiling: None,
+        system_time: nodedb_types::SystemTimeScope::Current,
     });
 
     match dispatch_kv(state, session, plan).await {

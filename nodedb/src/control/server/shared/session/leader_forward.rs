@@ -125,7 +125,7 @@ pub(crate) async fn forward_to_leader(
     let payload = outcome.payloads.into_iter().next().unwrap_or_default();
     let mut resp = bare_ok_response(RequestId::new(0));
     resp.payload = Payload::from_vec(payload);
-    resp.read_versions = outcome.read_versions;
+    resp.read_vshards = outcome.read_vshards;
     Ok(resp)
 }
 

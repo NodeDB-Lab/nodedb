@@ -11,24 +11,17 @@ use crate::control::server::shared::ddl::result::DdlError;
 
 use super::dispatch::ArrayLoadCtx;
 
-/// Picks each row's chunk bucket: its tile's vShard in a cluster, so each
-/// chunk reaches one shard. A node with no cluster topology holds every
-/// tile in one vShard, so every row shares one bucket.
-pub(super) enum CellRouter {
-    Single,
-    Cluster {
-        schema: Box<ArraySchema>,
-        prefix_bits: u8,
-        /// The last tile key, so a run of cells in one tile encodes once.
-        memo: TilePrefixMemo,
-    },
+/// Picks each row's chunk bucket: its tile's vShard, so each chunk reaches
+/// one shard.
+pub(super) struct CellRouter {
+    schema: Box<ArraySchema>,
+    prefix_bits: u8,
+    /// The last tile key, so a run of cells in one tile encodes once.
+    memo: TilePrefixMemo,
 }
 
 impl CellRouter {
     pub(super) fn for_array(ctx: &ArrayLoadCtx<'_>, array: &str) -> Result<Self, DdlError> {
-        if ctx.state.cluster_topology.is_none() {
-            return Ok(CellRouter::Single);
-        }
         let entry = {
             let catalog = ctx
                 .state
@@ -43,7 +36,7 @@ impl CellRouter {
         };
         let schema: ArraySchema = zerompk::from_msgpack(&entry.schema_msgpack)
             .map_err(|e| DdlError::internal(format!("COPY: array '{array}' schema decode: {e}")))?;
-        Ok(CellRouter::Cluster {
+        Ok(CellRouter {
             schema: Box::new(schema),
             prefix_bits: entry.prefix_bits,
             memo: TilePrefixMemo::new(),
@@ -51,13 +44,6 @@ impl CellRouter {
     }
 
     pub(super) fn vshard(&mut self, coords: &[ArrayCoordLiteral]) -> crate::Result<u32> {
-        match self {
-            CellRouter::Single => Ok(0),
-            CellRouter::Cluster {
-                schema,
-                prefix_bits,
-                memo,
-            } => cell_vshard(coords, schema, *prefix_bits, memo),
-        }
+        cell_vshard(coords, &self.schema, self.prefix_bits, &mut self.memo)
     }
 }

@@ -75,7 +75,7 @@ pub(crate) async fn execute_received_plan(
                 not_found: crate::control::local_dispatch::is_not_found(&resp),
                 payload: resp.payload.to_vec(),
                 watermark_lsn: resp.watermark_lsn,
-                read_versions: resp.read_versions,
+                read_vshards: resp.read_vshards,
             })
         }
         ReceivedRoute::AllCores => {

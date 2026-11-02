@@ -226,25 +226,14 @@ async fn propose_if_replicable(
         .with_user_roles(user_roles);
     let deadline = crate::control::server::shared::session::StatementDeadline::of_statement(shared)
         .tokio_instant();
-    let (payload, write_versions) =
-        propose_replicated_entry(shared, proposer, entry, deadline).await?;
-    Ok(Some(replicated_write_response(
-        shared,
-        payload,
-        write_versions,
-    )))
+    let payload = propose_replicated_entry(shared, proposer, entry, deadline).await?;
+    Ok(Some(replicated_write_response(shared, payload)))
 }
 
-/// The response a committed and applied replicated write answers with.
-///
-/// `write_versions` are the versions the write stamped. A session floors its
-/// later reads of the written vShards at them. A write carries no read
-/// watermark.
-fn replicated_write_response(
-    shared: &SharedState,
-    payload: Vec<u8>,
-    write_versions: crate::types::ReadVersions,
-) -> Response {
+/// The response a committed and applied replicated write answers with. A
+/// write carries no read watermark and scans no vShard a read-set entry
+/// names.
+fn replicated_write_response(shared: &SharedState, payload: Vec<u8>) -> Response {
     Response {
         request_id: RequestId::new(shared.request_id_counter.fetch_add(1, Ordering::Relaxed)),
         status: Status::Ok,
@@ -254,7 +243,7 @@ fn replicated_write_response(
         watermark_lsn: Lsn::ZERO,
         error_code: None,
         stage_vote: None,
-        read_versions: write_versions,
+        read_vshards: crate::types::ReadShards::new(),
         write_set: Vec::new(),
     }
 }

@@ -73,6 +73,7 @@ mod tests {
             right_rls_filters: Vec::new(),
             left_input: None,
             right_input: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         })
     }
 

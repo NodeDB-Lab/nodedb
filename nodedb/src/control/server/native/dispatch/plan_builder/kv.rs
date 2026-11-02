@@ -2,8 +2,8 @@
 
 //! KV engine plan builders.
 
-use nodedb_types::QualifiedCollection;
 use nodedb_types::protocol::TextFields;
+use nodedb_types::{QualifiedCollection, SystemTimeScope};
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::control::server::native::dispatch::DispatchCtx;
@@ -29,6 +29,7 @@ pub(crate) async fn build_scan(
         match_pattern,
         sort_keys: Vec::new(),
         surrogate_ceiling: None,
+        system_time: SystemTimeScope::Current,
     }))
 }
 
@@ -101,6 +102,7 @@ pub(crate) async fn build_batch_get(
         collection: QualifiedCollection::new(ctx.database_id(), collection),
         keys,
         rls_filters: Vec::new(),
+        system_time: SystemTimeScope::Current,
     }))
 }
 
@@ -160,6 +162,7 @@ pub(crate) async fn build_field_get(
         key,
         fields: field_names,
         rls_filters: Vec::new(),
+        system_time: SystemTimeScope::Current,
     }))
 }
 

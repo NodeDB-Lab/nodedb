@@ -64,5 +64,6 @@ pub(crate) async fn build_scan(
         projection: Vec::new(),
         rls_filters: Vec::new(),
         prefilter: None,
+        system_time: nodedb_types::SystemTimeScope::Current,
     }))
 }

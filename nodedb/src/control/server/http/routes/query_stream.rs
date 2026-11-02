@@ -270,7 +270,7 @@ mod tests {
         Ok(RowBatch {
             payload: json_object_batch(start, n),
             watermark_lsn: Lsn::ZERO,
-            read_versions: crate::types::ReadVersions::new(),
+            read_vshards: crate::types::ReadShards::new(),
         })
     }
 
@@ -403,6 +403,7 @@ mod tests {
             key: Vec::new(),
             rls_filters: Vec::new(),
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         let info = PlanMeteringInfo::extract(&plan);
         let guard = DetachedMeterGuard::new(&state, &scope, &info)

@@ -41,7 +41,7 @@ pub(super) async fn gather_cluster_partitioned(
 ) -> crate::Result<GatherOutcome> {
     if let PhysicalPlan::ClusterArray(op) = &plan {
         let rows = read_cluster_array(state, op, scope.txn_id).await?;
-        return Ok(GatherOutcome::unversioned(vec![rows]));
+        return Ok(GatherOutcome::without_reads(vec![rows]));
     }
     let mut local = plan;
     inline_cluster_arrays(state, &mut local, scope).await?;

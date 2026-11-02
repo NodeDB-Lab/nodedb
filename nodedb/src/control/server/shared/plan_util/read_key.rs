@@ -311,6 +311,8 @@ fn meta_read_key(op: &MetaOp) -> ReadKey {
         | MetaOp::CreateTenantSnapshot { .. }
         | MetaOp::RestoreTenantSnapshot { .. }
         | MetaOp::PurgeDepartedVShards { .. }
+        | MetaOp::PurgeVersionsBelow { .. }
+        | MetaOp::KvDueExpiries { .. }
         | MetaOp::PurgeTenant { .. }
         | MetaOp::UnregisterCollection { .. }
         | MetaOp::UnregisterMaterializedView { .. }
@@ -342,8 +344,7 @@ fn meta_read_key(op: &MetaOp) -> ReadKey {
         | MetaOp::ResolveTxn { .. }
         | MetaOp::CalvinResolve { .. }
         | MetaOp::ApplyTransactionRedo { .. }
-        | MetaOp::RestoreRedo(_)
-        | MetaOp::HomeVersions { .. } => ReadKey::Predicate,
+        | MetaOp::RestoreRedo(_) => ReadKey::Predicate,
     }
 }
 

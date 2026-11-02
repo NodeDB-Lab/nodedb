@@ -110,12 +110,13 @@ async fn dispatch_unlogged(
             // record carries.
             user_roles: Vec::new(),
             // Staged in-transaction writes are not yet durably committed; the
-            // committed write version is recorded at COMMIT via the batch funnel,
-            // so durability is not the funnel's to append here.
+            // committed write is noted at COMMIT via the batch funnel, so
+            // durability is not the funnel's to append here.
             durability: WalDurability::CallerSupplied {
                 wal_lsn: None,
                 resolved_now_ms: None,
                 minted: None,
+                system_ordinal: None,
             },
             read_route,
             change_feed: super::submit_write::ChangeFeedOwner::LocalApply,

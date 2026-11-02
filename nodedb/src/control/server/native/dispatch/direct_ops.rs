@@ -13,7 +13,7 @@ use crate::control::server::shared::metering::{PlanMeteringInfo, meter_dispatch}
 use crate::control::server::shared::quota_admission::admit_quota_for_dispatch;
 use crate::control::server::shared::session::TransactionState;
 use crate::control::server::shared::txn_route::statement_needs_implicit_txn;
-use crate::control::server::shared::write_admission::all_writes_bufferable;
+use crate::control::server::shared::write_admission::plan_is_write;
 use crate::types::TraceId;
 use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 
@@ -123,6 +123,23 @@ pub(crate) async fn handle_direct_op(
         return error_to_native_with_sqlstate(seq, "42501", &e);
     }
 
+    // Inside a transaction block a direct read reads the block's snapshot, as
+    // a SQL read does.
+    match crate::control::server::shared::session::ensure_txn_snapshot(
+        ctx.sessions,
+        ctx.peer_addr.into(),
+        ctx.state,
+    )
+    .await
+    {
+        Ok(Some(snapshot)) => crate::control::planner::system_cut::pin_plan_txn_snapshot(
+            &mut plan,
+            snapshot.statement_cap(),
+        ),
+        Ok(None) => {}
+        Err(e) => return error_to_native(seq, &e),
+    }
+
     // Refuse what column redaction cannot cover (redacted-column aggregate, graph traversal).
     if let Err(e) = crate::control::planner::redaction_refusal::refuse_unredactable_plan(
         &plan,
@@ -149,6 +166,10 @@ pub(crate) async fn handle_direct_op(
         return error_to_native_with_sqlstate(seq, "53400", &e);
     }
 
+    // Inside a transaction block every write runs through the statement
+    // loop the SQL path uses, which stages it into the block or refuses it.
+    let in_txn_block = ctx.sessions.transaction_state(ctx.peer_addr) == TransactionState::InBlock;
+
     // False for `dispatch_single_task`, which meters itself — re-metering here
     // will double-bill a `Staged` dispatch and wrongly bill a `Buffered` one.
     let mut needs_top_level_metering = true;
@@ -156,9 +177,11 @@ pub(crate) async fn handle_direct_op(
     // block, letting the metering call below run exactly once regardless of branch.
     let response: NativeResponse = async {
         // Plans that orchestrate on the Control Plane never reach the Data
-        // Plane as a single op.
-        if let Some(response) =
-            super::direct_orchestrated::dispatch_orchestrated(ctx, seq, &plan, vshard_id).await
+        // Plane as a single op. Their orchestrators apply at once, so inside a
+        // block they expand and stage through the statement loop below.
+        if !in_txn_block
+            && let Some(response) =
+                super::direct_orchestrated::dispatch_orchestrated(ctx, seq, &plan, vshard_id).await
         {
             return response;
         }
@@ -283,9 +306,12 @@ pub(crate) async fn handle_direct_op(
         // A write that fires a BEFORE, INSTEAD OF or SYNC AFTER body, a MERGE
         // into an edge-bearing collection, or a join-expanding write into the
         // source of a cross-shard materialized sum, runs in one transaction, as
-        // the SQL path's does. The loop there clone-checks, authorizes and
-        // meters each task itself.
-        if statement_needs_implicit_txn(ctx.state, &tasks) {
+        // the SQL path's does. So does every write inside a block: the loop
+        // expands a join or page write, takes a clone's copy-on-write steps,
+        // and stages each write into the block or refuses it with 25001. The
+        // loop clone-checks, authorizes and meters each task itself.
+        let block_write = in_txn_block && tasks.iter().any(|task| plan_is_write(&task.plan));
+        if block_write || statement_needs_implicit_txn(ctx.state, &tasks) {
             let _request = ctx.state.tenant_request_guard(tenant_id);
             needs_top_level_metering = false;
             return super::direct_txn::dispatch_direct_in_txn(
@@ -328,15 +354,6 @@ pub(crate) async fn handle_direct_op(
         }
 
         let _request = ctx.state.tenant_request_guard(tenant_id);
-        // Dispatching to Calvin applies the write durably at statement time,
-        // escaping the transaction buffer. Inside a block the per-task loop
-        // buffers each task instead, and COMMIT flushes the whole buffer
-        // through Calvin. A write the gate cannot buffer is refused here.
-        let in_txn_block =
-            ctx.sessions.transaction_state(ctx.peer_addr) == TransactionState::InBlock;
-        if in_txn_block && !all_writes_bufferable(&tasks) {
-            return error_to_native(seq, &crate::Error::CrossShardInExplicitTransaction);
-        }
         // Only reads to widen with are those materialized-sum settlement stamped
         // on the source rows its shipped balances folded from.
         let sum_read_vshards =
@@ -344,11 +361,11 @@ pub(crate) async fn handle_direct_op(
                 Ok(vshards) => vshards,
                 Err(error) => return error_to_native(seq, &error),
             };
-        let route_to_calvin = !in_txn_block
-            && matches!(
-                classify_dispatch(&tasks, &sum_read_vshards),
-                DispatchClass::MultiShard { .. }
-            );
+        // A block's writes returned above, so these tasks apply autocommit.
+        let route_to_calvin = matches!(
+            classify_dispatch(&tasks, &sum_read_vshards),
+            DispatchClass::MultiShard { .. }
+        );
         if route_to_calvin {
             let plans: Vec<PhysicalPlan> = tasks.iter().map(|task| task.plan.clone()).collect();
             match dispatch_authorized_tasks_to_calvin(

@@ -37,6 +37,7 @@ pub mod traverse_subgraph;
 pub mod walk_reads;
 pub mod whole_graph;
 
+pub use crate::control::version_cleanup::history_window::GraphHistory;
 pub use bfs::{CrossCoreBfsParams, cross_core_bfs_with_options};
 pub use bsp_pagerank::run_bsp_pagerank;
 pub use bsp_wcc::run_bsp_wcc;
@@ -47,7 +48,7 @@ pub use match_broadcast::{
 pub use match_scatter::{MatchScatterOutcome, scatter_match};
 pub use rag_fusion::serve_rag_plan;
 pub use read_groups::{confirm_graph_read, graph_read_groups};
-pub use read_scope::{check_walk_scope, graph_read_scope};
+pub use read_scope::{block_graph_temporal, check_walk_scope, graph_read_scope};
 pub use shortest_path::{CrossCoreShortestPathParams, cross_core_shortest_path};
 pub use traverse_subgraph::{CrossCoreTraverseSubgraphParams, cross_core_traverse_subgraph};
 pub use walk_reads::serve_walk_plan;

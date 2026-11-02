@@ -498,6 +498,7 @@ mod tests {
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
             resolved_sum_targets: Vec::new(),
             declared_primary_key: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         assert!(is_stageable_write(&bulk_update));
         assert_eq!(
@@ -517,6 +518,7 @@ mod tests {
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
             resolved_sum_targets: Vec::new(),
             declared_primary_key: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         assert!(is_stageable_write(&bulk_delete));
         assert_eq!(
@@ -857,6 +859,7 @@ mod tests {
             ef_search: 0,
             filter_bitmap: None,
             rls_filters: Vec::new(),
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         assert!(!is_stageable_write(&search));
     }
@@ -913,6 +916,7 @@ mod tests {
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
             returning: None,
             rls_filters: Vec::new(),
+            system_time: nodedb_types::SystemTimeScope::Current,
         };
         let delete = KvOp::PredicateDelete {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -920,6 +924,7 @@ mod tests {
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
             returning: None,
             rls_filters: Vec::new(),
+            system_time: nodedb_types::SystemTimeScope::Current,
         };
         assert_eq!(kv_write_shape(&update), Some(StagedWriteShape::Update));
         assert_eq!(kv_write_shape(&delete), Some(StagedWriteShape::Delete));
@@ -934,6 +939,7 @@ mod tests {
             key: b"k".to_vec(),
             rls_filters: Vec::new(),
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         assert!(!is_stageable_write(&get));
         assert_eq!(stageable_write_shape(&get), None);

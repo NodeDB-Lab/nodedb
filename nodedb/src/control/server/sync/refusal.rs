@@ -35,6 +35,7 @@ pub(super) fn retryable_refusal_reason(error: &crate::Error) -> Option<&str> {
             | ErrorCode::NotFound
             | ErrorCode::RejectedAuthz { .. }
             | ErrorCode::ConflictRetry
+            | ErrorCode::SerializationConflict { .. }
             | ErrorCode::CrdtFrontierMismatch { .. }
             | ErrorCode::ResourcesExhausted
             | ErrorCode::RejectedDanglingEdge { .. }
@@ -88,6 +89,7 @@ pub(super) fn retryable_refusal_reason(error: &crate::Error) -> Option<&str> {
         | crate::Error::ConflictRetry { .. }
         | crate::Error::CalvinSerializationConflict
         | crate::Error::CalvinParticipantError
+        | crate::Error::TxnSnapshotTooOld { .. }
         | crate::Error::RejectedPrevalidation { .. }
         | crate::Error::AppendOnlyViolation { .. }
         | crate::Error::BalanceViolation { .. }
@@ -194,7 +196,6 @@ pub(super) fn retryable_refusal_reason(error: &crate::Error) -> Option<&str> {
         | crate::Error::SessionTokenExpired
         | crate::Error::SessionKilledByAdmin
         | crate::Error::SessionUserDropped
-        | crate::Error::OidcProviderTenantUnbound
         | crate::Error::OidcProviderTenantUnavailable { .. }
         | crate::Error::ExternalRoleUndefined { .. }
         | crate::Error::OidcNoDefaultDatabase { .. }
@@ -235,6 +236,7 @@ fn is_indeterminate(error: &crate::Error) -> bool {
         | crate::Error::CrdtAdmissionRetriesExhausted { .. }
         | crate::Error::CalvinSerializationConflict
         | crate::Error::CalvinParticipantError
+        | crate::Error::TxnSnapshotTooOld { .. }
         // No leader or no quorum took the write: the retryable leader class.
         | crate::Error::RetryableLeaderChange { .. }
         | crate::Error::GroupQuorumUnavailable { .. }
@@ -347,7 +349,6 @@ fn is_indeterminate(error: &crate::Error) -> bool {
         | crate::Error::SessionTokenExpired
         | crate::Error::SessionKilledByAdmin
         | crate::Error::SessionUserDropped
-        | crate::Error::OidcProviderTenantUnbound
         | crate::Error::OidcProviderTenantUnavailable { .. }
         | crate::Error::ExternalRoleUndefined { .. }
         | crate::Error::OidcNoDefaultDatabase { .. }
@@ -367,6 +368,7 @@ fn is_indeterminate_code(code: &ErrorCode) -> bool {
         | ErrorCode::ResourcesExhausted
         | ErrorCode::DispatchCapacity { .. }
         | ErrorCode::ConflictRetry
+        | ErrorCode::SerializationConflict { .. }
         | ErrorCode::RetryableRefusal { .. }
         | ErrorCode::CoreFailStopped { .. }
         | ErrorCode::OllpRetryRequired

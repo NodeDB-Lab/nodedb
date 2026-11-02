@@ -88,6 +88,7 @@ mod tests {
                         key: Vec::new(),
                         rls_filters: Vec::new(),
                         surrogate_ceiling: None,
+                        system_time: nodedb_types::SystemTimeScope::Current,
                     })),
                     column_map: Vec::new(),
                 },
@@ -116,6 +117,7 @@ mod tests {
             limit: None,
             offset: 0,
             distinct: false,
+            system_time: nodedb_types::SystemTimeScope::Current,
         })
     }
 
@@ -151,6 +153,7 @@ mod tests {
                 limit: None,
                 offset: 0,
                 distinct: false,
+                system_time: nodedb_types::SystemTimeScope::Current,
             })
         };
         use nodedb_physical::physical_plan::GatheredSource;
@@ -198,6 +201,7 @@ mod tests {
             group_by: Vec::new(),
             aggregates: Vec::new(),
             filters: Vec::new(),
+            system_time: nodedb_types::SystemTimeScope::Current,
             having: Vec::new(),
             limit: usize::MAX,
             sub_group_by: Vec::new(),
@@ -264,6 +268,7 @@ mod tests {
                 key: Vec::new(),
                 rls_filters: Vec::new(),
                 surrogate_ceiling: None,
+                system_time: nodedb_types::SystemTimeScope::Current,
             })],
             txn_id: None,
         });

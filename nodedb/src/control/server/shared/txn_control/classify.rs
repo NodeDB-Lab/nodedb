@@ -215,8 +215,8 @@ mod tests {
         );
     }
 
-    /// Both protocols refuse a non-default isolation level on `START
-    /// TRANSACTION` with one message.
+    /// Both protocols accept every isolation level on `START TRANSACTION`
+    /// and refuse `DEFERRABLE` with one message.
     #[test]
     fn start_transaction_refusal_message() {
         let Some(TxnControl::Begin(modes)) =
@@ -224,12 +224,13 @@ mod tests {
         else {
             panic!("START TRANSACTION with an isolation level must classify as Begin");
         };
+        assert_eq!(modes.refusal("BEGIN"), None);
+        let Some(TxnControl::Begin(deferrable)) = classify("start transaction deferrable") else {
+            panic!("START TRANSACTION DEFERRABLE must classify as Begin");
+        };
         assert_eq!(
-            modes.refusal("BEGIN").as_deref(),
-            Some(
-                "BEGIN ISOLATION LEVEL REPEATABLE READ is not supported; \
-                 NodeDB enforces Snapshot Isolation"
-            )
+            deferrable.refusal("BEGIN").as_deref(),
+            Some("BEGIN DEFERRABLE is not supported")
         );
     }
 

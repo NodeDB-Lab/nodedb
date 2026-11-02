@@ -80,6 +80,17 @@ pub(super) async fn plan_statement(
     // A column DEFAULT that calls `nextval` draws per row in row order,
     // and records into this session's `currval` map, as the SQL form does.
     query_ctx.set_session_sequences(txn_ctx.sessions.sequence_values(txn_ctx.session_id));
+    // Inside an open block every read and every predicate match of the
+    // statement reads the block's snapshot, as the SQL path's statements do.
+    // A system transaction (a trigger or event action on its own private
+    // session) takes its own snapshot. A trigger body that joins a client
+    // statement's transaction plans on the client's session and reads its
+    // snapshot.
+    let txn_snapshot = txn_ctx.txn_snapshot(state).await.map_err(|error| {
+        let (_, sqlstate, message) = error_to_sqlstate(&error);
+        ddl_err(sqlstate, message)
+    })?;
+    query_ctx.set_txn_snapshot(txn_snapshot);
     let planned = match source {
         StatementSource::Sql {
             sql,

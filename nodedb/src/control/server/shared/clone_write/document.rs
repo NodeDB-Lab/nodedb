@@ -19,6 +19,7 @@ use crate::control::state::SharedState;
 use nodedb_physical::physical_plan::{DocumentOp, PhysicalPlan};
 use nodedb_physical::physical_task::PhysicalTask;
 
+use super::copy_source::{clone_source_view, copy_source_row};
 use super::entry::CloneWriteOutcome;
 use super::probes::{ProbeTarget, fetch_source_row, probe_row_in_target};
 use super::util::{strip_db_prefix, synthetic_affected_response, write_err};
@@ -200,11 +201,23 @@ pub(super) async fn intercept_doc_clone_write(
         source_db_id,
         origin.source_collection.as_str(),
     );
-    // Source rows this transaction's buffered tombstones and copy-ups hide.
-    let hidden = buffered_clone_suppressions(
-        &crate::control::planner::sql_plan_convert::convert::db_qualified(db_id, coll_name),
-    )
-    .surrogates;
+    // Source rows this transaction's buffered tombstones and copy-ups hide,
+    // and source rows a committed delete tombstoned.
+    let target_qualified =
+        crate::control::planner::sql_plan_convert::convert::db_qualified(db_id, coll_name);
+    let mut hidden = buffered_clone_suppressions(&target_qualified).surrogates;
+    hidden.extend(
+        catalog
+            .list_clone_tombstones(&target_qualified)
+            .map_err(|e| write_err(format!("clone write: tombstone list: {e}")))?,
+    );
+    let view = clone_source_view(
+        state,
+        tenant_id,
+        origin,
+        desc.bitemporal,
+        &source_coll_qualified,
+    );
     let target = ProbeTarget {
         tenant_id,
         db_id,
@@ -281,17 +294,9 @@ pub(super) async fn intercept_doc_clone_write(
             // is not evidence the row exists, since a surrogate outlives its row.
             // A row this transaction already hid is gone from the clone.
             let source_row = match src.filter(|src| !hidden.contains(&src.as_u32())) {
-                Some(src) => fetch_source_row(
-                    state,
-                    identity,
-                    tenant_id,
-                    source_db_id,
-                    &source_coll_qualified,
-                    document_id,
-                    src,
-                )
-                .await
-                .map_err(|e| write_err(format!("clone delete source probe: {e}")))?,
+                Some(src) => fetch_source_row(state, identity, view, document_id, src)
+                    .await
+                    .map_err(|e| write_err(format!("clone delete source probe: {e}")))?,
                 None => None,
             };
 
@@ -331,19 +336,11 @@ pub(super) async fn intercept_doc_clone_write(
                 return Ok(CloneWriteOutcome::Passthrough);
             }
 
-            let source_row_bytes = fetch_source_row(
-                state,
-                identity,
-                tenant_id,
-                source_db_id,
-                &source_coll_qualified,
-                document_id,
-                src,
-            )
-            .await
-            .map_err(|e| write_err(format!("clone write fetch source: {e}")))?;
+            let source_row = copy_source_row(state, identity, view, document_id, src)
+                .await
+                .map_err(|e| write_err(format!("clone write fetch source: {e}")))?;
 
-            let Some(source_row_bytes) = source_row_bytes else {
+            let Some(source_row) = source_row else {
                 return Ok(CloneWriteOutcome::Passthrough);
             };
 
@@ -354,7 +351,7 @@ pub(super) async fn intercept_doc_clone_write(
                 target_collection: coll_name,
                 source_surrogate: src,
                 source_doc_id: document_id.to_string(),
-                source_row_bytes,
+                source_row,
             })
             .await
             .map_err(|e| write_err(format!("clone copyup: {e}")))?;

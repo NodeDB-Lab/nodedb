@@ -135,34 +135,53 @@ impl<'a> ColumnarDispatcher for SharedStateColumnarDispatcher<'a> {
             &collection,
         )?;
 
-        // Decode column names from schema_bytes so we can build object rows.
-        // The Data Plane columnar insert handler expects rows as
-        // `Value::Object(HashMap<String, Value>)`, not positional arrays.
+        // The Data Plane columnar insert handler takes rows as
+        // `Value::Object(HashMap<String, Value>)`, not positional arrays. A row
+        // names its cells by the schema it carries. A row with no schema lists
+        // them in the collection's declared column order, as an INSERT with no
+        // column list does.
         let column_names: Vec<String> = if schema_bytes.is_empty() {
-            Vec::new()
+            self.shared
+                .credentials
+                .catalog()
+                .get_collection(database_id, tenant_id.as_u64(), &collection)?
+                .ok_or_else(|| crate::Error::CollectionNotFound {
+                    tenant_id,
+                    collection: collection.clone(),
+                })?
+                .fields
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect()
         } else {
             zerompk::from_msgpack::<ColumnarSchema>(&schema_bytes)
-                .map(|s| s.columns.into_iter().map(|c| c.name).collect())
-                .unwrap_or_default()
+                .map_err(|e| crate::Error::Serialization {
+                    format: "msgpack".into(),
+                    detail: format!("columnar sync into '{collection}': the row schema: {e}"),
+                })?
+                .columns
+                .into_iter()
+                .map(|c| c.name)
+                .collect()
         };
 
-        // Convert each row from positional Vec<Value> to named Value::Object.
-        // If column_names is empty (no schema_bytes), fall back to positional
-        // "col0", "col1", ... names so rows are never silently dropped.
-        let object_rows: Vec<Value> = rows
-            .into_iter()
-            .map(|row| {
-                let mut map = HashMap::with_capacity(row.len());
-                for (i, val) in row.into_iter().enumerate() {
-                    let key = column_names
-                        .get(i)
-                        .cloned()
-                        .unwrap_or_else(|| format!("col{i}"));
-                    map.insert(key, val);
-                }
-                Value::Object(map)
-            })
-            .collect();
+        // Name each positional cell. A row with more cells than the schema
+        // has columns is refused whole: a cell with no column has no place.
+        let mut object_rows: Vec<Value> = Vec::with_capacity(rows.len());
+        for row in rows {
+            if row.len() > column_names.len() {
+                return Err(crate::Error::BadRequest {
+                    detail: format!(
+                        "columnar sync into '{collection}': a row carries {} cells, but the \
+                         schema names {} columns",
+                        row.len(),
+                        column_names.len()
+                    ),
+                });
+            }
+            let map: HashMap<String, Value> = column_names.iter().cloned().zip(row).collect();
+            object_rows.push(Value::Object(map));
+        }
 
         // Assign cross-engine surrogates in row order before WAL append so
         // every replica stores and applies the same surrogate set. The
@@ -238,6 +257,7 @@ impl<'a> ColumnarDispatcher for SharedStateColumnarDispatcher<'a> {
             // Each replica's apply allocates its own LSN.
             wal_lsn: None,
             system_from: None,
+            restored_versions: Vec::new(),
             // Edge-to-origin sync replays rows already decided by the policy
             // where they were written; the writing device's session is not
             // present here to resolve `$auth.*` against.
@@ -543,7 +563,7 @@ mod tests {
 
     #[test]
     fn pk_bytes_headless_row_is_empty() {
-        let row = obj(&[("col0", Value::Integer(1)), ("col1", Value::Float(2.0))]);
+        let row = obj(&[("reading", Value::Integer(1)), ("level", Value::Float(2.0))]);
         assert!(columnar_row_pk_bytes(&row).is_empty());
     }
 

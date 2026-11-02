@@ -54,12 +54,14 @@ pub(super) async fn materialize_providers(
             limit,
             offset,
             distinct,
+            system_time,
         }) => {
             let rows = match super::cagg_rows::continuous_aggregate_rows(
                 state,
                 identity,
                 database_id,
                 &name,
+                system_time,
             )
             .await?
             {
@@ -79,6 +81,7 @@ pub(super) async fn materialize_providers(
                 limit,
                 offset,
                 distinct,
+                system_time,
             }))
         }
 
@@ -100,6 +103,7 @@ pub(super) async fn materialize_providers(
             group_by,
             aggregates,
             filters,
+            system_time,
             having,
             limit,
             sub_group_by,
@@ -116,6 +120,7 @@ pub(super) async fn materialize_providers(
                 group_by,
                 aggregates,
                 filters,
+                system_time,
                 having,
                 limit,
                 sub_group_by,
@@ -205,6 +210,7 @@ pub(super) async fn materialize_providers(
             lateral_alias,
             projection,
             left_join,
+            inner_system_time,
         }) => {
             let outer_plan = Box::pin(materialize_providers(
                 state,
@@ -224,6 +230,7 @@ pub(super) async fn materialize_providers(
                 lateral_alias,
                 projection,
                 left_join,
+                inner_system_time,
             }))
         }
 
@@ -237,6 +244,7 @@ pub(super) async fn materialize_providers(
             projection,
             left_join,
             outer_row_cap,
+            inner_system_time,
         }) => {
             let outer_plan = Box::pin(materialize_providers(
                 state,
@@ -255,6 +263,7 @@ pub(super) async fn materialize_providers(
                 projection,
                 left_join,
                 outer_row_cap,
+                inner_system_time,
             }))
         }
 

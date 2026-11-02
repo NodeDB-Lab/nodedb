@@ -69,6 +69,20 @@ pub(super) async fn execute_planned(
         ctx.tenant_id(),
     );
 
+    // Inside a transaction block every read of the statement reads the
+    // block's snapshot, taken at the block's first statement — the same
+    // resolution pgwire performs.
+    match crate::control::server::shared::session::ensure_txn_snapshot(
+        ctx.sessions,
+        ctx.peer_addr.into(),
+        ctx.state,
+    )
+    .await
+    {
+        Ok(snapshot) => ctx.query_ctx.set_txn_snapshot(snapshot),
+        Err(error) => return resp(error_to_native(seq, &error)),
+    }
+
     // General CHECK constraints and enum labels on an INSERT or UPDATE are
     // enforced before planning, by the same code pgwire runs.
     if let Err(error) = enforce_statement_checks(
@@ -138,10 +152,6 @@ pub(super) async fn execute_planned(
         output_schema: Some(&output_schema),
         database_id,
         sequences: &sequences,
-        client_session: Some(DmlTxnCtx {
-            sessions: ctx.sessions,
-            session_id: ctx.peer_addr.into(),
-        }),
     };
     let routed = route_atomic_statement(
         &exec,

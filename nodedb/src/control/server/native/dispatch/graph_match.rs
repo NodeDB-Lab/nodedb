@@ -68,6 +68,23 @@ pub(crate) async fn handle_graph_match(
         return error_to_native_with_sqlstate(seq, "42501", &error);
     }
 
+    // Inside a transaction block a MATCH reads the block's snapshot with the
+    // block's staged edges merged, as every other direct-op read does.
+    match crate::control::server::shared::session::ensure_txn_snapshot(
+        ctx.sessions,
+        ctx.peer_addr.into(),
+        ctx.state,
+    )
+    .await
+    {
+        Ok(Some(snapshot)) => crate::control::planner::system_cut::pin_plan_txn_snapshot(
+            &mut plan,
+            snapshot.statement_cap(),
+        ),
+        Ok(None) => {}
+        Err(error) => return error_to_native(seq, &error),
+    }
+
     // Stamp the active transaction id so MATCH reads resolve this connection's
     // staging overlay identically to every other direct-op read.
     let txn_id = ctx.sessions.tx_id(ctx.peer_addr);
@@ -124,7 +141,7 @@ pub(crate) async fn handle_graph_match(
             ctx.tenant_id(),
             crate::control::server::shared::session::ResponseReads {
                 plan: &plan_for_response,
-                read_versions: &response.read_versions,
+                read_vshards: &response.read_vshards,
                 found: response.status == Status::Ok,
                 distributed_reads: &[],
             },

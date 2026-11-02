@@ -56,6 +56,12 @@ pub(crate) async fn run_read(
     read: SortedIndexRead,
 ) -> Result<(PhysicalPlan, Response), DdlError> {
     let collection = gate_read(state, identity, database_id, index_name, what(&read))?;
+    // Inside a client block the read ranks the block's snapshot.
+    let snapshot = txn_ctx.txn_snapshot(state).await.map_err(|error| {
+        let (_, sqlstate, message) =
+            crate::control::server::pgwire::types::error_to_sqlstate(&error);
+        ddl_err(sqlstate, message)
+    })?;
     let sorted = plan_read(
         &ReadScope {
             txn_ctx,
@@ -63,6 +69,7 @@ pub(crate) async fn run_read(
             database_id,
             collection: &collection,
             index_name,
+            snapshot,
         },
         read,
     );

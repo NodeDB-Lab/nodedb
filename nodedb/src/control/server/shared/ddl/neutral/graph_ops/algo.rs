@@ -99,7 +99,12 @@ pub async fn algo(
     };
 
     let tenant_id = identity.tenant_id;
-    let scope = crate::control::server::graph_dispatch::graph_read_scope(state, &temporal)
+    let history = crate::control::server::graph_dispatch::GraphHistory {
+        database_id,
+        tenant_id,
+        collection: Some(&collection),
+    };
+    let scope = crate::control::server::graph_dispatch::graph_read_scope(state, &temporal, history)
         .await
         .map_err(|e| DdlError::from_error(&e))?;
 

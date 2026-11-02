@@ -93,6 +93,14 @@ pub async fn dispatch_graph(
             edge_predicate,
             temporal,
         }) => {
+            let temporal = match crate::control::server::graph_dispatch::block_graph_temporal(
+                state, txn_ctx, temporal,
+            )
+            .await
+            {
+                Ok(temporal) => temporal,
+                Err(e) => return Some(Err(DdlError::from_error(&e))),
+            };
             // Every hop of the walk merges the session transaction's staged
             // edge writes. Idle sessions resolve to `None`.
             let (txn_id, _) = txn_ctx.sessions.txn_identity(txn_ctx.session_id);
@@ -123,6 +131,14 @@ pub async fn dispatch_graph(
             direction,
             temporal,
         }) => {
+            let temporal = match crate::control::server::graph_dispatch::block_graph_temporal(
+                state, txn_ctx, temporal,
+            )
+            .await
+            {
+                Ok(temporal) => temporal,
+                Err(e) => return Some(Err(DdlError::from_error(&e))),
+            };
             // Read-your-own-writes for single-hop GRAPH reads needs the
             // session's active `TxnId` so the Data Plane merges this
             // transaction's staged edge writes (`GraphTxnOverlay`). Idle
@@ -155,6 +171,14 @@ pub async fn dispatch_graph(
             edge_predicate,
             temporal,
         }) => {
+            let temporal = match crate::control::server::graph_dispatch::block_graph_temporal(
+                state, txn_ctx, temporal,
+            )
+            .await
+            {
+                Ok(temporal) => temporal,
+                Err(e) => return Some(Err(DdlError::from_error(&e))),
+            };
             // Every hop of the path search merges the session transaction's
             // staged edge writes. Idle sessions resolve to `None`.
             let (txn_id, _) = txn_ctx.sessions.txn_identity(txn_ctx.session_id);
@@ -192,48 +216,68 @@ pub async fn dispatch_graph(
             mode,
             personalization,
             temporal,
-        }) => Some(
-            algo::algo(
-                state,
-                identity,
-                database_id,
-                algo::AlgoRequest {
-                    algorithm_name: &algorithm,
-                    collection,
-                    edge_label,
-                    damping,
-                    tolerance,
-                    resolution,
-                    max_iterations,
-                    sample_size,
-                    source_node,
-                    direction,
-                    mode,
-                    personalization,
-                    linearizable,
-                    temporal,
-                },
+        }) => {
+            let temporal = match crate::control::server::graph_dispatch::block_graph_temporal(
+                state, txn_ctx, temporal,
             )
-            .await,
-        ),
+            .await
+            {
+                Ok(temporal) => temporal,
+                Err(e) => return Some(Err(DdlError::from_error(&e))),
+            };
+            Some(
+                algo::algo(
+                    state,
+                    identity,
+                    database_id,
+                    algo::AlgoRequest {
+                        algorithm_name: &algorithm,
+                        collection,
+                        edge_label,
+                        damping,
+                        tolerance,
+                        resolution,
+                        max_iterations,
+                        sample_size,
+                        source_node,
+                        direction,
+                        mode,
+                        personalization,
+                        linearizable,
+                        temporal,
+                    },
+                )
+                .await,
+            )
+        }
         NodedbStatement::Graph(GraphStmt::GraphRagFusion {
             collection,
             params,
             temporal,
-        }) => Some(
-            rag_fusion::rag_fusion(
-                state,
-                identity,
-                database_id,
-                rag_fusion::RagFusionRequest {
-                    collection,
-                    params,
-                    linearizable,
-                    temporal,
-                },
+        }) => {
+            let temporal = match crate::control::server::graph_dispatch::block_graph_temporal(
+                state, txn_ctx, temporal,
             )
-            .await,
-        ),
+            .await
+            {
+                Ok(temporal) => temporal,
+                Err(e) => return Some(Err(DdlError::from_error(&e))),
+            };
+            Some(
+                rag_fusion::rag_fusion(
+                    state,
+                    identity,
+                    database_id,
+                    rag_fusion::RagFusionRequest {
+                        collection,
+                        params,
+                        linearizable,
+                        temporal,
+                    },
+                )
+                .await,
+            )
+        }
         NodedbStatement::Graph(GraphStmt::ShowGraphStats {
             collection,
             verbose,

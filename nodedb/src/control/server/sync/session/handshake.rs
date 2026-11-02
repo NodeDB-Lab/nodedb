@@ -574,16 +574,16 @@ mod tests {
         );
     }
 
-    /// A client built against the previous sync layout sends version 1. The
-    /// server refuses it at the handshake, before any delta frame: the ack
+    /// A client of another sync layout sends another version. The server
+    /// refuses it at the handshake, before any delta frame: the ack
     /// carries the server's version, so the client reads the refusal as the
     /// typed mismatch, and the session stays unauthenticated even where a
     /// trust identity is configured.
     #[tokio::test]
-    async fn handshake_refuses_a_client_of_the_previous_sync_layout() {
+    async fn handshake_refuses_a_client_of_another_sync_layout() {
         let (state, _dir) = trust_state();
-        let mut session = SyncSession::new("old-layout-session".into());
-        let msg = make_handshake(SYNC_WIRE_VERSION - 1);
+        let mut session = SyncSession::new("other-layout-session".into());
+        let msg = make_handshake(SYNC_WIRE_VERSION + 1);
 
         let frame = session
             .handle_handshake(&msg, HashMap::new(), Some(&state))
@@ -595,7 +595,7 @@ mod tests {
         assert!(!ack.success);
         assert_eq!(ack.server_wire_version, SYNC_WIRE_VERSION);
         let expected = SyncWireVersionMismatch {
-            client: SYNC_WIRE_VERSION - 1,
+            client: SYNC_WIRE_VERSION + 1,
             server: SYNC_WIRE_VERSION,
         };
         assert_eq!(msg.check_wire_version(), Err(expected));
@@ -682,17 +682,18 @@ mod tests {
         assert!(session.tracked_collections.is_empty());
         assert!(session.announced_collections.is_empty());
 
+        let delta_bytes = nodedb_types::json_to_msgpack(&serde_json::json!({"status": "active"}))
+            .expect("encode valid delta");
         let delta = DeltaPushMsg {
             collection: "orders".into(),
             document_id: "order-1".into(),
-            delta: nodedb_types::json_to_msgpack(&serde_json::json!({"status": "active"}))
-                .expect("encode valid delta"),
+            checksum: crc32c::crc32c(&delta_bytes),
+            delta: delta_bytes,
             peer_id: 1,
             mutation_id: 17,
             device_id: 0,
             delta_signature: [0; 32],
             collection_incarnation: nodedb_types::Hlc::ZERO,
-            checksum: 0,
             device_valid_time_ms: None,
             producer_id: 42,
             epoch: 7,
@@ -800,17 +801,18 @@ mod tests {
         // The configured trust identity is a superuser, so this will be
         // authorized and provisionally ACKed if the stale handshake retained
         // its staged identity. The production dispatch gate must deny it.
+        let delta_bytes = nodedb_types::json_to_msgpack(&serde_json::json!({"status": "active"}))
+            .expect("encode valid delta");
         let delta = DeltaPushMsg {
             collection: "orders".into(),
             document_id: "order-1".into(),
-            delta: nodedb_types::json_to_msgpack(&serde_json::json!({"status": "active"}))
-                .expect("encode valid delta"),
+            checksum: crc32c::crc32c(&delta_bytes),
+            delta: delta_bytes,
             peer_id: 1,
             mutation_id: 17,
             device_id: 0,
             delta_signature: [0; 32],
             collection_incarnation: nodedb_types::Hlc::ZERO,
-            checksum: 0,
             device_valid_time_ms: None,
             producer_id: 0,
             epoch: 0,

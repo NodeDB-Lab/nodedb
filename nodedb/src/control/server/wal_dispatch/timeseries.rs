@@ -222,6 +222,9 @@ pub(crate) struct ColumnarBatchRecord<'a> {
     pub conflict_policy: &'a crate::wal::ColumnarConflictPolicy,
     /// System-time ordinal of the first row of a bitemporal insert.
     pub system_from: Option<i64>,
+    /// The stamps of each row of a RESTORE re-issue, index-aligned with the
+    /// rows in `payload`. Empty for every other insert.
+    pub restored_versions: &'a [nodedb_types::columnar::RestoredVersion],
 }
 
 /// Encode the payload of a `TimeseriesBatch` WAL record for a columnar batch.
@@ -239,6 +242,7 @@ pub(crate) fn encode_columnar_batch_payload(
         surrogates,
         conflict_policy,
         system_from,
+        restored_versions,
     } = record;
     let record = nodedb_types::columnar::ColumnarWalRecord {
         kind: "columnar".to_string(),
@@ -248,6 +252,7 @@ pub(crate) fn encode_columnar_batch_payload(
         surrogates: surrogates.to_vec(),
         conflict_policy: conflict_policy.encode()?,
         system_from,
+        restored_versions: restored_versions.to_vec(),
     };
     zerompk::to_msgpack_vec(&record).map_err(|e| crate::Error::Serialization {
         format: "msgpack".into(),

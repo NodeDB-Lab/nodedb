@@ -28,6 +28,16 @@ impl NodeDbPgHandler {
         if let Some(mode) = self.sessions.get_parameter(session_id, "rounding_mode") {
             query_ctx.set_rounding_mode(&mode);
         }
+        // A cursor declared inside a transaction block reads the block's
+        // snapshot.
+        let txn_snapshot = crate::control::server::shared::session::ensure_txn_snapshot(
+            &self.sessions,
+            session_id,
+            &self.state,
+        )
+        .await
+        .map_err(|e| crate::control::server::pgwire::types::error_map::error_to_pg(&e))?;
+        query_ctx.set_txn_snapshot(txn_snapshot);
 
         let database_id = self
             .sessions

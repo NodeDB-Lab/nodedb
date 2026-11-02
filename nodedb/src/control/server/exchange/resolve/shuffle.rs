@@ -253,8 +253,8 @@ pub async fn resolve_shuffle_join(
     })?;
 
     // 7. Dispatch ALL producers CONCURRENTLY (build side=0, probe side=1), but
-    //    keep the two sides' futures SEPARATE so each side's observed
-    //    per-collection read-version can be max-folded independently.
+    //    keep the two sides' futures SEPARATE so each side's read vShards
+    //    fold independently.
     let mut build_produce_futures = Vec::with_capacity(build_nodes.len());
     for &node in &build_nodes {
         let req = ShuffleProduceRequest {
@@ -298,17 +298,17 @@ pub async fn resolve_shuffle_join(
     // versions independently: build ↔ right_collection, probe ↔
     // left_collection. Each side's producers scan the SAME single collection,
     // so the fold holds that collection's version on each vShard at read time:
-    // the OCC read-version comparand recorded for that side.
+    // the vShards that side's read-set entries home on.
     let (build_results, probe_results) = join(
         join_all(build_produce_futures),
         join_all(probe_produce_futures),
     )
     .await;
-    let mut build_rv = crate::types::ReadVersions::new();
+    let mut build_rv = crate::types::ReadShards::new();
     for result in build_results {
         build_rv.merge(&result?);
     }
-    let mut probe_rv = crate::types::ReadVersions::new();
+    let mut probe_rv = crate::types::ReadShards::new();
     for result in probe_results {
         probe_rv.merge(&result?);
     }
@@ -361,28 +361,29 @@ pub async fn resolve_shuffle_join(
     // call here. No leak: each `(shuffle_id, part, side)` inbox is dropped by
     // the part-owner after its consume completes.
     //
-    // Two per-side read captures carry each side's REAL observed read version:
+    // Two per-side read captures carry each side's read vShards:
     // the probe capture (left_collection) at `probe_rv`, the build capture
     // (right_collection) at `build_rv` — folded from the producers'
-    // `ShuffleProduceResponse.read_versions`. The record seam records one
+    // `ShuffleProduceResponse.read_vshards`. The record seam records one
     // read-set entry per capture, re-homing and revalidating each side's vshard
     // independently, so a concurrent write to EITHER side between the in-txn read
-    // and commit is detected (the build side is recorded too). The response's own scalar stays `ZERO`: the captures
-    // carry the versions, and also setting the scalar will double-record the
+    // and commit is detected (the build side is recorded too). The response's
+    // own set stays empty: the captures carry the vShards, and also setting it
+    // will double-record the
     // left side. The core-global watermark is not threaded through the shuffle
     // transport and likewise stays `ZERO`.
     let captures = vec![
         DistributedReadCapture {
             scan_plan: probe_scan,
-            read_versions: probe_rv,
+            read_vshards: probe_rv,
         },
         DistributedReadCapture {
             scan_plan: build_scan,
-            read_versions: build_rv,
+            read_vshards: build_rv,
         },
     ];
     Ok(Resolved::Gathered(
-        outcome_to_response(merged, Lsn::ZERO, crate::types::ReadVersions::new()),
+        outcome_to_response(merged, Lsn::ZERO, crate::types::ReadShards::new()),
         Vec::new(),
         captures,
     ))

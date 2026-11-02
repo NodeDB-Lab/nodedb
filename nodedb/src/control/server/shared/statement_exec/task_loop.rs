@@ -54,9 +54,6 @@ pub(crate) struct StatementExec<'a> {
     /// The sequence access the statement's Control-Plane computed columns
     /// read: the registry, plus the session's `currval` map when it has one.
     pub(crate) sequences: &'a SessionSequenceAccess<'a>,
-    /// The client's session, which notes its own committed writes. `None`
-    /// for a transport with no session.
-    pub(crate) client_session: Option<DmlTxnCtx<'a>>,
 }
 
 impl StatementExec<'_> {
@@ -217,17 +214,6 @@ pub(crate) async fn run_statement_loop(
         // statement's transaction. Recorded BEFORE the error short-circuit so
         // an absent-key point read (a `NotFound` from the Data Plane) is
         // captured too: a "not found" is a validatable phantom observation.
-        // A committed write floors the session's later reads at the
-        // versions it stamped.
-        if let Some(client) = &exec.client_session {
-            client.sessions.note_own_write_response(
-                client.session_id,
-                task_database_id,
-                exec.tenant_id(),
-                &plan,
-                &task_response,
-            );
-        }
         let records_read = task_response.status == Status::Ok
             || task_response.error_code.as_deref() == Some(&ErrorCode::NotFound);
         if records_read && let Some(txn) = txn {
@@ -238,7 +224,7 @@ pub(crate) async fn run_statement_loop(
                 exec.tenant_id(),
                 ResponseReads {
                     plan: &plan,
-                    read_versions: &task_response.read_versions,
+                    read_vshards: &task_response.read_vshards,
                     found: task_response.status == Status::Ok,
                     distributed_reads: &distributed_reads,
                 },

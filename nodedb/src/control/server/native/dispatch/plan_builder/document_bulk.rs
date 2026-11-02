@@ -51,6 +51,7 @@ pub(crate) async fn build_bulk_update(
         resolved_sum_targets: Vec::new(),
         // See `build_update`: reads the declared PRIMARY KEY from the catalog.
         declared_primary_key: declared_primary_key(ctx, collection)?,
+        system_time: nodedb_types::SystemTimeScope::Current,
     }))
 }
 
@@ -78,6 +79,7 @@ pub(crate) async fn build_bulk_delete(
         resolved_sum_targets: Vec::new(),
         // See `build_update`: reads the declared PRIMARY KEY from the catalog.
         declared_primary_key: declared_primary_key(ctx, collection)?,
+        system_time: nodedb_types::SystemTimeScope::Current,
     }))
 }
 

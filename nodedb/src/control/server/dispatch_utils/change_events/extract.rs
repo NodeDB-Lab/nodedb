@@ -486,6 +486,7 @@ mod tests {
             provenance: None,
             wal_lsn: None,
             system_from: None,
+            restored_versions: Vec::new(),
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
             returning: None,
             rls_filters: Vec::new(),
@@ -504,6 +505,7 @@ mod tests {
             filters: Vec::new(),
             system_from: None,
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         let meta = extract_write_metadata(&plan, TenantId::new(1));
         assert_eq!(

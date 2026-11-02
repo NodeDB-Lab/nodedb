@@ -3,12 +3,14 @@
 //! Resolution of nested-loop and sort-merge joins.
 //!
 //! Both read each side by collection name in the Data Plane, which sees
-//! committed rows only. Inside a transaction each by-name side is gathered
-//! through the collection's full engine scan instead, so the join sees the
-//! transaction's staged writes on either side. The scan applies the side's
+//! current committed rows only. Inside a transaction, or at a scope other
+//! than `Current`, each by-name side is gathered through the collection's
+//! full engine scan at the join's scope instead, so the join sees the
+//! transaction's snapshot and staged writes on either side. The scan applies the side's
 //! read policy, so an embedded side carries none of its own.
 
 use nodedb_physical::physical_plan::{PhysicalPlan, QueryOp};
+use nodedb_types::SystemTimeScope;
 
 use crate::control::server::exchange::full_scan::ScanSide;
 use crate::control::server::exchange::read_scope::ReadScope;
@@ -24,11 +26,14 @@ struct Side<'a> {
     collection: &'a str,
     rls_filters: &'a mut Vec<u8>,
     input: Option<Box<PhysicalPlan>>,
+    /// The scope the join reads its by-name sides at.
+    system_time: SystemTimeScope,
 }
 
 /// Resolve one side: an input already set has its Exchange children
-/// resolved. A by-name side inside a transaction becomes its gathered
-/// engine scan, and its read policy moves onto that scan.
+/// resolved. A by-name side inside a transaction, or at a scope other than
+/// `Current`, becomes its gathered engine scan at the join's scope, and its
+/// read policy moves onto that scan.
 async fn resolve_side(
     state: &SharedState,
     ctx: ReadScope,
@@ -42,7 +47,7 @@ async fn resolve_side(
         state,
         ctx,
         captures,
-        ScanSide::join_side(side.collection, side.rls_filters, &[]),
+        ScanSide::join_side(side.collection, side.rls_filters, &[]).at(side.system_time),
     )
     .await?;
     if embedded.is_some() {
@@ -70,6 +75,7 @@ pub(super) async fn resolve_by_name_join(
             mut right_rls_filters,
             left_input,
             right_input,
+            system_time,
         }) => {
             let left_input = resolve_side(
                 state,
@@ -79,6 +85,7 @@ pub(super) async fn resolve_by_name_join(
                     collection: left_collection.as_str(),
                     rls_filters: &mut left_rls_filters,
                     input: left_input,
+                    system_time,
                 },
             )
             .await?;
@@ -90,6 +97,7 @@ pub(super) async fn resolve_by_name_join(
                     collection: right_collection.as_str(),
                     rls_filters: &mut right_rls_filters,
                     input: right_input,
+                    system_time,
                 },
             )
             .await?;
@@ -103,6 +111,7 @@ pub(super) async fn resolve_by_name_join(
                 right_rls_filters,
                 left_input,
                 right_input,
+                system_time,
             })
         }
         PhysicalPlan::Query(QueryOp::SortMergeJoin {
@@ -116,6 +125,7 @@ pub(super) async fn resolve_by_name_join(
             mut right_rls_filters,
             left_input,
             right_input,
+            system_time,
         }) => {
             let left_input = resolve_side(
                 state,
@@ -125,6 +135,7 @@ pub(super) async fn resolve_by_name_join(
                     collection: left_collection.as_str(),
                     rls_filters: &mut left_rls_filters,
                     input: left_input,
+                    system_time,
                 },
             )
             .await?;
@@ -136,6 +147,7 @@ pub(super) async fn resolve_by_name_join(
                     collection: right_collection.as_str(),
                     rls_filters: &mut right_rls_filters,
                     input: right_input,
+                    system_time,
                 },
             )
             .await?;
@@ -150,6 +162,7 @@ pub(super) async fn resolve_by_name_join(
                 right_rls_filters,
                 left_input,
                 right_input,
+                system_time,
             })
         }
         other => other,

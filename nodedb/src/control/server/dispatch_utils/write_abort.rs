@@ -54,6 +54,7 @@ fn is_transient_verdict(code: &ErrorCode) -> bool {
         | ErrorCode::DispatchCapacity { .. }
         | ErrorCode::ExpiredBeforeExecution
         | ErrorCode::ConflictRetry
+        | ErrorCode::SerializationConflict { .. }
         | ErrorCode::OllpRetryRequired
         | ErrorCode::TxnOverlayMemoryExceeded { .. }
         | ErrorCode::TransactionRollback { .. } => true,
@@ -154,6 +155,7 @@ pub(crate) fn write_definitely_not_applied(code: &ErrorCode) -> bool {
         | ErrorCode::CoreFailStopped { .. }
         // Concurrency verdicts that abort the whole attempt before install.
         | ErrorCode::ConflictRetry
+        | ErrorCode::SerializationConflict { .. }
         | ErrorCode::OllpRetryRequired
         // The whole transaction aborted before any read-set was validated.
         | ErrorCode::TransactionRollback { .. }

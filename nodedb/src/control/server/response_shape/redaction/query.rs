@@ -505,6 +505,7 @@ mod tests {
             limit: None,
             offset: 0,
             distinct: false,
+            system_time: nodedb_types::SystemTimeScope::Current,
         })
     }
 
@@ -548,6 +549,7 @@ mod tests {
             limit: None,
             offset: 0,
             distinct: false,
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         assert_eq!(
             plan_source_collections(&gathered, DatabaseId::DEFAULT),
@@ -578,6 +580,7 @@ mod tests {
                 query_entries: vec![(1, 1.0)],
                 top_k: 1,
                 filters: Vec::new(),
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Vector(VectorOp::MultiVectorScoreSearch {
                 collection: docs(),
@@ -586,6 +589,7 @@ mod tests {
                 top_k: 1,
                 ef_search: 2,
                 mode: "max_sim".into(),
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
         ];
         for plan in plans {

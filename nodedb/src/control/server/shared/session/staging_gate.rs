@@ -52,15 +52,14 @@ pub enum InTxnRoute {
     /// Plane reads this transaction's overlay (read-your-own-writes).
     Read(Box<PhysicalTask>),
     /// A write that applies now, on the caller's durable autocommit route:
-    /// the session is outside a transaction block, or the write is one a
-    /// transaction cannot buffer (index DDL, a Calvin-routed bulk write).
+    /// the session is outside a transaction block. Inside a block, a write
+    /// the transaction cannot buffer is refused with
+    /// [`crate::Error::NotInTransactionBlock`] instead.
     ///
     /// The caller must dispatch it through the write funnel with
     /// `AppendHere`, or propose it through Raft in cluster mode
     /// (`dispatch_utils::dispatch_authorized_durable_write`). The read route
     /// appends no WAL record, and it refuses such a write.
-    ///
-    /// Inside a block the task carries the transaction id.
     Autocommit(Box<PhysicalTask>),
     /// A non-stageable write: buffered for COMMIT-time replay. The caller
     /// pushes an immediate "OK" tag.
@@ -109,6 +108,27 @@ impl DmlTxnCtx<'_> {
         self.sessions
             .read_consistency(self.session_id)
             .requires_leader()
+    }
+
+    /// The snapshot this context's next statement reads at: the block's
+    /// snapshot inside an open block, taken at its first statement. A system
+    /// transaction (a trigger or event action on its own private session)
+    /// takes one as a client block does: its commit validates its reads at
+    /// it. `None` outside a block.
+    pub async fn txn_snapshot(
+        &self,
+        state: &SharedState,
+    ) -> crate::Result<Option<super::TxnSnapshotCut>> {
+        super::ensure_txn_snapshot(self.sessions, self.session_id, state).await
+    }
+}
+
+/// The statement a write no transaction can buffer names in its refusal:
+/// run it outside the transaction block.
+pub(crate) fn non_transactional_write(plan: &PhysicalPlan) -> String {
+    match plan.collection() {
+        Some(collection) => format!("a non-transactional write to '{collection}'"),
+        None => "a non-transactional write".to_owned(),
     }
 }
 
@@ -206,15 +226,22 @@ where
     }
 
     if !plan_requires_txn_buffering(&task.plan) {
-        // Not buffered: it runs at the statement. Stamp the active transaction
-        // id onto the task so the Data Plane can check this transaction's
-        // staging overlay for read-your-own-writes on point lookups.
+        // A write the transaction cannot buffer applies durably at the
+        // statement: it survives ROLLBACK, and a version it writes lands
+        // above the block's snapshot, so COMMIT will refuse the block on it.
+        // It runs outside the block instead.
+        if plan_is_write(&task.plan) {
+            return Err(StagingGateError::Dispatch(
+                crate::Error::NotInTransactionBlock {
+                    statement: non_transactional_write(&task.plan),
+                },
+            ));
+        }
+        // A read runs at the statement. Stamp the active transaction id onto
+        // the task so the Data Plane can check this transaction's staging
+        // overlay for read-your-own-writes on point lookups.
         task.txn_id = sessions.tx_id(session_id);
-        return Ok(if plan_is_write(&task.plan) {
-            InTxnRoute::Autocommit(Box::new(task))
-        } else {
-            InTxnRoute::Read(Box::new(task))
-        });
+        return Ok(InTxnRoute::Read(Box::new(task)));
     }
 
     // A distributed array write is a routing wrapper with no Data-Plane
@@ -447,4 +474,117 @@ where
         payload,
         returning_rows: Vec::new(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nodedb_physical::physical_plan::KvOp;
+
+    fn shared_state(dir: &tempfile::TempDir) -> std::sync::Arc<SharedState> {
+        let wal = std::sync::Arc::new(
+            crate::wal::WalManager::open_for_testing(&dir.path().join("test.wal")).expect("wal"),
+        );
+        let (dispatcher, _data_sides) = crate::bridge::dispatch::Dispatcher::new(1, 64);
+        SharedState::new(dispatcher, wal).expect("state")
+    }
+
+    /// A write no transaction can buffer: it applies through Calvin's
+    /// resolved form, which a redo record never carries.
+    fn unbufferable_write() -> PhysicalTask {
+        PhysicalTask {
+            tenant_id: TenantId::new(1),
+            vshard_id: VShardId::new(0),
+            database_id: DatabaseId::DEFAULT,
+            plan: PhysicalPlan::Kv(KvOp::ResolvedWrite {
+                mutations: Vec::new(),
+                response_payload: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+            }),
+            post_set_op: PostSetOp::None,
+            txn_id: None,
+        }
+    }
+
+    async fn refuse_dispatch(_task: PhysicalTask) -> crate::Result<Response> {
+        Err(crate::Error::Internal {
+            detail: "the gate dispatches nothing for this write".into(),
+        })
+    }
+
+    #[tokio::test]
+    async fn an_unbufferable_write_is_refused_inside_a_block() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = shared_state(&dir);
+        let sessions = SessionStore::new();
+        let addr: std::net::SocketAddr = "127.0.0.1:5310".parse().expect("addr");
+        sessions.ensure_session(addr);
+        sessions.begin(addr).expect("begin");
+        let task = unbufferable_write();
+        assert!(plan_is_write(&task.plan));
+        assert!(!plan_requires_txn_buffering(&task.plan));
+
+        let routed = route_in_tx_write(
+            &state,
+            &sessions,
+            SessionId::from(&addr),
+            task,
+            refuse_dispatch,
+        )
+        .await;
+        match routed {
+            Err(StagingGateError::Dispatch(crate::Error::NotInTransactionBlock { statement })) => {
+                assert!(statement.contains("non-transactional write"), "{statement}");
+            }
+            Err(StagingGateError::Dispatch(other)) => panic!("unexpected error: {other}"),
+            Err(StagingGateError::Rejected { code }) => panic!("unexpected rejection: {code:?}"),
+            Ok(_) => panic!("a block must refuse a write it cannot buffer"),
+        }
+        assert_eq!(
+            sessions.buffered_tasks(addr).len(),
+            0,
+            "nothing is buffered"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unbufferable_write_applies_outside_a_block() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = shared_state(&dir);
+        let sessions = SessionStore::new();
+        let addr: std::net::SocketAddr = "127.0.0.1:5311".parse().expect("addr");
+        sessions.ensure_session(addr);
+
+        let routed = route_in_tx_write(
+            &state,
+            &sessions,
+            SessionId::from(&addr),
+            unbufferable_write(),
+            refuse_dispatch,
+        )
+        .await;
+        assert!(matches!(routed, Ok(InTxnRoute::Autocommit(_))));
+    }
+
+    /// A block reads its snapshot. A statement outside a block reads the
+    /// current state.
+    #[tokio::test]
+    async fn a_block_reads_a_snapshot() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = shared_state(&dir);
+        let addr: std::net::SocketAddr = "127.0.0.1:5310".parse().expect("addr");
+
+        let client = SessionStore::new();
+        client.ensure_session(addr);
+        let ctx = DmlTxnCtx {
+            sessions: &client,
+            session_id: SessionId::from(addr),
+        };
+        assert_eq!(ctx.txn_snapshot(&state).await.expect("idle"), None);
+        client.begin(addr).expect("begin");
+        assert!(
+            ctx.txn_snapshot(&state).await.expect("block").is_some(),
+            "a block reads its snapshot"
+        );
+    }
 }

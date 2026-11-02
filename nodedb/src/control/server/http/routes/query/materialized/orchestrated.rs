@@ -76,6 +76,7 @@ pub(super) async fn run_orchestrated(
         rls_write_check: _,
         resolved_sum_targets: _,
         declared_primary_key: _,
+        target_system_time: _,
     }) = &task.plan
     {
         crate::control::merge_orchestrator::run_authorized_merge(shared, authorize()?).await
@@ -93,6 +94,7 @@ pub(super) async fn run_orchestrated(
         rls_write_check: _,
         resolved_sum_targets: _,
         declared_primary_key: _,
+        target_system_time: _,
     }) = &task.plan
     {
         crate::control::update_from_join_orchestrator::run_authorized_update_from_join(

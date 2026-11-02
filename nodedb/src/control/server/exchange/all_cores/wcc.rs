@@ -59,7 +59,7 @@ pub(super) async fn fan_wcc_all_cores(
     Ok(NodeLevelResult {
         payload,
         watermark_lsn,
-        read_versions: crate::types::ReadVersions::new(),
+        read_vshards: crate::types::ReadShards::new(),
         not_found: false,
     })
 }

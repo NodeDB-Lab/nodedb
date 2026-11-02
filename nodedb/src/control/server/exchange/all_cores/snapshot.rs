@@ -103,8 +103,6 @@ pub(super) fn merge_core_snapshots(
         // concatenated — a forgotten field ships an incomplete snapshot and a
         // snapshot-installed follower comes up missing that state.
         let TenantDataSnapshot {
-            documents,
-            indexes,
             edges,
             vectors,
             kv_tables,
@@ -112,6 +110,7 @@ pub(super) fn merge_core_snapshots(
             crdt_constraints,
             timeseries,
             flushed_ts_segments,
+            ts_series_catalogs,
             columnar_engines,
             vector_params,
             index_configs,
@@ -130,6 +129,9 @@ pub(super) fn merge_core_snapshots(
             documents_versioned,
             indexes_versioned,
             vector_multi_documents,
+            vector_versions,
+            sparse_vectors,
+            spatial_indexes,
             arrays,
             metadata_floor,
             group_cut_index,
@@ -149,9 +151,10 @@ pub(super) fn merge_core_snapshots(
         merged.tenant_edge_applied.extend(tenant_edge_applied);
         merged.node_labels.extend(node_labels);
         merged.node_label_versions.extend(node_label_versions);
-        merged.documents.extend(documents);
         merged.vector_multi_documents.extend(vector_multi_documents);
-        merged.indexes.extend(indexes);
+        merged.vector_versions.extend(vector_versions);
+        merged.sparse_vectors.extend(sparse_vectors);
+        merged.spatial_indexes.extend(spatial_indexes);
         merged.edges.extend(edges);
         merged.vectors.extend(vectors);
         merged.kv_tables.extend(kv_tables);
@@ -159,6 +162,7 @@ pub(super) fn merge_core_snapshots(
         merged.crdt_constraints.extend(crdt_constraints);
         merged.timeseries.extend(timeseries);
         merged.flushed_ts_segments.extend(flushed_ts_segments);
+        merged.ts_series_catalogs.extend(ts_series_catalogs);
         merged.columnar_engines.extend(columnar_engines);
         merged.vector_params.extend(vector_params);
         merged.index_configs.extend(index_configs);
@@ -206,7 +210,7 @@ pub(super) fn merge_core_snapshots(
     Ok(NodeLevelResult {
         payload,
         watermark_lsn,
-        read_versions: crate::types::ReadVersions::new(),
+        read_vshards: crate::types::ReadShards::new(),
         not_found: false,
     })
 }

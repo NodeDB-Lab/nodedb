@@ -79,7 +79,7 @@ pub(super) async fn export_legs(
         user_roles: &[],
     })
     .await?;
-    reads.note([vshard], &outcome.read_versions);
+    reads.note([vshard]);
     let watermark_lsn = outcome
         .shard_watermarks
         .iter()

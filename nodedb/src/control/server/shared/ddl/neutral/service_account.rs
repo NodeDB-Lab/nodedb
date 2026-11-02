@@ -165,10 +165,8 @@ pub async fn create_service_account(
     if seen_for_tenant && !seen_for_database && !accessible_databases.is_empty() {
         // already set — fine
     } else if seen_for_tenant && !seen_for_database && accessible_databases.is_empty() {
-        // If FOR TENANT was used standalone (old form), that's allowed for backwards compat.
-        // Only reject when user explicitly wrote FOR TENANT ... (without IN DATABASE in
-        // the new sense) after the new parser added the requirement above, which already
-        // returns an error inline. So no additional check needed here.
+        // FOR TENANT alone is accepted. The account then has no explicit
+        // databases and authenticates against the default database.
     }
     let _ = seen_for_tenant; // suppress unused warning
 

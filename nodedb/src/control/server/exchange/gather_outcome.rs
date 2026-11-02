@@ -21,7 +21,7 @@
 use crate::control::server::payload_merge::{
     encode_msgpack_array, merge_msgpack_arrays, merge_payload_rows,
 };
-use crate::types::{Lsn, ReadVersions, VShardId};
+use crate::types::{Lsn, ReadShards, VShardId};
 
 use super::gather::finalize_aggregate;
 
@@ -33,11 +33,9 @@ pub struct GatherOutcome {
     /// Maximum watermark LSN seen across all responding cores. Retained as the
     /// scalar fence value for Strong-consistency callers that need one LSN.
     pub watermark_lsn: Lsn,
-    /// The read versions every responding core reported, one per vShard. A
-    /// vShard lives on ONE core, so only that core reports it: the scanned
-    /// collection's version at read time (the comparand for cross-shard OCC
-    /// read validation, distinct from `watermark_lsn`).
-    pub read_versions: ReadVersions,
+    /// The vShards every responding core read. The transaction read-set
+    /// homes an entry on each. Distinct from `watermark_lsn`.
+    pub read_vshards: ReadShards,
     /// Per-shard watermark LSNs — one `(vshard, watermark_lsn)` per responding
     /// core, NOT collapsed to the max. The transaction read-set records one
     /// entry per participating shard from this, so a predicate read fanned over
@@ -48,12 +46,12 @@ pub struct GatherOutcome {
 
 impl GatherOutcome {
     /// An outcome of `payloads` that carries no watermark and no read
-    /// version. Empty payloads are dropped.
-    pub(super) fn unversioned(payloads: Vec<Vec<u8>>) -> Self {
+    /// vShard. Empty payloads are dropped.
+    pub(super) fn without_reads(payloads: Vec<Vec<u8>>) -> Self {
         Self {
             payloads: payloads.into_iter().filter(|p| !p.is_empty()).collect(),
             watermark_lsn: Lsn::ZERO,
-            read_versions: ReadVersions::new(),
+            read_vshards: ReadShards::new(),
             shard_watermarks: Vec::new(),
         }
     }
@@ -114,7 +112,7 @@ mod tests {
 
     #[test]
     fn row_arrays_merge_in_answer_order() {
-        let outcome = GatherOutcome::unversioned(vec![
+        let outcome = GatherOutcome::without_reads(vec![
             encode_msgpack_array(&[row(1), row(2)]),
             Vec::new(),
             encode_msgpack_array(&[row(3)]),
@@ -131,7 +129,7 @@ mod tests {
     /// refuses it.
     #[test]
     fn a_non_array_payload_is_not_merged_as_an_element() {
-        let outcome = GatherOutcome::unversioned(vec![encode_msgpack_array(&[row(1)]), row(2)]);
+        let outcome = GatherOutcome::without_reads(vec![encode_msgpack_array(&[row(1)]), row(2)]);
         assert!(matches!(
             outcome.merged_array(),
             Err(crate::Error::Codec { .. })
@@ -141,7 +139,7 @@ mod tests {
     /// A routed point read answers its one row as a bare map.
     #[test]
     fn a_point_read_row_merges_as_one_relational_row() {
-        let outcome = GatherOutcome::unversioned(vec![encode_msgpack_array(&[row(1)]), row(2)]);
+        let outcome = GatherOutcome::without_reads(vec![encode_msgpack_array(&[row(1)]), row(2)]);
         let merged = outcome.merged_rows(false).expect("rows");
         assert_eq!(
             extract_msgpack_elements(&merged).expect("extract"),
@@ -152,7 +150,7 @@ mod tests {
     /// A payload in no row shape fails the relational merge.
     #[test]
     fn a_scalar_payload_is_not_a_relational_row() {
-        let outcome = GatherOutcome::unversioned(vec![vec![0x2a]]);
+        let outcome = GatherOutcome::without_reads(vec![vec![0x2a]]);
         assert!(matches!(
             outcome.merged_rows(true),
             Err(crate::Error::Codec { .. })
@@ -162,13 +160,13 @@ mod tests {
     /// The per-core payloads stay as their cores wrote them.
     #[test]
     fn payloads_keep_each_core_shape() {
-        let outcome = GatherOutcome::unversioned(vec![row(1), row(2)]);
+        let outcome = GatherOutcome::without_reads(vec![row(1), row(2)]);
         assert_eq!(outcome.payloads(), &[row(1), row(2)]);
     }
 
     #[test]
     fn no_payload_is_an_empty_array() {
-        let outcome = GatherOutcome::unversioned(vec![Vec::new()]);
+        let outcome = GatherOutcome::without_reads(vec![Vec::new()]);
         let shape = outcome.single_core_shape().expect("shape");
         assert!(
             extract_msgpack_elements(&shape)
@@ -185,13 +183,13 @@ mod tests {
     /// One core's payload is the single-core shape as is, a map included.
     #[test]
     fn one_payload_returns_verbatim() {
-        let outcome = GatherOutcome::unversioned(vec![row(7)]);
+        let outcome = GatherOutcome::without_reads(vec![row(7)]);
         assert_eq!(outcome.single_core_shape().expect("shape"), row(7));
     }
 
     #[test]
     fn several_row_arrays_merge_into_one() {
-        let outcome = GatherOutcome::unversioned(vec![
+        let outcome = GatherOutcome::without_reads(vec![
             encode_msgpack_array(&[row(1)]),
             encode_msgpack_array(&[row(2)]),
         ]);
@@ -205,7 +203,7 @@ mod tests {
     /// Two cores that each answer a map have no single-core shape.
     #[test]
     fn several_non_array_payloads_are_refused() {
-        let outcome = GatherOutcome::unversioned(vec![row(1), row(2)]);
+        let outcome = GatherOutcome::without_reads(vec![row(1), row(2)]);
         assert!(matches!(
             outcome.single_core_shape(),
             Err(crate::Error::Codec { .. })

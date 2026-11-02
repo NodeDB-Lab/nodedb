@@ -3,10 +3,11 @@
 //! Transaction modes on `BEGIN` and `START TRANSACTION`, and the policy that
 //! accepts or refuses them.
 //!
-//! NodeDB runs every transaction under Snapshot Isolation. `READ COMMITTED`
-//! is accepted because Snapshot Isolation is stronger. Every other isolation
-//! level is refused with SQLSTATE 0A000, the same policy `SET TRANSACTION`
-//! applies.
+//! NodeDB runs every transaction as a serializable snapshot transaction.
+//! `SERIALIZABLE`, `REPEATABLE READ`, `READ COMMITTED` and `READ UNCOMMITTED`
+//! are all accepted and all run serializable, because PostgreSQL permits a
+//! stronger level than the one requested. `DEFERRABLE` is refused with
+//! SQLSTATE 0A000.
 
 use super::tokens::Token;
 
@@ -29,20 +30,6 @@ impl IsolationLevel {
             IsolationLevel::Serializable => "SERIALIZABLE",
         }
     }
-
-    /// Return true if Snapshot Isolation satisfies this level.
-    pub fn is_supported(self) -> bool {
-        self == IsolationLevel::ReadCommitted
-    }
-}
-
-/// The refusal message for an isolation level NodeDB does not run.
-/// `command` is the statement that named it, such as `SET TRANSACTION`.
-pub fn unsupported_isolation_message(command: &str, level: IsolationLevel) -> String {
-    format!(
-        "{command} ISOLATION LEVEL {} is not supported; NodeDB enforces Snapshot Isolation",
-        level.as_sql()
-    )
 }
 
 /// A transaction access mode.
@@ -74,13 +61,9 @@ pub struct TxnModes {
 
 impl TxnModes {
     /// The reason NodeDB refuses these modes, or `None` when it runs them.
-    /// `command` names the statement in the message.
+    /// Every isolation level runs serializable. `command` names the
+    /// statement in the message.
     pub fn refusal(&self, command: &str) -> Option<String> {
-        if let Some(level) = self.isolation
-            && !level.is_supported()
-        {
-            return Some(unsupported_isolation_message(command, level));
-        }
         if self.deferrable == Some(true) {
             return Some(format!("{command} DEFERRABLE is not supported"));
         }
@@ -181,16 +164,26 @@ mod tests {
     }
 
     #[test]
-    fn refusal_follows_snapshot_isolation_policy() {
-        let accepted = modes("ISOLATION LEVEL READ COMMITTED, READ WRITE").expect("valid");
-        assert_eq!(accepted.refusal("BEGIN"), None);
-        for level in ["SERIALIZABLE", "REPEATABLE READ", "READ UNCOMMITTED"] {
-            let refused = modes(&format!("ISOLATION LEVEL {level}")).expect("valid");
-            let message = refused.refusal("BEGIN").expect("refused");
-            assert!(message.contains(level), "{message}");
-            assert!(message.contains("Snapshot Isolation"), "{message}");
+    fn every_isolation_level_is_accepted() {
+        for level in [
+            "SERIALIZABLE",
+            "REPEATABLE READ",
+            "READ COMMITTED",
+            "READ UNCOMMITTED",
+        ] {
+            let accepted = modes(&format!("ISOLATION LEVEL {level}, READ WRITE")).expect("valid");
+            assert_eq!(accepted.refusal("BEGIN"), None, "{level}");
         }
+    }
+
+    #[test]
+    fn deferrable_is_refused() {
         let deferrable = modes("DEFERRABLE").expect("valid");
-        assert!(deferrable.refusal("BEGIN").is_some());
+        assert_eq!(
+            deferrable.refusal("BEGIN").as_deref(),
+            Some("BEGIN DEFERRABLE is not supported")
+        );
+        let not_deferrable = modes("NOT DEFERRABLE").expect("valid");
+        assert_eq!(not_deferrable.refusal("BEGIN"), None);
     }
 }

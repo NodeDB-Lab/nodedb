@@ -28,30 +28,29 @@ pub(super) fn wal_append_array_op(
             array_id,
             cells_msgpack,
             provenance,
+            vshard_id: placement,
             ..
         } => {
             // The plan's cell bytes go into the record as they are: the
             // record is byte-identical to one encoded from the decoded cells.
-            let bytes = encode_put_spliced(array_id, cells_msgpack, provenance).map_err(|e| {
-                crate::Error::Serialization {
+            let bytes = encode_put_spliced(array_id, *placement, cells_msgpack, provenance)
+                .map_err(|e| crate::Error::Serialization {
                     format: "msgpack".into(),
                     detail: format!("wal array put encode: {e}"),
-                }
-            })?;
+                })?;
             Some(wal.append_array_put(tenant_id, vshard_id, database_id, &bytes)?)
         }
         ArrayOp::Delete {
             array_id,
             coords_msgpack,
             provenance,
+            vshard_id: placement,
             ..
         } => {
-            let bytes =
-                encode_delete_spliced(array_id, coords_msgpack, provenance).map_err(|e| {
-                    crate::Error::Serialization {
-                        format: "msgpack".into(),
-                        detail: format!("wal array delete encode: {e}"),
-                    }
+            let bytes = encode_delete_spliced(array_id, *placement, coords_msgpack, provenance)
+                .map_err(|e| crate::Error::Serialization {
+                    format: "msgpack".into(),
+                    detail: format!("wal array delete encode: {e}"),
                 })?;
             Some(wal.append_array_delete(tenant_id, vshard_id, database_id, &bytes)?)
         }

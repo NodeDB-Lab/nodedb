@@ -179,6 +179,17 @@ impl NodeDbPgHandler {
                 tenant_id,
             );
 
+        // Inside a transaction block every read of the statement reads the
+        // block's snapshot, taken at the block's first statement.
+        let txn_snapshot = crate::control::server::shared::session::ensure_txn_snapshot(
+            &self.sessions,
+            session_id,
+            &self.state,
+        )
+        .await
+        .map_err(StatementSetupError::from)?;
+        self.query_ctx.set_txn_snapshot(txn_snapshot);
+
         // Authoritative for both `PhysicalTask::database_id` and `$auth.database_id`.
         let database_id = scope.database_id();
 
@@ -200,7 +211,9 @@ impl NodeDbPgHandler {
 
         // Cache key isn't session-knob-scoped, so bypass entirely under a strategy
         // override — else a plan built for one join strategy serves a differently-tuned query.
-        let bypass_cache = override_flags.bypass_plan_cache();
+        // A plan inside a transaction block reads the block's snapshot, so it
+        // neither comes from nor enters the cache.
+        let bypass_cache = override_flags.bypass_plan_cache() || txn_snapshot.is_some();
 
         // A cached plan carries the RLS predicates and permission-tree filter
         // injected when it was built. Both stores keep a per-tenant version

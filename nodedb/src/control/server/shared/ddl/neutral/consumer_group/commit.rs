@@ -61,24 +61,6 @@ fn authorize_offset_commit(
     .map_err(|error| DdlError::new("42501", error.to_string()))
 }
 
-async fn migrate_legacy_group(
-    state: &SharedState,
-    database_id: DatabaseId,
-    tenant_id: u64,
-    stream_name: &str,
-    group_name: &str,
-) -> Result<(), DdlError> {
-    super::identity::migrate_legacy_topic_group(
-        state,
-        database_id,
-        tenant_id,
-        stream_name,
-        group_name,
-    )
-    .await
-    .map(|_| ())
-}
-
 /// Handle `COMMIT OFFSET PARTITION <p> AT <epoch>:<index>:<sequence> ON <stream> CONSUMER GROUP <name>`.
 pub async fn commit_offset(
     state: &SharedState,
@@ -127,16 +109,6 @@ pub async fn commit_offset(
                 .group_registry
                 .lifecycle_lock(database_id, tenant_id, &stream_name, &group_name);
         let _group_guard = lifecycle_lock.lock().await;
-        let legacy_group_lock = stream_name.strip_prefix("topic:").map(|legacy_stream| {
-            state
-                .group_registry
-                .lifecycle_lock(database_id, tenant_id, legacy_stream, &group_name)
-        });
-        let _legacy_group_guard = match legacy_group_lock {
-            Some(lock) => Some(lock.lock_owned().await),
-            None => None,
-        };
-        migrate_legacy_group(state, database_id, tenant_id, &stream_name, &group_name).await?;
 
         let def = registered_group(state, database_id, tenant_id, &stream_name, &group_name)?;
         let current = state.offset_store.get_offset(
@@ -197,16 +169,6 @@ pub async fn commit_offset(
                 .group_registry
                 .lifecycle_lock(database_id, tenant_id, &stream_name, &group_name);
         let _group_guard = lifecycle_lock.lock().await;
-        let legacy_group_lock = stream_name.strip_prefix("topic:").map(|legacy_stream| {
-            state
-                .group_registry
-                .lifecycle_lock(database_id, tenant_id, legacy_stream, &group_name)
-        });
-        let _legacy_group_guard = match legacy_group_lock {
-            Some(lock) => Some(lock.lock_owned().await),
-            None => None,
-        };
-        migrate_legacy_group(state, database_id, tenant_id, &stream_name, &group_name).await?;
 
         let def = registered_group(state, database_id, tenant_id, &stream_name, &group_name)?;
 

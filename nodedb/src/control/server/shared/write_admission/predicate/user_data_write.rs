@@ -9,14 +9,31 @@
 //! of a backup that already holds every row the tenant wrote.
 
 use crate::bridge::envelope::PhysicalPlan;
-use nodedb_physical::physical_plan::{CrdtOp, KvOp, MetaOp};
+use nodedb_physical::physical_plan::{CrdtOp, KvOp, KvResolvedMutation, MetaOp};
 
 use super::plan_is_write::plan_is_write;
 
 /// Whether `plan` writes a tenant's rows: a write-class plan that is not a
 /// schema install.
 pub fn plan_writes_user_data(plan: &PhysicalPlan) -> bool {
-    plan_is_write(plan) && !installs_schema(plan) && !calvin_install_without_user_write(plan)
+    plan_is_write(plan)
+        && !installs_schema(plan)
+        && !calvin_install_without_user_write(plan)
+        && !reaps_only(plan)
+}
+
+/// A KV write that only reaps expired keys. The node proposes it on its own
+/// when a TTL passes, and a backup that holds the key also holds its TTL, so
+/// it changes nothing a restore of that backup will not change too.
+fn reaps_only(plan: &PhysicalPlan) -> bool {
+    matches!(
+        plan,
+        PhysicalPlan::Kv(KvOp::ResolvedWrite { mutations, .. })
+            if !mutations.is_empty()
+                && mutations
+                    .iter()
+                    .all(|mutation| matches!(mutation, KvResolvedMutation::Reap { .. }))
+    )
 }
 
 /// The install of a Calvin slice that raises no write mark: a slice that
@@ -92,6 +109,8 @@ mod tests {
             collections: vec!["c".into()],
             sum_targets: Vec::new(),
             origin: nodedb_physical::physical_plan::RedoOrigin::Commit,
+            reads: Vec::new(),
+            snapshot_ordinal: None,
             calvin: Some(nodedb_physical::physical_plan::CalvinInstall {
                 epoch: 1,
                 position: 0,
@@ -108,5 +127,32 @@ mod tests {
     fn a_calvin_install_counts_only_when_its_slice_writes_user_rows() {
         assert!(plan_writes_user_data(&calvin_install(true)));
         assert!(!plan_writes_user_data(&calvin_install(false)));
+    }
+
+    #[test]
+    fn a_reap_only_write_raises_no_mark() {
+        let reap = KvResolvedMutation::Reap {
+            collection: collection(),
+            key: b"k".to_vec(),
+            expire_at_ms: 10,
+        };
+        let write = |mutations: Vec<KvResolvedMutation>| {
+            PhysicalPlan::Kv(KvOp::ResolvedWrite {
+                mutations,
+                response_payload: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+            })
+        };
+        assert!(!plan_writes_user_data(&write(vec![reap.clone()])));
+        let put = KvResolvedMutation::Put {
+            collection: collection(),
+            key: b"k".to_vec(),
+            value: b"v".to_vec(),
+            ttl_ms: 0,
+            expire_at_ms: 0,
+            surrogate: Surrogate::new(1),
+            precondition: None,
+        };
+        assert!(plan_writes_user_data(&write(vec![reap, put])));
     }
 }

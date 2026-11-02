@@ -53,23 +53,6 @@ pub async fn drop_consumer_group(
             .group_registry
             .lifecycle_lock(database_id, tenant_id, &stream_name, &group_name);
     let _group_guard = lifecycle_lock.lock().await;
-    let legacy_group_lock = stream_name.strip_prefix("topic:").map(|legacy_stream| {
-        state
-            .group_registry
-            .lifecycle_lock(database_id, tenant_id, legacy_stream, &group_name)
-    });
-    let _legacy_group_guard = match legacy_group_lock {
-        Some(lock) => Some(lock.lock_owned().await),
-        None => None,
-    };
-    super::identity::migrate_legacy_topic_group(
-        state,
-        database_id,
-        tenant_id,
-        &stream_name,
-        &group_name,
-    )
-    .await?;
 
     if state
         .group_registry

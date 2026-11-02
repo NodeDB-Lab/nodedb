@@ -28,8 +28,6 @@ use nodedb_physical::physical_plan::{GraphOp, WccSuperstepPlan, WccSuperstepResu
 pub(super) struct ShardWccResult {
     pub(super) node_id: u64,
     pub(super) result: WccSuperstepResult,
-    /// The versions the node's cores reported for the round.
-    pub(super) read_versions: crate::types::ReadVersions,
 }
 
 /// The inputs of one WCC round.
@@ -105,11 +103,7 @@ pub(super) async fn scatter_wcc_round(
             )
             .await?;
             let result = decode_wcc_from_payload(node_id, read.payload)?;
-            Ok::<ShardWccResult, crate::Error>(ShardWccResult {
-                node_id,
-                result,
-                read_versions: read.read_versions,
-            })
+            Ok::<ShardWccResult, crate::Error>(ShardWccResult { node_id, result })
         })
     });
 

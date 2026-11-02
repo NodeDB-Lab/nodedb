@@ -10,11 +10,11 @@ use crate::bridge::envelope::RowVersion;
 use crate::types::{DatabaseId, Lsn, TenantId, VShardId};
 use crate::wal::manager::WalAppender;
 
-/// Encode a document PUT redo record: `(collection, document_id, value,
-/// Option<SyncProvenance>, surrogate)`, with `(sys_from, valid_from_ms,
-/// valid_until_ms)` appended when `version` is `Some`; `sys_from` is the
-/// version's system-time ordinal. Must match
-/// `wal_replay_redo_document`'s decode.
+/// Encode a stamped document PUT redo record: `(collection, document_id,
+/// value, Option<SyncProvenance>, surrogate, sys_from, valid_from_ms,
+/// valid_until_ms)`. `sys_from` is the version's system-time ordinal. Must
+/// match `wal_replay_redo_document`'s decode. Every row an apply stored
+/// journals in this form.
 ///
 /// `document_id` is the row's client identity. The Event Plane replay reads
 /// it back verbatim as the event's row id.
@@ -23,48 +23,79 @@ pub(crate) fn encode_document_put_record(
     document_id: &str,
     value: &[u8],
     surrogate: u32,
-    version: Option<RowVersion>,
+    version: RowVersion,
 ) -> crate::Result<Vec<u8>> {
     let prov: Option<nodedb_types::sync::wire::SyncProvenance> = None;
-    match version {
-        Some(v) => zerompk::to_msgpack_vec(&(
-            collection,
-            document_id,
-            value,
-            prov,
-            surrogate,
-            v.sys_from,
-            v.valid_from_ms,
-            v.valid_until_ms,
-        )),
-        None => zerompk::to_msgpack_vec(&(collection, document_id, value, prov, surrogate)),
-    }
+    zerompk::to_msgpack_vec(&(
+        collection,
+        document_id,
+        value,
+        prov,
+        surrogate,
+        version.sys_from,
+        version.valid_from_ms,
+        version.valid_until_ms,
+    ))
     .map_err(|e| crate::Error::Serialization {
         format: "msgpack".into(),
         detail: format!("wal document put: {e}"),
     })
 }
 
-/// Encode a document DELETE redo record: `(collection, document_id,
-/// Option<SyncProvenance>, surrogate)` — surrogate keys the redb storage row —
-/// with the tombstone's system-time ordinal appended when `system_from` is
-/// `Some`.
+/// Encode the unstamped PUT record of a point write's pre-dispatch or
+/// opening forward record: `(collection, document_id, value,
+/// Option<SyncProvenance>, surrogate)`. The apply decides the version key,
+/// and its stamped write-set image replaces this record on replay. No other
+/// producer writes this form.
+fn encode_forward_put_record(
+    collection: &str,
+    document_id: &str,
+    value: &[u8],
+    surrogate: u32,
+) -> crate::Result<Vec<u8>> {
+    let prov: Option<nodedb_types::sync::wire::SyncProvenance> = None;
+    zerompk::to_msgpack_vec(&(collection, document_id, value, prov, surrogate)).map_err(|e| {
+        crate::Error::Serialization {
+            format: "msgpack".into(),
+            detail: format!("wal document put: {e}"),
+        }
+    })
+}
+
+/// Encode a stamped document DELETE redo record: `(collection, document_id,
+/// Option<SyncProvenance>, surrogate, system_from)`. The surrogate keys the
+/// redb storage row. `system_from` is the tombstone's system-time ordinal.
 ///
 /// `document_id` is the row's client identity, as for the PUT record.
 pub(crate) fn encode_document_delete_record(
     collection: &str,
     document_id: &str,
     surrogate: u32,
-    system_from: Option<i64>,
+    system_from: i64,
 ) -> crate::Result<Vec<u8>> {
     let prov: Option<nodedb_types::sync::wire::SyncProvenance> = None;
-    match system_from {
-        Some(sys) => zerompk::to_msgpack_vec(&(collection, document_id, prov, surrogate, sys)),
-        None => zerompk::to_msgpack_vec(&(collection, document_id, prov, surrogate)),
-    }
-    .map_err(|e| crate::Error::Serialization {
-        format: "msgpack".into(),
-        detail: format!("wal document delete: {e}"),
+    zerompk::to_msgpack_vec(&(collection, document_id, prov, surrogate, system_from)).map_err(|e| {
+        crate::Error::Serialization {
+            format: "msgpack".into(),
+            detail: format!("wal document delete: {e}"),
+        }
+    })
+}
+
+/// Encode the unstamped DELETE record of a point delete's pre-dispatch or
+/// opening forward record: `(collection, document_id,
+/// Option<SyncProvenance>, surrogate)`. No other producer writes this form.
+fn encode_forward_delete_record(
+    collection: &str,
+    document_id: &str,
+    surrogate: u32,
+) -> crate::Result<Vec<u8>> {
+    let prov: Option<nodedb_types::sync::wire::SyncProvenance> = None;
+    zerompk::to_msgpack_vec(&(collection, document_id, prov, surrogate)).map_err(|e| {
+        crate::Error::Serialization {
+            format: "msgpack".into(),
+            detail: format!("wal document delete: {e}"),
+        }
     })
 }
 
@@ -87,11 +118,10 @@ pub(super) fn opening_forward_sub_record(
     {
         return Ok(Some(crate::wal::RedoSubRecord {
             record_type: RecordType::Delete as u32,
-            payload: encode_document_delete_record(
+            payload: encode_forward_delete_record(
                 collection.as_str(),
                 document_id.as_str(),
                 surrogate.as_u32(),
-                None,
             )?,
         }));
     }
@@ -115,12 +145,11 @@ pub(super) fn opening_forward_sub_record(
     {
         return Ok(Some(crate::wal::RedoSubRecord {
             record_type: RecordType::Put as u32,
-            payload: encode_document_put_record(
+            payload: encode_forward_put_record(
                 collection.as_str(),
                 document_id.as_str(),
                 value,
                 surrogate.as_u32(),
-                None,
             )?,
         }));
     }
@@ -154,12 +183,11 @@ pub(super) fn wal_append_document_op(
         } => {
             // A versioned row's stamp is decided at apply, so its write set
             // carries the stamped image and cancels this record.
-            let entry = encode_document_put_record(
+            let entry = encode_forward_put_record(
                 collection.as_str(),
                 document_id.as_str(),
                 value,
                 surrogate.as_u32(),
-                None,
             )?;
             Some(wal.append_put(tenant_id, vshard_id, database_id, &entry)?)
         }
@@ -177,12 +205,11 @@ pub(super) fn wal_append_document_op(
         } => {
             // An `if_absent` insert that finds the row writes nothing: its
             // write set cancels this record, as it does for a versioned row.
-            let entry = encode_document_put_record(
+            let entry = encode_forward_put_record(
                 collection.as_str(),
                 document_id.as_str(),
                 value,
                 surrogate.as_u32(),
-                None,
             )?;
             Some(wal.append_put(tenant_id, vshard_id, database_id, &entry)?)
         }
@@ -199,11 +226,10 @@ pub(super) fn wal_append_document_op(
         } => {
             // The surrogate keys the row, its secondary indexes and its vector
             // nodes on replay.
-            let entry = encode_document_delete_record(
+            let entry = encode_forward_delete_record(
                 collection.as_str(),
                 document_id.as_str(),
                 surrogate.as_u32(),
-                None,
             )?;
             Some(wal.append_delete(tenant_id, vshard_id, database_id, &entry)?)
         }

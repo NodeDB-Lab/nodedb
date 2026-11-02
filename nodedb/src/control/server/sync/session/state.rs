@@ -87,7 +87,7 @@ pub struct SyncSession {
     pub last_seen_lsn: u64,
     /// Durable producer id assigned by `SyncProducerRegistry` at handshake.
     /// `0` means the session is not a Lite client or the registry was
-    /// unavailable — legacy / non-Lite connections remain at 0.
+    /// unavailable.
     pub producer_id: u64,
     /// The fencing epoch accepted by `SyncProducerRegistry` at handshake.
     /// `0` for non-Lite sessions.

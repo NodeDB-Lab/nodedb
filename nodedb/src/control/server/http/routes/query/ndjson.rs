@@ -147,7 +147,6 @@ pub async fn query_ndjson(
         output_schema: Some(&output_schema),
         database_id,
         sequences: &sequences,
-        client_session: None,
     };
     let routed = route_http_statement(
         &exec,

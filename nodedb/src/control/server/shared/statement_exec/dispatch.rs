@@ -100,6 +100,7 @@ pub(crate) async fn dispatch_statement_task(
         rls_write_check: _,
         resolved_sum_targets: _,
         declared_primary_key: _,
+        target_system_time: _,
     }) = &task.plan
     {
         let authorized = authorize_one_task(state, identity, &task)?;
@@ -125,6 +126,7 @@ pub(crate) async fn dispatch_statement_task(
         rls_write_check: _,
         resolved_sum_targets: _,
         declared_primary_key: _,
+        target_system_time: _,
     }) = &task.plan
     {
         let authorized = authorize_one_task(state, identity, &task)?;

@@ -9,37 +9,20 @@
 //! - A cluster array read (a slice or an aggregate) reads cells on many tile
 //!   vShards.
 //!
-//! The coordinator notes every vShard it read, each at the version the serving
-//! core reported, in the connection scope ([`note`]). Each protocol records
-//! the noted reads when the request ends ([`record_pending`]).
+//! The coordinator notes every vShard it read in the connection scope
+//! ([`note`]). Each protocol records the noted reads when the request ends
+//! ([`record_pending`]).
 //!
-//! Each vShard becomes one [`ReadSetEntry`] homed on that vShard. Commit
-//! validation then checks the entry on the vShard that holds the data:
-//!
-//! - A Calvin participant checks the collection's version on that vShard.
-//! - Any other commit fetches that version from the vShard's leader
-//!   (`commit::read_validation`).
-//!
-//! A version is a data-group log position, the same on every replica. So a
-//! version above the recorded one means the collection changed on that vShard
-//! after the read, whichever replica served it.
-
-use nodedb_types::WriteVersion;
+//! Each vShard becomes one [`ReadSetEntry`] homed on that vShard. The commit
+//! enlists that vShard, and its apply validates the entry there at the
+//! transaction's snapshot.
 
 use crate::types::{DatabaseId, TenantId, VShardId};
 
 use super::conn_scope::with_scope;
 use super::connection::SessionId;
-use super::read_set::{EngineTag, ReadKey, ReadOrigin, ReadSetEntry};
+use super::read_set::{EngineTag, ReadKey, ReadSetEntry};
 use super::store::SessionStore;
-
-/// One vShard a cross-shard read observed, at the version its serving core
-/// reported (`WriteVersion::ZERO` when the core reported none).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ShardObservation {
-    pub vshard: VShardId,
-    pub version: WriteVersion,
-}
 
 /// The vShards one cross-shard read observed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,7 +34,8 @@ pub struct ShardReads {
     /// The database-qualified collection the read scoped, or `None` when it
     /// read every collection.
     pub collection: Option<String>,
-    pub shards: Vec<ShardObservation>,
+    /// Every vShard the read observed.
+    pub shards: Vec<VShardId>,
 }
 
 /// Note a cross-shard read for the request now running. Outside a
@@ -83,17 +67,12 @@ pub fn record_pending(sessions: &SessionStore, session_id: SessionId) {
         return;
     }
     for reads in pending {
-        let entries = homed_entries(sessions, session_id, reads);
-        sessions.record_read_entries(session_id, entries);
+        sessions.record_read_entries(session_id, homed_entries(reads));
     }
 }
 
 /// One predicate entry per observed vShard, homed there.
-fn homed_entries(
-    sessions: &SessionStore,
-    session_id: SessionId,
-    reads: ShardReads,
-) -> Vec<ReadSetEntry> {
+fn homed_entries(reads: ShardReads) -> Vec<ReadSetEntry> {
     let ShardReads {
         engine,
         tenant_id,
@@ -104,31 +83,15 @@ fn homed_entries(
     let collection = collection.unwrap_or_default();
     shards
         .into_iter()
-        .map(|shard| {
-            // The session's own committed writes to the collection raise the
-            // read version, as `record_read_set` does, so a read never aborts
-            // on the session's own earlier write.
-            let own = if collection.is_empty() {
-                WriteVersion::ZERO
-            } else {
-                sessions.own_write_version(
-                    session_id,
-                    database_id,
-                    tenant_id,
-                    &collection,
-                    shard.vshard,
-                )
-            };
-            ReadSetEntry {
-                engine,
-                database_id,
-                tenant_id,
-                collection: collection.clone(),
-                key: ReadKey::Predicate,
-                read_version: shard.version.max(own),
-                origin: ReadOrigin::Session,
-                home: Some(shard.vshard),
-            }
+        .map(|vshard| ReadSetEntry {
+            engine,
+            database_id,
+            tenant_id,
+            collection: collection.clone(),
+            key: ReadKey::Predicate,
+            // The read ran at the block's snapshot.
+            observed_at: None,
+            home: Some(vshard),
         })
         .collect()
 }
@@ -152,16 +115,7 @@ mod tests {
             tenant_id: TenantId::new(1),
             database_id: DatabaseId::DEFAULT,
             collection: collection.map(str::to_owned),
-            shards: vec![
-                ShardObservation {
-                    vshard: VShardId::new(3),
-                    version: WriteVersion::logged(1, 10),
-                },
-                ShardObservation {
-                    vshard: VShardId::new(9),
-                    version: WriteVersion::logged(2, 20),
-                },
-            ],
+            shards: vec![VShardId::new(3), VShardId::new(9)],
         }
     }
 
@@ -172,7 +126,7 @@ mod tests {
             SessionId::LegacySocket(addr) => addr,
             SessionId::Connection(_) => unreachable!("legacy test identity"),
         });
-        sessions.begin(session_id, 0).expect("begin");
+        sessions.begin(session_id).expect("begin");
         (sessions, session_id)
     }
 
@@ -187,9 +141,8 @@ mod tests {
         let entries = sessions.take_read_set(session_id);
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].home, Some(VShardId::new(3)));
-        assert_eq!(entries[0].read_version, WriteVersion::logged(1, 10));
         assert_eq!(entries[1].home, Some(VShardId::new(9)));
-        assert_eq!(entries[1].read_version, WriteVersion::logged(2, 20));
+        assert!(entries.iter().all(|e| e.observed_at.is_none()));
         assert!(entries.iter().all(|e| e.key == ReadKey::Predicate));
         assert!(entries.iter().all(|e| e.collection == "db1.edges"));
         assert!(entries.iter().all(|e| e.engine == EngineTag::Graph));

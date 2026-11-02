@@ -12,7 +12,7 @@ use crate::bridge::envelope::PhysicalPlan;
 use crate::control::lease::QueryLeaseScope;
 use crate::control::metadata_proposer::DEFAULT_DRAIN_TIMEOUT;
 use crate::control::planner::calvin::{
-    TxnDispatchPosition, TxnProvenance, dispatch_strict_atomic_tasks_to_calvin,
+    TxnDispatchPosition, TxnProvenance, TxnReads, dispatch_strict_atomic_tasks_to_calvin,
 };
 use crate::control::security::audit::ArcAuditEmitter;
 use crate::control::security::identity::AuthenticatedIdentity;
@@ -248,7 +248,7 @@ async fn flush_ilp_batch_inner(
         &submitted,
         tenant_id,
         TxnDispatchPosition::Autocommit,
-        &[],
+        TxnReads::none(),
         None,
         TxnProvenance::client(identity.role_names()),
     )

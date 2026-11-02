@@ -34,6 +34,7 @@ pub(super) fn wal_append_columnar_op(
             provenance,
             wal_lsn: _,
             system_from,
+            restored_versions,
             // The compiled RLS predicate is a per-request authorization input,
             // not part of the row image being made durable, so it is not
             // written to the log and replay does not re-evaluate it.
@@ -47,10 +48,8 @@ pub(super) fn wal_append_columnar_op(
             // Encode a map-shaped `ColumnarWalRecord` carrying the per-row
             // cross-engine surrogates and the insert's conflict policy, so
             // replay restores the exact same identity and decides each
-            // existing key the way the live insert did. `surrogates` is index-aligned with the
-            // rows in `payload`. The map shape is distinct from the legacy
-            // 4-tuple array, so old on-disk records still decode via the
-            // replay fallback path.
+            // existing key the way the live insert did. `surrogates` is
+            // index-aligned with the rows in `payload`.
             let wal_payload = super::timeseries::encode_columnar_batch_payload(
                 super::timeseries::ColumnarBatchRecord {
                     collection: collection.as_str(),
@@ -62,6 +61,7 @@ pub(super) fn wal_append_columnar_op(
                         on_conflict_updates: on_conflict_updates.clone(),
                     },
                     system_from: *system_from,
+                    restored_versions,
                 },
             )?;
             Some(wal.append_timeseries_batch(tenant_id, vshard_id, database_id, &wal_payload)?)
@@ -72,7 +72,11 @@ pub(super) fn wal_append_columnar_op(
             updates,
             system_from,
             rls_write_check: _,
+            system_time,
         } => {
+            // Replay re-executes the predicate over the current state, so a
+            // record carries a current-state match only.
+            require_current_match(collection.as_str(), system_time)?;
             // Predicate UPDATE has no row post-image at append time (the
             // matching set is only known once the Data Plane scans current
             // state), so the durable record carries the predicate itself;
@@ -93,7 +97,9 @@ pub(super) fn wal_append_columnar_op(
             filters,
             system_from,
             rls_write_check: _,
+            system_time,
         } => {
+            require_current_match(collection.as_str(), system_time)?;
             // Mirrors the `Update` arm above; delete is idempotent (mark +
             // remove from PK index), so unlike update it tolerates a
             // hypothetical double-apply, but replay still runs it exactly
@@ -167,6 +173,24 @@ pub(super) fn wal_append_columnar_op(
     Ok(appended)
 }
 
+/// Refuse a predicate record whose match is not the current state: replay
+/// re-derives the matches over the current state. A block's predicate write
+/// stages and commits through its redo record instead.
+fn require_current_match(
+    collection: &str,
+    system_time: &nodedb_types::SystemTimeScope,
+) -> crate::Result<()> {
+    if system_time.is_current() {
+        return Ok(());
+    }
+    Err(crate::Error::PlanError {
+        detail: format!(
+            "columnar predicate UPDATE/DELETE on '{collection}' matching at {system_time:?} \
+             cannot be logged as a predicate: replay matches the current state"
+        ),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,6 +223,7 @@ mod tests {
             provenance: None,
             wal_lsn: None,
             system_from: Some(1_700_000_000_000_000_042),
+            restored_versions: vec![],
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
             returning: None,
             rls_filters: vec![],

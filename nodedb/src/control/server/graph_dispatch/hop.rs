@@ -160,10 +160,10 @@ pub(super) async fn execute_neighbor_hop(
 
     // Single-node mode: no routing table — every frontier node is local.
     if shared.cluster_routing.is_none() {
-        let (rows, versions) = expand_local(shared, scope, frontier).await?;
+        let rows = expand_local(shared, scope, frontier).await?;
         let merged = dedup_destinations(&rows);
         let mut reads = ShardReadLog::new();
-        reads.note(key_vshards(frontier), &versions);
+        reads.note(key_vshards(frontier));
         return Ok(HopOutput {
             rows,
             merged_destinations: merged,
@@ -180,8 +180,8 @@ pub(super) async fn execute_neighbor_hop(
     let mut all_rows: Vec<NeighborRow> = if local_nodes.is_empty() {
         Vec::new()
     } else {
-        let (rows, versions) = expand_local(shared, scope, &local_nodes).await?;
-        reads.note(key_vshards(&local_nodes), &versions);
+        let rows = expand_local(shared, scope, &local_nodes).await?;
+        reads.note(key_vshards(&local_nodes));
         rows
     };
 
@@ -316,12 +316,12 @@ impl ExpandScope<'_> {
 }
 
 /// Expand a locally-owned subset on all local Data-Plane cores. Returns the
-/// crossed edges and the versions the cores reported.
+/// crossed edges. The caller notes the frontier's key vShards as read.
 async fn expand_local(
     shared: &SharedState,
     scope: ExpandScope<'_>,
     node_ids: &[String],
-) -> crate::Result<(Vec<NeighborRow>, crate::types::ReadVersions)> {
+) -> crate::Result<Vec<NeighborRow>> {
     let plan = scope.plan(node_ids.to_vec());
     // A linearizable hop confirms the groups its plan reads first.
     if scope.linearizable {
@@ -331,6 +331,7 @@ async fn expand_local(
     crate::control::read_cut::await_read_cut(
         shared,
         &plan,
+        &crate::control::read_cut::cut_read_groups(shared, scope.database_id, &plan, None)?,
         crate::control::server::shared::session::StatementDeadline::of_statement(shared),
     )
     .await?;
@@ -343,7 +344,7 @@ async fn expand_local(
         scope.txn_id,
     )
     .await?;
-    Ok((decode_neighbor_rows(&resp.payload)?, resp.read_versions))
+    decode_neighbor_rows(&resp.payload)
 }
 
 /// Expand the remote-owned subsets concurrently: ship a typed
@@ -417,7 +418,7 @@ async fn expand_remote(
         // A remote dispatch error is fatal: a dropped owner means a partial
         // reachable set.
         let (read_vshard, outcome) = result?;
-        reads.note([read_vshard], &outcome.read_versions);
+        reads.note([read_vshard]);
         for payload in outcome.payloads {
             rows.extend(decode_neighbor_rows(&payload)?);
         }

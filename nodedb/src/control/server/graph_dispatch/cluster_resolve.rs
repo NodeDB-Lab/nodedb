@@ -31,15 +31,13 @@ pub(in crate::control::server::graph_dispatch) struct DispatchSuperstepParams<'a
     pub(in crate::control::server::graph_dispatch) linearizable: bool,
 }
 
-/// One owner node's answer to a graph superstep: its payload and the
-/// versions its cores reported.
+/// One owner node's answer to a graph superstep: its payload.
 pub(in crate::control::server::graph_dispatch) struct NodeRead {
     pub(in crate::control::server::graph_dispatch) payload: Payload,
-    pub(in crate::control::server::graph_dispatch) read_versions: crate::types::ReadVersions,
 }
 
 /// Dispatch a single already-built graph-superstep `plan` to one owner node and
-/// return its node-level payload and reported versions. The LOCAL node fans the plan across all its
+/// return its node-level payload. The LOCAL node fans the plan across all its
 /// Data-Plane cores via `execute_plan_all_local_cores` (per-core results merged
 /// into one payload); a REMOTE node gets one `RouteDecision::Remote` dispatch via
 /// `dispatch_route`. An empty payload denotes a zero-vertex shard — the caller's
@@ -73,6 +71,7 @@ pub(in crate::control::server::graph_dispatch) async fn dispatch_superstep_to_no
         crate::control::read_cut::await_read_cut(
             shared_arc,
             &plan,
+            &crate::control::read_cut::cut_read_groups(shared_arc, database_id, &plan, None)?,
             crate::control::server::shared::session::StatementDeadline::after(
                 std::time::Duration::from_millis(deadline_ms),
             ),
@@ -90,7 +89,6 @@ pub(in crate::control::server::graph_dispatch) async fn dispatch_superstep_to_no
         .await?;
         Ok(NodeRead {
             payload: Payload::from_vec(node_result.payload),
-            read_versions: node_result.read_versions,
         })
     } else {
         // Remote node: one dispatch via the gateway.
@@ -116,7 +114,6 @@ pub(in crate::control::server::graph_dispatch) async fn dispatch_superstep_to_no
             user_roles: &[],
         })
         .await?;
-        let read_versions = outcome.read_versions;
         let payload = outcome
             .payloads
             .into_iter()
@@ -125,10 +122,7 @@ pub(in crate::control::server::graph_dispatch) async fn dispatch_superstep_to_no
             .ok_or_else(|| crate::Error::Internal {
                 detail: format!("graph superstep: node={node_id} returned no payload"),
             })?;
-        Ok(NodeRead {
-            payload,
-            read_versions,
-        })
+        Ok(NodeRead { payload })
     }
 }
 

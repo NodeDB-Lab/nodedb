@@ -207,6 +207,7 @@ mod tests {
             rows: Vec::new(),
             rejected: 2,
             first_rejection: Some("type conflict".into()),
+            carried_system: false,
         };
         let task = PhysicalTask {
             tenant_id: crate::types::TenantId::new(1),

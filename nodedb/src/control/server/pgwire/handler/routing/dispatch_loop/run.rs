@@ -377,10 +377,8 @@ impl NodeDbPgHandler {
             self.track_dispatched_task(
                 DispatchedTask {
                     identity,
-                    client_session: session_id,
                     txn,
                     plan: &plan_for_response,
-                    database_id: task_database_id,
                 },
                 &resp,
                 &distributed_reads,

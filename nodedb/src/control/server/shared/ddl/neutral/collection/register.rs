@@ -235,6 +235,7 @@ fn build_timeseries_schema(
         // The collection type's interval is the one source of the partition
         // interval: CREATE and ALTER both write it.
         partition_interval: interval.clone(),
+        last_value_cache: coll.lvc_enabled,
     }))
 }
 

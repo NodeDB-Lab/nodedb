@@ -105,7 +105,7 @@ fn collect_requirements(plan: &PhysicalPlan, out: &mut Vec<AuthorizationRequirem
                 | MetaOp::TemporalPurgeDocumentStrict { collection, .. }
                 | MetaOp::TemporalPurgeColumnar { collection, .. }
                 | MetaOp::TemporalPurgeCrdt { collection, .. }
-                | MetaOp::QueryLastValues { collection }
+                | MetaOp::QueryLastValues { collection, .. }
                 | MetaOp::QueryLastValue { collection, .. }
                 | MetaOp::VerifyHashChain { collection }
                 | MetaOp::RebuildIndex { collection, .. },

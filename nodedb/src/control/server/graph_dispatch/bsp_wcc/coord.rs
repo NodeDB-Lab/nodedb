@@ -83,11 +83,11 @@ pub async fn run_bsp_wcc(
             .map(|sr| (sr.node_id, sr.result.system_as_of)),
     )?;
 
-    // Every owner's partition was read once, at the versions it reported.
+    // Every owner's partition was read once.
     let mut reads = ShardReadLog::new();
     for sr in &results {
         if let Some(target) = targets.iter().find(|t| t.node_id == sr.node_id) {
-            reads.note(target.owned_vshards.iter().copied(), &sr.read_versions);
+            reads.note(target.owned_vshards.iter().copied());
         }
     }
     reads.publish(

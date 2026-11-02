@@ -72,8 +72,8 @@ pub struct WalAppendRequest<'a> {
 ///
 /// Returns the WAL LSN allocated for writes it appended (`Some`), or `None`
 /// for reads / control ops that need no WAL record. The caller stamps the
-/// returned LSN onto the dispatched `Request` so the Data Plane can record the
-/// committed write version.
+/// returned LSN onto the dispatched `Request` so the Data Plane can note the
+/// committed write as applied.
 pub fn wal_append_if_write(
     wal: &WalManager,
     tenant_id: TenantId,
@@ -260,6 +260,8 @@ mod tests {
                 collections: Vec::new(),
                 sum_targets: Vec::new(),
                 origin: nodedb_physical::physical_plan::RedoOrigin::Commit,
+                reads: Vec::new(),
+                snapshot_ordinal: None,
                 calvin: None,
             },
         );

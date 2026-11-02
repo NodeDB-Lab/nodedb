@@ -147,6 +147,8 @@ pub(crate) fn provider_scan_of_rows(rows: Vec<u8>, sources: Vec<GatheredSource>)
         limit: None,
         offset: 0,
         distinct: false,
+        // Filled rows: the cut they were read at is already applied.
+        system_time: nodedb_types::SystemTimeScope::Current,
     })
 }
 
@@ -171,7 +173,7 @@ pub(super) enum ChildRows {
 /// body across all vShards, finalizes a partial-aggregate payload, and
 /// flattens hit-shaped payloads (vector / hybrid) to columned rows with the
 /// surrogate resolved to the user PK. An in-transaction read records the
-/// child's base collection in `captures` at its observed read-version.
+/// child's base collection in `captures` on the vShards it read.
 pub(super) async fn materialize_child_rows(
     state: &SharedState,
     ctx: ReadScope,
@@ -234,8 +236,7 @@ pub(super) async fn materialize_child_rows(
     let hit_collection = hit_collection_name(&child);
 
     // Record the child's single base collection in the in-transaction
-    // read-set at its own observed read-version (mirrors the root
-    // Gather arm). Autocommit reads skip the catalog lookup.
+    // read-set on the vShards it read (mirrors the root Gather arm). Autocommit reads skip the catalog lookup.
     let probe_collection: Option<String> = if txn_id.is_some() {
         hit_collection.clone()
     } else {
@@ -274,7 +275,7 @@ pub(super) async fn materialize_child_rows(
     {
         captures.push(DistributedReadCapture {
             scan_plan,
-            read_versions: outcome.read_versions.clone(),
+            read_vshards: outcome.read_vshards.clone(),
         });
     }
 
@@ -360,6 +361,8 @@ pub(super) async fn resolve_post_process(
             limit,
             offset,
             distinct,
+            // Filled rows: the child was read at its own cuts.
+            system_time: nodedb_types::SystemTimeScope::Current,
         },
     ))))
 }

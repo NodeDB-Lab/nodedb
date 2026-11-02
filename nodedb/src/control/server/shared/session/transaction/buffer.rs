@@ -46,27 +46,6 @@ impl SessionStore {
             .unwrap_or_default()
     }
 
-    /// Collect a value from each buffered write task's plan. Used at commit to
-    /// gather the collections this transaction wrote, so its own reads of those
-    /// collections are excluded from snapshot-isolation conflict detection
-    /// (a read-your-own-write is not a serialization conflict).
-    pub fn buffered_collections<F>(
-        &self,
-        addr: impl Into<SessionId>,
-        extract: F,
-    ) -> std::collections::HashSet<String>
-    where
-        F: Fn(&nodedb_physical::physical_plan::PhysicalPlan) -> Option<String>,
-    {
-        self.read_session(addr, |s| {
-            s.tx_buffer
-                .iter()
-                .filter_map(|task| extract(&task.plan))
-                .collect()
-        })
-        .unwrap_or_default()
-    }
-
     /// Clone the current transaction's buffered write tasks WITHOUT consuming
     /// them or transitioning session state, so COMMIT can classify dispatch off
     /// the buffered writes while still holding the option to `rollback` on a
@@ -254,7 +233,7 @@ mod tests {
         let store = SessionStore::new();
         let addr: std::net::SocketAddr = "127.0.0.1:5311".parse().expect("addr");
         store.ensure_session(addr);
-        store.begin(addr, 0).expect("begin");
+        store.begin(addr).expect("begin");
 
         assert!(store.buffer_write(addr, ingest_task()));
         store.note_ts_preview_rejected(addr, 0);

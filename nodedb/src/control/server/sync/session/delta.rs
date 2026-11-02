@@ -61,28 +61,26 @@ impl SyncSession {
             return SyncFrame::try_encode(SyncMessageType::DeltaReject, &reject);
         }
 
-        // CRC32C integrity check (skip for legacy clients with checksum=0).
-        if msg.checksum != 0 {
-            let computed = crc32c::crc32c(&msg.delta);
-            if computed != msg.checksum {
-                self.mutations_rejected += 1;
-                warn!(
-                    session = %self.session_id,
-                    mutation_id = msg.mutation_id,
-                    expected = msg.checksum,
-                    computed,
-                    "CRC32C checksum mismatch on delta payload"
-                );
-                let reject = DeltaRejectMsg {
-                    mutation_id: msg.mutation_id,
-                    reason: format!(
-                        "CRC32C mismatch: expected {:#010x}, computed {:#010x}",
-                        msg.checksum, computed
-                    ),
-                    compensation: Some(CompensationHint::IntegrityViolation),
-                };
-                return SyncFrame::try_encode(SyncMessageType::DeltaReject, &reject);
-            }
+        // CRC32C integrity check. Every client computes the checksum.
+        let computed = crc32c::crc32c(&msg.delta);
+        if computed != msg.checksum {
+            self.mutations_rejected += 1;
+            warn!(
+                session = %self.session_id,
+                mutation_id = msg.mutation_id,
+                expected = msg.checksum,
+                computed,
+                "CRC32C checksum mismatch on delta payload"
+            );
+            let reject = DeltaRejectMsg {
+                mutation_id: msg.mutation_id,
+                reason: format!(
+                    "CRC32C mismatch: expected {:#010x}, computed {:#010x}",
+                    msg.checksum, computed
+                ),
+                compensation: Some(CompensationHint::IntegrityViolation),
+            };
+            return SyncFrame::try_encode(SyncMessageType::DeltaReject, &reject);
         }
 
         // Update device metadata peer_id on first delta.
@@ -301,16 +299,17 @@ mod tests {
         let mut session = make_authenticated_session();
 
         let data = serde_json::json!({"status": "active"});
+        let delta = nodedb_types::json_to_msgpack(&data).unwrap();
         let msg = DeltaPushMsg {
             collection: "orders".into(),
             device_id: 0,
             delta_signature: [0; 32],
             collection_incarnation: nodedb_types::Hlc::ZERO,
             document_id: "o1".into(),
-            delta: nodedb_types::json_to_msgpack(&data).unwrap(),
+            checksum: crc32c::crc32c(&delta),
+            delta,
             peer_id: 1,
             mutation_id: 42,
-            checksum: 0,
             device_valid_time_ms: None,
             producer_id: 0,
             epoch: 0,
@@ -362,16 +361,17 @@ mod tests {
         let mut dlq = SyncDlq::new(DlqConfig::default());
 
         let data = serde_json::json!({"status": "draft"});
+        let delta = nodedb_types::json_to_msgpack(&data).unwrap();
         let msg = DeltaPushMsg {
             collection: "orders".into(),
             device_id: 0,
             delta_signature: [0; 32],
             collection_incarnation: nodedb_types::Hlc::ZERO,
             document_id: "o1".into(),
-            delta: nodedb_types::json_to_msgpack(&data).unwrap(),
+            checksum: crc32c::crc32c(&delta),
+            delta,
             peer_id: 1,
             mutation_id: 42,
-            checksum: 0,
             device_valid_time_ms: None,
             producer_id: 0,
             epoch: 0,
@@ -444,16 +444,18 @@ mod tests {
         ));
 
         let data = serde_json::json!({"key": "value"});
+        let delta = nodedb_types::json_to_msgpack(&data).unwrap();
+        let checksum = crc32c::crc32c(&delta);
         let msg = DeltaPushMsg {
             collection: "docs".into(),
             document_id: "d1".into(),
-            delta: nodedb_types::json_to_msgpack(&data).unwrap(),
+            delta: delta.clone(),
             peer_id: 1,
             mutation_id: 1,
             device_id: 0,
             delta_signature: [0; 32],
             collection_incarnation: nodedb_types::Hlc::ZERO,
-            checksum: 0,
+            checksum,
             device_valid_time_ms: None,
             producer_id: 0,
             epoch: 0,
@@ -470,13 +472,13 @@ mod tests {
         let msg2 = DeltaPushMsg {
             collection: "docs".into(),
             document_id: "d2".into(),
-            delta: nodedb_types::json_to_msgpack(&data).unwrap(),
+            delta,
             peer_id: 1,
             mutation_id: 2,
             device_id: 0,
             delta_signature: [0; 32],
             collection_incarnation: nodedb_types::Hlc::ZERO,
-            checksum: 0,
+            checksum,
             device_valid_time_ms: None,
             producer_id: 0,
             epoch: 0,
@@ -510,7 +512,7 @@ mod tests {
             device_id: 0,
             delta_signature: [0; 32],
             collection_incarnation: nodedb_types::Hlc::ZERO,
-            checksum: 0,
+            checksum: crc32c::crc32c(&delta),
             device_valid_time_ms: None,
             producer_id: 0,
             epoch: 0,
@@ -581,6 +583,35 @@ mod tests {
         assert_eq!(session.mutations_rejected, 1);
     }
 
+    /// A zero checksum on a non-empty delta is a mismatch like any other.
+    #[test]
+    fn zero_checksum_rejects_delta() {
+        let mut session = make_authenticated_session();
+        let delta = nodedb_types::json_to_msgpack(&serde_json::json!({"key": "value"})).unwrap();
+        assert_ne!(crc32c::crc32c(&delta), 0);
+        let msg = DeltaPushMsg {
+            collection: "docs".into(),
+            document_id: "d1".into(),
+            delta,
+            peer_id: 1,
+            mutation_id: 1,
+            device_id: 0,
+            delta_signature: [0; 32],
+            collection_incarnation: nodedb_types::Hlc::ZERO,
+            checksum: 0,
+            device_valid_time_ms: None,
+            producer_id: 0,
+            epoch: 0,
+            seq: 0,
+        };
+        let response = session.handle_delta_push(&msg, None, None, None);
+        assert_eq!(
+            response.expect("a reject frame").msg_type,
+            SyncMessageType::DeltaReject
+        );
+        assert_eq!(session.mutations_rejected, 1);
+    }
+
     /// The session emits its `DeltaAck` before the delta has been dispatched to
     /// the Data Plane, and stamps it `AckStatus::Applied`. Nothing has been
     /// applied at that point — the durable apply happens afterwards, and may be
@@ -593,13 +624,14 @@ mod tests {
         let mut session = make_authenticated_session();
 
         let data = serde_json::json!({"status": "active"});
+        let delta = nodedb_types::json_to_msgpack(&data).unwrap();
         let msg = DeltaPushMsg {
             collection: "orders".into(),
             document_id: "o1".into(),
-            delta: nodedb_types::json_to_msgpack(&data).unwrap(),
+            checksum: crc32c::crc32c(&delta),
+            delta,
             peer_id: 1,
             mutation_id: 42,
-            checksum: 0,
             device_valid_time_ms: None,
             producer_id: 0,
             epoch: 0,

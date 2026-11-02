@@ -46,6 +46,9 @@ pub(crate) struct WriteDispatch {
     /// outcome-floor window. The funnel closes the window from the write's
     /// outcome. `None` when the caller appended nothing for this dispatch.
     pub minted: Option<super::minted::MintedRecords>,
+    /// The system-time ordinal the caller's records carry, `None` when they
+    /// carry none or the caller appended nothing. The apply stamps it.
+    pub system_ordinal: Option<i64>,
 }
 
 /// Inputs for `dispatch_to_data_plane_inner`: the Data Plane request identity

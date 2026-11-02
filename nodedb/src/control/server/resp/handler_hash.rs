@@ -42,6 +42,7 @@ pub(super) async fn handle_hget(
         key,
         fields: vec![field.clone()],
         rls_filters: Vec::new(),
+        system_time: nodedb_types::SystemTimeScope::Current,
     });
 
     match dispatch_kv(state, session, plan).await {
@@ -90,6 +91,7 @@ pub(super) async fn handle_hmget(
         key,
         fields: fields.clone(),
         rls_filters: Vec::new(),
+        system_time: nodedb_types::SystemTimeScope::Current,
     });
 
     match dispatch_kv(state, session, plan).await {
