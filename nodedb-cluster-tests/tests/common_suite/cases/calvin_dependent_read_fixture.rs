@@ -15,6 +15,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use nodedb::engine::kv::hash_table::KvSnapshotTable;
 use nodedb::types::TenantId;
 
 use super::calvin_multishard_fixture::Fixture;
@@ -276,9 +277,9 @@ async fn local_kv_rows(node: &TestClusterNode, collection: &str) -> BTreeMap<Vec
             if key != table {
                 continue;
             }
-            let entries: Vec<(Vec<u8>, Vec<u8>, u64, u32)> =
+            let table: KvSnapshotTable =
                 zerompk::from_msgpack(&bytes).expect("KV table snapshot decodes");
-            rows.extend(entries.into_iter().map(|(key, value, _, _)| (key, value)));
+            rows.extend(table.rows.into_iter().map(|row| (row.key, row.value)));
         }
     }
     rows

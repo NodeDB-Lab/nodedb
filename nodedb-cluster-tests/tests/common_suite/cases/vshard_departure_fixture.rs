@@ -401,7 +401,7 @@ fn stale_in(
     for snap in snapshots {
         for collection in names.collections() {
             let keyed = snap
-                .documents
+                .documents_versioned
                 .iter()
                 .chain(&snap.kv_tables)
                 .chain(&snap.columnar_engines)

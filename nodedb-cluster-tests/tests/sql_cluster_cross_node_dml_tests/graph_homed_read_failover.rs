@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! A read-only transaction's homed read is never validated by a node that lost
+//! A transaction's homed read is never validated by a node that lost
 //! leadership.
 //!
 //! A transaction reads the neighbors of `r0` through a node that does not
 //! lead `r0`'s key vShard, so the read is homed on that vShard's leader `L`.
+//! It writes one log row, so its COMMIT checks its reads.
 //! `L` is then cut off from both other nodes. They elect a new leader, and an
 //! edge out of `r0` commits there. `L` is reconnected to the reader's node
 //! only, still cut off from the rest of the cluster. The reader's COMMIT must
@@ -20,6 +21,8 @@ use crate::common::occ_shuffle::pg_detail;
 
 const EDGES: &str = "hrf_edges";
 const READ_KEY: &str = "r0";
+/// The collection the transaction writes one row to.
+const LOG: &str = "hrf_log";
 
 /// Sever node `a` and node `b` from each other, both ways, or heal the link.
 fn link(cluster: &TestCluster, a: usize, b: usize, severed: bool) {
@@ -46,19 +49,21 @@ fn link(cluster: &TestCluster, a: usize, b: usize, severed: bool) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn a_deposed_leader_never_validates_a_homed_read() {
     let cluster = TestCluster::spawn_three().await.expect("3-node cluster");
-    cluster
-        .exec_ddl_on_any_leader(&format!("CREATE COLLECTION {EDGES}"))
-        .await
-        .unwrap_or_else(|e| panic!("CREATE COLLECTION {EDGES}: {e}"));
+    for collection in [EDGES, LOG] {
+        cluster
+            .exec_ddl_on_any_leader(&format!("CREATE COLLECTION {collection}"))
+            .await
+            .unwrap_or_else(|e| panic!("CREATE COLLECTION {collection}: {e}"));
+    }
     wait_for(
-        "all 3 nodes see the collection",
+        "all 3 nodes see both collections",
         Duration::from_secs(10),
         Duration::from_millis(50),
         || {
             cluster
                 .nodes
                 .iter()
-                .all(|n| n.cached_collection_count() >= 1)
+                .all(|n| n.cached_collection_count() >= 2)
         },
     )
     .await;
@@ -106,6 +111,12 @@ async fn a_deposed_leader_never_validates_a_homed_read() {
         .simple_query(&read_sql)
         .await
         .unwrap_or_else(|e| panic!("in-txn NEIGHBORS: {}", pg_detail(&e)));
+    client
+        .simple_query(&format!(
+            "INSERT INTO {LOG} (id, value) VALUES ('entry', '1')"
+        ))
+        .await
+        .unwrap_or_else(|e| panic!("in-txn log row: {}", pg_detail(&e)));
 
     // Cut the leader off. The other two elect a new leader of the group.
     link(&cluster, old, reader, true);

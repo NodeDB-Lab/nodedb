@@ -93,6 +93,7 @@ async fn pgwire_gateway_smoke_cache_hit() {
         key: b"pgwire-smoke-key".to_vec(),
         rls_filters: vec![],
         surrogate_ceiling: None,
+        system_time: nodedb_types::SystemTimeScope::Current,
     }));
     let cache_key = PlanCacheKey {
         sql_text_hash: hash_sql("GET gw_smoke_pgwire pgwire-smoke-key"),
@@ -163,6 +164,7 @@ async fn http_gateway_smoke_cache_hit() {
         key: b"http-smoke-key".to_vec(),
         rls_filters: vec![],
         surrogate_ceiling: None,
+        system_time: nodedb_types::SystemTimeScope::Current,
     }));
     let cache_key = PlanCacheKey {
         sql_text_hash: hash_sql("GET gw_smoke_http http-smoke-key"),
@@ -228,6 +230,7 @@ async fn resp_gateway_smoke_cache_hit() {
         key: b"resp-smoke-key".to_vec(),
         rls_filters: vec![],
         surrogate_ceiling: None,
+        system_time: nodedb_types::SystemTimeScope::Current,
     }));
     let cache_key = PlanCacheKey {
         sql_text_hash: hash_sql("GET gw_smoke_resp resp-smoke-key"),
@@ -296,6 +299,7 @@ async fn ilp_gateway_smoke_cache_hit() {
         key: b"ilp-smoke-key".to_vec(),
         rls_filters: vec![],
         surrogate_ceiling: None,
+        system_time: nodedb_types::SystemTimeScope::Current,
     }));
     let cache_key = PlanCacheKey {
         sql_text_hash: hash_sql("GET gw_smoke_ilp ilp-smoke-key"),
@@ -361,6 +365,7 @@ async fn native_gateway_smoke_cache_hit() {
         key: b"native-smoke-key".to_vec(),
         rls_filters: vec![],
         surrogate_ceiling: None,
+        system_time: nodedb_types::SystemTimeScope::Current,
     }));
     let cache_key = PlanCacheKey {
         sql_text_hash: hash_sql("GET gw_smoke_native native-smoke-key"),

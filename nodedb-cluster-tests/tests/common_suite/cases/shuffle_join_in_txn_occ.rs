@@ -9,25 +9,22 @@
 //! via a distributed equi-join the planner lowers to `Exchange{Shuffle}` wrapping
 //! a `HashJoin`. The coordinator fans PRODUCERs to EACH side's owner: the probe
 //! (left) side scans `left_collection`, the build (right) side scans
-//! `right_collection`. Each producer reports the scanned collection's
-//! write version at read time on its `ShuffleProduceResponse`; the coordinator
-//! records ONE read-set entry PER SIDE, each stamped with that side's real
-//! max-folded read version.
+//! `right_collection`. Each producer reports the vShards it read on its
+//! `ShuffleProduceResponse`; the coordinator records read-set entries PER
+//! SIDE, homed on that side's folded vShards.
 //!
-//!
-//! Three cases bound the fixed behavior:
+//! Three cases bound the behavior:
 //!
 //!  * `commits_when_neither_side_concurrently_written` — neither join side is
-//!    written during the txn, so both recorded real versions still validate and
-//!    COMMIT must SUCCEED.
+//!    written during the txn, so no version sits above the snapshot and COMMIT
+//!    must SUCCEED.
 //!  * `occ_aborts_on_stale_probe_read` — a confirmed-visible concurrent write to
-//!    the LEFT/probe collection advances it past the captured probe version, so
-//!    COMMIT must abort with 40001.
+//!    the LEFT/probe collection lands a version above the snapshot, so COMMIT
+//!    must abort with 40001.
 //!  * `occ_aborts_on_stale_build_read` — THE LOAD-BEARING CASE: a
 //!    confirmed-visible concurrent write to the RIGHT/build collection ONLY must
-//!    STILL abort with 40001. Pre-fix, no read-set entry existed for the build
-//!    collection, so this would have SILENTLY committed. This case proves the
-//!    hole is closed.
+//!    STILL abort with 40001. Without a read-set entry for the build collection
+//!    it would commit silently. This case proves the build side is recorded.
 //!
 //! ## Why a single node reproduces it
 //!
@@ -36,7 +33,7 @@
 //! transport + the shuffle producer/consumer hooks installed, so it can BOTH
 //! resolve a distributed `Exchange{Shuffle}` (producer/consumer loop back to the
 //! same node over the real RPC path, genuinely exercising the per-side read
-//! version reporting) AND route a cross-shard COMMIT through the
+//! vShard reporting) AND route a cross-shard COMMIT through the
 //! multi-participant Calvin barrier that revalidates read-only participants.
 //!
 //! The transaction WRITES two collections on DISTINCT vShards (`w1`, `w2`) so its
@@ -159,9 +156,7 @@ async fn spawn_node_with_collections() -> (
     .await;
 
     // Seed left and right with three matching join keys so the join returns real
-    // rows AND each side's committed write version is non-zero (the exact
-    // precondition that made the pre-fix ZERO probe read-version spuriously abort,
-    // and gives the stale-read cases a real baseline version to advance past).
+    // rows AND each side holds committed versions below the snapshot.
     node.client
         .simple_query(&format!(
             "INSERT INTO {left} (id, jk, val) VALUES \
@@ -215,7 +210,7 @@ async fn spawn_node_with_collections() -> (
 /// two buffered writes on distinct vShards, leaving the transaction OPEN. The two
 /// INSERTs buffer on the coordinator, so at COMMIT the write set spans two vShards
 /// → the Calvin barrier; the join SELECT registers BOTH join sides' vShards as
-/// read-only participants with captured real read versions.
+/// read-only participants.
 async fn begin_join_read_and_buffer_writes(
     node: &TestClusterNode,
     left: &str,
@@ -236,11 +231,9 @@ async fn begin_join_read_and_buffer_writes(
         .expect("open cross-shard txn: distributed join read + buffer writes");
 }
 
-/// Neither join side is concurrently written, so both recorded real read versions
-/// still validate at the barrier and COMMIT must SUCCEED. This is the direction
-/// the fix unblocks: before it, the probe (left) side recorded read version `0`
-/// and the barrier's `write_version(left) <= 0` check (left has committed writes,
-/// so its write version is above zero) spuriously aborted the COMMIT with 40001.
+/// Neither join side is concurrently written, so no version of either sits above
+/// the snapshot. Both reads validate at the barrier and COMMIT must SUCCEED,
+/// though both sides hold committed versions below the snapshot.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn shuffle_join_commits_when_neither_side_concurrently_written() {
     let (node, _data_dir, left, right, w1, w2) = spawn_node_with_collections().await;
@@ -297,8 +290,8 @@ async fn shuffle_join_commits_when_neither_side_concurrently_written() {
     node.shutdown().await;
 }
 
-/// A confirmed-visible concurrent write to the LEFT/probe collection advances it
-/// past the captured probe read version. COMMIT must abort with SQLSTATE 40001 —
+/// A confirmed-visible concurrent write to the LEFT/probe collection lands a
+/// version above the snapshot. COMMIT must abort with SQLSTATE 40001 —
 /// the barrier revalidates the probe side's read-only slice and finds it stale.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn shuffle_join_occ_aborts_on_stale_probe_read() {
@@ -308,8 +301,8 @@ async fn shuffle_join_occ_aborts_on_stale_probe_read() {
 
     begin_join_read_and_buffer_writes(&node, &left, &right, &w1, &w2).await;
 
-    // Concurrent writer on a SEPARATE connection advances the LEFT (probe)
-    // collection past the captured probe read version by inserting a new row.
+    // Concurrent writer on a SEPARATE connection lands a version of the LEFT
+    // (probe) collection above the snapshot by inserting a new row.
     let (writer, writer_conn) = open_client(&node).await;
     writer
         .simple_query(&format!(
@@ -361,12 +354,11 @@ async fn shuffle_join_occ_aborts_on_stale_probe_read() {
 }
 
 /// THE LOAD-BEARING CASE. A confirmed-visible concurrent write to the RIGHT/build
-/// collection ONLY must STILL abort the COMMIT with SQLSTATE 40001. Pre-fix,
-/// `extract_collection(HashJoin)` returned only the left collection, so NO
-/// read-set entry existed for the build collection — its vShard was never
-/// validated at the barrier and this transaction would have SILENTLY committed a
-/// stale join result. The abort here proves the build side is now recorded and
-/// the serializability hole is closed.
+/// collection ONLY must STILL abort the COMMIT with SQLSTATE 40001.
+/// `extract_collection(HashJoin)` returns only the left collection, so the
+/// build side's capture is its only read-set entry: without it the build
+/// vShard is never validated at the barrier and a stale join commits
+/// silently. The abort proves the build side is recorded.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn shuffle_join_occ_aborts_on_stale_build_read() {
     let (node, _data_dir, left, right, w1, w2) = spawn_node_with_collections().await;
@@ -375,8 +367,8 @@ async fn shuffle_join_occ_aborts_on_stale_build_read() {
 
     begin_join_read_and_buffer_writes(&node, &left, &right, &w1, &w2).await;
 
-    // Concurrent writer advances the RIGHT (build) collection ONLY — the LEFT
-    // side stays current. Pre-fix this write went undetected at commit.
+    // Concurrent writer lands a version of the RIGHT (build) collection ONLY —
+    // the LEFT side stays current.
     let (writer, writer_conn) = open_client(&node).await;
     writer
         .simple_query(&format!(
@@ -402,10 +394,11 @@ async fn shuffle_join_occ_aborts_on_stale_build_read() {
     )
     .await;
 
-    let err = node.client.simple_query("COMMIT").await.expect_err(
-        "COMMIT of a stale in-txn distributed join (BUILD side) must abort — the hole \
-             this closes; pre-fix it silently committed",
-    );
+    let err = node
+        .client
+        .simple_query("COMMIT")
+        .await
+        .expect_err("COMMIT of a stale in-txn distributed join (BUILD side) must abort");
     assert_eq!(
         pg_sqlstate(&err).as_deref(),
         Some("40001"),

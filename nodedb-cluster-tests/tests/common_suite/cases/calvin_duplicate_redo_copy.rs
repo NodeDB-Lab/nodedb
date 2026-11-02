@@ -44,7 +44,7 @@ fn installs(node: &TestClusterNode) -> u64 {
     node.shared
         .calvin
         .counters
-        .write_versions_recorded
+        .redo_installs
         .load(Ordering::Relaxed)
 }
 

@@ -282,8 +282,7 @@ async fn local_txn_documents(
     let snapshot: nodedb::types::TenantDataSnapshot =
         zerompk::from_msgpack(&bytes).expect("decode TenantDataSnapshot");
     let marker = format!(":{TXN_COLL}:");
-    snapshot
-        .documents
+    nodedb_test_support::cluster_harness::snapshot_rows::current_document_rows(&snapshot)
         .into_iter()
         .filter(|(key, _)| key.contains(&marker))
         .collect()

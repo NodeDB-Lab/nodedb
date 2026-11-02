@@ -97,6 +97,7 @@ async fn http_gateway_migration_single_node_query() {
         key: b"row-1".to_vec(),
         rls_filters: vec![],
         surrogate_ceiling: None,
+        system_time: nodedb_types::SystemTimeScope::Current,
     });
     let get_checked = common::authorize_gateway_plan(&node.shared, &ctx, get_plan).await;
     let get_result = gateway.execute(&ctx, get_checked).await;
@@ -195,6 +196,7 @@ async fn http_gateway_migration_cross_node_query() {
                         key: b"cross-key".to_vec(),
                         rls_filters: vec![],
                         surrogate_ceiling: None,
+                        system_time: nodedb_types::SystemTimeScope::Current,
                     })))
                 },
                 |plan| async {

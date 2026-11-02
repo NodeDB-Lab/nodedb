@@ -1,14 +1,11 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! A cross-shard, Calvin-committed write RECORDS its write-version in the
-//! per-core write-version index — closing the gap where Calvin applies advanced
-//! no version at all (fast-path writes and reads already do).
+//! A cross-shard, Calvin-committed write installs a stamped redo slice on each
+//! participant vShard.
 //!
-//! The version index itself lives on the `!Send` Data-Plane core and its
-//! readers are test-only, so this asserts the recording fired via the
-//! node-global `calvin.counters.write_versions_recorded` counter. The data
+//! The node-global `calvin.counters.redo_installs` counter shows it: the data
 //! group's apply loop increments it once per committed slice whose stamped
-//! redo installed, and the install records the slice's write versions.
+//! redo installed.
 
 use crate::common;
 
@@ -33,13 +30,12 @@ fn sequencer_leader(node: &TestClusterNode) -> u64 {
         .unwrap_or(0)
 }
 
-/// Count of committed Calvin applies whose write versions were recorded into
-/// the per-core write-version index.
-fn write_versions_recorded(node: &TestClusterNode) -> u64 {
+/// Count of committed Calvin slices whose stamped redo installed.
+fn redo_installs(node: &TestClusterNode) -> u64 {
     node.shared
         .calvin
         .counters
-        .write_versions_recorded
+        .redo_installs
         .load(Ordering::Relaxed)
 }
 
@@ -59,10 +55,9 @@ fn distinct_vshard_node_keys() -> (String, String) {
 }
 
 /// A cross-shard (dual-home edge) Calvin-committed write increments the
-/// node-global write-version-recorded counter: the stamped redo install of
-/// each slice records its keys' versions at the install's WAL LSN.
+/// node-global redo-install counter: each slice's stamped redo installs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn cross_shard_calvin_write_records_write_version() {
+async fn cross_shard_calvin_write_installs_its_redo() {
     // 4 Data-Plane cores so distinct vShards land on distinct cores — a genuine
     // cross-core transaction routed through the Calvin scheduler.
     let node = TestClusterNode::spawn_single_node_calvin(4)
@@ -91,13 +86,12 @@ async fn cross_shard_calvin_write_records_write_version() {
     .await;
 
     let (src, dst) = distinct_vshard_node_keys();
-    let recorded_before = write_versions_recorded(&node);
+    let installs_before = redo_installs(&node);
 
     // AUTOCOMMIT cross-shard edge insert: because the endpoints home to distinct
     // vShards, the edge dual-homes atomically through the Calvin scheduler
     // (`submit_calvin_routed`), not the single-home fast path. On commit each
-    // participating vShard's data group installs its slice's stamped redo,
-    // and the install records the slice's write versions.
+    // participating vShard's data group installs its slice's stamped redo.
     node.client
         .simple_query(&format!(
             "GRAPH INSERT EDGE IN 'sncalvin_wv_graph' FROM '{src}' TO '{dst}' TYPE 'l'"
@@ -108,18 +102,18 @@ async fn cross_shard_calvin_write_records_write_version() {
     // Each participant's data-group apply loop raises the counter on its own
     // schedule, so wait for it to advance.
     wait_for(
-        "calvin write-version recording fired for the cross-shard commit",
+        "calvin redo install fired for the cross-shard commit",
         Duration::from_secs(10),
         Duration::from_millis(25),
-        || write_versions_recorded(&node) > recorded_before,
+        || redo_installs(&node) > installs_before,
     )
     .await;
 
-    let recorded_after = write_versions_recorded(&node);
+    let installs_after = redo_installs(&node);
     assert!(
-        recorded_after > recorded_before,
-        "a cross-shard Calvin-committed write must record its write version \
-         (before={recorded_before}, after={recorded_after})"
+        installs_after > installs_before,
+        "a cross-shard Calvin-committed write must install its redo \
+         (before={installs_before}, after={installs_after})"
     );
 
     node.shutdown().await;

@@ -118,7 +118,7 @@ impl RaftRpcHandler for EchoHandler {
     ) -> nodedb_cluster::rpc_codec::ShuffleProduceResponse {
         nodedb_cluster::rpc_codec::ShuffleProduceResponse {
             error: None,
-            read_versions: Vec::new(),
+            read_vshards: Vec::new(),
         }
     }
 

@@ -9,7 +9,7 @@
 //! exercise the cross-shard OCC read-validation path, the transaction must go
 //! through the multi-participant Calvin barrier (`run_commit_calvin`) rather than
 //! the single-shard path. The barrier revalidates a read slice on its owning
-//! vShard at the read's real version, by dispatching a validate-only task to
+//! vShard at the snapshot ordinal, by dispatching a validate-only task to
 //! every read-only participant. If a read-only participant is never validated,
 //! a stale read commits silently — a non-serializable execution.
 //!
@@ -216,8 +216,8 @@ async fn spawn_node_with_collections()
 
 /// A cross-shard txn that READ `bread` and WROTE `w1`/`w2` (both buffered locally
 /// because the single node leads their data groups) must ABORT at COMMIT with
-/// SQLSTATE 40001 when a concurrent, confirmed-visible write has advanced
-/// `bread`'s version past the captured read. This is the barrier revalidating
+/// SQLSTATE 40001 when a concurrent, confirmed-visible write has landed a
+/// version of `bread` above the snapshot. This is the barrier revalidating
 /// `bread`'s read-only-participant slice and finding it stale.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cross_shard_read_occ_abort_on_stale_read() {
@@ -229,7 +229,7 @@ async fn cross_shard_read_occ_abort_on_stale_read() {
     // writes, leaving the transaction OPEN (no COMMIT). The two INSERTs buffer on
     // the coordinator, so at COMMIT the write set spans two vShards → participant
     // floor >= 2 → the multi-participant Calvin barrier; the SELECT registers
-    // bread's vShard as a read-only participant with a captured read version.
+    // bread's vShard as a read-only participant.
     let block = format!(
         "BEGIN; \
          SELECT * FROM {bread}; \
@@ -317,9 +317,9 @@ async fn cross_shard_read_occ_abort_on_stale_read() {
 
 /// The precision control: the SAME cross-shard shape (read `bread`, write
 /// `w1`/`w2`) with NO concurrent write to `bread` must COMMIT SUCCESSFULLY. The
-/// barrier validates `bread`'s read at its real read version and finds it still
-/// current — proving the abort above is caused by the genuine version advance,
-/// not a blanket cross-shard abort.
+/// barrier validates `bread`'s read at the snapshot ordinal and finds it still
+/// current — proving the abort above is caused by the concurrent version, not
+/// a blanket cross-shard abort.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cross_shard_read_occ_commits_when_read_still_current() {
     let (node, _data_dir, w1, w2, bread) = spawn_node_with_collections().await;

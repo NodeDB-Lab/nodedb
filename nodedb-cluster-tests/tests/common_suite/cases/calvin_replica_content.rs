@@ -194,7 +194,10 @@ pub(super) async fn local_content(
         let snapshot = node
             .tenant_snapshot_on_core(core, TenantId::new(TENANT))
             .await;
-        for (table, entries) in [("doc", snapshot.documents), ("idx", snapshot.indexes)] {
+        for (table, entries) in [
+            ("doc", snapshot.documents_versioned),
+            ("idx", snapshot.indexes_versioned),
+        ] {
             for (key, value) in entries {
                 let Some(collection) = key_collection(&key) else {
                     continue;
