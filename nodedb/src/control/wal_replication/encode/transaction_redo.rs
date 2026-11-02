@@ -62,6 +62,7 @@ fn content_of(payload: &TransactionRedoPayload) -> RedoContent {
                 surrogate: identity.surrogate.as_u32(),
             })
             .collect(),
+        reads: payload.reads.clone(),
     }
 }
 
@@ -81,10 +82,11 @@ fn redo_entry(
             event_source: ReplicatedEventSource::from(payload.event_source),
             origin: payload.origin,
             calvin: payload.calvin.clone(),
+            snapshot_ordinal: payload.snapshot_ordinal,
         },
     )
     .with_event_source(payload.event_source)
-    .naming(payload.collections.iter().map(String::as_str))
+    .naming_kinds(payload.incarnation_names.iter().cloned())
 }
 
 /// The one Raft entry that carries `payload` to every replica of `vshard_id`.
@@ -179,13 +181,20 @@ fn redo_proposal(
 ) -> crate::Result<RedoProposal> {
     let content = content_of(payload);
     let bytes = content.to_bytes()?;
-    // The entry around the content: the collections it names twice, once in
-    // the write and once with their incarnations, and the fixed fields.
-    let envelope = payload
+    // The entry around the content: the collections the write names, the
+    // names it carries with their incarnations, and the fixed fields.
+    let named_bytes = payload
         .collections
         .iter()
-        .map(|collection| 2 * collection.len() + COLLECTION_ENTRY_BYTES)
-        .sum::<usize>()
+        .map(String::len)
+        .chain(payload.incarnation_names.iter().map(|(name, _)| name.len()))
+        .sum::<usize>();
+    let named_count = payload
+        .collections
+        .len()
+        .max(payload.incarnation_names.len());
+    let envelope = named_bytes
+        .saturating_add(named_count.saturating_mul(COLLECTION_ENTRY_BYTES))
         .saturating_add(ENTRY_STAMP_BYTES);
     let mut last = redo_entry(target, payload, RedoBody::Inline(Box::new(content)));
     if bytes.len().saturating_add(envelope) <= max_entry_bytes {
@@ -215,6 +224,7 @@ fn redo_proposal(
         event_source: ReplicatedEventSource::from(payload.event_source),
         origin: payload.origin,
         calvin: payload.calvin.clone(),
+        snapshot_ordinal: payload.snapshot_ordinal,
     };
     Ok(RedoProposal::Chunked {
         stream,
@@ -294,11 +304,17 @@ mod tests {
                 user_roles: Vec::new(),
             },
             collections: vec!["orders".into()],
+            incarnation_names: vec![(
+                "orders".into(),
+                nodedb_cluster::calvin::types::IncarnationKind::Collection,
+            )],
             sum_targets: Vec::new(),
             identities: Vec::new(),
             event_source: EventSource::User,
             origin: RedoOrigin::Commit,
             calvin: None,
+            reads: Vec::new(),
+            snapshot_ordinal: None,
         }
     }
 
@@ -331,6 +347,7 @@ mod tests {
             incarnations: vec![CollectionIncarnation {
                 collection: "orders".into(),
                 incarnation: nodedb_types::Hlc::ZERO,
+                kind: nodedb_cluster::calvin::types::IncarnationKind::Collection,
             }],
         }
     }

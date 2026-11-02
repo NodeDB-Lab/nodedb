@@ -20,36 +20,15 @@ pub(super) struct ReturningFields<'a> {
     pub rls_filters: &'a [u8],
 }
 
-/// The two slots a record carries its materialized-sum resolution in. Travel
-/// together — passing only the older one silently strips every entry's target.
-pub(super) struct WireSumResolution<'a> {
-    /// The AUTHORITATIVE slot: `(target collection, join value)` → surrogate.
-    pub bindings: &'a [ReplicatedSumTarget],
-    /// The superseded `(join value, surrogate)` slot. Read only when `bindings`
-    /// is empty — see [`plan_targets`].
-    pub legacy: &'a [(String, u32)],
-}
-
-/// Lift the wire resolution back into plan shape. `bindings` wins whenever
-/// non-empty; `legacy` entries name no target, so lift untargeted.
-pub(super) fn plan_targets(wire: &WireSumResolution<'_>) -> Vec<ResolvedSumTarget> {
-    if !wire.bindings.is_empty() {
-        return wire
-            .bindings
-            .iter()
-            .map(|entry| {
-                ResolvedSumTarget::new(
-                    &entry.target_collection,
-                    &entry.join_value,
-                    nodedb_types::Surrogate::new(entry.surrogate),
-                )
-            })
-            .collect();
-    }
-    wire.legacy
-        .iter()
-        .map(|(join_value, surrogate)| {
-            ResolvedSumTarget::untargeted(join_value, nodedb_types::Surrogate::new(*surrogate))
+/// Lift the wire resolution back into plan shape.
+pub(super) fn plan_targets(wire: &[ReplicatedSumTarget]) -> Vec<ResolvedSumTarget> {
+    wire.iter()
+        .map(|entry| {
+            ResolvedSumTarget::new(
+                &entry.target_collection,
+                &entry.join_value,
+                nodedb_types::Surrogate::new(entry.surrogate),
+            )
         })
         .collect()
 }
@@ -59,7 +38,7 @@ pub(super) fn point_put(
     document_id: &str,
     value: &[u8],
     surrogate: u32,
-    resolved_sum_targets: &WireSumResolution<'_>,
+    resolved_sum_targets: &[ReplicatedSumTarget],
     returning: ReturningFields<'_>,
 ) -> PhysicalPlan {
     let pk_bytes = document_id.as_bytes().to_vec();
@@ -84,7 +63,7 @@ pub(super) struct SumDecisions<'a> {
     /// `(target collection, join value)` → target surrogate, resolved by the
     /// node that accepted the statement. Never re-resolved here — see this
     /// module's doc.
-    pub resolved: WireSumResolution<'a>,
+    pub resolved: &'a [ReplicatedSumTarget],
     /// Bindings whose delta a sibling task owns, so the inline fold skips them.
     pub deferred: &'a [String],
 }
@@ -120,7 +99,7 @@ pub(super) fn point_insert(
         returning: returning.returning,
         rls_filters: returning.rls_filters.to_vec(),
         // Read off the record — see this module's doc.
-        resolved_sum_targets: plan_targets(&resolved_sum_targets),
+        resolved_sum_targets: plan_targets(resolved_sum_targets),
         deferred_sum_targets: deferred_sum_targets.to_vec(),
     })
 }
@@ -129,7 +108,7 @@ pub(super) fn point_delete(
     collection: &str,
     document_id: &str,
     surrogate: Option<u32>,
-    resolved_sum_targets: &WireSumResolution<'_>,
+    resolved_sum_targets: &[ReplicatedSumTarget],
     returning: ReturningFields<'_>,
 ) -> PhysicalPlan {
     let pk_bytes = document_id.as_bytes().to_vec();
@@ -153,7 +132,7 @@ pub(super) fn point_delete(
 /// target's declared primary key, bundled together — plain positional
 /// arguments exceed clippy's arity lint.
 pub(super) struct PointUpdateExtras<'a> {
-    pub resolved_sum_targets: &'a WireSumResolution<'a>,
+    pub resolved_sum_targets: &'a [ReplicatedSumTarget],
     pub returning: ReturningFields<'a>,
     pub declared_primary_key: Option<String>,
 }
@@ -194,7 +173,7 @@ pub(super) fn point_update(
 /// bundled together — plain positional arguments there exceed clippy's arity
 /// lint once `returning` joins the signature.
 pub(super) struct UpsertExtras<'a> {
-    pub resolved_sum_targets: &'a WireSumResolution<'a>,
+    pub resolved_sum_targets: &'a [ReplicatedSumTarget],
     pub returning: ReturningFields<'a>,
 }
 
@@ -276,7 +255,7 @@ pub(super) fn batch_insert(
     documents: &[(String, Vec<u8>)],
     surrogates: &[u32],
     if_absent: bool,
-    resolved_sum_targets: &WireSumResolution<'_>,
+    resolved_sum_targets: &[ReplicatedSumTarget],
     deferred_sum_targets: &[String],
     returning: ReturningFields<'_>,
 ) -> crate::Result<PhysicalPlan> {
@@ -318,7 +297,7 @@ pub(super) fn bulk_dml(
     filters: &[u8],
     is_update: bool,
     updates: &[(String, UpdateValue)],
-    resolved_sum_targets: &WireSumResolution<'_>,
+    resolved_sum_targets: &[ReplicatedSumTarget],
     returning: ReturningFields<'_>,
     declared_primary_key: Option<String>,
 ) -> PhysicalPlan {
@@ -339,6 +318,7 @@ pub(super) fn bulk_dml(
             resolved_sum_targets,
             // Read off the record — see `point_update`.
             declared_primary_key,
+            system_time: nodedb_types::SystemTimeScope::Current,
         })
     } else {
         PhysicalPlan::Document(DocumentOp::BulkDelete {
@@ -354,6 +334,7 @@ pub(super) fn bulk_dml(
             resolved_sum_targets,
             // Read off the record — see `point_update`.
             declared_primary_key,
+            system_time: nodedb_types::SystemTimeScope::Current,
         })
     }
 }
@@ -363,7 +344,7 @@ pub(super) fn bulk_dml(
 pub(super) fn truncate(
     collection: &str,
     restart_identity: bool,
-    resolved_sum_targets: &WireSumResolution<'_>,
+    resolved_sum_targets: &[ReplicatedSumTarget],
     declared_primary_key: Option<String>,
 ) -> PhysicalPlan {
     PhysicalPlan::Document(DocumentOp::Truncate {
@@ -416,10 +397,7 @@ pub(super) fn resolved_write(
                 pk_bytes: document_id.as_bytes().to_vec(),
                 value: value.clone(),
                 precondition: precondition.clone(),
-                resolved_sum_targets: plan_targets(&WireSumResolution {
-                    bindings: resolved_sum_targets,
-                    legacy: &[],
-                }),
+                resolved_sum_targets: plan_targets(resolved_sum_targets),
             },
             W::Delete {
                 collection,
@@ -433,10 +411,7 @@ pub(super) fn resolved_write(
                 document_id: document_id.clone(),
                 pk_bytes: document_id.as_bytes().to_vec(),
                 precondition: precondition.clone(),
-                resolved_sum_targets: plan_targets(&WireSumResolution {
-                    bindings: resolved_sum_targets,
-                    legacy: &[],
-                }),
+                resolved_sum_targets: plan_targets(resolved_sum_targets),
             },
         })
         .collect();
@@ -544,6 +519,7 @@ mod tests {
                 Surrogate::new(4242),
             )],
             declared_primary_key: Some("sku".to_string()),
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         let bytes = to_replicated_entry(tenant, DatabaseId::DEFAULT, vshard, &bulk)
             .expect("encode must not error")
@@ -577,52 +553,10 @@ mod tests {
         }
     }
 
-    /// A record committed before the target collection travelled on the wire
-    /// still decodes: the superseded slot's entries are lifted untargeted and
-    /// match any binding by join value alone.
+    /// Two bindings on one join column into different targets travel as two
+    /// entries, and each decodes with its own target collection.
     #[test]
-    fn a_record_without_target_collections_decodes_as_untargeted() {
-        let entry = ReplicatedEntry::new(
-            1,
-            0,
-            0,
-            ReplicatedWrite::PointDelete {
-                collection: "entries".into(),
-                document_id: "e1".into(),
-                surrogate: Some(900),
-                resolved_sum_targets: vec![("acc-1".into(), 4242)],
-                resolved_sum_target_bindings: Vec::new(),
-                returning: None,
-                rls_filters: Vec::new(),
-            },
-        );
-        let (_, _, decoded, _) = decode::decode_replicated_entry(&entry.to_bytes())
-            .expect("decode_replicated_entry error")
-            .expect("decode_replicated_entry returned None");
-        match decoded {
-            PhysicalPlan::Document(DocumentOp::PointDelete {
-                resolved_sum_targets,
-                ..
-            }) => {
-                assert_eq!(
-                    resolved_sum_targets,
-                    vec![ResolvedSumTarget::untargeted("acc-1", Surrogate::new(4242))],
-                    "the older slot must still be read when the newer one is empty"
-                );
-                assert!(
-                    resolved_sum_targets[0].addresses("accounts", "acc-1"),
-                    "an untargeted entry answers for whichever binding asks"
-                );
-            }
-            other => panic!("expected PointDelete, got {other:?}"),
-        }
-    }
-
-    /// A current-node record carries the resolution in both slots; the newer one
-    /// is authoritative. The older slot stays populated so an older-binary peer
-    /// keeps working instead of seeing an empty resolution.
-    #[test]
-    fn a_current_record_carries_both_slots_and_reads_the_newer_one() {
+    fn a_record_carries_each_binding_with_its_target() {
         let plan = PhysicalPlan::Document(DocumentOp::PointDelete {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "entries"),
             document_id: "e1".into(),
@@ -647,20 +581,9 @@ mod tests {
         match &entry.write {
             ReplicatedWrite::PointDelete {
                 resolved_sum_targets,
-                resolved_sum_target_bindings,
                 ..
             } => {
-                assert_eq!(
-                    resolved_sum_target_bindings.len(),
-                    2,
-                    "both bindings must travel; the newer slot is the authoritative one"
-                );
-                assert_eq!(
-                    resolved_sum_targets,
-                    &vec![("acc-1".to_string(), 4242)],
-                    "the superseded slot keeps its one-entry-per-value shape, so an older \
-                     peer reads what it has always read"
-                );
+                assert_eq!(resolved_sum_targets.len(), 2, "both bindings must travel");
             }
             other => panic!("expected PointDelete, got {other:?}"),
         }
@@ -678,7 +601,7 @@ mod tests {
                     ResolvedSumTarget::new("accounts", "acc-1", Surrogate::new(4242)),
                     ResolvedSumTarget::new("audit_totals", "acc-1", Surrogate::new(9001)),
                 ],
-                "the newer slot wins, so the second binding keeps its own target row"
+                "the second binding keeps its own target row"
             ),
             other => panic!("expected PointDelete, got {other:?}"),
         }

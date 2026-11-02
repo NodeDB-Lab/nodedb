@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Raft propose/compact callback type aliases and their serde defaults.
+//! Raft propose/compact callback type aliases.
 
 /// Type alias for the synchronous Raft propose callback.
 ///
@@ -13,9 +13,7 @@ pub type RaftProposer =
 /// Type alias for the asynchronous Raft propose callback with leader forwarding.
 ///
 /// Takes `(vshard_id, idempotency_key, serialized_entry, deadline)` and returns, on
-/// success, an [`AppliedOutput`]: the Data Plane apply payload bytes and the
-/// write's versions. A write's version is the data-group log position of the
-/// entry that applied it, so every replica records the same version.
+/// success, an [`AppliedOutput`]: the Data Plane apply payload bytes.
 /// The `idempotency_key` matches the one embedded in the
 /// serialized `ReplicatedEntry`; the proposer registers the tracker waiter with
 /// this key so apply-side mismatch detection can surface `RetryableLeaderChange`
@@ -39,9 +37,8 @@ pub type AsyncRaftProposer = dyn Fn(
     + Sync;
 
 /// What this node's apply of a proposed write returns: the Data Plane apply
-/// payload and the versions the write stamped, one per written vShard. A
-/// write that names no single user collection stamps none.
-pub type AppliedOutput = (Vec<u8>, crate::types::ReadVersions);
+/// payload.
+pub type AppliedOutput = Vec<u8>;
 
 /// Where a proposed entry landed in its data group's Raft log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,24 +106,3 @@ pub type RaftCompactor = dyn Fn(u64, u64) -> std::result::Result<bool, crate::Er
 /// the current floor is a no-op.
 pub type RaftAppliedIndexSink =
     dyn Fn(u64, u64) -> std::result::Result<(), crate::Error> + Send + Sync;
-
-pub(crate) fn default_pq_m() -> usize {
-    crate::engine::vector::index_config::DEFAULT_PQ_M
-}
-/// Default `ColumnarIngest::intent` for a record written before that field
-/// existed: a plain `INSERT`.
-pub(crate) fn default_columnar_insert_intent()
--> nodedb_physical::physical_plan::ColumnarInsertIntent {
-    nodedb_physical::physical_plan::ColumnarInsertIntent::Insert
-}
-/// Default `ColumnarIngest::format` for a record written before that field
-/// existed: the sync path has only ever produced MessagePack payloads.
-pub(crate) fn default_columnar_ingest_format() -> String {
-    "msgpack".to_owned()
-}
-pub(crate) fn default_ivf_cells() -> usize {
-    crate::engine::vector::index_config::DEFAULT_IVF_CELLS
-}
-pub(crate) fn default_ivf_nprobe() -> usize {
-    crate::engine::vector::index_config::DEFAULT_IVF_NPROBE
-}

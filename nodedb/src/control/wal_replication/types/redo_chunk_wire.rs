@@ -25,6 +25,10 @@ pub struct RedoContent {
     pub sum_targets: Vec<RedoSumTargets>,
     /// Identities every replica binds before the apply.
     pub identities: Vec<ReplicatedIdentity>,
+    /// The transaction's reads homed on this vShard. Every replica's apply
+    /// validates them at the entry's snapshot ordinal before it installs.
+    /// They travel in the content, so a large read set chunks with the redo.
+    pub reads: Vec<nodedb_types::calvin::VersionedReadEntry>,
 }
 
 impl RedoContent {

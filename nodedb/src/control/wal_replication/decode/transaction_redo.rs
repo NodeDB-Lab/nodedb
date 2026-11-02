@@ -39,6 +39,7 @@ pub struct ChunkedRedo {
     event_source: ReplicatedEventSource,
     origin: RedoOrigin,
     calvin: Option<CalvinRedoMeta>,
+    snapshot_ordinal: Option<i64>,
 }
 
 impl ChunkedRedo {
@@ -50,6 +51,7 @@ impl ChunkedRedo {
             self.event_source,
             self.origin,
             self.calvin.clone(),
+            self.snapshot_ordinal,
         )
     }
 
@@ -70,10 +72,13 @@ fn payload_of(
     event_source: ReplicatedEventSource,
     origin: RedoOrigin,
     calvin: Option<CalvinRedoMeta>,
+    snapshot_ordinal: Option<i64>,
 ) -> TransactionRedoPayload {
     TransactionRedoPayload {
         redo: content.redo,
         collections: collections.to_vec(),
+        // The entry carries the stamped incarnations: the apply reads those.
+        incarnation_names: Vec::new(),
         sum_targets: content.sum_targets,
         identities: content
             .identities
@@ -87,6 +92,8 @@ fn payload_of(
         event_source: event_source.into(),
         origin,
         calvin,
+        reads: content.reads,
+        snapshot_ordinal,
     }
 }
 
@@ -98,6 +105,7 @@ pub fn decode_transaction_redo(write: &ReplicatedWrite) -> crate::Result<Decoded
         event_source,
         origin,
         calvin,
+        snapshot_ordinal,
     } = write
     else {
         return Err(crate::Error::Internal {
@@ -112,6 +120,7 @@ pub fn decode_transaction_redo(write: &ReplicatedWrite) -> crate::Result<Decoded
             *event_source,
             *origin,
             calvin.clone(),
+            *snapshot_ordinal,
         ))),
         RedoBody::Chunked { stream, count, len } => DecodedTransactionRedo::Chunked(ChunkedRedo {
             stream: *stream,
@@ -121,6 +130,7 @@ pub fn decode_transaction_redo(write: &ReplicatedWrite) -> crate::Result<Decoded
             event_source: *event_source,
             origin: *origin,
             calvin: calvin.clone(),
+            snapshot_ordinal: *snapshot_ordinal,
         }),
     })
 }
@@ -135,6 +145,7 @@ mod tests {
     use crate::event::EventSource;
     use crate::types::{DatabaseId, TenantId, VShardId};
     use crate::wal::{CalvinStamp, RedoRecord, RedoSubRecord};
+    use nodedb_cluster::calvin::types::IncarnationKind;
     use nodedb_physical::physical_plan::{RedoSumTargets, ResolvedSumTarget};
 
     fn payload() -> TransactionRedoPayload {
@@ -165,6 +176,10 @@ mod tests {
                 user_roles: vec!["approver".into()],
             },
             collections: vec!["accounts".into(), "entries".into()],
+            incarnation_names: vec![
+                ("accounts".into(), IncarnationKind::Collection),
+                ("entries".into(), IncarnationKind::Collection),
+            ],
             sum_targets: vec![RedoSumTargets {
                 collection: "entries".into(),
                 resolved: vec![ResolvedSumTarget::new("accounts", "a1", Surrogate::new(9))],
@@ -177,6 +192,13 @@ mod tests {
             event_source: EventSource::Trigger,
             origin: RedoOrigin::Restore,
             calvin: None,
+            reads: vec![nodedb_types::calvin::VersionedReadEntry {
+                engine: nodedb_types::calvin::EngineTag::Document,
+                collection: "accounts".into(),
+                key: nodedb_types::calvin::ReadKeyIdent::Predicate,
+                home_vshard: None,
+            }],
+            snapshot_ordinal: Some(1_700_000_000_000_000_123),
         }
     }
 
@@ -212,6 +234,9 @@ mod tests {
         assert_eq!(decoded.identities, original.identities);
         assert_eq!(decoded.event_source, EventSource::Trigger);
         assert_eq!(decoded.origin, RedoOrigin::Restore);
+        // The reads and the snapshot reach every replica's apply.
+        assert_eq!(decoded.reads, original.reads);
+        assert_eq!(decoded.snapshot_ordinal, original.snapshot_ordinal);
         // Every collection the redo writes travels for its incarnation stamp.
         let named: Vec<&str> = decoded_entry
             .incarnations
@@ -219,6 +244,39 @@ mod tests {
             .map(|named| named.collection.as_str())
             .collect();
         assert_eq!(named, vec!["accounts", "entries"]);
+    }
+
+    /// A session transaction that writes an array cell names the array as an
+    /// array, apart from a same-name collection, for its incarnation stamp.
+    #[test]
+    fn a_session_redo_names_an_array_by_its_own_kind() {
+        let array_put = nodedb_physical::physical_plan::PhysicalPlan::Array(
+            nodedb_physical::physical_plan::ArrayOp::Delete {
+                array_id: nodedb_array::types::ArrayId::new(nodedb_types::TenantId::new(1), "grid"),
+                coords_msgpack: Vec::new(),
+                wal_lsn: 0,
+                provenance: None,
+                vshard_id: 0,
+            },
+        );
+        let names = crate::control::planner::calvin::incarnation_names::incarnation_names(
+            std::slice::from_ref(&array_put),
+            |plan| nodedb_physical::physical_plan::written_collections(std::slice::from_ref(plan)),
+        );
+        let mut original = payload();
+        original.incarnation_names = names;
+        let entry = transaction_redo_entry(
+            TenantId::new(1),
+            DatabaseId::DEFAULT,
+            VShardId::new(7),
+            &original,
+        );
+        let named: Vec<(&str, IncarnationKind)> = entry
+            .incarnations
+            .iter()
+            .map(|named| (named.collection.as_str(), named.kind))
+            .collect();
+        assert_eq!(named, vec![("grid", IncarnationKind::Array)]);
     }
 
     /// A committed Calvin slice's meta travels unchanged through the entry,
@@ -290,6 +348,8 @@ mod tests {
         assert_eq!(rebuilt.identities, original.identities);
         assert_eq!(rebuilt.event_source, EventSource::Trigger);
         assert_eq!(rebuilt.origin, RedoOrigin::Restore);
+        assert_eq!(rebuilt.reads, original.reads);
+        assert_eq!(rebuilt.snapshot_ordinal, original.snapshot_ordinal);
     }
 
     #[test]

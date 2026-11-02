@@ -26,36 +26,16 @@ pub(super) struct WireReturning<'a> {
 }
 
 /// Flatten a plan's resolution into the authoritative wire shape (`Surrogate`
-/// travels as bare `u32`, like every other identity on this wire). An entry
-/// with no target collection is dropped rather than guessed at.
+/// travels as bare `u32`, like every other identity on this wire).
 pub(super) fn wire_target_bindings(resolved: &[ResolvedSumTarget]) -> Vec<ReplicatedSumTarget> {
     resolved
         .iter()
-        .filter_map(|entry| {
-            entry
-                .target_collection
-                .as_ref()
-                .map(|target_collection| ReplicatedSumTarget {
-                    target_collection: target_collection.clone(),
-                    join_value: entry.join_value.clone(),
-                    surrogate: entry.surrogate.as_u32(),
-                })
+        .map(|entry| ReplicatedSumTarget {
+            target_collection: entry.target_collection.clone(),
+            join_value: entry.join_value.clone(),
+            surrogate: entry.surrogate.as_u32(),
         })
         .collect()
-}
-
-/// The superseded `(join_value, surrogate)` shape, kept populated so an older
-/// peer binary still reads it correctly. Derived from the authoritative slot,
-/// never carried separately, so the two can't disagree. First binding wins per join value.
-pub(super) fn wire_targets(resolved: &[ResolvedSumTarget]) -> Vec<(String, u32)> {
-    let mut legacy: Vec<(String, u32)> = Vec::with_capacity(resolved.len());
-    for entry in resolved {
-        if legacy.iter().any(|(value, _)| *value == entry.join_value) {
-            continue;
-        }
-        legacy.push((entry.join_value.clone(), entry.surrogate.as_u32()));
-    }
-    legacy
 }
 
 pub(super) fn point_put(
@@ -72,8 +52,7 @@ pub(super) fn point_put(
         document_id: document_id.to_owned(),
         value: value.to_vec(),
         surrogate,
-        resolved_sum_targets: wire_targets(resolved_sum_targets),
-        resolved_sum_target_bindings: wire_target_bindings(resolved_sum_targets),
+        resolved_sum_targets: wire_target_bindings(resolved_sum_targets),
         returning,
         rls_filters: rls_filters.to_vec(),
     }
@@ -94,8 +73,7 @@ pub(super) fn point_insert(
         value: value.to_vec(),
         if_absent,
         surrogate,
-        resolved_sum_targets: wire_targets(sums.resolved),
-        resolved_sum_target_bindings: wire_target_bindings(sums.resolved),
+        resolved_sum_targets: wire_target_bindings(sums.resolved),
         deferred_sum_targets: sums.deferred.to_vec(),
         returning: returning.returning,
         rls_filters: returning.rls_filters.to_vec(),
@@ -114,8 +92,7 @@ pub(super) fn point_delete(
         collection: collection.to_owned(),
         document_id: document_id.to_owned(),
         surrogate,
-        resolved_sum_targets: wire_targets(resolved_sum_targets),
-        resolved_sum_target_bindings: wire_target_bindings(resolved_sum_targets),
+        resolved_sum_targets: wire_target_bindings(resolved_sum_targets),
         returning,
         rls_filters: rls_filters.to_vec(),
     }
@@ -135,8 +112,7 @@ pub(super) fn point_update(
         document_id: document_id.to_owned(),
         updates: updates.to_vec(),
         surrogate,
-        resolved_sum_targets: wire_targets(resolved_sum_targets),
-        resolved_sum_target_bindings: wire_target_bindings(resolved_sum_targets),
+        resolved_sum_targets: wire_target_bindings(resolved_sum_targets),
         returning: returning.returning,
         rls_filters: returning.rls_filters.to_vec(),
         declared_primary_key: declared_primary_key.map(str::to_owned),
@@ -158,8 +134,7 @@ pub(super) fn upsert(
         value: value.to_vec(),
         on_conflict_updates: on_conflict_updates.to_vec(),
         surrogate,
-        resolved_sum_targets: wire_targets(resolved_sum_targets),
-        resolved_sum_target_bindings: wire_target_bindings(resolved_sum_targets),
+        resolved_sum_targets: wire_target_bindings(resolved_sum_targets),
         returning: returning.returning,
         rls_filters: returning.rls_filters.to_vec(),
     }
@@ -184,8 +159,7 @@ pub(super) fn batch_upsert(
         documents: rows.documents.to_vec(),
         surrogates: rows.surrogates.iter().map(|s| s.as_u32()).collect(),
         on_conflict_updates: on_conflict_updates.to_vec(),
-        resolved_sum_targets: wire_targets(resolved_sum_targets),
-        resolved_sum_target_bindings: wire_target_bindings(resolved_sum_targets),
+        resolved_sum_targets: wire_target_bindings(resolved_sum_targets),
         returning: returning.returning,
         rls_filters: returning.rls_filters.to_vec(),
     }
@@ -216,8 +190,7 @@ pub(super) fn batch_insert(
         documents: documents.to_vec(),
         surrogates: surrogates.iter().map(|s| s.as_u32()).collect(),
         if_absent,
-        resolved_sum_targets: wire_targets(resolved_sum_targets),
-        resolved_sum_target_bindings: wire_target_bindings(resolved_sum_targets),
+        resolved_sum_targets: wire_target_bindings(resolved_sum_targets),
         deferred_sum_targets: deferred_sum_targets.to_vec(),
         returning,
         rls_filters: rls_filters.to_vec(),
@@ -236,8 +209,7 @@ pub(super) fn truncate(
     ReplicatedWrite::DocTruncate {
         collection: collection.to_owned(),
         restart_identity,
-        resolved_sum_targets: wire_targets(resolved_sum_targets),
-        resolved_sum_target_bindings: wire_target_bindings(resolved_sum_targets),
+        resolved_sum_targets: wire_target_bindings(resolved_sum_targets),
         declared_primary_key: declared_primary_key.map(str::to_owned),
     }
 }
@@ -258,8 +230,7 @@ pub(super) fn bulk_delete(
         filters: filters.to_vec(),
         is_update: false,
         updates: Vec::new(),
-        resolved_sum_targets: wire_targets(resolved_sum_targets),
-        resolved_sum_target_bindings: wire_target_bindings(resolved_sum_targets),
+        resolved_sum_targets: wire_target_bindings(resolved_sum_targets),
         returning,
         rls_filters: rls_filters.to_vec(),
         declared_primary_key: declared_primary_key.map(str::to_owned),
@@ -280,8 +251,7 @@ pub(super) fn bulk_update(
         filters: filters.to_vec(),
         is_update: true,
         updates: updates.to_vec(),
-        resolved_sum_targets: wire_targets(resolved_sum_targets),
-        resolved_sum_target_bindings: wire_target_bindings(resolved_sum_targets),
+        resolved_sum_targets: wire_target_bindings(resolved_sum_targets),
         returning,
         rls_filters: rls_filters.to_vec(),
         declared_primary_key: declared_primary_key.map(str::to_owned),

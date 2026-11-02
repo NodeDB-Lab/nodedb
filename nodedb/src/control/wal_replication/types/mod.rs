@@ -12,7 +12,7 @@
 //! 7. If a waiter exists (leader path), sends the response; otherwise only applies (follower)
 //!
 //! Split into:
-//! - [`aliases`]: Raft propose/compact callback type aliases + serde defaults.
+//! - [`aliases`]: Raft propose/compact callback type aliases.
 //! - [`wire_shapes`]: small wire-format types embedded inside [`ReplicatedWrite`].
 //! - [`replicated_write`]: the [`ReplicatedWrite`] enum itself.
 //! - [`replicated_entry`]: [`ReplicatedEntry`] (routing envelope) + (de)serialization.

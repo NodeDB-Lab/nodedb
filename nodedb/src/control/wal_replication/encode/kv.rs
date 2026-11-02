@@ -401,9 +401,20 @@ pub(super) fn resolved_write(
                     key: key.clone(),
                     precondition: precondition.clone(),
                 },
+                M::Reap {
+                    collection,
+                    key,
+                    expire_at_ms,
+                } => W::Reap {
+                    collection: collection.as_str().to_owned(),
+                    key: key.clone(),
+                    expire_at_ms: *expire_at_ms,
+                },
             })
             .collect(),
         response_payload: response_payload.to_vec(),
+        // Read once here: every replica's drift check judges at it.
+        resolved_now_ms: crate::engine::kv::current_ms(),
     }
 }
 

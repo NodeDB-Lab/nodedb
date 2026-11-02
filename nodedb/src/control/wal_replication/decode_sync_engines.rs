@@ -60,6 +60,7 @@ pub struct ColumnarIngestWire<'a> {
     pub on_conflict_updates: &'a [(String, UpdateValue)],
     pub schema_bytes: &'a [u8],
     pub surrogates: &'a [u32],
+    pub restored_versions: &'a [nodedb_types::columnar::RestoredVersion],
     pub prov_bytes: &'a Option<Vec<u8>>,
     pub returning_bytes: &'a Option<Vec<u8>>,
     pub rls_filters: &'a [u8],
@@ -84,6 +85,7 @@ pub fn columnar_ingest(wire: ColumnarIngestWire<'_>) -> crate::Result<PhysicalPl
         provenance,
         wal_lsn: None,
         system_from: None,
+        restored_versions: wire.restored_versions.to_vec(),
         // No predicate here: this node applies an already-committed sync
         // write. The writing identity is not available on this node.
         rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
@@ -233,6 +235,7 @@ mod tests {
             provenance: Some(prov.clone()),
             wal_lsn: None,
             system_from: None,
+            restored_versions: Vec::new(),
             rls_write_check: RlsWriteCheck::NoPolicyApplies,
             returning: None,
             rls_filters: Vec::new(),
@@ -335,6 +338,7 @@ mod tests {
             provenance: None,
             wal_lsn: None,
             system_from: None,
+            restored_versions: Vec::new(),
             rls_write_check: RlsWriteCheck::NoPolicyApplies,
             returning: None,
             rls_filters: Vec::new(),
@@ -381,6 +385,7 @@ mod tests {
             provenance: None,
             wal_lsn: None,
             system_from: None,
+            restored_versions: Vec::new(),
             rls_write_check: RlsWriteCheck::NoPolicyApplies,
             returning: None,
             rls_filters: Vec::new(),
@@ -424,6 +429,7 @@ mod tests {
             provenance: None,
             wal_lsn: None,
             system_from: None,
+            restored_versions: Vec::new(),
             rls_write_check: RlsWriteCheck::NoPolicyApplies,
             returning: None,
             rls_filters: Vec::new(),
@@ -474,6 +480,7 @@ mod tests {
             provenance: None,
             wal_lsn: None,
             system_from: None,
+            restored_versions: Vec::new(),
             rls_write_check: RlsWriteCheck::NoPolicyApplies,
             returning: Some(spec.clone()),
             rls_filters: Vec::new(),
@@ -517,6 +524,7 @@ mod tests {
             provenance: None,
             wal_lsn: None,
             system_from: None,
+            restored_versions: Vec::new(),
             rls_write_check: RlsWriteCheck::NoPolicyApplies,
             returning: None,
             rls_filters: b"rls-predicate".to_vec(),
@@ -540,6 +548,66 @@ mod tests {
                     b"rls-predicate".to_vec(),
                     "the RETURNING read-policy filter must survive replication"
                 );
+            }
+            other => panic!("expected Columnar(Insert), got {other:?}"),
+        }
+    }
+
+    /// A RESTORE re-issue's per-row stamps survive replication, so every
+    /// replica installs each version at the stamps the leader installs.
+    #[test]
+    fn columnar_ingest_restored_versions_roundtrip() {
+        let versions = vec![
+            nodedb_types::columnar::RestoredVersion {
+                sys_from: 10,
+                sys_to: Some(20),
+                clone_copy: false,
+            },
+            nodedb_types::columnar::RestoredVersion {
+                sys_from: 20,
+                sys_to: None,
+                clone_copy: false,
+            },
+        ];
+        let plan = PhysicalPlan::Columnar(ColumnarOp::Insert {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "metrics"),
+            payload: b"[{}]".to_vec(),
+            format: "msgpack".into(),
+            intent: ColumnarInsertIntent::Restore,
+            on_conflict_updates: Vec::new(),
+            surrogates: vec![
+                nodedb_types::Surrogate::new(1),
+                nodedb_types::Surrogate::new(2),
+            ],
+            schema_bytes: Vec::new(),
+            provenance: None,
+            wal_lsn: None,
+            system_from: None,
+            restored_versions: versions.clone(),
+            rls_write_check: RlsWriteCheck::NoPolicyApplies,
+            returning: None,
+            rls_filters: Vec::new(),
+        });
+        let entry = to_replicated_entry(
+            TenantId::new(1),
+            DatabaseId::DEFAULT,
+            VShardId::new(0),
+            &plan,
+        )
+        .expect("encode must not error")
+        .expect("ColumnarIngest should produce a ReplicatedEntry");
+        let bytes = entry.to_bytes();
+        let (_, _, decoded_plan, _) = decode::decode_replicated_entry(&bytes)
+            .expect("decode_replicated_entry error")
+            .expect("decode_replicated_entry returned None");
+        match decoded_plan {
+            PhysicalPlan::Columnar(ColumnarOp::Insert {
+                restored_versions,
+                intent,
+                ..
+            }) => {
+                assert_eq!(intent, ColumnarInsertIntent::Restore);
+                assert_eq!(restored_versions, versions);
             }
             other => panic!("expected Columnar(Insert), got {other:?}"),
         }

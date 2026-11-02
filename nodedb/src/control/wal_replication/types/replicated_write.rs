@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! Append-only Raft write wire ABI; variants must never be reordered.
 
-use super::aliases::{
-    default_columnar_ingest_format, default_columnar_insert_intent, default_ivf_cells,
-    default_ivf_nprobe, default_pq_m,
-};
 use super::redo_chunk_wire::RedoBody;
 use super::transaction_redo_wire::ReplicatedEventSource;
 use super::wire_shapes::{
@@ -33,48 +29,31 @@ pub enum ReplicatedWrite {
         document_id: String,
         value: Vec<u8>,
         surrogate: u32,
-        /// Join-key value → target surrogate, resolved by the proposing node.
-        /// No applying node can re-derive this from the source vShard alone.
-        /// SUPERSEDED by `resolved_sum_target_bindings`; kept for wire ABI compat.
-        #[serde(default)]
-        resolved_sum_targets: Vec<(String, u32)>,
-        /// Same resolution, keyed on `(target collection, join value)` — the
-        /// authoritative slot. Needed when a source drives two bindings on the
-        /// same join column into different targets; the untargeted slot above
-        /// can't tell those apart.
-        #[serde(default)]
-        resolved_sum_target_bindings: Vec<ReplicatedSumTarget>,
+        /// `(target collection, join value)` → target surrogate, resolved by
+        /// the proposing node. No applying node can re-derive this from the
+        /// source vShard alone.
+        resolved_sum_targets: Vec<ReplicatedSumTarget>,
         /// RETURNING projection spec (`ReturningSpec`), msgpack-encoded.
-        /// `None` if pre-dating this field or no RETURNING clause.
-        #[serde(default)]
+        /// `None` when the statement has no RETURNING clause.
         returning: Option<Vec<u8>>,
         /// Read filters gating what `returning` can show back.
-        #[serde(default)]
         rls_filters: Vec<u8>,
     },
     PointInsert {
         collection: String,
         document_id: String,
         value: Vec<u8>,
-        #[serde(default)]
         if_absent: bool,
         surrogate: u32,
         /// See `PointPut::resolved_sum_targets`.
-        #[serde(default)]
-        resolved_sum_targets: Vec<(String, u32)>,
+        resolved_sum_targets: Vec<ReplicatedSumTarget>,
         /// Target collections whose delta the proposing node split onto its own
         /// `ApplyBalanceDelta` entry because the target lives on a different
         /// vShard. Skipping this list double-counts the delta on apply.
-        #[serde(default)]
         deferred_sum_targets: Vec<String>,
-        /// See `PointPut::resolved_sum_target_bindings`.
-        #[serde(default)]
-        resolved_sum_target_bindings: Vec<ReplicatedSumTarget>,
         /// See `PointPut::returning`.
-        #[serde(default)]
         returning: Option<Vec<u8>>,
         /// See `PointPut::rls_filters`.
-        #[serde(default)]
         rls_filters: Vec<u8>,
     },
     PointDelete {
@@ -83,16 +62,10 @@ pub enum ReplicatedWrite {
         /// `None` when the key is unbound in its database: no row matches.
         surrogate: Option<u32>,
         /// See `PointPut::resolved_sum_targets`.
-        #[serde(default)]
-        resolved_sum_targets: Vec<(String, u32)>,
-        /// See `PointPut::resolved_sum_target_bindings`.
-        #[serde(default)]
-        resolved_sum_target_bindings: Vec<ReplicatedSumTarget>,
+        resolved_sum_targets: Vec<ReplicatedSumTarget>,
         /// See `PointPut::returning`.
-        #[serde(default)]
         returning: Option<Vec<u8>>,
         /// See `PointPut::rls_filters`.
-        #[serde(default)]
         rls_filters: Vec<u8>,
     },
     PointUpdate {
@@ -102,20 +75,13 @@ pub enum ReplicatedWrite {
         /// `None` when the key is unbound in its database: no row matches.
         surrogate: Option<u32>,
         /// See `PointPut::resolved_sum_targets`.
-        #[serde(default)]
-        resolved_sum_targets: Vec<(String, u32)>,
-        /// See `PointPut::resolved_sum_target_bindings`.
-        #[serde(default)]
-        resolved_sum_target_bindings: Vec<ReplicatedSumTarget>,
+        resolved_sum_targets: Vec<ReplicatedSumTarget>,
         /// See `PointPut::returning`.
-        #[serde(default)]
         returning: Option<Vec<u8>>,
         /// See `PointPut::rls_filters`.
-        #[serde(default)]
         rls_filters: Vec<u8>,
         /// The collection's declared `PRIMARY KEY` column, so every applier
         /// enforces NOT NULL on the computed post-image, not only the proposer.
-        #[serde(default)]
         declared_primary_key: Option<String>,
     },
     DocUpsert {
@@ -125,16 +91,10 @@ pub enum ReplicatedWrite {
         on_conflict_updates: Vec<(String, nodedb_physical::physical_plan::UpdateValue)>,
         surrogate: u32,
         /// See `PointPut::resolved_sum_targets`.
-        #[serde(default)]
-        resolved_sum_targets: Vec<(String, u32)>,
-        /// See `PointPut::resolved_sum_target_bindings`.
-        #[serde(default)]
-        resolved_sum_target_bindings: Vec<ReplicatedSumTarget>,
+        resolved_sum_targets: Vec<ReplicatedSumTarget>,
         /// See `PointPut::returning`.
-        #[serde(default)]
         returning: Option<Vec<u8>>,
         /// See `PointPut::rls_filters`.
-        #[serde(default)]
         rls_filters: Vec<u8>,
     },
     /// See `DocumentOp::BatchUpsert`: every replica judges the page alike.
@@ -144,16 +104,10 @@ pub enum ReplicatedWrite {
         surrogates: Vec<u32>,
         on_conflict_updates: Vec<(String, nodedb_physical::physical_plan::UpdateValue)>,
         /// See `PointPut::resolved_sum_targets`.
-        #[serde(default)]
-        resolved_sum_targets: Vec<(String, u32)>,
-        /// See `PointPut::resolved_sum_target_bindings`.
-        #[serde(default)]
-        resolved_sum_target_bindings: Vec<ReplicatedSumTarget>,
+        resolved_sum_targets: Vec<ReplicatedSumTarget>,
         /// See `PointPut::returning`.
-        #[serde(default)]
         returning: Option<Vec<u8>>,
         /// See `PointPut::rls_filters`.
-        #[serde(default)]
         rls_filters: Vec<u8>,
     },
     DocBatchInsert {
@@ -161,34 +115,23 @@ pub enum ReplicatedWrite {
         documents: Vec<(String, Vec<u8>)>,
         surrogates: Vec<u32>,
         /// See `BatchInsert::if_absent`: every replica skips the same rows.
-        #[serde(default)]
         if_absent: bool,
         /// See `PointPut::resolved_sum_targets`.
-        #[serde(default)]
-        resolved_sum_targets: Vec<(String, u32)>,
+        resolved_sum_targets: Vec<ReplicatedSumTarget>,
         /// See `PointInsert::deferred_sum_targets`.
-        #[serde(default)]
         deferred_sum_targets: Vec<String>,
-        /// See `PointPut::resolved_sum_target_bindings`.
-        #[serde(default)]
-        resolved_sum_target_bindings: Vec<ReplicatedSumTarget>,
         /// See `PointPut::returning`.
-        #[serde(default)]
         returning: Option<Vec<u8>>,
         /// See `PointPut::rls_filters`.
-        #[serde(default)]
         rls_filters: Vec<u8>,
     },
     VectorInsert {
         collection: String,
         vector: Vec<f32>,
         dim: usize,
-        #[serde(default)]
         field_name: String,
         surrogate: u32,
-        #[serde(default)]
         pk_bytes: Option<Vec<u8>>,
-        #[serde(default)]
         provenance: Option<Vec<u8>>,
     },
     VectorBatchInsert {
@@ -203,20 +146,14 @@ pub enum ReplicatedWrite {
     },
     SetVectorParams {
         collection: String,
-        #[serde(default)]
         field_name: String,
-        #[serde(default)]
         dim: usize,
         m: usize,
         ef_construction: usize,
         metric: String,
-        #[serde(default)]
         index_type: String,
-        #[serde(default = "default_pq_m")]
         pq_m: usize,
-        #[serde(default = "default_ivf_cells")]
         ivf_cells: usize,
-        #[serde(default = "default_ivf_nprobe")]
         ivf_nprobe: usize,
     },
     SparseInsert {
@@ -234,7 +171,6 @@ pub enum ReplicatedWrite {
         collection: String,
         field_name: String,
         document_surrogate: u32,
-        #[serde(default)]
         pk_bytes: Option<Vec<u8>>,
         vectors: Vec<f32>,
         count: usize,
@@ -251,7 +187,6 @@ pub enum ReplicatedWrite {
         surrogate: Option<u32>,
         field_name: String,
         /// Sync provenance encoded as zerompk bytes.
-        #[serde(default)]
         provenance: Option<Vec<u8>>,
     },
     /// Vector-primary insert family: `DirectInsert`, `DirectInsertIfAbsent`,
@@ -273,10 +208,8 @@ pub enum ReplicatedWrite {
         /// `ON CONFLICT DO UPDATE SET` patch; empty means whole-row replace.
         on_conflict_updates: Vec<(String, UpdateValue)>,
         /// See `ReplicatedWrite::PointPut::returning`.
-        #[serde(default)]
         returning: Option<Vec<u8>>,
         /// See `ReplicatedWrite::PointPut::rls_filters`.
-        #[serde(default)]
         rls_filters: Vec<u8>,
     },
     CrdtApply {
@@ -284,17 +217,12 @@ pub enum ReplicatedWrite {
         document_id: String,
         delta: Vec<u8>,
         peer_id: u64,
-        #[serde(default)]
         provenance: Option<Vec<u8>>,
         /// Leader-admitted constraint fence; zero means no fence.
-        #[serde(default)]
         constraint_version_required: u64,
         /// Leader-assigned surrogate for `document_id`, carried so every
         /// replica binds the SAME identity instead of each allocating its
-        /// own on apply. `0` (the wire default) means a record written
-        /// before this field existed — see `decode/crdt.rs::apply` for the
-        /// legacy fallback.
-        #[serde(default)]
+        /// own on apply.
         surrogate: u32,
     },
     ColumnarIngest {
@@ -304,23 +232,21 @@ pub enum ReplicatedWrite {
         /// Leader-assigned global surrogates, parallel to the rows in `payload`.
         surrogates: Vec<u32>,
         /// Sync provenance encoded as zerompk bytes.
-        #[serde(default)]
         provenance: Option<Vec<u8>>,
         /// "json", "msgpack", or "ilp" — see `ColumnarOp::Insert::format`.
-        /// Defaults to msgpack for a pre-field record.
-        #[serde(default = "default_columnar_ingest_format")]
         format: String,
         /// INSERT / INSERT IF ABSENT / UPSERT — see `ColumnarInsertIntent`.
-        #[serde(default = "default_columnar_insert_intent")]
         intent: ColumnarInsertIntent,
         /// `ON CONFLICT (pk) DO UPDATE SET field = expr` assignments.
-        #[serde(default)]
         on_conflict_updates: Vec<(String, UpdateValue)>,
+        /// The stamps of each row of a RESTORE re-issue, index-aligned with
+        /// the rows in `payload` (`ColumnarOp::Insert::restored_versions`).
+        /// Every replica installs each row at these stamps. Empty for every
+        /// other insert.
+        restored_versions: Vec<nodedb_types::columnar::RestoredVersion>,
         /// RETURNING projection spec (`ReturningSpec`), msgpack-encoded.
-        #[serde(default)]
         returning: Option<Vec<u8>>,
         /// Read filters (`Vec<ScanFilter>`) gating what `returning` can show.
-        #[serde(default)]
         rls_filters: Vec<u8>,
     },
     TimeseriesIngest {
@@ -334,13 +260,10 @@ pub enum ReplicatedWrite {
         /// the same instant.
         default_timestamp_ms: i64,
         /// Sync provenance encoded as zerompk bytes.
-        #[serde(default)]
         provenance: Option<Vec<u8>>,
         /// RETURNING projection spec (`ReturningSpec`), msgpack-encoded.
-        #[serde(default)]
         returning: Option<Vec<u8>>,
         /// Read filters (`Vec<ScanFilter>`) gating what `returning` can show.
-        #[serde(default)]
         rls_filters: Vec<u8>,
     },
     FtsIndex {
@@ -350,7 +273,6 @@ pub enum ReplicatedWrite {
         /// `(field, text)` per top-level string field.
         fields: Vec<(String, String)>,
         /// Sync provenance encoded as zerompk bytes.
-        #[serde(default)]
         provenance: Option<Vec<u8>>,
     },
     FtsDelete {
@@ -359,7 +281,6 @@ pub enum ReplicatedWrite {
         /// key's home binds none.
         surrogate: Option<u32>,
         /// Sync provenance encoded as zerompk bytes.
-        #[serde(default)]
         provenance: Option<Vec<u8>>,
     },
     SpatialInsert {
@@ -369,7 +290,6 @@ pub enum ReplicatedWrite {
         surrogate: u32,
         geometry_bytes: Vec<u8>,
         /// Sync provenance encoded as zerompk bytes.
-        #[serde(default)]
         provenance: Option<Vec<u8>>,
     },
     SpatialDelete {
@@ -379,7 +299,6 @@ pub enum ReplicatedWrite {
         /// key's home binds none.
         surrogate: Option<u32>,
         /// Sync provenance encoded as zerompk bytes.
-        #[serde(default)]
         provenance: Option<Vec<u8>>,
     },
     EdgePut {
@@ -395,10 +314,8 @@ pub enum ReplicatedWrite {
         dst_surrogate: u32,
         /// `VALID_TIME <from>` of the write, ms since epoch. `None` takes the
         /// applying write's wall time.
-        #[serde(default)]
         valid_from_ms: Option<i64>,
         /// `UNTIL <until>` of the write. `None` leaves the valid time open.
-        #[serde(default)]
         valid_until_ms: Option<i64>,
     },
     EdgeDelete {
@@ -436,26 +353,20 @@ pub enum ReplicatedWrite {
         /// Leader-resolved expiry clock; `None` when `ttl_ms == 0`.
         resolved_now_ms: Option<u64>,
         /// See `ReplicatedWrite::PointPut::returning`.
-        #[serde(default)]
         returning: Option<Vec<u8>>,
         /// See `ReplicatedWrite::PointPut::rls_filters`.
-        #[serde(default)]
         rls_filters: Vec<u8>,
         /// Sync provenance of a Lite KV push, encoded as zerompk bytes.
-        #[serde(default)]
         provenance: Option<Vec<u8>>,
     },
     KvDelete {
         collection: String,
         keys: Vec<Vec<u8>>,
         /// See `ReplicatedWrite::PointPut::returning`.
-        #[serde(default)]
         returning: Option<Vec<u8>>,
         /// See `ReplicatedWrite::PointPut::rls_filters`.
-        #[serde(default)]
         rls_filters: Vec<u8>,
         /// Sync provenance of a Lite KV push, encoded as zerompk bytes.
-        #[serde(default)]
         provenance: Option<Vec<u8>>,
     },
     KvInsert {
@@ -468,10 +379,8 @@ pub enum ReplicatedWrite {
         /// See `KvPut::resolved_now_ms`.
         resolved_now_ms: Option<u64>,
         /// See `ReplicatedWrite::PointPut::returning`.
-        #[serde(default)]
         returning: Option<Vec<u8>>,
         /// See `ReplicatedWrite::PointPut::rls_filters`.
-        #[serde(default)]
         rls_filters: Vec<u8>,
     },
     KvInsertOnConflictUpdate {
@@ -484,10 +393,8 @@ pub enum ReplicatedWrite {
         /// See `KvPut::resolved_now_ms`.
         resolved_now_ms: Option<u64>,
         /// See `ReplicatedWrite::PointPut::returning`.
-        #[serde(default)]
         returning: Option<Vec<u8>>,
         /// See `ReplicatedWrite::PointPut::rls_filters`.
-        #[serde(default)]
         rls_filters: Vec<u8>,
     },
     KvBatchPut {
@@ -501,10 +408,8 @@ pub enum ReplicatedWrite {
         /// See `KvPut::resolved_now_ms`.
         resolved_now_ms: Option<u64>,
         /// See `ReplicatedWrite::PointPut::returning`.
-        #[serde(default)]
         returning: Option<Vec<u8>>,
         /// See `ReplicatedWrite::PointPut::rls_filters`.
-        #[serde(default)]
         rls_filters: Vec<u8>,
     },
     KvExpire {
@@ -553,7 +458,6 @@ pub enum ReplicatedWrite {
         /// Read filters gating the OLD value this op hands back — see
         /// `KvOp::GetSet::rls_filters`. `GetSet` has no RETURNING projection,
         /// only this read gate.
-        #[serde(default)]
         rls_filters: Vec<u8>,
     },
     KvRegisterSortedIndex {
@@ -585,13 +489,10 @@ pub enum ReplicatedWrite {
         updates: Vec<(String, Vec<u8>)>,
         surrogate: u32,
         /// See `KvOp::FieldSet::if_present`.
-        #[serde(default)]
         if_present: bool,
         /// See `ReplicatedWrite::PointPut::returning`.
-        #[serde(default)]
         returning: Option<Vec<u8>>,
         /// See `ReplicatedWrite::PointPut::rls_filters`.
-        #[serde(default)]
         rls_filters: Vec<u8>,
     },
     KvTransfer {
@@ -619,10 +520,8 @@ pub enum ReplicatedWrite {
         /// coordinate and creates no row.
         cell_surrogate: Option<u32>,
         schema_hlc_bytes: [u8; 18],
-        #[serde(default)]
         provenance: Option<Vec<u8>>,
         /// See `ArrayCellPut::incarnation`.
-        #[serde(default)]
         incarnation: nodedb_types::Hlc,
     },
     ArraySchema {
@@ -638,20 +537,13 @@ pub enum ReplicatedWrite {
         /// See `PointPut::resolved_sum_targets`. A replica re-derives which rows
         /// match, but not which target row each credits — that came from the
         /// proposing node's scan of the target collection's catalog.
-        #[serde(default)]
-        resolved_sum_targets: Vec<(String, u32)>,
-        /// See `PointPut::resolved_sum_target_bindings`.
-        #[serde(default)]
-        resolved_sum_target_bindings: Vec<ReplicatedSumTarget>,
+        resolved_sum_targets: Vec<ReplicatedSumTarget>,
         /// See `PointPut::returning`.
-        #[serde(default)]
         returning: Option<Vec<u8>>,
         /// See `PointPut::rls_filters`.
-        #[serde(default)]
         rls_filters: Vec<u8>,
         /// See `PointUpdate::declared_primary_key`. `None` on the delete arm
         /// (`is_update = false`), which has no post-image to check.
-        #[serde(default)]
         declared_primary_key: Option<String>,
     },
     ColumnarBulkDml {
@@ -673,7 +565,6 @@ pub enum ReplicatedWrite {
         fields_json: String,
         /// Surrogate of the parent document hosting this block list. See
         /// `ReplicatedWrite::CrdtApply::surrogate`.
-        #[serde(default)]
         surrogate: u32,
     },
     CrdtListDelete {
@@ -682,7 +573,6 @@ pub enum ReplicatedWrite {
         list_path: String,
         index: u64,
         /// See `ReplicatedWrite::CrdtListInsert::surrogate`.
-        #[serde(default)]
         surrogate: u32,
     },
     CrdtListMove {
@@ -692,7 +582,6 @@ pub enum ReplicatedWrite {
         from_index: u64,
         to_index: u64,
         /// See `ReplicatedWrite::CrdtListInsert::surrogate`.
-        #[serde(default)]
         surrogate: u32,
     },
     CrdtDocUpsert {
@@ -704,10 +593,8 @@ pub enum ReplicatedWrite {
         /// The statement verb, so a decoded plan matches the proposed one.
         verb: CrdtWriteVerb,
         /// See `ReplicatedWrite::PointPut::returning`.
-        #[serde(default)]
         returning: Option<Vec<u8>>,
         /// See `ReplicatedWrite::PointPut::rls_filters`.
-        #[serde(default)]
         rls_filters: Vec<u8>,
     },
     CrdtDocDelete {
@@ -716,10 +603,8 @@ pub enum ReplicatedWrite {
         /// `None` when the key is unbound in its database: no row matches.
         surrogate: Option<u32>,
         /// See `ReplicatedWrite::PointPut::returning`.
-        #[serde(default)]
         returning: Option<Vec<u8>>,
         /// See `ReplicatedWrite::PointPut::rls_filters`.
-        #[serde(default)]
         rls_filters: Vec<u8>,
     },
     CalvinReadResult {
@@ -734,21 +619,15 @@ pub enum ReplicatedWrite {
         restart_identity: bool,
         /// See `BulkDml::resolved_sum_targets` — every row in the truncated
         /// collection takes its contribution off a resolved target.
-        #[serde(default)]
-        resolved_sum_targets: Vec<(String, u32)>,
-        /// See `PointPut::resolved_sum_target_bindings`.
-        #[serde(default)]
-        resolved_sum_target_bindings: Vec<ReplicatedSumTarget>,
+        resolved_sum_targets: Vec<ReplicatedSumTarget>,
         /// See `PointUpdate::declared_primary_key`. Names the column each
         /// removed row's identity is read from on every applier.
-        #[serde(default)]
         declared_primary_key: Option<String>,
     },
     KvTruncate {
         collection: String,
         /// `TRUNCATE ... RESTART IDENTITY`; the applying node resets the
         /// collection's sequences after the clear.
-        #[serde(default)]
         restart_identity: bool,
     },
     ConstraintChange {
@@ -760,20 +639,16 @@ pub enum ReplicatedWrite {
     ArrayCellPut {
         array: String,
         cells_msgpack: Vec<u8>,
-        #[serde(default)]
         provenance: Option<Vec<u8>>,
         /// The array incarnation the proposer wrote against. A replica
         /// routes the write to that incarnation wherever it lives.
-        #[serde(default)]
         incarnation: nodedb_types::Hlc,
     },
     ArrayCellDelete {
         array: String,
         coords_msgpack: Vec<u8>,
-        #[serde(default)]
         provenance: Option<Vec<u8>>,
         /// See `ArrayCellPut::incarnation`.
-        #[serde(default)]
         incarnation: nodedb_types::Hlc,
     },
 
@@ -787,10 +662,9 @@ pub enum ReplicatedWrite {
         provenance: Option<Vec<u8>>,
         /// Leader-admitted collection constraint fence.
         constraint_version_required: u64,
-        /// Mandatory exact preview frontier; absent on legacy `CrdtApply`.
+        /// Mandatory exact preview frontier.
         expected_frontier_digest: [u8; 32],
         /// See `ReplicatedWrite::CrdtApply::surrogate`.
-        #[serde(default)]
         surrogate: u32,
     },
     CrdtApplyAuthenticated {
@@ -807,7 +681,6 @@ pub enum ReplicatedWrite {
         delta_signature: [u8; 32],
         signing_required: bool,
         /// See `ReplicatedWrite::CrdtApply::surrogate`.
-        #[serde(default)]
         surrogate: u32,
     },
 
@@ -815,7 +688,6 @@ pub enum ReplicatedWrite {
     /// `SetVectorParams`.
     DropVectorIndex {
         collection: String,
-        #[serde(default)]
         field_name: String,
     },
 
@@ -840,7 +712,6 @@ pub enum ReplicatedWrite {
         /// Join value that resolved to `surrogate`.
         join_value: String,
         /// See `PointUpdate::declared_primary_key`, for the TARGET collection.
-        #[serde(default)]
         declared_primary_key: Option<String>,
     },
 
@@ -862,10 +733,8 @@ pub enum ReplicatedWrite {
     /// applying node's sequence store after the clear.
     ColumnarTruncate {
         collection: String,
-        #[serde(default)]
         restart_identity: bool,
         /// See `ColumnarOp::Truncate::erase_history`.
-        #[serde(default)]
         erase_history: bool,
     },
 
@@ -873,7 +742,6 @@ pub enum ReplicatedWrite {
     /// and on-disk partitions. `restart_identity` as above.
     TimeseriesTruncate {
         collection: String,
-        #[serde(default)]
         restart_identity: bool,
     },
 
@@ -894,6 +762,10 @@ pub enum ReplicatedWrite {
         /// Statement reply decided at resolve time; every replica returns it
         /// unchanged rather than recomputing from moved-on state.
         response_payload: Vec<u8>,
+        /// The instant the proposer stamped. Every replica judges each
+        /// mutation's drift check, expiry included, at it, so every replica
+        /// reaches one verdict.
+        resolved_now_ms: u64,
     },
 
     /// Resolved form of a deferred document write (`PointUpdate`,
@@ -914,10 +786,8 @@ pub enum ReplicatedWrite {
         field: String,
         rows: Vec<Surrogate>,
         /// See `ReplicatedWrite::PointPut::returning`.
-        #[serde(default)]
         returning: Option<Vec<u8>>,
         /// See `ReplicatedWrite::PointPut::rls_filters`.
-        #[serde(default)]
         rls_filters: Vec<u8>,
     },
 
@@ -927,7 +797,6 @@ pub enum ReplicatedWrite {
     VectorDirectTruncate {
         collection: String,
         field: String,
-        #[serde(default)]
         restart_identity: bool,
     },
 
@@ -943,10 +812,8 @@ pub enum ReplicatedWrite {
         storage_dtype: VectorStorageDtype,
         payload_indexes: Vec<(String, PayloadIndexKind)>,
         /// See `ReplicatedWrite::PointPut::returning`.
-        #[serde(default)]
         returning: Option<Vec<u8>>,
         /// See `ReplicatedWrite::PointPut::rls_filters`.
-        #[serde(default)]
         rls_filters: Vec<u8>,
     },
 
@@ -994,9 +861,7 @@ pub enum ReplicatedWrite {
         /// See `PointPut::rls_filters`.
         rls_filters: Vec<u8>,
         /// See `PointPut::resolved_sum_targets`.
-        resolved_sum_targets: Vec<(String, u32)>,
-        /// See `PointPut::resolved_sum_target_bindings`.
-        resolved_sum_target_bindings: Vec<ReplicatedSumTarget>,
+        resolved_sum_targets: Vec<ReplicatedSumTarget>,
         /// See `PointUpdate::declared_primary_key`.
         declared_primary_key: Option<String>,
     },
@@ -1020,9 +885,7 @@ pub enum ReplicatedWrite {
         /// See `PointPut::rls_filters`.
         rls_filters: Vec<u8>,
         /// See `PointPut::resolved_sum_targets`.
-        resolved_sum_targets: Vec<(String, u32)>,
-        /// See `PointPut::resolved_sum_target_bindings`.
-        resolved_sum_target_bindings: Vec<ReplicatedSumTarget>,
+        resolved_sum_targets: Vec<ReplicatedSumTarget>,
         /// See `PointUpdate::declared_primary_key`.
         declared_primary_key: Option<String>,
     },
@@ -1035,8 +898,8 @@ pub enum ReplicatedWrite {
     /// stream.
     TransactionRedo {
         body: RedoBody,
-        /// Every collection the transaction wrote, for the collection-floor
-        /// write versions.
+        /// Every collection the transaction wrote, for the collection write
+        /// notes.
         collections: Vec<String>,
         event_source: ReplicatedEventSource,
         /// Which commit-boundary checks every replica's apply runs.
@@ -1044,6 +907,10 @@ pub enum ReplicatedWrite {
         /// Set for a committed Calvin slice. The redo's `calvin_stamp` names
         /// its `(epoch, position)`, and the slice's scheduler holds its locks.
         calvin: Option<super::transaction_redo_wire::CalvinRedoMeta>,
+        /// The ordinal every replica's apply validates the content's reads
+        /// and the written keys at, before it installs. `None` for a
+        /// transaction with no snapshot and no read.
+        snapshot_ordinal: Option<i64>,
     },
     /// A backup's consistent cut through this group's log. It writes no
     /// data. Every entry before it applies before the backup snapshots, and
@@ -1058,7 +925,6 @@ pub enum ReplicatedWrite {
         /// A database backup's capture request. The group's leader snapshots
         /// the request's tenants when it applies the first barrier of the
         /// request, before it applies the next entry.
-        #[serde(default)]
         capture: Option<nodedb_physical::physical_plan::CutCaptureRequest>,
     },
     /// One message published to a durable topic whose home vShard is this
@@ -1177,8 +1043,7 @@ mod tests {
                 document_id: "d".into(),
                 value: vec![1, 2, 3],
                 surrogate: 1,
-                resolved_sum_targets: vec![("acc-1".into(), 4242)],
-                resolved_sum_target_bindings: vec![ReplicatedSumTarget {
+                resolved_sum_targets: vec![ReplicatedSumTarget {
                     target_collection: "accounts".into(),
                     join_value: "acc-1".into(),
                     surrogate: 4242,
@@ -1191,7 +1056,6 @@ mod tests {
                 document_id: "d".into(),
                 surrogate: Some(1),
                 resolved_sum_targets: Vec::new(),
-                resolved_sum_target_bindings: Vec::new(),
                 returning: None,
                 rls_filters: Vec::new(),
             },

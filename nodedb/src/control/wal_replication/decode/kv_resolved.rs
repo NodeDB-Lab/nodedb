@@ -115,6 +115,15 @@ pub(super) fn resolved_write(
                     key: key.clone(),
                     precondition: precondition.clone(),
                 },
+                W::Reap {
+                    collection,
+                    key,
+                    expire_at_ms,
+                } => M::Reap {
+                    collection: nodedb_types::QualifiedCollection::from_stored(collection.clone()),
+                    key: key.clone(),
+                    expire_at_ms: *expire_at_ms,
+                },
             })
         })
         .collect::<crate::Result<Vec<M>>>()?;

@@ -30,31 +30,39 @@ pub(crate) fn stamp_metadata_floor(state: &SharedState, entry: &mut ReplicatedEn
         .floor();
 }
 
-/// Stamp the incarnation this node's catalog holds for each collection
-/// `entry` names. A collection with no catalog row stays `Hlc::ZERO`, and a
-/// replica applies its write by key alone.
+/// Stamp the incarnation this node's catalogs hold for each collection and
+/// array `entry` names. A collection with no catalog row stays `Hlc::ZERO`,
+/// and a replica applies its write by key alone.
 pub(crate) fn stamp_collection_incarnations(
     state: &SharedState,
     entry: &mut ReplicatedEntry,
 ) -> crate::Result<()> {
+    use crate::control::array_catalog::named_incarnation::{array_incarnation_of, read_mirror};
+    use nodedb_cluster::calvin::types::IncarnationKind;
+
     let catalog = state.credentials.catalog();
+    let mirror = read_mirror(&state.array_catalog);
     let database_id = crate::types::DatabaseId::new(entry.database_id);
+    let tenant_id = crate::types::TenantId::new(entry.tenant_id);
     for named in &mut entry.incarnations {
-        named.incarnation =
-            catalog.incarnation_of(database_id, entry.tenant_id, &named.collection)?;
+        named.incarnation = match named.kind {
+            IncarnationKind::Collection => {
+                catalog.incarnation_of(database_id, entry.tenant_id, &named.collection)?
+            }
+            IncarnationKind::Array => {
+                array_incarnation_of(&mirror, tenant_id, database_id, &named.collection)
+            }
+        };
     }
     Ok(())
 }
 
 /// Propose `entry` via `proposer` and return the Data Plane apply payload
-/// bytes and the versions the write stamped. Each version is the data-group
-/// log position of the entry that applied the write, so it is the same on
-/// every replica. A write whose plan names no single user collection stamps
-/// none.
+/// bytes.
 ///
 /// An edge or label write is not proposed. It runs as a Calvin transaction
-/// (`planner::calvin::graph_sequencing`), and its applied payload and read
-/// version come back the same way.
+/// (`planner::calvin::graph_sequencing`), and its applied payload comes back
+/// the same way.
 ///
 /// `deadline` is the caller's deadline. Every attempt, each attempt's wait at
 /// the leader's write gate, and each wait for the local apply end at it.
@@ -82,7 +90,7 @@ pub(crate) async fn propose_replicated_entry(
     if let Some(response) =
         crate::control::planner::calvin::sequence_replicated_graph_write(state, &entry).await?
     {
-        return Ok((response.payload.to_vec(), response.read_versions));
+        return Ok(response.payload.to_vec());
     }
     // The write's commit instant. Stamped once, before the first propose, so
     // every re-proposal and every replica's apply carries the same value.

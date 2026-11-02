@@ -25,6 +25,9 @@ pub struct RedoTarget {
     pub tenant_id: TenantId,
     pub database_id: DatabaseId,
     pub vshard_id: VShardId,
+    /// The system-time ordinal the leader of the applied entry assigned,
+    /// `None` for a redo no entry carries: the local append reserves one.
+    pub system_ordinal: Option<i64>,
 }
 
 /// Record the cross-shard key a redo carries once the redo installed. The
@@ -113,9 +116,10 @@ pub(crate) async fn enqueue_transaction_redo(
                 apply_key,
                 commit_hlc,
                 change_position,
-                // A transaction redo carries the stamp of every version it
-                // installs.
-                system_ordinal: None,
+                // Every version the redo installs without a stamp of its own
+                // (a KV row, a timeseries batch, an array cell) stamps the
+                // ordinal the entry's leader assigned, on every replica.
+                system_ordinal: target.system_ordinal,
             },
             // Raft fixed the order.
             ordering: WriteOrdering::AlreadyOrdered,

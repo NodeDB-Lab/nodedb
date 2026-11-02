@@ -31,6 +31,7 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             format,
             intent,
             on_conflict_updates,
+            restored_versions,
             returning,
             rls_filters,
         } => decode_sync_engines::columnar_ingest(ColumnarIngestWire {
@@ -41,6 +42,7 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             on_conflict_updates,
             schema_bytes,
             surrogates,
+            restored_versions,
             prov_bytes: provenance,
             returning_bytes: returning,
             rls_filters,

@@ -6,8 +6,9 @@
 //! The write policy was decided on the proposing node over the resolved arms,
 //! so every rebuilt plan stamps `decided_earlier_in_request()`.
 
-use super::document::{ReturningFields, WireSumResolution, plan_targets};
+use super::document::{ReturningFields, plan_targets};
 use crate::bridge::envelope::PhysicalPlan;
+use crate::control::wal_replication::types::ReplicatedSumTarget;
 use nodedb_physical::physical_plan::document::MergeClauseOp;
 use nodedb_physical::physical_plan::{DocumentOp, RowSource, UpdateValue};
 
@@ -19,7 +20,7 @@ pub(super) struct JoinFields<'a> {
     pub target_join_col: &'a str,
     pub source_join_col: &'a str,
     pub source_rows: &'a [Vec<u8>],
-    pub resolved_sum_targets: &'a WireSumResolution<'a>,
+    pub resolved_sum_targets: &'a [ReplicatedSumTarget],
     pub declared_primary_key: Option<String>,
 }
 
@@ -52,6 +53,9 @@ pub(super) fn merge_apply(
         rls_write_check: nodedb_types::RlsWriteCheck::decided_earlier_in_request(),
         resolved_sum_targets: plan_targets(join.resolved_sum_targets),
         declared_primary_key: join.declared_primary_key,
+        // A replicated apply is an autocommit write: it matches the current
+        // target rows.
+        target_system_time: nodedb_types::SystemTimeScope::Current,
     })
 }
 
@@ -77,6 +81,9 @@ pub(super) fn update_from_join_apply(
         rls_write_check: nodedb_types::RlsWriteCheck::decided_earlier_in_request(),
         resolved_sum_targets: plan_targets(join.resolved_sum_targets),
         declared_primary_key: join.declared_primary_key,
+        // A replicated apply is an autocommit write: it matches the current
+        // target rows.
+        target_system_time: nodedb_types::SystemTimeScope::Current,
     })
 }
 
@@ -123,6 +130,7 @@ mod tests {
                 key: b"r1".to_vec(),
                 rls_filters: Vec::new(),
                 surrogate_ceiling: None,
+                system_time: nodedb_types::SystemTimeScope::Current,
             })),
             column_map: Vec::new(),
         })
@@ -152,6 +160,7 @@ mod tests {
             rls_write_check: RlsWriteCheck::decided_earlier_in_request(),
             resolved_sum_targets: vec![sum_target()],
             declared_primary_key: Some("id".into()),
+            target_system_time: nodedb_types::SystemTimeScope::Current,
         });
         let decoded = roundtrip(&plan);
         let PhysicalPlan::Document(DocumentOp::Merge {
@@ -199,6 +208,7 @@ mod tests {
             rls_write_check: RlsWriteCheck::decided_earlier_in_request(),
             resolved_sum_targets: vec![sum_target()],
             declared_primary_key: None,
+            target_system_time: nodedb_types::SystemTimeScope::Current,
         });
         let decoded = roundtrip(&plan);
         let PhysicalPlan::Document(DocumentOp::UpdateFromJoin {

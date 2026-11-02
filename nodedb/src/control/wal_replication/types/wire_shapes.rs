@@ -28,10 +28,8 @@ pub struct ReplicatedBatchEdge {
     pub dst_surrogate: u32,
     /// `VALID_TIME <from>` of a put, ms since epoch. `None` takes the
     /// applying write's wall time. A delete carries `None`.
-    #[serde(default)]
     pub valid_from_ms: Option<i64>,
     /// `UNTIL <until>` of a put. `None` leaves the valid time open.
-    #[serde(default)]
     pub valid_until_ms: Option<i64>,
 }
 
@@ -58,9 +56,8 @@ pub struct BalanceDeltaFields<'a> {
 }
 
 /// One entry of a write's materialized-sum resolution: which target row a
-/// binding's `(target collection, join value)` pair names. Supersedes the
-/// `(join_value, surrogate)` pairs in `*_sum_targets`, which can't tell apart
-/// two bindings sharing a join column into different targets.
+/// binding's `(target collection, join value)` pair names. The pair keeps two
+/// bindings that share a join column into different targets apart.
 #[derive(
     Debug,
     Clone,
@@ -156,6 +153,12 @@ pub enum KvResolvedMutationWire {
         collection: String,
         key: Vec<u8>,
         precondition: Option<Vec<u8>>,
+    },
+    /// See `KvResolvedMutation::Reap`.
+    Reap {
+        collection: String,
+        key: Vec<u8>,
+        expire_at_ms: u64,
     },
 }
 

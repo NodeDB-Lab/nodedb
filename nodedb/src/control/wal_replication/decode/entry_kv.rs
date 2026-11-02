@@ -242,7 +242,12 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<(PhysicalPlan
         ReplicatedWrite::KvResolvedWrite {
             mutations,
             response_payload,
-        } => kv_resolved::resolved_write(mutations, response_payload)?,
+            resolved_now_ms: rn,
+        } => {
+            // Every replica judges the drift checks at the proposer's instant.
+            resolved_now_ms = Some(*rn);
+            kv_resolved::resolved_write(mutations, response_payload)?
+        }
         ReplicatedWrite::KvTransferItem {
             source_collection,
             dest_collection,
