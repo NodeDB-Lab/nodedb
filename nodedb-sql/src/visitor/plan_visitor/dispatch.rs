@@ -285,6 +285,7 @@ pub fn dispatch<V: PlanVisitor>(visitor: &mut V, plan: &SqlPlan) -> Result<V::Ou
             payload_filters,
             pk_prefilter,
             projection: _,
+            temporal,
         } => visitor.vector_search(VectorSearchVisitArgs {
             collection,
             field,
@@ -298,6 +299,7 @@ pub fn dispatch<V: PlanVisitor>(visitor: &mut V, plan: &SqlPlan) -> Result<V::Ou
             skip_payload_fetch: *skip_payload_fetch,
             payload_filters,
             pk_prefilter: pk_prefilter.as_deref(),
+            temporal,
         }),
         SqlPlan::MultiVectorSearch {
             collection,
@@ -305,7 +307,8 @@ pub fn dispatch<V: PlanVisitor>(visitor: &mut V, plan: &SqlPlan) -> Result<V::Ou
             top_k,
             ef_search,
             projection: _,
-        } => visitor.multi_vector_search(collection, query_vector, *top_k, *ef_search),
+            temporal,
+        } => visitor.multi_vector_search(collection, query_vector, *top_k, *ef_search, temporal),
         SqlPlan::SparseSearch {
             collection,
             field,
@@ -313,18 +316,21 @@ pub fn dispatch<V: PlanVisitor>(visitor: &mut V, plan: &SqlPlan) -> Result<V::Ou
             top_k,
             filters,
             projection: _,
-        } => visitor.sparse_search(collection, field, query_entries, *top_k, filters),
+            temporal,
+        } => visitor.sparse_search(collection, field, query_entries, *top_k, filters, temporal),
         SqlPlan::TextSearch(TextSearchPlan {
             collection,
             shape,
             filters,
             scores,
             projection: _,
+            temporal,
         }) => visitor.text_search(TextSearchVisitArgs {
             collection,
             shape,
             filters,
             scores,
+            temporal,
         }),
         SqlPlan::HybridSearch(HybridSearchPlan {
             collection,
@@ -340,6 +346,7 @@ pub fn dispatch<V: PlanVisitor>(visitor: &mut V, plan: &SqlPlan) -> Result<V::Ou
             fuzzy,
             score_alias,
             projection: _,
+            temporal,
         }) => visitor.hybrid_search(HybridSearchVisitArgs {
             collection,
             vector_field,
@@ -353,6 +360,7 @@ pub fn dispatch<V: PlanVisitor>(visitor: &mut V, plan: &SqlPlan) -> Result<V::Ou
             mode: *mode,
             fuzzy: *fuzzy,
             score_alias: score_alias.as_deref(),
+            temporal,
         }),
         SqlPlan::HybridSearchTriple(HybridSearchTriplePlan {
             collection,
@@ -371,6 +379,7 @@ pub fn dispatch<V: PlanVisitor>(visitor: &mut V, plan: &SqlPlan) -> Result<V::Ou
             rrf_k,
             score_alias,
             projection: _,
+            temporal,
         }) => visitor.hybrid_search_triple(HybridSearchTripleVisitArgs {
             collection,
             vector_field,
@@ -387,6 +396,7 @@ pub fn dispatch<V: PlanVisitor>(visitor: &mut V, plan: &SqlPlan) -> Result<V::Ou
             fuzzy: *fuzzy,
             rrf_k: *rrf_k,
             score_alias: score_alias.as_deref(),
+            temporal,
         }),
         SqlPlan::SpatialScan {
             collection,
@@ -397,6 +407,7 @@ pub fn dispatch<V: PlanVisitor>(visitor: &mut V, plan: &SqlPlan) -> Result<V::Ou
             attribute_filters,
             limit,
             projection,
+            temporal,
         } => visitor.spatial_scan(SpatialScanVisitArgs {
             collection,
             field,
@@ -406,6 +417,7 @@ pub fn dispatch<V: PlanVisitor>(visitor: &mut V, plan: &SqlPlan) -> Result<V::Ou
             attribute_filters,
             limit: *limit,
             projection,
+            temporal,
         }),
         SqlPlan::RecursiveScan(RecursiveScanPlan {
             collection,

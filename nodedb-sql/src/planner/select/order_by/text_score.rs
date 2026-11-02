@@ -39,6 +39,7 @@ pub(super) fn attach_scores(
             filters,
             projection,
             sort_keys,
+            temporal,
             ..
         } => {
             refuse_scan_clauses(plan, "a bm25_score() scan")?;
@@ -48,6 +49,7 @@ pub(super) fn attach_scores(
                 filters: filters.clone(),
                 scores: Vec::new(),
                 projection: projection.clone(),
+                temporal: *temporal,
             };
             for column in scores {
                 search.add_score(column);
@@ -63,12 +65,12 @@ pub(super) fn attach_scores(
 }
 
 /// Refuse rewriting a `Scan` into `target` when the scan carries a clause the
-/// rewritten plan has no slot for. Rewriting would answer without it.
+/// rewritten plan has no slot for. Rewriting would answer without it. The
+/// scan's `AS OF` travels in the rewritten plan.
 pub(super) fn refuse_scan_clauses(plan: &SqlPlan, target: &str) -> Result<()> {
     let SqlPlan::Scan {
         distinct,
         window_functions,
-        temporal,
         ..
     } = plan
     else {
@@ -78,8 +80,6 @@ pub(super) fn refuse_scan_clauses(plan: &SqlPlan, target: &str) -> Result<()> {
         Some("DISTINCT")
     } else if !window_functions.is_empty() {
         Some("a window function")
-    } else if temporal.is_temporal() {
-        Some("AS OF")
     } else {
         None
     };

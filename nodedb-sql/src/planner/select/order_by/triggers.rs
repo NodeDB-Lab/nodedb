@@ -70,6 +70,27 @@ fn no_query_vector_error(function: &str) -> SqlError {
     }
 }
 
+/// The system time a search of `collection` drawn from `plan` reads at: the
+/// `AS OF` of the scan of `collection`. A join reads the `AS OF` of its
+/// searched side.
+fn search_temporal(plan: &SqlPlan, collection: &str) -> crate::temporal::TemporalScope {
+    match plan {
+        SqlPlan::Scan { temporal, .. } => *temporal,
+        SqlPlan::Join { left, right, .. } => [left, right]
+            .into_iter()
+            .find_map(|side| match side.as_ref() {
+                SqlPlan::Scan {
+                    collection: side_collection,
+                    temporal,
+                    ..
+                } if side_collection == collection => Some(*temporal),
+                _ => None,
+            })
+            .unwrap_or_default(),
+        _ => crate::temporal::TemporalScope::default(),
+    }
+}
+
 /// A search plan an ORDER BY trigger produced.
 pub(super) enum SortSearch {
     /// The plan returns its rows in the order the ORDER BY asked for.
@@ -137,6 +158,7 @@ pub(super) fn try_extract_sort_search(
         },
         _ => return Ok(None),
     };
+    let collection_for_scope = collection.clone();
     let args = extract_func_args(func)?;
     let raw_func_args: &[FunctionArg] = match &func.args {
         FunctionArguments::List(list) => &list.args,
@@ -202,6 +224,7 @@ pub(super) fn try_extract_sort_search(
                 payload_filters: Vec::new(),
                 pk_prefilter: None,
                 projection: source_projection(plan),
+                temporal: search_temporal(plan, &collection_for_scope),
             })))
         }
         SearchTrigger::SparseSearch => {
@@ -236,6 +259,7 @@ pub(super) fn try_extract_sort_search(
                     _ => Vec::new(),
                 },
                 projection: source_projection(plan),
+                temporal: search_temporal(plan, &collection_for_scope),
             })))
         }
         _ => Ok(None),

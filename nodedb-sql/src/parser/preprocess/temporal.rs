@@ -356,7 +356,7 @@ fn strip_as_of_valid_time(
                 "AS OF VALID TIME requires an expression".into(),
             ));
         }
-        SystemTimeScope::Pinned { .. } => {
+        SystemTimeScope::Pinned { .. } | SystemTimeScope::TxnSnapshot { .. } => {
             return Err(TemporalParseError(
                 "AS OF VALID TIME takes a time, not a pinned system-time ordinal".into(),
             ));
@@ -623,11 +623,9 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_millis() as i64;
-        let ts = ex
-            .temporal
-            .system_time
-            .as_of_ms()
-            .expect("NOW() resolves to AsOf");
+        let SystemTimeScope::AsOf(ts) = ex.temporal.system_time else {
+            panic!("NOW() resolves to AsOf, got {:?}", ex.temporal.system_time);
+        };
         assert!(
             ts >= before && ts <= after,
             "NOW() ts {ts} not in [{before}, {after}]"

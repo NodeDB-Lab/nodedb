@@ -190,7 +190,16 @@ fn resolve_join_key(scope: &TableScope, key: String) -> Result<String> {
         (ColumnNaming::JoinRow, BareColumn::Relation(table)) => {
             format!("{}.{key}", table.ref_name())
         }
-        (ColumnNaming::JoinRow, BareColumn::Output | BareColumn::Outer)
+        (ColumnNaming::JoinWriteRow, BareColumn::Relation(_)) => {
+            match scope.bare_column_qualifier(&key)? {
+                Some(qualifier) => format!("{qualifier}.{key}"),
+                None => key,
+            }
+        }
+        (
+            ColumnNaming::JoinRow | ColumnNaming::JoinWriteRow,
+            BareColumn::Output | BareColumn::Outer,
+        )
         | (ColumnNaming::AsWritten | ColumnNaming::OutputRow, _) => key,
     })
 }

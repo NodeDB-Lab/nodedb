@@ -15,7 +15,7 @@ use super::actions::convert_merge_clauses;
 use crate::engine_rules::{self, MergeParams, ScanParams};
 use crate::error::{Result, SqlError};
 use crate::parser::normalize::{normalize_ident, normalize_object_name_checked};
-use crate::resolver::columns::{ResolvedTable, TableScope};
+use crate::resolver::columns::{ColumnNaming, ResolvedTable, TableScope};
 use crate::temporal::TemporalScope;
 use crate::types::*;
 
@@ -70,10 +70,13 @@ pub fn plan_merge(stmt: &ast::Statement, catalog: &dyn SqlCatalog) -> Result<Vec
         extract_merge_equijoin(&merge.on, target_ref, &source_alias, &scope)?;
 
     // ── Convert WHEN clauses ──
+    // Arm conditions and values read the merged row: target fields bare,
+    // source fields keyed `<source_alias>.column`.
+    let clause_scope = scope.clone().with_column_naming(ColumnNaming::JoinWriteRow);
     let clauses = convert_merge_clauses(
         &merge.clauses,
         target_ref,
-        &scope,
+        &clause_scope,
         &target_scope,
         &target_info,
     )?;

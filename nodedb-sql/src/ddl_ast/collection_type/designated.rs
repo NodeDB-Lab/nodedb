@@ -4,14 +4,14 @@
 //! timeseries time key and the spatial geometry column, plus the reserved
 //! column names no declaration may claim.
 
-use nodedb_types::columnar::schema::{TS_SYSTEM, TS_VALID_FROM, TS_VALID_UNTIL};
+use nodedb_types::columnar::schema::{TS_SERIES, TS_SYSTEM, TS_VALID_FROM, TS_VALID_UNTIL};
 
 use crate::error::SqlError;
 
 /// Column names the columnar-family storage core stamps itself. A
 /// declaration that claims one of them would be shadowed at write time, so
 /// it is rejected at DDL instead.
-const RESERVED_COLUMNS: &[&str] = &[TS_SYSTEM, TS_VALID_FROM, TS_VALID_UNTIL];
+const RESERVED_COLUMNS: &[&str] = &[TS_SYSTEM, TS_SERIES, TS_VALID_FROM, TS_VALID_UNTIL];
 
 /// Reject any declared column whose name is reserved for engine use.
 pub(crate) fn reject_reserved_columns(columns: &[(String, String)]) -> Result<(), SqlError> {
@@ -23,7 +23,7 @@ pub(crate) fn reject_reserved_columns(columns: &[(String, String)]) -> Result<()
             return Err(SqlError::Parse {
                 detail: format!(
                     "column name '{name}' is reserved for engine-managed \
-                     bitemporal storage and cannot be declared"
+                     storage and cannot be declared"
                 ),
             });
         }

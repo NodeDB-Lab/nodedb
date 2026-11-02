@@ -257,6 +257,8 @@ pub enum SqlPlan {
         pk_prefilter: Option<Vec<SqlValue>>,
         /// Resolved SELECT target list, for output-schema derivation.
         projection: Vec<Projection>,
+        /// `AS OF SYSTEM TIME` of the search: the system time it reads at.
+        temporal: TemporalScope,
     },
     MultiVectorSearch {
         collection: String,
@@ -265,6 +267,8 @@ pub enum SqlPlan {
         ef_search: usize,
         /// Resolved SELECT target list, for output-schema derivation.
         projection: Vec<Projection>,
+        /// `AS OF SYSTEM TIME` of the search: the system time it reads at.
+        temporal: TemporalScope,
     },
     /// Sparse-vector inverted-index search.
     ///
@@ -284,6 +288,8 @@ pub enum SqlPlan {
         filters: Vec<Filter>,
         /// Resolved SELECT target list, for output-schema derivation.
         projection: Vec<Projection>,
+        /// `AS OF SYSTEM TIME` of the search: the system time it reads at.
+        temporal: TemporalScope,
     },
     /// Full-text search: `WHERE text_match(...)` matches, or a
     /// `bm25_score(...)` score scan over every row the filters admit.
@@ -306,6 +312,8 @@ pub enum SqlPlan {
         attribute_filters: Vec<Filter>,
         limit: usize,
         projection: Vec<Projection>,
+        /// `AS OF SYSTEM TIME` of the scan: the system time it reads at.
+        temporal: TemporalScope,
     },
 
     // ── Composite ──

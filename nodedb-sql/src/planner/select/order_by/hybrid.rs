@@ -56,6 +56,7 @@ struct HybridBase<'a> {
     filters: Vec<Filter>,
     score_alias: Option<&'a str>,
     projection: Vec<Projection>,
+    temporal: crate::temporal::TemporalScope,
 }
 
 /// Build a `SqlPlan::HybridSearch` or `SqlPlan::HybridSearchTriple` from a
@@ -75,6 +76,7 @@ pub(super) fn plan_hybrid_from_sort(
         limit,
         offset,
         filters,
+        temporal,
         ..
     } = plan
     else {
@@ -91,6 +93,7 @@ pub(super) fn plan_hybrid_from_sort(
         filters: filters.clone(),
         score_alias,
         projection: source_projection(plan),
+        temporal: *temporal,
     };
 
     // Determine whether args[2] (if present) is a function call (graph source)
@@ -141,6 +144,7 @@ fn plan_hybrid_two_source(args: &[ast::Expr], base: HybridBase<'_>) -> Result<Op
         fuzzy: text.options.params.fuzzy,
         score_alias: base.score_alias.map(|s| s.to_string()),
         projection: base.projection,
+        temporal: base.temporal,
     })))
 }
 
@@ -193,6 +197,7 @@ fn plan_hybrid_triple(args: &[ast::Expr], base: HybridBase<'_>) -> Result<Option
         rrf_k: (k1, k2, k3),
         score_alias: base.score_alias.map(|s| s.to_string()),
         projection: base.projection,
+        temporal: base.temporal,
     })))
 }
 

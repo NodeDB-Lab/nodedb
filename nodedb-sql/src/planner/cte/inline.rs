@@ -465,6 +465,7 @@ mod tests {
             payload_filters: Vec::new(),
             pk_prefilter: None,
             projection: Vec::new(),
+            temporal: crate::temporal::TemporalScope::default(),
         }
     }
 

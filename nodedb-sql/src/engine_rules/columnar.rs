@@ -50,15 +50,7 @@ impl EngineRules for ColumnarRules {
     }
 
     fn plan_scan(&self, p: ScanParams) -> Result<SqlPlan> {
-        if p.temporal.is_temporal() && !p.bitemporal {
-            return Err(SqlError::Unsupported {
-                detail: format!(
-                    "FOR SYSTEM_TIME / FOR VALID_TIME requires a bitemporal \
-                     collection; '{}' was not created WITH bitemporal = true",
-                    p.collection
-                ),
-            });
-        }
+        p.temporal.require_bitemporal(&p.collection, p.bitemporal)?;
         Ok(SqlPlan::Scan {
             collection: p.collection,
             alias: p.alias,
@@ -131,15 +123,7 @@ impl EngineRules for ColumnarRules {
     }
 
     fn plan_aggregate(&self, p: AggregateParams) -> Result<SqlPlan> {
-        if p.temporal.is_temporal() && !p.bitemporal {
-            return Err(SqlError::Unsupported {
-                detail: format!(
-                    "FOR SYSTEM_TIME / FOR VALID_TIME requires a bitemporal \
-                     collection; '{}' was not created WITH bitemporal = true",
-                    p.collection
-                ),
-            });
-        }
+        p.temporal.require_bitemporal(&p.collection, p.bitemporal)?;
         let base_scan = SqlPlan::Scan {
             collection: p.collection,
             alias: p.alias,

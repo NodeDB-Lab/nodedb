@@ -3,7 +3,7 @@
 //! Engine rules for strict document collections.
 
 use crate::engine_rules::*;
-use crate::error::{Result, SqlError};
+use crate::error::Result;
 use crate::types::*;
 
 pub struct StrictRules;
@@ -45,15 +45,7 @@ impl EngineRules for StrictRules {
     }
 
     fn plan_scan(&self, p: ScanParams) -> Result<SqlPlan> {
-        if p.temporal.is_temporal() && !p.bitemporal {
-            return Err(SqlError::Unsupported {
-                detail: format!(
-                    "FOR SYSTEM_TIME / FOR VALID_TIME requires a bitemporal \
-                     collection; '{}' was not created WITH bitemporal = true",
-                    p.collection
-                ),
-            });
-        }
+        p.temporal.require_bitemporal(&p.collection, p.bitemporal)?;
         if let Some(plan) =
             crate::engine_rules::try_document_index_lookup(&p, EngineType::DocumentStrict)
         {

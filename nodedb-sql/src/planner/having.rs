@@ -65,7 +65,7 @@ pub fn plan_having(
     // column by its bare name, never by the merged row's `qualifier.column`.
     let output_naming = match scope.column_naming() {
         ColumnNaming::JoinRow | ColumnNaming::OutputRow => ColumnNaming::OutputRow,
-        ColumnNaming::AsWritten => ColumnNaming::AsWritten,
+        ColumnNaming::AsWritten | ColumnNaming::JoinWriteRow => ColumnNaming::AsWritten,
     };
     let having_scope = scope
         .with_output_names(

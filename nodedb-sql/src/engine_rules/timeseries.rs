@@ -40,15 +40,7 @@ impl EngineRules for TimeseriesRules {
     }
 
     fn plan_scan(&self, p: ScanParams) -> Result<SqlPlan> {
-        if p.temporal.is_temporal() && !p.bitemporal {
-            return Err(SqlError::Unsupported {
-                detail: format!(
-                    "FOR SYSTEM_TIME / FOR VALID_TIME requires a bitemporal \
-                     timeseries collection; '{}' was not created WITH bitemporal = true",
-                    p.collection
-                ),
-            });
-        }
+        p.temporal.require_bitemporal(&p.collection, p.bitemporal)?;
         // Timeseries scans use TimeseriesScan for time-range-aware execution.
         let time_range = default_time_range();
         Ok(SqlPlan::TimeseriesScan(TimeseriesScanPlan {
@@ -128,15 +120,7 @@ impl EngineRules for TimeseriesRules {
     }
 
     fn plan_aggregate(&self, p: AggregateParams) -> Result<SqlPlan> {
-        if p.temporal.is_temporal() && !p.bitemporal {
-            return Err(SqlError::Unsupported {
-                detail: format!(
-                    "FOR SYSTEM_TIME / FOR VALID_TIME requires a bitemporal \
-                     timeseries collection; '{}' was not created WITH bitemporal = true",
-                    p.collection
-                ),
-            });
-        }
+        p.temporal.require_bitemporal(&p.collection, p.bitemporal)?;
         let Some(shape) = native_shape(&p) else {
             // The generic aggregate runs over the raw row source: memtable,
             // flushed partitions, staged rows, read policy and bitemporal

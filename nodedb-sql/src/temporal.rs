@@ -49,12 +49,15 @@ impl TemporalScope {
         self.system_time.is_temporal() || !matches!(self.valid_time, ValidTime::Any)
     }
 
-    /// Refuse a temporal scope on `collection` unless it is bitemporal.
+    /// Refuse a valid-time qualifier on `collection` unless it is
+    /// bitemporal. Every collection keeps system-time versions, so a
+    /// system-time qualifier reads any collection. Valid-time columns exist
+    /// on a `bitemporal = true` collection only.
     pub fn require_bitemporal(&self, collection: &str, bitemporal: bool) -> crate::Result<()> {
-        if self.is_temporal() && !bitemporal {
+        if !matches!(self.valid_time, ValidTime::Any) && !bitemporal {
             return Err(crate::SqlError::Unsupported {
                 detail: format!(
-                    "FOR SYSTEM_TIME / FOR VALID_TIME requires a bitemporal collection; \
+                    "FOR VALID_TIME requires a bitemporal collection; \
                      '{collection}' was not created WITH bitemporal = true"
                 ),
             });

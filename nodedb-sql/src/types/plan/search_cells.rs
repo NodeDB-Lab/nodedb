@@ -66,6 +66,7 @@ mod tests {
                 payload_filters: Vec::new(),
                 pk_prefilter: None,
                 projection: Vec::new(),
+                temporal: crate::temporal::TemporalScope::default(),
             }
             .carries_search_cells()
         );
@@ -77,6 +78,7 @@ mod tests {
                 top_k: 1,
                 filters: Vec::new(),
                 projection: Vec::new(),
+                temporal: crate::temporal::TemporalScope::default(),
             }
             .carries_search_cells()
         );
@@ -87,6 +89,7 @@ mod tests {
                 top_k: 1,
                 ef_search: 2,
                 projection: Vec::new(),
+                temporal: crate::temporal::TemporalScope::default(),
             }
             .carries_search_cells()
         );

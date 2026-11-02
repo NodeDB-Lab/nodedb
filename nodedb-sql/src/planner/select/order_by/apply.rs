@@ -108,7 +108,9 @@ pub(in crate::planner::select) fn apply_order_by(
         // sort keys read the group rows, keyed by bare column name.
         let input_scope = match scope.column_naming() {
             ColumnNaming::OutputRow => scope.clone().with_column_naming(ColumnNaming::JoinRow),
-            ColumnNaming::AsWritten | ColumnNaming::JoinRow => scope.clone(),
+            ColumnNaming::AsWritten | ColumnNaming::JoinRow | ColumnNaming::JoinWriteRow => {
+                scope.clone()
+            }
         };
         // ORDER BY sorts after aggregates are renamed to their user aliases,
         // so each key must address the output name. Binding runs to

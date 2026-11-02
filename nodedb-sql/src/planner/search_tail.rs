@@ -254,6 +254,7 @@ mod tests {
                 alias: "s".into(),
             }],
             projection,
+            temporal: crate::temporal::TemporalScope::default(),
         })
     }
 
