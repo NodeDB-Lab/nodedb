@@ -22,18 +22,19 @@ use nodedb_raft::message::LogEntry;
 use nodedb_raft::state::HardState;
 use nodedb_raft::storage::LogStorage;
 
-use crate::wire_version::envelope::{decode_versioned, encode_versioned};
+use crate::raft_storage_ops::{LogOp, apply_in_txn};
+use crate::wire_version::envelope::decode_versioned;
 
 /// Log entries: key = index (big-endian u64 for sorted iteration), value = versioned-envelope bytes.
-const ENTRIES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("raft.entries");
+pub(crate) const ENTRIES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("raft.entries");
 
 /// Metadata: key = name, value = MessagePack bytes.
-const META: TableDefinition<&str, &[u8]> = TableDefinition::new("raft.meta");
+pub(crate) const META: TableDefinition<&str, &[u8]> = TableDefinition::new("raft.meta");
 
-const KEY_HARD_STATE: &str = "hard_state";
-const KEY_SNAPSHOT_INDEX: &str = "snapshot_index";
-const KEY_SNAPSHOT_TERM: &str = "snapshot_term";
-const KEY_APPLIED_INDEX: &str = "applied_index";
+pub(crate) const KEY_HARD_STATE: &str = "hard_state";
+pub(crate) const KEY_SNAPSHOT_INDEX: &str = "snapshot_index";
+pub(crate) const KEY_SNAPSHOT_TERM: &str = "snapshot_term";
+pub(crate) const KEY_APPLIED_INDEX: &str = "applied_index";
 
 /// Persistent Raft log storage backed by redb.
 pub struct RedbLogStorage {
@@ -81,7 +82,30 @@ impl RedbLogStorage {
     }
 }
 
-fn index_key(index: u64) -> [u8; 8] {
+impl RedbLogStorage {
+    /// Apply `ops` in order inside one transaction. One commit, and so one
+    /// group of fsyncs, makes the whole run durable.
+    pub fn commit_ops(&mut self, ops: &[LogOp<'_>]) -> nodedb_raft::error::Result<()> {
+        if ops.is_empty() {
+            return Ok(());
+        }
+        let txn = self
+            .db
+            .begin_write()
+            .map_err(|e| nodedb_raft::error::RaftError::Storage {
+                detail: format!("write txn: {e}"),
+            })?;
+        for op in ops {
+            apply_in_txn(&txn, op)?;
+        }
+        txn.commit()
+            .map_err(|e| nodedb_raft::error::RaftError::Storage {
+                detail: format!("commit: {e}"),
+            })
+    }
+}
+
+pub(crate) fn index_key(index: u64) -> [u8; 8] {
     index.to_be_bytes()
 }
 
@@ -90,88 +114,13 @@ impl LogStorage for RedbLogStorage {
         if entries.is_empty() {
             return Ok(());
         }
-
-        let write_txn =
-            self.db
-                .begin_write()
-                .map_err(|e| nodedb_raft::error::RaftError::Storage {
-                    detail: format!("write txn: {e}"),
-                })?;
-        {
-            let mut table = write_txn.open_table(ENTRIES).map_err(|e| {
-                nodedb_raft::error::RaftError::Storage {
-                    detail: format!("open entries: {e}"),
-                }
-            })?;
-
-            for entry in entries {
-                let key = index_key(entry.index);
-                let value = encode_versioned(entry).map_err(|e| {
-                    nodedb_raft::error::RaftError::Storage {
-                        detail: format!("serialize entry: {e}"),
-                    }
-                })?;
-                table
-                    .insert(key.as_slice(), value.as_slice())
-                    .map_err(|e| nodedb_raft::error::RaftError::Storage {
-                        detail: format!("insert entry: {e}"),
-                    })?;
-            }
-        }
-        write_txn
-            .commit()
-            .map_err(|e| nodedb_raft::error::RaftError::Storage {
-                detail: format!("commit append: {e}"),
-            })?;
-
+        self.commit_ops(&[LogOp::Append(entries)])?;
         debug!(count = entries.len(), "raft log appended");
         Ok(())
     }
 
     fn truncate(&mut self, index: u64) -> nodedb_raft::error::Result<()> {
-        let write_txn =
-            self.db
-                .begin_write()
-                .map_err(|e| nodedb_raft::error::RaftError::Storage {
-                    detail: format!("write txn: {e}"),
-                })?;
-        {
-            let mut table = write_txn.open_table(ENTRIES).map_err(|e| {
-                nodedb_raft::error::RaftError::Storage {
-                    detail: format!("open entries: {e}"),
-                }
-            })?;
-
-            // Collect keys >= index to remove.
-            let start = index_key(index);
-            let keys_to_remove: Vec<[u8; 8]> = table
-                .range(start.as_slice()..)
-                .map_err(|e| nodedb_raft::error::RaftError::Storage {
-                    detail: format!("range: {e}"),
-                })?
-                .filter_map(|r| {
-                    r.ok().map(|(k, _)| {
-                        let mut buf = [0u8; 8];
-                        buf.copy_from_slice(k.value());
-                        buf
-                    })
-                })
-                .collect();
-
-            for key in &keys_to_remove {
-                table.remove(key.as_slice()).map_err(|e| {
-                    nodedb_raft::error::RaftError::Storage {
-                        detail: format!("remove: {e}"),
-                    }
-                })?;
-            }
-        }
-        write_txn
-            .commit()
-            .map_err(|e| nodedb_raft::error::RaftError::Storage {
-                detail: format!("commit truncate: {e}"),
-            })?;
-
+        self.commit_ops(&[LogOp::Truncate(index)])?;
         debug!(from_index = index, "raft log truncated");
         Ok(())
     }
@@ -221,77 +170,7 @@ impl LogStorage for RedbLogStorage {
     }
 
     fn compact(&mut self, index: u64, term: u64) -> nodedb_raft::error::Result<()> {
-        let write_txn =
-            self.db
-                .begin_write()
-                .map_err(|e| nodedb_raft::error::RaftError::Storage {
-                    detail: format!("write txn: {e}"),
-                })?;
-        {
-            // Remove entries <= index.
-            let mut table = write_txn.open_table(ENTRIES).map_err(|e| {
-                nodedb_raft::error::RaftError::Storage {
-                    detail: format!("open entries: {e}"),
-                }
-            })?;
-
-            let end = index_key(index + 1);
-            let keys_to_remove: Vec<[u8; 8]> = table
-                .range(..end.as_slice())
-                .map_err(|e| nodedb_raft::error::RaftError::Storage {
-                    detail: format!("range: {e}"),
-                })?
-                .filter_map(|r| {
-                    r.ok().map(|(k, _)| {
-                        let mut buf = [0u8; 8];
-                        buf.copy_from_slice(k.value());
-                        buf
-                    })
-                })
-                .collect();
-
-            for key in &keys_to_remove {
-                table.remove(key.as_slice()).map_err(|e| {
-                    nodedb_raft::error::RaftError::Storage {
-                        detail: format!("remove: {e}"),
-                    }
-                })?;
-            }
-
-            // Save snapshot metadata.
-            let mut meta =
-                write_txn
-                    .open_table(META)
-                    .map_err(|e| nodedb_raft::error::RaftError::Storage {
-                        detail: format!("open meta: {e}"),
-                    })?;
-
-            let idx_bytes = zerompk::to_msgpack_vec(&index).map_err(|e| {
-                nodedb_raft::error::RaftError::Storage {
-                    detail: format!("serialize: {e}"),
-                }
-            })?;
-            let term_bytes = zerompk::to_msgpack_vec(&term).map_err(|e| {
-                nodedb_raft::error::RaftError::Storage {
-                    detail: format!("serialize: {e}"),
-                }
-            })?;
-
-            meta.insert(KEY_SNAPSHOT_INDEX, idx_bytes.as_slice())
-                .map_err(|e| nodedb_raft::error::RaftError::Storage {
-                    detail: format!("insert meta: {e}"),
-                })?;
-            meta.insert(KEY_SNAPSHOT_TERM, term_bytes.as_slice())
-                .map_err(|e| nodedb_raft::error::RaftError::Storage {
-                    detail: format!("insert meta: {e}"),
-                })?;
-        }
-        write_txn
-            .commit()
-            .map_err(|e| nodedb_raft::error::RaftError::Storage {
-                detail: format!("commit compact: {e}"),
-            })?;
-
+        self.commit_ops(&[LogOp::Compact { index, term }])?;
         debug!(index, term, "raft log compacted");
         Ok(())
     }
@@ -321,37 +200,7 @@ impl LogStorage for RedbLogStorage {
     }
 
     fn save_hard_state(&mut self, state: &HardState) -> nodedb_raft::error::Result<()> {
-        let write_txn =
-            self.db
-                .begin_write()
-                .map_err(|e| nodedb_raft::error::RaftError::Storage {
-                    detail: format!("write txn: {e}"),
-                })?;
-        {
-            let mut table =
-                write_txn
-                    .open_table(META)
-                    .map_err(|e| nodedb_raft::error::RaftError::Storage {
-                        detail: format!("open meta: {e}"),
-                    })?;
-
-            let bytes = zerompk::to_msgpack_vec(state).map_err(|e| {
-                nodedb_raft::error::RaftError::Storage {
-                    detail: format!("serialize: {e}"),
-                }
-            })?;
-            table
-                .insert(KEY_HARD_STATE, bytes.as_slice())
-                .map_err(|e| nodedb_raft::error::RaftError::Storage {
-                    detail: format!("insert: {e}"),
-                })?;
-        }
-        write_txn
-            .commit()
-            .map_err(|e| nodedb_raft::error::RaftError::Storage {
-                detail: format!("commit: {e}"),
-            })?;
-
+        self.commit_ops(&[LogOp::HardState(state)])?;
         debug!(
             term = state.current_term,
             voted_for = state.voted_for,
@@ -391,37 +240,7 @@ impl LogStorage for RedbLogStorage {
     }
 
     fn save_applied_index(&mut self, index: u64) -> nodedb_raft::error::Result<()> {
-        let write_txn =
-            self.db
-                .begin_write()
-                .map_err(|e| nodedb_raft::error::RaftError::Storage {
-                    detail: format!("write txn: {e}"),
-                })?;
-        {
-            let mut table =
-                write_txn
-                    .open_table(META)
-                    .map_err(|e| nodedb_raft::error::RaftError::Storage {
-                        detail: format!("open meta: {e}"),
-                    })?;
-
-            let bytes = zerompk::to_msgpack_vec(&index).map_err(|e| {
-                nodedb_raft::error::RaftError::Storage {
-                    detail: format!("serialize: {e}"),
-                }
-            })?;
-            table
-                .insert(KEY_APPLIED_INDEX, bytes.as_slice())
-                .map_err(|e| nodedb_raft::error::RaftError::Storage {
-                    detail: format!("insert: {e}"),
-                })?;
-        }
-        write_txn
-            .commit()
-            .map_err(|e| nodedb_raft::error::RaftError::Storage {
-                detail: format!("commit: {e}"),
-            })?;
-
+        self.commit_ops(&[LogOp::AppliedIndex(index)])?;
         debug!(index, "raft applied index saved");
         Ok(())
     }
@@ -772,5 +591,36 @@ mod tests {
             "restarted voter must not grant a second vote in the same term"
         );
         assert_eq!(node.current_term(), TERM);
+    }
+
+    #[test]
+    fn one_commit_applies_a_run_of_writes_in_order() {
+        let (mut s, _dir) = open_temp();
+        let entries: Vec<LogEntry> = (1..=5)
+            .map(|index| LogEntry {
+                term: 1,
+                index,
+                data: vec![],
+            })
+            .collect();
+        let hard_state = HardState {
+            current_term: 3,
+            voted_for: 2,
+        };
+        s.commit_ops(&[
+            LogOp::Append(&entries),
+            LogOp::AppliedIndex(4),
+            LogOp::HardState(&hard_state),
+            LogOp::Compact { index: 2, term: 1 },
+            LogOp::Truncate(5),
+        ])
+        .unwrap();
+
+        let loaded = s.load_entries_after(0).unwrap();
+        let indexes: Vec<u64> = loaded.iter().map(|e| e.index).collect();
+        assert_eq!(indexes, vec![3, 4]);
+        assert_eq!(s.snapshot_metadata(), (2, 1));
+        assert_eq!(s.load_applied_index().unwrap(), 4);
+        assert_eq!(s.load_hard_state().unwrap(), hard_state);
     }
 }

@@ -59,6 +59,7 @@ pub mod quic_transport;
 pub mod raft_bootstrap;
 pub mod raft_loop;
 pub mod raft_storage;
+pub mod raft_storage_ops;
 pub mod rdma_transport;
 pub mod reachability;
 pub mod read_index_wait;
