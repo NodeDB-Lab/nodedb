@@ -328,7 +328,10 @@ mod tests {
         let outcome = propose_catalog_entry_async(&cluster.state, &orders())
             .await
             .expect("propose");
-        assert!(outcome.is_replicated(), "{outcome:?}");
+        assert!(
+            outcome.is_replicated(),
+            "a one-node cluster buffered the propose instead of replicating it"
+        );
         assert_orders_applied(&cluster.state);
         cluster.shutdown().await;
     }
