@@ -18,6 +18,7 @@ use crate::data::executor::response_codec;
 use crate::engine::timeseries::columnar_memtable::{ColumnarMemtable, ColumnarMemtableConfig};
 use crate::engine::timeseries::ilp;
 use crate::engine::timeseries::ilp_ingest;
+use nodedb_types::columnar::schema::TS_SYSTEM;
 
 use super::admission;
 use super::ingest_dispatch::{TimeseriesApplyMode, TimeseriesIngestParams};
@@ -48,6 +49,7 @@ impl CoreLoop {
             }
             None => {
                 let mut schema = self.initial_ts_schema(task, tid, collection, lines);
+                ilp_ingest::ensure_system_column(&mut schema);
                 if bitemporal {
                     ilp_ingest::ensure_bitemporal_columns(&mut schema);
                 }
@@ -212,6 +214,7 @@ impl CoreLoop {
         let is_new_memtable = !self.columnar_memtables.contains_key(&key);
         if is_new_memtable {
             let mut schema = self.initial_ts_schema(task, tid, collection, &lines);
+            ilp_ingest::ensure_system_column(&mut schema);
             if bitemporal {
                 ilp_ingest::ensure_bitemporal_columns(&mut schema);
             }
@@ -230,6 +233,12 @@ impl CoreLoop {
         };
         if !is_new_memtable && let Some(mt) = self.columnar_memtables.get_mut(&key) {
             ilp_ingest::evolve_schema(mt, &lines);
+            if mt.schema().ts_system_idx().is_none() {
+                mt.add_column(
+                    TS_SYSTEM.to_string(),
+                    crate::engine::timeseries::columnar_memtable::ColumnType::Int64,
+                );
+            }
         }
         let schema_changed = !is_new_memtable
             && self
@@ -252,10 +261,9 @@ impl CoreLoop {
         }
 
         let emits_events = self.ts_ingest_emits_events(task, collection, mode);
-        let stamps = if bitemporal {
-            Some(ilp_ingest::BitempStamps { system_ms: now_ms })
-        } else {
-            None
+        let stamp = ilp_ingest::RowStamp {
+            system_ordinal: self.ts_batch_ordinal(mode, now_ms),
+            bitemporal,
         };
         let Some(mt) = self.columnar_memtables.get_mut(&key) else {
             return self.response_error(
@@ -265,7 +273,11 @@ impl CoreLoop {
                 },
             );
         };
-        let lvc = self.ts_last_value_caches.get_mut(&key);
+        let horizon = self.maintenance.version_purge.safe_horizon;
+        let mut lvc = self.ts_last_value_caches.get_mut(&key);
+        if let Some(cache) = lvc.as_deref_mut() {
+            cache.set_horizon(horizon);
+        }
         let catalog = self.ts_series_catalogs.entry(key.clone()).or_default();
         let outcome = ilp_ingest::ingest_batch_with_lvc(ilp_ingest::IngestBatchArgs {
             memtable: mt,
@@ -273,7 +285,7 @@ impl CoreLoop {
             catalog,
             default_timestamp_ms: now_ms,
             lvc,
-            bitemporal: stamps,
+            stamp: Some(stamp),
             collect_row_indices: returning.is_some() || emits_events,
         });
         let accepted = outcome.accepted;
@@ -403,6 +415,7 @@ impl CoreLoop {
                 .schema()
                 .columns
                 .iter()
+                .filter(|(name, _)| bitemporal || name != TS_SYSTEM)
                 .map(|(name, col_type)| serde_json::json!([name, col_type.ddl_type_name()]))
                 .collect();
             serde_json::json!({
@@ -433,7 +446,7 @@ impl CoreLoop {
             watermark_lsn: self.watermark,
             error_code: None,
             stage_vote: None,
-            read_versions: crate::types::ReadVersions::new(),
+            read_vshards: crate::types::ReadShards::new(),
             write_set: Vec::new(),
         }
     }

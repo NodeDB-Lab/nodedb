@@ -32,6 +32,7 @@
 mod active_passive;
 mod discard;
 mod shared;
+mod snapshot_vote;
 mod static_stage;
 #[cfg(test)]
 mod test_commit;
@@ -39,3 +40,4 @@ mod test_commit;
 pub(in crate::data::executor) use shared::CalvinExecCtx;
 #[cfg(test)]
 pub(in crate::data::executor) use shared::test_support;
+pub(in crate::data::executor) use snapshot_vote::CalvinSnapshot;

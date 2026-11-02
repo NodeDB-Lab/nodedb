@@ -17,7 +17,13 @@ use super::rls_gate;
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::timeseries::resolved_ingest::{ResolveBase, TsDriftPolicy};
+use crate::engine::timeseries::columnar_memtable::ColumnValue;
+use crate::engine::timeseries::ilp::IlpLine;
+use crate::engine::timeseries::ilp_ingest::line_system_ordinal;
+use crate::engine::timeseries::resolved_ingest::{
+    CLONE_COPY_INGEST_FORMAT, ResolveBase, ResolvedTsBatch, TsDriftPolicy,
+};
+use nodedb_types::columnar::schema::TS_SYSTEM;
 
 /// One ingest payload to normalize and stamp.
 pub(in crate::data::executor) struct StampedIngest<'a> {
@@ -143,6 +149,12 @@ impl CoreLoop {
                 base: base.as_ref(),
             },
         );
+        // A clone copy's rows keep their source versions' ordinals.
+        let batch = if format == CLONE_COPY_INGEST_FORMAT {
+            batch.and_then(|batch| carry_source_ordinals(batch, parsed.lines()))
+        } else {
+            batch
+        };
         // A `RETURNING` ingest takes every row or none: its row set has no
         // place to report a rejected row.
         if returning.is_some()
@@ -232,7 +244,7 @@ impl CoreLoop {
                 })?;
                 Ok(lines.join("\n"))
             }
-            "msgpack" => {
+            "msgpack" | CLONE_COPY_INGEST_FORMAT => {
                 let rows =
                     super::msgpack_decode::decode_msgpack_rows(payload).map_err(|error| {
                         ErrorCode::RejectedPrevalidation {
@@ -262,4 +274,44 @@ impl CoreLoop {
             }),
         }
     }
+}
+
+/// `batch` with every row's `_ts_system` set to the ordinal its line carries,
+/// and marked so the install keeps those ordinals: a clone copy installs each
+/// row as its source version.
+pub(in crate::data::executor) fn carry_source_ordinals(
+    mut batch: ResolvedTsBatch,
+    lines: &[IlpLine<'_>],
+) -> crate::Result<ResolvedTsBatch> {
+    let copy_error = |detail: String| crate::Error::Internal {
+        detail: format!("timeseries clone copy: {detail}"),
+    };
+    let system_idx = batch
+        .columns
+        .iter()
+        .position(|(name, _)| name == TS_SYSTEM)
+        .ok_or_else(|| {
+            copy_error(format!(
+                "'{}' resolved no {TS_SYSTEM} column",
+                batch.measurement
+            ))
+        })?;
+    for row in &mut batch.rows {
+        let line = usize::try_from(row.line)
+            .ok()
+            .and_then(|index| lines.get(index))
+            .ok_or_else(|| copy_error(format!("row names line {} of {}", row.line, lines.len())))?;
+        let ordinal = line_system_ordinal(line).ok_or_else(|| {
+            copy_error(format!("line {} carries no {TS_SYSTEM} ordinal", row.line))
+        })?;
+        let cell = row.values.get_mut(system_idx).ok_or_else(|| {
+            copy_error(format!("row of line {} has no {TS_SYSTEM} cell", row.line))
+        })?;
+        *cell = ColumnValue::Int64(ordinal);
+    }
+    batch.carried_system = true;
+    // A clone copy changes nothing a reader of the clone sees: no install
+    // and no WAL catch-up emits an event for its rows.
+    batch.emits_events = false;
+    Ok(batch)
 }

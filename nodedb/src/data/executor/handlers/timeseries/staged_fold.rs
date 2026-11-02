@@ -123,7 +123,7 @@ fn column_value(name: &str, column_type: ColumnType, value: &Value) -> crate::Re
             Value::Integer(i) => ColumnValue::Int64(*i),
             _ => return Err(mismatch()),
         },
-        ColumnType::Symbol => match value {
+        ColumnType::Symbol | ColumnType::Text => match value {
             Value::String(s) => ColumnValue::Symbol(s.clone()),
             _ => return Err(mismatch()),
         },

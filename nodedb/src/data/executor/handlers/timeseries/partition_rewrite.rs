@@ -33,7 +33,7 @@ use crate::data::executor::timeseries_checkpoint::stamp::{read_ts_stamp, write_t
 use crate::engine::timeseries::columnar_memtable::{
     ColumnData, ColumnarDrainResult, ColumnarSchema,
 };
-use crate::engine::timeseries::columnar_segment::ColumnarSegmentWriter;
+use crate::engine::timeseries::columnar_segment::{ColumnarSegmentWriter, write_partition_meta};
 use crate::engine::timeseries::partition_registry::PartitionEntry;
 use crate::types::{DatabaseId, TenantId};
 
@@ -71,7 +71,10 @@ impl CoreLoop {
             Some(memtable) => Some(memtable.schema().clone()),
             None => read_ts_schema(&ts_dir)?,
         };
-        let targets: Vec<(i64, PartitionEntry)> = match self.ts_registries.get(&key) {
+        let targets: Vec<(
+            crate::engine::timeseries::partition_registry::PartitionKey,
+            PartitionEntry,
+        )> = match self.ts_registries.get(&key) {
             Some(registry) => registry
                 .iter()
                 .filter(|(_, entry)| {
@@ -80,13 +83,13 @@ impl CoreLoop {
                         PartitionState::Sealed | PartitionState::Merged
                     )
                 })
-                .map(|(start, entry)| (*start, entry.clone()))
+                .map(|(partition_key, entry)| (partition_key.clone(), entry.clone()))
                 .collect(),
             None => Vec::new(),
         };
 
         let mut rewritten = 0u64;
-        for (start, entry) in targets {
+        for (partition_key, entry) in targets {
             let meta = rewrite_partition(
                 &ts_dir,
                 &entry,
@@ -94,7 +97,7 @@ impl CoreLoop {
                 self.segment_keks.ts_segment_kek.as_ref(),
             )?;
             if let Some(registry) = self.ts_registries.get_mut(&key) {
-                registry.update_meta(start, meta);
+                registry.update_meta(&partition_key, meta);
             }
             rewritten += 1;
         }
@@ -162,6 +165,13 @@ fn rewrite_partition(
             kek,
         )
         .map_err(|e| storage(&staged_dir, "write", &e))?;
+    // A partition a TRUNCATE ended stays ended: the end lands in the staged
+    // copy's `partition.meta` before the swap publishes it.
+    if entry.meta.ended_at.is_some() {
+        meta.ended_at = entry.meta.ended_at;
+        write_partition_meta(&staged_dir, &meta, kek)
+            .map_err(|e| storage(&staged_dir, "write the end of", &e))?;
+    }
 
     nodedb_wal::segment::atomic_swap_dirs_fsync(ts_dir, &entry.dir_name, &backup, &staged)
         .map_err(|e| storage(&live_dir, "swap in the rewritten copy of", &e))?;

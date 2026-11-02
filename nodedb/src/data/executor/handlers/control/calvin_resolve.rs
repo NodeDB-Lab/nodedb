@@ -173,7 +173,7 @@ mod tests {
             wal_lsn: None,
             resolved_now_ms: None,
             commit_hlc: None,
-            entry_version: None,
+            system_ordinal: None,
             admission: Admission::Exempt(ExemptReason::Read),
         };
         ExecutionTask::new(request)
@@ -213,6 +213,7 @@ mod tests {
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             resolved_sum_targets: Vec::new(),
             declared_primary_key: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         })
     }
 
@@ -232,6 +233,7 @@ mod tests {
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             resolved_sum_targets: Vec::new(),
             declared_primary_key: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         })
     }
 
@@ -244,7 +246,14 @@ mod tests {
             &doc_value(field, val),
         );
         core.sparse
-            .put(DatabaseId::DEFAULT.as_u64(), 1, collection, &doc_id, &body)
+            .put(
+                DatabaseId::DEFAULT.as_u64(),
+                1,
+                collection,
+                &doc_id,
+                &body,
+                core.bitemporal_ordinal(),
+            )
             .expect("seed row");
     }
 
@@ -299,8 +308,14 @@ mod tests {
             position,
             epoch_system_ms: 0,
         };
-        let resp =
-            core.execute_calvin_execute_static(task, ctx, &TenantId::new(1), plans, &[], &[]);
+        let resp = core.execute_calvin_execute_static(
+            task,
+            ctx,
+            &TenantId::new(1),
+            plans,
+            crate::data::executor::handlers::control::calvin::CalvinSnapshot::NONE,
+            &[],
+        );
         assert_eq!(resp.status, Status::Ok, "staging must succeed: {resp:?}");
     }
 
@@ -328,38 +343,41 @@ mod tests {
         );
         assert_eq!(record.ops.len(), 1, "one staged document put");
 
-        let (collection, doc_id, value, prov, surrogate): (
-            String,
-            String,
-            Vec<u8>,
-            Option<nodedb_types::sync::wire::SyncProvenance>,
-            u32,
-        ) = zerompk::from_msgpack(&record.ops[0].payload).expect("decode document put sub-record");
-        assert_eq!(collection, "orders");
-        assert_eq!(doc_id, "o1");
+        let put = crate::wal::DocumentPutRedo::decode(&record.ops[0].payload)
+            .expect("decode document put sub-record");
+        assert_eq!(put.collection, "orders");
+        assert_eq!(put.document_id, "o1");
         assert_eq!(
-            value,
+            put.value,
             crate::data::executor::doc_format::canonicalize_document_for_storage(&doc_value(
                 "a", "1"
             ))
         );
-        assert!(prov.is_none());
-        assert_eq!(surrogate, 7);
+        assert!(put.provenance.is_none());
+        assert_eq!(put.surrogate, 7);
+        // A new row holds no version, so its version takes the transaction's
+        // ordinal unraised. Every install writes that version key.
+        assert_eq!(
+            put.stamp.map(|stamp| stamp.sys_from),
+            Some(nodedb_types::calvin_txn_ordinal(0, 0)),
+            "the put carries the Calvin transaction's ordinal"
+        );
     }
 
     /// Decode every `Delete` sub-record's surrogate out of a resolved redo.
+    /// Every delete carries its tombstone's version key.
     fn deleted_surrogates(record: &RedoRecord) -> Vec<u32> {
         let mut out: Vec<u32> = record
             .ops
             .iter()
             .map(|op| {
-                let (_collection, _doc_id, _prov, surrogate): (
-                    String,
-                    String,
-                    Option<nodedb_types::sync::wire::SyncProvenance>,
-                    u32,
-                ) = zerompk::from_msgpack(&op.payload).expect("decode document delete sub-record");
-                surrogate
+                let delete = crate::wal::DocumentDeleteRedo::decode(&op.payload)
+                    .expect("decode document delete sub-record");
+                assert!(
+                    delete.sys_from.is_some(),
+                    "the delete carries its tombstone's version key"
+                );
+                delete.surrogate
             })
             .collect();
         out.sort_unstable();
@@ -419,7 +437,7 @@ mod tests {
             ctx,
             &TenantId::new(1),
             &[bulk_delete_plan("orders", Some(vec![20, 21]))],
-            &[],
+            crate::data::executor::handlers::control::calvin::CalvinSnapshot::NONE,
             &[],
         );
         assert_eq!(staged.status, Status::Error);
@@ -469,17 +487,13 @@ mod tests {
         }));
 
         for op in &record.ops {
-            let (_collection, _doc_id, value, _prov, _surrogate): (
-                String,
-                String,
-                Vec<u8>,
-                Option<nodedb_types::sync::wire::SyncProvenance>,
-                u32,
-            ) = zerompk::from_msgpack(&op.payload).expect("decode document put sub-record");
+            let put = crate::wal::DocumentPutRedo::decode(&op.payload)
+                .expect("decode document put sub-record");
             assert_eq!(
-                value, expected,
+                put.value, expected,
                 "post-image must match execute_bulk_update's transform"
             );
+            assert!(put.stamp.is_some(), "the put carries its version key");
         }
     }
 
@@ -499,7 +513,7 @@ mod tests {
             ctx,
             &TenantId::new(1),
             &[bulk_delete_plan("orders", None)],
-            &[],
+            crate::data::executor::handlers::control::calvin::CalvinSnapshot::NONE,
             &[],
         );
         assert_eq!(
@@ -543,7 +557,11 @@ mod tests {
         };
         let mut engine = nodedb_columnar::MutationEngine::new("m".to_string(), schema);
         engine
-            .insert_with_surrogate(&[Value::Integer(1), Value::Integer(10)], Surrogate::new(5))
+            .insert_with_surrogate(
+                &[Value::Integer(1), Value::Integer(10)],
+                Surrogate::new(5),
+                1,
+            )
             .expect("seed base row");
         core.columnar_engines.insert(
             (DatabaseId::DEFAULT, TenantId::new(1), "m".to_string()),
@@ -570,6 +588,7 @@ mod tests {
             provenance: None,
             wal_lsn: None,
             system_from: None,
+            restored_versions: Vec::new(),
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             returning: None,
             rls_filters: Vec::new(),
@@ -643,7 +662,7 @@ mod tests {
                 ctx,
                 &TenantId::new(1),
                 std::slice::from_ref(&edge_put),
-                &[],
+                crate::data::executor::handlers::control::calvin::CalvinSnapshot::NONE,
                 &[],
             );
             assert_eq!(staged.status, Status::Ok, "staging: {staged:?}");

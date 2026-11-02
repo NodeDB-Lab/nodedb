@@ -76,7 +76,7 @@ pub(in crate::data::executor) fn read_ts_cell<'a>(
         (ColumnType::Int64, ColumnData::Int64(v)) => {
             Ok(TsCell::Int(*v.get(row).ok_or_else(out_of_range)?))
         }
-        (ColumnType::Symbol, ColumnData::Symbol(ids)) => {
+        (ColumnType::Symbol | ColumnType::Text, ColumnData::Symbol(ids)) => {
             let id = *ids.get(row).ok_or_else(out_of_range)?;
             if id == NULL_SYMBOL_ID {
                 return Ok(TsCell::Null);

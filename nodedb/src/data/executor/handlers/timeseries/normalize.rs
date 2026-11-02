@@ -328,6 +328,60 @@ mod tests {
         );
     }
 
+    /// A SQL row, an ILP line with a tag, and an ILP line with a string
+    /// field store the same cells. The column type decides the series key:
+    /// under a `Symbol` column all three key on `host`, under a `Text`
+    /// column none does. Either way they share one series.
+    #[test]
+    fn a_sql_row_and_its_ilp_lines_share_a_series() {
+        use crate::engine::timeseries::columnar_memtable::{ColumnType, ColumnarSchema, TimeKind};
+        use crate::engine::timeseries::ilp::parse_batch;
+        use crate::engine::timeseries::ilp_ingest::{
+            ensure_system_column, line_row, row_series_key,
+        };
+        use nodedb_types::timeseries::SeriesKey;
+
+        let rows = vec![vec![
+            ("ts".to_string(), MsgpackValue::Int(1000)),
+            ("host".to_string(), MsgpackValue::Str("a".into())),
+            ("v".to_string(), MsgpackValue::Float(1.5)),
+        ]];
+        let sql = msgpack_rows_to_ilp(&rows, "m", Some("ts")).expect("ilp");
+        let batch = format!("{sql}m,host=a v=2.5 2000000000\nm host=\"a\",v=3.5 3000000000\n");
+        let lines = parse_batch(&batch).expect("valid ILP").into_lines();
+        let cases = [
+            (
+                ColumnType::Symbol,
+                SeriesKey::new("m", vec![("host".into(), "a".into())]),
+            ),
+            (ColumnType::Text, SeriesKey::new("m", Vec::new())),
+        ];
+        for (host_type, expected) in cases {
+            let mut schema = ColumnarSchema {
+                columns: vec![
+                    ("ts".into(), ColumnType::Timestamp(TimeKind::Millis)),
+                    ("host".into(), host_type),
+                    ("v".into(), ColumnType::Float64),
+                ],
+                timestamp_idx: 0,
+                codecs: Vec::new(),
+            };
+            ensure_system_column(&mut schema);
+            let keys: Vec<_> = lines
+                .iter()
+                .map(|line| {
+                    let (_, values) = line_row(&schema, line, 0, None);
+                    row_series_key(line.measurement.as_ref(), &schema, &values)
+                })
+                .collect();
+            assert_eq!(keys.len(), 3);
+            assert!(
+                keys.iter().all(|key| *key == expected),
+                "{host_type:?}: {keys:?}"
+            );
+        }
+    }
+
     /// A typed instant in a non-time column is a string field carrying its
     /// ISO 8601 text.
     #[test]

@@ -50,8 +50,14 @@ impl CoreLoop {
             position: 0,
             epoch_system_ms,
         };
-        let staged =
-            self.execute_calvin_execute_static(task, ctx, &TenantId::new(tid), plans, &[], &[]);
+        let staged = self.execute_calvin_execute_static(
+            task,
+            ctx,
+            &TenantId::new(tid),
+            plans,
+            crate::data::executor::handlers::control::calvin::CalvinSnapshot::NONE,
+            &[],
+        );
         if staged.status != Status::Ok {
             return staged;
         }
@@ -82,6 +88,8 @@ impl CoreLoop {
                 reply: answer.reply,
                 user_write: true,
             }),
+            reads: Vec::new(),
+            snapshot_ordinal: None,
         });
         let mut request = task.request.clone();
         request.wal_lsn = Some(Lsn::new(lsn));

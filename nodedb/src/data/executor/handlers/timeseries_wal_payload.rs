@@ -40,6 +40,7 @@ impl CoreLoop {
             provenance,
             format,
             default_timestamp_ms,
+            system_ordinal,
         } = args;
         let Some(format) = format.filter(|format| INGEST_FORMATS.contains(format)) else {
             self.replay_record_unapplied(
@@ -86,6 +87,13 @@ impl CoreLoop {
         } else {
             TimeseriesApplyMode::Replay
         };
+        // The batch stamps the ordinal the record carries, the one its live
+        // apply stamped. A record that carries none keeps the scope the
+        // install or replay already holds.
+        let outer_ordinal = self.apply_scope.replicated_ordinal;
+        if system_ordinal.is_some() {
+            self.apply_scope.replicated_ordinal = system_ordinal;
+        }
         let response = self.execute_timeseries_ingest(TimeseriesIngestExec {
             task: &task,
             tid,
@@ -107,6 +115,7 @@ impl CoreLoop {
             returning: None,
             rls_filters: &[],
         });
+        self.apply_scope.replicated_ordinal = outer_ordinal;
         if response.status != crate::bridge::envelope::Status::Ok {
             self.replay_record_rejected(
                 "timeseries",
@@ -149,6 +158,7 @@ impl CoreLoop {
             surrogates,
             conflict_policy,
             system_from,
+            restored_versions,
         } = args;
         // Each row whose key already exists is skipped, merged or replaced the
         // way the live insert decided it.
@@ -186,6 +196,9 @@ impl CoreLoop {
                 provenance: None,
                 wal_lsn: Some(record_lsn),
                 system_from,
+                // The handler reads the stamps from the params below, never
+                // from the embedded plan.
+                restored_versions: Vec::new(),
                 rls_write_check: nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
                 returning: None,
                 rls_filters: Vec::new(),
@@ -194,8 +207,8 @@ impl CoreLoop {
         );
         // Restore the persisted per-row surrogates so `execute_columnar_insert`
         // rebinds the exact same cross-engine identity via
-        // `insert_with_surrogate`. An empty slice (legacy records / sync path)
-        // falls back to fresh allocation as before.
+        // `insert_with_surrogate`. An empty slice leaves the rows unbound,
+        // exactly as the live insert that carried no surrogates did.
         let response = self.execute_columnar_insert(
             &task,
             crate::data::executor::handlers::columnar_write::ColumnarInsertParams {
@@ -208,6 +221,7 @@ impl CoreLoop {
                 schema_bytes: &[],
                 provenance: provenance.as_ref(),
                 system_from,
+                restored_versions: &restored_versions,
                 rls_write_check: &nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
                 // WAL replay reconstructs stored state; there is no client
                 // waiting on a projection, and no identity to gate reads for.

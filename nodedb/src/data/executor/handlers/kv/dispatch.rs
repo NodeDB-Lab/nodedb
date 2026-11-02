@@ -22,6 +22,7 @@ impl CoreLoop {
                 key,
                 rls_filters,
                 surrogate_ceiling,
+                system_time,
             } => self.execute_kv_get(
                 task,
                 super::crud::KvGetParams {
@@ -31,6 +32,7 @@ impl CoreLoop {
                     key,
                     rls_filters,
                     surrogate_ceiling: *surrogate_ceiling,
+                    system_time: *system_time,
                 },
             ),
             KvOp::Put {
@@ -186,7 +188,18 @@ impl CoreLoop {
                 collection,
                 keys,
                 rls_filters,
-            } => self.execute_kv_batch_get(task, did, tid, collection.as_str(), keys, rls_filters),
+                system_time,
+            } => self.execute_kv_batch_get(
+                task,
+                super::batch::KvBatchGetArgs {
+                    did,
+                    tid,
+                    collection: collection.as_str(),
+                    keys,
+                    rls_filters,
+                    system_time: *system_time,
+                },
+            ),
             KvOp::BatchPut {
                 collection,
                 entries,
@@ -233,6 +246,7 @@ impl CoreLoop {
                 key,
                 fields,
                 rls_filters,
+                system_time,
             } => self.execute_kv_field_get(
                 task,
                 super::field::KvFieldGetArgs {
@@ -242,6 +256,7 @@ impl CoreLoop {
                     key,
                     fields,
                     rls_filters,
+                    system_time: *system_time,
                 },
             ),
             KvOp::FieldSet {
@@ -385,39 +400,18 @@ impl CoreLoop {
             KvOp::DropSortedIndex { index_name } => {
                 self.execute_kv_drop_sorted_index(task, did, tid, index_name)
             }
-            KvOp::SortedIndexRank {
-                index_name,
-                primary_key,
-            } => self.execute_kv_sorted_index_rank(task, did, tid, index_name, primary_key),
-            KvOp::SortedIndexTopK { index_name, k } => {
-                self.execute_kv_sorted_index_top_k(task, did, tid, index_name, *k)
-            }
-            KvOp::SortedIndexRange {
-                index_name,
-                score_min,
-                score_max,
-            } => self.execute_kv_sorted_index_range(
-                task,
-                super::sorted::KvSortedIndexRangeParams {
-                    did,
-                    tid,
-                    index_name,
-                    score_min: score_min.as_deref(),
-                    score_max: score_max.as_deref(),
-                },
-            ),
-            KvOp::SortedIndexCount { index_name } => {
-                self.execute_kv_sorted_index_count(task, did, tid, index_name)
-            }
-            KvOp::SortedIndexScore {
-                index_name,
-                primary_key,
-            } => self.execute_kv_sorted_index_score(task, did, tid, index_name, primary_key),
+            // Every sorted-index read answers at its system-time scope.
+            KvOp::SortedIndexRank { .. }
+            | KvOp::SortedIndexTopK { .. }
+            | KvOp::SortedIndexRange { .. }
+            | KvOp::SortedIndexCount { .. }
+            | KvOp::SortedIndexScore { .. } => self.dispatch_kv_sorted_read(task, did, tid, op),
             KvOp::SortedIndexTxnRead {
                 collection,
                 index_name,
                 pending,
                 read,
+                system_time,
             } => self.execute_kv_sorted_index_txn_read(
                 task,
                 super::sorted_txn::SortedIndexTxnReadParams {
@@ -427,6 +421,7 @@ impl CoreLoop {
                     index_name,
                     pending: pending.as_ref(),
                     read,
+                    system_time,
                 },
             ),
             KvOp::Transfer { .. } => self.dispatch_kv_transfer(task, did, tid, op),
@@ -435,13 +430,19 @@ impl CoreLoop {
                 collection,
                 cursor,
                 count,
+                system_time,
+                only_key,
             } => self.execute_kv_materialize_scan(
                 task,
-                did,
-                tid,
-                collection.as_str(),
-                cursor,
-                *count,
+                super::materialize_scan::KvMaterializeScan {
+                    did,
+                    tid,
+                    collection: collection.as_str(),
+                    cursor,
+                    count: *count,
+                    system_time: *system_time,
+                    only_key: only_key.as_deref(),
+                },
             ),
             // A predicate write resolves to a mutation list before it is
             // logged, and a transaction stages it. It never applies directly.

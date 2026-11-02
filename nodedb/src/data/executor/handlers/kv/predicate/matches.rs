@@ -76,4 +76,43 @@ impl CoreLoop {
             cursor = next_cursor;
         }
     }
+
+    /// [`Self::kv_predicate_matches`] read at `system_as_of`: `None` reads
+    /// the current rows, expiry judged at `now_ms`. `Some(ordinal)` reads
+    /// every row visible at `ordinal`, expiry judged at the cut's wall time.
+    pub(in crate::data::executor) fn kv_predicate_matches_at(
+        &self,
+        did: u64,
+        tid: u64,
+        collection: &str,
+        filters: &[u8],
+        system_as_of: Option<i64>,
+        now_ms: u64,
+    ) -> Result<Vec<KvPredicateRow>, ErrorCode> {
+        let Some(at) = system_as_of else {
+            return self.kv_predicate_matches(did, tid, collection, filters, now_ms);
+        };
+        let crs = self.crs_context();
+        let predicates: Vec<ScanFilter> = if filters.is_empty() {
+            Vec::new()
+        } else {
+            zerompk::from_msgpack(filters).map_err(|e| ErrorCode::Internal {
+                detail: format!("kv predicate dml on '{collection}': filter decode: {e}"),
+            })?
+        };
+        let mut matched = Vec::new();
+        for (key, value) in self.kv_engine.collection_rows_at(did, tid, collection, at) {
+            if !predicates.is_empty() {
+                let (_key_str, row) =
+                    crate::data::executor::scan_normalize::kv_row_to_doc(&key, &value);
+                if !ScanFilter::all_match_binary(&predicates, &row, &crs)
+                    .map_err(ErrorCode::from)?
+                {
+                    continue;
+                }
+            }
+            matched.push((key, value));
+        }
+        Ok(matched)
+    }
 }

@@ -13,6 +13,7 @@ use super::calvin_overlay_stage_bulk::{
 use crate::bridge::envelope::ErrorCode;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::bulk_dml::TxnPrediction;
+use crate::data::executor::handlers::write_match_cut::write_match_cut;
 use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::TxnId;
@@ -36,6 +37,7 @@ impl CoreLoop {
                 rls_write_check,
                 resolved_sum_targets,
                 declared_primary_key,
+                system_time,
                 ..
             } => self.stage_calvin_bulk_delete(CalvinBulkDeleteStage {
                 task,
@@ -44,6 +46,7 @@ impl CoreLoop {
                 collection: collection.as_str(),
                 check: CalvinBulkCheck {
                     filters,
+                    system_as_of: write_match_cut(system_time, "a Calvin predicate DELETE")?,
                     prediction: TxnPrediction::of(ollp_predicted_surrogates, ollp_predicted_edges),
                     resolved_sum_targets,
                 },
@@ -59,6 +62,7 @@ impl CoreLoop {
                 rls_write_check,
                 resolved_sum_targets,
                 declared_primary_key,
+                system_time,
                 ..
             } => self.stage_calvin_bulk_update(CalvinBulkUpdateStage {
                 task,
@@ -68,6 +72,7 @@ impl CoreLoop {
                 updates,
                 check: CalvinBulkCheck {
                     filters,
+                    system_as_of: write_match_cut(system_time, "a Calvin predicate UPDATE")?,
                     prediction: TxnPrediction::of(ollp_predicted_surrogates, ollp_predicted_edges),
                     resolved_sum_targets,
                 },

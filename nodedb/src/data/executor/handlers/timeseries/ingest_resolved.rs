@@ -39,16 +39,12 @@ use std::borrow::Cow;
 
 use crate::bridge::envelope::{Admission, ErrorCode, Payload, Response, Status};
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::core_loop::event_emit::RowWriteEvent;
-use crate::data::executor::core_loop::fail_stop::FailStopCause;
 use crate::data::executor::response_codec;
-use crate::data::executor::task::ExecutionTask;
-use crate::engine::timeseries::columnar_memtable::{ColumnarMemtable, ColumnarMemtableConfig};
+use crate::engine::timeseries::columnar_memtable::{
+    ColumnValue, ColumnarMemtable, ColumnarMemtableConfig,
+};
 use crate::engine::timeseries::ilp_ingest;
 use crate::engine::timeseries::resolved_ingest::{ResolvedTsBatch, ResolvedTsRow, TsDriftPolicy};
-use crate::event::WriteOp;
-use crate::event::types::RowId;
-use nodedb_types::timeseries::SeriesKey;
 
 use super::admission;
 use super::ingest_dispatch::{TimeseriesApplyMode, TimeseriesIngestParams};
@@ -82,6 +78,10 @@ impl CoreLoop {
         // The resolved rows carry the stamp their resolve took. It folds into
         // the shared clock on every replica and every replay.
         self.observe_ingest_stamp_ms(now_ms);
+        // Every landing row stores the batch's system-time ordinal, the one
+        // this apply stamps, not the placeholder its resolve took. A clone
+        // copy's rows keep the ordinals they carry.
+        let system_ordinal = self.ts_batch_ordinal(mode, now_ms);
         let key: CollKey = (task.request.database_id, tid, collection.to_string());
         let live = mode == TimeseriesApplyMode::Immediate;
         let fit = self.schema_fit(&key, &batch);
@@ -157,7 +157,23 @@ impl CoreLoop {
         // schema has no values: every replica rejects it at this log
         // position. A refusable install never gets here with one, since only
         // a by-name fit conflicts.
-        let row_values = landing_values(fit, &schema, &batch);
+        let mut row_values = landing_values(fit, &schema, &batch);
+        if let Some(system_idx) = schema.ts_system_idx() {
+            for values in row_values.iter_mut().flatten() {
+                let Some(cell) = values.get_mut(system_idx) else {
+                    continue;
+                };
+                // A clone copy keeps its source version's ordinal, which
+                // folds into the shared clock so a later write stamps above.
+                if batch.carried_system
+                    && let ColumnValue::Int64(carried) = *cell
+                {
+                    self.hlc.update_from_remote(carried);
+                    continue;
+                }
+                *cell = ColumnValue::Int64(system_ordinal);
+            }
+        }
         let conflicts = row_values.iter().filter(|values| values.is_none()).count();
         // Every landing row is checked before any lands: the tag
         // dictionaries hold its tags after the flush before the record.
@@ -229,14 +245,19 @@ impl CoreLoop {
 
         let mut landed: Vec<usize> = Vec::with_capacity(batch.rows.len());
         let mut failed: Option<String> = None;
+        let horizon = self.maintenance.version_purge.safe_horizon;
         if let Some(mt) = self.columnar_memtables.get_mut(&key) {
             let catalog = self.ts_series_catalogs.entry(key.clone()).or_default();
             let mut lvc = self.ts_last_value_caches.get_mut(&key);
+            if let Some(cache) = lvc.as_deref_mut() {
+                cache.set_horizon(horizon);
+            }
             for (position, (row, values)) in batch.rows.iter().zip(&row_values).enumerate() {
                 let Some(values) = values else {
                     continue;
                 };
-                let series_key = SeriesKey::new(batch.measurement.as_str(), row.tags.clone());
+                let series_key =
+                    ilp_ingest::row_series_key(batch.measurement.as_str(), &schema, values);
                 let series_id = ilp_ingest::resolve_series(catalog, &series_key);
                 match mt.ingest_row(series_id, values) {
                     Err(e) => {
@@ -248,6 +269,7 @@ impl CoreLoop {
                         if let Some(cache) = lvc.as_deref_mut() {
                             ilp_ingest::update_last_value(
                                 cache,
+                                &schema,
                                 series_id,
                                 row.timestamp_ms,
                                 values,
@@ -386,87 +408,10 @@ impl CoreLoop {
                 watermark_lsn: self.watermark,
                 error_code: None,
                 stage_vote: None,
-                read_versions: crate::types::ReadVersions::new(),
+                read_vshards: crate::types::ReadShards::new(),
                 write_set: Vec::new(),
             },
             Err(e) => self.response_error(task, ErrorCode::from(e)),
-        }
-    }
-
-    /// The answer to a resolved record whose rows cannot land as carried.
-    ///
-    /// A refusable install stores nothing and answers `OllpRetryRequired`:
-    /// its record is cancelled and the writer resolves again. Every other
-    /// install is a record whose landing rows every node stores, so skipping
-    /// one for a node-local reason diverges this node from its peers.
-    /// The core fail-stops instead: it refuses every request until a restart
-    /// replays the record.
-    fn unfit_resolved_ingest(
-        &mut self,
-        task: &ExecutionTask,
-        refusable: bool,
-        detail: &str,
-    ) -> Response {
-        if refusable {
-            return self.response_error(task, ErrorCode::OllpRetryRequired);
-        }
-        self.fail_stop_core(FailStopCause::CommittedRowUnfit, detail);
-        self.response_error(
-            task,
-            ErrorCode::RetryableRefusal {
-                reason: detail.to_string(),
-            },
-        )
-    }
-
-    /// Whether the live memtable of `key` must flush before `batch` lands
-    /// whole: it is at its soft or hard limit, the engine budget is under
-    /// pressure, it cannot also hold the bytes the batch took at resolve, or
-    /// its tag dictionaries have no room for the batch's tags.
-    fn ts_resolved_needs_flush(&self, key: &CollKey, batch: &ResolvedTsBatch) -> bool {
-        let governor_pressure = self
-            .governor
-            .try_reserve(key.0, key.1, nodedb_mem::EngineId::Timeseries, 0)
-            .is_err();
-        let soft_limit = self.ts_tuning.memtable_budget_bytes;
-        let hard_limit = self.ts_tuning.memtable_hard_limit_bytes;
-        self.columnar_memtables.get(key).is_some_and(|mt| {
-            let resident = mt.memory_bytes();
-            let with_batch = resident
-                .saturating_add(usize::try_from(batch.resolved_bytes).unwrap_or(usize::MAX));
-            resident >= soft_limit
-                || resident >= hard_limit
-                || (resident > 0 && with_batch >= hard_limit)
-                || governor_pressure
-                || !admission::rows_have_tag_headroom(
-                    mt,
-                    &batch.columns,
-                    &batch.rows,
-                    self.ts_tuning.max_tag_cardinality,
-                )
-        })
-    }
-
-    /// Emit one Insert event per landed row's image, in row order.
-    fn emit_resolved_ts_events(
-        &mut self,
-        task: &crate::data::executor::task::ExecutionTask,
-        collection: &str,
-        images: &[&[u8]],
-    ) {
-        for image in images {
-            self.emit_event_with_row_id_as(
-                task,
-                task.request.event_source,
-                RowWriteEvent {
-                    collection,
-                    op: WriteOp::Insert,
-                    row_id: RowId::Batch,
-                    new_value: Some(*image),
-                    old_value: None,
-                    image_fault: None,
-                },
-            );
         }
     }
 }

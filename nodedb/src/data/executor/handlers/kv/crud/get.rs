@@ -26,6 +26,7 @@ impl CoreLoop {
             key,
             rls_filters,
             surrogate_ceiling,
+            system_time,
         } = params;
         debug!(core = self.core_id, %collection, "kv get");
 
@@ -33,7 +34,10 @@ impl CoreLoop {
         // transaction's staging overlay before falling back to the base KV
         // engine, keyed by the same hex-encoded identity the staging path
         // uses for KV rows.
-        if let Some(txn_id) = task.request.txn_id {
+        // A historical read never sees staged writes.
+        if let Some(txn_id) = task.request.txn_id
+            && system_time.merges_txn_overlay()
+        {
             // Read-your-own-writes refreshes the lease (see the reaper).
             self.touch_overlay(txn_id);
             let coll_key = (
@@ -78,17 +82,19 @@ impl CoreLoop {
         }
 
         let now_ms = current_ms();
-        let fetched = match surrogate_ceiling {
-            Some(ceiling) => {
-                // Clone-delegated read: drop the row when its binding was
-                // allocated AFTER the clone's AS-OF surrogate ceiling. Every
-                // stored entry holds a bound surrogate.
-                self.kv_engine
-                    .get_with_surrogate(did, tid, collection, key, now_ms)
-                    .and_then(|(value, surrogate)| (surrogate.as_u32() <= ceiling).then_some(value))
-            }
-            None => self.kv_engine.get(did, tid, collection, key, now_ms),
-        };
+        // The base read answers at the plan's system-time cut: `Current` is
+        // one probe, a past cut reads the version visible there. A
+        // clone-delegated read drops the row when its binding was allocated
+        // AFTER the clone's AS-OF surrogate ceiling. Every stored entry holds
+        // a bound surrogate.
+        let fetched = self
+            .kv_engine
+            .get_at(did, tid, collection, key, system_time, now_ms)
+            .and_then(|(value, surrogate)| {
+                surrogate_ceiling
+                    .is_none_or(|ceiling| surrogate.as_u32() <= ceiling)
+                    .then_some(value)
+            });
         match fetched {
             Some(value) => {
                 // RLS post-fetch: evaluate filters against KV value.

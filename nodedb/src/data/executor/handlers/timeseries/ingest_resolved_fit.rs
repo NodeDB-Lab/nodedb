@@ -159,7 +159,6 @@ mod tests {
     fn row(extra: &str, absent: Vec<u32>) -> ResolvedTsRow {
         ResolvedTsRow {
             line: 0,
-            tags: Vec::new(),
             timestamp_ms: 1_000,
             values: vec![
                 ColumnValue::Timestamp(1_000),

@@ -155,7 +155,8 @@ mod tests {
             vec![
                 ("ts".into(), ColumnType::Timestamp(TimeKind::Millis)),
                 ("host".into(), ColumnType::Symbol),
-                ("value".into(), ColumnType::Symbol),
+                // A string field is text, never a series dimension.
+                ("value".into(), ColumnType::Text),
                 ("n".into(), ColumnType::Int64),
             ]
         );

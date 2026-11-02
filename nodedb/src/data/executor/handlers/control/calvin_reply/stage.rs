@@ -644,6 +644,7 @@ mod tests {
             rls_write_check: RlsWriteCheck::NoPolicyApplies,
             resolved_sum_targets: Vec::new(),
             declared_primary_key: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         let response = commit(&[update, bulk_delete], |core| {
             let body = crate::data::executor::doc_format::canonicalize_document_for_storage(
@@ -656,6 +657,7 @@ mod tests {
                     "orders",
                     &nodedb_types::StorageKey::for_surrogate(Surrogate::new(1)),
                     &body,
+                    core.bitemporal_ordinal(),
                 )
                 .expect("seed row");
         });
@@ -864,6 +866,7 @@ mod tests {
             provenance: None,
             wal_lsn: None,
             system_from: None,
+            restored_versions: Vec::new(),
             rls_write_check: RlsWriteCheck::NoPolicyApplies,
             returning: returning(&["note"]),
             rls_filters: Vec::new(),

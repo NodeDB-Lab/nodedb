@@ -6,9 +6,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use tracing::{debug, info_span};
 
-use nodedb_types::calvin::VersionedReadEntry;
-
-use crate::bridge::envelope::{ErrorCode, Payload, Response, StageVote, Status};
+use crate::bridge::envelope::{ErrorCode, Payload, Response, Status};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::commit_pending::PendingCommit;
 use crate::data::executor::handlers::control::calvin_reply::{CalvinReply, CalvinStaging};
@@ -20,13 +18,14 @@ use crate::data::executor::handlers::control::calvin_txn_id::calvin_synthetic_tx
 use crate::data::panic_payload::panic_payload_to_string;
 
 use super::shared::CalvinExecCtx;
+use super::snapshot_vote::CalvinSnapshot;
 
 impl CoreLoop {
     /// Validate a static-set Calvin transaction and stage it for commit.
     ///
     /// Computes the local commit vote by checking whether this participant's
-    /// slice of the transaction's versioned read-set is still current
-    /// against the per-core write versions, then STAGES the write plans into
+    /// slice of the transaction's versioned read-set is still current at the
+    /// snapshot ordinal, then STAGES the write plans into
     /// the synthetic overlay and the commit-pending buffer keyed by
     /// `(epoch, position)`. It performs NO base mutation and fires NO side
     /// effects. Nothing is observable until the apply of the slice's stamped
@@ -41,7 +40,7 @@ impl CoreLoop {
         ctx: CalvinExecCtx,
         tenant_id: &TenantId,
         plans: &[PhysicalPlan],
-        versioned_reads: &[VersionedReadEntry],
+        snapshot: CalvinSnapshot<'_>,
         body_plans: &[u32],
     ) -> Response {
         let CalvinExecCtx {
@@ -57,7 +56,7 @@ impl CoreLoop {
             epoch_system_ms,
             vshard_id,
             plan_count = plans.len(),
-            read_count = versioned_reads.len(),
+            read_count = snapshot.reads.len(),
             "calvin stage for commit"
         );
         let _stage_span = info_span!(
@@ -122,15 +121,22 @@ impl CoreLoop {
             }
         };
 
-        // Local commit vote: is this participant's slice of the read-set still
-        // current against the local write versions? Empty read-set is vacuously
-        // current. Read-only — no base mutation here. A stale-read false vote
-        // retains the fully staged state until the durable global verdict.
-        let vote = StageVote::of_read_set(self.read_set_still_current(
+        // Local commit vote: did anything this participant's slice read or
+        // replaces move past the transaction's snapshot? Read-only: no base
+        // mutation here. A conflict vote retains the fully staged state until
+        // the durable global verdict.
+        let vote = match self.calvin_snapshot_vote(
             task,
             tenant_id.as_u64(),
-            versioned_reads,
-        ));
+            &snapshot,
+            plans,
+            nodedb_types::calvin_txn_ordinal(epoch_system_ms, position),
+        ) {
+            Ok(vote) => vote,
+            Err(error) => {
+                return self.calvin_stage_failure(task, epoch, position, vshard_id, error);
+            }
+        };
 
         // Publish only a fully staged transaction. Resolve reads these plans
         // against the overlay; a global abort drops both.
@@ -153,7 +159,7 @@ impl CoreLoop {
             watermark_lsn: self.watermark,
             error_code: None,
             stage_vote: Some(vote),
-            read_versions: crate::types::ReadVersions::new(),
+            read_vshards: crate::types::ReadShards::new(),
             write_set: Vec::new(),
         }
     }
@@ -182,6 +188,9 @@ impl CoreLoop {
 #[cfg(test)]
 mod tests {
     use nodedb_physical::physical_plan::TimeseriesOp;
+    use nodedb_types::calvin::VersionedReadEntry;
+
+    use crate::bridge::envelope::StageVote;
     use nodedb_types::{QualifiedCollection, Surrogate};
 
     use super::*;
@@ -201,7 +210,14 @@ mod tests {
             position: 0,
             epoch_system_ms: 0,
         };
-        core.execute_calvin_execute_static(&make_task(), ctx, &TenantId::new(1), plans, &[], &[])
+        core.execute_calvin_execute_static(
+            &make_task(),
+            ctx,
+            &TenantId::new(1),
+            plans,
+            CalvinSnapshot::NONE,
+            &[],
+        )
     }
 
     fn assert_drift_stages_nothing(core: &CoreLoop, response: &Response, epoch: u64) {
@@ -292,6 +308,7 @@ mod tests {
                     SOURCE,
                     &nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate)),
                     &body,
+                    core.bitemporal_ordinal(),
                 )
                 .expect("seed source row");
         };
@@ -343,7 +360,14 @@ mod tests {
             epoch_system_ms: 0,
         };
 
-        let resp = core.execute_calvin_execute_static(&task, ctx, &tenant_id, &plans, &[], &[]);
+        let resp = core.execute_calvin_execute_static(
+            &task,
+            ctx,
+            &tenant_id,
+            &plans,
+            CalvinSnapshot::NONE,
+            &[],
+        );
         assert_eq!(resp.status, Status::Ok);
         // An empty read-set is current.
         assert_eq!(resp.stage_vote, Some(StageVote::Commit));
@@ -370,55 +394,70 @@ mod tests {
         );
     }
 
-    /// A predicate read of `collection` on vShard 0, taken after the entry at
-    /// `index`.
-    fn homed_read(collection: &str, index: u64) -> VersionedReadEntry {
+    /// A predicate read of `collection`, homed on the collection's vShard.
+    fn predicate_read(collection: &str) -> VersionedReadEntry {
         VersionedReadEntry {
             engine: nodedb_types::calvin::EngineTag::Document,
             collection: collection.to_string(),
             key: nodedb_types::calvin::ReadKeyIdent::Predicate,
-            read_version: nodedb_types::WriteVersion::logged(0, index),
-            home_vshard: Some(0),
+            home_vshard: None,
         }
     }
 
-    /// Record a write of `collection` applying the entry at `index` on
-    /// vShard 0.
-    fn write_at(core: &mut CoreLoop, collection: &str, index: u64) {
-        core.note_write(
-            DatabaseId::DEFAULT,
-            TenantId::new(1),
-            collection,
-            None,
-            crate::data::executor::core_loop::write_index::WriteStamp {
-                vshard: crate::types::VShardId::new(0),
-                lsn: crate::types::Lsn::new(index),
-                entry: Some(nodedb_types::WriteVersion::logged(0, index)),
-            },
+    /// Store a version of row `surrogate` of `collection` at `ordinal`.
+    fn version_at(core: &mut CoreLoop, collection: &str, surrogate: u32, ordinal: i64) {
+        core.sparse
+            .put(
+                DatabaseId::DEFAULT.as_u64(),
+                1,
+                collection,
+                &nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate)),
+                &doc_value("a", "1"),
+                ordinal,
+            )
+            .expect("store version");
+    }
+
+    /// Stage one insert into `collection` at `(3, position)` on the
+    /// collection's vShard, with a predicate read of `collection` taken at
+    /// `snapshot`.
+    fn stage_with_snapshot(
+        core: &mut CoreLoop,
+        position: u32,
+        collection: &str,
+        snapshot: i64,
+    ) -> (Response, ExecutionTask) {
+        let task = crate::data::executor::core_loop::tests::task_with_vshard(
+            crate::data::executor::core_loop::newest_ordinals::collection_vshard(
+                DatabaseId::DEFAULT,
+                collection,
+            ),
         );
+        let reads = [predicate_read(collection)];
+        let resp = core.execute_calvin_execute_static(
+            &task,
+            CalvinExecCtx {
+                epoch: 3,
+                position,
+                epoch_system_ms: 0,
+            },
+            &TenantId::new(1),
+            &[point_insert_plan(collection, "o1", 7)],
+            CalvinSnapshot {
+                reads: &reads,
+                ordinal: Some(snapshot),
+            },
+            &[],
+        );
+        (resp, task)
     }
 
     #[test]
     fn static_stage_with_a_superseded_read_votes_serialization_conflict() {
         let dir = tempfile::tempdir().unwrap();
         let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
-        write_at(&mut core, "orders", 20);
-        let task = make_task();
-        let tenant_id = TenantId::new(1);
-        let ctx = CalvinExecCtx {
-            epoch: 3,
-            position: 0,
-            epoch_system_ms: 0,
-        };
-
-        let resp = core.execute_calvin_execute_static(
-            &task,
-            ctx,
-            &tenant_id,
-            &[point_insert_plan("orders", "o1", 7)],
-            &[homed_read("orders", 10)],
-            &[],
-        );
+        version_at(&mut core, "orders", 9, 20);
+        let (resp, task) = stage_with_snapshot(&mut core, 0, "orders", 10);
 
         assert_eq!(resp.status, Status::Ok);
         assert_eq!(resp.stage_vote, Some(StageVote::SerializationConflict));
@@ -431,26 +470,142 @@ mod tests {
     fn static_stage_with_a_current_read_votes_commit() {
         let dir = tempfile::tempdir().unwrap();
         let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
-        write_at(&mut core, "orders", 20);
-        let task = make_task();
-        let tenant_id = TenantId::new(1);
-        let ctx = CalvinExecCtx {
-            epoch: 3,
-            position: 1,
-            epoch_system_ms: 0,
-        };
-
-        let resp = core.execute_calvin_execute_static(
-            &task,
-            ctx,
-            &tenant_id,
-            &[point_insert_plan("orders", "o1", 7)],
-            &[homed_read("orders", 20)],
-            &[],
-        );
+        version_at(&mut core, "orders", 9, 20);
+        let (resp, _) = stage_with_snapshot(&mut core, 1, "orders", 20);
 
         assert_eq!(resp.status, Status::Ok);
         assert_eq!(resp.stage_vote, Some(StageVote::Commit));
+    }
+
+    /// The stage replaces row 7. A version of row 7 above the snapshot is a
+    /// write-write conflict: the first committer wins.
+    #[test]
+    fn static_stage_over_a_row_written_after_the_snapshot_votes_serialization_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        version_at(&mut core, "orders", 7, 30);
+        let task = make_task();
+        let resp = core.execute_calvin_execute_static(
+            &task,
+            CalvinExecCtx {
+                epoch: 4,
+                position: 0,
+                epoch_system_ms: 0,
+            },
+            &TenantId::new(1),
+            &[PhysicalPlan::Document(
+                nodedb_physical::physical_plan::DocumentOp::PointPut {
+                    collection: QualifiedCollection::new(DatabaseId::DEFAULT, "orders"),
+                    document_id: "o1".into(),
+                    value: doc_value("a", "2"),
+                    surrogate: Surrogate::new(7),
+                    pk_bytes: Vec::new(),
+                    returning: None,
+                    rls_filters: Vec::new(),
+                    resolved_sum_targets: Vec::new(),
+                },
+            )],
+            CalvinSnapshot {
+                reads: &[],
+                ordinal: Some(10),
+            },
+            &[],
+        );
+        assert_eq!(resp.stage_vote, Some(StageVote::SerializationConflict));
+    }
+
+    /// Stage `plans` at `(5, position)` on the vShard of `orders`, with a
+    /// predicate read of `orders` taken at `snapshot`.
+    fn stage_orders_at_snapshot(
+        core: &mut CoreLoop,
+        position: u32,
+        plans: &[PhysicalPlan],
+        snapshot: i64,
+    ) -> Response {
+        let task = crate::data::executor::core_loop::tests::task_with_vshard(
+            crate::data::executor::core_loop::newest_ordinals::collection_vshard(
+                DatabaseId::DEFAULT,
+                "orders",
+            ),
+        );
+        let reads = [predicate_read("orders")];
+        core.execute_calvin_execute_static(
+            &task,
+            CalvinExecCtx {
+                epoch: 5,
+                position,
+                epoch_system_ms: 0,
+            },
+            &TenantId::new(1),
+            plans,
+            CalvinSnapshot {
+                reads: &reads,
+                ordinal: Some(snapshot),
+            },
+            &[],
+        )
+    }
+
+    /// `plan` with its match cut set to the transaction snapshot `ordinal`.
+    fn at_snapshot(mut plan: PhysicalPlan, ordinal: i64) -> PhysicalPlan {
+        if let PhysicalPlan::Document(
+            nodedb_physical::physical_plan::DocumentOp::BulkDelete { system_time, .. }
+            | nodedb_physical::physical_plan::DocumentOp::BulkUpdate { system_time, .. },
+        ) = &mut plan
+        {
+            *system_time = nodedb_types::SystemTimeScope::TxnSnapshot {
+                ordinal,
+                cut_marker: 0,
+            };
+        }
+        plan
+    }
+
+    /// A Calvin predicate write matches at the transaction's snapshot, as a
+    /// session stage does. A row committed after the snapshot is no
+    /// prediction drift. The serialization vote refuses the transaction.
+    #[test]
+    fn a_calvin_bulk_delete_matches_at_the_snapshot_and_the_vote_refuses_a_later_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        version_at(&mut core, "orders", 10, 10);
+        version_at(&mut core, "orders", 11, 30);
+        let plan = at_snapshot(bulk_delete_plan("orders", Some(vec![10])), 20);
+
+        let resp = stage_orders_at_snapshot(&mut core, 0, &[plan], 20);
+
+        assert_eq!(resp.status, Status::Ok, "{:?}", resp.error_code);
+        assert_eq!(resp.stage_vote, Some(StageVote::SerializationConflict));
+    }
+
+    /// An update matches at the snapshot alike, and commits when nothing
+    /// moved past it.
+    #[test]
+    fn a_calvin_bulk_update_matches_at_the_snapshot_and_commits_when_current() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        version_at(&mut core, "orders", 10, 10);
+        let plan = at_snapshot(bulk_update_plan("orders", Some(vec![10])), 20);
+
+        let resp = stage_orders_at_snapshot(&mut core, 1, &[plan], 20);
+
+        assert_eq!(resp.status, Status::Ok, "{:?}", resp.error_code);
+        assert_eq!(resp.stage_vote, Some(StageVote::Commit));
+    }
+
+    /// A prediction that misses a row visible at the snapshot still drifts.
+    #[test]
+    fn a_calvin_bulk_update_that_misses_a_snapshot_row_drifts() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        version_at(&mut core, "orders", 10, 10);
+        version_at(&mut core, "orders", 11, 15);
+        let plan = at_snapshot(bulk_update_plan("orders", Some(vec![10])), 20);
+
+        let resp = stage_orders_at_snapshot(&mut core, 2, &[plan], 20);
+
+        assert_eq!(resp.status, Status::Error);
+        assert_eq!(resp.stage_vote, Some(StageVote::PredictionDrift));
     }
 
     #[test]
@@ -470,7 +625,7 @@ mod tests {
             },
             &tenant_id,
             &[point_insert_plan("orders", "o1", 7)],
-            &[],
+            CalvinSnapshot::NONE,
             &[],
         );
 
@@ -515,7 +670,14 @@ mod tests {
             bulk_delete_plan("orders", None),
         ];
 
-        let response = core.execute_calvin_execute_static(&task, ctx, &tenant_id, &plans, &[], &[]);
+        let response = core.execute_calvin_execute_static(
+            &task,
+            ctx,
+            &tenant_id,
+            &plans,
+            CalvinSnapshot::NONE,
+            &[],
+        );
 
         assert_eq!(response.status, Status::Error);
         assert_eq!(response.stage_vote, Some(StageVote::ParticipantError));
@@ -550,7 +712,7 @@ mod tests {
             },
             &tenant_id,
             &[bulk_delete_plan("orders", None)],
-            &[],
+            CalvinSnapshot::NONE,
             &[],
         );
 
@@ -596,7 +758,7 @@ mod tests {
             ctx,
             &tenant_id,
             &[point_insert_plan("orders", "o1", 7)],
-            &[],
+            CalvinSnapshot::NONE,
             &[],
         );
 
@@ -641,7 +803,7 @@ mod tests {
             },
             &tenant,
             &[malformed],
-            &[],
+            CalvinSnapshot::NONE,
             &[],
         );
         assert_eq!(failed.stage_vote, Some(StageVote::ParticipantError));
@@ -662,7 +824,7 @@ mod tests {
             },
             &tenant,
             &[valid],
-            &[],
+            CalvinSnapshot::NONE,
             &[],
         );
         assert_eq!(staged.stage_vote, Some(StageVote::Commit));
@@ -683,7 +845,7 @@ mod tests {
             },
             &tenant,
             &[mismatch],
-            &[],
+            CalvinSnapshot::NONE,
             &[],
         );
         let mismatch_id = calvin_synthetic_txn_id(21, 2, vshard).expect("synthetic transaction id");
@@ -706,7 +868,7 @@ mod tests {
             },
             &tenant,
             &[overflow],
-            &[],
+            CalvinSnapshot::NONE,
             &[],
         );
         let overflow_id = calvin_synthetic_txn_id(21, 3, vshard).expect("synthetic transaction id");

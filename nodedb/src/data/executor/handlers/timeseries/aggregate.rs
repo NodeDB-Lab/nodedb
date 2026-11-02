@@ -52,6 +52,9 @@ pub(in crate::data::executor) struct TsAggregateParams<'a> {
     /// AUTO_TIER buckets of the part of `time_range` raw partitions no
     /// longer serve, already grouped like the result.
     pub tier_partials: Option<GroupedAggResult>,
+    /// The row versions the read sees. A partition a TRUNCATE ended at or
+    /// below the cut is not read.
+    pub cut: nodedb_columnar::VersionCut,
     /// `(encoded key, output name)` of each output column, in SELECT-list
     /// order. Empty keeps the encoded keys.
     pub output_columns: &'a [(String, String)],
@@ -81,6 +84,7 @@ impl CoreLoop {
             staged,
             raw_range,
             tier_partials,
+            cut,
             output_columns,
         } = params;
 
@@ -116,7 +120,7 @@ impl CoreLoop {
             && let Some(registry) = self.ts_registries.get(&key)
         {
             let query_range = nodedb_types::timeseries::TimeRange::new(time_range.0, time_range.1);
-            let entries: Vec<_> = registry.query_partitions(&query_range);
+            let entries: Vec<_> = registry.query_partitions(&query_range, cut);
 
             if !entries.is_empty() {
                 let data_dir = &self.data_dir;

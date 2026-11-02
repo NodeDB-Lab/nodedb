@@ -7,27 +7,37 @@
 //! # The determinism rule
 //!
 //! Staging resolves EXACTLY the CP-injected `ollp_predicted_surrogates` set,
-//! verbatim, via the `ollp_predicted_doc_ids` primitive. The install applies
-//! the redo record `CalvinResolve` builds from this staging, so the staged
-//! rows are the rows the install writes.
+//! verbatim, in ascending surrogate order, as `ollp_predicted_doc_ids` orders
+//! it. The install applies the redo record `CalvinResolve` builds from this
+//! staging, so the staged rows are the rows the install writes.
 //!
 //! # The prediction check
 //!
 //! Before a bulk plan stages, the leader checks its prediction against the
-//! rows the predicate matches at the plan's turn: BASE with the overlay of
-//! the plans staged before it. The surrogate set, the implicit edges of
-//! matched edge documents, and the materialized-sum coverage must all hold.
-//! A miss refuses the stage with `OllpRetryRequired`, which votes
+//! rows the predicate matches at the plan's turn. BASE is read at the plan's
+//! match cut: the transaction's snapshot inside a block, the current version
+//! otherwise. The overlay of the plans staged before it folds in on top. A
+//! session stage on a single shard matches the same way, for documents and
+//! columnar alike. The surrogate set, the implicit edges of matched edge
+//! documents, and the materialized-sum coverage must all hold. A miss
+//! refuses the stage with `OllpRetryRequired`, which votes
 //! `PredictionDrift`. Only the data-group leader stages, and a bulk plan
 //! holds its collection's lock, so a lagging follower never judges.
 //!
-//! Reading each predicted surrogate's CURRENT body (for `BulkUpdate`'s
-//! post-image and read-your-own-writes) is still safe to source from local
-//! BASE ∪ OVERLAY: Calvin's deterministic total order guarantees every
-//! replica has applied the identical prior-ops prefix before this op stages,
-//! so the content at a fixed, already-agreed-upon key is identical across
-//! replicas — unlike predicate *membership*, which is what the surrogate-set
-//! fixing above protects against.
+//! The stage reads each predicted row's body from the same match: the
+//! version at the cut with the overlay on top. A delete takes its identity
+//! from it, and an update applies its assignments to it.
+//!
+//! # Why a snapshot match stays serializable
+//!
+//! The install writes over the current state, not the snapshot. The slice's
+//! serialization vote (`calvin::snapshot_vote`) runs after the stage. A
+//! predicate write records a predicate read of its collection, so the vote
+//! commits only while no row of the collection on this vShard holds a
+//! committed version above the snapshot. Under a commit vote each row's
+//! current version is its version at the snapshot. The match, the bodies and
+//! the post-images are then the ones a current-state match yields. Under any
+//! other vote the transaction aborts, and nothing the stage built installs.
 //!
 //! `BulkUpdate`'s per-row transform reuses `CoreLoop::stage_apply_update`,
 //! the decode → apply-updates → recompute-generated → re-encode pipeline
@@ -36,15 +46,15 @@
 //! Each stage returns the number of rows it staged, the affected count the
 //! statement reports.
 
+use std::collections::BTreeMap;
+
 use nodedb_physical::physical_plan::{ResolvedSumTarget, UpdateValue};
-use nodedb_types::Surrogate;
+use nodedb_types::StorageKey;
 
 use crate::bridge::envelope::ErrorCode;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::enforcement::materialized_sum::divergence::SumTargetCheck;
-use crate::data::executor::handlers::bulk_dml::scan::ollp_predicted_doc_ids;
 use crate::data::executor::handlers::bulk_dml::{TxnPrediction, decode_bulk_filters};
-use crate::data::executor::handlers::transaction::overlay::Staged;
 use crate::data::executor::handlers::transaction::stage_write::{
     StagedStatement, stored_row_identity,
 };
@@ -56,6 +66,9 @@ use crate::types::{DatabaseId, TenantId, TxnId};
 pub(in crate::data::executor) struct CalvinBulkCheck<'a> {
     /// The predicate's serialized filters.
     pub filters: &'a [u8],
+    /// The cut BASE is matched at: `None` for the current rows, `Some` for
+    /// the transaction's snapshot ordinal.
+    pub system_as_of: Option<i64>,
     /// The rows the Control Plane predicted. `None` when the plan carries none.
     pub prediction: Option<TxnPrediction<'a>>,
     /// The materialized-sum resolution the plan carries.
@@ -110,10 +123,9 @@ pub(in crate::data::executor) struct CalvinBulkUpdateStage<'a> {
 
 impl CoreLoop {
     /// Stage a Calvin `BulkDelete` into the overlay: one tombstone per
-    /// predicted surrogate, resolved to its doc-id via
-    /// `ollp_predicted_doc_ids` — the identical primitive the install
-    /// uses to derive `apply_ids`. NOT a live predicate rescan. Returns the
-    /// number of predicted rows that exist.
+    /// predicted surrogate, in ascending order, keyed by its surrogate's
+    /// storage key. NOT a live predicate rescan. Returns the number of
+    /// predicted rows that exist.
     pub(in crate::data::executor) fn stage_calvin_bulk_delete(
         &mut self,
         params: CalvinBulkDeleteStage<'_>,
@@ -133,28 +145,16 @@ impl CoreLoop {
         let database_id = task.request.database_id;
         let coll_key: (DatabaseId, TenantId, String) =
             (database_id, TenantId::new(tid), collection.to_string());
-        self.check_calvin_prediction(txn_id, &coll_key, &[], &check, prediction)?;
-        let predicted = prediction.surrogates;
+        let matched = self.check_calvin_prediction(txn_id, &coll_key, &[], &check, prediction)?;
 
-        let mut predicted_sorted: Vec<u32> = predicted.to_vec();
-        predicted_sorted.sort_unstable();
-        let doc_ids = ollp_predicted_doc_ids(predicted);
-
-        // Each row's identity is read once from its current body under
-        // BASE ∪ OVERLAY, by the rule INSERT minted it with, so an earlier
-        // plan of the same transaction is observed. A row with no current
-        // body removes nothing; its tombstone is keyed by the decimal
-        // surrogate.
+        // Each row's identity is read once from its matched body, by the rule
+        // INSERT minted it with, so an earlier plan of the same transaction
+        // is observed. A row with no body removes nothing; its tombstone is
+        // keyed by the decimal surrogate.
         let strict_schema = self.resolve_strict_schema(database_id.as_u64(), tid, collection);
         let mut rows: Vec<(u32, nodedb_types::RowIdentity, Option<Vec<u8>>)> =
-            Vec::with_capacity(doc_ids.len());
-        for (surrogate, doc_id) in predicted_sorted.into_iter().zip(doc_ids) {
-            let body = self.calvin_current_body(CalvinRowRead {
-                txn_id,
-                coll_key: &coll_key,
-                surrogate,
-                storage_key: &doc_id,
-            })?;
+            Vec::with_capacity(prediction.surrogates.len());
+        for (surrogate, doc_id, body) in predicted_rows(prediction.surrogates, matched) {
             let identity = match &body {
                 Some(body) => {
                     stored_row_identity(body, strict_schema.as_ref(), declared_primary_key, doc_id)
@@ -195,8 +195,9 @@ impl CoreLoop {
     }
 
     /// Stage a Calvin `BulkUpdate` into the overlay: for each predicted
-    /// surrogate, read its current BASE ∪ OVERLAY body (read-your-own-writes
-    /// against earlier ops in the same Calvin transaction), apply `updates`
+    /// surrogate, take its matched body: BASE at the plan's match cut with
+    /// the overlay of earlier ops of the same Calvin transaction on top
+    /// (read-your-own-writes). Apply `updates`
     /// via the exact same per-row transform `execute_bulk_update` /
     /// `stage_point_update` use (`CoreLoop::stage_apply_update`), and stage
     /// the post-image as a `Put`. Row set = predicted surrogates, matching
@@ -204,8 +205,8 @@ impl CoreLoop {
     /// same-transaction `INSERT` created after the predicted set was
     /// computed at recon).
     ///
-    /// A predicted surrogate that resolves to no current body (already
-    /// tombstoned in this transaction, or absent from BASE) is skipped — the
+    /// A predicted surrogate with no matched body (already tombstoned in
+    /// this transaction, or absent at the cut) is skipped — the
     /// identical `continue`-on-miss behavior `execute_bulk_update` exhibits
     /// for its own `apply_ids` loop. Returns the number of rows staged.
     pub(in crate::data::executor) fn stage_calvin_bulk_update(
@@ -228,26 +229,15 @@ impl CoreLoop {
         let database_id = task.request.database_id;
         let coll_key: (DatabaseId, TenantId, String) =
             (database_id, TenantId::new(tid), collection.to_string());
-        self.check_calvin_prediction(txn_id, &coll_key, updates, &check, prediction)?;
-        let predicted = prediction.surrogates;
-
-        let mut predicted_sorted: Vec<u32> = predicted.to_vec();
-        predicted_sorted.sort_unstable();
+        let matched =
+            self.check_calvin_prediction(txn_id, &coll_key, updates, &check, prediction)?;
         let strict_schema = self.resolve_strict_schema(database_id.as_u64(), tid, collection);
 
         let mut post_images = Vec::new();
-        for surrogate in predicted_sorted {
-            let storage_key = nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate));
-
-            // Current body: overlay wins over base (read-your-own-writes),
-            // mirroring `stage_point_update`'s exact overlay-then-base read.
-            let Some(current_bytes) = self.calvin_current_body(CalvinRowRead {
-                txn_id,
-                coll_key: &coll_key,
-                surrogate,
-                storage_key: &storage_key,
-            })?
-            else {
+        for (surrogate, storage_key, body) in predicted_rows(prediction.surrogates, matched) {
+            // The matched body: the version at the cut with the overlay on
+            // top (read-your-own-writes).
+            let Some(current_bytes) = body else {
                 continue;
             };
 
@@ -302,11 +292,12 @@ impl CoreLoop {
     }
 
     /// Refuse a Calvin bulk plan whose prediction does not hold at its turn
-    /// in the transaction: BASE with the overlay of the plans staged before
-    /// it. The surrogate set and the implicit edges must equal the rows'. The
-    /// materialized-sum resolution must cover every join value the rows
-    /// require, read after `updates` for an update. A miss refuses with
-    /// `OllpRetryRequired`, which votes `PredictionDrift`.
+    /// in the transaction: BASE at the plan's match cut with the overlay of
+    /// the plans staged before it. The surrogate set and the implicit edges
+    /// must equal the rows'. The materialized-sum resolution must cover every
+    /// join value the rows require, read after `updates` for an update. A
+    /// miss refuses with `OllpRetryRequired`, which votes `PredictionDrift`.
+    /// Returns the matched rows.
     fn check_calvin_prediction(
         &self,
         txn_id: TxnId,
@@ -314,10 +305,10 @@ impl CoreLoop {
         updates: &[(String, UpdateValue)],
         check: &CalvinBulkCheck<'_>,
         prediction: TxnPrediction<'_>,
-    ) -> crate::Result<()> {
+    ) -> crate::Result<Vec<(StorageKey, Vec<u8>)>> {
         let drift = || crate::Error::DataPlane(ErrorCode::OllpRetryRequired);
         let filters = decode_bulk_filters(check.filters)?;
-        let rows = self.txn_matching_rows(txn_id, coll_key, &filters)?;
+        let rows = self.txn_matching_rows(txn_id, coll_key, &filters, check.system_as_of)?;
         if !prediction.holds(&rows) {
             return Err(drift());
         }
@@ -329,7 +320,7 @@ impl CoreLoop {
             resolved: check.resolved_sum_targets,
         };
         if !self.declares_materialized_sums(&sum_check) {
-            return Ok(());
+            return Ok(rows);
         }
         let images: Vec<serde_json::Value> = rows
             .iter()
@@ -338,39 +329,28 @@ impl CoreLoop {
         if self.sum_targets_diverged(&sum_check, &images) {
             return Err(drift());
         }
-        Ok(())
+        Ok(rows)
     }
 }
 
-/// One row a Calvin bulk stage reads under BASE ∪ OVERLAY.
-struct CalvinRowRead<'a> {
-    txn_id: TxnId,
-    coll_key: &'a (DatabaseId, TenantId, String),
-    surrogate: u32,
-    storage_key: &'a nodedb_types::StorageKey,
-}
-
-impl CoreLoop {
-    /// The row's current stored body inside the Calvin transaction. A staged
-    /// put wins over base. A staged tombstone or a staged TRUNCATE hides the
-    /// row. Otherwise the body is base storage: the current version on a
-    /// bitemporal collection.
-    fn calvin_current_body(&self, read: CalvinRowRead<'_>) -> crate::Result<Option<Vec<u8>>> {
-        let overlay = self.txn_overlays.get(&read.txn_id);
-        match overlay.and_then(|o| o.get(read.coll_key, read.surrogate)) {
-            Some(Staged::Put(body)) => return Ok(Some(body.clone())),
-            Some(Staged::Tombstone) => return Ok(None),
-            None => {}
-        }
-        if overlay.is_some_and(|o| !o.base_visible(read.coll_key)) {
-            return Ok(None);
-        }
-        let (database_id, tenant, collection) = read.coll_key;
-        self.current_row_body(
-            database_id.as_u64(),
-            tenant.as_u64(),
-            collection,
-            read.storage_key,
-        )
-    }
+/// Each predicted surrogate in ascending order, with its storage key and its
+/// body among `matched`. `None` when `matched` holds no row for it.
+fn predicted_rows(
+    predicted: &[u32],
+    matched: Vec<(StorageKey, Vec<u8>)>,
+) -> Vec<(u32, StorageKey, Option<Vec<u8>>)> {
+    let mut bodies: BTreeMap<u32, Vec<u8>> = matched
+        .into_iter()
+        .map(|(key, body)| (key.surrogate().as_u32(), body))
+        .collect();
+    let mut sorted = predicted.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    sorted
+        .into_iter()
+        .map(|surrogate| {
+            let key = StorageKey::for_surrogate(nodedb_types::Surrogate::new(surrogate));
+            (surrogate, key, bodies.remove(&surrogate))
+        })
+        .collect()
 }

@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use nodedb_types::columnar::schema::TS_SYSTEM;
+use nodedb_types::columnar::schema::{TS_SERIES, TS_SYSTEM, TS_VALID_FROM};
 
 use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::handlers::columnar_read::filter::value_matches_filters;
@@ -67,7 +67,41 @@ pub(super) fn rmpv_system_time(row: &rmpv::Value) -> i64 {
     i64::MIN
 }
 
-/// Emit the memtable rows at `row_indices`, in the order given.
+/// Render the stored `_ts_system` field of an emitted row for its reader.
+///
+/// `_ts_system` stores the system-time ordinal of the batch that wrote the
+/// row. A bitemporal row, one that carries `_ts_valid_from`, shows the
+/// ordinal's millisecond, the unit `AS OF SYSTEM TIME` takes. Every other
+/// row hides the field: it is the engine's version stamp, not a declared
+/// column. Called once a row passed every predicate, since predicates
+/// compare the stored ordinal.
+///
+/// Every row also drops `_ts_series`: the series id the engine stamps for
+/// the last-value cache, which no reader sees.
+pub(in crate::data::executor) fn render_system_time(row: &mut rmpv::Value) {
+    let rmpv::Value::Map(fields) = row else {
+        return;
+    };
+    fields.retain(|(key, _)| key.as_str() != Some(TS_SERIES));
+    let bitemporal = fields
+        .iter()
+        .any(|(key, _)| key.as_str() == Some(TS_VALID_FROM));
+    if !bitemporal {
+        fields.retain(|(key, _)| key.as_str() != Some(TS_SYSTEM));
+        return;
+    }
+    for (key, value) in fields.iter_mut() {
+        if key.as_str() == Some(TS_SYSTEM)
+            && let rmpv::Value::Integer(stored) = value
+            && let Some(ordinal) = stored.as_i64()
+        {
+            *value = rmpv::Value::Integer(nodedb_types::ordinal_to_ms(ordinal).into());
+        }
+    }
+}
+
+/// Emit the memtable rows at `row_indices`, in the order given, each with
+/// its system time rendered ([`render_system_time`]).
 ///
 /// The read-back a write's `RETURNING` projection uses. It deliberately goes
 /// through [`emit_memtable_row`] — the same function `SELECT` uses — so the two
@@ -98,7 +132,11 @@ pub(in crate::data::executor) fn emit_memtable_rows_at(
     row_indices
         .iter()
         .filter(|&&idx| idx < row_count)
-        .map(|&idx| emit_memtable_row(mt, &columns, idx))
+        .map(|&idx| {
+            let mut row = emit_memtable_row(mt, &columns, idx)?;
+            render_system_time(&mut row);
+            Ok(row)
+        })
         .collect()
 }
 
@@ -211,4 +249,43 @@ pub(super) fn apply_computed_columns_rmpv(
         ));
     }
     Ok(rmpv::Value::Map(fields))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_system_time;
+
+    fn row(fields: &[(&str, i64)]) -> rmpv::Value {
+        rmpv::Value::Map(
+            fields
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        rmpv::Value::String((*k).into()),
+                        rmpv::Value::Integer((*v).into()),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    /// A bitemporal row shows its system time in milliseconds. A plain row
+    /// hides the stored ordinal.
+    #[test]
+    fn system_time_renders_by_collection_kind() {
+        let ordinal = 1_700_000_000_123 * 1_000_000 + 42;
+        let mut bitemporal = row(&[("v", 1), ("_ts_system", ordinal), ("_ts_valid_from", 0)]);
+        render_system_time(&mut bitemporal);
+        assert_eq!(
+            bitemporal,
+            row(&[
+                ("v", 1),
+                ("_ts_system", 1_700_000_000_123),
+                ("_ts_valid_from", 0)
+            ])
+        );
+        let mut plain = row(&[("v", 1), ("_ts_system", ordinal)]);
+        render_system_time(&mut plain);
+        assert_eq!(plain, row(&[("v", 1)]));
+    }
 }

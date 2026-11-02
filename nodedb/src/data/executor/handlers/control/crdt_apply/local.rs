@@ -111,6 +111,13 @@ impl CoreLoop {
                 &crs,
             );
             match outcome {
+                // Loro names every operation by `(peer, counter)` and trims
+                // the ones the document already holds. A re-delivered delta
+                // imports no operation: the document did not move, so there
+                // is no new row version to materialize.
+                ValidatedApplyOutcome::Clean {
+                    imported_ops: 0, ..
+                } => Ok(None),
                 ValidatedApplyOutcome::Clean { .. } => {
                     imported_authoritative = true;
                     Ok(Self::encode_crdt_row(engine, collection, document_id))
@@ -300,6 +307,55 @@ pub(in crate::data::executor::handlers::control::crdt_apply) mod tests {
                 .expect("source write");
         }
         source.export_snapshot().expect("source snapshot")
+    }
+
+    /// Every stored version of the sparse row `document_id` of `docs`.
+    fn row_versions(core: &CoreLoop, task: &ExecutionTask, document_id: &str) -> usize {
+        let key = crate::engine::document::store::StorageKey::for_surrogate(document_surrogate(
+            document_id,
+        ));
+        let mut versions = 0;
+        core.sparse
+            .versioned_for_each_version(
+                task.request.database_id.as_u64(),
+                task.request.tenant_id.as_u64(),
+                "docs",
+                |row, _, _| {
+                    if *row == key {
+                        versions += 1;
+                    }
+                    Ok(())
+                },
+            )
+            .expect("scan versions");
+        versions
+    }
+
+    /// A re-delivered delta imports no Loro operation, so it adds no row
+    /// version: the materialized row keeps the one version its first
+    /// delivery wrote.
+    #[test]
+    fn a_redelivered_delta_adds_no_row_version() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _request_tx, _response_rx) = make_core_with_dir(dir.path());
+        let task = make_default_task();
+        let source = nodedb_crdt::CrdtState::new(42).expect("source state");
+        source
+            .upsert("docs", "one", &[("value", LoroValue::String("one".into()))])
+            .expect("source write");
+        let delta = source.export_snapshot().expect("source snapshot");
+
+        let first = core.apply_crdt_local(&task, params("one", &delta));
+        assert_eq!(first.status, Status::Ok, "got {:?}", first.error_code);
+        assert_eq!(row_versions(&core, &task, "one"), 1);
+
+        let again = core.apply_crdt_local(&task, params("one", &delta));
+        assert_eq!(again.status, Status::Ok, "got {:?}", again.error_code);
+        assert_eq!(
+            row_versions(&core, &task, "one"),
+            1,
+            "a re-delivered delta must not add history"
+        );
     }
 
     /// A delta whose document carries no surrogate is refused before the

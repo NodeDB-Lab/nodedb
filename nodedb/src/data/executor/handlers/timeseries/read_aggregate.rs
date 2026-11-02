@@ -15,7 +15,6 @@
 //! its deadline.
 
 use nodedb_physical::physical_plan::{PhysicalPlan, TimeseriesOp};
-use nodedb_types::timeseries::PartitionState;
 
 use crate::bridge::dispatch::BridgeResponse;
 use crate::bridge::envelope::{ErrorCode, Response};
@@ -23,9 +22,12 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::columnar_read::convert::rmpv_time_cell;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::timeseries::columnar_memtable::TimeKind;
-use crate::engine::timeseries::continuous_agg::{ColumnLayout, FoldScope, GroupCell};
+use crate::engine::timeseries::continuous_agg::{
+    ColumnLayout, FoldScope, GroupCell, PartialAggregate,
+};
 use crate::types::{DatabaseId, TenantId};
 use crate::util::rmpv_value::value_to_rmpv;
+use nodedb_types::SystemTimeScope;
 
 use super::cagg_fold::{CaggRoot, FoldFilter};
 
@@ -34,6 +36,7 @@ pub struct CaggReadWaiter {
     task: ExecutionTask,
     root: String,
     aggregate: String,
+    system_time: SystemTimeScope,
 }
 
 impl CoreLoop {
@@ -48,10 +51,15 @@ impl CoreLoop {
             PhysicalPlan::Timeseries(TimeseriesOp::ReadAggregate {
                 collection,
                 aggregate,
-            }) => Some((collection.as_str().to_string(), aggregate.clone())),
+                system_time,
+            }) => Some((
+                collection.as_str().to_string(),
+                aggregate.clone(),
+                *system_time,
+            )),
             _ => None,
         };
-        let Some((root, aggregate)) = read else {
+        let Some((root, aggregate, system_time)) = read else {
             return Some(task);
         };
         let db = task.request.database_id.as_u64();
@@ -65,6 +73,7 @@ impl CoreLoop {
             task,
             root,
             aggregate,
+            system_time,
         });
         None
     }
@@ -91,18 +100,15 @@ impl CoreLoop {
         );
         let mgr = &self.continuous_agg_mgr;
         self.ts_registries.get(&key).is_some_and(|registry| {
-            registry
-                .iter()
-                .filter(|(_, entry)| entry.meta.state != PartitionState::Deleted)
-                .any(|(_, entry)| {
-                    mgr.needs_fold(
-                        database_id,
-                        tenant_id,
-                        root,
-                        &entry.dir_name,
-                        FoldScope::Tick,
-                    )
-                })
+            registry.current_partitions().any(|entry| {
+                mgr.needs_fold(
+                    database_id,
+                    tenant_id,
+                    root,
+                    &entry.dir_name,
+                    FoldScope::Tick,
+                )
+            })
         })
     }
 
@@ -126,7 +132,12 @@ impl CoreLoop {
                 self.maintenance.cagg_read_waiters.push(waiter);
                 continue;
             } else {
-                self.execute_ts_read_aggregate(&waiter.task, &waiter.root, &waiter.aggregate)
+                self.execute_ts_read_aggregate(
+                    &waiter.task,
+                    &waiter.root,
+                    &waiter.aggregate,
+                    waiter.system_time,
+                )
             };
             if let Err(e) = self
                 .response_tx
@@ -142,19 +153,45 @@ impl CoreLoop {
     }
     /// Finalized rows of continuous aggregate `aggregate` rooted at `root`:
     /// a msgpack array of maps, one per bucket and group, holding `bucket`,
-    /// the GROUP BY columns and the output columns.
+    /// the GROUP BY columns and the output columns. A read at a cut returns
+    /// the rows the aggregate held at the cut (`read_aggregate_at.rs`).
     pub(in crate::data::executor) fn execute_ts_read_aggregate(
         &mut self,
         task: &ExecutionTask,
         root: &str,
         aggregate: &str,
+        system_time: SystemTimeScope,
     ) -> Response {
         let db = task.request.database_id.as_u64();
         let tid = task.request.tenant_id.as_u64();
         let now_ms = self.ingest_now_ms();
+        let at = match system_time {
+            SystemTimeScope::Current => None,
+            SystemTimeScope::AsOf(ms) => Some(nodedb_types::ms_to_ordinal_upper(ms)),
+            SystemTimeScope::Pinned { ordinal, .. }
+            | SystemTimeScope::TxnSnapshot { ordinal, .. } => Some(ordinal),
+            SystemTimeScope::AllVersions => {
+                return self.response_error(
+                    task,
+                    crate::Error::BadRequest {
+                        detail: format!(
+                            "continuous aggregate '{aggregate}' keeps no version history: \
+                             AS OF SYSTEM TIME NULL cannot read it"
+                        ),
+                    },
+                );
+            }
+        };
+        let read = super::read_aggregate_at::CaggReadAt {
+            database_id: task.request.database_id,
+            tid: task.request.tenant_id,
+            root,
+            aggregate,
+            at: at.unwrap_or(i64::MAX),
+        };
         match self
             .complete_cagg_root(db, tid, root, now_ms)
-            .and_then(|()| self.encode_cagg_rows(db, tid, aggregate))
+            .and_then(|()| self.encode_cagg_rows(read, at.is_some()))
         {
             Ok(payload) => self.response_with_payload(task, payload),
             Err(e) => self.response_error(task, e),
@@ -198,12 +235,16 @@ impl CoreLoop {
         }
     }
 
+    /// Encode the rows of `read.aggregate`: its current buckets, or the
+    /// buckets it held at `read.at` when `at_cut`.
     fn encode_cagg_rows(
         &self,
-        database_id: u64,
-        tenant_id: u64,
-        aggregate: &str,
+        read: super::read_aggregate_at::CaggReadAt<'_>,
+        at_cut: bool,
     ) -> crate::Result<Vec<u8>> {
+        let database_id = read.database_id.as_u64();
+        let tenant_id = read.tid.as_u64();
+        let aggregate = read.aggregate;
         let mgr = &self.continuous_agg_mgr;
         let Some(def) = mgr.get_definition(database_id, tenant_id, aggregate) else {
             return Err(crate::Error::UndefinedObject {
@@ -223,9 +264,22 @@ impl CoreLoop {
         let kind = mgr
             .time_kind(database_id, tenant_id, aggregate)
             .unwrap_or(TimeKind::Millis);
-        let buckets = mgr
-            .get_materialized(database_id, tenant_id, aggregate)
-            .unwrap_or_default();
+        let at_snapshot = if at_cut {
+            Some(self.cagg_buckets_at(read)?)
+        } else {
+            None
+        };
+        let buckets: Vec<&PartialAggregate> = match &at_snapshot {
+            Some(held) => {
+                let mut sorted: Vec<&PartialAggregate> = held.values().collect();
+                sorted
+                    .sort_by(|a, b| (a.bucket_ts, &a.group_key).cmp(&(b.bucket_ts, &b.group_key)));
+                sorted
+            }
+            None => mgr
+                .get_materialized(database_id, tenant_id, aggregate)
+                .unwrap_or_default(),
+        };
         let mut rows = Vec::with_capacity(buckets.len());
         for bucket in buckets {
             let mut fields = Vec::with_capacity(1 + def.group_by.len() + def.aggregates.len());
@@ -279,7 +333,12 @@ mod tests {
 
     /// `(host, count, sum)` of every row the read returns, sorted.
     fn read(core: &mut crate::data::executor::core_loop::CoreLoop) -> Vec<(String, i64, i64)> {
-        let resp = core.execute_ts_read_aggregate(&task_at(20), COLLECTION, "by_host");
+        let resp = core.execute_ts_read_aggregate(
+            &task_at(20),
+            COLLECTION,
+            "by_host",
+            nodedb_types::SystemTimeScope::Current,
+        );
         rows_of(&resp)
     }
 
@@ -355,6 +414,7 @@ mod tests {
             PhysicalPlan::Timeseries(TimeseriesOp::ReadAggregate {
                 collection: nodedb_types::QualifiedCollection::new(DatabaseId::DEFAULT, COLLECTION),
                 aggregate: "by_host".into(),
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             None,
         )
@@ -444,7 +504,12 @@ mod tests {
     fn reading_an_unknown_aggregate_is_refused() {
         let dir = tempfile::tempdir().expect("tempdir");
         let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
-        let resp = core.execute_ts_read_aggregate(&task_at(20), COLLECTION, "missing");
+        let resp = core.execute_ts_read_aggregate(
+            &task_at(20),
+            COLLECTION,
+            "missing",
+            nodedb_types::SystemTimeScope::Current,
+        );
         assert_ne!(resp.status, Status::Ok);
     }
 }

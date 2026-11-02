@@ -20,7 +20,7 @@ pub(in crate::data::executor) struct RangeScanArgs<'a> {
     pub upper: Option<&'a [u8]>,
     pub limit: usize,
     /// Row-level-security filters applied to the scanned rows before they are
-    /// returned. The index-backed and fallback full-scan paths both filter, so
+    /// returned. The index-narrowed and full-scan paths both filter, so
     /// which one the collection happens to take is not observable.
     pub rls_filters: &'a [u8],
 }
@@ -105,150 +105,22 @@ impl CoreLoop {
         }
     }
 
+    /// Range scan: current rows whose `field` lies in `[lower, upper)`,
+    /// sorted ascending by `field` and capped at `limit`. See
+    /// [`Self::execute_range_scan_versioned`].
     pub(in crate::data::executor) fn execute_range_scan(
         &mut self,
         task: &ExecutionTask,
         args: RangeScanArgs<'_>,
     ) -> Response {
-        let crs = self.crs_context();
-        // Bitemporal collections keep every write on the versioned redb table;
-        // their plain INDEXES / DOCUMENTS tables are empty, so the index probe
-        // + plain-table fallback below would return ZERO rows. Route them to
-        // the versioned current-state scan instead (full-scan + range filter,
-        // matching `execute_document_scan`).
-        if self.is_bitemporal(task.request.database_id.as_u64(), args.tid, args.collection) {
-            return self.execute_range_scan_bitemporal(task, args);
-        }
-
-        let RangeScanArgs {
-            tid,
-            collection,
-            field,
-            lower,
-            upper,
-            limit,
-            rls_filters,
-        } = args;
-        debug!(core = self.core_id, %collection, %field, limit, "range scan");
-
-        // Try index-backed range scan first. The index returns rows in key
-        // order, so an explicit limit reads exactly that many. Without one,
-        // every row is read under the scan byte budget.
-        let budget = self.query_tuning.max_scan_result_bytes;
-        let unbounded = limit == usize::MAX;
-        let index_limit = if unbounded {
-            super::super::scan_budget::fetch_limit_for(usize::MAX, 0, budget)
-        } else {
-            limit
-        };
-        let results =
-            match self
-                .sparse
-                .range_scan(crate::engine::sparse::btree_index::RangeScanParams {
-                    database_id: task.request.database_id.as_u64(),
-                    tenant_id: tid,
-                    collection,
-                    field,
-                    lower,
-                    upper,
-                    limit: index_limit,
-                }) {
-                Ok(r)
-                    if unbounded && super::super::scan_budget::scan_bytes_exceeded(&r, budget) =>
-                {
-                    return self.response_error(task, ErrorCode::ResourcesExhausted);
-                }
-                Ok(r) => {
-                    let mut kept = Vec::with_capacity(r.len());
-                    for (id, bytes) in r {
-                        match self.row_passes_rls(&bytes, rls_filters) {
-                            Ok(true) => kept.push((id, bytes)),
-                            Ok(false) => {}
-                            Err(e) => {
-                                return self.response_error(task, ErrorCode::from(e));
-                            }
-                        }
-                    }
-                    kept
-                }
-                Err(e) => {
-                    warn!(core = self.core_id, error = %e, "sparse range scan failed");
-                    return self.response_error(task, ErrorCode::from(e));
-                }
-            };
-
-        // If the index returned nothing, fall back to full scan + sort.
-        // This handles collections without a secondary index on `field`.
-        // The sort needs every row: a read cut at a row count would sort a
-        // prefix and silently return the wrong rows. The read is bounded by
-        // the scan byte budget alone, and a collection past it fails loudly.
-        if results.is_empty() {
-            let scan_limit = super::super::scan_budget::fetch_limit_for(usize::MAX, 0, budget);
-            let scanned = match self.scan_collection(
-                task.request.database_id.as_u64(),
-                tid,
-                collection,
-                scan_limit,
-            ) {
-                Ok(docs) => docs,
-                Err(e) => return self.response_error(task, ErrorCode::from(e)),
-            };
-            if super::super::scan_budget::scan_bytes_exceeded(&scanned, budget) {
-                return self.response_error(task, ErrorCode::ResourcesExhausted);
-            }
-            let scan_result =
-                self.retain_rows_matching(scanned, rls_filters, "RLS filter (range scan)");
-            match scan_result {
-                Ok(mut docs) => {
-                    let sort_keys = [nodedb_physical::physical_plan::SortKeySpec::column(
-                        field, true,
-                    )];
-                    let strict_schema = self.strict_schema_for(
-                        task.request.database_id,
-                        crate::types::TenantId::new(tid),
-                        collection,
-                    );
-                    let decimal_keys = super::super::document::sort::decimal_sort_keys(
-                        &sort_keys,
-                        strict_schema.as_ref(),
-                    );
-                    if let Err(e) = super::super::document::sort::sort_rows(
-                        &mut docs,
-                        &sort_keys,
-                        &decimal_keys,
-                        &crs,
-                    ) {
-                        return self.response_error(task, ErrorCode::from(e));
-                    }
-                    docs.truncate(limit);
-                    // Raw msgpack passthrough — no decode/re-encode.
-                    let rows: Vec<_> = docs
-                        .iter()
-                        .map(|(id, val)| {
-                            let mp = super::super::super::doc_format::json_to_msgpack(val);
-                            (id.clone(), mp)
-                        })
-                        .collect();
-                    match super::super::super::response_codec::encode_raw_document_rows(&rows) {
-                        Ok(payload) => return self.response_with_payload(task, payload),
-                        Err(e) => {
-                            return self.response_error(task, ErrorCode::from(e));
-                        }
-                    }
-                }
-                Err(e) => {
-                    return self.response_error(task, ErrorCode::from(e));
-                }
-            }
-        }
-
-        match super::super::super::response_codec::encode(&results) {
-            Ok(payload) => self.response_with_payload(task, payload),
-            Err(e) => {
-                warn!(core = self.core_id, error = %e, "range scan serialization failed");
-                self.response_error(task, ErrorCode::from(e))
-            }
-        }
+        debug!(
+            core = self.core_id,
+            collection = %args.collection,
+            field = %args.field,
+            limit = args.limit,
+            "range scan"
+        );
+        self.execute_range_scan_versioned(task, args)
     }
 
     /// Execute a coordinated checkpoint and answer with this core's checkpoint

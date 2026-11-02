@@ -129,7 +129,7 @@ pub(in crate::data::executor) mod test_support {
             wal_lsn: None,
             resolved_now_ms: None,
             commit_hlc: None,
-            entry_version: None,
+            system_ordinal: None,
             admission: Admission::Exempt(ExemptReason::Read),
         };
         ExecutionTask::new(request)
@@ -194,6 +194,7 @@ pub(in crate::data::executor) mod test_support {
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             resolved_sum_targets: Vec::new(),
             declared_primary_key: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         })
     }
 
@@ -217,6 +218,7 @@ pub(in crate::data::executor) mod test_support {
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             resolved_sum_targets: Vec::new(),
             declared_primary_key: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         })
     }
 
@@ -230,7 +232,14 @@ pub(in crate::data::executor) mod test_support {
         let doc_id = nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate));
         let body = doc_format::canonicalize_document_for_storage(&doc_value("a", "1"));
         core.sparse
-            .put(DatabaseId::DEFAULT.as_u64(), 1, collection, &doc_id, &body)
+            .put(
+                DatabaseId::DEFAULT.as_u64(),
+                1,
+                collection,
+                &doc_id,
+                &body,
+                core.bitemporal_ordinal(),
+            )
             .expect("seed row");
     }
 }

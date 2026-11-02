@@ -23,6 +23,7 @@ use crate::data::executor::handlers::control::calvin_txn_id::calvin_synthetic_tx
 use crate::data::panic_payload::panic_payload_to_string;
 
 use super::shared::CalvinExecCtx;
+use super::snapshot_vote::CalvinSnapshot;
 
 impl CoreLoop {
     /// Execute a passive-participant dependent-read Calvin txn.
@@ -99,6 +100,7 @@ impl CoreLoop {
         tenant_id: &TenantId,
         plans: &[PhysicalPlan],
         injected_reads: &BTreeMap<PassiveReadKeyId, Value>,
+        snapshot: CalvinSnapshot<'_>,
     ) -> Response {
         let CalvinExecCtx {
             epoch,
@@ -166,6 +168,19 @@ impl CoreLoop {
             }
         };
 
+        // The slice's read set and writes validate against the transaction's
+        // snapshot exactly as a static stage's do.
+        let vote = match self.calvin_snapshot_vote(
+            task,
+            tenant_id.as_u64(),
+            &snapshot,
+            plans,
+            nodedb_types::calvin_txn_ordinal(epoch_system_ms, position),
+        ) {
+            Ok(vote) => vote,
+            Err(e) => return self.calvin_stage_failure(task, epoch, position, vshard_id, e),
+        };
+
         // Publish only a fully staged transaction. Resolve reads these plans
         // against the overlay; a global abort drops both.
         self.calvin.commit_pending.insert(
@@ -186,10 +201,9 @@ impl CoreLoop {
             payload: Payload::empty(),
             watermark_lsn: self.watermark,
             error_code: None,
-            // The dependent-read path carries no versioned read-set. Its OLLP
-            // check passed above, so the slice votes commit.
-            stage_vote: Some(StageVote::Commit),
-            read_versions: crate::types::ReadVersions::new(),
+            // The OLLP check passed above. The vote is the snapshot's.
+            stage_vote: Some(vote),
+            read_vshards: crate::types::ReadShards::new(),
             write_set: Vec::new(),
         }
     }
@@ -351,7 +365,14 @@ mod tests {
         };
         let injected = BTreeMap::new();
 
-        let resp = core.execute_calvin_execute_active(&task, ctx, &tenant_id, &plans, &injected);
+        let resp = core.execute_calvin_execute_active(
+            &task,
+            ctx,
+            &tenant_id,
+            &plans,
+            &injected,
+            CalvinSnapshot::NONE,
+        );
         assert_eq!(resp.status, Status::Ok);
         assert_eq!(resp.stage_vote, Some(StageVote::Commit));
 
@@ -410,7 +431,14 @@ mod tests {
         };
         let injected = BTreeMap::new();
 
-        let resp = core.execute_calvin_execute_active(&task, ctx, &tenant_id, &plans, &injected);
+        let resp = core.execute_calvin_execute_active(
+            &task,
+            ctx,
+            &tenant_id,
+            &plans,
+            &injected,
+            CalvinSnapshot::NONE,
+        );
         assert_eq!(resp.status, Status::Error);
         assert_eq!(
             resp.error_code.as_deref(),
@@ -450,6 +478,7 @@ mod tests {
             &tenant_id,
             &[point_insert_plan("orders", "o1", 7)],
             &BTreeMap::new(),
+            CalvinSnapshot::NONE,
         );
 
         assert_eq!(resp.status, Status::Error);
