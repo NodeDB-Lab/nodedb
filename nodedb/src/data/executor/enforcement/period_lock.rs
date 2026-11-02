@@ -156,7 +156,7 @@ mod tests {
     use crate::engine::sparse::btree::SparseEngine;
     use nodedb_types::Surrogate;
 
-    /// Reads a reference row from the plain table of `sparse`.
+    /// Reads a reference row's current version from `sparse`.
     fn reader(
         sparse: &SparseEngine,
     ) -> impl Fn(&str, &StorageKey) -> crate::Result<Option<Vec<u8>>> + '_ {
@@ -245,6 +245,7 @@ mod tests {
                 REF_TABLE,
                 &StorageKey::for_surrogate(REF_ROW),
                 &nodedb_types::json_to_msgpack(&doc).unwrap(),
+                1,
             )
             .expect("seed reference row");
     }
@@ -329,6 +330,7 @@ mod tests {
                 REF_TABLE,
                 &StorageKey::for_surrogate(REF_ROW),
                 &nodedb_types::json_to_msgpack(&doc).unwrap(),
+                1,
             )
             .expect("seed reference row without a status column");
         let config = make_config(&["OPEN", "ADJUSTING"]);

@@ -1,132 +1,84 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Plain columnar profile temporal-purge.
+//! Plain columnar profile history purge.
 //!
-//! Row-level audit purge on bitemporal plain-columnar collections.
-//! Lists every row version (flushed segments and live memtable), groups
-//! them by primary key, and marks the versions no read at or after the
-//! cutoff resolves to in the engine's per-segment delete bitmap. The
-//! millisecond retention horizon converts to the last ordinal of that
-//! millisecond (`ms_to_ordinal_upper`), as the document and edge purges
-//! convert it.
+//! Every plain-columnar and spatial collection keeps row versions: a row an
+//! overwrite or a delete ended records `sys_to`, the ending write's
+//! ordinal. A purge at horizon `H` removes every version with
+//! `sys_to <= H`: a later version or a delete replaced it at or below the
+//! horizon, so no read at or above the horizon sees it. The newest version
+//! at or below the horizon stays, so `AS OF` reads at or after the horizon
+//! still resolve each key. A key whose last version ended at or below the
+//! horizon loses its whole history, the bitemporal tombstone included.
+//! Versions above the horizon are never touched.
 //!
-//! Per PK, the head is the newest version at or below the cutoff: the one a
-//! read at the cutoff resolves to. Every older version goes. The head stays,
-//! so "AS OF" reads at or after the cutoff still resolve each key. A head
-//! that is a tombstone resolves to absent, so it goes with its whole
-//! history. Versions above the cutoff are never touched.
-//!
-//! A version's row index is its physical position in its segment or in the
-//! memtable: the index the delete bitmap marks.
+//! The bitemporal `audit_retain_ms` retention runs the same rule. Its
+//! millisecond cutoff converts to the last ordinal of that millisecond
+//! (`ms_to_ordinal_upper`), as the document and edge purges convert it.
 
-use std::collections::HashMap;
-
-use nodedb_columnar::MutationEngine;
 use nodedb_types::{DatabaseId, TenantId};
 
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::handlers::columnar_read::versions::{RowVersion, VersionColumns};
 
 impl CoreLoop {
-    /// See module docs. Returns the number of rows tombstoned in
-    /// per-segment delete bitmaps. No WAL records are appended here; the
-    /// caller is responsible for the `RecordType::TemporalPurge` audit
-    /// record that covers the batch.
+    /// Remove every version of the columnar collection `collection` whose
+    /// `sys_to` is at or below the ordinal `horizon`. Returns the number of
+    /// rows purged. A collection with no engine on this core purges nothing.
     ///
-    /// `Err` when a segment or memtable row does not read, or a row carries
-    /// no system time. Nothing is marked then.
+    /// The purge reads and rewrites stamps only, never a segment. No WAL
+    /// record is appended here: the caller owns the audit record that
+    /// covers the batch.
+    pub(in crate::data::executor) fn purge_columnar_versions_below(
+        &mut self,
+        database_id: DatabaseId,
+        tid: TenantId,
+        collection: &str,
+        horizon: i64,
+    ) -> usize {
+        let key = (database_id, tid, collection.to_string());
+        let Some(engine) = self.columnar_engines.get_mut(&key) else {
+            return 0;
+        };
+        let purged = engine.purge_versions_below(horizon);
+        if purged > 0 {
+            self.checkpoint_coordinator.mark_dirty("columnar", purged);
+            // The removed versions leave the collection's history charge.
+            self.recharge_columnar_history(&key);
+        }
+        purged
+    }
+
+    /// The `audit_retain_ms` retention of a bitemporal plain-columnar
+    /// collection: [`Self::purge_columnar_versions_below`] at the last
+    /// ordinal of millisecond `cutoff_system_ms`. A collection that is not
+    /// bitemporal has no audit retention and purges nothing here.
     pub(super) fn plain_columnar_purge(
         &mut self,
         database_id: DatabaseId,
         tid: TenantId,
         collection: &str,
         cutoff_system_ms: i64,
-    ) -> crate::Result<usize> {
+    ) -> usize {
         let key = (database_id, tid, collection.to_string());
-        let victims_per_seg = {
-            let Some(engine) = self.columnar_engines.get(&key) else {
-                return Ok(0);
-            };
-            if !engine.schema().is_bitemporal() {
-                return Ok(0);
-            }
-            let columns = VersionColumns::of(engine).ok_or_else(|| crate::Error::Storage {
-                engine: "columnar".into(),
-                detail: "bitemporal collection without primary key columns".into(),
-            })?;
-            let versions = self.columnar_row_versions(&key, engine, &columns)?;
-            purge_victims(
-                engine,
-                versions,
-                nodedb_types::ms_to_ordinal_upper(cutoff_system_ms),
-            )
-        };
-        if victims_per_seg.is_empty() {
-            return Ok(0);
+        let bitemporal = self
+            .columnar_engines
+            .get(&key)
+            .is_some_and(|engine| engine.schema().is_bitemporal());
+        if !bitemporal {
+            return 0;
         }
-
-        let engine_mut =
-            self.columnar_engines
-                .get_mut(&key)
-                .ok_or_else(|| crate::Error::Internal {
-                    detail: format!("columnar engine for '{collection}' is gone mid-purge"),
-                })?;
-        let mut total = 0usize;
-        for (seg_id, mut row_indices) in victims_per_seg {
-            row_indices.sort_unstable();
-            row_indices.dedup();
-            total += row_indices.len();
-            engine_mut
-                .delete_bitmap_mut(seg_id)
-                .mark_deleted_batch(&row_indices);
-        }
-        Ok(total)
+        self.purge_columnar_versions_below(
+            database_id,
+            tid,
+            collection,
+            nodedb_types::ms_to_ordinal_upper(cutoff_system_ms),
+        )
     }
-}
-
-/// The row indices to tombstone, per segment: every version older than its
-/// PK's head at the ordinal `cutoff`, and the head itself when it is a
-/// tombstone. A version the delete bitmap already marks reads as absent, so
-/// it is neither a head nor a victim.
-fn purge_victims(
-    engine: &MutationEngine,
-    versions: Vec<RowVersion>,
-    cutoff: i64,
-) -> HashMap<u64, Vec<u32>> {
-    let candidates: Vec<&RowVersion> = versions
-        .iter()
-        .filter(|v| v.sys_ts <= cutoff)
-        .filter(|v| {
-            !engine
-                .delete_bitmap(v.seg_id)
-                .is_some_and(|bm| bm.is_deleted(v.row_idx))
-        })
-        .collect();
-    let mut heads: HashMap<&[u8], (i64, bool)> = HashMap::new();
-    for v in &candidates {
-        let slot = heads
-            .entry(v.pk_bytes.as_slice())
-            .or_insert((v.sys_ts, v.closed));
-        if v.sys_ts >= slot.0 {
-            *slot = (v.sys_ts, v.closed);
-        }
-    }
-
-    let mut victims_per_seg: HashMap<u64, Vec<u32>> = HashMap::new();
-    for v in &candidates {
-        let Some(&(head_ts, head_closed)) = heads.get(v.pk_bytes.as_slice()) else {
-            continue;
-        };
-        if v.sys_ts < head_ts || head_closed {
-            victims_per_seg.entry(v.seg_id).or_default().push(v.row_idx);
-        }
-    }
-    victims_per_seg
 }
 
 #[cfg(test)]
 mod tests {
-    use nodedb_columnar::pk_index::encode_pk;
+    use nodedb_columnar::{MutationEngine, VersionCut};
     use nodedb_types::columnar::{ColumnDef, ColumnType, ColumnarSchema};
     use nodedb_types::value::Value;
 
@@ -157,38 +109,44 @@ mod tests {
         ]
     }
 
-    /// A tombstoned memtable row ahead of the superseded version does not
-    /// shift the index the purge marks.
+    fn key() -> (DatabaseId, TenantId, String) {
+        (DatabaseId::DEFAULT, TenantId::new(1), "bt".to_string())
+    }
+
+    /// `(id, _ts_system)` of every version a read at `cut` sees.
+    fn seen(core: &CoreLoop, cut: VersionCut) -> Vec<(i64, i64)> {
+        core.columnar_engines
+            .get(&key())
+            .expect("engine")
+            .scan_memtable_versions(cut)
+            .map(|row| match row.expect("read").2.as_slice() {
+                [Value::Integer(ts), _, _, Value::Integer(id)] => (*id, *ts),
+                other => panic!("unexpected cells {other:?}"),
+            })
+            .collect()
+    }
+
+    /// The purge removes the version superseded at or below the horizon,
+    /// and a key deleted at or below it, and keeps the head.
     #[test]
-    fn the_purge_marks_the_physical_row_behind_a_deleted_row() {
+    fn the_purge_removes_superseded_and_deleted_versions() {
         let dir = tempfile::tempdir().expect("tempdir");
         let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
         let mut engine = MutationEngine::new("bt".to_string(), schema());
-        // Physical rows: 0 = id 9 (deleted below), 1 = id 1 at 10, 2 = id 1 at 50.
-        engine.insert(&version(at_ms(5), 9)).expect("insert");
-        engine.insert(&version(at_ms(10), 1)).expect("insert");
-        engine.insert(&version(at_ms(50), 1)).expect("insert");
-        engine.delete(&Value::Integer(9)).expect("delete");
-        let memtable_seg = engine.memtable_segment_id();
-        let key = (DatabaseId::DEFAULT, TenantId::new(1), "bt".to_string());
-        core.columnar_engines.insert(key.clone(), engine);
+        engine.insert(&version(at_ms(5), 9), 0).expect("insert");
+        engine.insert(&version(at_ms(10), 1), 0).expect("insert");
+        engine.insert(&version(at_ms(50), 1), 0).expect("insert");
+        engine.delete(&Value::Integer(9), at_ms(6)).expect("delete");
+        core.columnar_engines.insert(key(), engine);
 
-        let purged = core
-            .plain_columnar_purge(key.0, key.1, "bt", 100)
-            .expect("purge");
+        let purged = core.plain_columnar_purge(key().0, key().1, "bt", 100);
 
-        assert_eq!(purged, 1, "the version of id 1 at 10 is superseded");
-        let engine = core.columnar_engines.get(&key).expect("engine");
-        let bitmap = engine.delete_bitmap(memtable_seg).expect("bitmap");
-        assert!(bitmap.is_deleted(0), "the deleted row stays deleted");
-        assert!(bitmap.is_deleted(1), "the superseded version is marked");
-        assert!(!bitmap.is_deleted(2), "the latest version stays live");
-        assert_eq!(
-            engine
-                .pk_index()
-                .get(&encode_pk(&Value::Integer(1)))
-                .map(|loc| loc.row_index),
-            Some(2)
+        assert_eq!(purged, 2, "id 1 at 10 and the deleted id 9");
+        assert_eq!(seen(&core, VersionCut::All), vec![(1, at_ms(50))]);
+        assert_eq!(seen(&core, VersionCut::Current), vec![(1, at_ms(50))]);
+        assert!(
+            seen(&core, VersionCut::At(at_ms(20))).is_empty(),
+            "no version below the horizon stays but the head"
         );
     }
 
@@ -200,24 +158,23 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
         let mut engine = MutationEngine::new("bt".to_string(), schema());
-        // Physical rows: 0 = id 1 in ms 100, 1 = id 1 in ms 101, 2 = id 1 in ms 102.
-        engine.insert(&version(at_ms(100), 1)).expect("insert");
-        engine.insert(&version(at_ms(101), 1)).expect("insert");
-        engine.insert(&version(at_ms(102), 1)).expect("insert");
-        let memtable_seg = engine.memtable_segment_id();
-        let key = (DatabaseId::DEFAULT, TenantId::new(1), "bt".to_string());
-        core.columnar_engines.insert(key.clone(), engine);
+        engine.insert(&version(at_ms(100), 1), 0).expect("insert");
+        engine.insert(&version(at_ms(101), 1), 0).expect("insert");
+        engine.insert(&version(at_ms(102), 1), 0).expect("insert");
+        core.columnar_engines.insert(key(), engine);
 
-        let purged = core
-            .plain_columnar_purge(key.0, key.1, "bt", 101)
-            .expect("purge");
+        let purged = core.plain_columnar_purge(key().0, key().1, "bt", 101);
 
         assert_eq!(purged, 1, "only the version older than the head goes");
-        let engine = core.columnar_engines.get(&key).expect("engine");
-        let bitmap = engine.delete_bitmap(memtable_seg).expect("bitmap");
-        assert!(bitmap.is_deleted(0));
-        assert!(!bitmap.is_deleted(1), "the head inside ms 101 stays");
-        assert!(!bitmap.is_deleted(2), "a version after the horizon stays");
+        assert_eq!(
+            seen(&core, VersionCut::All),
+            vec![(1, at_ms(101)), (1, at_ms(102))]
+        );
+        assert_eq!(
+            seen(&core, VersionCut::At(at_ms(101))),
+            vec![(1, at_ms(101))],
+            "the head inside ms 101 answers a read at the horizon"
+        );
     }
 
     /// A key a delete closed below the horizon loses its whole history,
@@ -236,33 +193,70 @@ mod tests {
                 Value::Integer(id),
             ]
         };
-        // Physical rows: 0 = id 1 in ms 10, 1 = id 1 closed in ms 20,
-        // 2 = id 2 in ms 10, 3 = id 2 closed in ms 300.
-        engine.insert(&version(at_ms(10), 1)).expect("insert");
-        engine.close(&tombstone(at_ms(20), 1), None).expect("close");
-        engine.insert(&version(at_ms(10), 2)).expect("insert");
+        engine.insert(&version(at_ms(10), 1), 0).expect("insert");
         engine
-            .close(&tombstone(at_ms(300), 2), None)
+            .close(&tombstone(at_ms(20), 1), None, 0)
             .expect("close");
-        let memtable_seg = engine.memtable_segment_id();
-        let key = (DatabaseId::DEFAULT, TenantId::new(1), "bt".to_string());
-        core.columnar_engines.insert(key.clone(), engine);
+        engine.insert(&version(at_ms(10), 2), 0).expect("insert");
+        engine
+            .close(&tombstone(at_ms(300), 2), None, 0)
+            .expect("close");
+        core.columnar_engines.insert(key(), engine);
 
-        let purged = core
-            .plain_columnar_purge(key.0, key.1, "bt", 100)
-            .expect("purge");
+        let purged = core.plain_columnar_purge(key().0, key().1, "bt", 100);
 
         assert_eq!(purged, 2, "id 1's version and tombstone go");
-        let engine = core.columnar_engines.get(&key).expect("engine");
-        let bitmap = engine.delete_bitmap(memtable_seg).expect("bitmap");
-        assert!(
-            bitmap.is_deleted(0) && bitmap.is_deleted(1),
-            "id 1's whole history"
+        assert_eq!(
+            seen(&core, VersionCut::All),
+            vec![(2, at_ms(10)), (2, at_ms(300))],
+            "id 2's head and its later tombstone stay"
         );
-        assert!(!bitmap.is_deleted(2), "id 2's head at the horizon stays");
-        assert!(
-            !bitmap.is_deleted(3),
-            "id 2's tombstone after the horizon stays"
+        assert_eq!(
+            seen(&core, VersionCut::At(at_ms(150))),
+            vec![(2, at_ms(10))]
         );
+        let engine = core.columnar_engines.get(&key()).expect("engine");
+        assert_eq!(
+            engine.closed_location(&nodedb_columnar::pk_index::encode_pk(&Value::Integer(1))),
+            None,
+            "the purged tombstone leaves the closed-key index"
+        );
+    }
+
+    /// A collection that is not bitemporal keeps versions too. The horizon
+    /// purge removes its superseded versions; the audit retention leaves it
+    /// alone.
+    #[test]
+    fn a_plain_collection_purges_at_the_horizon_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        let schema = ColumnarSchema::new(vec![
+            ColumnDef::required("id", ColumnType::Int64).with_primary_key(),
+            ColumnDef::required("v", ColumnType::Int64),
+        ])
+        .expect("valid");
+        let mut engine = MutationEngine::new("bt".to_string(), schema);
+        engine
+            .insert(&[Value::Integer(1), Value::Integer(10)], 10)
+            .expect("insert");
+        engine
+            .insert(&[Value::Integer(1), Value::Integer(20)], 20)
+            .expect("overwrite");
+        core.columnar_engines.insert(key(), engine);
+
+        assert_eq!(
+            core.plain_columnar_purge(key().0, key().1, "bt", i64::MAX / 2),
+            0
+        );
+        assert_eq!(
+            core.purge_columnar_versions_below(key().0, key().1, "bt", 19),
+            0
+        );
+        assert_eq!(
+            core.purge_columnar_versions_below(key().0, key().1, "bt", 20),
+            1
+        );
+        let engine = core.columnar_engines.get(&key()).expect("engine");
+        assert_eq!(engine.scan_memtable_versions(VersionCut::All).count(), 1);
     }
 }

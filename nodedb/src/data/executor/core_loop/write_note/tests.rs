@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! `CoreLoop` fixtures shared by the write-version-index tests and by other
+//! `CoreLoop` fixtures shared by the write-note tests and by other
 //! executor test modules (`make_core_with_dir` / `make_default_task` are
 //! `pub` for exactly that reason).
 
@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use nodedb_bridge::buffer::RingBuffer;
 use nodedb_physical::physical_plan::DocumentOp;
-use nodedb_types::{DatabaseId, QualifiedCollection, Surrogate, TenantId, WriteVersion};
+use nodedb_types::{DatabaseId, QualifiedCollection, Surrogate, TenantId};
 
 use crate::bridge::dispatch::{BridgeRequest, BridgeResponse};
 use crate::bridge::envelope::{PhysicalPlan, Priority, Request, Response};
@@ -81,7 +81,7 @@ pub(crate) fn make_request(plan: PhysicalPlan) -> Request {
         wal_lsn: None,
         resolved_now_ms: None,
         commit_hlc: None,
-        entry_version: None,
+        system_ordinal: None,
         admission: crate::bridge::envelope::Admission::Admitted,
     }
 }
@@ -106,38 +106,12 @@ pub(crate) fn wal_task(lsn: u64) -> ExecutionTask {
     ExecutionTask::with_wal_lsn(make_request(point_get()), Some(Lsn::new(lsn)))
 }
 
-/// An `ExecutionTask` carrying WAL LSN `lsn` that applies the data-group
-/// entry at `entry`.
-pub(crate) fn entry_task(lsn: u64, entry: WriteVersion) -> ExecutionTask {
-    ExecutionTask::with_wal_lsn(
-        Request {
-            entry_version: Some(crate::bridge::envelope::AppliedEntry::unstamped(entry)),
-            ..make_request(point_get())
-        },
-        Some(Lsn::new(lsn)),
-    )
-}
-
 /// An `ExecutionTask` homing to `vshard_id`, carrying no WAL LSN.
 pub(crate) fn task_with_vshard(vshard_id: VShardId) -> ExecutionTask {
     ExecutionTask::new(Request {
         vshard_id,
         ..make_request(point_get())
     })
-}
-
-/// The version a write at `lsn` records on a vShard no entry ever wrote:
-/// a single-node write.
-pub(crate) fn local(lsn: u64) -> WriteVersion {
-    WriteVersion::local_after(WriteVersion::ZERO, lsn)
-}
-
-/// The vShard a replayed write of `collection` in `db` records under when no
-/// registered record stamp names one: the collection's home vShard.
-pub(crate) fn replay_home(db: DatabaseId, collection: &str) -> VShardId {
-    nodedb_types::CollectionKey::from_qualified_str(db, collection)
-        .unwrap_or_else(|_| nodedb_types::CollectionKey::from_bare(db, collection))
-        .vshard()
 }
 
 /// Put `{a: value}` as document `document_id` of `collection` under `task`.

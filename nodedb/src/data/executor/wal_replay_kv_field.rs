@@ -16,7 +16,7 @@ use tracing::warn;
 
 use super::core_loop::CoreLoop;
 use super::handlers::kv::field_compute::merge_field_updates;
-use crate::data::executor::core_loop::write_index::KeyRepr;
+use crate::data::executor::core_loop::write_note::KeyRepr;
 
 impl CoreLoop {
     /// Decode + tombstone-gate + replay one `kv_field_set` WAL record.

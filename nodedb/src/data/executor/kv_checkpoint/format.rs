@@ -16,9 +16,8 @@ use super::index_format::KvCheckpointIndexes;
 /// that suppresses the records which would have corrected them.
 ///
 /// The secondary index content a file carries is keyed by
-/// `engine::kv::index::kv_index_key`; a change to that encoding changes
-/// this version.
-pub(crate) const KV_CKPT_FORMAT_VERSION: u16 = 5;
+/// `engine::kv::index::kv_index_key`.
+pub(crate) const KV_CKPT_FORMAT_VERSION: u16 = 1;
 
 /// Names the live generation. Writing this file is what publishes a checkpoint.
 #[derive(
@@ -71,6 +70,48 @@ pub(crate) struct KvCheckpointEntry {
     /// restored row would be invisible to every bitmap intersection that joins
     /// KV against the vector / FTS / spatial engines.
     pub surrogate: u32,
+    /// System-time ordinal of the write that set the row's value. A restore
+    /// installs it verbatim, so a read at any cut answers what it answered
+    /// before the restart.
+    pub sys_from: i64,
+}
+
+/// One ended version of a KV row, visible at ordinals `[sys_from, sys_to)`.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
+pub(crate) struct KvCheckpointVersion {
+    pub sys_from: i64,
+    pub sys_to: i64,
+    /// Value bytes the version held.
+    pub value: Vec<u8>,
+    /// Absolute expiry instant in ms the version held, `0` for no TTL.
+    pub expire_at_ms: u64,
+    /// Bound row identity the version held.
+    pub surrogate: u32,
+}
+
+/// Every ended version of one key, oldest first.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
+pub(crate) struct KvCheckpointKeyHistory {
+    pub key: Vec<u8>,
+    pub versions: Vec<KvCheckpointVersion>,
 }
 
 /// One collection's rows within a generation.
@@ -93,6 +134,9 @@ pub(crate) struct KvCheckpointFile {
     /// The LSN lives in the manifest, not here — see the module docs for why a
     /// per-file stamp is unsound.
     pub entries: Vec<KvCheckpointEntry>,
+    /// Every ended version of every key, including keys no live row holds:
+    /// a read at an earlier cut answers from them after a restart.
+    pub history: Vec<KvCheckpointKeyHistory>,
     /// Every index registration on the collection, with its content.
     ///
     /// In the same file as the rows, deliberately: a registration's only other

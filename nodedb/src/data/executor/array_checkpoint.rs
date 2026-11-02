@@ -253,6 +253,12 @@ mod tests {
         }
 
         fn send(&mut self, op: ArrayOp) -> Response {
+            self.send_entry(op, None)
+        }
+
+        /// Send `op` as a write that stamps `system_ordinal`, or as a local
+        /// request that stamps a fresh ordinal when it is `None`.
+        fn send_entry(&mut self, op: ArrayOp, system_ordinal: Option<i64>) -> Response {
             let id = self.next_id;
             self.next_id += 1;
             self.req_tx
@@ -275,7 +281,7 @@ mod tests {
                     wal_lsn: None,
                     resolved_now_ms: None,
                     commit_hlc: None,
-                    entry_version: None,
+                    system_ordinal,
                     admission: crate::bridge::envelope::Admission::Admitted,
                 }))
                 .expect("push request");
@@ -313,16 +319,22 @@ mod tests {
                 .observe_outcome_floor(Lsn::new(lsn));
         }
 
-        /// `put` with an explicit system time, for bitemporal versions.
-        fn put_at(&mut self, id: &ArrayId, x: i64, y: i64, v: i64, sys_ms: i64, wal_lsn: u64) {
-            let cells = vec![cell(x, y, v, sys_ms)];
-            let r = self.send(ArrayOp::Put {
-                array_id: id.clone(),
-                cells_msgpack: zerompk::to_msgpack_vec(&cells).expect("encode cells"),
-                wal_lsn,
-                provenance: None,
-                vshard_id: 0,
-            });
+        /// `put` at an explicit system-time ordinal, for bitemporal
+        /// versions: the put applies as the data-group entry at log index
+        /// `wal_lsn`, whose leader stamped `sys`. The apply raises it above a
+        /// newer stored version.
+        fn put_at(&mut self, id: &ArrayId, x: i64, y: i64, v: i64, sys: i64, wal_lsn: u64) {
+            let cells = vec![cell(x, y, v, sys)];
+            let r = self.send_entry(
+                ArrayOp::Put {
+                    array_id: id.clone(),
+                    cells_msgpack: zerompk::to_msgpack_vec(&cells).expect("encode cells"),
+                    wal_lsn,
+                    provenance: None,
+                    vshard_id: 0,
+                },
+                Some(sys),
+            );
             assert_eq!(r.status, Status::Ok, "array put: {r:?}");
         }
 
@@ -527,6 +539,7 @@ mod tests {
 
         let payload = encode_put_with_version(&ArrayPutPayload {
             array_id: id.clone(),
+            vshard_id: 0,
             cells: vec![ArrayPutCell {
                 coord: vec![CoordValue::Int64(9), CoordValue::Int64(9)],
                 attrs: vec![CellValue::Int64(40)],
@@ -634,6 +647,7 @@ mod tests {
         use crate::engine::array::wal::{ArrayPutPayload, encode_put_with_version};
         let payload = encode_put_with_version(&ArrayPutPayload {
             array_id: id.clone(),
+            vshard_id: 0,
             cells: vec![cell(x, y, v, sys_ms)],
             provenance: None,
         })
@@ -817,7 +831,7 @@ mod tests {
         let dropped = before
             .core
             .array_engine
-            .temporal_purge(TenantId::new(TID), DatabaseId::DEFAULT, &id.name, 250)
+            .purge_array_versions_below(TenantId::new(TID), DatabaseId::DEFAULT, &id.name, 250)
             .expect("purge");
         assert!(dropped >= 1, "the purge dropped the superseded versions");
         assert!(matches!(ceiling(&before, 249), CeilingResult::NotFound));

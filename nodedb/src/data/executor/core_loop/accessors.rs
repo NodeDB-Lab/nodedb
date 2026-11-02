@@ -246,7 +246,7 @@ impl CoreLoop {
             .get(&key)
             .map(|reg| {
                 let range = nodedb_types::timeseries::TimeRange::new(0, i64::MAX);
-                reg.query_partitions(&range)
+                reg.query_partitions(&range, nodedb_columnar::VersionCut::Current)
                     .iter()
                     .map(|e| e.meta.row_count)
                     .sum()

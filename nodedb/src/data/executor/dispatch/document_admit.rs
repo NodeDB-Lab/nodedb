@@ -46,6 +46,17 @@ pub(super) fn is_document_write(op: &DocumentOp) -> bool {
     )
 }
 
+/// Whether the op adds or removes stored document versions or index entry
+/// versions: every write, plus `TRUNCATE` (tombstones) and `DROP INDEX`
+/// (removes the field's entries).
+pub(super) fn changes_document_history(op: &DocumentOp) -> bool {
+    is_document_write(op)
+        || matches!(
+            op,
+            DocumentOp::Truncate { .. } | DocumentOp::DropIndex { .. }
+        )
+}
+
 /// Resolve a scan's temporal slice.
 ///
 /// The slice differs ONLY in the fetch stage; sort, computed columns, window
@@ -62,10 +73,19 @@ pub(super) fn doc_scan_mode(
         DocScanMode::AsOf {
             system_as_of: system_time.as_of_ordinal(),
             valid_at_ms,
+            merge_overlay: merges_overlay(system_time, valid_at_ms),
         }
     } else {
         DocScanMode::Current
     }
+}
+
+/// True when a read at `system_time` folds the reading transaction's
+/// staged writes on top of the versions it selects: a current read or a
+/// transaction snapshot read, with no valid-time point. Staged bodies carry
+/// no valid-time history, so a valid-time read never merges them.
+pub(super) fn merges_overlay(system_time: &SystemTimeScope, valid_at_ms: Option<i64>) -> bool {
+    system_time.merges_txn_overlay() && valid_at_ms.is_none()
 }
 
 /// The error a single-cut read answers `AS OF SYSTEM TIME NULL` with.
@@ -84,9 +104,9 @@ pub(super) fn all_versions_refused(reads: &str) -> crate::bridge::envelope::Erro
 pub(super) fn point_cut(system_time: &SystemTimeScope) -> Option<Option<i64>> {
     match system_time {
         SystemTimeScope::Current => Some(None),
-        SystemTimeScope::AsOf(_) | SystemTimeScope::Pinned { .. } => {
-            Some(system_time.as_of_ordinal())
-        }
+        SystemTimeScope::AsOf(_)
+        | SystemTimeScope::Pinned { .. }
+        | SystemTimeScope::TxnSnapshot { .. } => Some(system_time.as_of_ordinal()),
         SystemTimeScope::AllVersions => None,
     }
 }
@@ -102,12 +122,14 @@ mod tests {
         let DocScanMode::AsOf {
             system_as_of,
             valid_at_ms,
+            merge_overlay,
         } = doc_scan_mode(&SystemTimeScope::AsOf(42), None)
         else {
             panic!("an AS OF scan reads a temporal slice");
         };
         assert_eq!(system_as_of, Some(nodedb_types::ms_to_ordinal_upper(42)));
         assert_eq!(valid_at_ms, None);
+        assert!(!merge_overlay);
         let pinned = SystemTimeScope::Pinned {
             ordinal: 42_000_000_007,
             cut_marker: 0,
@@ -117,6 +139,32 @@ mod tests {
         };
         assert_eq!(system_as_of, Some(42_000_000_007));
         assert!(doc_scan_mode(&SystemTimeScope::Current, None).is_current());
+    }
+
+    /// A transaction snapshot scan reads at its ordinal and merges the
+    /// transaction's staged writes. A pinned scan never merges them.
+    #[test]
+    fn a_txn_snapshot_scan_reads_at_its_ordinal_and_merges_staged_writes() {
+        let snapshot = SystemTimeScope::TxnSnapshot {
+            ordinal: 42_000_000_009,
+            cut_marker: 3,
+        };
+        let mode = doc_scan_mode(&snapshot, None);
+        assert!(mode.merges_txn_overlay());
+        let DocScanMode::AsOf { system_as_of, .. } = mode else {
+            panic!("a snapshot scan reads at an ordinal");
+        };
+        assert_eq!(system_as_of, Some(42_000_000_009));
+        let pinned = SystemTimeScope::Pinned {
+            ordinal: 42_000_000_009,
+            cut_marker: 3,
+        };
+        assert!(!doc_scan_mode(&pinned, None).merges_txn_overlay());
+        assert!(doc_scan_mode(&SystemTimeScope::Current, None).merges_txn_overlay());
+        assert!(!doc_scan_mode(&snapshot, Some(5)).merges_txn_overlay());
+        assert_eq!(point_cut(&snapshot), Some(Some(42_000_000_009)));
+        assert!(merges_overlay(&snapshot, None));
+        assert!(!merges_overlay(&pinned, None));
     }
 
     #[test]

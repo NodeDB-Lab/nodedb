@@ -98,9 +98,8 @@ pub struct CoreLoop {
     /// Vector dimension declared by `CREATE VECTOR INDEX ... DIM <n>`, per
     /// index. Every vector written to the field is checked against it, so a
     /// pipeline emitting the wrong embedding width is rejected at the write
-    /// rather than discovered as poor search results. Absent = never declared
-    /// (a pre-existing index, or one created before DIM was enforced), in
-    /// which case the index adopts the width of the first vector it sees.
+    /// rather than discovered as poor search results. Absent = the index
+    /// declared no DIM, and it adopts the width of the first vector it sees.
     /// Key: `(DatabaseId, TenantId, collection_key)` — same shape as `vector_params`.
     pub(in crate::data::executor) declared_dims: HashMap<(DatabaseId, TenantId, String), usize>,
 
@@ -237,6 +236,14 @@ pub struct CoreLoop {
     pub(in crate::data::executor) columnar_memtable_mem:
         HashMap<(DatabaseId, TenantId, String), nodedb_mem::ReservationToken>,
 
+    /// Live charge of the bytes each tenant's document versions and index
+    /// entry versions hold, history included, to the document engine's
+    /// budget. Recharged via `recharge_document_history` after every
+    /// document write, so the charge tracks the store's history counter.
+    /// Key: (DatabaseId, TenantId).
+    pub(in crate::data::executor) document_history_mem:
+        HashMap<(DatabaseId, TenantId), nodedb_mem::ReservationToken>,
+
     /// Per-collection columnar mutation engines for plain/spatial profiles.
     /// Uses `nodedb-columnar`'s `MutationEngine` with full INSERT/UPDATE/DELETE.
     /// Key: (DatabaseId, TenantId, collection).
@@ -278,11 +285,11 @@ pub struct CoreLoop {
     /// Per-collection series catalogs — the only source of `SeriesId`.
     ///
     /// The catalog resolves hash collisions, so two distinct `SeriesKey`s never
-    /// share an ID. It must live beside `ts_last_value_caches` and be torn down
-    /// with it: those two plus the memtable's per-series row counts are the only
-    /// consumers of `SeriesId`, they are all in-memory and per-collection, and a
-    /// catalog that outlived them would hand out IDs for series they no longer
-    /// hold. Key: (DatabaseId, TenantId, collection).
+    /// share an ID. Every stored row carries its id in `_ts_series`, so the
+    /// catalog is durable (`series.catalog`) and only grows: the id a key
+    /// gets depends on every key held, so only a replicated drop or purge
+    /// removes a catalog, and every replica gives every key the same id.
+    /// Key: (DatabaseId, TenantId, collection).
     pub(in crate::data::executor) ts_series_catalogs:
         HashMap<(DatabaseId, TenantId, String), nodedb_types::timeseries::SeriesCatalog>,
 
@@ -293,9 +300,13 @@ pub struct CoreLoop {
         crate::engine::timeseries::partition_registry::PartitionRegistry,
     >,
 
-    /// Aside partition directories of committed timeseries truncates whose
-    /// removal failed at batch finalize; the maintenance tick retries them.
-    pub(in crate::data::executor) ts_truncate_backlog: Vec<std::path::PathBuf>,
+    /// The newest TRUNCATE ordinal this process applied, per timeseries
+    /// collection. A truncate resets the collection's continuous aggregates,
+    /// so a read below it cannot use them. Kept apart from the partition
+    /// ends, which retention can remove. A transaction snapshot never
+    /// outlives the process, so memory is enough.
+    /// Key: (DatabaseId, TenantId, collection).
+    pub(in crate::data::executor) ts_newest_truncate: HashMap<(DatabaseId, TenantId, String), i64>,
 
     /// Continuous aggregate manager for this core. Fires on memtable flush.
     pub(in crate::data::executor) continuous_agg_mgr:
@@ -462,9 +473,13 @@ pub struct CoreLoop {
     pub(in crate::data::executor) ts_resolve_holds:
         HashMap<(DatabaseId, TenantId, String), std::collections::HashSet<crate::types::TxnId>>,
 
-    /// Per-core write-version index (per key + per collection, per vShard),
-    /// advanced by every committed write-apply. Type + GC in `write_index/`.
-    pub(in crate::data::executor) write_index: super::write_index::WriteVersionIndex,
+    /// The stamps of the WAL records the replay arms apply: every record
+    /// during restart replay, the installed record during a committed redo
+    /// install.
+    pub(in crate::data::executor) record_stamps: super::write_note::RecordStamps,
+    /// The newest system-time ordinal each collection slice and vShard
+    /// holds, cached from storage. Transaction commits validate against it.
+    pub(in crate::data::executor) newest_ordinals: super::newest_ordinals::NewestOrdinals,
 
     /// The version keys the current record's apply forces.
     pub(in crate::data::executor) apply_scope: super::apply_scope::ApplyScope,

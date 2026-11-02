@@ -183,6 +183,7 @@ mod tests {
                         value: e.value,
                         expire_at_ms: e.expire_at_ms,
                         surrogate: e.surrogate.0,
+                        sys_from: e.sys_from,
                     })
                     .collect()
             })
@@ -190,6 +191,10 @@ mod tests {
         KvCheckpointFile {
             format_version: KV_CKPT_FORMAT_VERSION,
             entries,
+            history: coll
+                .table
+                .map(super::super::history_codec::export_history)
+                .unwrap_or_default(),
             indexes: export_collection_indexes(engine, coll.table_key),
         }
     }

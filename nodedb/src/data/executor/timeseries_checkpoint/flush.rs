@@ -164,7 +164,7 @@ mod tests {
                     wal_lsn: wal_lsn.map(crate::types::Lsn::new),
                     resolved_now_ms: None,
                     commit_hlc: None,
-                    entry_version: None,
+                    system_ordinal: None,
                     admission: crate::bridge::envelope::Admission::Admitted,
                 }))
                 .expect("push request");
@@ -201,6 +201,11 @@ mod tests {
         /// partitions and the live memtable together — so this asserts the rows
         /// are QUERYABLE, not merely that a file exists.
         fn scan_hosts(&mut self) -> Vec<String> {
+            decode_hosts(&self.scan_at(nodedb_types::SystemTimeScope::Current))
+        }
+
+        /// The raw payload of an unbounded scan at `system_time`.
+        fn scan_at(&mut self, system_time: nodedb_types::SystemTimeScope) -> Vec<u8> {
             let r = self.send(
                 PhysicalPlan::Timeseries(TimeseriesOp::Scan {
                     collection: QualifiedCollection::new(DatabaseId::DEFAULT, COLL),
@@ -214,7 +219,7 @@ mod tests {
                     aggregates: Vec::new(),
                     gap_fill: String::new(),
                     rls_filters: Vec::new(),
-                    system_time: nodedb_types::SystemTimeScope::Current,
+                    system_time,
                     valid_at_ms: None,
                     computed_columns: Vec::new(),
                     having: Vec::new(),
@@ -224,7 +229,7 @@ mod tests {
                 None,
             );
             assert_eq!(r.status, Status::Ok, "ts scan: {r:?}");
-            decode_hosts(r.payload.as_bytes())
+            r.payload.as_bytes().to_vec()
         }
     }
 
@@ -294,6 +299,53 @@ mod tests {
             after.scan_hosts(),
             vec!["a".to_string(), "b".to_string()],
             "every checkpointed row must come back from its on-disk partition"
+        );
+    }
+
+    /// A read pinned at a system-time cut sees exactly the batches applied
+    /// at or below it, from the memtable and, after a checkpoint and a
+    /// restart, from the flushed partition. The restart folds the flushed
+    /// system time into the clock, and a plain collection's rows hide the
+    /// stored ordinal.
+    #[test]
+    fn a_pinned_cut_sees_the_batches_at_or_below_it_across_a_restart() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut before = Core::open_at(dir.path());
+        before.ingest("a", 1.0, 1_000, 10);
+        let cut = before.core.hlc.peek();
+        before.ingest("b", 2.0, 2_000, 20);
+        let pinned = nodedb_types::SystemTimeScope::Pinned {
+            ordinal: cut,
+            cut_marker: 0,
+        };
+        assert_eq!(decode_hosts(&before.scan_at(pinned)), vec!["a".to_string()]);
+        assert_eq!(
+            before.scan_hosts(),
+            vec!["a".to_string(), "b".to_string()],
+            "a current read sees every batch"
+        );
+        observe_floor(&mut before, 20);
+        before
+            .core
+            .checkpoint_timeseries_memtables()
+            .expect("flush to a writable dir must succeed");
+        drop(before);
+
+        let mut after = Core::open_at(dir.path());
+        after
+            .core
+            .load_ts_registries()
+            .expect("valid partitions must load");
+        assert!(
+            after.core.hlc.peek() > cut,
+            "the flushed system time folded into the clock"
+        );
+        let payload = after.scan_at(pinned);
+        assert_eq!(decode_hosts(&payload), vec!["a".to_string()]);
+        let json = crate::data::executor::response_codec::decode_payload_to_json(&payload);
+        assert!(
+            !json.contains("_ts_system"),
+            "a plain collection hides the stored ordinal: {json}"
         );
     }
 

@@ -2,20 +2,24 @@
 
 //! WAL replay for the columnar-family `TRUNCATE` records
 //! (`RecordType::ColumnarTruncate`, `RecordType::TimeseriesTruncate`) and
-//! the per-collection floor they impose on the `TimeseriesBatch` records
-//! written before them.
+//! the per-collection floor an erasing truncate imposes on the
+//! `TimeseriesBatch` records written before it.
 //!
 //! Both records route through the live handlers, so replay leaves the
-//! engines exactly as the live truncate did. A `TimeseriesBatch` record
-//! below a collection's truncate LSN describes a row the truncate removed;
-//! `replay_timeseries_wal` skips it through [`TruncateFloors`] rather than
-//! ingesting it only to wipe it again at the truncate's LSN.
+//! engines exactly as the live truncate did.
+//!
+//! A columnar truncate ends every row at its ordinal and keeps the rows as
+//! history. A timeseries truncate ends every partition at its ordinal and
+//! keeps the partitions as history. Replay applies every record below
+//! either one, then the truncate, so the same versions end at the same
+//! ordinals. Only a columnar truncate marked `erase_history` floors the
+//! records below it: `replay_timeseries_wal` skips them through
+//! [`TruncateFloors`] rather than ingesting rows the truncate wipes again.
 //!
 //! A timeseries truncate that took effect before the crash is named by its
-//! collection's replay stamp. Replay never re-applies it: it would remove
-//! rows written after it. It imposes no floor either. The stamp names every
-//! record it removed, and a record it does not name applied after the
-//! truncate and survives it.
+//! collection's replay stamp. Replay never re-applies it: a record below its
+//! LSN that applied after it sits in the memtable as a current row, and a
+//! second apply would end it.
 
 use crate::data::executor::handlers::columnar_truncate::TruncateHistory;
 use std::collections::HashMap;
@@ -25,7 +29,6 @@ use nodedb_wal::WalRecord;
 use nodedb_wal::record::RecordType;
 
 use super::core_loop::CoreLoop;
-use super::timeseries_checkpoint::stamp::TsReplayStamp;
 use crate::bridge::envelope::{PhysicalPlan, Status};
 use crate::types::{DatabaseId, Lsn, TenantId};
 use nodedb_physical::physical_plan::{ColumnarOp, TimeseriesOp};
@@ -33,55 +36,42 @@ use nodedb_physical::physical_plan::{ColumnarOp, TimeseriesOp};
 /// The key of one columnar-family collection on a core.
 type CollectionKey = (DatabaseId, TenantId, String);
 
-/// The truncates a replay pass must honour, read off the WAL before the
-/// engine pass replays it.
+/// The erasing truncates a replay pass must honour, read off the WAL before
+/// the engine pass replays it.
 #[derive(Debug, Default)]
 pub(in crate::data::executor) struct TruncateFloors {
-    /// Highest LSN of a truncate that has not taken effect, per collection.
-    /// Its replay removes every earlier record of the collection.
+    /// Highest LSN of an erasing truncate, per collection. Its replay
+    /// removes every earlier record of the collection.
     floors: HashMap<CollectionKey, u64>,
-    /// Timeseries truncates the collection stamp names and the pass has not
-    /// reached yet. A sub-record at such an LSN precedes the truncate in its
-    /// redo group, so the truncate removed its rows.
-    named_ahead: HashMap<CollectionKey, Vec<u64>>,
 }
 
-/// The collection a truncate record names, or `None` for any other record.
-fn truncate_key(record: &WalRecord) -> Option<CollectionKey> {
-    truncate_target(record).map(|(key, _)| key)
-}
-
-/// The collection a truncate record names, and whether the truncate erases
-/// history: a timeseries truncate, or a columnar truncate the record marks
-/// `erase_history`. `None` for any other record.
-fn truncate_target(record: &WalRecord) -> Option<(CollectionKey, bool)> {
+/// The collection an erasing truncate record names: a columnar truncate the
+/// record marks `erase_history`. `None` for any other record, a truncate
+/// that ends its rows as history included.
+fn erasing_truncate_target(record: &WalRecord) -> Option<CollectionKey> {
     let record_type = RecordType::from_raw(record.logical_record_type());
-    let columnar = match record_type {
-        Some(RecordType::ColumnarTruncate) => true,
-        Some(RecordType::TimeseriesTruncate) => false,
-        _ => return None,
-    };
+    if record_type != Some(RecordType::ColumnarTruncate) {
+        return None;
+    }
     let payload = zerompk::from_msgpack::<ColumnarTruncateWalRecord>(&record.payload).ok()?;
-    let key = (
-        DatabaseId::new(record.header.database_id),
-        TenantId::new(record.header.tenant_id),
-        payload.collection,
-    );
-    Some((key, !columnar || payload.erase_history))
+    payload.erase_history.then(|| {
+        (
+            DatabaseId::new(record.header.database_id),
+            TenantId::new(record.header.tenant_id),
+            payload.collection,
+        )
+    })
 }
 
 impl TruncateFloors {
-    /// Collect the truncate records that route to `core_id`. `stamps` holds
-    /// the timeseries collection stamps restored from disk. `bitemporal`
-    /// names a bitemporal collection: its columnar truncate closes keys and
-    /// keeps every earlier record's rows as history, so it imposes no floor,
-    /// unless the record erases history.
+    /// Collect the erasing truncate records that route to `core_id`. A
+    /// truncate that ends its rows imposes no floor: every earlier record
+    /// replays, and the truncate's replay ends the rows as the live truncate
+    /// did, so a read before it still sees them.
     pub(in crate::data::executor) fn collect(
         records: &[WalRecord],
         num_cores: usize,
         core_id: usize,
-        stamps: &HashMap<CollectionKey, TsReplayStamp>,
-        bitemporal: &dyn Fn(&CollectionKey) -> bool,
     ) -> Self {
         let mut this = Self::default();
         for record in records {
@@ -93,53 +83,25 @@ impl TruncateFloors {
             if target_core != core_id {
                 continue;
             }
-            let Some((key, erases)) = truncate_target(record) else {
+            let Some(key) = erasing_truncate_target(record) else {
                 continue;
             };
-            if !erases && bitemporal(&key) {
-                continue;
-            }
-            let lsn = record.header.lsn;
-            let took_effect = stamps
-                .get(&key)
-                .is_some_and(|stamp| stamp.truncates.skips(lsn));
-            if took_effect {
-                this.named_ahead.entry(key).or_default().push(lsn);
-            } else {
-                let floor = this.floors.entry(key).or_insert(0u64);
-                *floor = (*floor).max(lsn);
-            }
+            let floor = this.floors.entry(key).or_insert(0u64);
+            *floor = (*floor).max(record.header.lsn);
         }
         this
     }
 
-    /// The pass reached the truncate `record`: sub-records after it in its
-    /// redo group apply.
-    pub(in crate::data::executor) fn pass(&mut self, record: &WalRecord) {
-        let Some(key) = truncate_key(record) else {
-            return;
-        };
-        if let Some(ahead) = self.named_ahead.get_mut(&key) {
-            ahead.retain(|lsn| *lsn != record.header.lsn);
-        }
-    }
-
-    /// Whether a record at `lsn` for `key` is removed by a truncate of that
-    /// collection.
+    /// Whether a record at `lsn` for `key` is removed by an erasing truncate
+    /// of that collection.
     ///
-    /// Strictly below a truncate that has not taken effect: a record at the
-    /// truncate's own LSN is a sibling sub-record of the same transaction
-    /// redo group. Replay applies a group's sub-records in the order the
-    /// transaction wrote them, so a row staged before the truncate is removed
-    /// by the truncate's own replay, and a row staged after it must apply. A
-    /// truncate that took effect is not replayed, so a sibling ahead of it is
-    /// skipped here instead.
+    /// Strictly below the truncate: a record at the truncate's own LSN is a
+    /// sibling sub-record of the same transaction redo group. Replay applies
+    /// a group's sub-records in the order the transaction wrote them, so a
+    /// row staged before the truncate is removed by the truncate's own
+    /// replay, and a row staged after it must apply.
     pub(in crate::data::executor) fn covers(&self, key: &CollectionKey, lsn: u64) -> bool {
         self.floors.get(key).is_some_and(|floor| lsn < *floor)
-            || self
-                .named_ahead
-                .get(key)
-                .is_some_and(|ahead| ahead.contains(&lsn))
     }
 
     /// Same as [`Self::covers`], keyed by the collection's parts. The key
@@ -152,7 +114,7 @@ impl TruncateFloors {
         collection: &str,
         lsn: u64,
     ) -> bool {
-        if self.floors.is_empty() && self.named_ahead.is_empty() {
+        if self.floors.is_empty() {
             return false;
         }
         self.covers(&(database_id, tenant_id, collection.to_string()), lsn)
@@ -180,13 +142,7 @@ impl CoreLoop {
                 tombstones,
             )
         } else {
-            self.replay_timeseries_truncate(
-                &record.payload,
-                record.header.tenant_id,
-                database_id,
-                record.header.lsn,
-                tombstones,
-            )
+            self.replay_timeseries_truncate(record, database_id, tombstones)
         }
     }
 
@@ -272,18 +228,19 @@ impl CoreLoop {
         true
     }
 
-    /// Replay one `TimeseriesTruncate` record through the live handler.
-    /// Gated by the collection's replay stamp: a truncate it names already
-    /// took effect, and re-applying it would remove rows written after it.
+    /// Replay one `TimeseriesTruncate` record through the live handler, at
+    /// the ordinal the record carries. Gated by the collection's replay
+    /// stamp: a truncate it names already took effect, and re-applying it
+    /// would end rows that applied after it.
     pub(in crate::data::executor) fn replay_timeseries_truncate(
         &mut self,
-        payload: &[u8],
-        tenant_id: u64,
+        wal_record: &WalRecord,
         database_id: DatabaseId,
-        record_lsn: u64,
         tombstones: &nodedb_wal::TombstoneSet,
     ) -> bool {
-        let record = match zerompk::from_msgpack::<ColumnarTruncateWalRecord>(payload) {
+        let tenant_id = wal_record.header.tenant_id;
+        let record_lsn = wal_record.header.lsn;
+        let record = match zerompk::from_msgpack::<ColumnarTruncateWalRecord>(&wal_record.payload) {
             Ok(record) => record,
             Err(e) => {
                 self.replay_record_unapplied(
@@ -328,15 +285,17 @@ impl CoreLoop {
             }),
             Some(Lsn::new(record_lsn)),
         );
-        // The install keeps the partition directory aside until the whole
-        // record landed, so a rollback can rename it back.
+        // The install records what the truncate changed until the whole
+        // record landed, so a rollback can reverse it.
         let mut undo = Vec::new();
         let recording = self.recording_redo_undo();
+        let outer = self.enter_record_ordinal(wal_record);
         let response = self.execute_timeseries_truncate(
             &task,
             &record.collection,
             recording.then_some(&mut undo),
         );
+        self.apply_scope.replicated_ordinal = outer;
         self.record_redo_undo(undo);
         if response.status != Status::Ok {
             self.replay_record_rejected(
@@ -360,10 +319,22 @@ mod tests {
     use nodedb_wal::record::WalRecordArgs;
 
     fn truncate_record(record_type: RecordType, lsn: u64, vshard: u32, coll: &str) -> WalRecord {
+        erasing_truncate_record(record_type, lsn, vshard, coll, false)
+    }
+
+    /// A truncate record that names `erase_history`. Only a columnar
+    /// truncate reads the flag.
+    fn erasing_truncate_record(
+        record_type: RecordType,
+        lsn: u64,
+        vshard: u32,
+        coll: &str,
+        erase_history: bool,
+    ) -> WalRecord {
         let payload = zerompk::to_msgpack_vec(&ColumnarTruncateWalRecord {
             collection: coll.to_string(),
             system_from: None,
-            erase_history: false,
+            erase_history,
         })
         .expect("encode");
         WalRecord::new(WalRecordArgs {
@@ -381,8 +352,14 @@ mod tests {
 
     #[test]
     fn a_row_at_the_truncates_own_lsn_is_not_covered() {
-        let records = vec![truncate_record(RecordType::ColumnarTruncate, 9, 0, "c")];
-        let floors = TruncateFloors::collect(&records, 1, 0, &HashMap::new(), &|_| false);
+        let records = vec![erasing_truncate_record(
+            RecordType::ColumnarTruncate,
+            9,
+            0,
+            "c",
+            true,
+        )];
+        let floors = TruncateFloors::collect(&records, 1, 0);
         let c = (DatabaseId::DEFAULT, TenantId::new(1), "c".to_string());
         assert!(floors.covers(&c, 8));
         assert!(
@@ -391,87 +368,140 @@ mod tests {
         );
     }
 
-    /// A columnar truncate of a bitemporal collection keeps every earlier
-    /// row as history, so it imposes no floor. A timeseries truncate still
-    /// does.
+    /// A columnar truncate ends every earlier row, and a timeseries truncate
+    /// every earlier partition. Both keep them as history, so neither
+    /// imposes a floor: the rows replay, and the truncate's replay ends
+    /// them. Only a columnar truncate that erases history floors.
     #[test]
-    fn a_bitemporal_columnar_truncate_imposes_no_floor() {
+    fn only_an_erasing_truncate_imposes_a_floor() {
         let records = vec![
             truncate_record(RecordType::ColumnarTruncate, 9, 0, "c"),
+            erasing_truncate_record(RecordType::ColumnarTruncate, 9, 0, "erased", true),
             truncate_record(RecordType::TimeseriesTruncate, 9, 0, "ts"),
         ];
-        let floors = TruncateFloors::collect(&records, 1, 0, &HashMap::new(), &|_| true);
-        let c = (DatabaseId::DEFAULT, TenantId::new(1), "c".to_string());
-        let ts = (DatabaseId::DEFAULT, TenantId::new(1), "ts".to_string());
-        assert!(!floors.covers(&c, 8));
-        assert!(floors.covers(&ts, 8));
+        let floors = TruncateFloors::collect(&records, 1, 0);
+        let key = |name: &str| (DatabaseId::DEFAULT, TenantId::new(1), name.to_string());
+        assert!(!floors.covers(&key("c"), 8));
+        assert!(floors.covers(&key("erased"), 8));
+        assert!(!floors.covers(&key("ts"), 8));
     }
 
     #[test]
     fn floors_keep_the_highest_truncate_lsn_per_collection_on_this_core() {
         let records = vec![
-            truncate_record(RecordType::ColumnarTruncate, 5, 0, "c"),
-            truncate_record(RecordType::ColumnarTruncate, 9, 0, "c"),
-            truncate_record(RecordType::TimeseriesTruncate, 7, 0, "ts"),
+            erasing_truncate_record(RecordType::ColumnarTruncate, 5, 0, "c", true),
+            erasing_truncate_record(RecordType::ColumnarTruncate, 9, 0, "c", true),
+            erasing_truncate_record(RecordType::ColumnarTruncate, 7, 0, "e", true),
             // Routes to another core.
-            truncate_record(RecordType::TimeseriesTruncate, 50, 1, "ts"),
+            erasing_truncate_record(RecordType::ColumnarTruncate, 50, 1, "e", true),
         ];
-        let floors = TruncateFloors::collect(&records, 2, 0, &HashMap::new(), &|_| false);
+        let floors = TruncateFloors::collect(&records, 2, 0);
         let c = (DatabaseId::DEFAULT, TenantId::new(1), "c".to_string());
-        let ts = (DatabaseId::DEFAULT, TenantId::new(1), "ts".to_string());
+        let e = (DatabaseId::DEFAULT, TenantId::new(1), "e".to_string());
         assert!(floors.covers(&c, 8));
         assert!(!floors.covers(&c, 10));
-        assert!(floors.covers(&ts, 6));
+        assert!(floors.covers(&e, 6));
         assert!(
-            !floors.covers(&ts, 8),
+            !floors.covers(&e, 8),
             "the other core's truncate is not ours"
         );
         assert!(floors.covers_collection(DatabaseId::DEFAULT, TenantId::new(1), "c", 1));
         assert!(!floors.covers_collection(DatabaseId::DEFAULT, TenantId::new(1), "other", 1));
     }
 
-    /// A truncate the collection stamp names took effect before the crash.
-    /// It sets no floor, so a record below it that applied after it
-    /// replays. A sibling sub-record at its own LSN is skipped until the pass
-    /// reaches the truncate, and applies after it.
+    /// A `TimeseriesBatch` record carrying one columnar insert of
+    /// `{id, v}` stamped `system_from`, at `lsn`.
+    fn insert_record(lsn: u64, id: i64, v: i64, system_from: i64) -> WalRecord {
+        use nodedb_types::Value;
+        let row = Value::Object(HashMap::from([
+            ("id".to_string(), Value::Integer(id)),
+            ("v".to_string(), Value::Integer(v)),
+        ]));
+        let rec = nodedb_types::columnar::ColumnarWalRecord {
+            kind: "columnar".to_string(),
+            collection: "c".to_string(),
+            payload: nodedb_types::value_to_msgpack(&Value::Array(vec![row])).expect("encode row"),
+            provenance: None,
+            surrogates: Vec::new(),
+            conflict_policy: Vec::new(),
+            system_from: Some(system_from),
+            restored_versions: Vec::new(),
+        };
+        WalRecord::new(WalRecordArgs {
+            record_type: RecordType::TimeseriesBatch as u32,
+            lsn,
+            tenant_id: 1,
+            vshard_id: 0,
+            database_id: 0,
+            payload: zerompk::to_msgpack_vec(&rec).expect("encode record"),
+            encryption_key: None,
+            preamble_bytes: None,
+        })
+        .expect("wal record")
+    }
+
+    /// Restart replay with no checkpoint reproduces the live truncate: the
+    /// rows written before it replay and end at its ordinal, so a read
+    /// before the truncate still sees them, and a read after sees only the
+    /// rows written after it.
     #[test]
-    fn a_named_truncate_sets_no_floor_and_skips_only_the_siblings_ahead_of_it() {
-        let ts = (DatabaseId::DEFAULT, TenantId::new(1), "ts".to_string());
-        let stamps = HashMap::from([(
-            ts.clone(),
-            TsReplayStamp {
-                rows: crate::types::replay_stamp::ReplayStamp::default(),
-                truncates: crate::types::replay_stamp::ReplayStamp::naming(20),
-            },
-        )]);
-        let truncate = truncate_record(RecordType::TimeseriesTruncate, 20, 0, "ts");
-        let mut floors =
-            TruncateFloors::collect(std::slice::from_ref(&truncate), 1, 0, &stamps, &|_| false);
+    fn replay_keeps_the_history_a_truncate_ended() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _tx, _rx) =
+            crate::data::executor::core_loop::tests::make_core_with_dir(dir.path());
+        let truncate = {
+            let payload = zerompk::to_msgpack_vec(&ColumnarTruncateWalRecord {
+                collection: "c".to_string(),
+                system_from: Some(200),
+                erase_history: false,
+            })
+            .expect("encode");
+            WalRecord::new(WalRecordArgs {
+                record_type: RecordType::ColumnarTruncate as u32,
+                lsn: 30,
+                tenant_id: 1,
+                vshard_id: 0,
+                database_id: 0,
+                payload,
+                encryption_key: None,
+                preamble_bytes: None,
+            })
+            .expect("wal record")
+        };
+        let records = vec![
+            insert_record(10, 1, 10, 100),
+            insert_record(20, 2, 20, 110),
+            truncate,
+            insert_record(40, 3, 30, 300),
+        ];
+        core.replay_timeseries_wal(&records, 1, &nodedb_wal::TombstoneSet::new());
 
-        assert!(
-            !floors.covers(&ts, 15),
-            "a record in flight at the truncate replays"
-        );
-        assert!(
-            floors.covers(&ts, 20),
-            "a sibling ahead of the truncate is skipped"
-        );
-        floors.pass(&truncate);
-        assert!(
-            !floors.covers(&ts, 20),
-            "a sibling after the truncate applies"
-        );
-
-        let unnamed = TruncateFloors::collect(
-            std::slice::from_ref(&truncate),
-            1,
-            0,
-            &HashMap::new(),
-            &|_| false,
-        );
-        assert!(
-            unnamed.covers(&ts, 15),
-            "a truncate that did not take effect floors"
-        );
+        let engine = core
+            .columnar_engines
+            .get(&(DatabaseId::DEFAULT, TenantId::new(1), "c".to_string()))
+            .expect("engine");
+        let id_idx = engine
+            .schema()
+            .columns
+            .iter()
+            .position(|c| c.name == "id")
+            .expect("id column");
+        let ids = |cut| {
+            let mut ids: Vec<i64> = engine
+                .scan_memtable_versions(cut)
+                .map(|row| match row.expect("read").2.get(id_idx) {
+                    Some(nodedb_types::Value::Integer(id)) => *id,
+                    other => panic!("no id cell: {other:?}"),
+                })
+                .collect();
+            ids.sort_unstable();
+            ids
+        };
+        use nodedb_columnar::VersionCut;
+        assert_eq!(ids(VersionCut::At(150)), vec![1, 2], "before the truncate");
+        assert_eq!(ids(VersionCut::At(105)), vec![1]);
+        assert!(ids(VersionCut::At(250)).is_empty(), "after the truncate");
+        assert_eq!(ids(VersionCut::Current), vec![3]);
+        assert_eq!(ids(VersionCut::All), vec![1, 2, 3], "the ended rows stay");
     }
 }

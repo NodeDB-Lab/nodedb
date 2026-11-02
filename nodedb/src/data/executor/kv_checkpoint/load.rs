@@ -147,6 +147,7 @@ impl CoreLoop {
                 (tenant_id, collection),
                 DecodedKvCollection {
                     entries: file.entries,
+                    history: file.history,
                     indexes,
                 },
             );
@@ -167,7 +168,7 @@ impl CoreLoop {
         // is recoverable from the name itself — the same recovery the snapshot
         // restore path performs, reused so the rebuilt table key matches the one
         // live reads compute.
-        let database_id = database_id_from_qualified(collection);
+        let database_id = database_id_from_qualified(collection)?;
 
         // Rows first, while the collection still holds zero registrations: the
         // write path's zero-index fast path then leaves the indexes untouched,
@@ -177,18 +178,19 @@ impl CoreLoop {
         // `index_restore.rs`.
         let mut restored = 0usize;
         for entry in &state.entries {
-            // Drop rows whose TTL elapsed while the process was down; they would
-            // otherwise reappear alive until the expiry wheel next ticked.
-            if entry.expire_at_ms != 0 && entry.expire_at_ms <= now_ms {
-                continue;
-            }
             // Absolute expiry installed verbatim. Deriving `ttl_ms = expire_at -
             // now_ms` and letting `put` recompute `now_ms + ttl_ms` would drift
             // the instant forward by the checkpoint-to-restart delay.
             //
-            // `put` — not a raw table insert — because it carries the surrogate
-            // through, so the restored row keeps its cross-engine identity.
-            self.kv_engine.put_with_absolute_expiry(
+            // A row whose TTL elapsed while the process was down is installed
+            // too. Every read hides it from `now_ms` on, the expiry wheel
+            // schedules it and reaps it at its next tick, and a read at a cut
+            // before its expiry still sees it.
+            //
+            // The write path — not a raw table insert — because it carries the
+            // surrogate through, so the restored row keeps its cross-engine
+            // identity, and it stamps the row's recorded `sys_from`.
+            self.kv_engine.restore_live_row(
                 crate::engine::kv::KvPutParams {
                     database_id,
                     tenant_id,
@@ -201,8 +203,18 @@ impl CoreLoop {
                     surrogate: nodedb_types::Surrogate(entry.surrogate),
                 },
                 entry.expire_at_ms,
+                entry.sys_from,
             )?;
             restored += 1;
+        }
+        for key_history in &state.history {
+            self.kv_engine.restore_key_history(
+                database_id,
+                tenant_id,
+                collection,
+                &key_history.key,
+                super::history_codec::restore_versions(key_history),
+            )?;
         }
 
         restore_collection_indexes(
@@ -242,8 +254,8 @@ mod tests {
     /// live reads never compute, and the collection reads back empty.
     #[test]
     fn qualified_collection_recovers_its_database_id() {
-        assert_eq!(database_id_from_qualified("users"), 0);
-        assert_eq!(database_id_from_qualified("2/orders"), 2);
+        assert_eq!(database_id_from_qualified("users").unwrap(), 0);
+        assert_eq!(database_id_from_qualified("2/orders").unwrap(), 2);
     }
 
     fn new_engine() -> crate::engine::kv::KvEngine {
@@ -298,6 +310,7 @@ mod tests {
                 value: e.value,
                 expire_at_ms: e.expire_at_ms,
                 surrogate: e.surrogate.0,
+                sys_from: e.sys_from,
             })
             .collect();
         assert_eq!(entries.len(), 3, "every live row must export");
@@ -305,6 +318,7 @@ mod tests {
         let written = KvCheckpointFile {
             format_version: KV_CKPT_FORMAT_VERSION,
             entries,
+            history: Vec::new(),
             indexes: KvCheckpointIndexes::default(),
         };
 
@@ -411,6 +425,109 @@ mod tests {
         assert_eq!(decoded.replay, replay, "the stamp must survive exactly");
     }
 
+    /// Ended versions round-trip through the checkpoint file: after a restore
+    /// every read at an earlier cut answers what it answered before, live rows
+    /// keep their `sys_from`, and a key deleted before the checkpoint still
+    /// reads at a cut before its delete.
+    #[test]
+    fn checkpoint_file_roundtrips_version_history() {
+        use super::super::history_codec::{export_history, restore_versions};
+        use nodedb_types::SystemTimeScope;
+
+        let pinned = |ordinal| SystemTimeScope::Pinned {
+            ordinal,
+            cut_marker: 0,
+        };
+        let mut engine = new_engine();
+        let put_at = |engine: &mut crate::engine::kv::KvEngine, key: &[u8], value: &[u8], at| {
+            let guard = engine.open_write_scope(Some(at));
+            engine
+                .put(crate::engine::kv::KvPutParams {
+                    database_id: 0,
+                    tenant_id: 7,
+                    collection: "users",
+                    key,
+                    value,
+                    ttl_ms: 0,
+                    now_ms: 1_000,
+                    surrogate: Surrogate(u32::from(key[0])),
+                })
+                .expect("a bound row writes");
+            engine.close_write_scope(guard);
+        };
+        put_at(&mut engine, b"a", b"a1", 100);
+        put_at(&mut engine, b"a", b"a2", 200);
+        put_at(&mut engine, b"b", b"b1", 100);
+        let guard = engine.open_write_scope(Some(300));
+        engine.delete(0, 7, "users", &[b"b".to_vec()], 1_000);
+        engine.close_write_scope(guard);
+
+        let coll = engine.live_collections().next().expect("one collection");
+        let table = coll.table.expect("a table");
+        let written = KvCheckpointFile {
+            format_version: KV_CKPT_FORMAT_VERSION,
+            entries: table
+                .export_entries_with_surrogates()
+                .into_iter()
+                .map(|e| KvCheckpointEntry {
+                    key: e.key,
+                    value: e.value,
+                    expire_at_ms: e.expire_at_ms,
+                    surrogate: e.surrogate.0,
+                    sys_from: e.sys_from,
+                })
+                .collect(),
+            history: export_history(table),
+            indexes: KvCheckpointIndexes::default(),
+        };
+        let bytes = zerompk::to_msgpack_vec(&written).expect("encode");
+        let decoded: KvCheckpointFile = zerompk::from_msgpack(&bytes).expect("decode");
+        assert_eq!(decoded, written);
+
+        let mut restored = new_engine();
+        for entry in &decoded.entries {
+            restored
+                .restore_live_row(
+                    crate::engine::kv::KvPutParams {
+                        database_id: 0,
+                        tenant_id: 7,
+                        collection: "users",
+                        key: &entry.key,
+                        value: &entry.value,
+                        ttl_ms: 0,
+                        now_ms: 1_000,
+                        surrogate: Surrogate(entry.surrogate),
+                    },
+                    entry.expire_at_ms,
+                    entry.sys_from,
+                )
+                .expect("a checkpointed row is bound");
+        }
+        for key_history in &decoded.history {
+            restored
+                .restore_key_history(
+                    0,
+                    7,
+                    "users",
+                    &key_history.key,
+                    restore_versions(key_history),
+                )
+                .expect("a checkpointed history merges");
+        }
+
+        let read = |key: &[u8], scope| {
+            restored
+                .get_at(0, 7, "users", key, scope, 1_000)
+                .map(|(value, _)| value)
+        };
+        assert_eq!(read(b"a", pinned(150)), Some(b"a1".to_vec()));
+        assert_eq!(read(b"a", pinned(250)), Some(b"a2".to_vec()));
+        assert_eq!(read(b"b", pinned(250)), Some(b"b1".to_vec()));
+        assert_eq!(read(b"b", pinned(350)), None);
+        assert_eq!(read(b"a", SystemTimeScope::Current), Some(b"a2".to_vec()));
+        assert_eq!(read(b"b", SystemTimeScope::Current), None);
+    }
+
     /// Entries still sitting in the rehash source are live rows. An export that
     /// walked only the primary slots would silently drop them while the
     /// checkpoint reported an LSN claiming they were durable.
@@ -424,7 +541,7 @@ mod tests {
         let mut inserted = 0u32;
         while !table.is_rehashing() {
             let key = format!("k{inserted}");
-            table.put(key.as_bytes(), b"v", 0, Surrogate(inserted + 1));
+            table.put(key.as_bytes(), b"v", 0, Surrogate(inserted + 1), 1);
             inserted += 1;
             assert!(
                 inserted < 1_000,

@@ -23,7 +23,7 @@ use crate::types::{DatabaseId, TenantId};
 /// How the bytes of a sparse-store row are encoded. See the module docs for
 /// why this is never derived from the bytes themselves.
 pub(in crate::data::executor) enum SparseBodyFormat {
-    /// Schemaless document body: standard msgpack, or legacy JSON that the
+    /// Schemaless document body: standard msgpack, or JSON that the
     /// normalizer transcodes.
     Document,
     /// Strict document body: a Binary Tuple decoded against this schema.

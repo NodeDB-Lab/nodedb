@@ -45,10 +45,14 @@ pub(in crate::data::executor) struct AggParams<'a> {
     pub return_partial: bool,
     /// Optional shard bucket. Only tiles whose key routes to it contribute.
     pub shard_bucket: Option<ShardBucket>,
-    /// Bitemporal system-time cutoff. `None` = live read.
+    /// System-time ordinal cutoff. `None` = live read.
     pub system_as_of: Option<i64>,
     /// Bitemporal valid-time point. `None` = no valid-time filter.
     pub valid_at_ms: Option<i64>,
+    /// True for a live read and a transaction snapshot read: the
+    /// transaction's staged cells fold into the result, and no horizon
+    /// summary row is appended for the system cut.
+    pub merge_overlay: bool,
     /// zerompk-encoded [`ArrayRegion`]. Empty = the whole array.
     pub region_msgpack: &'a [u8],
     /// Reduce `raw * scale + offset` for an attr with a scale or offset.
@@ -107,6 +111,7 @@ impl CoreLoop {
             shard_bucket,
             system_as_of,
             valid_at_ms,
+            merge_overlay,
             region_msgpack,
             physical,
         } = p;
@@ -144,7 +149,9 @@ impl CoreLoop {
         // Resolve the tile set + below-horizon signal uniformly across temporal
         // and current-state reads. The two differ only in how tiles are sourced;
         // the reduce/encode kernel below is identical for both.
-        let temporal = system_as_of.is_some() || valid_at_ms.is_some();
+        // A transaction snapshot reads at an ordinal, but reports like a live
+        // read: it reads the transaction's view, not committed history.
+        let temporal = (system_as_of.is_some() && !merge_overlay) || valid_at_ms.is_some();
         // Read-your-own-writes folds the transaction's overlay into this
         // shard's result, for the finalizing single-node read and for the
         // distributed partial alike. Each shard's overlay holds only the
@@ -153,10 +160,10 @@ impl CoreLoop {
         // folding them into the shard's partial counts every staged cell
         // exactly once at the coordinator's merge. `AS OF SYSTEM TIME` is a
         // snapshot of committed history and skips the overlay.
-        let overlay_txn = if system_as_of.is_some() {
-            None
-        } else {
+        let overlay_txn = if merge_overlay {
             task.request.txn_id
+        } else {
+            None
         };
         let (all_tiles, truncated_before_horizon) = match self.collect_agg_tiles(AggTileScan {
             array_id,
@@ -453,7 +460,7 @@ mod tests {
             wal_lsn: None,
             resolved_now_ms: None,
             commit_hlc: None,
-            entry_version: None,
+            system_ordinal: None,
             admission: crate::bridge::envelope::Admission::Admitted,
         }
     }
@@ -512,10 +519,22 @@ mod tests {
         }
 
         fn send_plan(&mut self, plan: PhysicalPlan) -> crate::bridge::envelope::Response {
+            self.send_request(plan, None)
+        }
+
+        /// Send `plan` as a write that stamps `system_ordinal`, or as a
+        /// local request that stamps a fresh ordinal when it is `None`.
+        fn send_request(
+            &mut self,
+            plan: PhysicalPlan,
+            system_ordinal: Option<i64>,
+        ) -> crate::bridge::envelope::Response {
             let id = self.next_id;
             self.next_id += 1;
+            let mut request = make_request(plan, id);
+            request.system_ordinal = system_ordinal;
             self.req_tx
-                .try_push(BridgeRequest::unfloored(make_request(plan, id)))
+                .try_push(BridgeRequest::unfloored(request))
                 .unwrap();
             self.core.tick();
             let resp = self.resp_rx.try_pop().unwrap();
@@ -535,15 +554,25 @@ mod tests {
             assert_eq!(r.status, Status::Ok, "open failed: {r:?}");
         }
 
+        /// The apply stamps the write's ordinal. A test cell's nonzero
+        /// `system_from_ms` names a millisecond: the put stamps that
+        /// millisecond's first ordinal, as a replicated entry's leader
+        /// assigns it, so `AS OF` reads and audit rows see that millisecond. A zero `system_from_ms` applies as a local
+        /// write that stamps a fresh ordinal.
         fn put(&mut self, aid: &ArrayId, cells: Vec<ArrayPutCell>, lsn: u64) {
+            let stamp_ms = cells.first().map_or(0, |c| c.system_from_ms);
+            let system_ordinal = (stamp_ms != 0).then(|| stamp_ms * nodedb_types::NANOS_PER_MS);
             let bytes = zerompk::to_msgpack_vec(&cells).unwrap();
-            let r = self.send(ArrayOp::Put {
-                array_id: aid.clone(),
-                cells_msgpack: bytes,
-                wal_lsn: lsn,
-                provenance: None,
-                vshard_id: 0,
-            });
+            let r = self.send_request(
+                PhysicalPlan::Array(ArrayOp::Put {
+                    array_id: aid.clone(),
+                    cells_msgpack: bytes,
+                    wal_lsn: lsn,
+                    provenance: None,
+                    vshard_id: 0,
+                }),
+                system_ordinal,
+            );
             assert_eq!(r.status, Status::Ok, "put failed: {r:?}");
         }
 

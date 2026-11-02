@@ -94,6 +94,15 @@ impl CoreLoop {
             }
         })?;
 
+        // The KV engine stamps its row versions from the core's clock and
+        // charges its resident bytes to the governor's KV budget.
+        let mut kv_engine = crate::engine::kv::KvEngine::from_tuning(
+            crate::engine::kv::current_ms(),
+            &nodedb_types::config::tuning::KvTuning::default(),
+        );
+        kv_engine.attach_clock(Arc::clone(&hlc));
+        kv_engine.attach_governor(Arc::clone(&governor));
+
         Ok(Self {
             core_id,
             // A core opened without a node fires only actions armed for every
@@ -132,6 +141,7 @@ impl CoreLoop {
             ),
             columnar_memtables: HashMap::new(),
             columnar_memtable_mem: HashMap::new(),
+            document_history_mem: HashMap::new(),
             columnar_engines: HashMap::new(),
             columnar_flushed_segments: HashMap::new(),
             columnar_flushed_surrogates: HashMap::new(),
@@ -140,7 +150,7 @@ impl CoreLoop {
             ts_last_value_caches: HashMap::new(),
             ts_series_catalogs: HashMap::new(),
             ts_registries: HashMap::new(),
-            ts_truncate_backlog: Vec::new(),
+            ts_newest_truncate: HashMap::new(),
             continuous_agg_mgr:
                 crate::engine::timeseries::continuous_agg::ContinuousAggregateManager::new(),
             checkpoint_coordinator: crate::storage::checkpoint::CheckpointCoordinator::new(
@@ -155,10 +165,7 @@ impl CoreLoop {
             graph_tuning: nodedb_types::config::tuning::GraphTuning::default(),
             ts_tuning: nodedb_types::config::tuning::TimeseriesToning::default(),
             vector_tuning: nodedb_types::config::tuning::VectorTuning::default(),
-            kv_engine: crate::engine::kv::KvEngine::from_tuning(
-                crate::engine::kv::current_ms(),
-                &nodedb_types::config::tuning::KvTuning::default(),
-            ),
+            kv_engine,
             // A fresh core has restored nothing and flushed nothing, so every
             // engine is durable through nothing and no replay floor is set —
             // see `CheckpointFloors::new` for what each zero costs and why.
@@ -188,7 +195,8 @@ impl CoreLoop {
             txn_savepoints: HashMap::new(),
             txn_created_columnar_engines: HashMap::new(),
             ts_resolve_holds: HashMap::new(),
-            write_index: super::write_index::WriteVersionIndex::new(),
+            record_stamps: super::write_note::RecordStamps::default(),
+            newest_ordinals: super::newest_ordinals::NewestOrdinals::default(),
             calvin: super::calvin_state::CalvinCoreState::new(),
             apply_scope: super::apply_scope::ApplyScope::default(),
             redo_apply:

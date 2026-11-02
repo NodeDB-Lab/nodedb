@@ -26,6 +26,7 @@ impl CoreLoop {
                 group_by,
                 aggregates,
                 filters,
+                system_time,
                 having,
                 limit,
                 sub_group_by,
@@ -40,6 +41,7 @@ impl CoreLoop {
                         tid,
                         collection: collection.as_str(),
                         input: input.as_deref(),
+                        system_time: *system_time,
                         group_by,
                         aggregates,
                         filters,
@@ -215,6 +217,7 @@ impl CoreLoop {
                 right_rls_filters,
                 left_input,
                 right_input,
+                system_time,
             } => self.execute_nested_loop_join(NestedLoopJoinParams {
                 task,
                 tid,
@@ -227,6 +230,7 @@ impl CoreLoop {
                 right_rls_filters,
                 left_input: left_input.as_deref(),
                 right_input: right_input.as_deref(),
+                system_time,
             }),
 
             QueryOp::SortMergeJoin {
@@ -240,6 +244,7 @@ impl CoreLoop {
                 right_rls_filters,
                 left_input,
                 right_input,
+                system_time,
             } => self.execute_sort_merge_join(SortMergeJoinParams {
                 task,
                 tid,
@@ -253,6 +258,7 @@ impl CoreLoop {
                 right_rls_filters,
                 left_input: left_input.as_deref(),
                 right_input: right_input.as_deref(),
+                system_time,
             }),
 
             QueryOp::RecursiveScan {
@@ -263,6 +269,7 @@ impl CoreLoop {
                 max_iterations,
                 distinct,
                 limit,
+                system_time,
             } => self.execute_recursive_scan(
                 task,
                 crate::data::executor::handlers::recursive::RecursiveScanParams {
@@ -274,6 +281,7 @@ impl CoreLoop {
                     max_iterations: *max_iterations,
                     distinct: *distinct,
                     limit: *limit,
+                    system_time,
                 },
             ),
 
@@ -303,13 +311,17 @@ impl CoreLoop {
                 filters,
                 fields,
                 limit_per_facet,
+                system_time,
             } => self.execute_facet_counts(
                 task,
-                tid,
-                collection.as_str(),
-                filters,
-                fields,
-                *limit_per_facet,
+                crate::data::executor::handlers::facet::FacetCountsParams {
+                    tid,
+                    collection: collection.as_str(),
+                    filter_bytes: filters,
+                    fields,
+                    limit_per_facet: *limit_per_facet,
+                    system_time,
+                },
             ),
 
             QueryOp::PartialAggregate {
@@ -317,6 +329,7 @@ impl CoreLoop {
                 group_by,
                 aggregates,
                 filters,
+                system_time,
             } => {
                 // This variant still carries plain column-name keys; lift them
                 // to bare-column specs for the shared executor entry point.
@@ -330,6 +343,7 @@ impl CoreLoop {
                         tid,
                         collection: collection.as_str(),
                         input: None,
+                        system_time: *system_time,
                         group_by: &group_specs,
                         aggregates,
                         filters,
@@ -349,12 +363,14 @@ impl CoreLoop {
                 group_by,
                 aggregates,
                 filters,
+                system_time,
             } => self.execute_partial_aggregate_state(
                 crate::data::executor::handlers::aggregate::state_emit::PartialAggregateStateParams {
                     task,
                     tid,
                     collection: collection.as_str(),
                     input: input.as_deref(),
+                    system_time: *system_time,
                     group_by,
                     aggregates,
                     filters,
@@ -399,6 +415,7 @@ impl CoreLoop {
                 lateral_alias,
                 projection,
                 left_join,
+                inner_system_time,
             } => self.execute_lateral_top_k(LateralTopKParams {
                 task,
                 tid,
@@ -412,6 +429,7 @@ impl CoreLoop {
                 lateral_alias,
                 projection,
                 left_join: *left_join,
+                inner_system_time: *inner_system_time,
             }),
 
             QueryOp::LateralLoop {
@@ -424,6 +442,7 @@ impl CoreLoop {
                 projection,
                 left_join,
                 outer_row_cap,
+                inner_system_time,
             } => self.execute_lateral_loop(LateralLoopParams {
                 task,
                 tid,
@@ -436,6 +455,7 @@ impl CoreLoop {
                 projection,
                 left_join: *left_join,
                 outer_row_cap: *outer_row_cap,
+                inner_system_time: *inner_system_time,
             }),
         }
     }

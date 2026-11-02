@@ -20,8 +20,9 @@
 //!
 //! The collection directory carries `memtable.schema`. Every flush writes it
 //! before the partition's commit point, so the schema on disk always covers
-//! every record a partition names. A truncate moves the collection directory
-//! aside, and the file with it. Dropping the collection removes the directory.
+//! every record a partition names. A truncate keeps it: the schema outlives
+//! the truncate as it outlives a flush. Dropping the collection removes the
+//! directory.
 //!
 //! A snapshot carries each memtable's schema from memory. A core snapshot
 //! captures it as this file. A tenant snapshot, which a Raft snapshot install

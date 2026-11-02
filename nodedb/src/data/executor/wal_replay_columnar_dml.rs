@@ -55,8 +55,8 @@ use nodedb_types::columnar::ColumnarDmlWalRecord;
 impl CoreLoop {
     /// Try to decode `payload` as a `columnar_dml` predicate-DML record and,
     /// if it is one, replay it. Returns `None` when the payload does not
-    /// decode as this shape (caller falls back to `decode_batch_record`'s
-    /// row-payload / legacy-tuple attempts), `Some(0)` when it decoded but was
+    /// decode as this shape (caller then decodes the row-payload and
+    /// timeseries-tuple shapes `decode_batch_record` reads), `Some(0)` when it decoded but was
     /// tombstoned, already covered by the restored columnar checkpoint, or the
     /// live re-execution reported a typed error (logged, never panics),
     /// `Some(1)` on successful replay.
@@ -147,6 +147,7 @@ impl CoreLoop {
                 updates: updates.clone(),
                 system_from: record.system_from,
                 rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
+                system_time: nodedb_types::SystemTimeScope::Current,
             })
         } else {
             PhysicalPlan::Columnar(ColumnarOp::Delete {
@@ -156,6 +157,7 @@ impl CoreLoop {
                 filters: record.filters.clone(),
                 system_from: record.system_from,
                 rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
+                system_time: nodedb_types::SystemTimeScope::Current,
             })
         };
         let task = Self::replay_task(
@@ -490,6 +492,7 @@ mod tests {
             provenance: None,
             wal_lsn: None,
             system_from: None,
+            restored_versions: Vec::new(),
             rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
             returning: None,
             rls_filters: Vec::new(),
@@ -585,6 +588,7 @@ mod tests {
             filters: eq_filter_bytes("id", Value::Integer(2)),
             system_from: None,
             rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         let outcome = wal_append_if_write(
             &wal,
@@ -620,6 +624,7 @@ mod tests {
             )],
             system_from: None,
             rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         let outcome = wal_append_if_write(
             &wal,
@@ -644,6 +649,7 @@ mod tests {
             filters: eq_filter_bytes("id", Value::Integer(2)),
             system_from: None,
             rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
 
         let records = append_via_autocommit(&[insert, delete]);
@@ -679,6 +685,7 @@ mod tests {
             )],
             system_from: None,
             rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
 
         let records = append_via_autocommit(&[insert, update]);
@@ -718,6 +725,7 @@ mod tests {
             )],
             system_from: None,
             rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
 
         let records = append_via_autocommit(&[insert, update]);

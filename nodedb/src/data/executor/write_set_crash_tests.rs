@@ -197,7 +197,7 @@ fn request(plan: PhysicalPlan, origin: GroupOrigin) -> Request {
         wal_lsn: Some(origin.lsn),
         resolved_now_ms: None,
         commit_hlc: None,
-        entry_version: None,
+        system_ordinal: None,
         admission: Admission::Admitted,
     }
 }
@@ -256,10 +256,13 @@ fn notes_after_replay(dir: &Path, records: &[WalRecord]) -> Vec<String> {
     let (mut core, _req, _resp) = make_core_with_dir(dir);
     core.replay_all_wal(records, 1, &TombstoneSet::new())
         .expect("replay");
-    core.sparse
-        .scan_all_for_tenant(DatabaseId::DEFAULT.as_u64(), TID)
-        .expect("rows")
+    [ORDERS, TOTALS]
         .into_iter()
+        .flat_map(|collection| {
+            core.sparse
+                .scan_documents(DatabaseId::DEFAULT.as_u64(), TID, collection, usize::MAX)
+                .expect("rows")
+        })
         .filter_map(|(_, bytes)| {
             let (start, _) = nodedb_query::msgpack_scan::extract_field(&bytes, 0, "note")?;
             nodedb_query::msgpack_scan::read_str(&bytes, start).map(str::to_string)
@@ -387,18 +390,29 @@ fn put_row(id: &str, surrogate: u32, note: &str) -> PhysicalPlan {
     })
 }
 
-/// The target row `t` of another collection, as a sum fold stores it.
-fn target_row(note: &str) -> WriteSetEntry {
-    WriteSetEntry::put(100, RowIdentity::from_user_key("t"), note_doc(note))
-        .in_collection(TOTALS.to_string())
+/// The target row `t` of another collection, as a sum fold stores it: at
+/// the version ordinal `sys_from` its write stamped.
+fn target_row(note: &str, sys_from: i64) -> WriteSetEntry {
+    WriteSetEntry::put(
+        100,
+        RowIdentity::from_user_key("t"),
+        note_doc(note),
+        crate::bridge::envelope::RowVersion::open(sys_from),
+    )
+    .in_collection(TOTALS.to_string())
 }
 
 /// Write A folds the target row, then crashes before its parts. A later
 /// write B of another row folds the same target row and journals it. Boot
-/// journals A's parts at the WAL tail, after B's. Replay orders every part
-/// by its write's origin, so the target row keeps B's later image.
+/// journals A's parts at the WAL tail, after B's. Each image carries the
+/// version ordinal its write stamped, so replay orders the row's versions
+/// by ordinal, not WAL position, and the target row keeps B's later image.
 #[test]
 fn a_part_boot_journals_never_regresses_a_later_write_of_its_row() {
+    use crate::data::executor::handlers::transaction::redo_apply::test_commit::test_stamp;
+    // A stamps its fold before B does, as the live run ordered them.
+    let stamp_a = test_stamp();
+    let stamp_b = test_stamp();
     let live = Live::open();
     let plan_a = put_row("a", 1, "a");
     let a = live.append_origin(&plan_a);
@@ -414,7 +428,7 @@ fn a_part_boot_journals_never_regresses_a_later_write_of_its_row() {
             collection: ORDERS,
             origin: b,
         },
-        &[target_row("fresh")],
+        &[target_row("fresh", stamp_b)],
     )
     .expect("parts of b");
     live.wal.sync().expect("sync");
@@ -422,7 +436,7 @@ fn a_part_boot_journals_never_regresses_a_later_write_of_its_row() {
     // A's write set as the core stores it: the fold of the target row.
     let task_a = ExecutionTask::new(request(plan_a, a));
     let mut response_a = live.core.response_ok(&task_a);
-    response_a.write_set = vec![target_row("stale")];
+    response_a.write_set = vec![target_row("stale", stamp_a)];
     let group_a = JournalGroup {
         origin: a.lsn,
         collection: ORDERS.to_string(),
@@ -478,6 +492,8 @@ fn calvin_install() -> PhysicalPlan {
             reply: CalvinReplySpec::Count(Vec::new()),
             user_write: true,
         }),
+        reads: Vec::new(),
+        snapshot_ordinal: None,
     })
 }
 

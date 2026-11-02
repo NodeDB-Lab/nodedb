@@ -102,7 +102,7 @@ impl CoreLoop {
                 // The task never started, so nothing it would write ran.
                 error_code: Some(Box::new(ErrorCode::ExpiredBeforeExecution)),
                 stage_vote: None,
-                read_versions: crate::types::ReadVersions::new(),
+                read_vshards: crate::types::ReadShards::new(),
                 write_set: Vec::new(),
             }
         } else {
@@ -279,7 +279,7 @@ mod tests {
             wal_lsn: None,
             resolved_now_ms: None,
             commit_hlc: None,
-            entry_version: None,
+            system_ordinal: None,
             admission: crate::bridge::envelope::Admission::Admitted,
         }
     }
@@ -365,6 +365,7 @@ mod tests {
                 "x",
                 &nodedb_types::StorageKey::for_surrogate(nodedb_types::Surrogate::new(999)),
                 b"data",
+                core.bitemporal_ordinal(),
             )
             .unwrap();
         req_tx

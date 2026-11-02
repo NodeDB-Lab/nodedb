@@ -15,7 +15,7 @@ use tracing::warn;
 use super::core_loop::CoreLoop;
 use super::handlers::kv::declared_body::fit_kv_image;
 use super::handlers::kv::transfer_compute::{TransferError, compute_transfer};
-use crate::data::executor::core_loop::write_index::KeyRepr;
+use crate::data::executor::core_loop::write_note::KeyRepr;
 
 /// Fields needed to replay one `kv_transfer` delta record.
 pub(super) struct ReplayKvTransferParams<'a> {

@@ -97,6 +97,27 @@ impl CoreLoop {
             for (surrogate, value) in docs {
                 let storage_key =
                     crate::engine::document::store::StorageKey::for_surrogate(surrogate);
+                // The rebuilt node starts where the row's current version
+                // starts, so a read at an earlier cut does not see it.
+                let sys_from = match self.sparse.versioned_get_current_with_sys_from(
+                    db,
+                    tenant_id,
+                    &collection,
+                    &storage_key,
+                ) {
+                    Ok(Some((sys_from, _))) => sys_from,
+                    Ok(None) => continue,
+                    Err(e) => {
+                        tracing::warn!(
+                            core = self.core_id,
+                            %collection,
+                            error = %e,
+                            "vector-index rebuild could not read the row's version; \
+                             its embeddings will not be searchable"
+                        );
+                        continue;
+                    }
+                };
                 // Same as WAL replay: the document is already durable, so a
                 // width mismatch from before the forward-path check existed is
                 // reported and skipped rather than aborting the rebuild. The
@@ -110,6 +131,10 @@ impl CoreLoop {
                         storage_key,
                         value: &value,
                         wal_lsn: 0,
+                        sys_from,
+                        // The rebuild indexes each stored row once, into an
+                        // index that holds none of its nodes.
+                        replaces_row: false,
                     },
                     &mut Vec::new(),
                 ) {

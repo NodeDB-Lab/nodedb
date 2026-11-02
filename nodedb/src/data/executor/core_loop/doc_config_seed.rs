@@ -79,6 +79,9 @@ mod tests {
             doc_bytes(),
             Option::<nodedb_types::sync::wire::SyncProvenance>::None,
             surrogate,
+            1_000i64,
+            i64::MIN,
+            i64::MAX,
         ))
         .unwrap();
         WalRecord::new(WalRecordArgs {

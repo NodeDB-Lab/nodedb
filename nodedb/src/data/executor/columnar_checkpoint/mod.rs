@@ -118,6 +118,7 @@
 //! caller clamps instead of truncating.
 
 mod format;
+mod geometry_history;
 mod geometry_restore;
 mod load;
 mod manifest;

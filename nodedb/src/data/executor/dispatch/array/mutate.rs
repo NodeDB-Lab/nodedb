@@ -11,10 +11,13 @@ use crate::data::executor::task::ExecutionTask;
 use crate::engine::array::wal::{ArrayDeleteCell, ArrayPutCell};
 
 impl CoreLoop {
+    /// Apply an `ArrayOp::Put`. Every tile version it writes is placed on
+    /// `placement`, the op's `vshard_id`.
     pub(in crate::data::executor) fn handle_array_put(
         &mut self,
         task: &ExecutionTask,
         array_id: &ArrayId,
+        placement: u32,
         cells_msgpack: &[u8],
         wal_lsn: u64,
         provenance: Option<&SyncProvenance>,
@@ -34,7 +37,7 @@ impl CoreLoop {
                 },
             );
         }
-        let cells: Vec<ArrayPutCell> = match zerompk::from_msgpack(cells_msgpack) {
+        let mut cells: Vec<ArrayPutCell> = match zerompk::from_msgpack(cells_msgpack) {
             Ok(c) => c,
             Err(e) => {
                 return self.response_error(
@@ -58,8 +61,15 @@ impl CoreLoop {
                 return self.response_error(task, refusal);
             }
         }
+        // Every cell lands at this apply's system-time ordinal.
+        if let Err(e) = self.stamp_array_puts(array_id, placement, &mut cells) {
+            return self.response_error(task, ErrorCode::from(e));
+        }
         let n = cells.len();
-        if let Err(e) = self.array_engine.put_cells(array_id, cells, wal_lsn) {
+        if let Err(e) = self
+            .array_engine
+            .put_cells(array_id, placement, cells, wal_lsn)
+        {
             // A refused cell keeps its SQLSTATE: 22003 for a value out of
             // range, 42804 for a value of another type than its attr.
             return self.response_error(task, ErrorCode::from(crate::Error::from(e)));
@@ -75,10 +85,13 @@ impl CoreLoop {
         encode_count_response(self, task, "inserted", n)
     }
 
+    /// Apply an `ArrayOp::Delete`. Every tile version it writes is placed
+    /// on `placement`, the op's `vshard_id`.
     pub(in crate::data::executor) fn handle_array_delete(
         &mut self,
         task: &ExecutionTask,
         array_id: &ArrayId,
+        placement: u32,
         coords_msgpack: &[u8],
         wal_lsn: u64,
         provenance: Option<&SyncProvenance>,
@@ -97,7 +110,7 @@ impl CoreLoop {
                 },
             );
         }
-        let cells: Vec<ArrayDeleteCell> = match zerompk::from_msgpack(coords_msgpack) {
+        let mut cells: Vec<ArrayDeleteCell> = match zerompk::from_msgpack(coords_msgpack) {
             Ok(c) => c,
             Err(e) => {
                 return self.response_error(
@@ -125,7 +138,14 @@ impl CoreLoop {
                 }
             }
         }
-        if let Err(e) = self.array_engine.delete_cells(array_id, cells, wal_lsn) {
+        // Every tombstone lands at this apply's system-time ordinal.
+        if let Err(e) = self.stamp_array_deletes(array_id, placement, &mut cells) {
+            return self.response_error(task, ErrorCode::from(e));
+        }
+        if let Err(e) = self
+            .array_engine
+            .delete_cells(array_id, placement, cells, wal_lsn)
+        {
             return self.response_error(
                 task,
                 ErrorCode::Internal {
@@ -165,7 +185,7 @@ impl CoreLoop {
     ///
     /// The Control Plane allocated `wal_lsn` from the central WAL writer, so
     /// it is the committed write LSN in the same space as the core watermark.
-    /// It advances the collection floor and is noted as applied. The note
+    /// It is noted as applied. The note
     /// comes before the threshold flush, so the stamp that flush publishes
     /// names this record. A write with no WAL record (`wal_lsn == 0`) notes
     /// nothing.
@@ -200,6 +220,8 @@ impl CoreLoop {
         task: &ExecutionTask,
         array_id: &ArrayId,
     ) -> Response {
+        // The array's stored tiles change wholesale.
+        self.forget_newest_ordinals();
         if let Err(e) = self.array_engine.stage_drop_array(array_id) {
             return self.response_error(
                 task,
@@ -220,6 +242,8 @@ impl CoreLoop {
         array_id: &ArrayId,
         target: &ArrayId,
     ) -> Response {
+        // The array's stored tiles change wholesale.
+        self.forget_newest_ordinals();
         if self.array_engine.is_open(array_id)
             && let Err(e) = self.flush_array(array_id)
         {
@@ -241,6 +265,8 @@ impl CoreLoop {
         task: &ExecutionTask,
         array_id: &ArrayId,
     ) -> Response {
+        // The array's stored tiles change wholesale.
+        self.forget_newest_ordinals();
         if let Err(e) = self.array_engine.purge_drop_array(array_id) {
             return self.response_error(
                 task,
@@ -258,14 +284,21 @@ impl CoreLoop {
         array_id: &ArrayId,
         audit_retain_ms: Option<i64>,
     ) -> Response {
+        // The array's stored tiles change wholesale.
+        self.forget_newest_ordinals();
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
-        let merged = match self
-            .array_engine
-            .maybe_compact(array_id, audit_retain_ms, now_ms)
-        {
+        // The audit window keeps history back to `now - audit_retain_ms`:
+        // the merge collapses what that millisecond's last ordinal
+        // supersedes. It stays at or below the cleanup horizon, so no open
+        // snapshot and no commit a replica still applies reads below it.
+        let safe_horizon = self.maintenance.version_purge.safe_horizon;
+        let horizon = audit_retain_ms.map(|retain_ms| {
+            nodedb_types::ms_to_ordinal_upper(now_ms.saturating_sub(retain_ms)).min(safe_horizon)
+        });
+        let merged = match self.array_engine.maybe_compact(array_id, horizon) {
             Ok(m) => m,
             Err(e) => {
                 return self.response_error(
@@ -328,7 +361,7 @@ mod tests {
             wal_lsn: None,
             resolved_now_ms: None,
             commit_hlc: None,
-            entry_version: None,
+            system_ordinal: None,
             admission: crate::bridge::envelope::Admission::Admitted,
         }
     }
@@ -546,7 +579,7 @@ mod tests {
         // rather than colliding with v1's entry.
         {
             let mut cat = core.array_catalog.write().unwrap();
-            cat.unregister("recyc");
+            cat.unregister_in_database(aid.tenant_id, aid.database_id, &aid.name);
         }
 
         // Finalization purges the reversible tombstone before recreation.

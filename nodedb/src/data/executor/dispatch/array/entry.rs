@@ -55,19 +55,25 @@ impl CoreLoop {
                 cells_msgpack,
                 wal_lsn,
                 provenance,
-                ..
-            } => {
-                self.handle_array_put(task, array_id, cells_msgpack, *wal_lsn, provenance.as_ref())
-            }
+                vshard_id,
+            } => self.handle_array_put(
+                task,
+                array_id,
+                *vshard_id,
+                cells_msgpack,
+                *wal_lsn,
+                provenance.as_ref(),
+            ),
             ArrayOp::Delete {
                 array_id,
                 coords_msgpack,
                 wal_lsn,
                 provenance,
-                ..
+                vshard_id,
             } => self.handle_array_delete(
                 task,
                 array_id,
+                *vshard_id,
                 coords_msgpack,
                 *wal_lsn,
                 provenance.as_ref(),
@@ -126,7 +132,7 @@ impl CoreLoop {
                 valid_at_ms,
                 region_msgpack,
                 physical,
-            } => match self.point_in_time_ms(task, *system_time, "ARRAY_AGG") {
+            } => match self.point_in_time_ordinal(task, *system_time, "ARRAY_AGG") {
                 Ok(system_as_of) => self.dispatch_array_aggregate(
                     task,
                     AggParams {
@@ -139,6 +145,7 @@ impl CoreLoop {
                         shard_bucket: *shard_bucket,
                         system_as_of,
                         valid_at_ms: *valid_at_ms,
+                        merge_overlay: system_time.merges_txn_overlay(),
                         region_msgpack,
                         physical: *physical,
                     },
@@ -154,7 +161,7 @@ impl CoreLoop {
                 shard_bucket,
                 system_time,
                 valid_at_ms,
-            } => match self.point_in_time_ms(task, *system_time, "ARRAY_ELEMENTWISE") {
+            } => match self.point_in_time_ordinal(task, *system_time, "ARRAY_ELEMENTWISE") {
                 Ok(system_as_of) => self.dispatch_array_elementwise(
                     task,
                     ElementwiseParams {
@@ -166,6 +173,7 @@ impl CoreLoop {
                         shard_bucket: *shard_bucket,
                         system_as_of,
                         valid_at_ms: *valid_at_ms,
+                        merge_overlay: system_time.merges_txn_overlay(),
                     },
                 ),
                 Err(resp) => resp,
@@ -173,12 +181,12 @@ impl CoreLoop {
         }
     }
 
-    /// The millisecond cutoff an aggregate or elementwise read reads at.
-    /// Array tile versions stamp system time in milliseconds, so a pinned
-    /// scope reads its newest whole millisecond (`as_of_ms`). `None` for a
-    /// live read. `AllVersions` is refused: a reduction over every version
-    /// has no meaning.
-    fn point_in_time_ms(
+    /// The system-time ordinal an aggregate or elementwise read reads at.
+    /// Array tile versions are keyed by ordinal, so a pinned scope reads at
+    /// its ordinal and `AsOf(ms)` at the last ordinal of `ms`
+    /// (`as_of_ordinal`). `None` for a live read. `AllVersions` is refused: a
+    /// reduction over every version has no meaning.
+    fn point_in_time_ordinal(
         &self,
         task: &ExecutionTask,
         system_time: SystemTimeScope,
@@ -186,7 +194,9 @@ impl CoreLoop {
     ) -> Result<Option<i64>, Response> {
         match system_time {
             SystemTimeScope::Current => Ok(None),
-            SystemTimeScope::AsOf(_) | SystemTimeScope::Pinned { .. } => Ok(system_time.as_of_ms()),
+            SystemTimeScope::AsOf(_)
+            | SystemTimeScope::Pinned { .. }
+            | SystemTimeScope::TxnSnapshot { .. } => Ok(system_time.as_of_ordinal()),
             SystemTimeScope::AllVersions => Err(self.response_error(
                 task,
                 ErrorCode::Unsupported {
@@ -273,6 +283,8 @@ impl CoreLoop {
                         detail: format!("array engine open: {e}"),
                     },
                 )
-            })
+            })?;
+        self.fold_array_versions(array_id);
+        Ok(())
     }
 }

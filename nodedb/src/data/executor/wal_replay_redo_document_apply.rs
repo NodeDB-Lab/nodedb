@@ -503,6 +503,7 @@ mod tests {
                 COLL,
                 &StorageKey::for_surrogate(Surrogate::new(rows[1].0)),
                 &doc_format::encode_to_msgpack(&doc),
+                core.bitemporal_ordinal(),
             )
             .expect("overwrite row");
 

@@ -15,6 +15,7 @@ mod execute;
 pub mod graph;
 pub mod kv;
 pub mod meta;
+mod meta_newest;
 pub mod meta_retention;
 pub mod query;
 pub mod spatial;

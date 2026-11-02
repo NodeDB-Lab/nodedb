@@ -30,7 +30,7 @@
 use tracing::warn;
 
 use super::core_loop::CoreLoop;
-use crate::data::executor::core_loop::write_index::KeyRepr;
+use crate::data::executor::core_loop::write_note::KeyRepr;
 use crate::data::executor::handlers::transaction::undo::UndoEntry;
 
 impl CoreLoop {
@@ -52,7 +52,6 @@ impl CoreLoop {
         payload: &[u8],
         tenant_id: u64,
         database_id: u64,
-        now_ms: u64,
         record_lsn: u64,
         tombstones: &nodedb_wal::TombstoneSet,
     ) -> Option<usize> {
@@ -68,7 +67,7 @@ impl CoreLoop {
         if self.claim_for_validation() {
             return Some(0);
         }
-        self.record_kv_ttl_undo(database_id, tenant_id, &collection, &key, now_ms);
+        self.record_kv_ttl_undo(database_id, tenant_id, &collection, &key);
 
         let applied = self.kv_engine.expire_with_absolute_expiry(
             database_id,
@@ -109,7 +108,6 @@ impl CoreLoop {
         payload: &[u8],
         tenant_id: u64,
         database_id: u64,
-        now_ms: u64,
         record_lsn: u64,
         tombstones: &nodedb_wal::TombstoneSet,
     ) -> Option<usize> {
@@ -125,7 +123,7 @@ impl CoreLoop {
         if self.claim_for_validation() {
             return Some(0);
         }
-        self.record_kv_ttl_undo(database_id, tenant_id, &collection, &key, now_ms);
+        self.record_kv_ttl_undo(database_id, tenant_id, &collection, &key);
 
         let applied = self
             .kv_engine
@@ -152,30 +150,30 @@ impl CoreLoop {
 
 impl CoreLoop {
     /// In the install pass of a committed-redo apply, record the undo that
-    /// puts the key's current expiry back. The value is not touched, so the
-    /// undo restores only the expiry. A key that is absent now records
-    /// nothing: the TTL change will find no key either.
+    /// reverses a TTL change exactly. The change ends the key's live version
+    /// into history, so the undo reinstalls the whole stored version at its
+    /// own start. A key that stores no live version now records nothing: the
+    /// TTL change will find no key either.
     fn record_kv_ttl_undo(
         &mut self,
         database_id: u64,
         tenant_id: u64,
         collection: &str,
         key: &[u8],
-        now_ms: u64,
     ) {
         if !self.recording_redo_undo() {
             return;
         }
-        let Some(image) =
-            self.kv_engine
-                .entry_image(database_id, tenant_id, collection, key, now_ms)
+        let Some(image) = self
+            .kv_engine
+            .stored_image(database_id, tenant_id, collection, key)
         else {
             return;
         };
-        self.record_redo_undo([UndoEntry::KvTtl {
+        self.record_redo_undo([UndoEntry::KvPut {
             collection: collection.to_string(),
             key: key.to_vec(),
-            prior_expire_at_ms: image.expire_at_ms,
+            prior: Some(image),
         }]);
     }
 }

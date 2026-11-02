@@ -11,7 +11,10 @@
 use crate::bridge::envelope::{ErrorCode, Response};
 use nodedb_physical::physical_plan::{DocumentOp, RowSource};
 
+use nodedb_types::SystemTimeScope;
+
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::handlers::write_match_cut::{autocommit_match_cut, write_match_cut};
 use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
 
@@ -38,6 +41,7 @@ impl CoreLoop {
             rls_write_check,
             resolved_sum_targets,
             declared_primary_key,
+            target_system_time,
         } = op
         else {
             return self.response_error(
@@ -49,6 +53,11 @@ impl CoreLoop {
         };
         let Some(source_rows) = source_rows.as_deref() else {
             return self.response_error(task, unresolved_source("UPDATE ... FROM", source));
+        };
+        let target_cut = match join_target_cut(target_system_time, resolve_only, "UPDATE ... FROM")
+        {
+            Ok(cut) => cut,
+            Err(code) => return self.response_error(task, code),
         };
         self.execute_update_from_join(
             task,
@@ -68,6 +77,7 @@ impl CoreLoop {
                 rls_write_check,
                 resolved_sum_targets,
                 declared_primary_key: declared_primary_key.as_deref(),
+                target_cut,
             },
         )
     }
@@ -97,6 +107,7 @@ impl CoreLoop {
             rls_write_check,
             resolved_sum_targets,
             declared_primary_key,
+            target_system_time,
         } = op
         else {
             return self.response_error(
@@ -108,6 +119,10 @@ impl CoreLoop {
         };
         let Some(source_rows) = source_rows.as_deref() else {
             return self.response_error(task, unresolved_source("MERGE", source));
+        };
+        let target_cut = match join_target_cut(target_system_time, resolve_only, "MERGE") {
+            Ok(cut) => cut,
+            Err(code) => return self.response_error(task, code),
         };
         self.execute_merge(
             task,
@@ -127,6 +142,7 @@ impl CoreLoop {
                 rls_write_check,
                 resolved_sum_targets,
                 declared_primary_key: declared_primary_key.as_deref(),
+                target_cut,
             },
         )
     }
@@ -162,6 +178,21 @@ impl CoreLoop {
     }
 }
 
+/// The ordinal a join write matches its target rows at. The RESOLVE pass of
+/// a transaction block reads at the block's snapshot. The write pass applies
+/// an autocommit statement, so it matches the current rows only.
+fn join_target_cut(
+    target_system_time: &SystemTimeScope,
+    resolve_only: bool,
+    statement: &str,
+) -> Result<Option<i64>, ErrorCode> {
+    if resolve_only {
+        write_match_cut(target_system_time, statement)
+    } else {
+        autocommit_match_cut(target_system_time, statement).map(|()| None)
+    }
+}
+
 /// The error for a join write that reached the Data Plane without its source
 /// rows. The Control Plane reads the source and ships it on every entry
 /// point; the Data Plane holds no read path for a source relation.
@@ -172,5 +203,37 @@ fn unresolved_source(statement: &str, source: &RowSource) -> ErrorCode {
              Plane must read the source and ship it",
             source.label()
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_resolve_pass_matches_the_target_at_the_block_snapshot() {
+        let snapshot = SystemTimeScope::TxnSnapshot {
+            ordinal: 42,
+            cut_marker: 1,
+        };
+        assert_eq!(join_target_cut(&snapshot, true, "MERGE"), Ok(Some(42)));
+        assert_eq!(
+            join_target_cut(&SystemTimeScope::Current, true, "MERGE"),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn a_write_pass_matches_the_current_target_only() {
+        assert_eq!(
+            join_target_cut(&SystemTimeScope::Current, false, "UPDATE ... FROM"),
+            Ok(None)
+        );
+        let snapshot = SystemTimeScope::TxnSnapshot {
+            ordinal: 42,
+            cut_marker: 1,
+        };
+        assert!(join_target_cut(&snapshot, false, "UPDATE ... FROM").is_err());
+        assert!(join_target_cut(&SystemTimeScope::AsOf(7), true, "MERGE").is_err());
     }
 }

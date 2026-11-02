@@ -9,6 +9,7 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::columnar_mutation::ColumnarDml;
 use crate::data::executor::handlers::columnar_read::ColumnarScanParams;
 use crate::data::executor::handlers::columnar_truncate::TruncateHistory;
+use crate::data::executor::handlers::write_match_cut::autocommit_match_cut;
 use crate::data::executor::task::ExecutionTask;
 
 impl CoreLoop {
@@ -53,6 +54,7 @@ impl CoreLoop {
                 provenance,
                 wal_lsn: _,
                 system_from,
+                restored_versions,
                 rls_write_check,
                 returning,
                 rls_filters,
@@ -72,6 +74,7 @@ impl CoreLoop {
                         schema_bytes,
                         provenance: provenance.as_ref(),
                         system_from: *system_from,
+                        restored_versions,
                         rls_write_check,
                         returning: returning.as_ref(),
                         rls_filters,
@@ -86,7 +89,11 @@ impl CoreLoop {
                 updates,
                 system_from,
                 rls_write_check,
+                system_time,
             } => {
+                if let Err(e) = autocommit_match_cut(system_time, "a columnar predicate UPDATE") {
+                    return self.response_error(task, e);
+                }
                 if let Some(r) = self.check_engine_pressure(task, nodedb_mem::EngineId::Columnar) {
                     return r;
                 }
@@ -108,7 +115,11 @@ impl CoreLoop {
                 filters,
                 system_from,
                 rls_write_check,
+                system_time,
             } => {
+                if let Err(e) = autocommit_match_cut(system_time, "a columnar predicate DELETE") {
+                    return self.response_error(task, e);
+                }
                 if let Some(r) = self.check_engine_pressure(task, nodedb_mem::EngineId::Columnar) {
                     return r;
                 }

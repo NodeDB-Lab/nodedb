@@ -71,6 +71,7 @@ impl CoreLoop {
                 ef_search,
                 filter_bitmap,
                 rls_filters,
+                system_time,
             } => self.execute_vector_multi_search(
                 super::super::handlers::vector_search::VectorMultiSearchParams {
                     task,
@@ -81,6 +82,7 @@ impl CoreLoop {
                     ef_search: *ef_search,
                     filter_bitmap: filter_bitmap.as_ref(),
                     rls_filters,
+                    system_time: *system_time,
                 },
             ),
 
@@ -102,6 +104,7 @@ impl CoreLoop {
                 ann_options,
                 skip_payload_fetch,
                 payload_filters,
+                system_time,
             } => self.execute_vector_search(
                 super::super::handlers::vector_search::VectorSearchParams {
                     task,
@@ -118,6 +121,7 @@ impl CoreLoop {
                     ann_options,
                     skip_payload_fetch: *skip_payload_fetch,
                     payload_filters: payload_filters.as_slice(),
+                    system_time: *system_time,
                 },
             ),
 
@@ -207,6 +211,7 @@ impl CoreLoop {
                 query_entries,
                 top_k,
                 filters,
+                system_time,
             } => self.execute_sparse_search(
                 task,
                 tid,
@@ -216,6 +221,7 @@ impl CoreLoop {
                     query_entries,
                     top_k: *top_k,
                     filters,
+                    system_time: *system_time,
                 },
             ),
 
@@ -267,6 +273,7 @@ impl CoreLoop {
                 top_k,
                 ef_search,
                 mode,
+                system_time,
             } => self.execute_multi_vector_score_search(
                 super::super::handlers::vector_multi::MultiVectorScoreSearchParams {
                     task,
@@ -277,6 +284,7 @@ impl CoreLoop {
                     top_k: *top_k,
                     ef_search: *ef_search,
                     mode_str: mode,
+                    system_time: *system_time,
                 },
             ),
 

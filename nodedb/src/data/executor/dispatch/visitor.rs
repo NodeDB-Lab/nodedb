@@ -63,7 +63,10 @@ impl<'a, 'b> PhysicalTaskVisitor for DataPlaneVisitor<'a, 'b> {
     }
 
     fn columnar(&mut self, op: &ColumnarOp) -> Result<Response, Self::Error> {
-        Ok(self.core_loop.dispatch_columnar(self.task, op))
+        let response = self.core_loop.dispatch_columnar(self.task, op);
+        // A write moves the collection's history: its charge follows.
+        self.core_loop.recharge_columnar_written(self.task, op);
+        Ok(response)
     }
 
     fn timeseries(&mut self, op: &TimeseriesOp) -> Result<Response, Self::Error> {

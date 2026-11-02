@@ -23,7 +23,7 @@ use tracing::warn;
 
 use super::core_loop::CoreLoop;
 use super::handlers::kv::conflict_merge::merge_kv_conflict_body;
-use crate::data::executor::core_loop::write_index::KeyRepr;
+use crate::data::executor::core_loop::write_note::KeyRepr;
 use nodedb_physical::physical_plan::UpdateValue;
 
 /// Fields of a decoded `kv_insert_on_conflict_update` record, bundled so

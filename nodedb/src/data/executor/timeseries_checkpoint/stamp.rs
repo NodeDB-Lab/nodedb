@@ -6,12 +6,13 @@
 //!
 //! A timeseries ingest is an append, so restart replay must apply a record
 //! exactly once. [`TsReplayStamp::rows`] names the records whose rows a
-//! partition holds or a truncate removed. Replay skips exactly those. A record
+//! partition holds. Replay skips exactly those. A record
 //! still on its way to the core when a flush ran is not named, even when a
 //! higher LSN is, so it replays once.
 //!
 //! [`TsReplayStamp::truncates`] names the truncates that took effect. Replay
-//! skips a named truncate: re-applying it would remove rows written after it.
+//! skips a named truncate: re-applying it would end rows that applied after
+//! it.
 //!
 //! ## Where it lives
 //!
@@ -20,8 +21,8 @@
 //!   commit point, so a committed partition always carries the stamp naming
 //!   its rows.
 //! - The collection directory carries `replay.stamp` too. A truncate writes it
-//!   into the fresh directory it leaves behind. Retention writes it before it
-//!   removes a partition, so the names of the removed partition survive it.
+//!   to name itself. Retention and the truncate purge write it before they
+//!   remove a partition, so the names of the removed partition survive it.
 //!
 //! The collection stamp is the union of every copy. Stamps only grow, so the
 //! union never names a record no copy names.
@@ -58,7 +59,7 @@ pub(in crate::data::executor) type TsCollectionKey = (DatabaseId, TenantId, Stri
     Debug, Clone, Default, PartialEq, Eq, zerompk::ToMessagePack, zerompk::FromMessagePack,
 )]
 pub(in crate::data::executor) struct TsReplayStamp {
-    /// Records whose rows a partition holds or a truncate removed.
+    /// Records whose rows a partition holds.
     pub rows: ReplayStamp,
     /// Truncates of the collection that took effect.
     pub truncates: ReplayStamp,
@@ -165,7 +166,7 @@ impl CoreLoop {
     }
 
     /// Whether `key`'s collection stamp names the record at `lsn` as held by
-    /// a partition or removed by a truncate.
+    /// a partition.
     pub(in crate::data::executor) fn ts_rows_named(&self, key: &TsCollectionKey, lsn: u64) -> bool {
         self.ts_replay
             .stamps
@@ -316,6 +317,7 @@ mod tests {
                     last_flushed_wal_lsn: 0,
                     column_stats: std::collections::HashMap::new(),
                     max_system_ts: 0,
+                    ended_at: None,
                 },
                 dir_name: name.to_string(),
             });
