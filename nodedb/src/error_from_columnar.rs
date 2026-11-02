@@ -17,7 +17,8 @@ impl From<ColumnarError> for Error {
             | ColumnarError::JsonParse { .. }
             | ColumnarError::RangeParse { .. }
             | ColumnarError::MsgpackSerialize { .. }
-            | ColumnarError::MsgpackDeserialize { .. } => Self::BadRequest {
+            | ColumnarError::MsgpackDeserialize { .. }
+            | ColumnarError::InvalidVersionInterval { .. } => Self::BadRequest {
                 detail: e.to_string(),
             },
             // A stored cell or segment that does not decode is corruption,

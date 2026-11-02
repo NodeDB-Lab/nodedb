@@ -371,6 +371,7 @@ pub fn spawn_data_plane_cores(
         timeseries: config.tuning.timeseries.clone(),
         vector: config.tuning.vector.clone(),
         checkpoint_interval: std::time::Duration::from_secs(config.checkpoint.interval_secs),
+        commit_snapshot_window: config.tuning.network.snapshot_max_hold(),
     };
 
     let mut core_handles = Vec::with_capacity(num_cores);

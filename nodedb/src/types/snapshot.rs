@@ -5,21 +5,11 @@
 /// Shared between Control Plane (backup/restore DDL) and Data Plane
 /// (snapshot creation/restoration). Lives in `types` to avoid
 /// cross-plane module visibility leaks.
-///
-/// Map-encoded (`#[msgpack(map)]`) so fields can be added with
-/// `#[msgpack(default)]` and older snapshots (serialized before the field
-/// existed) still decode without a migration — new fields appear with their
-/// `Default` value. This is the same evolution pattern used by
-/// `ContinuousAggregateDef` and `RetentionPolicyDef`.
 #[derive(
     serde::Serialize, serde::Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack, Default,
 )]
 #[msgpack(map)]
 pub struct TenantDataSnapshot {
-    /// Sparse engine documents: `[("{tid}:{collection}:{doc_id}", value_bytes), ...]`
-    pub documents: Vec<(String, Vec<u8>)>,
-    /// Sparse engine index entries: `[("{tid}:{collection}:{field}:{value}:{doc_id}", []), ...]`
-    pub indexes: Vec<(String, Vec<u8>)>,
     /// Graph edges: `[("{collection}\x00{src}\x00{label}\x00{dst}\x00{system_from:020}", value_bytes), ...]`
     ///
     /// The edge key does NOT carry the owning tenant. This (no-tenant) field is
@@ -28,7 +18,7 @@ pub struct TenantDataSnapshot {
     /// (which spans tenants and applies once with no per-tenant dispatch), use
     /// the tenant-aware companion [`Self::tenant_edges`] instead.
     pub edges: Vec<(String, Vec<u8>)>,
-    /// Vector collections: `[("{tid}:{collection}", serialized_vectors_msgpack), ...]`
+    /// Vector collections: `[("{db}:{tid}:{coll_key}", serialized_vectors_msgpack), ...]`
     /// Each value is a MessagePack-serialized list of `(vector_id, f32_data, doc_id)`.
     /// HNSW graph is NOT serialized — it's rebuilt on restore from raw vectors.
     pub vectors: Vec<(String, Vec<u8>)>,
@@ -40,20 +30,17 @@ pub struct TenantDataSnapshot {
     /// `[(tenant_id, collection, loro_export_bytes), ...]`. Each collection
     /// owns its own LoroDoc. `tenant_id` is carried explicitly because the
     /// merged multi-tenant Raft snapshot is applied with a dispatch tenant of 0.
-    /// `#[msgpack(default)]`: snapshots written before this field decode empty.
-    #[msgpack(default)]
-    #[serde(default)]
     pub crdt_state: Vec<(u64, u64, String, Vec<u8>)>,
-    /// Timeseries memtable data: `[("{tid}:{collection}", serialized_columns_msgpack), ...]`
+    /// Timeseries memtable data: `[("{db}:{tid}:{collection}", serialized_columns_msgpack), ...]`
     pub timeseries: Vec<(String, Vec<u8>)>,
     /// Flushed on-disk timeseries segments per collection.
-    ///
-    /// `#[msgpack(default)]`: snapshots created before this field was added
-    /// decode with an empty Vec — the restore path treats an empty slice as
-    /// "no flushed segments to restore", which is safe and correct.
-    #[msgpack(default)]
-    #[serde(default)]
     pub flushed_ts_segments: Vec<TsFlushedCollectionBlob>,
+    /// Timeseries series catalogs: `[("{db}:{tid}:{collection}",
+    /// series_catalog_file_bytes), ...]`. Every stored row carries its
+    /// series id, so a snapshot carries the catalog that gave the ids: an
+    /// installed collection gives every key the id its rows carry. The
+    /// install puts each catalog in place before it restores any row.
+    pub ts_series_catalogs: Vec<(String, Vec<u8>)>,
 
     /// Plain-columnar (and spatial) engine state per collection.
     ///
@@ -63,12 +50,6 @@ pub struct TenantDataSnapshot {
     /// - `msgpack_bytes` is a zerompk-serialized `nodedb_columnar::ColumnarEngineSnapshot`
     ///   (stored as opaque bytes to keep this type decoupled from the columnar
     ///   wire layout and mirror the `vectors`/`kv_tables` encoding pattern).
-    ///
-    /// `#[msgpack(default)]`: snapshots created before this field was added
-    /// decode with an empty Vec — safe because the restore path skips an
-    /// empty slice.
-    #[msgpack(default)]
-    #[serde(default)]
     pub columnar_engines: Vec<(String, Vec<u8>)>,
 
     /// Per-collection HNSW parameters set via DDL, carried through snapshots
@@ -77,12 +58,6 @@ pub struct TenantDataSnapshot {
     ///
     /// Key format: `"{db}:{tid}:{collection_key}"` (same as `vectors`).
     /// Value: msgpack-serialized `HnswParams`.
-    ///
-    /// `#[msgpack(default)]`: snapshots written before this field decode with
-    /// an empty Vec — the restore path falls back to `HnswParams::default()`,
-    /// which matches the pre-fix behavior.
-    #[msgpack(default)]
-    #[serde(default)]
     pub vector_params: Vec<(String, Vec<u8>)>,
 
     /// Per-collection index config (index type, PQ/IVF params) carried through
@@ -91,17 +66,11 @@ pub struct TenantDataSnapshot {
     ///
     /// Key format: `"{db}:{tid}:{collection_key}"` (same as `vectors`).
     /// Value: msgpack-serialized `IndexConfig`.
-    ///
-    /// `#[msgpack(default)]`: snapshots written before this field decode with
-    /// an empty Vec — the restore path skips the loop, leaving the collection
-    /// to use default index routing, matching pre-fix behavior.
-    #[msgpack(default)]
-    #[serde(default)]
     pub index_configs: Vec<(String, Vec<u8>)>,
 
     /// PK → surrogate identity bindings for the snapshotted collections.
     ///
-    /// The surrogate map (`surrogate_pk_v4` / `surrogate_pk_rev_v4` catalog
+    /// The surrogate map (`surrogate_pk` / `surrogate_pk_rev` catalog
     /// tables) is DATA-derived per-node state: on the cluster apply path a
     /// follower binds it when it applies a replicated `PointInsert`/`PointPut`.
     /// The snapshot install path bypasses that apply path entirely (it installs
@@ -111,14 +80,10 @@ pub struct TenantDataSnapshot {
     /// to nothing. Carrying + rebinding these on the Control-Plane apply side
     /// closes that gap.
     ///
-    /// `#[msgpack(default)]`: snapshots/backups created before this field was
-    /// added decode with an empty Vec — the rebind step treats an empty slice
-    /// as "nothing to rebind", which is safe. The Data-Plane snapshot builder
+    /// The Data-Plane snapshot builder
     /// (`create.rs`) has no catalog access and leaves this empty; it is filled
     /// by the Control-Plane snapshot builder / backup orchestrator and consumed
     /// by the Control-Plane applier / restore orchestrator.
-    #[msgpack(default)]
-    #[serde(default)]
     pub surrogate_pk: Vec<SurrogateBindEntry>,
 
     /// Graph edges WITH their owning database and tenant, for the per-group
@@ -127,58 +92,38 @@ pub struct TenantDataSnapshot {
     /// carries neither). Each entry is `(database_id, tenant_id, edge_key,
     /// value_bytes)`. The `edges` field (no database, no tenant) is used by a
     /// restore dispatched in the snapshot's own database and tenant.
-    ///
-    /// `#[msgpack(default)]`: snapshots created before this field was added
-    /// decode with an empty Vec — safe because the restore path skips an empty
-    /// slice (same evolution pattern as `surrogate_pk`).
-    #[msgpack(default)]
-    #[serde(default)]
     pub tenant_edges: Vec<(u64, u64, String, Vec<u8>)>,
 
     /// Graph edge versions a TRUNCATE hides from a current read, keyed like
     /// `edges`. A read as of an earlier system time still reaches one, so a
     /// snapshot carries them with the cuts and applied ordinals. Empty in a
     /// backup: its RESTORE re-issues the versions a current read reaches.
-    #[msgpack(default)]
-    #[serde(default)]
     pub edge_hidden: Vec<(String, Vec<u8>)>,
 
     /// Every TRUNCATE cut of an edge collection, as `(collection, cut)`.
     /// Empty in a backup.
-    #[msgpack(default)]
-    #[serde(default)]
     pub edge_cuts: Vec<(String, i64)>,
 
     /// The applied ordinal of every edge version applied at another ordinal
     /// than its system time, as `(edge_key, applied)`. Empty in a backup.
-    #[msgpack(default)]
-    #[serde(default)]
     pub edge_applied: Vec<(String, i64)>,
 
     /// `edge_cuts` with each cut's database and tenant, for the per-group
     /// Raft snapshot, as `(database_id, tenant_id, collection, cut)`. The
     /// group's hidden edge versions travel in `tenant_edges`.
-    #[msgpack(default)]
-    #[serde(default)]
     pub tenant_edge_cuts: Vec<(u64, u64, String, i64)>,
 
     /// `edge_applied` with each entry's database and tenant, for the
     /// per-group Raft snapshot, as `(database_id, tenant_id, edge_key,
     /// applied)`.
-    #[msgpack(default)]
-    #[serde(default)]
     pub tenant_edge_applied: Vec<(u64, u64, String, i64)>,
 
     /// Every labeled node's current label set, as `(database_id, tenant_id,
     /// node, labels)`. A node's labels home on `VShardId::from_key(node)`.
-    #[msgpack(default)]
-    #[serde(default)]
     pub node_labels: Vec<NodeLabelsEntry>,
 
     /// Every node-label version, as `(database_id, tenant_id, node,
     /// system_from, labels)`. Each keeps its system time.
-    #[msgpack(default)]
-    #[serde(default)]
     pub node_label_versions: Vec<NodeLabelVersionEntry>,
 
     /// CRDT constraint state, one entry per `(tenant, collection)` that has an
@@ -196,12 +141,6 @@ pub struct TenantDataSnapshot {
     /// `<=` an installed version that never advances. Carrying the constraint
     /// set + version through the snapshot lets `restore_crdt_constraints`
     /// reconstruct the validator and the installed version in one shot.
-    ///
-    /// `#[msgpack(default)]`: snapshots written before this field decode with
-    /// an empty Vec — the restore path skips the loop, reproducing the
-    /// pre-fix (fail-safe, over-rejecting) behavior rather than a hard error.
-    #[msgpack(default)]
-    #[serde(default)]
     pub crdt_constraints: Vec<CrdtConstraintEntry>,
 
     /// The group's tenant write marks, for the per-group Raft snapshot:
@@ -211,8 +150,6 @@ pub struct TenantDataSnapshot {
     /// takes their marks from here, and RESTORE's staleness guard reads the
     /// same marks on it as on every other replica. Empty in a backup: the
     /// guard reads the marks of the destination cluster.
-    #[msgpack(default)]
-    #[serde(default)]
     pub group_write_marks: Vec<(u64, u64, u8, String, u64)>,
 
     /// `(log_index, proposal_key)` of the group's committed entries at or
@@ -221,29 +158,20 @@ pub struct TenantDataSnapshot {
     /// entries. It takes their keys from here, so its duplicate check skips a
     /// later copy of the same proposal, and a waiter learns whether its own
     /// proposal committed. Empty in a backup.
-    #[msgpack(default)]
-    #[serde(default)]
     pub group_proposal_keys: Vec<(u64, u64)>,
 
     /// Lowest index from which `group_proposal_keys` is complete. `0` when
     /// every key in the window is present. Below it a missing key proves
     /// nothing, so a waiter there learns its outcome is unknown.
-    #[msgpack(default)]
-    #[serde(default)]
     pub group_proposal_keys_complete_from: u64,
 
-    /// Document versions of `bitemporal=true` collections:
+    /// Every document version of every document collection:
     /// `[("{db}:{tid}:{collection}:{doc_id}\x00{system_from:020}", versioned_value), ...]`.
-    /// These collections write only the versioned table, so `documents`
-    /// carries none of their rows. Every version keeps its system time.
-    #[msgpack(default)]
-    #[serde(default)]
+    /// Every version keeps its system time, tombstones included.
     pub documents_versioned: Vec<(String, Vec<u8>)>,
 
-    /// Versioned secondary-index entries of `bitemporal=true` collections:
+    /// Every versioned secondary-index entry of every document collection:
     /// `[("{db}:{tid}:{collection}:{field}:{value}:{doc_id}\x00{system_from:020}", tag), ...]`.
-    #[msgpack(default)]
-    #[serde(default)]
     pub indexes_versioned: Vec<(String, Vec<u8>)>,
 
     /// Multi-vector documents per vector index:
@@ -251,16 +179,25 @@ pub struct TenantDataSnapshot {
     /// `vectors`. A `vectors` row carries no membership, and a one-vector
     /// multi-vector document is otherwise indistinguishable from a
     /// single-vector row.
-    #[msgpack(default)]
-    #[serde(default)]
     pub vector_multi_documents: Vec<(String, Vec<nodedb_types::Surrogate>)>,
+
+    /// The system-time history of each vector index, keyed like `vectors`:
+    /// `[("{db}:{tid}:{coll_key}", msgpack VectorIndexHistory), ...]`. A
+    /// `vectors` row carries the live vector only.
+    pub vector_versions: Vec<(String, Vec<u8>)>,
+
+    /// Every sparse vector index with its history:
+    /// `[("{db}:{tid}:{collection}", msgpack FieldIndexImage), ...]`.
+    pub sparse_vectors: Vec<(String, Vec<u8>)>,
+
+    /// Every spatial R-tree with its history and entry map:
+    /// `[("{db}:{tid}:{collection}", msgpack FieldIndexImage), ...]`.
+    pub spatial_indexes: Vec<(String, Vec<u8>)>,
 
     /// Array cell versions, one blob per `(array, vShard)` on each core.
     /// Every version keeps its system time, tombstones and erasures included.
     /// Only a snapshot requested with `arrays` carries them: a backup and a
     /// Raft group snapshot.
-    #[msgpack(default)]
-    #[serde(default)]
     pub arrays: Vec<ArrayCellsBlob>,
 
     /// The metadata group index the builder had applied when it captured a
@@ -269,8 +206,6 @@ pub struct TenantDataSnapshot {
     /// waits until its own metadata group applied this index. A new
     /// incarnation's storage clear then runs before the rows land, never
     /// after. `0` holds nothing: a backup and a per-core part carry `0`.
-    #[msgpack(default)]
-    #[serde(default)]
     pub metadata_floor: u64,
 
     /// The group's applied index a Raft group snapshot was captured at. The
@@ -280,8 +215,6 @@ pub struct TenantDataSnapshot {
     /// follower treats the entries between the two as covered and never
     /// applies them. `0` holds nothing: a backup and a per-core part carry
     /// `0`.
-    #[msgpack(default)]
-    #[serde(default)]
     pub group_cut_index: u64,
 
     /// The Event Plane lane state of a Raft group snapshot's vShards: the
@@ -289,23 +222,17 @@ pub struct TenantDataSnapshot {
     /// follower caught up by the snapshot never applies the entries it
     /// covers, so it holds their events from here and can own the vShards'
     /// firing and delivery. Empty in a backup and a per-core part.
-    #[msgpack(default)]
-    #[serde(default)]
     pub group_event_lane: GroupEventLane,
 
     /// The Calvin cut of a Raft group snapshot: the sequencer index its
     /// Calvin state holds every input through, and each vShard's applied
     /// positions. `None` in a backup and a per-core part.
-    #[msgpack(default)]
-    #[serde(default)]
     pub group_calvin: Option<super::snapshot_calvin::GroupCalvinCut>,
 
     /// The open chunked redo streams of a Raft group snapshot's group. A
     /// follower caught up by the snapshot never applies the chunks it covers,
     /// so it holds them from here for each stream's final entry. Empty in a
     /// backup and a per-core part.
-    #[msgpack(default)]
-    #[serde(default)]
     pub group_redo_streams: Vec<crate::wal::CarriedRedoStream>,
 }
 
@@ -316,43 +243,7 @@ pub type NodeLabelsEntry = (u64, u64, String, Vec<String>);
 /// labels)`.
 pub type NodeLabelVersionEntry = (u64, u64, String, i64, Vec<String>);
 
-/// One `(partition, epoch, index, sequence)` position with its held row.
-pub type HeldAtPosition = (u32, u64, u64, u64, Vec<u8>);
-
-/// One partition's cursor, as `(partition, epoch, index, sequence)`.
-pub type PartitionCursor = (u32, u64, u64, u64);
-
-/// The Event Plane lane state a Raft group snapshot carries for its vShards.
-#[derive(
-    Debug,
-    Clone,
-    Default,
-    PartialEq,
-    Eq,
-    serde::Serialize,
-    serde::Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-)]
-#[msgpack(map)]
-pub struct GroupEventLane {
-    /// Held trigger actions, each an encoded held event.
-    #[msgpack(default)]
-    #[serde(default)]
-    pub held_actions: Vec<HeldAtPosition>,
-    /// The trigger firing cursors of the group's partitions.
-    #[msgpack(default)]
-    #[serde(default)]
-    pub action_cursors: Vec<PartitionCursor>,
-    /// Held committed messages, each an encoded `RedoPublish`.
-    #[msgpack(default)]
-    #[serde(default)]
-    pub held_publishes: Vec<HeldAtPosition>,
-    /// The message delivery cursors of the group's partitions.
-    #[msgpack(default)]
-    #[serde(default)]
-    pub publish_cursors: Vec<PartitionCursor>,
-}
+pub use super::snapshot_lane::{GroupEventLane, HeldAtPosition, PartitionCursor};
 
 /// One array's cell versions whose tile keys route to one vShard.
 #[derive(
@@ -409,7 +300,7 @@ pub struct CrdtConstraintEntry {
 
 /// A single PK → surrogate identity binding carried in a snapshot/backup.
 ///
-/// Mirrors one row of the `surrogate_pk_v4` catalog table for one
+/// Mirrors one row of the `surrogate_pk` catalog table for one
 /// `(database_id, tenant_id, collection)`. Rebound on the Control-Plane apply side via
 /// `SystemCatalog::put_surrogate` so PK point-lookups resolve on a
 /// snapshot-installed / restored node.
@@ -461,7 +352,6 @@ pub struct TsFlushedCollectionBlob {
     /// `partitions` by directory name, and the restore keeps those names,
     /// so the image and the partitions stay in step. It carries the buckets
     /// folded from partitions raw retention has removed.
-    #[serde(default)]
     pub cagg_image: Vec<u8>,
 }
 
@@ -490,71 +380,10 @@ pub struct TsFlushedPartitionBlob {
 mod tests {
     use super::*;
 
-    /// Backward-compat: a `TenantDataSnapshot` serialized WITHOUT the
-    /// `columnar_engines` field (simulating a snapshot from before this field
-    /// was added) must decode successfully with `columnar_engines` defaulting
-    /// to `Vec::new()`.
-    ///
-    /// We simulate the "old" wire format by defining an 8-field map-encoded
-    /// struct that matches the schema before `columnar_engines` was added,
-    /// serialising it, then decoding as the new 9-field `TenantDataSnapshot`.
-    /// zerompk's `#[msgpack(default)]` fills in the missing field with
-    /// `Vec::new()`.
+    /// Round-trip for the `surrogate_pk` field: a snapshot carrying bindings
+    /// survives encode→decode intact.
     #[test]
-    fn backward_compat_missing_columnar_engines_defaults_to_empty() {
-        #[derive(zerompk::ToMessagePack, zerompk::FromMessagePack)]
-        #[msgpack(map)]
-        struct OldSnapshot {
-            documents: Vec<(String, Vec<u8>)>,
-            indexes: Vec<(String, Vec<u8>)>,
-            edges: Vec<(String, Vec<u8>)>,
-            vectors: Vec<(String, Vec<u8>)>,
-            kv_tables: Vec<(String, Vec<u8>)>,
-            timeseries: Vec<(String, Vec<u8>)>,
-            flushed_ts_segments: Vec<TsFlushedCollectionBlob>,
-        }
-
-        let old = OldSnapshot {
-            documents: vec![("k".to_string(), b"v".to_vec())],
-            indexes: vec![],
-            edges: vec![],
-            vectors: vec![],
-            kv_tables: vec![],
-            timeseries: vec![("ts:c".to_string(), b"data".to_vec())],
-            flushed_ts_segments: vec![],
-        };
-        let bytes = zerompk::to_msgpack_vec(&old).expect("encode old snapshot");
-
-        // Decode as new schema — columnar_engines must default to empty.
-        let decoded: TenantDataSnapshot =
-            zerompk::from_msgpack(&bytes).expect("decode old snapshot as new schema");
-        assert_eq!(decoded.documents.len(), 1);
-        assert_eq!(decoded.timeseries.len(), 1);
-        assert!(
-            decoded.columnar_engines.is_empty(),
-            "expected columnar_engines to default to empty for old snapshot"
-        );
-        assert!(
-            decoded.surrogate_pk.is_empty(),
-            "expected surrogate_pk to default to empty for old snapshot"
-        );
-        assert!(
-            decoded.tenant_edges.is_empty(),
-            "expected tenant_edges to default to empty for old snapshot"
-        );
-        assert!(
-            decoded.crdt_state.is_empty(),
-            "expected crdt_state to default to empty for old snapshot"
-        );
-    }
-
-    /// Round-trip + backward-compat for the `surrogate_pk` field: a snapshot
-    /// carrying bindings survives encode→decode intact, and a snapshot
-    /// serialized WITHOUT the field (the 9-field schema that existed before
-    /// `surrogate_pk` was added) decodes with `surrogate_pk` defaulting to
-    /// empty.
-    #[test]
-    fn surrogate_pk_round_trips_and_back_compat() {
+    fn surrogate_pk_round_trips() {
         let snap = TenantDataSnapshot {
             surrogate_pk: vec![
                 SurrogateBindEntry {
@@ -578,90 +407,6 @@ mod tests {
         let decoded: TenantDataSnapshot =
             zerompk::from_msgpack(&bytes).expect("decode snapshot with surrogate_pk");
         assert_eq!(decoded.surrogate_pk, snap.surrogate_pk);
-
-        // Old 9-field schema (pre-surrogate_pk) must still decode.
-        #[derive(zerompk::ToMessagePack)]
-        #[msgpack(map)]
-        struct OldSnapshot {
-            documents: Vec<(String, Vec<u8>)>,
-            indexes: Vec<(String, Vec<u8>)>,
-            edges: Vec<(String, Vec<u8>)>,
-            vectors: Vec<(String, Vec<u8>)>,
-            kv_tables: Vec<(String, Vec<u8>)>,
-            timeseries: Vec<(String, Vec<u8>)>,
-            flushed_ts_segments: Vec<TsFlushedCollectionBlob>,
-            columnar_engines: Vec<(String, Vec<u8>)>,
-        }
-        let old = OldSnapshot {
-            documents: vec![("k".to_string(), b"v".to_vec())],
-            indexes: vec![],
-            edges: vec![],
-            vectors: vec![],
-            kv_tables: vec![],
-            timeseries: vec![],
-            flushed_ts_segments: vec![],
-            columnar_engines: vec![],
-        };
-        let old_bytes = zerompk::to_msgpack_vec(&old).expect("encode old snapshot");
-        let decoded_old: TenantDataSnapshot =
-            zerompk::from_msgpack(&old_bytes).expect("decode old snapshot as new schema");
-        assert_eq!(decoded_old.documents.len(), 1);
-        assert!(
-            decoded_old.surrogate_pk.is_empty(),
-            "expected surrogate_pk to default to empty for old snapshot"
-        );
-        assert!(
-            decoded_old.tenant_edges.is_empty(),
-            "expected tenant_edges to default to empty for old snapshot"
-        );
-        assert!(
-            decoded_old.crdt_state.is_empty(),
-            "expected crdt_state to default to empty for old snapshot"
-        );
-    }
-
-    /// Backward-compat: a `TenantDataSnapshot` serialized WITHOUT the
-    /// `flushed_ts_segments` field (simulating a snapshot from before this
-    /// field was added) must decode successfully with `flushed_ts_segments`
-    /// defaulting to `Vec::new()`.
-    ///
-    /// We simulate the "old" wire format by defining a 7-field map-encoded
-    /// struct that matches the original schema, serialising it, then decoding
-    /// as the new 8-field `TenantDataSnapshot`. zerompk's `#[msgpack(default)]`
-    /// fills in the missing `flushed_ts_segments` with `Vec::new()`.
-    #[test]
-    fn backward_compat_missing_flushed_ts_segments_defaults_to_empty() {
-        /// Mirrors the original 7-field schema — no `flushed_ts_segments`.
-        #[derive(zerompk::ToMessagePack, zerompk::FromMessagePack)]
-        #[msgpack(map)]
-        struct OldSnapshot {
-            documents: Vec<(String, Vec<u8>)>,
-            indexes: Vec<(String, Vec<u8>)>,
-            edges: Vec<(String, Vec<u8>)>,
-            vectors: Vec<(String, Vec<u8>)>,
-            kv_tables: Vec<(String, Vec<u8>)>,
-            timeseries: Vec<(String, Vec<u8>)>,
-        }
-
-        let old = OldSnapshot {
-            documents: vec![("k".to_string(), b"v".to_vec())],
-            indexes: vec![],
-            edges: vec![],
-            vectors: vec![],
-            kv_tables: vec![],
-            timeseries: vec![("ts:c".to_string(), b"data".to_vec())],
-        };
-        let bytes = zerompk::to_msgpack_vec(&old).expect("encode old snapshot");
-
-        // Decode as new schema — flushed_ts_segments must default to empty.
-        let decoded: TenantDataSnapshot =
-            zerompk::from_msgpack(&bytes).expect("decode old snapshot as new schema");
-        assert_eq!(decoded.documents.len(), 1);
-        assert_eq!(decoded.timeseries.len(), 1);
-        assert!(
-            decoded.flushed_ts_segments.is_empty(),
-            "expected flushed_ts_segments to default to empty for old snapshot"
-        );
     }
 
     /// Blob round-trip: `TsFlushedCollectionBlob` with one partition containing
@@ -700,12 +445,9 @@ mod tests {
     /// Round-trip: `vector_params` and `index_configs` survive msgpack
     /// encode → decode with non-default values.
     ///
-    /// This test FAILS without the two new fields on `TenantDataSnapshot`
-    /// because the fields simply do not exist and there is nothing to assert.
-    /// With the fix, both sections are present, carry non-default values, and
-    /// decode back intact. The test does NOT pre-seed params on a live CoreLoop
-    /// so it exercises the struct wire format in isolation — the appropriate
-    /// level since `TenantDataSnapshot` is the boundary type.
+    /// The test seeds no params on a live CoreLoop. It exercises the struct
+    /// wire format in isolation, because `TenantDataSnapshot` is the boundary
+    /// type.
     #[test]
     fn vector_params_and_index_configs_round_trip() {
         use nodedb_types::hnsw::HnswParams;
@@ -820,101 +562,5 @@ mod tests {
         let decoded_not_null: nodedb_crdt::Constraint =
             zerompk::from_msgpack(&encoded[1]).expect("decode NotNull constraint");
         assert_eq!(decoded_not_null, not_null);
-    }
-
-    /// Backward-compat: a `TenantDataSnapshot` serialized WITHOUT the
-    /// `crdt_constraints` field (the schema that existed before this field
-    /// was added) must decode successfully with `crdt_constraints` defaulting
-    /// to `Vec::new()`.
-    #[test]
-    fn backward_compat_missing_crdt_constraints_defaults_to_empty() {
-        #[derive(zerompk::ToMessagePack)]
-        #[msgpack(map)]
-        struct OldSnapshot {
-            documents: Vec<(String, Vec<u8>)>,
-            indexes: Vec<(String, Vec<u8>)>,
-            edges: Vec<(String, Vec<u8>)>,
-            vectors: Vec<(String, Vec<u8>)>,
-            kv_tables: Vec<(String, Vec<u8>)>,
-            crdt_state: Vec<(u64, String, Vec<u8>)>,
-            timeseries: Vec<(String, Vec<u8>)>,
-            flushed_ts_segments: Vec<TsFlushedCollectionBlob>,
-            columnar_engines: Vec<(String, Vec<u8>)>,
-            vector_params: Vec<(String, Vec<u8>)>,
-            index_configs: Vec<(String, Vec<u8>)>,
-            surrogate_pk: Vec<SurrogateBindEntry>,
-            tenant_edges: Vec<(u64, String, Vec<u8>)>,
-        }
-        let old = OldSnapshot {
-            documents: vec![("k".to_string(), b"v".to_vec())],
-            indexes: Vec::<(String, Vec<u8>)>::new(),
-            edges: Vec::<(String, Vec<u8>)>::new(),
-            vectors: Vec::<(String, Vec<u8>)>::new(),
-            kv_tables: Vec::<(String, Vec<u8>)>::new(),
-            crdt_state: Vec::<(u64, String, Vec<u8>)>::new(),
-            timeseries: Vec::<(String, Vec<u8>)>::new(),
-            flushed_ts_segments: Vec::<TsFlushedCollectionBlob>::new(),
-            columnar_engines: Vec::<(String, Vec<u8>)>::new(),
-            vector_params: Vec::<(String, Vec<u8>)>::new(),
-            index_configs: Vec::<(String, Vec<u8>)>::new(),
-            surrogate_pk: Vec::<SurrogateBindEntry>::new(),
-            tenant_edges: Vec::<(u64, String, Vec<u8>)>::new(),
-        };
-        let bytes = zerompk::to_msgpack_vec(&old).expect("encode old snapshot");
-        let decoded: TenantDataSnapshot =
-            zerompk::from_msgpack(&bytes).expect("decode old snapshot as new schema");
-        assert_eq!(decoded.documents.len(), 1);
-        assert!(
-            decoded.crdt_constraints.is_empty(),
-            "crdt_constraints must default to empty for old snapshot"
-        );
-    }
-
-    /// Backward-compat: a snapshot written WITHOUT `vector_params` and
-    /// `index_configs` (old wire format) must still decode with both fields
-    /// defaulting to empty — matching the `#[msgpack(default)]` contract.
-    #[test]
-    fn backward_compat_missing_vector_params_and_index_configs_default_to_empty() {
-        // Old schema: the 11-field struct that existed before the two new fields.
-        #[derive(zerompk::ToMessagePack)]
-        #[msgpack(map)]
-        struct OldSnapshot {
-            documents: Vec<(String, Vec<u8>)>,
-            indexes: Vec<(String, Vec<u8>)>,
-            edges: Vec<(String, Vec<u8>)>,
-            vectors: Vec<(String, Vec<u8>)>,
-            kv_tables: Vec<(String, Vec<u8>)>,
-            crdt_state: Vec<(u64, String, Vec<u8>)>,
-            timeseries: Vec<(String, Vec<u8>)>,
-            flushed_ts_segments: Vec<TsFlushedCollectionBlob>,
-            columnar_engines: Vec<(String, Vec<u8>)>,
-            surrogate_pk: Vec<SurrogateBindEntry>,
-            tenant_edges: Vec<(u64, String, Vec<u8>)>,
-        }
-        let old = OldSnapshot {
-            documents: vec![("k".to_string(), b"v".to_vec())],
-            indexes: Vec::<(String, Vec<u8>)>::new(),
-            edges: Vec::<(String, Vec<u8>)>::new(),
-            vectors: Vec::<(String, Vec<u8>)>::new(),
-            kv_tables: Vec::<(String, Vec<u8>)>::new(),
-            crdt_state: Vec::<(u64, String, Vec<u8>)>::new(),
-            timeseries: Vec::<(String, Vec<u8>)>::new(),
-            flushed_ts_segments: Vec::<TsFlushedCollectionBlob>::new(),
-            columnar_engines: Vec::<(String, Vec<u8>)>::new(),
-            surrogate_pk: Vec::<SurrogateBindEntry>::new(),
-            tenant_edges: Vec::<(u64, String, Vec<u8>)>::new(),
-        };
-        let bytes = zerompk::to_msgpack_vec(&old).expect("encode old snapshot");
-        let decoded: TenantDataSnapshot =
-            zerompk::from_msgpack(&bytes).expect("decode old snapshot as new schema");
-        assert_eq!(decoded.documents.len(), 1);
-        assert!(
-            decoded.vector_params.is_empty(),
-            "vector_params must default to empty for old snapshot"
-        );
-        assert!(
-            decoded.index_configs.is_empty(),
-            "index_configs must default to empty for old snapshot"
-        );
     }
 }

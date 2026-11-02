@@ -43,6 +43,10 @@ pub(crate) fn classify(e: &Error) -> NodeDbError {
             collection,
             document_id,
         } => NodeDbError::write_conflict(collection.clone(), document_id.clone()),
+        Error::TxnSnapshotTooOld { age_ms, limit_ms } => NodeDbError::write_conflict(
+            "transaction snapshot",
+            format!("snapshot is {age_ms}ms old, past the {limit_ms}ms limit"),
+        ),
         Error::CalvinSerializationConflict => NodeDbError::write_conflict(
             "cross-shard",
             "global OCC verdict was abort (read-set validation failed)",
@@ -390,9 +394,6 @@ pub(crate) fn classify(e: &Error) -> NodeDbError {
         Error::SessionUserDropped => {
             NodeDbError::bad_request("session terminated: user account dropped".to_owned())
         }
-        Error::OidcProviderTenantUnbound => NodeDbError::bad_request(
-            "OIDC: authenticated provider has no tenant binding".to_owned(),
-        ),
         Error::OidcProviderTenantUnavailable { .. } => NodeDbError::bad_request(
             "OIDC: authenticated provider tenant is unavailable".to_owned(),
         ),

@@ -76,6 +76,15 @@ pub enum Error {
     )]
     CalvinParticipantError,
 
+    /// A statement of a transaction block whose snapshot is older than
+    /// `[tuning.network] txn_snapshot_max_age_secs`. Clients retry the block
+    /// as SQLSTATE `40001`.
+    #[error(
+        "transaction snapshot is {age_ms}ms old, past the {limit_ms}ms limit \
+         (txn_snapshot_max_age_secs); retry the transaction"
+    )]
+    TxnSnapshotTooOld { age_ms: u64, limit_ms: u64 },
+
     #[error("CRDT delta pre-validation rejected: {constraint} — {reason}")]
     RejectedPrevalidation { constraint: String, reason: String },
 
@@ -764,10 +773,6 @@ pub enum Error {
     /// Session closed because the associated user was dropped.
     #[error("session closed: user account was dropped")]
     SessionUserDropped,
-
-    /// OIDC bearer token rejected because the authenticated provider has no tenant binding.
-    #[error("OIDC token rejected: authenticated provider has no tenant binding")]
-    OidcProviderTenantUnbound,
 
     /// OIDC provider tenant is absent or unreadable.
     #[error("OIDC token rejected: authenticated provider tenant is unavailable")]

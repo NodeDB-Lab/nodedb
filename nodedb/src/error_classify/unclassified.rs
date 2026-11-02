@@ -46,6 +46,7 @@ pub(crate) fn is_unclassified_failure(e: &Error) -> bool {
         | Error::ConflictRetry { .. }
         | Error::CalvinSerializationConflict
         | Error::CalvinParticipantError
+        | Error::TxnSnapshotTooOld { .. }
         | Error::RejectedPrevalidation { .. }
         | Error::RetryableRefusal { .. }
         | Error::AppendOnlyViolation { .. }
@@ -132,7 +133,6 @@ pub(crate) fn is_unclassified_failure(e: &Error) -> bool {
         | Error::SessionTokenExpired
         | Error::SessionKilledByAdmin
         | Error::SessionUserDropped
-        | Error::OidcProviderTenantUnbound
         | Error::OidcProviderTenantUnavailable { .. }
         | Error::ExternalRoleUndefined { .. }
         | Error::OidcNoDefaultDatabase { .. }

@@ -24,11 +24,13 @@ mod lease;
 mod outcome_floor;
 mod quota;
 mod raft_apply;
+mod read_cut;
 mod recovery;
 mod redo_stream;
 mod retention;
 mod vector;
 mod vector_build;
+mod version_cleanup;
 mod vshard_departure;
 mod write_path;
 
@@ -75,6 +77,7 @@ pub(in crate::diag) use quota::{
 pub(in crate::diag) use raft_apply::{
     CalvinBarrierLogStoreFailed, CalvinLeftStateNotForgotten, RaftEntryReapplied,
 };
+pub(in crate::diag) use read_cut::OrdinalReservationLeaked;
 pub(in crate::diag) use recovery::{ReplayRecordUnapplied, WalArchivalFailedTruncationHeld};
 pub(in crate::diag) use redo_stream::{
     RedoAbandonGivenUp, RedoSnapshotDebtNotRecorded, RedoStreamLostHere,
@@ -82,6 +85,7 @@ pub(in crate::diag) use redo_stream::{
 pub(in crate::diag) use retention::RetentionAutowireOrphaned;
 pub(in crate::diag) use vector::VectorIndexNotApplied;
 pub(in crate::diag) use vector_build::{VectorBuildNotInstalled, VectorBuilderUnavailable};
+pub(in crate::diag) use version_cleanup::{HistoryChargeStale, VersionCleanupFailed};
 pub(in crate::diag) use vshard_departure::VShardDeparturePurgeFailed;
 pub(in crate::diag) use write_path::{
     BatchInsertWithoutSurrogates, FtsIndexUpdateFailed, OrphanedIndexEntryAfterDelete,

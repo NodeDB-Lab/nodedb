@@ -176,6 +176,11 @@ pub(crate) fn data_plane_code_to_public(code: ErrorCode) -> NodeDbError {
             NodeDbError::from_wire(PublicCode::BAD_REQUEST, detail)
         }
         ErrorCode::TransactionRollback { detail } => NodeDbError::transaction_rollback(detail),
+        // A first-committer-wins refusal: the retriable class the SQL
+        // surfaces send as `40001`.
+        ErrorCode::SerializationConflict { detail } => {
+            NodeDbError::from_wire(PublicCode::WRITE_CONFLICT, detail)
+        }
         ErrorCode::ActiveSqlTransaction { detail } => NodeDbError::active_sql_transaction(detail),
         ErrorCode::DependentObjectsExist { object, detail } => {
             NodeDbError::dependent_objects_exist(object, detail)

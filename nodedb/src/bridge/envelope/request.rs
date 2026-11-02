@@ -81,10 +81,9 @@ pub struct Request {
     /// WAL LSN the Control Plane allocated for this write at wal-dispatch time.
     /// The committed write-LSN is part of the cross-plane write contract: the
     /// Data Plane copies it onto the [`ExecutionTask`] so the apply chokepoint
-    /// records the per-key / per-collection write version (see
-    /// `data::executor::core_loop::write_index`). `None` for reads, control
-    /// ops, and writes whose LSN is not (yet) threaded — the version index is
-    /// skipped rather than advanced with a wrong value.
+    /// notes the write as applied (see `data::executor::core_loop::write_note`).
+    /// `None` for reads, control ops, and writes whose LSN is not threaded:
+    /// the note is skipped rather than taken at a wrong LSN.
     ///
     /// [`ExecutionTask`]: crate::data::executor::task::ExecutionTask
     pub wal_lsn: Option<Lsn>,
@@ -110,14 +109,13 @@ pub struct Request {
     /// of the WAL record they reproduce.
     pub commit_hlc: Option<u64>,
 
-    /// The data-group Raft entry this write applies: its log position, which
-    /// the Data Plane records as the version of every row the write touches,
-    /// and the system-time ordinal its leader assigned, which every
-    /// bitemporal version the write lands stamps. Every replica that applies
-    /// the entry records the same version and stamps the same ordinal.
-    /// `None` for reads, control ops, and writes that apply no entry: those
-    /// version by their WAL LSN on the core and stamp from the local clock.
-    pub entry_version: Option<super::AppliedEntry>,
+    /// The system-time ordinal the write stamps: the stamp of every version
+    /// it lands, or the first ordinal of the run a columnar insert stamps.
+    /// The leader of the replicated entry the write applies assigned it, or
+    /// the local append reserved it, and the write's WAL records carry it.
+    /// Every replica that applies the entry stamps the same ordinal. `None`
+    /// for reads, control ops, and writes that stamp from the local clock.
+    pub system_ordinal: Option<i64>,
 
     /// Write-admission decision for this request.
     ///
@@ -241,7 +239,7 @@ mod tests {
             wal_lsn: None,
             resolved_now_ms: None,
             commit_hlc: None,
-            entry_version: None,
+            system_ordinal: None,
             admission: Admission::Exempt(ExemptReason::Read),
         }
     }
@@ -297,7 +295,7 @@ mod tests {
             wal_lsn: None,
             resolved_now_ms: None,
             commit_hlc: None,
-            entry_version: None,
+            system_ordinal: None,
             admission: Admission::Exempt(ExemptReason::Read),
         };
         match req.plan {

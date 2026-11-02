@@ -25,12 +25,14 @@ mod lease;
 mod outcome_floor;
 mod quota;
 mod raft_apply;
+mod read_cut;
 mod recovery;
 mod redo_stream;
 mod retention;
 mod shared;
 mod vector;
 mod vector_build;
+mod version_cleanup;
 mod vshard_departure;
 
 pub use array_sync::array_snapshot_buffer_poisoned;
@@ -71,6 +73,7 @@ pub use raft_apply::{
     calvin_barrier_log_store_failed, calvin_left_state_not_forgotten, raft_entries_reapplied,
     raft_entry_reapplied,
 };
+pub use read_cut::ordinal_reservation_leaked;
 pub use recovery::{
     batch_insert_without_surrogates, fts_index_update_failed, orphaned_index_entry_after_delete,
     replay_record_unapplied, strict_row_undecodable, wal_archival_failed_truncation_held,
@@ -86,4 +89,5 @@ pub use vector_build::{
     VectorBuildTarget, vector_build_failed, vector_builder_disconnected,
     vector_builder_spawn_failed, vector_rebuild_unreadable,
 };
+pub use version_cleanup::{history_charge_stale, version_cleanup_failed};
 pub use vshard_departure::vshard_departure_purge_failed;

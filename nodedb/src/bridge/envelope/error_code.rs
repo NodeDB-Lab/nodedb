@@ -196,6 +196,12 @@ pub enum ErrorCode {
     /// The whole transaction aborted before any read-set was validated, and
     /// the client retries it. SQLSTATE `40000` (transaction_rollback).
     TransactionRollback { detail: String },
+    /// A committing transaction read or replaced a row that another
+    /// transaction committed a version of above its snapshot. Nothing of it
+    /// applied, on any replica, and the client retries the whole
+    /// transaction. `detail` names the collection and the read or write that
+    /// moved. SQLSTATE `40001` (serialization_failure).
+    SerializationConflict { detail: String },
     /// The statement cannot run in the current transaction state, such as
     /// inside an explicit transaction block. SQLSTATE `25001`
     /// (active_sql_transaction).

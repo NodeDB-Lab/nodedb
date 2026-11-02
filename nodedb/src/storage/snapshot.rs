@@ -16,10 +16,9 @@ use crate::types::Lsn;
 
 /// On-disk format version for [`SnapshotMeta`].
 ///
-/// Increment this constant whenever the serialized layout of `SnapshotMeta`
-/// changes in a backward-incompatible way. Readers must reject any snapshot
-/// whose stored `format_version` does not match this value.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 3;
+/// Readers must reject any snapshot whose stored `format_version` does not
+/// match this value.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 1;
 
 /// Snapshot metadata stored alongside the snapshot data.
 #[derive(

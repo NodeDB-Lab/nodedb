@@ -144,6 +144,7 @@ mod tests {
                 database_id: 0,
                 event_source: NO_EVENT_SOURCE,
                 commit_hlc: *commit_hlc,
+                system_ordinal: nodedb_wal::NO_SYSTEM_ORDINAL,
             };
             writer.append_keyed(target, payload, 0).unwrap();
         }

@@ -143,35 +143,6 @@ pub async fn wire_state(
         crate::control::pitr::wire_pitr(shared, Arc::clone(&cluster_handle.catalog)).await?;
     }
 
-    // Initialise quarantine storage.
-    {
-        let q_cfg = config
-            .quarantine_storage
-            .as_ref()
-            .map(|s| s.to_quarantine_storage_config())
-            .unwrap_or_else(
-                crate::config::server::QuarantineStorageSettings::default_storage_config,
-            );
-        match crate::storage::quarantine::registry::build_quarantine_store(
-            &q_cfg,
-            &config.server.data_dir,
-        ) {
-            Ok(store) => {
-                if let Some(state) = Arc::get_mut(shared) {
-                    state.quarantine_storage = store;
-                    info!("quarantine storage initialised");
-                }
-            }
-            Err(e) => {
-                tracing::error!(
-                    error = %e,
-                    "quarantine storage init failed — aborting startup"
-                );
-                std::process::exit(1);
-            }
-        }
-    }
-
     // Wire maintenance budget tracker (shared with Data Plane cores so
     // ALTER DATABASE SET QUOTA updates live caps immediately).
     if let Some(state) = Arc::get_mut(shared) {

@@ -88,6 +88,8 @@ pub fn spawn_background_loops(
     // a quota's `period_secs` to.
 
     maintenance::spawn_clone_materializer_sweep(shared, config);
+    maintenance::spawn_version_cleanup(shared, config);
+    super::kv_expiry::spawn_kv_expiry_reaper(shared, config);
 
     // CRDT constraint reconcile (one node cluster-wide). That node
     // re-derives each collection's constraint set from the catalog and

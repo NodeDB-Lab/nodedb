@@ -48,14 +48,14 @@ pub enum RowEffect {
     /// it to that same encoder.
     Put {
         value: Vec<u8>,
-        /// The version key of a row on a `bitemporal=true` collection.
-        version: Option<RowVersion>,
+        /// The version key the row landed at. Every document write stamps
+        /// its version, so replay installs the row at exactly this key.
+        version: RowVersion,
     },
     /// The row is gone.
     Delete {
-        /// The system-time ordinal of the tombstone of a row on a
-        /// `bitemporal=true` collection.
-        system_from: Option<i64>,
+        /// The system-time ordinal of the row's tombstone.
+        system_from: i64,
     },
     /// Replay must not apply the write's own pre-dispatch record: the apply
     /// wrote nothing, or another entry of this write set carries the row's
@@ -78,8 +78,8 @@ pub enum EdgeImage {
     Delete(crate::wal::EdgeDeleteRedo),
 }
 
-/// The version key a `bitemporal=true` row landed at. Replay installs the row
-/// at exactly this key.
+/// The version key a row landed at. Replay installs the row at exactly this
+/// key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RowVersion {
     /// The version's system-time ordinal.
@@ -100,25 +100,23 @@ impl RowVersion {
 }
 
 impl WriteSetEntry {
-    /// The row identified by `surrogate` now holds `value`.
-    pub fn put(surrogate: u32, identity: RowIdentity, value: Vec<u8>) -> Self {
+    /// The row identified by `surrogate` now holds `value`, at `version`.
+    pub fn put(surrogate: u32, identity: RowIdentity, value: Vec<u8>, version: RowVersion) -> Self {
         Self {
             surrogate,
             identity,
-            effect: RowEffect::Put {
-                value,
-                version: None,
-            },
+            effect: RowEffect::Put { value, version },
             collection: None,
         }
     }
 
-    /// The row identified by `surrogate` is gone.
-    pub fn delete(surrogate: u32, identity: RowIdentity) -> Self {
+    /// The row identified by `surrogate` is gone, by a tombstone at
+    /// `system_from`.
+    pub fn delete(surrogate: u32, identity: RowIdentity, system_from: i64) -> Self {
         Self {
             surrogate,
             identity,
-            effect: RowEffect::Delete { system_from: None },
+            effect: RowEffect::Delete { system_from },
             collection: None,
         }
     }
@@ -147,19 +145,6 @@ impl WriteSetEntry {
             effect: RowEffect::Edge(image),
             collection: None,
         }
-    }
-
-    /// This entry, at the version a `bitemporal=true` collection wrote it at.
-    /// `None` leaves the entry unversioned.
-    pub fn versioned(mut self, version: Option<RowVersion>) -> Self {
-        match &mut self.effect {
-            RowEffect::Put { version: slot, .. } => *slot = version,
-            RowEffect::Delete { system_from } => {
-                *system_from = version.map(|v| v.sys_from);
-            }
-            RowEffect::CancelForward | RowEffect::Edge(_) => {}
-        }
-        self
     }
 
     /// This entry, naming a row of `collection` rather than the statement's.
@@ -192,17 +177,12 @@ pub struct Response {
     /// Watermark LSN at the time of read (for snapshot consistency tracking).
     pub watermark_lsn: Lsn,
 
-    /// The write versions the read observed, one per vShard: the read
-    /// collection's version on its home vShard, or every vShard's latest
-    /// version a graph read walked. The comparand for cross-shard OCC read
-    /// validation. Distinct from `watermark_lsn` (this core's WAL position).
-    ///
-    /// On a WRITE response it is the POST-write version of the written
-    /// collection on the write's vShard (the handlers record before
-    /// responding), which is how the Raft apply path returns a committed
-    /// write's own version to its proposer. Empty when the plan names no
-    /// user collection.
-    pub read_versions: crate::types::ReadVersions,
+    /// The vShards the read scanned: the read collection's home vShard, the
+    /// vShard an array read covers, or every vShard a graph read's core
+    /// hosts. The transaction read-set homes one entry on each, and commit
+    /// validates it there at the snapshot ordinal. Empty for a write and for
+    /// a plan that names no user collection.
+    pub read_vshards: crate::types::ReadShards,
 
     /// Error code if status is not Ok.
     pub error_code: Option<Box<ErrorCode>>,
@@ -234,7 +214,7 @@ mod tests {
             watermark_lsn: Lsn::new(42),
             error_code: None,
             stage_vote: None,
-            read_versions: crate::types::ReadVersions::new(),
+            read_vshards: crate::types::ReadShards::new(),
             write_set: Vec::new(),
         };
         assert_eq!(resp.status, Status::Ok);
@@ -253,7 +233,7 @@ mod tests {
             watermark_lsn: Lsn::ZERO,
             error_code: Some(Box::new(ErrorCode::DeadlineExceeded)),
             stage_vote: None,
-            read_versions: crate::types::ReadVersions::new(),
+            read_vshards: crate::types::ReadShards::new(),
             write_set: Vec::new(),
         };
         assert_eq!(

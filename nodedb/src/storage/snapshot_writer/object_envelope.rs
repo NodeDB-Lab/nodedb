@@ -24,7 +24,7 @@ pub(super) const SNAPSHOT_MANIFEST_KIND: u8 = 0;
 pub(super) const SNAPSHOT_CHUNK_KIND: u8 = 1;
 
 const SNAPSHOT_CONTEXT_MAGIC: [u8; 4] = *b"SNCT";
-const SNAPSHOT_CONTEXT_VERSION: u8 = 3;
+const SNAPSHOT_CONTEXT_VERSION: u8 = 1;
 const SNAPSHOT_CONTEXT_FIXED_BYTES: usize = 4 + 1 + 1 + 2;
 
 /// What one object is, bound into its authenticated payload so an object

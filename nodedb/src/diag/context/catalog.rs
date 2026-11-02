@@ -147,7 +147,7 @@ pub(in crate::diag) struct ConsumerGroupOffsetsRetained<'a> {
     pub stream: &'a str,
     /// Group whose cursors survived.
     pub group: &'a str,
-    /// Offset-store call that failed (`delete_group`, `migrate_group_stream`).
+    /// Offset-store call that failed (`delete_group`).
     pub operation: &'a str,
     /// What failed, without the per-occurrence detail.
     pub error_class: &'a str,
