@@ -34,14 +34,16 @@ struct IndexEdits {
 
 impl InvertedIndex {
     /// Remove `surrogates` from every index of `collection` in one write
-    /// transaction. A document not in an index is left alone there. Either
-    /// every removal commits or none does.
+    /// transaction, each document's indexed version ending at system-time
+    /// ordinal `ordinal`. A document not in an index is left alone there.
+    /// Either every removal commits or none does.
     pub fn remove_documents(
         &self,
         database_id: u64,
         tid: TenantId,
         collection: &str,
         surrogates: &[Surrogate],
+        ordinal: i64,
     ) -> crate::Result<()> {
         if surrogates.is_empty() {
             return Ok(());
@@ -56,6 +58,7 @@ impl InvertedIndex {
                 tid,
                 collection,
                 surrogate: *surrogate,
+                ordinal,
             };
             self.note_doc_write(doc);
             let mut field_keys = doc_fields::read(&txn, doc)?;
@@ -65,6 +68,9 @@ impl InvertedIndex {
                 let Some(old_len) = prior_doc_length(&txn, doc, index)? else {
                     continue;
                 };
+                // The version's tokens leave for the history before its
+                // postings go.
+                self.end_text_version_in_txn(&txn, doc, index, old_len)?;
                 let terms = doc_terms::occupied_terms(&txn, doc, index, true)?;
                 doc_terms::clear(&txn, doc, index)?;
                 {
@@ -179,7 +185,8 @@ mod tests {
             .unwrap();
 
         let removed: Vec<Surrogate> = (1..=5u32).map(Surrogate::new).collect();
-        idx.remove_documents(DB, T, "docs", &removed).unwrap();
+        idx.remove_documents(DB, T, "docs", &removed, super::super::UNVERSIONED)
+            .unwrap();
 
         assert_eq!(
             hits(&idx, IndexScope::document("docs"), "rust"),
@@ -199,8 +206,14 @@ mod tests {
         let (idx, _dir) = open_temp();
         idx.index_document(DB, T, "docs", Surrogate::new(1), &body("alpha"))
             .unwrap();
-        idx.remove_documents(DB, T, "docs", &[Surrogate::new(9)])
-            .unwrap();
+        idx.remove_documents(
+            DB,
+            T,
+            "docs",
+            &[Surrogate::new(9)],
+            super::super::UNVERSIONED,
+        )
+        .unwrap();
         assert_eq!(idx.corpus_stats(DB, T, "docs").unwrap().0, 1);
     }
 }

@@ -3,12 +3,16 @@
 //! Versioned secondary-index operations.
 //!
 //! Index key: `"{database_id}:{tenant}:{coll}:{field}:{value}:{doc_id}\x00{sys_from:020}"`.
-//! Value: single byte (`0x00` live, `0xFF` tombstone).
+//! Value: single byte (`0x00` live, `0xFF` tombstone). The versioned index
+//! is the only secondary index of every document collection.
+
+use std::ops::ControlFlow;
 
 use nodedb_types::StorageKey;
 use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 
-use super::key::format_sys_from;
+use super::history_bytes::{insert_counted, remove_counted};
+use super::index_visible::{EntryRange, for_each_visible_entry, upper_value_bound};
 use super::value::{TAG_LIVE, TAG_TOMBSTONE, VersionedIndexEntry};
 use crate::engine::sparse::btree::{KeyedTable, SparseEngine, invalid_storage_key_err, redb_err};
 
@@ -42,9 +46,7 @@ impl SparseEngine {
         let mut t = txn
             .open_table(INDEXES_VERSIONED)
             .map_err(|e| redb_err("open table", e))?;
-        t.insert(key.as_str(), [TAG_LIVE].as_slice())
-            .map_err(|e| redb_err("insert", e))?;
-        Ok(())
+        insert_counted(txn, &mut t, &key, &[TAG_LIVE])
     }
 
     /// `versioned_index_tombstone` inside a caller-owned write transaction.
@@ -57,9 +59,7 @@ impl SparseEngine {
         let mut t = txn
             .open_table(INDEXES_VERSIONED)
             .map_err(|e| redb_err("open table", e))?;
-        t.insert(key.as_str(), [TAG_TOMBSTONE].as_slice())
-            .map_err(|e| redb_err("insert tombstone", e))?;
-        Ok(())
+        insert_counted(txn, &mut t, &key, &[TAG_TOMBSTONE])
     }
 
     /// Physically remove one versioned index entry's redb entry inside a
@@ -78,8 +78,23 @@ impl SparseEngine {
         let mut t = txn
             .open_table(INDEXES_VERSIONED)
             .map_err(|e| redb_err("open table", e))?;
-        t.remove(key.as_str()).map_err(|e| redb_err("remove", e))?;
-        Ok(())
+        remove_counted(txn, &mut t, &key)
+    }
+
+    /// Whether an entry, live or tombstone, is stored at exactly `e`'s key,
+    /// read inside a caller-owned write transaction.
+    pub fn versioned_index_entry_exists_in_txn(
+        &self,
+        txn: &redb::WriteTransaction,
+        e: VersionedIndexEntry<'_>,
+    ) -> crate::Result<bool> {
+        let key = e.redb_key();
+        let t = txn
+            .open_table(INDEXES_VERSIONED)
+            .map_err(|e| redb_err("open table", e))?;
+        Ok(t.get(key.as_str())
+            .map_err(|e| redb_err("get", e))?
+            .is_some())
     }
 
     /// Append a versioned secondary index entry in its own transaction.
@@ -132,14 +147,15 @@ impl SparseEngine {
             .collect::<Result<_, _>>()
             .map_err(|e| redb_err("entry", e))?;
         for key in &keys {
-            t.remove(key.as_str())
-                .map_err(|e| redb_err("remove entry", e))?;
+            remove_counted(txn, &mut t, key)?;
         }
         Ok(keys.len())
     }
 
-    /// Look up doc_ids for a `(field, value)` pair at a system-time cutoff.
-    /// Returns only doc_ids whose newest entry ≤ cutoff is live.
+    /// The doc ids whose row version visible at `sys_cutoff` (`None` =
+    /// current) holds `value` under `field`, in doc-id order. The match is
+    /// exact: an entry for `"a:b"` never answers a lookup of `"a"`. Every
+    /// matching doc id is returned.
     pub fn versioned_index_lookup_as_of(
         &self,
         database_id: u64,
@@ -149,68 +165,221 @@ impl SparseEngine {
         value: &str,
         sys_cutoff: Option<i64>,
     ) -> crate::Result<Vec<StorageKey>> {
-        let lo = format!("{database_id}:{tenant}:{coll}:{field}:{value}:");
-        // `:` = 0x3A, next byte `;` = 0x3B gives a clean exclusive bound.
-        let hi = format!("{database_id}:{tenant}:{coll}:{field}:{value};");
-        let cutoff_key = sys_cutoff.map(format_sys_from);
-
+        let field_prefix = format!("{database_id}:{tenant}:{coll}:{field}:");
+        let lo = format!("{field_prefix}{value}:");
+        // `:` = 0x3A, next byte `;` = 0x3B bounds every key of this value.
+        // Keys of a longer value that starts with `{value}:` sort inside the
+        // bound too. The exact value comparison below drops them.
+        let hi = format!("{field_prefix}{value};");
         let txn = self.db.begin_read().map_err(|e| redb_err("read txn", e))?;
         let t = txn
             .open_table(INDEXES_VERSIONED)
             .map_err(|e| redb_err("open table", e))?;
-        let range = t
-            .range(lo.as_str()..hi.as_str())
-            .map_err(|e| redb_err("range", e))?;
-
-        // Group by doc_id; keep newest-in-window tag per group.
-        let mut out: Vec<StorageKey> = Vec::new();
-        let mut current_id: Option<StorageKey> = None;
-        let mut best: Option<(i64, u8)> = None;
-
-        for r in range {
-            let (k, v) = r.map_err(|e| redb_err("entry", e))?;
-            let key_str = k.value();
-            let Some(rest) = key_str.strip_prefix(lo.as_str()) else {
-                continue;
-            };
-            let Some((seg, suffix)) = rest.rsplit_once('\x00') else {
-                continue;
-            };
-            let doc_id = StorageKey::parse(seg)
-                .ok_or_else(|| invalid_storage_key_err(KeyedTable::IndexesVersioned, coll, seg))?;
-            if let Some(ref c) = cutoff_key
-                && suffix > c.as_str()
-            {
-                continue;
-            }
-            let Ok(sf) = suffix.parse::<i64>() else {
-                continue;
-            };
-            let tag = v.value().first().copied().unwrap_or(TAG_TOMBSTONE);
-
-            if current_id != Some(doc_id) {
-                if let Some(prev_id) = current_id
-                    && let Some((_, t)) = best
-                    && t == TAG_LIVE
-                {
-                    out.push(prev_id);
+        let mut out = Vec::new();
+        for_each_visible_entry(
+            &t,
+            EntryRange {
+                coll,
+                prefix: &field_prefix,
+                start: &lo,
+                end: &hi,
+            },
+            sys_cutoff,
+            |entry_value, doc_id| {
+                if entry_value == value {
+                    out.push(doc_id);
                 }
-                current_id = Some(doc_id);
-                best = None;
-            }
-            best = Some(match best.take() {
-                Some((prev_sf, prev_t)) if prev_sf >= sf => (prev_sf, prev_t),
-                _ => (sf, tag),
-            });
-        }
-        if let Some(doc_id) = current_id
-            && let Some((_, t)) = best
-            && t == TAG_LIVE
-        {
-            out.push(doc_id);
-        }
+                Ok(ControlFlow::Continue(()))
+            },
+        )?;
         Ok(out)
     }
+
+    /// The `(value, doc_id)` entries of `field` visible at the cut whose
+    /// value lies in `[lower, upper)`, compared as strings, in value order.
+    /// A `None` bound is open. Every matching entry is returned.
+    pub fn versioned_index_range_as_of(
+        &self,
+        q: VersionedIndexRange<'_>,
+    ) -> crate::Result<Vec<(String, StorageKey)>> {
+        let VersionedIndexRange {
+            database_id,
+            tenant,
+            coll,
+            field,
+            lower,
+            upper,
+            sys_cutoff,
+        } = q;
+        let field_prefix = format!("{database_id}:{tenant}:{coll}:{field}:");
+        let lo = match lower {
+            Some(lower) => format!("{field_prefix}{lower}"),
+            None => field_prefix.clone(),
+        };
+        let hi = match upper {
+            Some(upper) => upper_value_bound(&field_prefix, upper),
+            None => format!("{database_id}:{tenant}:{coll}:{field};"),
+        };
+        let txn = self.db.begin_read().map_err(|e| redb_err("read txn", e))?;
+        let t = txn
+            .open_table(INDEXES_VERSIONED)
+            .map_err(|e| redb_err("open table", e))?;
+        let mut out = Vec::new();
+        for_each_visible_entry(
+            &t,
+            EntryRange {
+                coll,
+                prefix: &field_prefix,
+                start: &lo,
+                end: &hi,
+            },
+            sys_cutoff,
+            |value, doc_id| {
+                let above_lower = lower.is_none_or(|l| value >= l);
+                let below_upper = upper.is_none_or(|u| value < u);
+                if above_lower && below_upper {
+                    out.push((value.to_string(), doc_id));
+                }
+                Ok(ControlFlow::Continue(()))
+            },
+        )?;
+        Ok(out)
+    }
+
+    /// Tombstone, at `sys_from`, every index entry of `doc_id` in `coll`
+    /// that is live now, inside a caller-owned write transaction. Walks the
+    /// collection's whole index. Returns the `(field, value)` pairs it
+    /// tombstoned, so a rollback removes exactly those entries.
+    pub fn versioned_index_tombstone_document_in_txn(
+        &self,
+        txn: &redb::WriteTransaction,
+        database_id: u64,
+        tenant: u64,
+        coll: &str,
+        doc_id: &StorageKey,
+        sys_from: i64,
+    ) -> crate::Result<Vec<(String, String)>> {
+        let coll_prefix = super::key::coll_prefix(database_id, tenant, coll);
+        let coll_end = super::key::coll_prefix_end(database_id, tenant, coll);
+        let mut live: Vec<(String, String)> = Vec::new();
+        {
+            let t = txn
+                .open_table(INDEXES_VERSIONED)
+                .map_err(|e| redb_err("open table", e))?;
+            for_each_visible_entry(
+                &t,
+                EntryRange {
+                    coll,
+                    prefix: &coll_prefix,
+                    start: &coll_prefix,
+                    end: &coll_end,
+                },
+                None,
+                |field_value, entry_doc| {
+                    if entry_doc == *doc_id {
+                        let (field, value) = field_value.split_once(':').ok_or_else(|| {
+                            invalid_storage_key_err(KeyedTable::IndexesVersioned, coll, field_value)
+                        })?;
+                        live.push((field.to_string(), value.to_string()));
+                    }
+                    Ok(ControlFlow::Continue(()))
+                },
+            )?;
+        }
+        for (field, value) in &live {
+            self.versioned_index_tombstone_in_txn(
+                txn,
+                VersionedIndexEntry {
+                    database_id,
+                    tenant,
+                    coll,
+                    field,
+                    value,
+                    doc_id,
+                    sys_from,
+                },
+            )?;
+        }
+        Ok(live)
+    }
+
+    /// Every `(doc_id, value)` entry of `field` that is live now, in value
+    /// order, up to `limit` entries.
+    pub fn scan_index_values(
+        &self,
+        database_id: u64,
+        tenant: u64,
+        coll: &str,
+        field: &str,
+        limit: usize,
+    ) -> crate::Result<Vec<(StorageKey, String)>> {
+        let field_prefix = format!("{database_id}:{tenant}:{coll}:{field}:");
+        let hi = format!("{database_id}:{tenant}:{coll}:{field};");
+        let txn = self.db.begin_read().map_err(|e| redb_err("read txn", e))?;
+        let t = txn
+            .open_table(INDEXES_VERSIONED)
+            .map_err(|e| redb_err("open table", e))?;
+        let mut out = Vec::new();
+        for_each_visible_entry(
+            &t,
+            EntryRange {
+                coll,
+                prefix: &field_prefix,
+                start: &field_prefix,
+                end: &hi,
+            },
+            None,
+            |value, doc_id| {
+                if out.len() >= limit {
+                    return Ok(ControlFlow::Break(()));
+                }
+                out.push((doc_id, value.to_string()));
+                Ok(ControlFlow::Continue(()))
+            },
+        )?;
+        Ok(out)
+    }
+
+    /// Append many live index entries in key order inside a caller-owned
+    /// write transaction. `keys` are full versioned index keys
+    /// ([`VersionedIndexEntry::redb_key`]). They are sorted and deduplicated
+    /// here, then written in that order into one opened table: a backfill
+    /// scans rows in id order while the index is ordered by value, and key
+    /// order keeps each insert near the last. An array field can yield one
+    /// value twice for a row, so deduplication is required.
+    pub fn versioned_index_put_sorted_in_txn(
+        &self,
+        txn: &redb::WriteTransaction,
+        keys: &mut Vec<String>,
+    ) -> crate::Result<()> {
+        keys.sort_unstable();
+        keys.dedup();
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let mut t = txn
+            .open_table(INDEXES_VERSIONED)
+            .map_err(|e| redb_err("open table", e))?;
+        for key in keys.iter() {
+            insert_counted(txn, &mut t, key, &[TAG_LIVE])?;
+        }
+        Ok(())
+    }
+}
+
+/// Arguments for [`SparseEngine::versioned_index_range_as_of`].
+#[derive(Debug, Clone, Copy)]
+pub struct VersionedIndexRange<'a> {
+    pub database_id: u64,
+    pub tenant: u64,
+    pub coll: &'a str,
+    pub field: &'a str,
+    /// Inclusive lower value bound.
+    pub lower: Option<&'a str>,
+    /// Exclusive upper value bound.
+    pub upper: Option<&'a str>,
+    /// System-time ordinal cut (`None` = current).
+    pub sys_cutoff: Option<i64>,
 }
 
 #[cfg(test)]
@@ -306,5 +475,140 @@ mod tests {
             e.versioned_index_remove_in_txn(&txn, idx_entry("c", "email", "nobody@x", &u9, 999));
         assert!(r.is_ok());
         txn.commit().unwrap();
+    }
+
+    #[test]
+    fn lookup_is_exact_on_values_holding_a_colon() {
+        let (e, _d) = open_temp();
+        let u1 = key(1);
+        let u2 = key(2);
+        e.versioned_index_put(idx_entry("c", "f", "a", &u1, 100))
+            .unwrap();
+        e.versioned_index_put(idx_entry("c", "f", "a:b", &u2, 100))
+            .unwrap();
+        assert_eq!(
+            e.versioned_index_lookup_as_of(1, 1, "c", "f", "a", None)
+                .unwrap(),
+            vec![u1]
+        );
+        assert_eq!(
+            e.versioned_index_lookup_as_of(1, 1, "c", "f", "a:b", None)
+                .unwrap(),
+            vec![u2]
+        );
+    }
+
+    #[test]
+    fn lookup_returns_every_match() {
+        let (e, _d) = open_temp();
+        let ids: Vec<StorageKey> = (1..=1500).map(key).collect();
+        for id in &ids {
+            e.versioned_index_put(idx_entry("c", "f", "v", id, 100))
+                .unwrap();
+        }
+        let got = e
+            .versioned_index_lookup_as_of(1, 1, "c", "f", "v", None)
+            .unwrap();
+        assert_eq!(got.len(), 1500, "no silent truncation");
+    }
+
+    #[test]
+    fn range_lookup_honors_bounds_and_cut() {
+        let (e, _d) = open_temp();
+        let (u1, u2, u3, u4) = (key(1), key(2), key(3), key(4));
+        e.versioned_index_put(idx_entry("c", "age", "025", &u1, 100))
+            .unwrap();
+        e.versioned_index_put(idx_entry("c", "age", "030", &u2, 100))
+            .unwrap();
+        e.versioned_index_put(idx_entry("c", "age", "035", &u3, 100))
+            .unwrap();
+        e.versioned_index_put(idx_entry("c", "age", "040", &u4, 100))
+            .unwrap();
+        // Row 2 moves from 030 to 045 at 200.
+        e.versioned_index_tombstone(idx_entry("c", "age", "030", &u2, 200))
+            .unwrap();
+        e.versioned_index_put(idx_entry("c", "age", "045", &u2, 200))
+            .unwrap();
+        let range = |cut: Option<i64>| {
+            e.versioned_index_range_as_of(VersionedIndexRange {
+                database_id: 1,
+                tenant: 1,
+                coll: "c",
+                field: "age",
+                lower: Some("025"),
+                upper: Some("036"),
+                sys_cutoff: cut,
+            })
+            .unwrap()
+        };
+        assert_eq!(
+            range(Some(150)),
+            vec![
+                ("025".to_string(), u1),
+                ("030".to_string(), u2),
+                ("035".to_string(), u3)
+            ]
+        );
+        assert_eq!(
+            range(None),
+            vec![("025".to_string(), u1), ("035".to_string(), u3)]
+        );
+    }
+
+    #[test]
+    fn range_upper_is_exclusive_and_prefix_values_stay_in() {
+        let (e, _d) = open_temp();
+        let (u1, u2) = (key(1), key(2));
+        e.versioned_index_put(idx_entry("c", "f", "a", &u1, 100))
+            .unwrap();
+        e.versioned_index_put(idx_entry("c", "f", "a!", &u2, 100))
+            .unwrap();
+        let got = e
+            .versioned_index_range_as_of(VersionedIndexRange {
+                database_id: 1,
+                tenant: 1,
+                coll: "c",
+                field: "f",
+                lower: None,
+                upper: Some("a!"),
+                sys_cutoff: None,
+            })
+            .unwrap();
+        assert_eq!(got, vec![("a".to_string(), u1)]);
+    }
+
+    #[test]
+    fn tombstone_document_hides_every_live_entry_of_the_row() {
+        let (e, _d) = open_temp();
+        let (u1, u2) = (key(1), key(2));
+        e.versioned_index_put(idx_entry("c", "f", "x", &u1, 100))
+            .unwrap();
+        e.versioned_index_put(idx_entry("c", "g", "y", &u1, 100))
+            .unwrap();
+        e.versioned_index_put(idx_entry("c", "f", "x", &u2, 100))
+            .unwrap();
+        let txn = e.db.begin_write().unwrap();
+        let mut gone = e
+            .versioned_index_tombstone_document_in_txn(&txn, 1, 1, "c", &u1, 200)
+            .unwrap();
+        txn.commit().unwrap();
+        gone.sort();
+        assert_eq!(
+            gone,
+            vec![
+                ("f".to_string(), "x".to_string()),
+                ("g".to_string(), "y".to_string())
+            ]
+        );
+        assert_eq!(
+            e.versioned_index_lookup_as_of(1, 1, "c", "f", "x", None)
+                .unwrap(),
+            vec![u2]
+        );
+        assert_eq!(
+            e.versioned_index_lookup_as_of(1, 1, "c", "f", "x", Some(150))
+                .unwrap(),
+            vec![u1, u2]
+        );
     }
 }

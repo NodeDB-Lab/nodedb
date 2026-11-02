@@ -1,31 +1,34 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Audit-retention purge for the versioned document / index tables.
+//! History purge and hard drops for the versioned document / index tables.
 //!
-//! Same contract as `edge_store::temporal::purge`: drop *superseded*
-//! versions below the ordinal cutoff of `cutoff_system_ms`
-//! (`ms_to_ordinal_upper`). The newest version of every
-//! `(doc_id)` — live, tombstone, or GDPR-erased — is always preserved so
-//! the Ceiling read for any future `AS OF` cutoff still sees the row's
-//! terminal state.
+//! The purge at ordinal `horizon` removes every version no read at or above
+//! the horizon can see: a version whose successor's `sys_from <= horizon`,
+//! and a tombstone at or below the horizon with nothing after it. The
+//! version visible at the horizon always stays, so every `AS OF` read at or
+//! above the horizon answers as before the purge. The audit-retention purge
+//! of a `bitemporal=true` collection runs the same rule at its retention
+//! cutoff.
 
-use redb::{ReadableDatabase, ReadableTable};
+use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 
 use super::doc::DOCUMENTS_VERSIONED;
+use super::history_bytes::remove_counted;
 use super::index::INDEXES_VERSIONED;
 use super::key::{coll_prefix, coll_prefix_end, tenant_prefix, tenant_prefix_end};
-use crate::engine::sparse::btree::{SparseEngine, redb_err};
+use super::value::TAG_TOMBSTONE;
+use crate::engine::sparse::btree::{KeyedTable, SparseEngine, invalid_storage_key_err, redb_err};
 
 impl SparseEngine {
     /// Hard-drop **every** version of every document + secondary-index entry
     /// for a single `(database_id, tenant, coll)` from the versioned tables.
     ///
     /// This is the DROP-collection counterpart to
-    /// [`Self::purge_superseded_document_versions`] (retention GC): where the
-    /// GC path keeps the terminal version of every doc_id, this path removes
-    /// the entire collection prefix unconditionally. Without it, a
-    /// DROP + re-CREATE of a `bitemporal=true` collection under the same name
-    /// reuses the same key prefix and the old versioned history resurrects.
+    /// [`Self::purge_document_versions_below`]: where the purge keeps the
+    /// version visible at its horizon, this path removes the entire
+    /// collection prefix unconditionally. Without it, a DROP + re-CREATE
+    /// under the same name reuses the same key prefix and the old history
+    /// resurrects.
     ///
     /// Returns `(doc_versions_removed, index_versions_removed)`.
     pub fn delete_all_versioned_for_collection(
@@ -78,8 +81,7 @@ impl SparseEngine {
             }
             docs_removed = doc_keys.len();
             for k in &doc_keys {
-                docs.remove(k.as_str())
-                    .map_err(|e| redb_err("remove doc version drop", e))?;
+                remove_counted(&txn, &mut docs, k)?;
             }
 
             let mut idx = txn
@@ -95,8 +97,7 @@ impl SparseEngine {
             }
             idx_removed = idx_keys.len();
             for k in &idx_keys {
-                idx.remove(k.as_str())
-                    .map_err(|e| redb_err("remove idx version drop", e))?;
+                remove_counted(&txn, &mut idx, k)?;
             }
         }
         txn.commit()
@@ -104,10 +105,11 @@ impl SparseEngine {
         Ok((docs_removed, idx_removed))
     }
 
-    /// Purge superseded document + index versions for `(tenant, coll)`.
-    /// `cutoff_system_ms` is the retention horizon in milliseconds. It
-    /// converts to the last ordinal of that millisecond, as the edge store's
-    /// purge converts it. Returns `(docs_deleted, index_entries_deleted)`.
+    /// Audit-retention purge of `(tenant, coll)`. `cutoff_system_ms` is the
+    /// retention horizon in milliseconds. It converts to the last ordinal of
+    /// that millisecond, as the edge store's purge converts it, and the purge
+    /// runs [`Self::purge_document_versions_below`] at that ordinal. Returns
+    /// `(doc_versions_deleted, index_entries_deleted)`.
     pub fn purge_superseded_document_versions(
         &self,
         database_id: u64,
@@ -115,9 +117,29 @@ impl SparseEngine {
         coll: &str,
         cutoff_system_ms: i64,
     ) -> crate::Result<(usize, usize)> {
-        let cutoff = nodedb_types::ms_to_ordinal_upper(cutoff_system_ms);
-        let doc_victims = self.collect_doc_victims(database_id, tenant, coll, cutoff)?;
-        let idx_victims = self.collect_index_victims(database_id, tenant, coll, cutoff)?;
+        let horizon = nodedb_types::ms_to_ordinal_upper(cutoff_system_ms);
+        self.purge_document_versions_below(database_id, tenant, coll, horizon)
+    }
+
+    /// Remove every document version and index entry of `(tenant, coll)`
+    /// that no read at or above `horizon` can see.
+    ///
+    /// A version goes when its successor's `sys_from <= horizon`. The
+    /// version visible at the horizon always stays. A tombstone at or below
+    /// the horizon with nothing after it goes too, and its row leaves the
+    /// table entirely. Returns `(doc_versions_deleted,
+    /// index_entries_deleted)`.
+    pub fn purge_document_versions_below(
+        &self,
+        database_id: u64,
+        tenant: u64,
+        coll: &str,
+        horizon: i64,
+    ) -> crate::Result<(usize, usize)> {
+        let lo = coll_prefix(database_id, tenant, coll);
+        let hi = coll_prefix_end(database_id, tenant, coll);
+        let doc_victims = self.collect_victims(DOCUMENTS_VERSIONED, &lo, &hi, horizon, coll)?;
+        let idx_victims = self.collect_victims(INDEXES_VERSIONED, &lo, &hi, horizon, coll)?;
 
         if doc_victims.is_empty() && idx_victims.is_empty() {
             return Ok((0, 0));
@@ -132,131 +154,92 @@ impl SparseEngine {
                 .open_table(DOCUMENTS_VERSIONED)
                 .map_err(|e| redb_err("open docs purge", e))?;
             for k in &doc_victims {
-                docs.remove(k.as_str())
-                    .map_err(|e| redb_err("remove doc version", e))?;
+                remove_counted(&txn, &mut docs, k)?;
             }
             let mut idx = txn
                 .open_table(INDEXES_VERSIONED)
                 .map_err(|e| redb_err("open idx purge", e))?;
             for k in &idx_victims {
-                idx.remove(k.as_str())
-                    .map_err(|e| redb_err("remove idx version", e))?;
+                remove_counted(&txn, &mut idx, k)?;
             }
         }
         txn.commit().map_err(|e| redb_err("commit purge", e))?;
         Ok((doc_victims.len(), idx_victims.len()))
     }
 
-    fn collect_doc_victims(
+    /// The keys of `table_def` in `[lo, hi)` that the purge rule at
+    /// `horizon` removes. Both versioned tables key a version as
+    /// `{base}\x00{sys_from:020}` and lead its value with the tag byte, so
+    /// one walk serves both. Only the tag byte is read.
+    fn collect_victims(
         &self,
-        database_id: u64,
-        tenant: u64,
+        table_def: TableDefinition<'static, &'static str, &'static [u8]>,
+        lo: &str,
+        hi: &str,
+        horizon: i64,
         coll: &str,
-        cutoff: i64,
     ) -> crate::Result<Vec<String>> {
-        let lo = coll_prefix(database_id, tenant, coll);
-        let hi = coll_prefix_end(database_id, tenant, coll);
         let txn = self
             .db
             .begin_read()
             .map_err(|e| redb_err("read txn purge", e))?;
         let t = txn
-            .open_table(DOCUMENTS_VERSIONED)
-            .map_err(|e| redb_err("open docs read purge", e))?;
-        let range = t
-            .range(lo.as_str()..hi.as_str())
-            .map_err(|e| redb_err("range purge", e))?;
+            .open_table(table_def)
+            .map_err(|e| redb_err("open table purge", e))?;
+        let range = t.range(lo..hi).map_err(|e| redb_err("range purge", e))?;
 
-        // Stream pattern: table sorted by (doc_id, sys_from) ascending.
-        // Group-by rule: base-group identity is the prefix before `\x00`.
-        // Whenever we see a row for a base we've already seen, the previous
-        // row in that base is guaranteed to be superseded; it becomes a
-        // victim only if also below the cutoff. The last-seen row per base
-        // is always kept.
         let mut victims: Vec<String> = Vec::new();
-        let mut pending: Option<(String, i64, String)> = None; // (base, sys_from, full_key)
-
+        // The previous version of the row being walked: its key, its
+        // `sys_from`, and whether it is a tombstone.
+        let mut pending: Option<PendingVersion> = None;
         for r in range {
-            let (k, _v) = r.map_err(|e| redb_err("entry purge", e))?;
-            let key_str = k.value().to_string();
-            let Some((base, suffix)) = key_str.rsplit_once('\x00') else {
-                continue;
-            };
-            let Ok(sys_from) = suffix.parse::<i64>() else {
-                continue;
-            };
-            let base_s = base.to_string();
-
-            match pending.take() {
-                None => {
-                    pending = Some((base_s, sys_from, key_str));
-                }
-                Some((prev_base, prev_sf, prev_key)) if prev_base == base_s => {
-                    if prev_sf < cutoff {
-                        victims.push(prev_key);
+            let (k, v) = r.map_err(|e| redb_err("entry purge", e))?;
+            let key = k.value();
+            let invalid = || invalid_storage_key_err(KeyedTable::DocumentsVersioned, coll, key);
+            let (base, suffix) = key.rsplit_once('\x00').ok_or_else(invalid)?;
+            let sys_from = suffix.parse::<i64>().map_err(|_| invalid())?;
+            let tombstone = v.value().first().copied().ok_or_else(invalid)? == TAG_TOMBSTONE;
+            if let Some(prev) = pending.take() {
+                let superseded = prev.base_len == base.len()
+                    && prev.key.as_bytes()[..prev.base_len] == *base.as_bytes();
+                if superseded {
+                    if sys_from <= horizon {
+                        victims.push(prev.key);
                     }
-                    pending = Some((base_s, sys_from, key_str));
-                }
-                Some(_prev_latest_for_other_base) => {
-                    pending = Some((base_s, sys_from, key_str));
+                } else if prev.terminal_victim(horizon) {
+                    victims.push(prev.key);
                 }
             }
+            pending = Some(PendingVersion {
+                key: key.to_string(),
+                base_len: base.len(),
+                sys_from,
+                tombstone,
+            });
+        }
+        if let Some(prev) = pending
+            && prev.terminal_victim(horizon)
+        {
+            victims.push(prev.key);
         }
         Ok(victims)
     }
+}
 
-    fn collect_index_victims(
-        &self,
-        database_id: u64,
-        tenant: u64,
-        coll: &str,
-        cutoff: i64,
-    ) -> crate::Result<Vec<String>> {
-        let lo = coll_prefix(database_id, tenant, coll);
-        let hi = coll_prefix_end(database_id, tenant, coll);
-        let txn = self
-            .db
-            .begin_read()
-            .map_err(|e| redb_err("read txn idx purge", e))?;
-        let t = txn
-            .open_table(INDEXES_VERSIONED)
-            .map_err(|e| redb_err("open idx read purge", e))?;
-        let range = t
-            .range(lo.as_str()..hi.as_str())
-            .map_err(|e| redb_err("range idx purge", e))?;
+/// The last version the purge walk read.
+struct PendingVersion {
+    key: String,
+    /// Length of the key's `{base}` part, before `\x00`.
+    base_len: usize,
+    sys_from: i64,
+    tombstone: bool,
+}
 
-        // Same streaming group-by: the base here is
-        // `{tenant}:{coll}:{field}:{value}:{doc_id}`, terminated by `\x00`.
-        let mut victims: Vec<String> = Vec::new();
-        let mut pending: Option<(String, i64, String)> = None;
-
-        for r in range {
-            let (k, _v) = r.map_err(|e| redb_err("entry idx purge", e))?;
-            let key_str = k.value().to_string();
-            let Some((base, suffix)) = key_str.rsplit_once('\x00') else {
-                continue;
-            };
-            let Ok(sys_from) = suffix.parse::<i64>() else {
-                continue;
-            };
-            let base_s = base.to_string();
-
-            match pending.take() {
-                None => {
-                    pending = Some((base_s, sys_from, key_str));
-                }
-                Some((prev_base, prev_sf, prev_key)) if prev_base == base_s => {
-                    if prev_sf < cutoff {
-                        victims.push(prev_key);
-                    }
-                    pending = Some((base_s, sys_from, key_str));
-                }
-                Some(_) => {
-                    pending = Some((base_s, sys_from, key_str));
-                }
-            }
-        }
-        Ok(victims)
+impl PendingVersion {
+    /// Whether this version, the newest of its row, goes: a tombstone at or
+    /// below the horizon.
+    fn terminal_victim(&self, horizon: i64) -> bool {
+        self.tombstone && self.sys_from <= horizon
     }
 }
 
@@ -293,8 +276,9 @@ mod tests {
         .unwrap();
     }
 
-    /// A superseded version written in the horizon millisecond itself is
-    /// purged: the horizon converts to the last ordinal of that millisecond.
+    /// A version superseded inside the horizon millisecond is purged: the
+    /// horizon converts to the last ordinal of that millisecond. The version
+    /// visible at the horizon stays.
     #[test]
     fn purge_reaches_versions_inside_the_horizon_millisecond() {
         let (_d, eng) = fresh_engine();
@@ -316,8 +300,8 @@ mod tests {
         let (docs, _idx) = eng
             .purge_superseded_document_versions(1, 1, "c", 150)
             .unwrap();
-        assert_eq!(docs, 2, "both superseded versions of ms 150 are purged");
-        assert_eq!(count_doc_versions(&eng, 1), 1);
+        assert_eq!(docs, 1, "only the version superseded inside ms 150 goes");
+        assert_eq!(count_doc_versions(&eng, 1), 2);
     }
 
     fn count_doc_versions(eng: &SparseEngine, doc_id: u32) -> usize {
@@ -339,7 +323,11 @@ mod tests {
         let (docs, _idx) = eng
             .purge_superseded_document_versions(1, 1, "c", 150)
             .unwrap();
-        assert_eq!(docs, 1, "only v@100 is below cutoff AND superseded");
+        assert_eq!(docs, 0, "v@100 is the version visible at 150 and stays");
+        let (docs, _idx) = eng
+            .purge_superseded_document_versions(1, 1, "c", 250)
+            .unwrap();
+        assert_eq!(docs, 1, "v@100 is superseded at 200 <= 250");
         assert_eq!(count_doc_versions(&eng, 1), 2);
     }
 
@@ -365,7 +353,7 @@ mod tests {
             put_version(&eng, id, 300);
         }
         let (docs, _) = eng
-            .purge_superseded_document_versions(1, 1, "c", 150)
+            .purge_superseded_document_versions(1, 1, "c", 250)
             .unwrap();
         assert_eq!(docs, 2, "one victim per doc");
         assert_eq!(count_doc_versions(&eng, 1), 2);
@@ -379,10 +367,10 @@ mod tests {
         put_version(&eng, 1, 200);
         put_version(&eng, 1, 300);
         let (a, _) = eng
-            .purge_superseded_document_versions(1, 1, "c", 150)
+            .purge_superseded_document_versions(1, 1, "c", 250)
             .unwrap();
         let (b, _) = eng
-            .purge_superseded_document_versions(1, 1, "c", 150)
+            .purge_superseded_document_versions(1, 1, "c", 250)
             .unwrap();
         assert_eq!(a, 1);
         assert_eq!(b, 0);
@@ -538,7 +526,7 @@ mod tests {
         .unwrap();
 
         let (docs, _) = eng
-            .purge_superseded_document_versions(1, 1, "c", 150)
+            .purge_superseded_document_versions(1, 1, "c", 250)
             .unwrap();
         assert_eq!(docs, 1);
         // The other collection and tenant still have all their versions.
@@ -555,5 +543,80 @@ mod tests {
         let lo_t2 = super::super::key::doc_prefix(1, 2, "c", &key(1));
         let hi_t2 = super::super::key::doc_prefix_end(1, 2, "c", &key(1));
         assert_eq!(t.range(lo_t2.as_str()..hi_t2.as_str()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn purge_keeps_the_version_visible_at_the_horizon() {
+        let (_d, eng) = fresh_engine();
+        for sys_from in [100, 200, 300] {
+            eng.put(
+                1,
+                1,
+                "c",
+                &key(1),
+                format!("v{sys_from}").as_bytes(),
+                sys_from,
+            )
+            .unwrap();
+        }
+        let (docs, _) = eng.purge_document_versions_below(1, 1, "c", 250).unwrap();
+        assert_eq!(docs, 1, "only v@100 goes: its successor 200 <= 250");
+        let at = |cut: i64| {
+            eng.versioned_get_as_of(1, 1, "c", &key(1), Some(cut), None)
+                .unwrap()
+        };
+        assert_eq!(at(250), Some(b"v200".to_vec()));
+        assert_eq!(at(300), Some(b"v300".to_vec()));
+    }
+
+    #[test]
+    fn purge_removes_a_row_whose_tombstone_is_below_the_horizon() {
+        let (_d, eng) = fresh_engine();
+        eng.put(1, 1, "c", &key(1), b"v1", 100).unwrap();
+        eng.delete(1, 1, "c", &key(1), 200).unwrap();
+        eng.put(1, 1, "c", &key(2), b"w1", 100).unwrap();
+        eng.delete(1, 1, "c", &key(2), 400).unwrap();
+        let (docs, _) = eng.purge_document_versions_below(1, 1, "c", 300).unwrap();
+        assert_eq!(
+            docs, 2,
+            "row 1 leaves the table: its live version and tombstone"
+        );
+        assert_eq!(count_doc_versions(&eng, 1), 0);
+        assert_eq!(
+            count_doc_versions(&eng, 2),
+            2,
+            "row 2's tombstone sits above the horizon"
+        );
+        assert_eq!(
+            eng.versioned_get_as_of(1, 1, "c", &key(2), Some(300), None)
+                .unwrap(),
+            Some(b"w1".to_vec())
+        );
+    }
+
+    #[test]
+    fn purge_applies_the_rule_to_index_entries() {
+        use super::super::value::VersionedIndexEntry;
+        let (_d, eng) = fresh_engine();
+        let doc1 = key(1);
+        let entry = |value: &'static str, sys_from: i64| VersionedIndexEntry {
+            database_id: 1,
+            tenant: 1,
+            coll: "c",
+            field: "f",
+            value,
+            doc_id: &doc1,
+            sys_from,
+        };
+        eng.versioned_index_put(entry("a", 100)).unwrap();
+        eng.versioned_index_tombstone(entry("a", 200)).unwrap();
+        eng.versioned_index_put(entry("b", 200)).unwrap();
+        let (_, idx) = eng.purge_document_versions_below(1, 1, "c", 250).unwrap();
+        assert_eq!(idx, 2, "value a's put and its tombstone both go");
+        assert_eq!(
+            eng.versioned_index_lookup_as_of(1, 1, "c", "f", "b", None)
+                .unwrap(),
+            vec![doc1]
+        );
     }
 }

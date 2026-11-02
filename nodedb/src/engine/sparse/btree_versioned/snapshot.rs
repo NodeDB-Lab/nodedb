@@ -2,13 +2,14 @@
 
 //! Tenant export and raw import of the versioned document and index tables.
 //!
-//! A `bitemporal=true` collection writes only these tables, so a tenant
-//! snapshot that reads `DOCUMENTS` and `INDEXES` alone carries none of its
-//! rows. Keys and values move verbatim: every version keeps its system time.
+//! Every document collection stores its rows and index entries only in
+//! these tables. Keys and values move verbatim: every version keeps its
+//! system time.
 
 use redb::TableDefinition;
 
 use super::doc::DOCUMENTS_VERSIONED;
+use super::history_bytes::insert_counted;
 use super::index::INDEXES_VERSIONED;
 use crate::engine::sparse::btree::{SparseEngine, redb_err};
 
@@ -54,7 +55,7 @@ impl SparseEngine {
 
     fn put_table_raw(
         &self,
-        table_def: TableDefinition<&str, &[u8]>,
+        table_def: TableDefinition<'static, &'static str, &'static [u8]>,
         key: &str,
         value: &[u8],
     ) -> crate::Result<()> {
@@ -66,9 +67,7 @@ impl SparseEngine {
             let mut table = txn
                 .open_table(table_def)
                 .map_err(|e| redb_err("open table", e))?;
-            table
-                .insert(key, value)
-                .map_err(|e| redb_err("raw insert", e))?;
+            insert_counted(&txn, &mut table, key, value)?;
         }
         txn.commit().map_err(|e| redb_err("commit", e))?;
         Ok(())
@@ -140,5 +139,11 @@ mod tests {
                 .as_deref(),
             Some(b"v2".as_slice())
         );
+        assert_eq!(
+            target.document_history_bytes(0, 3).unwrap(),
+            source.document_history_bytes(0, 3).unwrap(),
+            "the installed versions count the bytes they hold"
+        );
+        assert_eq!(target.document_history_bytes(0, 4).unwrap(), 0);
     }
 }

@@ -7,18 +7,22 @@
 //! the caller's `stop` signal once per scanned version so a long scan can be
 //! ended from outside.
 
+use std::ops::ControlFlow;
+
 use nodedb_types::StorageKey;
 use redb::{ReadableDatabase, ReadableTable};
 
 use super::doc::{DOCUMENTS_VERSIONED, VersionedRow};
-use super::key::{coll_prefix, coll_prefix_end, format_sys_from};
+use super::key::{coll_prefix, coll_prefix_end};
 use super::value::{TAG_TOMBSTONE, VersionedScanParams, decode_value};
+use super::visible::{ScanRange, for_each_visible};
 use crate::engine::sparse::btree::{KeyedTable, SparseEngine, invalid_storage_key_err, redb_err};
 
 impl SparseEngine {
-    /// Scan every doc_id in a collection at the requested cutoff.
-    /// Returns `(doc_id, body)` pairs for live versions only. O(N)
-    /// collection-wide; callers add filter/limit on top.
+    /// Scan every doc_id in a collection at the requested cutoff: one row
+    /// per doc, its version visible at the cut. Returns `(doc_id, body)`
+    /// pairs for live versions only. Only the visible version of a row is
+    /// decoded.
     /// `predicate` receives each surviving version's doc-id and document body,
     /// and is evaluated before the version counts toward `limit`, so a
     /// selective filter never causes the scan to early-stop with fewer
@@ -65,65 +69,44 @@ impl SparseEngine {
             Some(after) => format!("{lo}{after}\x01"),
             None => lo.clone(),
         };
-        let cutoff_key = sys_cutoff.map(format_sys_from);
         let txn = self.db.begin_read().map_err(|e| redb_err("read txn", e))?;
         let t = txn
             .open_table(DOCUMENTS_VERSIONED)
             .map_err(|e| redb_err("open table", e))?;
-        let range = t
-            .range(start.as_str()..hi.as_str())
-            .map_err(|e| redb_err("range", e))?;
-
-        // Group entries by doc_id; keep the newest-in-window per group.
-        // The table is sorted by (doc_id, sys_from) ascending so we can
-        // stream and flush whenever doc_id changes.
         let mut out = Vec::new();
-        let mut current_id: Option<StorageKey> = None;
-        let mut best_for_current: Option<(i64, Vec<u8>)> = None;
-
-        for r in range {
-            if stop() {
-                break;
-            }
-            let (k, v) = r.map_err(|e| redb_err("entry", e))?;
-            let key_str = k.value();
-            let Some((id_part, suffix)) = key_str.rsplit_once('\x00') else {
-                continue;
-            };
-            let Some(seg) = id_part.strip_prefix(lo.as_str()) else {
-                continue;
-            };
-            let doc_id = StorageKey::parse(seg).ok_or_else(|| {
-                invalid_storage_key_err(KeyedTable::DocumentsVersioned, coll, seg)
-            })?;
-            if let Some(ref c) = cutoff_key
-                && suffix > c.as_str()
-            {
-                continue;
-            }
-            let Ok(sf) = suffix.parse::<i64>() else {
-                continue;
-            };
-            if current_id != Some(doc_id) {
-                if let Some(prev_id) = current_id {
-                    flush_scan(prev_id, &best_for_current, valid_at_ms, predicate, &mut out)?;
-                    if out.len() >= limit {
-                        return Ok(out);
-                    }
+        if limit == 0 {
+            return Ok(out);
+        }
+        for_each_visible(
+            &t,
+            ScanRange {
+                coll,
+                prefix: &lo,
+                start: &start,
+                end: &hi,
+            },
+            sys_cutoff,
+            stop,
+            |row| {
+                let value = &row.value;
+                if let Some(vt) = valid_at_ms
+                    && (vt < value.valid_from_ms || vt >= value.valid_until_ms)
+                {
+                    return Ok(ControlFlow::Continue(()));
                 }
-                current_id = Some(doc_id);
-                best_for_current = None;
-            }
-            let val = v.value().to_vec();
-            // Keep the newest entry for this doc_id (largest sys_from).
-            best_for_current = Some(match best_for_current.take() {
-                Some((prev_sf, prev_v)) if prev_sf >= sf => (prev_sf, prev_v),
-                _ => (sf, val),
-            });
-        }
-        if let Some(prev_id) = current_id {
-            flush_scan(prev_id, &best_for_current, valid_at_ms, predicate, &mut out)?;
-        }
+                // The caller's scan filters run here, so `limit` counts
+                // matching rows.
+                if !predicate(&row.doc_id, value.body) {
+                    return Ok(ControlFlow::Continue(()));
+                }
+                out.push((row.doc_id, value.body.to_vec()));
+                Ok(if out.len() >= limit {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                })
+            },
+        )?;
         Ok(out)
     }
 
@@ -259,32 +242,4 @@ impl SparseEngine {
         all.truncate(limit);
         Ok(all)
     }
-}
-
-/// Emit the newest-per-doc-id entry into `out` if it's live and passes
-/// the valid-time predicate.
-fn flush_scan(
-    id: StorageKey,
-    pick: &Option<(i64, Vec<u8>)>,
-    valid_at_ms: Option<i64>,
-    predicate: &dyn Fn(&StorageKey, &[u8]) -> bool,
-    out: &mut Vec<(StorageKey, Vec<u8>)>,
-) -> crate::Result<()> {
-    let Some((_sf, v)) = pick else { return Ok(()) };
-    let decoded = decode_value(v)?;
-    if !decoded.is_live() {
-        return Ok(());
-    }
-    if let Some(vt) = valid_at_ms
-        && (vt < decoded.valid_from_ms || vt >= decoded.valid_until_ms)
-    {
-        return Ok(());
-    }
-    // Caller's scan filters are pushed down here so they are applied before the
-    // row counts toward the scan's `limit`.
-    if !predicate(&id, decoded.body) {
-        return Ok(());
-    }
-    out.push((id, decoded.body.to_vec()));
-    Ok(())
 }

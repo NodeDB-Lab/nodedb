@@ -12,7 +12,7 @@ use tracing::info;
 
 use super::chain_head::CHAIN_HEADS;
 use super::crdt_dead_letter::CRDT_DEAD_LETTERS;
-use super::tables::{DOCUMENTS, INDEXES, redb_err};
+use super::tables::redb_err;
 use super::write_set_capture::WRITE_SET_CAPTURES;
 use crate::engine::durability_gate::GatedDatabase;
 
@@ -36,12 +36,6 @@ impl SparseEngine {
 
         let write_txn = db.begin_write().map_err(|e| redb_err("write txn", e))?;
         {
-            let _ = write_txn
-                .open_table(DOCUMENTS)
-                .map_err(|e| redb_err("open documents table", e))?;
-            let _ = write_txn
-                .open_table(INDEXES)
-                .map_err(|e| redb_err("open indexes table", e))?;
             // Created unconditionally, including for databases written before
             // chain heads were persisted: `load_chain_heads` runs at every boot
             // and a read transaction cannot open a table that does not exist.

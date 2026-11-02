@@ -5,10 +5,12 @@
 use nodedb_types::StorageKey;
 use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 
+use super::history_bytes::{insert_counted, remove_counted};
 use super::key::{doc_prefix, doc_prefix_end, versioned_doc_key};
 use super::value::{
     TAG_GDPR_ERASED, TAG_LIVE, TAG_TOMBSTONE, VersionedPut, decode_value, encode_value,
 };
+use super::visible::{RowRef, visible_body, visible_version};
 use crate::engine::sparse::btree::{SparseEngine, redb_err};
 
 /// One row of an audit-log (`AS OF SYSTEM TIME NULL`) scan: a single
@@ -31,8 +33,8 @@ pub struct VersionedRow {
     pub deleted: bool,
 }
 
-/// Versioned document table. Distinct from `super::super::btree::DOCUMENTS`
-/// so bitemporal and current-only collections coexist. Keys carry the leading
+/// The document table. Every document collection keeps every version of
+/// every row here, bitemporal or not. Keys carry the leading
 /// `{database_id}:` component.
 pub(crate) const DOCUMENTS_VERSIONED: TableDefinition<&str, &[u8]> =
     TableDefinition::new("documents_versioned");
@@ -51,34 +53,25 @@ impl SparseEngine {
                 .map_err(|e| redb_err("open documents_versioned", e))?;
         }
         txn.commit().map_err(|e| redb_err("commit", e))?;
-        Ok(())
+        self.ensure_history_bytes_table()
     }
 
-    /// Append one version. Always creates a new key; never overwrites an
-    /// earlier version at the same `sys_from`.
+    /// Append one version in its own write transaction.
     pub fn versioned_put(&self, p: VersionedPut<'_>) -> crate::Result<()> {
-        let key = versioned_doc_key(p.database_id, p.tenant, p.coll, p.doc_id, p.sys_from);
-        let val = encode_value(TAG_LIVE, p.valid_from_ms, p.valid_until_ms, p.body);
         let txn = self
             .db
             .begin_write()
             .map_err(|e| redb_err("write txn", e))?;
-        {
-            let mut t = txn
-                .open_table(DOCUMENTS_VERSIONED)
-                .map_err(|e| redb_err("open table", e))?;
-            t.insert(key.as_str(), val.as_slice())
-                .map_err(|e| redb_err("insert", e))?;
-        }
+        self.versioned_put_in_txn(&txn, p)?;
         txn.commit().map_err(|e| redb_err("commit", e))?;
         Ok(())
     }
 
-    /// `versioned_put` inside a caller-owned write transaction. Used by
-    /// composite write paths (PointPut / UPSERT / UPDATE on bitemporal
-    /// collections) so the document + its versioned index entries + the
-    /// current-state side-effects (stats, text/vector/spatial indexes,
-    /// document cache) commit atomically.
+    /// Append one version inside a caller-owned write transaction. Composite
+    /// write paths (PointPut / UPSERT / UPDATE) use it so the document, its
+    /// index entries and the current-state side effects (stats, text, vector,
+    /// spatial indexes, document cache) commit atomically. A version at an
+    /// existing `sys_from` is replaced.
     pub fn versioned_put_in_txn(
         &self,
         txn: &redb::WriteTransaction,
@@ -89,12 +82,10 @@ impl SparseEngine {
         let mut t = txn
             .open_table(DOCUMENTS_VERSIONED)
             .map_err(|e| redb_err("open table", e))?;
-        t.insert(key.as_str(), val.as_slice())
-            .map_err(|e| redb_err("insert", e))?;
-        Ok(())
+        insert_counted(txn, &mut t, &key, &val)
     }
 
-    /// Append a tombstone version.
+    /// Append a tombstone version in its own write transaction.
     pub fn versioned_tombstone(
         &self,
         database_id: u64,
@@ -103,19 +94,11 @@ impl SparseEngine {
         doc_id: &StorageKey,
         sys_from: i64,
     ) -> crate::Result<()> {
-        let key = versioned_doc_key(database_id, tenant, coll, doc_id, sys_from);
-        let val = encode_value(TAG_TOMBSTONE, 0, 0, &[]);
         let txn = self
             .db
             .begin_write()
             .map_err(|e| redb_err("write txn", e))?;
-        {
-            let mut t = txn
-                .open_table(DOCUMENTS_VERSIONED)
-                .map_err(|e| redb_err("open table", e))?;
-            t.insert(key.as_str(), val.as_slice())
-                .map_err(|e| redb_err("insert tombstone", e))?;
-        }
+        self.versioned_tombstone_in_txn(&txn, database_id, tenant, coll, doc_id, sys_from)?;
         txn.commit().map_err(|e| redb_err("commit", e))?;
         Ok(())
     }
@@ -135,9 +118,7 @@ impl SparseEngine {
         let mut t = txn
             .open_table(DOCUMENTS_VERSIONED)
             .map_err(|e| redb_err("open table", e))?;
-        t.insert(key.as_str(), val.as_slice())
-            .map_err(|e| redb_err("insert tombstone", e))?;
-        Ok(())
+        insert_counted(txn, &mut t, &key, &val)
     }
 
     /// Physically remove one version's redb entry inside a caller-owned
@@ -159,15 +140,14 @@ impl SparseEngine {
         let mut t = txn
             .open_table(DOCUMENTS_VERSIONED)
             .map_err(|e| redb_err("open table", e))?;
-        t.remove(key.as_str()).map_err(|e| redb_err("remove", e))?;
-        Ok(())
+        remove_counted(txn, &mut t, &key)
     }
 
-    /// Check whether the current-state version of `doc_id` is live
-    /// (not tombstoned, not GDPR-erased, and at least one version
-    /// exists) inside a caller-owned write transaction. Used by
-    /// PointInsert on bitemporal collections to enforce primary-key
-    /// uniqueness linearizably with the subsequent `versioned_put`.
+    /// Check whether the current-state version of `doc_id` is live (not
+    /// tombstoned, not GDPR-erased, and at least one version exists) inside a
+    /// caller-owned write transaction, so it sees the versions `txn` staged.
+    /// PointInsert enforces primary-key uniqueness through it, linearizably
+    /// with the version it appends.
     pub fn versioned_exists_current_in_txn(
         &self,
         txn: &redb::WriteTransaction,
@@ -176,21 +156,17 @@ impl SparseEngine {
         coll: &str,
         doc_id: &StorageKey,
     ) -> crate::Result<bool> {
-        let lo = doc_prefix(database_id, tenant, coll, doc_id);
-        let hi = doc_prefix_end(database_id, tenant, coll, doc_id);
         let t = txn
             .open_table(DOCUMENTS_VERSIONED)
             .map_err(|e| redb_err("open table", e))?;
-        let range = t
-            .range(lo.as_str()..hi.as_str())
-            .map_err(|e| redb_err("range", e))?;
-        let mut last: Option<Vec<u8>> = None;
-        for r in range {
-            let (_k, v) = r.map_err(|e| redb_err("entry", e))?;
-            last = Some(v.value().to_vec());
-        }
-        match last {
-            Some(bytes) => Ok(decode_value(&bytes)?.is_live()),
+        let row = RowRef {
+            database_id,
+            tenant,
+            coll,
+            doc_id,
+        };
+        match visible_version(&t, row, None)? {
+            Some((_, guard)) => Ok(decode_value(guard.value())?.is_live()),
             None => Ok(false),
         }
     }
@@ -220,12 +196,12 @@ impl SparseEngine {
             let keys: Vec<String> = t
                 .range(lo.as_str()..hi.as_str())
                 .map_err(|e| redb_err("range", e))?
-                .filter_map(|r| r.ok().map(|(k, _)| k.value().to_string()))
-                .collect();
+                .map(|r| r.map(|(k, _)| k.value().to_string()))
+                .collect::<Result<_, _>>()
+                .map_err(|e| redb_err("entry", e))?;
+            let erased = encode_value(TAG_GDPR_ERASED, 0, 0, &[]);
             for k in keys {
-                let erased = encode_value(TAG_GDPR_ERASED, 0, 0, &[]);
-                t.insert(k.as_str(), erased.as_slice())
-                    .map_err(|e| redb_err("erase insert", e))?;
+                insert_counted(&txn, &mut t, &k, &erased)?;
                 replaced += 1;
             }
         }
@@ -233,9 +209,13 @@ impl SparseEngine {
         Ok(replaced)
     }
 
-    /// Ceiling read: most recent version at or before `sys_cutoff`.
-    /// Returns `Ok(None)` when nothing is present, or the newest entry is
-    /// a tombstone / GDPR-erased (both hide the row from normal reads).
+    /// The body of `doc_id` visible at `sys_cutoff` (`None` = current).
+    ///
+    /// Without `valid_at_ms` this is one reverse seek: the newest version at
+    /// or below the cut decides, and a tombstone or an erasure hides the row.
+    /// With `valid_at_ms` the read walks back from that version to the newest
+    /// live one whose valid interval holds `valid_at_ms`. A tombstone or an
+    /// erasure on the way hides the row.
     pub fn versioned_get_as_of(
         &self,
         database_id: u64,
@@ -245,49 +225,43 @@ impl SparseEngine {
         sys_cutoff: Option<i64>,
         valid_at_ms: Option<i64>,
     ) -> crate::Result<Option<Vec<u8>>> {
-        let lo = doc_prefix(database_id, tenant, coll, doc_id);
-        let hi = match sys_cutoff {
-            Some(ms) => versioned_doc_key(database_id, tenant, coll, doc_id, ms),
-            None => doc_prefix_end(database_id, tenant, coll, doc_id),
-        };
         let txn = self.db.begin_read().map_err(|e| redb_err("read txn", e))?;
         let t = txn
             .open_table(DOCUMENTS_VERSIONED)
             .map_err(|e| redb_err("open table", e))?;
-        let range = match sys_cutoff {
-            Some(_) => t
-                .range(lo.as_str()..=hi.as_str())
-                .map_err(|e| redb_err("range", e))?,
-            None => t
-                .range(lo.as_str()..hi.as_str())
-                .map_err(|e| redb_err("range", e))?,
+        let row = RowRef {
+            database_id,
+            tenant,
+            coll,
+            doc_id,
         };
-        let mut entries: Vec<Vec<u8>> = Vec::new();
-        for r in range {
-            let (_k, v) = r.map_err(|e| redb_err("entry", e))?;
-            entries.push(v.value().to_vec());
+        let Some(vt) = valid_at_ms else {
+            return Ok(visible_body(&t, row, sys_cutoff)?.map(|(_, body)| body));
+        };
+        let lo = doc_prefix(database_id, tenant, coll, doc_id);
+        let hi = match sys_cutoff {
+            Some(cutoff) => versioned_doc_key(database_id, tenant, coll, doc_id, cutoff),
+            None => doc_prefix_end(database_id, tenant, coll, doc_id),
+        };
+        let range = match sys_cutoff {
+            Some(_) => t.range(lo.as_str()..=hi.as_str()),
+            None => t.range(lo.as_str()..hi.as_str()),
         }
-        // Iterate in reverse to pick the newest version ≤ cutoff whose
-        // valid-time predicate holds.
-        for v in entries.into_iter().rev() {
-            let decoded = decode_value(&v)?;
+        .map_err(|e| redb_err("range", e))?;
+        for entry in range.rev() {
+            let (_key, value) = entry.map_err(|e| redb_err("entry", e))?;
+            let decoded = decode_value(value.value())?;
             if !decoded.is_live() {
-                // Ceiling hit a tombstone / erasure as the newest entry —
-                // the row is absent at this cutoff, even if live versions
-                // exist further back.
                 return Ok(None);
             }
-            if let Some(vt) = valid_at_ms
-                && (vt < decoded.valid_from_ms || vt >= decoded.valid_until_ms)
-            {
-                continue;
+            if vt >= decoded.valid_from_ms && vt < decoded.valid_until_ms {
+                return Ok(Some(decoded.body.to_vec()));
             }
-            return Ok(Some(decoded.body.to_vec()));
         }
         Ok(None)
     }
 
-    /// Current-state read = `versioned_get_as_of(None, None)`.
+    /// The current body of `doc_id`: one reverse seek.
     pub fn versioned_get_current(
         &self,
         database_id: u64,
@@ -295,7 +269,34 @@ impl SparseEngine {
         coll: &str,
         doc_id: &StorageKey,
     ) -> crate::Result<Option<Vec<u8>>> {
-        self.versioned_get_as_of(database_id, tenant, coll, doc_id, None, None)
+        Ok(self
+            .versioned_get_current_with_sys_from(database_id, tenant, coll, doc_id)?
+            .map(|(_, body)| body))
+    }
+
+    /// The current body of `doc_id` with the system-time ordinal of the
+    /// version that holds it. One reverse seek.
+    pub fn versioned_get_current_with_sys_from(
+        &self,
+        database_id: u64,
+        tenant: u64,
+        coll: &str,
+        doc_id: &StorageKey,
+    ) -> crate::Result<Option<(i64, Vec<u8>)>> {
+        let txn = self.db.begin_read().map_err(|e| redb_err("read txn", e))?;
+        let t = txn
+            .open_table(DOCUMENTS_VERSIONED)
+            .map_err(|e| redb_err("open table", e))?;
+        visible_body(
+            &t,
+            RowRef {
+                database_id,
+                tenant,
+                coll,
+                doc_id,
+            },
+            None,
+        )
     }
 
     /// Visit every version of every row of `coll`, in row order and, within
@@ -321,24 +322,18 @@ impl SparseEngine {
         for entry in range {
             let (k, v) = entry.map_err(|e| redb_err("entry", e))?;
             let key_str = k.value();
-            let Some((id_part, suffix)) = key_str.rsplit_once('\x00') else {
-                continue;
-            };
-            let Some(seg) = id_part.strip_prefix(lo.as_str()) else {
-                continue;
-            };
-            let doc_id = StorageKey::parse(seg).ok_or_else(|| {
+            let invalid = || {
                 crate::engine::sparse::btree::invalid_storage_key_err(
                     crate::engine::sparse::btree::KeyedTable::DocumentsVersioned,
                     coll,
-                    seg,
+                    key_str,
                 )
-            })?;
-            let Ok(sys_from) = suffix.parse::<i64>() else {
-                continue;
             };
-            let bytes = v.value();
-            let decoded = decode_value(bytes)?;
+            let (id_part, suffix) = key_str.rsplit_once('\x00').ok_or_else(invalid)?;
+            let seg = id_part.strip_prefix(lo.as_str()).ok_or_else(invalid)?;
+            let doc_id = StorageKey::parse(seg).ok_or_else(invalid)?;
+            let sys_from = suffix.parse::<i64>().map_err(|_| invalid())?;
+            let decoded = decode_value(v.value())?;
             visit(&doc_id, sys_from, decoded.is_live().then_some(decoded.body))?;
         }
         Ok(())
@@ -355,23 +350,20 @@ impl SparseEngine {
         coll: &str,
         doc_id: &StorageKey,
     ) -> crate::Result<Option<Vec<u8>>> {
-        let lo = doc_prefix(database_id, tenant, coll, doc_id);
-        let hi = doc_prefix_end(database_id, tenant, coll, doc_id);
         let t = txn
             .open_table(DOCUMENTS_VERSIONED)
             .map_err(|e| redb_err("open table", e))?;
-        let newest = t
-            .range(lo.as_str()..hi.as_str())
-            .map_err(|e| redb_err("range", e))?
-            .next_back()
-            .transpose()
-            .map_err(|e| redb_err("entry", e))?;
-        let Some((_key, value)) = newest else {
-            return Ok(None);
-        };
-        let bytes = value.value();
-        let decoded = decode_value(bytes)?;
-        Ok(decoded.is_live().then(|| decoded.body.to_vec()))
+        Ok(visible_body(
+            &t,
+            RowRef {
+                database_id,
+                tenant,
+                coll,
+                doc_id,
+            },
+            None,
+        )?
+        .map(|(_, body)| body))
     }
 
     /// The system-time ordinal of the newest stored version of `doc_id`,
@@ -383,19 +375,17 @@ impl SparseEngine {
         coll: &str,
         doc_id: &StorageKey,
     ) -> crate::Result<Option<i64>> {
-        let lo = doc_prefix(database_id, tenant, coll, doc_id);
-        let hi = doc_prefix_end(database_id, tenant, coll, doc_id);
         let txn = self.db.begin_read().map_err(|e| redb_err("read txn", e))?;
         let t = txn
             .open_table(DOCUMENTS_VERSIONED)
             .map_err(|e| redb_err("open table", e))?;
-        let newest = t
-            .range(lo.as_str()..hi.as_str())
-            .map_err(|e| redb_err("range", e))?
-            .next_back()
-            .transpose()
-            .map_err(|e| redb_err("entry", e))?;
-        Ok(newest.and_then(|(key, _value)| super::key::parse_sys_from(key.value())))
+        let row = RowRef {
+            database_id,
+            tenant,
+            coll,
+            doc_id,
+        };
+        Ok(visible_version(&t, row, None)?.map(|(sys_from, _)| sys_from))
     }
 }
 

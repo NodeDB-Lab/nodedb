@@ -23,6 +23,7 @@ mod doc_image;
 mod doc_terms;
 mod document;
 mod errors;
+mod history;
 mod indexing;
 mod rebuild_install;
 mod rebuild_journal;
@@ -36,6 +37,7 @@ pub(crate) mod test_support;
 
 pub use core::InvertedIndex;
 pub use doc_image::FtsDocImage;
+pub use history::{TextCutView, UNVERSIONED};
 pub use indexing::IndexDocScope;
 pub use nodedb_fts::posting::{MatchOffset, Posting, QueryMode, TextSearchResult};
 pub use nodedb_fts::{DocumentText, FtsSearchParams, IndexScope};
