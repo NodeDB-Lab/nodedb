@@ -52,11 +52,10 @@ pub(in crate::data::executor) struct GraphExpansionParams<'a> {
 /// Reached nodes, in both currencies.
 ///
 /// `reached` is the surrogate-bound subset with hop distances — the form that
-/// fuses with another engine's candidates on the storage key. `names` /
-/// `distances` are every reached node resolved by name, for ranking by name
-/// and for the response. Both come from a single pass at the end.
+/// fuses with another engine's candidates on the storage key. `distances`
+/// holds every reached node resolved by name, for ranking by name and for the
+/// response. Both come from a single pass at the end.
 pub(in crate::data::executor) struct GraphExpansion {
-    pub names: Vec<String>,
     pub distances: HashMap<String, usize>,
     /// `(surrogate, hop distance)` for each reached node that carries a
     /// surrogate. Nodes counted in `unaddressable` are absent here.
@@ -98,7 +97,6 @@ impl CoreLoop {
 
         let Some(partition) = self.csr_view(database_id, tid, Some(collection), scope)? else {
             return Ok(GraphExpansion {
-                names: Vec::new(),
                 distances: HashMap::new(),
                 reached: Vec::new(),
                 truncated: false,
@@ -163,7 +161,6 @@ impl CoreLoop {
         partition: &crate::engine::graph::csr::CsrIndex,
         hops: &SurrogateHops,
     ) -> GraphExpansion {
-        let mut names = Vec::with_capacity(hops.distances.len());
         let mut distances = HashMap::with_capacity(hops.distances.len());
         let mut reached = Vec::with_capacity(hops.reached.len() as usize);
         for &(local, depth) in &hops.distances {
@@ -171,7 +168,6 @@ impl CoreLoop {
             // is total; skipping rather than unwrapping keeps a torn index from
             // panicking a core.
             if let Some(name) = partition.node_name_checked(local) {
-                names.push(name.to_string());
                 distances.insert(name.to_string(), depth);
             }
             // `node_surrogate_raw` yields the ZERO sentinel for an unbound node.
@@ -181,7 +177,6 @@ impl CoreLoop {
             }
         }
         GraphExpansion {
-            names,
             distances,
             reached,
             truncated: hops.truncated,

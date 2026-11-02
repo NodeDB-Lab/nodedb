@@ -171,6 +171,7 @@ async fn run(state: &SharedState, scope: RagScope, plan: &PhysicalPlan) -> crate
                 surrogates: hit_surrogates,
                 names: Vec::new(),
                 linearizable,
+                learn_collection: true,
             },
         )
         .await?
@@ -226,6 +227,7 @@ async fn run(state: &SharedState, scope: RagScope, plan: &PhysicalPlan) -> crate
                 surrogates: Vec::new(),
                 names: walk.order.clone(),
                 linearizable,
+                learn_collection: false,
             },
         )
         .await?;
@@ -237,7 +239,7 @@ async fn run(state: &SharedState, scope: RagScope, plan: &PhysicalPlan) -> crate
 
     // 5. Fuse, exactly as one core does.
     let graph_expanded_count = walk.order.len();
-    let graph_list = graph_nodes_to_ranked_results(walk.order, &walk.distances);
+    let graph_list = graph_nodes_to_ranked_results(&walk.distances);
     let vector_list = vector_ranked_list(&vector_scores);
     let (fused, op_name) = match (bm25_query, bm25_field, rrf_k_triple) {
         (Some(_), Some(_), Some((vector_k, text_k, graph_k))) => {

@@ -11,12 +11,16 @@ use crate::bridge::envelope::PhysicalPlan;
 use crate::control::gateway::TaskRoute;
 use crate::control::gateway::dispatcher::{DispatchRouteParams, dispatch_route};
 use crate::control::gateway::version_set::GatewayVersionSet;
+use crate::control::server::exchange::gather::{CoreFan, gather_cores};
+use crate::control::server::response_translate::pk_resolve::resolve_surrogate_pks;
 use crate::control::server::shared::session::StatementDeadline;
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, Lsn, TenantId, TraceId};
+use nodedb_types::Surrogate;
 
 use super::super::cluster_resolve::gateway_shared;
-use super::super::shard_reads::ShardReadLog;
+use super::super::hop::local_owner_cores;
+use super::super::shard_reads::{ShardReadLog, key_vshards};
 use super::super::whole_graph::scatter_to_graph_owners;
 use crate::control::gateway::live_leaders::resolve_live_decision;
 
@@ -151,11 +155,112 @@ pub(super) struct BindingsRequest {
     pub surrogates: Vec<u32>,
     pub names: Vec<String>,
     pub linearizable: bool,
+    /// The caller reads `Bindings::knows_collection`.
+    pub learn_collection: bool,
 }
 
-/// Run the `Bindings` stage of `plan` on every graph owner and merge their
-/// answers.
+/// Run the `Bindings` stage of `plan` and merge the owners' answers.
+///
+/// A graph node lives on the core that owns its key vShard, and its name is
+/// its row's key. The stage therefore names each requested surrogate from the
+/// catalog and asks the owner core of each name. It asks every graph owner
+/// only when a surrogate has no key here, another node owns a name, or the
+/// caller needs `knows_collection` and the owners asked do not hold the
+/// collection.
 pub(super) async fn bindings(
+    state: &SharedState,
+    plan: &PhysicalPlan,
+    request: BindingsRequest,
+) -> crate::Result<Bindings> {
+    let Some(mut found) = owner_bindings(state, plan, &request).await? else {
+        return scattered_bindings(state, plan, request).await;
+    };
+    if request.learn_collection && !found.knows_collection {
+        let everywhere = BindingsRequest {
+            surrogates: Vec::new(),
+            names: Vec::new(),
+            ..request
+        };
+        found.knows_collection = scattered_bindings(state, plan, everywhere)
+            .await?
+            .knows_collection;
+    }
+    Ok(found)
+}
+
+/// The `Bindings` stage on the cores that own the requested nodes. `None`
+/// when the owners cannot be named from this node.
+async fn owner_bindings(
+    state: &SharedState,
+    plan: &PhysicalPlan,
+    request: &BindingsRequest,
+) -> crate::Result<Option<Bindings>> {
+    let mut names = request.names.clone();
+    if !request.surrogates.is_empty() {
+        let keys = resolve_surrogate_pks(
+            state,
+            request.database_id,
+            request.tenant_id,
+            &request.collection,
+            request.surrogates.iter().map(|&raw| Surrogate::new(raw)),
+        )
+        .await?;
+        for &raw in &request.surrogates {
+            match keys.get(Surrogate::new(raw)) {
+                Some(name) => names.push(name.to_owned()),
+                None => return Ok(None),
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    if names.is_empty() {
+        return Ok(None);
+    }
+    let Some(by_core) = local_owner_cores(state, &names)? else {
+        return Ok(None);
+    };
+    let cores: Vec<usize> = by_core.keys().copied().collect();
+    let outcome = gather_cores(
+        state,
+        &CoreFan {
+            tenant_id: request.tenant_id,
+            database_id: request.database_id,
+            trace_id: TraceId::ZERO,
+            txn_id: None,
+            cores: &cores,
+        },
+        |core| {
+            let names = by_core.get(&core).cloned().unwrap_or_default();
+            with_stage(
+                plan,
+                RagStage::Bindings {
+                    surrogates: Vec::new(),
+                    names,
+                },
+            )
+        },
+    )
+    .await?;
+    let mut reads = ShardReadLog::new();
+    reads.note(key_vshards(&names));
+    reads.publish(
+        request.tenant_id,
+        request.database_id,
+        Some(request.collection.clone()),
+    );
+    let payload = outcome.merged_array()?;
+    let rows: Vec<RagBindingRow> =
+        zerompk::from_msgpack(&payload).map_err(|e| crate::Error::Codec {
+            detail: format!("rag fusion bindings decode: {e}"),
+        })?;
+    let mut bindings = Bindings::default();
+    bindings.absorb(rows);
+    Ok(Some(bindings))
+}
+
+/// The `Bindings` stage on every graph owner.
+async fn scattered_bindings(
     state: &SharedState,
     plan: &PhysicalPlan,
     request: BindingsRequest,
@@ -167,6 +272,7 @@ pub(super) async fn bindings(
         surrogates,
         names,
         linearizable,
+        learn_collection: _,
     } = request;
     let plan = with_stage(plan, RagStage::Bindings { surrogates, names });
     let payloads = scatter_to_graph_owners(
