@@ -16,10 +16,11 @@ pub enum ColumnarError {
     InvalidMagic([u8; 4]),
 
     #[error(
-        "incompatible segment version: reader {reader_major}.x, segment {segment_major}.{segment_minor}"
+        "incompatible segment version: reader {reader_major}.{reader_minor}, segment {segment_major}.{segment_minor}"
     )]
     IncompatibleVersion {
         reader_major: u8,
+        reader_minor: u8,
         segment_major: u8,
         segment_minor: u8,
     },
@@ -78,6 +79,10 @@ pub enum ColumnarError {
 
     #[error("primary key not found")]
     PrimaryKeyNotFound,
+
+    /// A version to install that ends before it starts.
+    #[error("row version interval is empty: sys_to {sys_to} is below sys_from {sys_from}")]
+    InvalidVersionInterval { sys_from: i64, sys_to: i64 },
 
     #[error("segment ID space exhausted: u64::MAX segments have been allocated")]
     SegmentIdExhausted,

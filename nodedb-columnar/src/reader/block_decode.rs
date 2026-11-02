@@ -102,6 +102,19 @@ pub(super) fn result_valid_slice_mut(result: &mut DecodedColumn, offset: usize) 
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Blocks `decode_block` decoded on this thread, for tests that prove a
+    /// skipped block is never decoded.
+    static DECODED_BLOCKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Blocks `decode_block` decoded on this thread so far.
+#[cfg(test)]
+pub(crate) fn decoded_block_count() -> usize {
+    DECODED_BLOCKS.with(std::cell::Cell::get)
+}
+
 /// Decode a single block and append results to the DecodedColumn.
 pub(super) fn decode_block(
     result: &mut DecodedColumn,
@@ -111,6 +124,8 @@ pub(super) fn decode_block(
     row_count: usize,
     dictionary: Option<&[String]>,
 ) -> Result<(), ColumnarError> {
+    #[cfg(test)]
+    DECODED_BLOCKS.with(|count| count.set(count.get() + 1));
     let bitmap_size = row_count.div_ceil(8);
 
     if block_data.len() < bitmap_size {

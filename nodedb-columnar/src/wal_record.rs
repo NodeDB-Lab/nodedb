@@ -33,17 +33,22 @@ pub enum ColumnarWalRecord {
         /// column type: i64 as 8 LE bytes, f64 as 8 LE bytes, strings as
         /// length-prefixed UTF-8, etc.
         row_data: Vec<u8>,
+        /// The system-time ordinal the row's version starts at.
+        sys_from: i64,
     },
 
-    /// Rows were marked as deleted in a segment's delete bitmap.
+    /// Rows were ended: marked in a segment's delete bitmap and stamped
+    /// with the ordinal the ending write took.
     ///
     /// On replay, these row indices are re-applied to the segment's
-    /// delete bitmap.
+    /// delete bitmap and end at `sys_to`.
     #[serde(rename = "delete_rows")]
     DeleteRows {
         collection: String,
         segment_id: u64,
         row_indices: Vec<u32>,
+        /// The system-time ordinal the rows end at.
+        sys_to: i64,
     },
 
     /// The memtable was flushed to a new segment.
@@ -399,11 +404,13 @@ mod tests {
             ColumnarWalRecord::InsertRow {
                 collection: "test".into(),
                 row_data: vec![1, 2, 3],
+                sys_from: 7,
             },
             ColumnarWalRecord::DeleteRows {
                 collection: "test".into(),
                 segment_id: 0,
                 row_indices: vec![5, 10, 15],
+                sys_to: 9,
             },
             ColumnarWalRecord::MemtableFlushed {
                 collection: "test".into(),

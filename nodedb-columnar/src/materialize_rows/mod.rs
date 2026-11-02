@@ -10,4 +10,4 @@
 
 pub mod rows;
 
-pub use rows::materialize_segment_live_rows;
+pub use rows::{SegmentRow, materialize_segment_rows};

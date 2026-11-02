@@ -12,12 +12,11 @@ use zerompk::{FromMessagePack, ToMessagePack};
 /// Magic bytes identifying a NodeDB columnar segment.
 pub const MAGIC: [u8; 4] = *b"NDBS";
 
-/// Current format major version. Readers reject segments with higher major.
+/// Format major version. Readers reject a segment of any other major version.
 pub const VERSION_MAJOR: u8 = 1;
 
-/// Current format minor version. Readers tolerate segments with same major
-/// but higher minor (unknown footer fields are ignored).
-pub const VERSION_MINOR: u8 = 1;
+/// Format minor version. Readers reject a segment of any other minor version.
+pub const VERSION_MINOR: u8 = 0;
 
 /// Endianness marker: 0x01 = little-endian (always LE for NodeDB).
 pub const ENDIANNESS_LE: u8 = 0x01;
@@ -60,7 +59,7 @@ impl SegmentHeader {
         buf
     }
 
-    /// Parse a header from bytes. Returns None if magic/version is invalid.
+    /// Parse a header from bytes. Returns an error if magic or version is invalid.
     pub fn from_bytes(data: &[u8]) -> Result<Self, crate::error::ColumnarError> {
         if data.len() < HEADER_SIZE {
             return Err(crate::error::ColumnarError::TruncatedSegment {
@@ -78,10 +77,10 @@ impl SegmentHeader {
         let version_major = data[4];
         let version_minor = data[5];
 
-        // Reject incompatible major version.
-        if version_major > VERSION_MAJOR {
+        if version_major != VERSION_MAJOR || version_minor != VERSION_MINOR {
             return Err(crate::error::ColumnarError::IncompatibleVersion {
                 reader_major: VERSION_MAJOR,
+                reader_minor: VERSION_MINOR,
                 segment_major: version_major,
                 segment_minor: version_minor,
             });
@@ -149,7 +148,7 @@ pub struct BlockStats {
     ///
     /// Set alongside `min` (which holds the lossy f64 cast) so that predicates
     /// with integral values outside ±2^53 can compare losslessly. `None` for
-    /// all non-integer column types and for segments written before minor v1.
+    /// all non-integer column types.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_i64: Option<i64>,
     /// Exact integer maximum for i64/timestamp columns (see `min_i64`).
@@ -400,7 +399,7 @@ mod tests {
     #[test]
     fn header_incompatible_major() {
         let mut bytes = SegmentHeader::current().to_bytes();
-        bytes[4] = VERSION_MAJOR + 1; // Future major version.
+        bytes[4] = VERSION_MAJOR + 1;
         assert!(matches!(
             SegmentHeader::from_bytes(&bytes),
             Err(crate::error::ColumnarError::IncompatibleVersion { .. })
@@ -408,12 +407,13 @@ mod tests {
     }
 
     #[test]
-    fn header_compatible_minor() {
+    fn header_incompatible_minor() {
         let mut bytes = SegmentHeader::current().to_bytes();
-        bytes[5] = VERSION_MINOR + 5; // Future minor version, same major.
-        let parsed = SegmentHeader::from_bytes(&bytes).expect("compatible minor");
-        assert_eq!(parsed.version_major, VERSION_MAJOR);
-        assert_eq!(parsed.version_minor, VERSION_MINOR + 5);
+        bytes[5] = VERSION_MINOR + 1;
+        assert!(matches!(
+            SegmentHeader::from_bytes(&bytes),
+            Err(crate::error::ColumnarError::IncompatibleVersion { .. })
+        ));
     }
 
     #[test]
@@ -528,7 +528,7 @@ mod tests {
     mod golden {
         use super::*;
 
-        /// Asserts magic bytes, version_major == 1, version_minor == 1, and
+        /// Asserts magic bytes, version_major == 1, version_minor == 0, and
         /// that the footer CRC round-trips cleanly.
         #[test]
         fn golden_columnar_segment_format() {
@@ -539,7 +539,7 @@ mod tests {
             assert_eq!(bytes[4], VERSION_MAJOR, "major version mismatch");
             assert_eq!(bytes[5], VERSION_MINOR, "minor version mismatch");
             assert_eq!(bytes[4], 1u8, "expected VERSION_MAJOR == 1");
-            assert_eq!(bytes[5], 1u8, "expected VERSION_MINOR == 1");
+            assert_eq!(bytes[5], 0u8, "expected VERSION_MINOR == 0");
 
             // Footer golden: serialize, then re-parse, asserting CRC consistency.
             let footer = SegmentFooter {

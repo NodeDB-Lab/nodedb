@@ -20,6 +20,7 @@ use crate::predicate::ScanPredicate;
 use super::block_decode::{
     append_null_fill, decode_block, empty_decoded, result_valid_len, result_valid_slice_mut,
 };
+use super::block_select::BlockSelection;
 use super::types::DecodedColumn;
 
 fn checked_slice(data: &[u8], start: usize, len: usize) -> Result<&[u8], ColumnarError> {
@@ -156,7 +157,7 @@ impl<'a> SegmentReader<'a> {
         col_idx: usize,
         predicates: &[ScanPredicate],
     ) -> Result<DecodedColumn, ColumnarError> {
-        self.read_column_impl(col_idx, predicates, &DeleteBitmap::new())
+        self.read_column_impl(col_idx, predicates, &DeleteBitmap::new(), None)
     }
 
     /// Read multiple columns with shared predicate pushdown.
@@ -168,10 +169,8 @@ impl<'a> SegmentReader<'a> {
         col_indices: &[usize],
         predicates: &[ScanPredicate],
     ) -> Result<Vec<DecodedColumn>, ColumnarError> {
-        col_indices
-            .iter()
-            .map(|&idx| self.read_column_filtered(idx, predicates))
-            .collect()
+        let selection = self.select_blocks(predicates);
+        self.read_columns_selected(col_indices, &selection)
     }
 
     /// Read a column with both predicate pushdown and delete bitmap masking.
@@ -184,29 +183,72 @@ impl<'a> SegmentReader<'a> {
         predicates: &[ScanPredicate],
         deletes: &DeleteBitmap,
     ) -> Result<DecodedColumn, ColumnarError> {
-        self.read_column_impl(col_idx, predicates, deletes)
+        self.read_column_impl(col_idx, predicates, deletes, None)
     }
 
-    /// Read multiple columns with predicate pushdown and delete bitmap.
+    /// Read multiple columns with predicate pushdown and delete bitmap. All
+    /// columns share the same block skip decisions.
     pub fn read_columns_with_deletes(
         &self,
         col_indices: &[usize],
         predicates: &[ScanPredicate],
         deletes: &DeleteBitmap,
     ) -> Result<Vec<DecodedColumn>, ColumnarError> {
+        let selection = self.select_blocks(predicates);
         col_indices
             .iter()
-            .map(|&idx| self.read_column_with_deletes(idx, predicates, deletes))
+            .map(|&idx| self.read_column_impl(idx, &[], deletes, Some(&selection)))
             .collect()
     }
 
-    /// Shared implementation for column reading with predicate pushdown and
-    /// optional delete bitmap masking.
+    /// Number of 1024-row blocks every column of the segment holds.
+    pub fn block_count(&self) -> usize {
+        self.footer
+            .columns
+            .first()
+            .map_or(0, |col| col.block_stats.len())
+    }
+
+    /// The blocks whose statistics can match every predicate. A block one
+    /// predicate's statistics rule out holds no row the conjunction admits,
+    /// so no column of it is decoded. A predicate on a column the segment
+    /// does not hold rules nothing out.
+    pub fn select_blocks(&self, predicates: &[ScanPredicate]) -> BlockSelection {
+        BlockSelection::from_fn(self.block_count(), |block| {
+            !predicates.iter().any(|pred| {
+                self.footer
+                    .columns
+                    .get(pred.col_idx)
+                    .and_then(|col| col.block_stats.get(block))
+                    .is_some_and(|stats| pred.can_skip_block(stats))
+            })
+        })
+    }
+
+    /// Read `col_indices`, decoding only the blocks `selection` selects.
+    ///
+    /// Every column keeps the segment's row alignment: an unselected block
+    /// reads as null rows and is never decompressed.
+    pub fn read_columns_selected(
+        &self,
+        col_indices: &[usize],
+        selection: &BlockSelection,
+    ) -> Result<Vec<DecodedColumn>, ColumnarError> {
+        let no_deletes = DeleteBitmap::new();
+        col_indices
+            .iter()
+            .map(|&idx| self.read_column_impl(idx, &[], &no_deletes, Some(selection)))
+            .collect()
+    }
+
+    /// Shared implementation for column reading with predicate pushdown,
+    /// optional delete bitmap masking, and an optional block selection.
     fn read_column_impl(
         &self,
         col_idx: usize,
         predicates: &[ScanPredicate],
         deletes: &DeleteBitmap,
+        selection: Option<&BlockSelection>,
     ) -> Result<DecodedColumn, ColumnarError> {
         if col_idx >= self.footer.columns.len() {
             return Err(ColumnarError::ColumnOutOfRange {
@@ -243,7 +285,7 @@ impl<'a> SegmentReader<'a> {
         let mut result = empty_decoded(col_meta.layout);
         let mut global_row: u32 = 0;
 
-        for block_stat in &col_meta.block_stats {
+        for (block, block_stat) in col_meta.block_stats.iter().enumerate() {
             let block_row_count = block_stat.row_count;
 
             let header_end = cursor
@@ -285,7 +327,10 @@ impl<'a> SegmentReader<'a> {
             let delete_skip =
                 !deletes.is_empty() && deletes.is_block_fully_deleted(global_row, block_row_count);
 
-            if pred_skip || delete_skip {
+            // Skip a block the caller's selection leaves out.
+            let unselected = selection.is_some_and(|sel| !sel.is_selected(block));
+
+            if pred_skip || delete_skip || unselected {
                 append_null_fill(&mut result, block_row_count as usize);
                 global_row += block_row_count;
                 continue;
@@ -317,8 +362,92 @@ impl<'a> SegmentReader<'a> {
 
 #[cfg(test)]
 mod tests {
+    use nodedb_types::columnar::{ColumnDef, ColumnType, ColumnarSchema};
+    use nodedb_types::value::Value;
+
     use super::checked_slice;
+    use super::{BlockSelection, SegmentReader};
     use crate::error::ColumnarError;
+    use crate::memtable::ColumnarMemtable;
+    use crate::predicate::ScanPredicate;
+    use crate::reader::block_decode::decoded_block_count;
+    use crate::reader::decoded_cell_value;
+    use crate::test_support::test_memory;
+    use crate::writer::{PROFILE_PLAIN, SegmentWriter};
+
+    /// A segment of `rows` rows over `(id, v = 2 * id)`, three blocks for
+    /// 2500 rows.
+    fn two_column_segment(rows: usize) -> Vec<u8> {
+        let schema = ColumnarSchema::new(vec![
+            ColumnDef::required("id", ColumnType::Int64).with_primary_key(),
+            ColumnDef::required("v", ColumnType::Int64),
+        ])
+        .expect("valid");
+        let mut mt = ColumnarMemtable::new(&schema);
+        for i in 0..rows {
+            let i = i64::try_from(i).expect("row fits i64");
+            mt.append_row(&[Value::Integer(i), Value::Integer(2 * i)])
+                .expect("append");
+        }
+        let (schema, columns, row_count) = mt.drain();
+        SegmentWriter::new(PROFILE_PLAIN, test_memory())
+            .write_segment(&schema, &columns, row_count, None)
+            .expect("write")
+    }
+
+    /// A predicate on one column rules a block out for every column: the
+    /// selected read decodes only the selected blocks, and each row of a
+    /// selected block reads as the full decode reads it.
+    #[test]
+    fn a_selected_read_decodes_only_the_selected_blocks() {
+        let segment = two_column_segment(2500);
+        let reader = SegmentReader::open(&segment).expect("open");
+        assert_eq!(reader.block_count(), 3);
+
+        let before_full = decoded_block_count();
+        let full = reader.read_columns(&[0, 1], &[]).expect("full read");
+        assert_eq!(
+            decoded_block_count() - before_full,
+            6,
+            "3 blocks x 2 columns"
+        );
+
+        // `v >= 4200` holds only in block 2 (ids 2100..).
+        let selection = reader.select_blocks(&[ScanPredicate::gte_i64(1, 4200)]);
+        assert_eq!(selection.selected_count(), 1);
+        assert!(selection.is_selected(2));
+
+        let before = decoded_block_count();
+        let partial = reader
+            .read_columns_selected(&[0, 1], &selection)
+            .expect("selected read");
+        assert_eq!(
+            decoded_block_count() - before,
+            2,
+            "one block per column: blocks 0 and 1 are never decoded"
+        );
+
+        for row in 0..2500 {
+            for (full_col, partial_col) in full.iter().zip(&partial) {
+                let partial_cell =
+                    decoded_cell_value(partial_col, row, &ColumnType::Int64).expect("cell");
+                if selection.holds_row(row) {
+                    let full_cell =
+                        decoded_cell_value(full_col, row, &ColumnType::Int64).expect("cell");
+                    assert_eq!(partial_cell, full_cell, "row {row}");
+                } else {
+                    assert_eq!(partial_cell, Value::Null, "row {row} is not decoded");
+                }
+            }
+        }
+
+        let none = BlockSelection::from_fn(reader.block_count(), |_| false);
+        let before_none = decoded_block_count();
+        reader
+            .read_columns_selected(&[0, 1], &none)
+            .expect("empty read");
+        assert_eq!(decoded_block_count(), before_none);
+    }
 
     #[test]
     fn block_range_rejects_truncated_and_overflowed_lengths() {

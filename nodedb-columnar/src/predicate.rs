@@ -268,9 +268,9 @@ fn can_skip_numeric(op: PredicateOp, value: f64, stats: &BlockStats) -> bool {
 
 /// Block-skip logic for integer predicates (lossless i64 comparison).
 ///
-/// When `BlockStats` carries `min_i64`/`max_i64` (written by minor v1+), the
+/// When `BlockStats` carries `min_i64`/`max_i64` (integer columns), the
 /// comparison is done entirely in i64 — no f64 rounding. When the exact fields
-/// are absent (segments written at minor v0), we fall through to the f64 path
+/// are absent (non-integer columns), we fall through to the f64 path
 /// via `f64_to_exact_i64`: if the predicate value itself converts losslessly
 /// we can still do an exact comparison against the (possibly rounded) f64
 /// stats, which is conservative (may fail to skip) but never incorrect.
@@ -718,7 +718,7 @@ mod tests {
         BlockStats::integer(min, max, 0, 1024)
     }
 
-    /// Helper: BlockStats with only f64 fields (simulates a v0 segment).
+    /// Helper: BlockStats with only f64 fields (a non-integer column).
     fn f64_only_stats(min: f64, max: f64) -> BlockStats {
         BlockStats::numeric(min, max, 0, 1024)
     }
@@ -773,10 +773,10 @@ mod tests {
         );
     }
 
-    /// for a v0 segment (no min_i64/max_i64), integer predicates whose
+    /// for f64-only stats (no min_i64/max_i64), integer predicates whose
     /// value fits in f64 exactly fall through to the f64 path correctly.
     #[test]
-    fn integer_predicate_fallback_to_f64_for_v0_segment() {
+    fn integer_predicate_fallback_to_f64_for_f64_only_stats() {
         // Small value that f64 can represent exactly.
         let stats = f64_only_stats(10.0, 50.0);
         // 75 is outside [10, 50] → should skip.
@@ -785,12 +785,12 @@ mod tests {
         assert!(!ScanPredicate::eq_i64(0, 30).can_skip_block(&stats));
     }
 
-    /// for a v0 segment, an integer predicate with a value outside
+    /// for f64-only stats, an integer predicate with a value outside
     /// ±2^53 (not exactly representable in f64) must NOT skip — conservative.
     #[test]
-    fn integer_predicate_v0_segment_unsafe_value_no_skip() {
-        // Construct f64-only stats whose f64 min/max happen to equal the
-        // rounded form of the predicate value — the old code would skip here.
+    fn integer_predicate_f64_only_stats_unsafe_value_no_skip() {
+        // Construct f64-only stats whose f64 min/max equal the rounded form
+        // of the predicate value. A naive f64 compare skips here.
         let large: i64 = 9_007_199_254_740_993; // 2^53 + 1
         let large_f64 = large as f64; // rounds to 9_007_199_254_740_992.0
         let stats = f64_only_stats(large_f64, large_f64);
