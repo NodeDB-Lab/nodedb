@@ -86,7 +86,7 @@ async fn refuse_once(
                         watermark_lsn: Lsn::ZERO,
                         error_code: code.clone().map(Box::new),
                         stage_vote: None,
-                        read_versions: crate::types::ReadVersions::new(),
+                        read_vshards: crate::types::ReadShards::new(),
                         write_set: Vec::new(),
                     },
                 })

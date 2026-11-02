@@ -345,8 +345,6 @@ pub struct SharedState {
     pub snapshot_storage: Arc<dyn object_store::ObjectStore>,
     /// PITR node life, base snapshot catalog, and last run outcome.
     pub pitr: crate::control::pitr::PitrState,
-    /// Quarantine archive object store (defaults to local FS).
-    pub quarantine_storage: Arc<dyn object_store::ObjectStore>,
     /// Hybrid Logical Clock for metadata descriptor `modification_hlc` stamps.
     /// The same clock stamps WAL time anchors ([`crate::wal::WalManager::hlc_clock`]).
     pub hlc_clock: Arc<nodedb_types::HlcClock>,
@@ -443,6 +441,8 @@ pub struct SharedState {
     /// In-process Calvin state: applied epoch, counters, apply results, lock
     /// managers and their promotion channels.
     pub calvin: super::calvin_local::CalvinLocalState,
+    /// Ordinal reservations and open snapshots that close and hold read cuts.
+    pub read_cut: crate::control::read_cut::ReadCutState,
     /// Per-key write-ordering lock. With no Calvin scheduler on a write's
     /// vShard, same-key autocommit writes still serialize so WAL-LSN order
     /// equals Data-Plane apply order. One FIFO-fair async mutex per key spans

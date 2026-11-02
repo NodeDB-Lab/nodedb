@@ -277,6 +277,7 @@ mod tests {
             key: vec![],
             rls_filters: vec![],
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }))
     }
 

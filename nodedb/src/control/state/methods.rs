@@ -213,6 +213,22 @@ impl SharedState {
             .map(|last| nodedb_types::Lsn::new(last.saturating_add(1)))
     }
 
+    /// The exclusive LSN bound of the WAL state committed by system-time
+    /// ordinal `ordinal`: every record under it committed at or before it.
+    ///
+    /// Ordinals and anchor times are both wall-clock nanoseconds. A negative
+    /// ordinal is before every anchor. Errors as [`Self::ms_to_lsn`] does.
+    pub fn ordinal_to_lsn(
+        &self,
+        ordinal: i64,
+    ) -> Result<nodedb_types::Lsn, nodedb_types::LsnTimeError> {
+        let target_ns = u64::try_from(ordinal.max(0)).unwrap_or(0);
+        self.wal
+            .time_anchors()
+            .lsn_at_or_before(target_ns)
+            .map(|last| nodedb_types::Lsn::new(last.saturating_add(1)))
+    }
+
     /// Shared HTTP client reused by every outbound emitter: the egress
     /// client of [`Self::remote_sources`]. Cloning the Arc is cheap — the
     /// client itself owns a connection pool, DNS resolver, and TLS session

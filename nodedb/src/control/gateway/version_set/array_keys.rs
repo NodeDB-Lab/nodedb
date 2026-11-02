@@ -119,6 +119,7 @@ mod tests {
             limit: None,
             offset: 0,
             distinct: false,
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         assert!(array_names(&plan).is_empty());
     }

@@ -108,8 +108,7 @@ impl<'s> OpenSystemTxn<'s> {
         identity: AuthenticatedIdentity,
         event_source: EventSource,
     ) -> Result<Self, SystemTxnError> {
-        let scope =
-            SystemTxnScope::begin(state).map_err(|source| SystemTxnError::Begin { source })?;
+        let scope = SystemTxnScope::begin().map_err(|source| SystemTxnError::Begin { source })?;
         Ok(Self {
             state,
             session: Some(TxnSession::Owned(scope)),

@@ -109,10 +109,10 @@ pub(super) async fn dispatch_remote(
                 payloads: vec![resp.payload.to_vec()],
                 shard_watermarks,
                 // Coordinator-gathered at the exchange root: the gather folded
-                // the read versions across the responding shards and stamped
-                // them on this response, so carry them through. This route did
-                // not observe a version of its own to report.
-                read_versions: resp.read_versions,
+                // the read vShards across the responding shards and stamped
+                // them on this response, so carry them through. This route
+                // read no vShard of its own to report.
+                read_vshards: resp.read_vshards,
                 not_found: false,
             });
         }
@@ -125,13 +125,13 @@ pub(super) async fn dispatch_remote(
             return Ok(DispatchOutcome {
                 payloads: vec![merged],
                 shard_watermarks: vec![(VShardId::new(vshard_id as u32), lsn)],
-                // A materialized stream reports no read versions: its frames
+                // A materialized stream reports no read vShards: its frames
                 // carry per-batch watermarks only. Empty is honest here rather
                 // than lossy: the streaming branch is gated on
                 // `txn_id.is_none()` (`resolve/exchange.rs`), so a stream never
                 // serves an in-transaction read and no read-set entry consumes
                 // this value.
-                read_versions: crate::types::ReadVersions::new(),
+                read_vshards: crate::types::ReadShards::new(),
                 not_found: false,
             });
         }
@@ -220,7 +220,7 @@ pub(super) async fn dispatch_remote(
                     Lsn::new(resp.watermark_lsn),
                 )],
                 payloads: resp.payloads,
-                read_versions: crate::types::ReadVersions::from_wire(&resp.read_versions),
+                read_vshards: crate::types::ReadShards::from_wire(&resp.read_vshards),
                 not_found,
             })
         }

@@ -5,18 +5,18 @@
 //! A transport that renders a Data-Plane `Response` gets the same shape from
 //! the gateway that local SPSC dispatch gives it. The shape keeps the error
 //! status and code of a `NotFound` verdict, the read watermark, and the
-//! read versions.
+//! vShards the read scanned.
 
 use crate::Error;
 use crate::bridge::envelope::{ErrorCode, Payload, Response, Status};
 use crate::control::server::shared::clone_write::CloneCheckedTask;
-use crate::types::{Lsn, ReadVersions, RequestId, VShardId};
+use crate::types::{Lsn, ReadShards, RequestId, VShardId};
 
 use super::core::{Gateway, QueryContext, authorized_plan_for_context};
 
 /// A gateway execution's payloads, per-shard read watermarks, and read
-/// versions, as [`GatewayOutcome::into_parts`] returns them.
-pub type GatewayParts = (Vec<Vec<u8>>, Vec<(VShardId, Lsn)>, ReadVersions);
+/// vShards, as [`GatewayOutcome::into_parts`] returns them.
+pub type GatewayParts = (Vec<Vec<u8>>, Vec<(VShardId, Lsn)>, ReadShards);
 
 /// Everything one gateway execution observed across its routes.
 pub struct GatewayOutcome {
@@ -24,8 +24,8 @@ pub struct GatewayOutcome {
     pub payloads: Vec<Vec<u8>>,
     /// One `(vshard, watermark_lsn)` per participating shard.
     pub shard_watermarks: Vec<(VShardId, Lsn)>,
-    /// The read versions every route observed, one per vShard.
-    pub read_versions: ReadVersions,
+    /// The vShards every route read.
+    pub read_vshards: ReadShards,
     /// A single-route plan's owning core refused it with `ErrorCode::NotFound`.
     ///
     /// Always `false` for a fan-out: there it means a shard holds no slice.
@@ -33,9 +33,9 @@ pub struct GatewayOutcome {
 }
 
 impl GatewayOutcome {
-    /// Payloads, per-shard watermarks, and read versions.
+    /// Payloads, per-shard watermarks, and read vShards.
     pub fn into_parts(self) -> GatewayParts {
-        (self.payloads, self.shard_watermarks, self.read_versions)
+        (self.payloads, self.shard_watermarks, self.read_vshards)
     }
 
     /// The response local SPSC dispatch returns for the same task.
@@ -47,7 +47,7 @@ impl GatewayOutcome {
             .max()
             .unwrap_or(Lsn::ZERO);
         if self.not_found {
-            return not_found_response(watermark_lsn, self.read_versions);
+            return not_found_response(watermark_lsn, self.read_vshards);
         }
         let payload = self
             .payloads
@@ -55,7 +55,7 @@ impl GatewayOutcome {
             .next()
             .map(Payload::from_vec)
             .unwrap_or_else(Payload::empty);
-        response(Status::Ok, None, payload, watermark_lsn, self.read_versions)
+        response(Status::Ok, None, payload, watermark_lsn, self.read_vshards)
     }
 }
 
@@ -63,7 +63,7 @@ impl Gateway {
     /// Execute one authorized task and return its Data-Plane response shape.
     ///
     /// A `NotFound` verdict, local or remote, returns as an error-status
-    /// response carrying the versions the read observed, the same as local
+    /// response carrying the vShards the read scanned, the same as local
     /// SPSC dispatch returns it. The caller records a phantom read from it
     /// and renders the verdict. Every other error returns as its typed `Err`.
     pub async fn execute_response(
@@ -79,13 +79,13 @@ impl Gateway {
     }
 }
 
-fn not_found_response(watermark_lsn: Lsn, read_versions: ReadVersions) -> Response {
+fn not_found_response(watermark_lsn: Lsn, read_vshards: ReadShards) -> Response {
     response(
         Status::Error,
         Some(ErrorCode::NotFound),
         Payload::empty(),
         watermark_lsn,
-        read_versions,
+        read_vshards,
     )
 }
 
@@ -94,7 +94,7 @@ fn response(
     error_code: Option<ErrorCode>,
     payload: Payload,
     watermark_lsn: Lsn,
-    read_versions: ReadVersions,
+    read_vshards: ReadShards,
 ) -> Response {
     Response {
         request_id: RequestId::new(0),
@@ -105,7 +105,7 @@ fn response(
         watermark_lsn,
         error_code: error_code.map(Box::new),
         stage_vote: None,
-        read_versions,
+        read_vshards,
         write_set: Vec::new(),
     }
 }
@@ -114,8 +114,8 @@ fn response(
 mod tests {
     use super::*;
 
-    fn read_versions() -> ReadVersions {
-        ReadVersions::single(VShardId::new(3), nodedb_types::WriteVersion::logged(1, 5))
+    fn read_vshards() -> ReadShards {
+        ReadShards::single(VShardId::new(3))
     }
 
     fn outcome(not_found: bool) -> GatewayOutcome {
@@ -125,7 +125,7 @@ mod tests {
                 (VShardId::new(3), Lsn::new(7)),
                 (VShardId::new(4), Lsn::new(9)),
             ],
-            read_versions: read_versions(),
+            read_vshards: read_vshards(),
             not_found,
         }
     }
@@ -136,16 +136,16 @@ mod tests {
         assert_eq!(resp.status, Status::Error);
         assert_eq!(resp.error_code.as_deref(), Some(&ErrorCode::NotFound));
         assert_eq!(resp.watermark_lsn, Lsn::new(9));
-        assert_eq!(resp.read_versions, read_versions());
+        assert_eq!(resp.read_vshards, read_vshards());
     }
 
     #[test]
-    fn a_success_keeps_its_payload_watermark_and_read_versions() {
+    fn a_success_keeps_its_payload_watermark_and_read_vshards() {
         let resp = outcome(false).into_response();
         assert_eq!(resp.status, Status::Ok);
         assert!(resp.error_code.is_none());
         assert_eq!(resp.payload.to_vec(), vec![0x90u8]);
         assert_eq!(resp.watermark_lsn, Lsn::new(9));
-        assert_eq!(resp.read_versions, read_versions());
+        assert_eq!(resp.read_vshards, read_vshards());
     }
 }

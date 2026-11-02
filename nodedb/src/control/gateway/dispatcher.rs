@@ -28,14 +28,14 @@ use super::version_set::GatewayVersionSet;
 ///
 /// `shard_watermarks` is one `(vshard, watermark_lsn)` per contributing shard
 /// — local SPSC watermark, or remote `ExecuteResponse.watermark_lsn` keyed to
-/// the owning vShard. A read-set entry takes its version from
-/// `read_versions`, never from a watermark.
+/// the owning vShard. A read-set entry takes its home vShards from
+/// `read_vshards`, never from a watermark.
 pub struct DispatchOutcome {
     pub payloads: Vec<Vec<u8>>,
     pub shard_watermarks: Vec<(VShardId, Lsn)>,
-    /// The versions this route observed, one per vShard. Folded across
-    /// routes for OCC read validation.
-    pub read_versions: crate::types::ReadVersions,
+    /// The vShards this route read. Folded across routes. The transaction
+    /// read-set homes an entry on each.
+    pub read_vshards: crate::types::ReadShards,
     /// The owning core refused the task with `ErrorCode::NotFound`.
     ///
     /// A fan-out reads it as a shard that holds no slice. A single-route
@@ -87,9 +87,16 @@ pub(crate) async fn dispatch_route(
             confirm_local_read(shared, database_id, &route.plan, &read_groups, deadline_ms).await?;
             // A historical read runs only once this node installed its cut
             // (`read_cut::wait`).
+            let cut_groups = crate::control::read_cut::cut_read_groups(
+                shared,
+                database_id,
+                &route.plan,
+                Some(route.vshard_id),
+            )?;
             crate::control::read_cut::await_read_cut(
                 shared,
                 &route.plan,
+                &cut_groups,
                 crate::control::server::shared::session::StatementDeadline::after(
                     std::time::Duration::from_millis(deadline_ms),
                 ),

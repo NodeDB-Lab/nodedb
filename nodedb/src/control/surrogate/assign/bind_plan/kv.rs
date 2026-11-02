@@ -134,7 +134,8 @@ pub(super) fn bind(binder: &IdentityBinder<'_>, op: &mut KvOp) -> crate::Result<
                     KvResolvedMutation::Rewrite { .. }
                     | KvResolvedMutation::Delete { .. }
                     | KvResolvedMutation::Expire { .. }
-                    | KvResolvedMutation::Persist { .. } => {}
+                    | KvResolvedMutation::Persist { .. }
+                    | KvResolvedMutation::Reap { .. } => {}
                 }
             }
             binder.resolve_slots_in_place(slots)

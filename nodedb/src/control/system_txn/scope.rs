@@ -3,7 +3,6 @@
 //! An owned transaction block for work the database initiates itself.
 
 use crate::control::server::shared::session::{DmlTxnCtx, SessionId, SessionStore};
-use crate::control::state::SharedState;
 
 /// A private session sitting inside a transaction block, owned by the caller.
 ///
@@ -20,7 +19,7 @@ pub struct SystemTxnScope {
 
 impl SystemTxnScope {
     /// Open a transaction block on a fresh private session.
-    pub fn begin(state: &SharedState) -> Result<Self, crate::Error> {
+    pub fn begin() -> Result<Self, crate::Error> {
         let sessions = SessionStore::new();
         let addr = std::net::SocketAddr::from(([0, 0, 0, 0], 0));
         // `begin` reports success without entering the block when the session
@@ -28,16 +27,11 @@ impl SystemTxnScope {
         sessions.ensure_session(addr);
         let session_id = SessionId::from(addr);
 
-        let snapshot_epoch = state
-            .calvin
-            .last_applied_epoch
-            .load(std::sync::atomic::Ordering::Acquire);
-
         // DDL buffers into the slots `conn_scope::scoped_system_txn` installs
         // around the transaction, and COMMIT applies it with the writes.
         crate::control::server::shared::session::ddl_buffer::activate();
         sessions
-            .begin(session_id, snapshot_epoch)
+            .begin(session_id)
             .map_err(|detail| crate::Error::BadRequest {
                 detail: detail.to_owned(),
             })?;

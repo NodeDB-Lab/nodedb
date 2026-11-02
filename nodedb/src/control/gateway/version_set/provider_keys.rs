@@ -114,6 +114,7 @@ mod tests {
             limit: None,
             offset: 0,
             distinct: false,
+            system_time: nodedb_types::SystemTimeScope::Current,
         })
     }
 
@@ -137,6 +138,7 @@ mod tests {
                 limit: None,
                 offset: 0,
                 distinct: false,
+                system_time: nodedb_types::SystemTimeScope::Current,
             }))
             .is_empty()
         );

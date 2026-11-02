@@ -26,13 +26,12 @@ pub type PromotionSenders = BTreeMap<u32, tokio::sync::mpsc::UnboundedSender<Vec
 /// Calvin schedulers.
 pub struct CalvinLocalState {
     /// Last globally-applied Calvin epoch, advanced by the per-vShard
-    /// deterministic schedulers as they apply epochs. Read at `BEGIN` to anchor
-    /// a session's cross-shard snapshot version (`tx_snapshot_epoch`). `Arc` so
-    /// schedulers (holding `Arc<SharedState>`) advance the same counter the
-    /// session reads. 0 until a scheduler applies an epoch.
+    /// deterministic schedulers as they apply epochs. `Arc` so every
+    /// scheduler (holding `Arc<SharedState>`) advances the same counter. 0
+    /// until a scheduler applies an epoch.
     pub last_applied_epoch: Arc<AtomicU64>,
-    /// Node-global Calvin observability counters (write versions recorded,
-    /// read-set validation failures, commits installed/dropped).
+    /// Node-global Calvin observability counters (redo installs, read-set
+    /// validation failures, commits installed/dropped).
     pub counters: CalvinCounters,
     /// Local, in-process sidecar carrying the applied Data-Plane
     /// [`Response`](crate::bridge::envelope::Response) (affected-count and any
@@ -118,10 +117,11 @@ impl CalvinLocalState {
         Self {
             last_applied_epoch: Arc::new(AtomicU64::new(0)),
             counters: CalvinCounters {
-                write_versions_recorded: Arc::new(AtomicU64::new(0)),
+                redo_installs: Arc::new(AtomicU64::new(0)),
                 read_set_validation_failures: Arc::new(AtomicU64::new(0)),
                 commits_flushed: Arc::new(AtomicU64::new(0)),
                 commits_dropped: Arc::new(AtomicU64::new(0)),
+                redo_proposals: Arc::new(AtomicU64::new(0)),
                 redo_copies_skipped: Arc::new(AtomicU64::new(0)),
                 stage_restages: Arc::new(AtomicU64::new(0)),
             },

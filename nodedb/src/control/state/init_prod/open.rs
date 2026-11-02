@@ -302,7 +302,6 @@ impl SharedState {
             cold_storage: None,
             snapshot_storage: Arc::new(object_store::memory::InMemory::new()),
             pitr: Default::default(),
-            quarantine_storage: Arc::new(object_store::memory::InMemory::new()),
             hlc_clock,
             tenant_write_hlc: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             tenant_marks: crate::control::state::tenant_marks::TenantMarks::load(
@@ -336,6 +335,7 @@ impl SharedState {
                 crate::control::server::shared::ddl::neutral::maintenance::auto_analyze::DmlCounter::new(),
             wal_catchup_lsn: AtomicU64::new(0),
             calvin: crate::control::state::calvin_local::CalvinLocalState::new(),
+            read_cut: crate::control::read_cut::ReadCutState::new(),
             write_order_locks: Arc::new(
                 crate::control::server::shared::write_admission::KeyedWriteOrderLock::new(),
             ),

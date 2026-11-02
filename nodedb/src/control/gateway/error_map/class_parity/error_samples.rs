@@ -50,6 +50,10 @@ pub(crate) fn error_samples() -> Vec<crate::Error> {
         },
         E::CalvinSerializationConflict,
         E::CalvinParticipantError,
+        E::TxnSnapshotTooOld {
+            age_ms: 301_000,
+            limit_ms: 300_000,
+        },
         E::RejectedPrevalidation {
             constraint: "check".into(),
             reason: text(),
@@ -366,7 +370,6 @@ pub(crate) fn error_samples() -> Vec<crate::Error> {
         E::SessionTokenExpired,
         E::SessionKilledByAdmin,
         E::SessionUserDropped,
-        E::OidcProviderTenantUnbound,
         E::OidcProviderTenantUnavailable { tenant_id: 1 },
         E::ExternalRoleUndefined {
             subject: "alice".into(),

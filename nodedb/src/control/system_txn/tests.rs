@@ -112,7 +112,7 @@ async fn answer_all(state: Arc<SharedState>, mut side: CoreChannelDataSide, stop
                 watermark_lsn: Lsn::ZERO,
                 error_code,
                 stage_vote: None,
-                read_versions: crate::types::ReadVersions::new(),
+                read_vshards: crate::types::ReadShards::new(),
                 write_set: Vec::new(),
             };
             side.response_tx

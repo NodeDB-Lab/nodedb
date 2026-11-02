@@ -25,7 +25,7 @@ pub(crate) struct HistoricalCut {
 /// The read cut of one historical statement: the cap every `AS OF SYSTEM
 /// TIME` of the statement is pinned under, and the cut marker that fixes it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct StatementCap {
+pub struct StatementCap {
     /// The newest ordinal any read of the statement reads at.
     pub cap: i64,
     /// The cut marker whose cut is `cap`, `0` on a node without cluster
@@ -63,11 +63,11 @@ impl StatementCap {
 /// order, and the sequencer mints each at or after its wall clock.
 ///
 /// A past cut (`latest_as_of_ms` ends below a fresh clock ordinal) needs no
-/// cap: the clock stamps every later write above it, and a Calvin epoch
-/// minted after the statement starts carries a later instant. An epoch
-/// minted before the statement starts can still be applying, so in a
-/// cluster the statement places one cut marker, and every serving node
-/// waits for it.
+/// cap: the clock stamps every later write above it. In a cluster the
+/// statement places one cut marker whose floor is that clock ordinal. Every
+/// Calvin epoch sequenced after the marker carries a later instant, whatever
+/// the sequencer leader's clock reads. An epoch sequenced before it can
+/// still be applying, so every serving node waits for the marker.
 ///
 /// A cut at or past now takes a cap in a cluster in three steps:
 ///
@@ -76,24 +76,63 @@ impl StatementCap {
 /// 2. The clock part ([`settled_clock_cap`]), read after the first marker:
 ///    at or above every version applied here, including one stamped by a
 ///    node whose clock leads. The wall clock then leaves its millisecond.
-/// 3. A second marker, proposed after the clock part settles. A Calvin
-///    epoch minted after it carries a later instant, so its versions are
-///    above the cap. Its cut covers every Calvin epoch minted before it.
+/// 3. A second marker, proposed after the clock part settles, with the
+///    clock part as its floor. Applying it raises the sequencer's applied
+///    epoch instant to the floor's millisecond, and the sequencer leader
+///    mints every epoch it appends after the marker above that floor
+///    (`MultiRaft::propose_to_sequencer`). A new leader seeds from its
+///    applied log. So every Calvin epoch sequenced after the marker carries
+///    a later instant, with no bound on clock skew, and its versions are
+///    above the cap. The marker's cut covers every epoch sequenced before
+///    it and the clock part.
 ///
 /// The cap is the higher of the clock part and the second marker's cut
 /// ([`cluster_cap`]), and the plan carries the second marker. On a node
 /// without cluster routing the cap is the clock part alone.
+///
+/// A write fixes its ordinal before it applies, so a write at or below the
+/// cap can still be applying on this node. The cap returns only once every
+/// write this node reserved at or below the cap applied here
+/// (`super::close::close_local_cut`), within the statement deadline. Every
+/// pin of the statement is at or below the cap. Every other serving node
+/// closes the cut when it waits for it (`super::wait`).
 pub(crate) async fn statement_cap(
     state: &SharedState,
     latest_as_of_ms: i64,
 ) -> crate::Result<StatementCap> {
+    let cap = take_cap(state, latest_as_of_ms).await?;
+    let deadline = crate::control::server::shared::session::StatementDeadline::of_statement(state);
+    super::close::close_local_cut(state, cap.cap, deadline).await?;
+    Ok(cap)
+}
+
+/// Open a transaction snapshot and take its cut: the block's
+/// [`StatementCap`] at now, and the guard that holds the snapshot open in
+/// this node's active-snapshot registry until the block ends.
+///
+/// The snapshot opens before the cut is taken, so no report this node sends
+/// in between passes the cut (`super::snapshots`).
+pub async fn open_txn_snapshot(
+    state: &SharedState,
+) -> crate::Result<(StatementCap, super::snapshots::SnapshotGuard)> {
+    let mut guard = state.read_cut.snapshots.open();
+    let now_ms = nodedb_types::ordinal_to_ms(nodedb_types::wall_now_ns_i64());
+    let cap = statement_cap(state, now_ms).await?;
+    guard.pin(cap.cap);
+    Ok((cap, guard))
+}
+
+/// The cap [`statement_cap`] takes, before the local close.
+async fn take_cap(state: &SharedState, latest_as_of_ms: i64) -> crate::Result<StatementCap> {
     let clock = state.wal.ordinal_clock();
     let probe = clock_cap(&clock);
     let clustered = state.cluster_routing.is_some();
     if is_past_cut(latest_as_of_ms, probe) {
         let marker = if clustered {
+            // The marker carries the cap as its floor: no Calvin epoch
+            // sequenced after it stamps at or below the cap.
             let marker = super::run_marker::new_cut_marker(state);
-            resolve_read_cut(state, marker).await?;
+            resolve_read_cut(state, marker, probe).await?;
             marker
         } else {
             0
@@ -106,10 +145,12 @@ pub(crate) async fn statement_cap(
             marker: 0,
         });
     }
-    resolve_read_cut(state, super::run_marker::new_cut_marker(state)).await?;
+    resolve_read_cut(state, super::run_marker::new_cut_marker(state), 0).await?;
     let local = settled_clock_cap(&clock).await;
+    // The second marker carries the clock part as its floor. Its cut covers
+    // it, and every Calvin epoch sequenced after it stamps above it.
     let marker = super::run_marker::new_cut_marker(state);
-    let calvin_cut = resolve_read_cut(state, marker).await?;
+    let calvin_cut = resolve_read_cut(state, marker, local).await?;
     let cap = cluster_cap(local, calvin_cut);
     // A Calvin cut above the clock part moves the clock past the cap too.
     clock.update_from_remote(cap);
@@ -122,8 +163,9 @@ fn is_past_cut(as_of_ms: i64, clock_now: i64) -> bool {
     nodedb_types::ms_to_ordinal_upper(as_of_ms) < clock_now
 }
 
-async fn resolve_read_cut(state: &SharedState, marker: u64) -> crate::Result<i64> {
-    crate::control::server::exchange::all_cores::read_cut::resolve_read_cut(state, marker).await
+async fn resolve_read_cut(state: &SharedState, marker: u64, floor: i64) -> crate::Result<i64> {
+    crate::control::server::exchange::all_cores::read_cut::resolve_read_cut(state, marker, floor)
+        .await
 }
 
 /// The cap of a cluster statement: the clock ordinal `local`, raised to the
