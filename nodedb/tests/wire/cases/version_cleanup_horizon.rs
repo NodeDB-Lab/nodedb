@@ -21,8 +21,14 @@ const PURGE_WAIT: Duration = Duration::from_secs(45);
 /// Bytes of each overwritten value.
 const VALUE_BYTES: usize = 400;
 
-/// Overwrites of the one row.
-const OVERWRITES: usize = 300;
+/// Rows the overwrites cover.
+const ROWS: usize = 100;
+
+/// Whole-collection overwrites. Each one supersedes one version of every
+/// row. The writes take a few statements, so they finish well inside the
+/// history window on a slow runner, and no pass trims them before the
+/// test measures them.
+const ROUNDS: usize = 3;
 
 /// How long an open block stays open while passes run: several 200 ms
 /// passes, well inside the 5 s snapshot age limit.
@@ -42,7 +48,7 @@ fn value(round: usize) -> String {
     format!("{round:04}").repeat(VALUE_BYTES / 4)
 }
 
-/// Many overwrites of one row grow its history. Once the horizon passes
+/// Overwrites of many rows grow their history. Once the horizon passes
 /// them, the pass removes them and releases their charge, and the current
 /// read still answers the last value.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -52,25 +58,25 @@ async fn the_pass_removes_overwritten_history_and_keeps_the_current_row() {
         .exec("CREATE COLLECTION vc_plain")
         .await
         .expect("CREATE COLLECTION");
+    let rows: Vec<String> = (0..ROWS)
+        .map(|row| format!("('r{row}', '{}')", value(0)))
+        .collect();
     server
         .exec(&format!(
-            "INSERT INTO vc_plain (id, payload) VALUES ('r', '{}')",
-            value(0)
+            "INSERT INTO vc_plain (id, payload) VALUES {}",
+            rows.join(", ")
         ))
         .await
         .expect("INSERT");
     let before = document_bytes(&server).await;
-    for round in 1..=OVERWRITES {
+    for round in 1..=ROUNDS {
         server
-            .exec(&format!(
-                "UPDATE vc_plain SET payload = '{}' WHERE id = 'r'",
-                value(round)
-            ))
+            .exec(&format!("UPDATE vc_plain SET payload = '{}'", value(round)))
             .await
             .unwrap_or_else(|e| panic!("UPDATE {round}: {e}"));
     }
     let grown = document_bytes(&server).await;
-    let history = i64::try_from(OVERWRITES * VALUE_BYTES).expect("history bytes");
+    let history = i64::try_from(ROWS * ROUNDS * VALUE_BYTES).expect("history bytes");
     assert!(
         grown - before >= history,
         "the overwrites charge their history: {before} -> {grown}"
@@ -92,12 +98,15 @@ async fn the_pass_removes_overwritten_history_and_keeps_the_current_row() {
     );
 
     let current = server
-        .query_text("SELECT payload FROM vc_plain WHERE id = 'r'")
+        .query_text(&format!(
+            "SELECT COUNT(*) FROM vc_plain WHERE payload = '{}'",
+            value(ROUNDS)
+        ))
         .await
         .expect("SELECT");
     assert_eq!(
         current,
-        vec![value(OVERWRITES)],
+        vec![ROWS.to_string()],
         "the current read is unchanged"
     );
 }
