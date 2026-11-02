@@ -242,6 +242,7 @@ impl HnswIndex {
             })
             .collect();
 
+        let tombstones = nodes.iter().filter(|n| n.deleted).count();
         let initial_capacity = snap.ef_construction.max(ARENA_INITIAL_CAPACITY);
         Ok(Self {
             dim: snap.dim,
@@ -253,6 +254,7 @@ impl HnswIndex {
                 dtype: CHECKPOINT_DTYPE,
             },
             nodes,
+            tombstones,
             entry_point: snap.entry_point,
             max_layer: snap.max_layer,
             rng: Xorshift64::new(snap.rng_state),

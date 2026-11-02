@@ -24,6 +24,9 @@ pub struct HnswIndex {
     pub(crate) params: HnswParams,
     pub(crate) dim: usize,
     pub(crate) nodes: Vec<Node>,
+    /// Nodes whose `deleted` flag is set. Every change to a flag changes
+    /// this count with it, so a count of live nodes reads no node.
+    pub(crate) tombstones: usize,
     pub(crate) entry_point: Option<u32>,
     pub(crate) max_layer: usize,
     pub(crate) rng: Xorshift64,
@@ -64,6 +67,7 @@ impl HnswIndex {
         Self {
             dim,
             nodes: Vec::new(),
+            tombstones: 0,
             entry_point: None,
             max_layer: 0,
             rng: Xorshift64::new(seed),

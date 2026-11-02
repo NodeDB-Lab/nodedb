@@ -65,10 +65,12 @@ const FLAT_WINDOW_PER_HIT: usize = 20;
 impl CoreLoop {
     /// Rank `fetch_k` candidates and attach their bodies.
     ///
-    /// With a non-empty `residual`, the window widens until `top_k` hits
-    /// pass it or the index returns fewer candidates than the window asked
-    /// for. A hit passes when it has a body and every filter matches that
-    /// body. The next width follows the pass rate seen so far, and a hit
+    /// With a non-empty `residual` and no candidate bitmap, the first window
+    /// is at least as wide as the search beam, since the beam ranks that many
+    /// candidates whatever the window. The window then widens until `top_k`
+    /// hits pass it or the index returns fewer candidates than the window
+    /// asked for. A hit passes when it has a body and every filter matches
+    /// that body. The next width follows the pass rate seen so far, and a hit
     /// already ranked keeps the body it was given, so a widening ranks each
     /// candidate's body once.
     pub(super) fn rank_window(
@@ -86,8 +88,13 @@ impl CoreLoop {
             Some(_) => window.collection.len(),
         };
         let crs = self.crs_context();
-        if !residual.is_empty() && window.collection.scans_flat_only() {
-            fetch_k = fetch_k.max(top_k.saturating_mul(FLAT_WINDOW_PER_HIT));
+        if !residual.is_empty() {
+            if window.bitmap.is_none() {
+                fetch_k = fetch_k.max(effective_ef(window.ef_search, fetch_k));
+            }
+            if window.collection.scans_flat_only() {
+                fetch_k = fetch_k.max(top_k.saturating_mul(FLAT_WINDOW_PER_HIT));
+            }
         }
         let mut ranked_before: HashMap<u32, VectorSearchHit> = HashMap::new();
         loop {

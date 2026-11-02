@@ -105,6 +105,7 @@ impl HnswIndex {
             .unwrap_or(0);
 
         self.nodes = new_nodes;
+        self.tombstones = 0;
         self.connect_unreachable();
         (tombstone_count, id_map)
     }
