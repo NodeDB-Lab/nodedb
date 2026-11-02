@@ -5,20 +5,12 @@
 use serde::{Deserialize, Serialize};
 
 /// Complete definition of a threshold alert rule.
-///
-/// Map-encoded so fields (e.g. `database_id`) can be added with
-/// `#[msgpack(default)]` and older rows still decode without a migration.
 #[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 #[msgpack(map)]
 pub struct AlertDef {
     /// Owning database. Scopes catalog keys, the in-memory registry, and
     /// background eval-loop dispatch so an alert created in one database
     /// never evaluates against another database's storage.
-    ///
-    /// `#[msgpack(default)]`: rows persisted before database scoping decode
-    /// with `0` (`DatabaseId::DEFAULT`) — the database those legacy rows
-    /// lived in — so no migration is required.
-    #[msgpack(default)]
     pub database_id: u64,
     /// Owning tenant.
     pub tenant_id: u64,

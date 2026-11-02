@@ -31,7 +31,7 @@ pub fn validate_topic_name(name: &str) -> Result<(), &'static str> {
 
 /// Persistent definition of a durable topic. Stored in the system catalog.
 #[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
-#[msgpack(map, allow_unknown_fields)]
+#[msgpack(map)]
 pub struct TopicDef {
     /// Tenant that owns this topic.
     pub tenant_id: u64,
@@ -43,23 +43,17 @@ pub struct TopicDef {
     pub owner: String,
     /// Creation timestamp (epoch seconds).
     pub created_at: u64,
-    /// Database that owns this topic. Missing map fields from legacy records
-    /// decode into the built-in default database.
-    #[msgpack(default)]
+    /// Database that owns this topic.
     pub database_id: DatabaseId,
     /// Last sequence durably assigned to this topic.
-    #[msgpack(default)]
     pub last_sequence: u64,
     /// Position of the last message: the Raft log index of the entry that
     /// carries it.
-    #[msgpack(default)]
     pub last_lsn: u64,
     /// Partition epoch of the last message's position.
-    #[msgpack(default)]
     pub last_epoch: u64,
     /// Stamped at propose time on create; fences a replayed delete to the
     /// incarnation it targeted.
-    #[msgpack(default)]
     pub modification_hlc: nodedb_types::Hlc,
 }
 
@@ -91,7 +85,7 @@ pub struct PublishOrigin {
 
 /// A durably retained topic publication.
 #[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
-#[msgpack(map, allow_unknown_fields)]
+#[msgpack(map)]
 pub struct TopicMessage {
     /// Database that owns the topic.
     pub database_id: DatabaseId,
@@ -107,7 +101,6 @@ pub struct TopicMessage {
     /// carries it.
     pub lsn: u64,
     /// Partition epoch of the position.
-    #[msgpack(default)]
     pub epoch: u64,
     /// Original publish payload, without JSON normalization.
     pub payload: String,

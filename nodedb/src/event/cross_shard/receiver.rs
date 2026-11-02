@@ -22,54 +22,12 @@ use super::metrics::CrossShardMetrics;
 use super::types::{CrossShardWriteRequest, CrossShardWriteResponse};
 use crate::control::security::identity::{AuthenticatedIdentity, Role};
 use crate::control::state::SharedState;
-use crate::types::{DatabaseId, TenantId};
+use crate::types::TenantId;
 use crate::wal::CrossShardAppliedKey;
 
-/// Exact pre-database positional wire layout.
-///
-/// This type is intentionally private so only the receiver accepts the legacy
-/// representation; all newly emitted requests use `CrossShardWriteRequest`'s
-/// current versioned map encoding.
-#[derive(zerompk::ToMessagePack, zerompk::FromMessagePack)]
-struct LegacyCrossShardWriteRequest {
-    sql: String,
-    tenant_id: u64,
-    source_vshard: u32,
-    source_lsn: u64,
-    source_sequence: u64,
-    cascade_depth: u32,
-    source_collection: String,
-    target_vshard: u32,
-}
-
-impl From<LegacyCrossShardWriteRequest> for CrossShardWriteRequest {
-    fn from(legacy: LegacyCrossShardWriteRequest) -> Self {
-        Self {
-            sql: legacy.sql,
-            tenant_id: legacy.tenant_id,
-            database_id: DatabaseId::DEFAULT.as_u64(),
-            source_vshard: legacy.source_vshard,
-            source_lsn: legacy.source_lsn,
-            source_sequence: legacy.source_sequence,
-            origin: String::new(),
-            cascade_depth: legacy.cascade_depth,
-            source_collection: legacy.source_collection,
-            target_vshard: legacy.target_vshard,
-        }
-    }
-}
-
-/// Decode the current map encoding, falling back only to the exact legacy
-/// positional layout. Payloads that fit neither representation fail closed.
-fn decode_write_request(payload: &[u8]) -> Result<CrossShardWriteRequest, String> {
-    match zerompk::from_msgpack(payload) {
-        Ok(request) => Ok(request),
-        Err(current_error) => zerompk::from_msgpack::<LegacyCrossShardWriteRequest>(payload)
-            .map(CrossShardWriteRequest::from)
-            .map_err(|legacy_error| {
-                format!("current encoding: {current_error}; legacy encoding: {legacy_error}")
-            }),
-    }
+/// Decode the map encoding. Any other payload fails closed.
+fn decode_write_request(payload: &[u8]) -> Result<CrossShardWriteRequest, zerompk::Error> {
+    zerompk::from_msgpack(payload)
 }
 
 /// Handles incoming cross-shard event writes.
@@ -402,8 +360,19 @@ mod tests {
     }
 
     #[test]
-    fn legacy_request_decode_uses_default_database() {
-        let legacy = LegacyCrossShardWriteRequest {
+    fn positional_request_encoding_is_refused() {
+        #[derive(zerompk::ToMessagePack)]
+        struct PositionalRequest {
+            sql: String,
+            tenant_id: u64,
+            source_vshard: u32,
+            source_lsn: u64,
+            source_sequence: u64,
+            cascade_depth: u32,
+            source_collection: String,
+            target_vshard: u32,
+        }
+        let payload = zerompk::to_msgpack_vec(&PositionalRequest {
             sql: "INSERT INTO audit VALUES (1)".into(),
             tenant_id: 7,
             source_vshard: 3,
@@ -412,16 +381,9 @@ mod tests {
             cascade_depth: 1,
             source_collection: "orders".into(),
             target_vshard: 9,
-        };
-
-        let payload = zerompk::to_msgpack_vec(&legacy).unwrap();
-        let decoded = decode_write_request(&payload).unwrap();
-
-        assert_eq!(decoded.database_id, DatabaseId::DEFAULT.as_u64());
-        assert_eq!(decoded.sql, legacy.sql);
-        assert_eq!(decoded.tenant_id, legacy.tenant_id);
-        assert_eq!(decoded.source_lsn, legacy.source_lsn);
-        assert_eq!(decoded.target_vshard, legacy.target_vshard);
+        })
+        .unwrap();
+        assert!(decode_write_request(&payload).is_err());
     }
 
     #[test]

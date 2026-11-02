@@ -113,35 +113,6 @@ impl GroupRegistry {
         map.get(&key).cloned()
     }
 
-    /// Move one legacy group from a bare topic name to its canonical topic
-    /// stream key. Returns the migrated definition when it existed.
-    pub fn migrate_stream(
-        &self,
-        database_id: DatabaseId,
-        tenant_id: u64,
-        legacy_stream: &str,
-        canonical_stream: &str,
-        group: &str,
-    ) -> Option<ConsumerGroupDef> {
-        let mut map = self.groups.write().unwrap_or_else(|p| p.into_inner());
-        let legacy_key = (
-            database_id,
-            tenant_id,
-            legacy_stream.to_string(),
-            group.to_string(),
-        );
-        let mut def = map.remove(&legacy_key)?;
-        def.stream_name = canonical_stream.to_string();
-        let key = (
-            database_id,
-            tenant_id,
-            canonical_stream.to_string(),
-            group.to_string(),
-        );
-        map.insert(key, def.clone());
-        Some(def)
-    }
-
     /// List all groups (all tenants, all streams). Used by the recovery verifier.
     pub fn list_all(&self) -> Vec<ConsumerGroupDef> {
         let map = self.groups.read().unwrap_or_else(|p| p.into_inner());

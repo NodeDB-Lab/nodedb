@@ -11,9 +11,7 @@
 
 use std::collections::HashMap;
 
-use crate::control::server::shared::ddl::neutral::consumer_group::identity::{
-    canonical_stream_name, migrate_legacy_topic_group,
-};
+use crate::control::server::shared::ddl::neutral::consumer_group::identity::canonical_stream_name;
 use crate::control::state::SharedState;
 use crate::event::cdc::offset::CdcOffset;
 
@@ -36,7 +34,7 @@ pub async fn consume_stream(
     state: &SharedState,
     params: &ConsumeParams<'_>,
 ) -> Result<ConsumeResult, ConsumeError> {
-    let canonical_stream = resolve_stream(state, params).await?;
+    let canonical_stream = resolve_stream(state, params);
     let params = ConsumeParams {
         database_id: params.database_id,
         tenant_id: params.tenant_id,
@@ -83,66 +81,14 @@ pub async fn consume_stream(
     }
 }
 
-/// The canonical stream name for `params`, migrating a legacy bare-topic
-/// group onto it first.
-async fn resolve_stream(
-    state: &SharedState,
-    params: &ConsumeParams<'_>,
-) -> Result<String, ConsumeError> {
-    let resolve = || {
-        canonical_stream_name(
-            state,
-            params.database_id,
-            params.tenant_id,
-            params.stream_name,
-        )
-    };
-    let first = resolve();
-    let Some(topic_name) = first.strip_prefix("topic:").map(str::to_owned) else {
-        return Ok(first);
-    };
-    // Migration mutates catalog, registry, and the separate offset store.
-    // It must serialize with DROP TOPIC exactly like DDL does: topic first,
-    // then canonical and legacy group identities in that fixed order.
-    let topic_lock =
-        state
-            .ep_topic_registry
-            .lifecycle_lock(params.database_id, params.tenant_id, &topic_name);
-    let _topic_guard = topic_lock
-        .try_lock()
-        .map_err(|_| ConsumeError::LifecycleBusy)?;
-    let canonical_stream = resolve();
-    let Some(legacy_stream) = canonical_stream.strip_prefix("topic:").map(str::to_owned) else {
-        return Ok(canonical_stream);
-    };
-    let canonical_lock = state.group_registry.lifecycle_lock(
-        params.database_id,
-        params.tenant_id,
-        &canonical_stream,
-        params.group_name,
-    );
-    let _canonical_guard = canonical_lock
-        .try_lock()
-        .map_err(|_| ConsumeError::LifecycleBusy)?;
-    let legacy_lock = state.group_registry.lifecycle_lock(
-        params.database_id,
-        params.tenant_id,
-        &legacy_stream,
-        params.group_name,
-    );
-    let _legacy_guard = legacy_lock
-        .try_lock()
-        .map_err(|_| ConsumeError::LifecycleBusy)?;
-    migrate_legacy_topic_group(
+/// The canonical stream name for `params`.
+fn resolve_stream(state: &SharedState, params: &ConsumeParams<'_>) -> String {
+    canonical_stream_name(
         state,
         params.database_id,
         params.tenant_id,
-        &canonical_stream,
-        params.group_name,
+        params.stream_name,
     )
-    .await
-    .map_err(|error| ConsumeError::RemoteError(error.message))?;
-    Ok(canonical_stream)
 }
 
 /// Validate the stream and consumer-group identity before a local buffer read.

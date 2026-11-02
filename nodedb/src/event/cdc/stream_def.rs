@@ -165,11 +165,9 @@ impl CompactionConfig {
 
 /// Persistent definition of a change stream. Stored in the system catalog.
 #[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
-#[msgpack(map, allow_unknown_fields)]
+#[msgpack(map)]
 pub struct ChangeStreamDef {
-    /// Database that owns this stream. Legacy MessagePack definitions without
-    /// this field decode into the built-in default database.
-    #[msgpack(default)]
+    /// Database that owns this stream.
     pub database_id: DatabaseId,
     /// Tenant that owns this stream.
     pub tenant_id: u64,
@@ -184,16 +182,12 @@ pub struct ChangeStreamDef {
     /// Retention configuration.
     pub retention: RetentionConfig,
     /// Log compaction configuration (optional).
-    #[msgpack(default)]
     pub compaction: CompactionConfig,
     /// Webhook delivery configuration (optional).
-    #[msgpack(default)]
     pub webhook: crate::event::webhook::WebhookConfig,
     /// Policy for events that arrive below the partition watermark.
-    #[msgpack(default)]
     pub late_data: LateDataPolicy,
     /// Kafka bridge delivery configuration (optional).
-    #[msgpack(default)]
     pub kafka: crate::event::kafka::KafkaDeliveryConfig,
     /// Owner (creator).
     pub owner: String,
@@ -209,17 +203,14 @@ pub struct ChangeStreamDef {
     /// Data→Event bus. The subscriber's scope is therefore captured once, in
     /// the Control Plane, and read back from this record at delivery.
     ///
-    /// Empty for a definition written before the field existed, and for a
-    /// creator holding no roles. The two are indistinguishable, and no policy —
-    /// which is keyed on a role — matches an empty list, so delivery of a
-    /// collection some policy protects is refused rather than sent in the clear
-    /// (see `redaction::CdcSubscriberScope`). Streams over collections no policy
+    /// Empty for a creator holding no roles. No policy matches an empty list,
+    /// because every policy is keyed on a role. Delivery of a collection some
+    /// policy protects is then refused, never sent in the clear (see
+    /// `redaction::CdcSubscriberScope`). Streams over collections no policy
     /// covers are unaffected.
-    #[msgpack(default)]
     pub subscriber_roles: Vec<String>,
     /// Stamped at propose time on every put; fences a replayed delete to the
     /// incarnation it targeted.
-    #[msgpack(default)]
     pub modification_hlc: nodedb_types::Hlc,
 }
 

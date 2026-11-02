@@ -16,7 +16,6 @@ pub struct WebhookConfig {
     /// Per-request timeout in seconds. Default: 5.
     pub timeout_secs: u64,
     /// Optional custom headers (key → value).
-    #[msgpack(default)]
     pub headers: Vec<(String, String)>,
 }
 
@@ -74,8 +73,9 @@ mod tests {
         assert_eq!(decoded.headers.len(), 1);
     }
 
+    /// A config map without `headers` is malformed: every writer writes it.
     #[test]
-    fn deserialize_missing_headers_defaults_to_empty() {
+    fn deserialize_missing_headers_is_refused() {
         #[derive(zerompk::ToMessagePack)]
         #[msgpack(map)]
         struct PartialConfig {
@@ -89,7 +89,6 @@ mod tests {
             timeout_secs: 2,
         };
         let bytes = zerompk::to_msgpack_vec(&partial).unwrap();
-        let cfg: WebhookConfig = zerompk::from_msgpack(&bytes).unwrap();
-        assert!(cfg.headers.is_empty());
+        assert!(zerompk::from_msgpack::<WebhookConfig>(&bytes).is_err());
     }
 }

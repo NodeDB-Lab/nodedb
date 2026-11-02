@@ -80,6 +80,7 @@ pub(super) fn spawn_consumers(
                 cdc_router: Arc::clone(deps.cdc_router),
                 num_cores,
                 slab_account: account,
+                watermark_flush_interval: crate::event::consumer_helpers::WATERMARK_FLUSH_INTERVAL,
             })
         })
         .collect();

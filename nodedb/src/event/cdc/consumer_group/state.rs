@@ -300,39 +300,6 @@ impl OffsetStore {
             .unwrap_or_default()
     }
 
-    /// Move committed offsets from a legacy bare topic key to the canonical
-    /// `topic:<name>` key. Callers invoke this only after a topic definition
-    /// identifies the legacy name as a topic, never for ordinary streams.
-    pub fn migrate_group_stream(
-        &self,
-        database_id: DatabaseId,
-        tenant_id: u64,
-        legacy_stream: &str,
-        canonical_stream: &str,
-        group: &str,
-    ) -> crate::Result<()> {
-        for offset in self.get_all_offsets(database_id, tenant_id, legacy_stream, group) {
-            let current = self.get_offset(
-                database_id,
-                tenant_id,
-                canonical_stream,
-                group,
-                offset.partition_id,
-            );
-            if offset.committed_offset > current {
-                self.commit_offset(
-                    database_id,
-                    tenant_id,
-                    canonical_stream,
-                    group,
-                    offset.partition_id,
-                    offset.committed_offset,
-                )?;
-            }
-        }
-        self.delete_group(database_id, tenant_id, legacy_stream, group)
-    }
-
     /// Delete offsets for several groups in one durable redb transaction.
     ///
     /// DROP TOPIC uses this to make cleanup all-or-nothing within the separate

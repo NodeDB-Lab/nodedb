@@ -30,6 +30,9 @@ pub struct ConsumerConfig {
     pub num_cores: usize,
     /// Per-consumer slab-pin accounting for WAL memory budget enforcement.
     pub slab_account: Arc<crate::event::slab_budget::ConsumerSlabAccount>,
+    /// How long a delivered prefix waits before the consumer persists it.
+    /// Production passes `WATERMARK_FLUSH_INTERVAL`.
+    pub watermark_flush_interval: std::time::Duration,
 }
 
 /// Handle to a running consumer task.

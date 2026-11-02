@@ -7,7 +7,7 @@ use crate::types::DatabaseId;
 
 /// Persistent definition of a consumer group. Stored in the system catalog.
 #[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
-#[msgpack(map, allow_unknown_fields)]
+#[msgpack(map)]
 pub struct ConsumerGroupDef {
     /// Tenant that owns this group.
     pub tenant_id: u64,
@@ -19,13 +19,10 @@ pub struct ConsumerGroupDef {
     pub owner: String,
     /// Creation timestamp (epoch seconds).
     pub created_at: u64,
-    /// Database that owns this group. Missing map fields from legacy records
-    /// decode into the built-in default database.
-    #[msgpack(default)]
+    /// Database that owns this group.
     pub database_id: DatabaseId,
     /// Stamped at propose time on every put; fences a replayed delete to the
     /// incarnation it targeted.
-    #[msgpack(default)]
     pub modification_hlc: nodedb_types::Hlc,
 }
 

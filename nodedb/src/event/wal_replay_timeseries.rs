@@ -43,9 +43,7 @@ pub(crate) fn replayed_timeseries_events(
         );
         return Vec::new();
     };
-    if record.kind.as_deref() != Some("timeseries")
-        || record.format.as_deref() != Some(RESOLVED_INGEST_FORMAT)
-    {
+    if record.kind != "timeseries" || record.format.as_deref() != Some(RESOLVED_INGEST_FORMAT) {
         return Vec::new();
     }
     let batch = match ResolvedTsBatch::from_bytes(&record.payload) {
@@ -151,12 +149,12 @@ mod tests {
             now_ms: 1_000,
             resolved_bytes: 64,
             emits_events,
+            carried_system: false,
             rows: images
                 .iter()
                 .enumerate()
                 .map(|(i, image)| ResolvedTsRow {
                     line: i as u64,
-                    tags: Vec::new(),
                     timestamp_ms: 1_000 + i as i64,
                     values: vec![
                         ColumnValue::Timestamp(1_000 + i as i64),

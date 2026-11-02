@@ -318,6 +318,23 @@ fn decompose_redo_to_events(
         let Some(record_type) = RecordType::from_raw(sub.record_type) else {
             continue;
         };
+        // A clone copy changes nothing a reader of the clone sees, so it
+        // emits no event, as its install emits none.
+        if record_type == RecordType::Put
+            && crate::wal::DocumentPutRedo::decode(&sub.payload).is_some_and(|put| put.clone_copy)
+        {
+            continue;
+        }
+        // A RESTORE's columnar key, ended timeseries partition and series
+        // catalog emit no row event, as their installs emit none: a columnar
+        // key publishes through the record's change entries.
+        if record_type == RecordType::TimeseriesBatch
+            && (crate::wal::ColumnarRestoreRedo::decode(&sub.payload).is_some()
+                || crate::wal::TimeseriesEndedPartitionRedo::decode(&sub.payload).is_some()
+                || crate::wal::TimeseriesSeriesCatalogRedo::decode(&sub.payload).is_some())
+        {
+            continue;
+        }
         if let Some(kind) = row_kind(record_type) {
             events.extend(single_row_events(
                 kind,
@@ -398,6 +415,12 @@ mod tests {
     use crate::event::types::WriteOp;
     use nodedb_types::sync::wire::SyncProvenance;
 
+    /// A document put payload in the shape the write path journals.
+    fn doc_put(collection: &str, document_id: &str, value: &[u8]) -> Vec<u8> {
+        zerompk::to_msgpack_vec(&(collection, document_id, value, None::<SyncProvenance>, 9u32))
+            .unwrap()
+    }
+
     /// Assert a record maps to exactly one event and return it.
     fn one_event(record: &WalRecord, seq: &mut u64) -> WriteEvent {
         let mut events = record_to_events(record, seq);
@@ -407,7 +430,9 @@ mod tests {
 
     #[test]
     fn parse_document_put() {
-        let payload = zerompk::to_msgpack_vec(&("orders", "order-1", b"value")).unwrap();
+        let provenance: Option<SyncProvenance> = None;
+        let payload =
+            zerompk::to_msgpack_vec(&("orders", "order-1", b"value", provenance, 9u32)).unwrap();
         let record = make_record(RecordType::Put, &payload, 1, 0, 100);
         let mut seq = 0u64;
         let event = one_event(&record, &mut seq);
@@ -420,7 +445,8 @@ mod tests {
 
     #[test]
     fn parse_document_delete() {
-        let payload = zerompk::to_msgpack_vec(&("orders", "order-1")).unwrap();
+        let provenance: Option<SyncProvenance> = None;
+        let payload = zerompk::to_msgpack_vec(&("orders", "order-1", provenance, 9u32)).unwrap();
         let record = make_record(RecordType::Delete, &payload, 1, 0, 101);
         let mut seq = 0u64;
         let event = one_event(&record, &mut seq);
@@ -502,32 +528,26 @@ mod tests {
         }
     }
 
+    /// A document put or delete without a surrogate is no record shape. It
+    /// yields no event and consumes no sequence.
     #[test]
-    fn parse_document_put_with_provenance() {
-        // New 4-element arity: (collection, document_id, value, Option<SyncProvenance>).
+    fn a_document_record_without_a_surrogate_yields_no_event() {
         let provenance: Option<SyncProvenance> = None;
-        let payload =
-            zerompk::to_msgpack_vec(&("orders", "order-2", b"value2", provenance)).unwrap();
-        let record = make_record(RecordType::Put, &payload, 1, 0, 200);
+        let put =
+            zerompk::to_msgpack_vec(&("orders", "order-2", b"value2", provenance.clone())).unwrap();
+        let delete = zerompk::to_msgpack_vec(&("orders", "order-2", provenance)).unwrap();
         let mut seq = 0u64;
-        let event = one_event(&record, &mut seq);
-        assert_eq!(event.collection.as_ref(), "orders");
-        assert_eq!(event.row_id.as_str(), "order-2");
-        assert_eq!(event.op, WriteOp::Insert);
-        assert_eq!(seq, 1);
-    }
-
-    #[test]
-    fn parse_document_delete_with_provenance() {
-        // New 3-element arity: (collection, document_id, Option<SyncProvenance>).
-        let provenance: Option<SyncProvenance> = None;
-        let payload = zerompk::to_msgpack_vec(&("orders", "order-2", provenance)).unwrap();
-        let record = make_record(RecordType::Delete, &payload, 1, 0, 201);
-        let mut seq = 0u64;
-        let event = one_event(&record, &mut seq);
-        assert_eq!(event.op, WriteOp::Delete);
-        assert_eq!(event.row_id.as_str(), "order-2");
-        assert_eq!(seq, 1);
+        assert!(
+            record_to_events(&make_record(RecordType::Put, &put, 1, 0, 200), &mut seq).is_empty()
+        );
+        assert!(
+            record_to_events(
+                &make_record(RecordType::Delete, &delete, 1, 0, 201),
+                &mut seq
+            )
+            .is_empty()
+        );
+        assert_eq!(seq, 0);
     }
 
     /// A resolved redo record names each row's net kind: a put of a
@@ -539,7 +559,14 @@ mod tests {
 
         let put = |id: &str| RedoSubRecord {
             record_type: RecordType::Put as u32,
-            payload: zerompk::to_msgpack_vec(&("orders", id, b"doc-value")).unwrap(),
+            payload: zerompk::to_msgpack_vec(&(
+                "orders",
+                id,
+                b"doc-value",
+                None::<SyncProvenance>,
+                9u32,
+            ))
+            .unwrap(),
         };
         let change = |id: &str, kind| RedoRowChange {
             collection: "orders".into(),
@@ -581,11 +608,72 @@ mod tests {
     /// a document Put and a KV Put — decomposes into two WriteEvents, both
     /// carrying the redo record's WAL LSN (the watermark-dedup key), with the
     /// same collection/op/value mapping the raw Put arms produce.
+    /// A clone copy emits no event on catch-up, as its install emits none.
+    /// A plain stamped put of the same row still does.
+    #[test]
+    fn a_clone_copy_put_emits_no_event() {
+        use crate::wal::{RedoRecord, RedoSubRecord};
+
+        let put = |clone_copy: bool| {
+            let prov: Option<SyncProvenance> = None;
+            let payload = if clone_copy {
+                zerompk::to_msgpack_vec(&(
+                    "orders",
+                    "o1",
+                    vec![1u8],
+                    prov,
+                    7u32,
+                    42i64,
+                    i64::MIN,
+                    i64::MAX,
+                    true,
+                ))
+            } else {
+                zerompk::to_msgpack_vec(&(
+                    "orders",
+                    "o1",
+                    vec![1u8],
+                    prov,
+                    7u32,
+                    42i64,
+                    i64::MIN,
+                    i64::MAX,
+                ))
+            };
+            RedoSubRecord {
+                record_type: RecordType::Put as u32,
+                payload: payload.unwrap(),
+            }
+        };
+        let events_of = |sub: RedoSubRecord| {
+            let redo = RedoRecord {
+                version: 1,
+                ops: vec![sub],
+                calvin_stamp: None,
+                cross_shard_applied: None,
+                row_sources: Vec::new(),
+                publishes: Vec::new(),
+                row_changes: Vec::new(),
+                user_roles: Vec::new(),
+            };
+            let record = make_record(
+                RecordType::TransactionRedo,
+                &redo.to_bytes().unwrap(),
+                7,
+                0,
+                300,
+            );
+            record_to_events(&record, &mut 0u64)
+        };
+        assert!(events_of(put(true)).is_empty());
+        assert_eq!(events_of(put(false)).len(), 1);
+    }
+
     #[test]
     fn transaction_redo_decomposes_into_per_op_events() {
         use crate::wal::{RedoRecord, RedoSubRecord};
 
-        let doc_payload = zerompk::to_msgpack_vec(&("orders", "order-9", b"doc-value")).unwrap();
+        let doc_payload = doc_put("orders", "order-9", b"doc-value");
         let kv_payload =
             zerompk::to_msgpack_vec(&("kv_put", "cache", b"k9", b"v9", 0u64, None::<u64>, 9u32))
                 .unwrap();
@@ -645,8 +733,8 @@ mod tests {
     fn transaction_redo_row_sources_override_body_rows() {
         use crate::wal::{RedoRecord, RedoRowSource, RedoSubRecord};
 
-        let client = zerompk::to_msgpack_vec(&("orders", "o-client", b"c")).unwrap();
-        let body = zerompk::to_msgpack_vec(&("orders", "o-body", b"b")).unwrap();
+        let client = doc_put("orders", "o-client", b"c");
+        let body = doc_put("orders", "o-body", b"b");
         let redo = RedoRecord {
             version: 1,
             ops: vec![
@@ -694,7 +782,7 @@ mod tests {
         use crate::wal::{RedoRecord, RedoSubRecord};
 
         let vec_payload = zerompk::to_msgpack_vec(&("vecs", vec![1.0f32, 2.0, 3.0], 3u32)).unwrap();
-        let doc_payload = zerompk::to_msgpack_vec(&("orders", "order-x", b"v")).unwrap();
+        let doc_payload = doc_put("orders", "order-x", b"v");
         let redo = RedoRecord {
             version: 1,
             ops: vec![
@@ -1001,8 +1089,15 @@ mod tests {
     #[test]
     fn a_timeseries_batch_without_resolved_rows_replays_no_write_event() {
         let prov: Option<SyncProvenance> = None;
-        let payload = zerompk::to_msgpack_vec(&("timeseries", "metrics", vec![1u8, 2, 3], prov))
-            .expect("enc");
+        let payload = zerompk::to_msgpack_vec(&(
+            "timeseries",
+            "metrics",
+            vec![1u8, 2, 3],
+            prov,
+            "ilp".to_string(),
+            1_000i64,
+        ))
+        .expect("enc");
         let record = make_record(RecordType::TimeseriesBatch, &payload, 1, 0, 700);
         let mut seq = 0u64;
         assert!(record_to_events(&record, &mut seq).is_empty());
@@ -1019,6 +1114,7 @@ mod tests {
 
         let put = ArrayPutPayload {
             array_id: ArrayId::new(nodedb_types::TenantId::new(1), "genome"),
+            vshard_id: 0,
             cells: Vec::new(),
             provenance: None,
         };
@@ -1029,6 +1125,7 @@ mod tests {
 
         let del = ArrayDeletePayload {
             array_id: ArrayId::new(nodedb_types::TenantId::new(1), "genome"),
+            vshard_id: 0,
             cells: Vec::new(),
             provenance: None,
         };
@@ -1193,6 +1290,7 @@ mod tests {
                 apply_key: 0,
                 event_source: source.map_or(nodedb_wal::NO_EVENT_SOURCE, EventSource::wal_code),
                 commit_hlc: 0,
+                system_ordinal: nodedb_wal::NO_SYSTEM_ORDINAL,
             },
         )
         .unwrap()
@@ -1200,7 +1298,7 @@ mod tests {
 
     #[test]
     fn a_replayed_row_carries_the_source_its_record_stored() {
-        let payload = zerompk::to_msgpack_vec(&("orders", "order-1", b"value")).unwrap();
+        let payload = doc_put("orders", "order-1", b"value");
         for source in [
             EventSource::Restore,
             EventSource::Trigger,
@@ -1216,7 +1314,7 @@ mod tests {
 
     #[test]
     fn a_row_record_without_a_source_rebuilds_no_event() {
-        let payload = zerompk::to_msgpack_vec(&("orders", "order-1", b"value")).unwrap();
+        let payload = doc_put("orders", "order-1", b"value");
         let record = make_sourced_record(RecordType::Put, &payload, 301, None);
         let mut seq = 0u64;
         assert!(record_to_events(&record, &mut seq).is_empty());
@@ -1229,7 +1327,7 @@ mod tests {
     fn a_redo_replays_rows_with_the_live_apply_sources() {
         use crate::wal::{RedoRecord, RedoSubRecord};
 
-        let doc = zerompk::to_msgpack_vec(&("orders", "order-9", b"doc")).unwrap();
+        let doc = doc_put("orders", "order-9", b"doc");
         let kv =
             zerompk::to_msgpack_vec(&("kv_put", "cache", b"k9", b"v9", 0u64, None::<u64>, 9u32))
                 .unwrap();
@@ -1285,7 +1383,7 @@ mod tests {
     fn a_redo_replays_its_publishes_after_its_rows() {
         use crate::wal::{RedoPublish, RedoRecord, RedoSubRecord};
 
-        let doc = zerompk::to_msgpack_vec(&("orders", "order-1", b"doc")).unwrap();
+        let doc = doc_put("orders", "order-1", b"doc");
         let redo = RedoRecord {
             version: 1,
             ops: vec![RedoSubRecord {

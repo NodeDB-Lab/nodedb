@@ -28,9 +28,6 @@ pub enum ConsumeError {
     InvalidLimit(usize),
     /// Caller-provided cluster cursor vector is malformed or exceeds its bound.
     InvalidRemoteOffsets(&'static str),
-    /// A concurrent topic/group lifecycle transition owns the required locks.
-    /// The caller must retry rather than read or migrate a mixed incarnation.
-    LifecycleBusy,
     /// The consumer's cursor on `partition_id` lies below the first event the
     /// serving node holds, and no replica that holds the events answered. A
     /// snapshot install or retention dropped them. The consumer resets to
@@ -72,10 +69,6 @@ impl std::fmt::Display for ConsumeError {
             Self::InvalidRemoteOffsets(reason) => {
                 write!(f, "invalid remote CDC committed offsets: {reason}")
             }
-            Self::LifecycleBusy => write!(
-                f,
-                "topic or consumer-group lifecycle transition is in progress"
-            ),
             Self::OffsetOutOfRange {
                 partition_id,
                 available_from,
