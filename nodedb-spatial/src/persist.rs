@@ -29,7 +29,7 @@ use nodedb_types::{BboxSpace, BoundingBox};
 use serde::{Deserialize, Serialize};
 use zerompk::{FromMessagePack, ToMessagePack};
 
-use crate::rtree::{RTree, RTreeEntry, TreeSrid};
+use crate::rtree::{EndedEntry, HistoryRows, LiveStart, RTree, RTreeEntry, TreeSrid};
 
 // ── SEGV framing constants ─────────────────────────────────────────────────
 //
@@ -45,9 +45,9 @@ const SEGV_MAGIC: [u8; 4] = *b"SEGV";
 /// Magic header for rkyv-serialized R-tree snapshots (6 bytes).
 const RTREE_RKYV_MAGIC: &[u8; 6] = b"RKSPT\0";
 
-/// Current format version for rkyv-serialized R-tree snapshots. Version 3
-/// carries the tree's SRID and bbox space.
-pub const RTREE_FORMAT_VERSION: u8 = 3;
+/// Format version for rkyv-serialized R-tree snapshots. A snapshot carries
+/// the tree's SRID, its bbox space, and its system-time history.
+pub const RTREE_FORMAT_VERSION: u8 = 1;
 
 // ── SEGV framing helpers ───────────────────────────────────────────────────
 
@@ -140,6 +140,10 @@ struct RTreeSnapshotRkyv {
     /// from here, so it never resolves the SRID against a CRS registry.
     planar: bool,
     entries: Vec<RTreeEntry>,
+    /// The start ordinal of each live entry indexed at a versioned ordinal.
+    live_starts: Vec<LiveStart>,
+    /// The ended entries a read at a past cut still sees.
+    ended: Vec<EndedEntry>,
 }
 
 // ── RTree checkpoint impl ──────────────────────────────────────────────────
@@ -154,10 +158,13 @@ impl RTree {
         &self,
         kek: Option<&nodedb_wal::crypto::WalEncryptionKey>,
     ) -> Result<Vec<u8>, RTreeCheckpointError> {
+        let history = self.history_rows();
         let snapshot = RTreeSnapshotRkyv {
             srid: self.srid().code(),
             planar: self.space() == BboxSpace::Planar,
             entries: self.entries().into_iter().cloned().collect(),
+            live_starts: history.live,
+            ended: history.ended,
         };
         let rkyv_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&snapshot)
             .map_err(|e| RTreeCheckpointError::RkyvSerialize(e.to_string()))?;
@@ -240,7 +247,12 @@ impl RTree {
                 BboxSpace::Geographic
             },
         };
-        Ok(RTree::bulk_load(snapshot.entries, memory, srid))
+        let mut tree = RTree::bulk_load(snapshot.entries, memory, srid);
+        tree.restore_history(HistoryRows {
+            live: snapshot.live_starts,
+            ended: snapshot.ended,
+        });
+        Ok(tree)
     }
 }
 
@@ -440,6 +452,23 @@ mod tests {
             "checkpoint too small: {} bytes",
             bytes.len()
         );
+    }
+
+    #[test]
+    fn checkpoint_preserves_history() {
+        let mut tree = RTree::new(test_memory(), TreeSrid::WGS84);
+        tree.insert_at(make_entry(1, 10.0, 20.0), 10);
+        tree.end_at(1, "d1", 20);
+        tree.insert_at(make_entry(1, 11.0, 21.0), 20);
+        let bytes = tree.checkpoint_to_bytes(None).unwrap();
+        let restored = RTree::from_checkpoint(&bytes, None, test_memory()).unwrap();
+        assert_eq!(restored.history_rows(), tree.history_rows());
+        let world = BoundingBox::new(-180.0, -90.0, 180.0, 90.0);
+        assert_eq!(restored.search_at(&world, 15).len(), 1);
+        assert!(matches!(
+            restored.search_at(&world, 15).as_slice(),
+            [crate::rtree::CutCandidate::Ended(e)] if e.sys_to == 20
+        ));
     }
 
     #[test]

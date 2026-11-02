@@ -5,6 +5,7 @@
 use nodedb_types::geometry::Srid;
 use nodedb_types::{BboxSpace, BoundingBox};
 
+use super::history::SpatialHistory;
 use super::node::{Node, NodeKind, RTreeEntry};
 use super::search::NnResult;
 use super::tree_srid::TreeSrid;
@@ -33,7 +34,19 @@ pub struct RTree {
     /// Enforces database, tenant, and engine memory budgets on large batch
     /// allocations (bulk load, full-scan serialization, range search results).
     pub(crate) memory: ScopedMemory,
+    /// The start ordinals of the live entries and the ended entries.
+    pub(crate) history: SpatialHistory,
 }
+
+/// Bytes one node reserves: the node and a full list of the larger of its
+/// two list element kinds, one past capacity for a split in progress.
+const NODE_RESERVE_BYTES: usize = std::mem::size_of::<Node>()
+    + (super::node::LEAF_CAPACITY + 1)
+        * if std::mem::size_of::<RTreeEntry>() > std::mem::size_of::<super::node::ChildRef>() {
+            std::mem::size_of::<RTreeEntry>()
+        } else {
+            std::mem::size_of::<super::node::ChildRef>()
+        };
 
 /// A geometry in one SRID offered to an R-tree holding another.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -53,7 +66,21 @@ impl RTree {
             srid: srid.srid,
             space: srid.space,
             memory,
+            history: SpatialHistory::default(),
         }
+    }
+
+    /// Bytes the tree holds resident: its live nodes and entries, and its
+    /// history. A governor charge follows this value.
+    pub fn resident_bytes(&self) -> usize {
+        self.nodes_bytes() + self.history.resident_bytes()
+    }
+
+    /// Bytes the node array reserves: each node with room for a full entry
+    /// or child list. Constant time, and at or above the bytes the lists
+    /// hold: no list grows past its capacity but transiently in a split.
+    pub(crate) fn nodes_bytes(&self) -> usize {
+        self.nodes.len() * NODE_RESERVE_BYTES
     }
 
     /// Shared reference to the scoped memory handle.
@@ -71,18 +98,26 @@ impl RTree {
         self.space
     }
 
-    /// Whether an entry in `srid` can join this tree. An empty tree accepts
-    /// any SRID, since its first entry decides.
+    /// Whether an entry in `srid` can join this tree. A tree with no live
+    /// entry and no ended entry accepts any SRID, since its first entry
+    /// decides.
     pub fn accepts_srid(&self, srid: Srid) -> bool {
-        self.is_empty() || self.srid == srid
+        self.holds_nothing() || self.srid == srid
+    }
+
+    /// Whether the tree holds no live entry and no ended entry: its next
+    /// entry decides its SRID.
+    pub fn holds_nothing(&self) -> bool {
+        self.is_empty() && self.history.has_no_ended()
     }
 
     /// Fix the tree's SRID for an entry about to be inserted.
     ///
-    /// An empty tree adopts `srid`. A non-empty tree in another SRID refuses
-    /// with [`SridMismatch`] and is left unchanged.
+    /// A tree with no live entry and no ended entry adopts `srid`. Any
+    /// other tree in another SRID refuses with [`SridMismatch`] and is left
+    /// unchanged.
     pub fn bind_srid(&mut self, srid: TreeSrid) -> Result<(), SridMismatch> {
-        if self.is_empty() {
+        if self.holds_nothing() {
             self.srid = srid.srid;
             self.space = srid.space;
             return Ok(());
