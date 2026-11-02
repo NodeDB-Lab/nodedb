@@ -322,6 +322,7 @@ mod tests {
     fn last_values(collection: &str) -> PhysicalPlan {
         PhysicalPlan::Meta(MetaOp::QueryLastValues {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, collection),
+            system_time: nodedb_types::SystemTimeScope::Current,
         })
     }
 
@@ -389,6 +390,7 @@ mod tests {
         let mut plan = PhysicalPlan::Meta(MetaOp::QueryLastValue {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "metrics"),
             series_id: 7,
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         assert_refused(inject(&mut plan, &store), "metrics");
     }

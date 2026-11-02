@@ -24,11 +24,41 @@ use crate::control::planner::calvin::{
     classify_dispatch, read_vshards_of, submit_calvin_routed,
 };
 use crate::control::server::shared::authorization::AuthorizedTaskSet;
-use crate::control::server::shared::session::read_set::ReadSetEntry;
+use crate::control::server::shared::session::read_set::{ReadSetEntry, read_snapshot_ordinal};
 use crate::control::state::SharedState;
 use crate::event::EventSource;
 use crate::types::TenantId;
 use nodedb_physical::physical_task::PhysicalTask;
+
+/// What a Calvin transaction's participants validate as they apply: its
+/// reads, and the snapshot ordinal they validate the reads and the written
+/// keys at.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TxnReads<'a> {
+    pub entries: &'a [ReadSetEntry],
+    /// `None` for a transaction with no snapshot and no read.
+    pub snapshot_ordinal: Option<i64>,
+}
+
+impl<'a> TxnReads<'a> {
+    /// A transaction that read nothing and holds no snapshot.
+    pub(crate) fn none() -> Self {
+        Self {
+            entries: &[],
+            snapshot_ordinal: None,
+        }
+    }
+
+    /// The reads of a statement outside a transaction block. Only a read
+    /// that pinned its own cut can join one, so the snapshot is the lowest
+    /// such cut.
+    pub(crate) fn autocommit(entries: &'a [ReadSetEntry]) -> crate::Result<Self> {
+        Ok(Self {
+            entries,
+            snapshot_ordinal: read_snapshot_ordinal(None, entries)?,
+        })
+    }
+}
 
 /// The sources a Calvin transaction's writes commit under.
 #[derive(Debug, Clone)]
@@ -78,19 +108,21 @@ impl TxnProvenance {
 /// applied primary response; `None` means no response was retained. This is not
 /// an affected-row envelope and callers must apply their own operation semantics.
 ///
-/// Every participant stamps `provenance` on the transaction's writes.
+/// Every participant stamps `provenance` on the transaction's writes, and
+/// validates the `reads` homed on it at their snapshot ordinal.
 pub(crate) async fn dispatch_strict_atomic_tasks_to_calvin(
     state: &SharedState,
     tasks: &[PhysicalTask],
     tenant_id: TenantId,
     position: TxnDispatchPosition,
-    reads: &[ReadSetEntry],
+    reads: TxnReads<'_>,
     lock_owner: Option<nodedb_cluster::calvin::types::TxnIdWire>,
     provenance: TxnProvenance,
 ) -> crate::Result<Option<Response>> {
     let resolved = crate::control::write_resolve::resolve_tasks_for_log(state, tasks).await?;
     let tasks = resolved.as_deref().unwrap_or(tasks);
-    let mut tx_class = admit_strict_atomic_tasks(tasks, tenant_id, position, reads)?;
+    let mut tx_class = admit_strict_atomic_tasks(tasks, tenant_id, position, reads.entries)?;
+    tx_class.snapshot_ordinal = reads.snapshot_ordinal;
     tx_class.set_lock_owner(lock_owner);
     tx_class.set_event_source(provenance.event_source.wal_code());
     tx_class.set_body_plans(provenance.body_tasks);
@@ -123,7 +155,7 @@ fn admit_strict_atomic_tasks(
     // complete write-home set itself. In particular, graph edges contribute both
     // endpoint homes, which the task-level classifier cannot reconstruct from a
     // task's routed source home alone. It still unions `reads` into participants
-    // and preserves their versioned OCC observations.
+    // and carries them for each participant's apply to validate.
     build_single_vshard_tx_class(tasks, tenant_id, reads)
 }
 
@@ -152,7 +184,8 @@ fn admit_legacy_multi_shard_dispatch(
 /// [`dispatch_strict_atomic_tasks_to_calvin`], while best-effort remains
 /// rejected because this helper has no non-atomic dispatch implementation.
 /// The transaction carries the roles of the identity the tasks were
-/// authorized for.
+/// authorized for. `reads` are a statement's plan-derivation reads, each at
+/// the cut it pinned.
 pub async fn dispatch_authorized_tasks_to_calvin(
     state: &SharedState,
     authorized: AuthorizedTaskSet,
@@ -180,7 +213,7 @@ pub async fn dispatch_authorized_tasks_to_calvin(
                 &tasks,
                 tenant_id,
                 position,
-                reads,
+                TxnReads::autocommit(reads)?,
                 lock_owner,
                 TxnProvenance::client(user_roles),
             )
@@ -196,9 +229,7 @@ pub async fn dispatch_authorized_tasks_to_calvin(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::control::server::shared::session::read_set::{
-        EngineTag, ReadKey, ReadOrigin, ReadPoint,
-    };
+    use crate::control::server::shared::session::read_set::{EngineTag, ReadKey, ReadPoint};
     use crate::types::{DatabaseId, VShardId};
     use nodedb_cluster::calvin::types::TxnIdWire;
     use nodedb_physical::physical_plan::{DocumentOp, GraphOp, PhysicalPlan};
@@ -235,8 +266,7 @@ mod tests {
             key: ReadKey::Point {
                 repr: ReadPoint::Surrogate(1),
             },
-            read_version: nodedb_types::WriteVersion::logged(0, 1),
-            origin: ReadOrigin::Session,
+            observed_at: None,
             home: None,
         }
     }

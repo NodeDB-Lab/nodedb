@@ -90,6 +90,8 @@ pub(super) fn apply_meta(ctx: &PermCtx<'_>, op: &mut MetaOp) -> crate::Result<()
         | MetaOp::ConvertCollection { .. }
         | MetaOp::RestoreTenantSnapshot { .. }
         | MetaOp::PurgeDepartedVShards { .. }
+        | MetaOp::PurgeVersionsBelow { .. }
+        | MetaOp::KvDueExpiries { .. }
         | MetaOp::PurgeTenant { .. }
         | MetaOp::UnregisterCollection { .. }
         | MetaOp::UnregisterMaterializedView { .. }
@@ -112,8 +114,7 @@ pub(super) fn apply_meta(ctx: &PermCtx<'_>, op: &mut MetaOp) -> crate::Result<()
         | MetaOp::CalvinDrop { .. }
         | MetaOp::CalvinResolve { .. }
         | MetaOp::ApplyTransactionRedo { .. }
-        | MetaOp::RestoreRedo(_)
-        | MetaOp::HomeVersions { .. } => Ok(()),
+        | MetaOp::RestoreRedo(_) => Ok(()),
     }
 }
 

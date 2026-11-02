@@ -123,6 +123,9 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_aggregate(
             limit: None,
             offset: 0,
             distinct: false,
+            // A temporal scan lowers through `convert_input_sourced_aggregate`
+            // above. A transaction block pins this cut to its snapshot.
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         return Ok(vec![build_input_sourced_aggregate_task(
             InputSourcedTaskParams {
@@ -167,8 +170,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_aggregate(
     // group; an explicit `LIMIT n` overwrites it — see `nodedb-sql`
     // `apply_limit`), so `limit == AGGREGATE_NO_LIMIT` means "no explicit
     // LIMIT". `grouping_sets` (ROLLUP / CUBE) cannot be shuffled either: the
-    // partial-state producer keys on the base GROUP BY columns only. Only honored
-    // in cluster mode (single-node has no peers to shuffle across).
+    // partial-state producer keys on the base GROUP BY columns only.
     //
     // These structural gates are correctness gates and are checked FIRST. The
     // shuffle is taken when EITHER the operator forces it
@@ -176,8 +178,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_aggregate(
     // the GROUP BY's estimated group cardinality. The cost model is consulted
     // only after the structural gates pass, so it can never override correctness;
     // force still wins (and short-circuits the stats lookup).
-    let shuffle_agg_eligible = ctx.cluster_enabled
-        && !group_strs.is_empty()
+    let shuffle_agg_eligible = !group_strs.is_empty()
         && bridge_sort_keys.is_empty()
         && limit == nodedb_sql::planner::aggregate::AGGREGATE_NO_LIMIT
         && bridge_grouping_sets.is_empty()
@@ -200,6 +201,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_aggregate(
         group_by: group_specs,
         aggregates: agg_specs,
         filters: filter_bytes,
+        system_time: nodedb_types::SystemTimeScope::Current,
         having: having_bytes,
         limit,
         sub_group_by: Vec::new(),

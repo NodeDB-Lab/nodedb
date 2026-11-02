@@ -76,7 +76,10 @@ macro_rules! impl_scan_search_arms_for_convert_visitor {
                 skip_payload_fetch,
                 payload_filters,
                 pk_prefilter,
+                temporal,
             } = args;
+            let system_time =
+                super::super::scan::search_system_time(temporal, collection, "vector search")?;
             super::super::scan::convert_vector_search(
                 super::super::scan_params::VectorSearchParams {
                     collection,
@@ -93,6 +96,7 @@ macro_rules! impl_scan_search_arms_for_convert_visitor {
                     skip_payload_fetch,
                     payload_filters,
                     pk_prefilter,
+                    system_time,
                 },
             )
         }
@@ -104,7 +108,10 @@ macro_rules! impl_scan_search_arms_for_convert_visitor {
             query_entries: &[(u32, f32)],
             top_k: usize,
             filters: &[nodedb_sql::types::Filter],
+            temporal: &nodedb_sql::TemporalScope,
         ) -> crate::Result<Vec<nodedb_physical::physical_task::PhysicalTask>> {
+            let system_time =
+                super::super::scan::search_system_time(temporal, collection, "sparse search")?;
             super::super::scan::convert_sparse_search(
                 super::super::scan_params::SparseSearchParams {
                     collection,
@@ -114,6 +121,7 @@ macro_rules! impl_scan_search_arms_for_convert_visitor {
                     filters,
                     tenant_id: self.tenant_id,
                     database_id: self.ctx.database_id,
+                    system_time,
                 },
             )
         }
@@ -127,7 +135,10 @@ macro_rules! impl_scan_search_arms_for_convert_visitor {
                 shape,
                 filters,
                 scores,
+                temporal,
             } = args;
+            let system_time =
+                super::super::scan::search_system_time(temporal, collection, "text search")?;
             super::super::scan::convert_text_search(
                 super::super::scan_params::TextSearchConvertParams {
                     collection,
@@ -136,6 +147,7 @@ macro_rules! impl_scan_search_arms_for_convert_visitor {
                     scores,
                     tenant_id: self.tenant_id,
                     database_id: self.ctx.database_id,
+                    system_time,
                 },
             )
         }
@@ -157,7 +169,10 @@ macro_rules! impl_scan_search_arms_for_convert_visitor {
                 mode,
                 fuzzy,
                 score_alias,
+                temporal,
             } = args;
+            let system_time =
+                super::super::scan::search_system_time(temporal, collection, "hybrid search")?;
             super::super::scan::convert_hybrid_search(
                 super::super::scan_params::HybridSearchParams {
                     collection,
@@ -174,6 +189,7 @@ macro_rules! impl_scan_search_arms_for_convert_visitor {
                     score_alias,
                     tenant_id: self.tenant_id,
                     database_id: self.ctx.database_id,
+                    system_time,
                 },
             )
         }
@@ -198,7 +214,10 @@ macro_rules! impl_scan_search_arms_for_convert_visitor {
                 fuzzy,
                 rrf_k,
                 score_alias,
+                temporal,
             } = args;
+            let system_time =
+                super::super::scan::search_system_time(temporal, collection, "hybrid search")?;
             let graph_edge_label_owned: Option<String> = graph_edge_label.map(str::to_owned);
             super::super::scan::convert_hybrid_search_triple(
                 super::super::scan_params::HybridSearchTripleParams {
@@ -219,6 +238,7 @@ macro_rules! impl_scan_search_arms_for_convert_visitor {
                     score_alias,
                     tenant_id: self.tenant_id,
                     database_id: self.ctx.database_id,
+                    system_time,
                 },
             )
         }
@@ -236,7 +256,10 @@ macro_rules! impl_scan_search_arms_for_convert_visitor {
                 attribute_filters,
                 limit,
                 projection,
+                temporal,
             } = args;
+            let system_time =
+                super::super::scan::search_system_time(temporal, collection, "spatial scan")?;
             super::super::scan::convert_spatial_scan(super::super::scan_params::SpatialScanParams {
                 collection,
                 field,
@@ -248,6 +271,7 @@ macro_rules! impl_scan_search_arms_for_convert_visitor {
                 projection,
                 tenant_id: self.tenant_id,
                 database_id: self.ctx.database_id,
+                system_time,
             })
         }
     };

@@ -12,43 +12,44 @@ use nodedb_cluster::calvin::types::{
     VersionedReadSet,
 };
 
-/// Map the neutral session read-set into the replicated, versioned
-/// [`VersionedReadSet`] carried on the `TxClass`.
-///
-/// Each [`ReadSetEntry`] becomes one [`VersionedReadEntry`], preserving
-/// engine, collection, read version, home, and the point/predicate
-/// distinction. Own-overlay exclusion already happened at capture time, so
-/// this is a faithful 1:1 projection.
+/// Map the neutral session read-set into the replicated read-set carried on
+/// the `TxClass`.
 pub(super) fn versioned_reads_from(reads: &[ReadSetEntry]) -> VersionedReadSet {
-    VersionedReadSet::new(
-        reads
-            .iter()
-            .map(|entry| VersionedReadEntry {
-                engine: entry.engine,
-                collection: entry.collection.clone(),
-                key: match &entry.key {
-                    ReadKey::Point { repr } => ReadKeyIdent::Point(repr.to_key_repr()),
-                    ReadKey::Predicate => ReadKeyIdent::Predicate,
-                    ReadKey::IndexEq { field, value } => ReadKeyIdent::IndexEq {
-                        field: field.clone(),
-                        value: value.clone(),
-                    },
-                    ReadKey::IndexRange { field, lo, hi } => ReadKeyIdent::IndexRange {
-                        field: field.clone(),
-                        lo: lo.clone(),
-                        hi: hi.clone(),
-                    },
+    VersionedReadSet::new(versioned_read_entries(reads))
+}
+
+/// Project each [`ReadSetEntry`] onto one replicated [`VersionedReadEntry`],
+/// preserving engine, collection, home, and the point, predicate, and index
+/// identity of the read. A Calvin `TxClass` and a single-shard redo record
+/// carry the same projection, and every apply validates it at the
+/// transaction's snapshot ordinal.
+pub(crate) fn versioned_read_entries(reads: &[ReadSetEntry]) -> Vec<VersionedReadEntry> {
+    reads
+        .iter()
+        .map(|entry| VersionedReadEntry {
+            engine: entry.engine,
+            collection: entry.collection.clone(),
+            key: match &entry.key {
+                ReadKey::Point { repr } => ReadKeyIdent::Point(repr.to_key_repr()),
+                ReadKey::Predicate => ReadKeyIdent::Predicate,
+                ReadKey::IndexEq { field, value } => ReadKeyIdent::IndexEq {
+                    field: field.clone(),
+                    value: value.clone(),
                 },
-                read_version: entry.read_version,
-                home_vshard: entry.home.map(|home| home.as_u32()),
-            })
-            .collect(),
-    )
+                ReadKey::IndexRange { field, lo, hi } => ReadKeyIdent::IndexRange {
+                    field: field.clone(),
+                    lo: lo.clone(),
+                    hi: hi.clone(),
+                },
+            },
+            home_vshard: entry.home.map(|home| home.as_u32()),
+        })
+        .collect()
 }
 
 /// Build the routing and lock `read_set` for a Calvin `TxClass` from the
 /// neutral session read-set. This is the key-IDENTITY set for participants
-/// and locks, not the versioned OCC set ([`versioned_reads_from`]).
+/// and locks, not the validation set ([`versioned_reads_from`]).
 ///
 /// Each read maps to the keys the scheduler locks `Shared`:
 /// - A point read locks its row: a surrogate or a KV key.
@@ -527,7 +528,6 @@ mod graph_read_lock_tests {
     use crate::control::cluster::calvin::scheduler::driver::helpers::{LockSite, expand_rw_set};
     use crate::control::cluster::calvin::scheduler::lock_manager::LockKey;
     use crate::control::planner::calvin::tx_class::write_keys::WriteKeys;
-    use crate::control::server::shared::session::read_set::ReadOrigin;
     use crate::types::{DatabaseId, RecordHomes, TenantId, VShardId};
     use nodedb_cluster::calvin::types::{SequencedTxn, TxClass};
     use std::sync::Arc;
@@ -539,8 +539,7 @@ mod graph_read_lock_tests {
             tenant_id: TenantId::new(1),
             collection: "g".to_owned(),
             key: ReadKey::Predicate,
-            read_version: nodedb_types::WriteVersion::logged(0, 5),
-            origin: ReadOrigin::Session,
+            observed_at: None,
             home,
         }
     }
@@ -596,5 +595,62 @@ mod graph_read_lock_tests {
             !read_mode.compatible(write_mode),
             "a graph read ({read_mode:?}) must conflict with an edge write ({write_mode:?})"
         );
+    }
+}
+
+/// The projection a single-shard redo record carries.
+#[cfg(test)]
+mod payload_read_tests {
+    use super::*;
+    use crate::types::{DatabaseId, KeyRepr, TenantId, VShardId};
+
+    fn read(collection: &str, key: ReadKey, home: Option<u32>) -> ReadSetEntry {
+        ReadSetEntry {
+            engine: EngineTag::Document,
+            database_id: DatabaseId::DEFAULT,
+            tenant_id: TenantId::new(1),
+            collection: collection.to_owned(),
+            key,
+            observed_at: None,
+            home: home.map(VShardId::new),
+        }
+    }
+
+    /// Every read reaches the projection, a read of a collection the
+    /// transaction writes included, with its identity and home intact.
+    #[test]
+    fn every_read_reaches_the_payload_projection() {
+        let reads = [
+            read(
+                "written",
+                ReadKey::Point {
+                    repr: ReadPoint::Surrogate(7),
+                },
+                None,
+            ),
+            read(
+                "written",
+                ReadKey::IndexEq {
+                    field: "$.email".into(),
+                    value: "a@b.c".into(),
+                },
+                None,
+            ),
+            read("edges", ReadKey::Predicate, Some(4)),
+        ];
+        let projected = versioned_read_entries(&reads);
+        assert_eq!(projected.len(), reads.len());
+        assert_eq!(projected[0].collection, "written");
+        assert_eq!(projected[0].key, ReadKeyIdent::Point(KeyRepr::Surrogate(7)));
+        assert_eq!(
+            projected[1].key,
+            ReadKeyIdent::IndexEq {
+                field: "$.email".into(),
+                value: "a@b.c".into(),
+            }
+        );
+        assert_eq!(projected[0].home_vshard, None);
+        assert_eq!(projected[2].key, ReadKeyIdent::Predicate);
+        assert_eq!(projected[2].home_vshard, Some(4));
     }
 }

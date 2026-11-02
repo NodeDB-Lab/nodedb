@@ -211,9 +211,7 @@ mod tests {
     use crate::control::planner::calvin::cross_shard_mode::CrossShardTxnMode;
     use crate::control::planner::calvin::types::{DispatchClass, DispatchOutcome};
     use crate::control::server::shared::session::TransactionState;
-    use crate::control::server::shared::session::read_set::{
-        EngineTag, ReadKey, ReadOrigin, ReadSetEntry,
-    };
+    use crate::control::server::shared::session::read_set::{EngineTag, ReadKey, ReadSetEntry};
     use crate::types::{DatabaseId, TenantId, VShardId};
     use nodedb_physical::physical_plan::{ColumnarOp, CrdtOp, DocumentOp, PhysicalPlan};
     use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
@@ -301,6 +299,7 @@ mod tests {
                 rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
                 resolved_sum_targets: Vec::new(),
                 declared_primary_key: None,
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             post_set_op: PostSetOp::None,
             txn_id: None,
@@ -364,12 +363,14 @@ mod tests {
             updates: vec![],
             system_from: None,
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         let delete = PhysicalPlan::Columnar(ColumnarOp::Delete {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "metrics"),
             filters: vec![],
             system_from: None,
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         assert!(
             is_write_plan(&update),
@@ -512,8 +513,7 @@ mod tests {
             tenant_id: TenantId::new(1),
             collection: read_coll.clone(),
             key: ReadKey::Predicate,
-            read_version: nodedb_types::WriteVersion::logged(0, 1),
-            origin: ReadOrigin::Session,
+            observed_at: None,
             home: None,
         };
 

@@ -110,6 +110,9 @@ pub struct PreexecRequest<'a> {
     /// The session transaction whose staged rows the scan also sees. `None`
     /// outside a transaction block.
     pub txn_id: Option<TxnId>,
+    /// The scope the scan reads at: `Current` outside a block, the block's
+    /// `TxnSnapshot` for a write the block stages.
+    pub system_time: nodedb_types::SystemTimeScope,
 }
 
 /// Dispatch a pre-execution scan for `request`. Returns the sorted list of
@@ -135,6 +138,7 @@ pub async fn run_preexec_scan(
         prefilter,
         identity,
         txn_id,
+        system_time,
     } = request;
     // `id` (the hex surrogate) is always included regardless of projection.
     // `_from`/`_to`/`_type`/`weight` surface the implicit edge of any matched
@@ -170,7 +174,7 @@ pub async fn run_preexec_scan(
         projection,
         computed_columns: vec![],
         window_functions: vec![],
-        system_time: nodedb_types::SystemTimeScope::Current,
+        system_time,
         valid_at_ms: None,
         prefilter,
     });
@@ -205,9 +209,8 @@ pub async fn run_preexec_scan(
 /// Each row in the response is a msgpack map `{"id": .., "data": {..}}`
 /// (`encode_raw_document_rows`). `id` is an 8-character lowercase hex string
 /// encoding the document's u32 surrogate (e.g. `"0000002a"` → `42u32`). Rows
-/// whose `id` cannot be parsed are skipped: they are legacy non-surrogate
-/// documents that predate the surrogate-keyed storage format and do not
-/// participate in OLLP verification.
+/// whose `id` is no storage key carry no surrogate. They are skipped and do
+/// not participate in OLLP verification.
 ///
 /// Additionally, for any row carrying BOTH `_from` and `_to` as strings, an
 /// implicit [`ScannedEdge`] is recorded (with the raw `_type` as `label`, or
@@ -241,10 +244,9 @@ fn decode_rows(rows: &Value, identity: RowIdentityRead<'_>) -> PreexecScan {
         let Value::Object(row) = row else {
             continue;
         };
-        // A row whose `id` is not a parseable 8-hex surrogate is a legacy
-        // non-surrogate document: it is excluded from the surrogate set AND
-        // cannot be a surrogate-keyed edge doc, so any edge it carries is
-        // skipped too.
+        // A row whose `id` is not a parseable 8-hex storage key carries no
+        // surrogate: it is excluded from the surrogate set AND cannot be a
+        // surrogate-keyed edge doc, so any edge it carries is skipped too.
         let Some(surrogate) = row
             .get("id")
             .and_then(Value::as_str)

@@ -386,6 +386,7 @@ mod tests {
             group_by: Vec::<GroupKeySpec>::new(),
             aggregates: specs,
             filters: Vec::new(),
+            system_time: nodedb_types::SystemTimeScope::Current,
             having: Vec::new(),
             limit: 0,
             sub_group_by: Vec::new(),
@@ -540,6 +541,7 @@ mod tests {
             group_by: Vec::<GroupKeySpec>::new(),
             aggregates: vec![spec],
             filters: Vec::new(),
+            system_time: nodedb_types::SystemTimeScope::Current,
             having: Vec::new(),
             limit: 0,
             sub_group_by: Vec::new(),
@@ -676,6 +678,7 @@ mod tests {
             limit: None,
             offset: 0,
             distinct: false,
+            system_time: nodedb_types::SystemTimeScope::Current,
         })
     }
 
@@ -689,6 +692,7 @@ mod tests {
             group_by: Vec::<GroupKeySpec>::new(),
             aggregates: vec![spec],
             filters: Vec::new(),
+            system_time: nodedb_types::SystemTimeScope::Current,
             having: Vec::new(),
             limit: usize::MAX,
             sub_group_by: Vec::new(),
@@ -735,6 +739,7 @@ mod tests {
             limit: None,
             offset: 0,
             distinct: false,
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         let plan = aggregate_over(gathered, agg_spec("min", "ssn"));
         assert_refused(check(&plan, &store, "support"));

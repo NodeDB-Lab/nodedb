@@ -311,7 +311,7 @@ pub fn build_output_schema<C: SqlCatalog + ?Sized>(
                 &view, agg,
             )?)
         }
-        // `ArrayElementwise` compiles to `ArrayOp::Elementwise`, which
+        // `ArrayElementwise` compiles to `ClusterArrayOp::Elementwise`, which
         // `describe_plan` classifies as `PlanKind::MultiRow`. `MultiRow`
         // responses are shaped by `shape_generic_rows` ->
         // `shape_decoded_rows`, which derives column names from the decoded
@@ -459,6 +459,7 @@ mod tests {
             payload_filters: Vec::new(),
             pk_prefilter: None,
             projection: id_and_dist_projection(),
+            temporal: nodedb_sql::TemporalScope::default(),
         }];
         let schema =
             build_output_schema(&plans, &NoCatalog, nodedb_types::DatabaseId::DEFAULT, None)
@@ -482,6 +483,7 @@ mod tests {
             fuzzy: false,
             score_alias: None,
             projection: id_and_dist_projection(),
+            temporal: nodedb_sql::TemporalScope::default(),
         })];
         let schema =
             build_output_schema(&plans, &NoCatalog, nodedb_types::DatabaseId::DEFAULT, None)
@@ -505,6 +507,7 @@ mod tests {
             filters: Vec::new(),
             scores: Vec::new(),
             projection: id_and_dist_projection(),
+            temporal: nodedb_sql::TemporalScope::default(),
         })];
         let schema =
             build_output_schema(&plans, &NoCatalog, nodedb_types::DatabaseId::DEFAULT, None)

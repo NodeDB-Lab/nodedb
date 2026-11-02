@@ -13,7 +13,7 @@ use super::super::aggregate::{
     extract_computed_columns, extract_projection_names, serialize_window_functions,
 };
 use super::super::expr::convert_sort_keys;
-use super::super::filter::serialize_filters;
+use super::super::filter::{serialize_filters, serialize_timeseries_filters};
 use super::super::scan_params::ScanParams;
 use super::super::value::{sql_value_to_bytes, sql_value_to_nodedb_value, sql_value_to_string};
 use crate::control::planner::sql_plan_convert::valid_time_point;
@@ -71,6 +71,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_scan(
                 limit: *limit,
                 offset: *offset,
                 distinct: *distinct,
+                system_time: temporal.system_time,
             }),
             post_set_op: PostSetOp::None,
             txn_id: None,
@@ -89,13 +90,14 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_scan(
             // The time range is derived in the Data Plane, from the query's
             // bounds on the collection's declared TIME_KEY column. Only the
             // core holding the collection knows which column that is.
+            // `_ts_system` predicates compare in stored ordinals.
             PhysicalPlan::Timeseries(TimeseriesOp::Scan {
                 collection: qualified_collection.clone(),
                 time_range: UNBOUNDED_TIME_RANGE,
                 sort_keys: sort.clone(),
                 projection: proj_names,
                 limit: limit.unwrap_or(usize::MAX),
-                filters: filter_bytes,
+                filters: serialize_timeseries_filters(filters)?,
                 bucket_interval_ms: 0,
                 group_by: Vec::new(),
                 aggregates: Vec::new(),
@@ -123,8 +125,8 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_scan(
         }),
         // A spatial collection stores its rows in the columnar engine, so its
         // scan is the columnar scan: no LIMIT reads every row under the byte
-        // budget. The planner refuses `AS OF` on a spatial collection, so the
-        // scope carried here is always the current one.
+        // budget. The columnar rows keep system-time versions, so the scan
+        // reads at the statement's system time.
         EngineType::Spatial => PhysicalPlan::Columnar(ColumnarOp::Scan {
             collection: qualified_collection.clone(),
             projection: proj_names,
@@ -153,6 +155,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_scan(
             // Original SQL planner output never carries a clone ceiling;
             // the clone resolver overrides it when delegating to source.
             surrogate_ceiling: None,
+            system_time: temporal.system_time,
         }),
         EngineType::DocumentSchemaless | EngineType::DocumentStrict => {
             PhysicalPlan::Document(DocumentOp::Scan {
@@ -259,7 +262,8 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_document_index_look
     let system_time = match temporal.system_time {
         scope @ (SystemTimeScope::Current
         | SystemTimeScope::AsOf(_)
-        | SystemTimeScope::Pinned { .. }) => scope,
+        | SystemTimeScope::Pinned { .. }
+        | SystemTimeScope::TxnSnapshot { .. }) => scope,
         SystemTimeScope::AllVersions => {
             return Err(crate::Error::PlanError {
                 detail: format!("index lookup on '{collection}' cannot list every version"),
@@ -309,6 +313,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_point_get(
             key: sql_value_to_bytes(key_value)?,
             rls_filters: Vec::new(),
             surrogate_ceiling: None,
+            system_time: SystemTimeScope::Current,
         }),
         EngineType::DocumentSchemaless | EngineType::DocumentStrict => {
             let pk_string = sql_value_to_string(key_value);

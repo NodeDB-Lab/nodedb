@@ -28,6 +28,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_recursive_scan(
             max_iterations: *p.max_iterations,
             distinct: *p.distinct,
             limit: *p.limit,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
         post_set_op: PostSetOp::None,
         txn_id: None,

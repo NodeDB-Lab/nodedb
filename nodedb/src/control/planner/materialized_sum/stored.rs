@@ -26,7 +26,7 @@ use nodedb_physical::physical_plan::{DocumentOp, MaterializedSumBinding, UpdateV
 use nodedb_types::Surrogate;
 use nodedb_types::id::TxnId;
 
-use super::recon::recon_point_row;
+use super::recon::{read_cut, recon_point_row};
 use super::resolve::lookup_join_value;
 use super::resolve_target::ResolvedTargets;
 use crate::control::state::SharedState;
@@ -77,13 +77,13 @@ pub(super) struct StoredRowScope<'a> {
 }
 
 /// What reading the stored row produced: the write's pre-/post-image pairs
-/// and the version they were read at — from the SAME read that resolved
-/// the join values, so a re-read will fold a different snapshot.
+/// and the cut they were read at — from the SAME read that resolved the join
+/// values, so a re-read will fold a different snapshot.
 pub(super) struct StoredImages {
     /// One pair per row this write touches — at most one, for a point shape.
     pub images: Vec<(Option<serde_json::Value>, Option<serde_json::Value>)>,
-    /// The source collection's version on its vShard at read time.
-    pub read_version: nodedb_types::WriteVersion,
+    /// The ordinal of the read cut taken before the read.
+    pub observed_at: i64,
 }
 
 /// The stored row an op rewrites or removes, or `None` for every op that
@@ -239,7 +239,9 @@ pub(super) async fn extend_with_stored_row(
     database_id: DatabaseId,
     trace_id: TraceId,
 ) -> crate::Result<StoredImages> {
-    let read = recon_point_row(
+    // The cut the stored image is validated at, taken before the read.
+    let observed_at = read_cut(state).await?;
+    let row = recon_point_row(
         state,
         tenant_id,
         database_id,
@@ -253,13 +255,13 @@ pub(super) async fn extend_with_stored_row(
     let outcome = StoredImages {
         images: images_of(
             scope,
-            read.rows.as_ref(),
+            row.as_ref(),
             &crate::control::crs_context::crs_context_for(state),
         )?,
-        read_version: read.read_version,
+        observed_at,
     };
 
-    if read.rows.is_none() {
+    if row.is_none() {
         // Nothing stored: the body-driven resolution already covers the only
         // target such a write can address.
         return Ok(outcome);

@@ -31,8 +31,6 @@ pub struct QueryContext {
     /// `INSERT INTO ARRAY` / `DELETE FROM ARRAY` to resolve and persist
     /// catalog entries. `None` for sub-planners that don't own array DDL.
     pub(super) array_catalog: Option<crate::control::array_catalog::ArrayCatalogHandle>,
-    /// WAL allocator — required by array DML for `wal_lsn` allocation.
-    pub(super) wal: Option<Arc<crate::wal::WalManager>>,
     /// The node a statement's `AS OF SYSTEM TIME` cut is pinned against
     /// (`statement_cut`). `None` before the node installs its gateway: a
     /// cut then stays unpinned, and the Data Plane reads it at the last
@@ -41,10 +39,6 @@ pub struct QueryContext {
     /// The node's surrogate assigner. Every write the planner lowers binds
     /// its rows through it.
     pub(super) surrogate_assigner: Arc<crate::control::surrogate::SurrogateAssigner>,
-    /// Cluster mode flag — `true` when the node has a live cluster
-    /// topology. Passed into `ConvertContext` so array converters can
-    /// emit `ClusterArray` variants instead of local `Array` variants.
-    pub(super) cluster_enabled: bool,
     /// Bitemporal retention registry — forwarded to `ConvertContext` so
     /// `ALTER ARRAY` can update the purge-scheduler's view of the
     /// array's retention policy. `None` for sub-planners.
@@ -106,6 +100,12 @@ pub struct QueryContext {
     /// that sequence access is unavailable rather than crossing sessions.
     pub(super) session_sequences:
         std::sync::Mutex<Option<Arc<crate::control::sequence::SessionSequenceValues>>>,
+    /// The calling connection's transaction snapshot, set per request by
+    /// the protocol's planning path (`set_txn_snapshot`). `Some` while the
+    /// connection is inside a transaction block: every read the next plan
+    /// call builds reads at it (`statement_cut`).
+    pub(super) txn_snapshot:
+        std::sync::Mutex<Option<crate::control::server::shared::session::TxnSnapshotCut>>,
 }
 
 impl QueryContext {
@@ -134,10 +134,8 @@ impl QueryContext {
             // `SharedState` owns the array catalog from construction, so every
             // context can plan array DML.
             array_catalog: Some(state.array_catalog.clone()),
-            wal: None,
             cut_state: state.self_arc().ok().map(|shared| Arc::downgrade(&shared)),
             surrogate_assigner: Arc::clone(&state.surrogate_assigner),
-            cluster_enabled: state.cluster_topology.is_some(),
             bitemporal_retention_registry: Some(Arc::clone(&state.bitemporal_retention_registry)),
             // max_vector_dim starts at 0 (unlimited); connection handlers
             // call set_max_vector_dim before each planning call.
@@ -156,6 +154,7 @@ impl QueryContext {
                 super::tuning::DEFAULT_SHUFFLE_AGG_THRESHOLD,
             ),
             session_sequences: std::sync::Mutex::new(None),
+            txn_snapshot: std::sync::Mutex::new(None),
         }
     }
 
@@ -176,10 +175,8 @@ impl QueryContext {
             },
             retention_registry: retention,
             array_catalog: Some(state.array_catalog.clone()),
-            wal: Some(Arc::clone(&state.wal)),
             cut_state: Some(Arc::downgrade(state)),
             surrogate_assigner: Arc::clone(&state.surrogate_assigner),
-            cluster_enabled: state.cluster_topology.is_some(),
             bitemporal_retention_registry: Some(Arc::clone(&state.bitemporal_retention_registry)),
             // max_vector_dim is tenant-specific; callers supply it via
             // `with_tenant_quota` after construction so the context can be
@@ -197,6 +194,7 @@ impl QueryContext {
                 super::tuning::DEFAULT_SHUFFLE_AGG_THRESHOLD,
             ),
             session_sequences: std::sync::Mutex::new(None),
+            txn_snapshot: std::sync::Mutex::new(None),
         }
     }
 }
@@ -212,6 +210,23 @@ impl QueryContext {
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         *slot = values;
+    }
+
+    /// Bind the calling connection's transaction snapshot for the next plan
+    /// call: `Some` inside a transaction block, `None` outside one.
+    pub fn set_txn_snapshot(
+        &self,
+        snapshot: Option<crate::control::server::shared::session::TxnSnapshotCut>,
+    ) {
+        let mut slot = self.txn_snapshot.lock().unwrap_or_else(|p| p.into_inner());
+        *slot = snapshot;
+    }
+
+    /// The transaction snapshot bound for the current plan call.
+    pub(super) fn txn_snapshot(
+        &self,
+    ) -> Option<crate::control::server::shared::session::TxnSnapshotCut> {
+        *self.txn_snapshot.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     /// The `currval` map bound for the current plan call.

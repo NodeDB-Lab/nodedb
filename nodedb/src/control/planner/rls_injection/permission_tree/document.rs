@@ -233,6 +233,7 @@ mod tests {
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
             resolved_sum_targets: Vec::new(),
             declared_primary_key: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         assert!(apply(&mut plan, &cache).is_ok());
         match &plan {
@@ -271,6 +272,7 @@ mod tests {
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
             resolved_sum_targets: Vec::new(),
             declared_primary_key: None,
+            target_system_time: nodedb_types::SystemTimeScope::Current,
         });
         assert!(apply(&mut plan, &cache).is_ok());
         match &plan {

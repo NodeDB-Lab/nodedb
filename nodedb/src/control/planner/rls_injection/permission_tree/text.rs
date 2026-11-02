@@ -76,6 +76,7 @@ mod tests {
             rls_filters: Vec::new(),
             scores: Vec::new(),
             bound: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         assert!(apply(&mut plan, &cache).is_ok());
         match &plan {
@@ -101,6 +102,7 @@ mod tests {
             filters: Vec::new(),
             rls_filters: Vec::new(),
             scores: Vec::new(),
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         assert!(apply(&mut plan, &cache).is_ok());
         match &plan {

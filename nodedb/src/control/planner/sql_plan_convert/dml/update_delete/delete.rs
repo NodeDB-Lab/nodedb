@@ -50,6 +50,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_delete(
                     // Attached by `inject_returning_spec` after plan conversion.
                     returning: None,
                     rls_filters: Vec::new(),
+                    system_time: nodedb_types::SystemTimeScope::Current,
                 }),
                 post_set_op: PostSetOp::None,
                 txn_id: None,
@@ -108,6 +109,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_delete(
                 filters: effective_filter,
                 system_from: None,
                 rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             post_set_op: PostSetOp::None,
             txn_id: None,
@@ -155,6 +157,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_delete(
                 // recon-scans the rows this predicate matches.
                 resolved_sum_targets: Vec::new(),
                 declared_primary_key,
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             post_set_op: PostSetOp::None,
             txn_id: None,
@@ -219,6 +222,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_delete(
                 // recon-scans the rows this predicate matches.
                 resolved_sum_targets: Vec::new(),
                 declared_primary_key,
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             post_set_op: PostSetOp::None,
             txn_id: None,
@@ -266,10 +270,8 @@ mod tests {
             retention_registry: None,
             array_catalog: None,
             credentials: Some(Arc::new(store)),
-            wal: None,
             surrogate_assigner:
                 crate::control::planner::sql_plan_convert::test_support::test_assigner(),
-            cluster_enabled: false,
             bitemporal_retention_registry: None,
             max_vector_dim: 0,
             force_shuffle_join: false,
@@ -279,6 +281,7 @@ mod tests {
             broadcast_threshold_bytes: 8 * 1024 * 1024,
             shuffle_agg_threshold: 10_000,
             prefetched: Default::default(),
+            reads_txn_snapshot: false,
             database_id: crate::types::DatabaseId::DEFAULT,
             tenant_id: crate::types::TenantId::new(0),
         };

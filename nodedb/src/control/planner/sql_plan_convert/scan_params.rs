@@ -112,6 +112,8 @@ pub(super) struct VectorSearchParams<'a> {
     /// Primary keys the search ranks among, lowered to
     /// `VectorOp::Search::filter_bitmap`. `None`: every row.
     pub pk_prefilter: Option<&'a [nodedb_sql::types::SqlValue]>,
+    /// The system time the search reads at.
+    pub system_time: nodedb_types::SystemTimeScope,
 }
 
 /// Parameters for `convert_sparse_search`.
@@ -126,6 +128,8 @@ pub(super) struct SparseSearchParams<'a> {
     pub filters: &'a [Filter],
     pub tenant_id: TenantId,
     pub database_id: crate::types::DatabaseId,
+    /// The system time the search reads at.
+    pub system_time: nodedb_types::SystemTimeScope,
 }
 
 /// Parameters for `convert_text_search`.
@@ -137,6 +141,8 @@ pub(super) struct TextSearchConvertParams<'a> {
     pub scores: &'a [nodedb_sql::types::TextScoreColumn],
     pub tenant_id: TenantId,
     pub database_id: crate::types::DatabaseId,
+    /// The system time the search reads at.
+    pub system_time: nodedb_types::SystemTimeScope,
 }
 
 /// Parameters for `convert_hybrid_search`.
@@ -160,6 +166,8 @@ pub(super) struct HybridSearchParams<'a> {
     pub score_alias: Option<&'a str>,
     pub tenant_id: TenantId,
     pub database_id: crate::types::DatabaseId,
+    /// The system time the search reads at.
+    pub system_time: nodedb_types::SystemTimeScope,
 }
 
 /// Parameters for `convert_hybrid_search_triple`.
@@ -183,6 +191,8 @@ pub(super) struct HybridSearchTripleParams<'a> {
     pub score_alias: Option<&'a str>,
     pub tenant_id: TenantId,
     pub database_id: crate::types::DatabaseId,
+    /// The system time the search reads at.
+    pub system_time: nodedb_types::SystemTimeScope,
 }
 
 /// Parameters for `convert_spatial_scan`.
@@ -197,4 +207,6 @@ pub(super) struct SpatialScanParams<'a> {
     pub projection: &'a [Projection],
     pub tenant_id: TenantId,
     pub database_id: crate::types::DatabaseId,
+    /// The system time the scan reads at.
+    pub system_time: nodedb_types::SystemTimeScope,
 }

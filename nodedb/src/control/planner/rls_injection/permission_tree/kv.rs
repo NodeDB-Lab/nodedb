@@ -117,7 +117,8 @@ pub(super) fn apply_kv(ctx: &PermCtx<'_>, op: &mut KvOp) -> crate::Result<()> {
         KvOp::ResolvedWrite { mutations, .. } => {
             for mutation in mutations.iter() {
                 let level = match mutation {
-                    nodedb_physical::physical_plan::KvResolvedMutation::Delete { .. } => {
+                    nodedb_physical::physical_plan::KvResolvedMutation::Delete { .. }
+                    | nodedb_physical::physical_plan::KvResolvedMutation::Reap { .. } => {
                         PermTreeLevel::Delete
                     }
                     _ => PermTreeLevel::Write,
@@ -157,6 +158,7 @@ mod tests {
             key: b"k1".to_vec(),
             rls_filters: Vec::new(),
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         assert!(apply(&mut plan, &cache).is_ok());
         match &plan {
@@ -191,6 +193,7 @@ mod tests {
         let mut plan = PhysicalPlan::Kv(KvOp::SortedIndexTopK {
             index_name: "leaderboard".into(),
             k: 10,
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         match apply(&mut plan, &cache) {
             Err(crate::Error::PlanError { detail }) => {
@@ -209,6 +212,7 @@ mod tests {
         let mut plan = PhysicalPlan::Kv(KvOp::SortedIndexTopK {
             index_name: "leaderboard".into(),
             k: 10,
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         let before = plan.clone();
         assert!(apply_without_tree(&mut plan).is_ok());

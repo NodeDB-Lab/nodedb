@@ -9,6 +9,7 @@ mod plan;
 mod streaming_mv;
 mod text;
 
+pub(crate) use aggregate::collect_columns;
 pub use expr_reads::{
     RedactionReadCheck, refuse_redacted_expression_reads, refuse_redacted_expression_reads_in_tasks,
 };

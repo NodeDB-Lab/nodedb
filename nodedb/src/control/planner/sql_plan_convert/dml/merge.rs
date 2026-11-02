@@ -103,6 +103,9 @@ pub(in super::super) fn convert_merge(
             // the neutral plan has no classification to derive keys from.
             resolved_sum_targets: Vec::new(),
             declared_primary_key,
+            // The statement cut pass pins it to the block's snapshot inside
+            // a transaction block.
+            target_system_time: nodedb_types::SystemTimeScope::Current,
         }),
         post_set_op: PostSetOp::None,
         txn_id: None,

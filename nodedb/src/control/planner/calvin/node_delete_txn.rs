@@ -47,12 +47,14 @@ pub async fn txn_node_delete_tasks(
         PhysicalPlan::Document(DocumentOp::BulkDelete {
             collection,
             filters,
+            system_time,
             ..
         }) => (
             collection,
             DeleteTarget::Rows {
                 filters: filters.clone(),
                 prefilter: None,
+                system_time: *system_time,
             },
         ),
         PhysicalPlan::Document(DocumentOp::PointDelete {
@@ -64,6 +66,9 @@ pub async fn txn_node_delete_tasks(
             DeleteTarget::Rows {
                 filters: Vec::new(),
                 prefilter: Some([*surrogate].into_iter().collect()),
+                // A point delete names its row: the row's current version
+                // with the staged writes on top.
+                system_time: nodedb_types::SystemTimeScope::Current,
             },
         ),
         PhysicalPlan::Crdt(CrdtOp::DocDelete {
@@ -115,7 +120,14 @@ pub async fn txn_node_delete_tasks(
     let (identities, scanned_edges) = match (target, prediction) {
         // The statement's prediction read these rows already.
         (DeleteTarget::Rows { .. }, Some(scan)) => (scan.identities.clone(), scan.edges.clone()),
-        (DeleteTarget::Rows { filters, prefilter }, None) => {
+        (
+            DeleteTarget::Rows {
+                filters,
+                prefilter,
+                system_time,
+            },
+            None,
+        ) => {
             let scan = run_preexec_scan(
                 state,
                 tenant_id,
@@ -128,6 +140,7 @@ pub async fn txn_node_delete_tasks(
                         declared_primary_key: declared_primary_key.as_deref(),
                     },
                     txn_id,
+                    system_time,
                 },
             )
             .await?;
@@ -196,6 +209,8 @@ enum DeleteTarget {
     Rows {
         filters: Vec<u8>,
         prefilter: Option<nodedb_types::SurrogateBitmap>,
+        /// The scope the rows are matched at, the delete's own.
+        system_time: nodedb_types::SystemTimeScope,
     },
     /// One CRDT document, whose id names its node.
     Document(String),

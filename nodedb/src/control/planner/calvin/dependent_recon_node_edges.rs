@@ -72,6 +72,8 @@ pub(super) async fn reconnoitre(
             prefilter: None,
             identity,
             txn_id: None,
+            // An autocommit recon reads the current state.
+            system_time: nodedb_types::SystemTimeScope::Current,
         },
     )
     .await?;

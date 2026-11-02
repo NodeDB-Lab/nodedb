@@ -169,6 +169,7 @@ mod tests {
                 alias: "s".into(),
             }],
             bound: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         })
     }
 
@@ -261,6 +262,7 @@ mod tests {
             filters: Vec::new(),
             rls_filters: Vec::new(),
             scores: vec![score],
+            system_time: nodedb_types::SystemTimeScope::Current,
         })
     }
 

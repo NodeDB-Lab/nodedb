@@ -26,6 +26,21 @@ pub(crate) fn serialize_filters(filters: &[Filter]) -> crate::Result<Vec<u8>> {
     encode_scan_filters(&scan_filters)
 }
 
+/// [`serialize_filters`] for a timeseries scan: every `_ts_system`
+/// predicate compares in stored ordinals
+/// ([`super::system_time::system_time_filters_to_ordinals`]).
+pub(crate) fn serialize_timeseries_filters(filters: &[Filter]) -> crate::Result<Vec<u8>> {
+    if filters.is_empty() {
+        return Ok(Vec::new());
+    }
+    let scan_filters: Vec<nodedb_query::scan_filter::ScanFilter> = filters
+        .iter()
+        .flat_map(|f| filter_to_scan_filters(&f.expr))
+        .collect();
+    let scan_filters = super::system_time::system_time_filters_to_ordinals(scan_filters)?;
+    encode_scan_filters(&scan_filters)
+}
+
 /// Serialize post-join WHERE filters, preserving table qualifiers inside full
 /// expression predicates so they resolve against alias-prefixed merged rows.
 pub(crate) fn serialize_join_post_filters(filters: &[Filter]) -> crate::Result<Vec<u8>> {

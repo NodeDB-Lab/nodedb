@@ -39,7 +39,7 @@ pub(super) async fn singular_period_value(
             let Some(surrogate) = surrogate else {
                 return Ok(None);
             };
-            let read = recon_point_row(
+            let row = recon_point_row(
                 scope.state,
                 scope.tenant_id,
                 scope.database_id,
@@ -49,8 +49,7 @@ pub(super) async fn singular_period_value(
                 *surrogate,
             )
             .await?;
-            Ok(read
-                .rows
+            Ok(row
                 .as_ref()
                 .and_then(|row| row.get(def.period_column.as_str()))
                 .and_then(|v| v.as_str())

@@ -169,7 +169,8 @@ pub(super) fn resolve_array_temporal(
     let system_time = match temporal.system_time {
         scope @ (nodedb_types::SystemTimeScope::Current
         | nodedb_types::SystemTimeScope::AsOf(_)
-        | nodedb_types::SystemTimeScope::Pinned { .. }) => scope,
+        | nodedb_types::SystemTimeScope::Pinned { .. }
+        | nodedb_types::SystemTimeScope::TxnSnapshot { .. }) => scope,
         nodedb_types::SystemTimeScope::AllVersions => {
             return Err(crate::Error::PlanError {
                 detail: format!(

@@ -26,10 +26,10 @@ use super::write_keys::task_write_keys;
 /// `reads` is the neutral session read-set captured during the transaction; it
 /// is projected onto the `TxClass`'s routing/identity `read_set` (collection-
 /// homed) so a txn that writes shard A but reads shard B enumerates B as a
-/// participant, and onto `versioned_reads` (write-versioned OCC validation set)
-/// for commit-time optimistic-concurrency validation. Autocommit and
-/// pure-write paths pass an empty slice, yielding an empty read_set and
-/// versioned_reads.
+/// participant, and onto `versioned_reads`, the set every participant's
+/// apply validates at the transaction's snapshot ordinal. The caller sets
+/// that ordinal on the class. Autocommit and pure-write paths pass an empty
+/// slice, yielding an empty read_set and versioned_reads.
 ///
 /// Returns `Err(SequencerUnavailable)` if msgpack encoding of plans fails.
 pub fn build_static_tx_class(
@@ -98,44 +98,15 @@ fn build_static_tx_class_impl(
     // and a row write its surrogate.
     let write_sets = task_write_keys(tasks)?.into_key_sets();
 
-    // Read-your-own-write: a SESSION read of a collection this txn also WRITES
-    // must NOT enter the OCC read set. The txn's own staged write advances that
-    // collection's write floor, so validating the earlier read against it will
-    // flag it stale and abort the commit — a false serialization conflict. This
-    // mirrors the written-collection exclusion the non-Calvin commit check
-    // (`session::commit::read_validation`) applies.
-    //
-    // A PLAN-DERIVATION read is exempt, and the exemption is what makes the
-    // derivation guard exist at all. Such a read observed COMMITTED base state
-    // BEFORE this transaction existed, and it is precisely the observation a
-    // value the transaction ships was computed from — a cross-shard
-    // materialized-sum settlement folds a delta from a pre-image of the source
-    // row and sends it to another shard. The source collection is one this
-    // statement always writes, so the exclusion will drop every such entry and
-    // `read_set_still_current` will validate nothing: a concurrent write
-    // between the fold and the apply will commit a total folded from an image
-    // that has moved. The kind is carried on the entry rather than inferred
-    // here, so no entry can be classified by accident of which collection it
-    // names.
-    let written_collections: std::collections::HashSet<String> = write_sets
-        .iter()
-        .map(|ks| ks.collection().to_string())
-        .collect();
-    let owned_reads: Vec<ReadSetEntry> = reads
-        .iter()
-        .filter(|e| {
-            e.origin.survives_own_write_exclusion()
-                || !written_collections.contains(e.collection.as_str())
-        })
-        .cloned()
-        .collect();
-
+    // Every read enters the read set, including a read of a collection the
+    // transaction writes. Validation compares committed versions with the
+    // snapshot, and a staged write moves no committed version, so the
+    // transaction never conflicts with its own writes.
     let write_set = ReadWriteSet::new(write_sets);
-    // Populate the routing/identity read_set from the (own-write-filtered)
-    // session read-set so a txn that writes shard A but reads shard B enumerates
-    // B as a participant. An empty read set (autocommit / pure-write, or all
-    // reads self-written) yields an empty read_set.
-    let read_set = read_set_from(&owned_reads);
+    // Populate the routing/identity read_set from the session read-set so a
+    // txn that writes shard A but reads shard B enumerates B as a participant.
+    // An empty read set (autocommit / pure-write) yields an empty read_set.
+    let read_set = read_set_from(reads);
 
     // Encode all plans as msgpack bytes.
     let plans: Vec<&PhysicalPlan> = tasks.iter().map(|t| &t.plan).collect();
@@ -144,10 +115,9 @@ fn build_static_tx_class_impl(
         detail: format!("failed to encode PhysicalPlan vec for Calvin TxClass: {e}"),
     })?;
 
-    // versioned_reads carries the write-versioned OCC validation set, populated
-    // from the same session read-set the routing `read_set` above was built
-    // from.
-    let versioned_reads = versioned_reads_from(&owned_reads);
+    // versioned_reads carries the validation set, populated from the same
+    // session read-set the routing `read_set` above was built from.
+    let versioned_reads = versioned_reads_from(reads);
 
     let result = if allow_single_vshard {
         TxClass::new_single_vshard_in_database(
@@ -178,9 +148,7 @@ fn build_static_tx_class_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::control::server::shared::session::read_set::{
-        EngineTag, ReadKey, ReadOrigin, ReadPoint,
-    };
+    use crate::control::server::shared::session::read_set::{EngineTag, ReadKey, ReadPoint};
     use crate::types::{DatabaseId, KeyRepr, VShardId};
     use nodedb_physical::physical_plan::DocumentOp;
     use nodedb_types::Surrogate;
@@ -224,24 +192,14 @@ mod tests {
         }
     }
 
-    fn read_entry(collection: &str, key: ReadKey, read_index: u64) -> ReadSetEntry {
-        origin_read_entry(collection, key, read_index, ReadOrigin::Session)
-    }
-
-    fn origin_read_entry(
-        collection: &str,
-        key: ReadKey,
-        read_index: u64,
-        origin: ReadOrigin,
-    ) -> ReadSetEntry {
+    fn read_entry(collection: &str, key: ReadKey) -> ReadSetEntry {
         ReadSetEntry {
             engine: EngineTag::Document,
             database_id: DatabaseId::DEFAULT,
             tenant_id: TenantId::new(1),
             collection: collection.to_owned(),
             key,
-            read_version: nodedb_types::WriteVersion::logged(0, read_index),
-            origin,
+            observed_at: None,
             home: None,
         }
     }
@@ -272,25 +230,24 @@ mod tests {
         let (col_a, col_b) = two_distinct_collections();
         let tasks = vec![point_insert_task(&col_a, 1), point_insert_task(&col_b, 2)];
 
-        // Synthetic read-set: one point read (surrogate identity) at index 7 and
-        // one collection-scoped predicate read at index 11, on two collections
-        // distinct from the write collections.
+        // Synthetic read-set: one point read (surrogate identity) and one
+        // collection-scoped predicate read, on two collections distinct from
+        // the write collections.
         let reads = vec![
             read_entry(
                 "read_col",
                 ReadKey::Point {
                     repr: ReadPoint::Surrogate(42),
                 },
-                7,
             ),
-            read_entry("scan_col", ReadKey::Predicate, 11),
+            read_entry("scan_col", ReadKey::Predicate),
         ];
 
         let tx = build_static_tx_class(&tasks, TenantId::new(1), &reads)
             .expect("valid multi-vShard TxClass");
 
-        // versioned_reads (the versioned OCC validation set) carries the
-        // same session reads, 1:1, for commit-time validation.
+        // versioned_reads (the validation set) carries the same session reads,
+        // 1:1.
         assert_eq!(
             tx.versioned_reads.len(),
             reads.len(),
@@ -298,7 +255,6 @@ mod tests {
         );
         for (entry, read) in tx.versioned_reads.iter().zip(reads.iter()) {
             assert_eq!(entry.collection, read.collection);
-            assert_eq!(entry.read_version, read.read_version);
             let expected_key = match &read.key {
                 ReadKey::Point { repr } => {
                     nodedb_cluster::calvin::types::ReadKeyIdent::Point(repr.to_key_repr())
@@ -394,13 +350,12 @@ mod tests {
         let (col_a, col_b) = two_distinct_collections();
         let tasks = vec![point_insert_task(&col_a, 1), point_insert_task(&col_b, 2)];
         let reads = vec![
-            read_entry("scan_col", ReadKey::Predicate, 11),
+            read_entry("scan_col", ReadKey::Predicate),
             read_entry(
                 "read_col",
                 ReadKey::Point {
                     repr: ReadPoint::Surrogate(9),
                 },
-                10,
             ),
         ];
         let reader = build_static_tx_class(&tasks, TenantId::new(1), &reads)
@@ -466,28 +421,21 @@ mod tests {
         );
     }
 
-    /// A PLAN-DERIVATION read of a collection the transaction WRITES survives
-    /// the own-write exclusion, reaching BOTH the routing read_set and the
-    /// write-versioned `versioned_reads` the Data Plane's
-    /// `read_set_still_current` check consumes.
-    ///
-    /// This is the whole of the cross-shard materialized-sum guard: the delta
-    /// shipped to the target was folded from a pre-image of a source row, and
-    /// the source collection is one the statement always writes. Dropped here,
-    /// nothing validates the fold and a concurrent write to the source row
-    /// between the fold and the apply commits a wrong total.
+    /// A read of a collection the transaction also writes reaches both the
+    /// routing read_set and `versioned_reads`. A staged write moves no
+    /// committed version, so validating the read never aborts the
+    /// transaction on its own write, and a concurrent writer of the row still
+    /// aborts it.
     #[test]
-    fn a_derivation_read_of_a_written_collection_survives_the_own_write_exclusion() {
+    fn a_read_of_a_written_collection_is_validated() {
         let (col_a, col_b) = two_distinct_collections();
         let tasks = vec![point_insert_task(&col_a, 1), point_insert_task(&col_b, 2)];
 
-        let reads = vec![origin_read_entry(
+        let reads = vec![read_entry(
             &col_a,
             ReadKey::Point {
                 repr: ReadPoint::Surrogate(11),
             },
-            42,
-            ReadOrigin::PlanDerivation,
         )];
 
         let tx = build_static_tx_class(&tasks, TenantId::new(1), &reads)
@@ -496,13 +444,9 @@ mod tests {
         assert_eq!(
             tx.versioned_reads.len(),
             1,
-            "a derivation read must reach versioned_reads — that set IS the guard"
+            "a read of a written collection must reach versioned_reads"
         );
         assert_eq!(tx.versioned_reads.0[0].collection, col_a);
-        assert_eq!(
-            tx.versioned_reads.0[0].read_version,
-            nodedb_types::WriteVersion::logged(0, 42)
-        );
         assert_eq!(
             tx.versioned_reads.0[0].key,
             nodedb_cluster::calvin::types::ReadKeyIdent::Point(KeyRepr::Surrogate(11))
@@ -512,38 +456,7 @@ mod tests {
             tx.read_set.0.iter().map(|ks| ks.collection()).collect();
         assert!(
             read_colls.contains(col_a.as_str()),
-            "a derivation read must also reach the routing read_set"
-        );
-    }
-
-    /// The other half: an ordinary SESSION read of a collection the transaction
-    /// writes is excluded. Without this, disabling the exclusion will pass the
-    /// test above, and every transaction that reads a row it
-    /// then writes will abort on its own staged write.
-    #[test]
-    fn a_session_read_of_a_written_collection_is_still_excluded() {
-        let (col_a, col_b) = two_distinct_collections();
-        let tasks = vec![point_insert_task(&col_a, 1), point_insert_task(&col_b, 2)];
-
-        let reads = vec![read_entry(
-            &col_a,
-            ReadKey::Point {
-                repr: ReadPoint::Surrogate(11),
-            },
-            42,
-        )];
-
-        let tx = build_static_tx_class(&tasks, TenantId::new(1), &reads)
-            .expect("valid multi-vShard TxClass");
-
-        assert!(
-            tx.versioned_reads.is_empty(),
-            "a session read of a self-written collection must not be validated \
-             against the transaction's own staged write"
-        );
-        assert!(
-            tx.read_set.is_empty(),
-            "and it must not enter the routing read_set either"
+            "a read of a written collection must also reach the routing read_set"
         );
     }
 

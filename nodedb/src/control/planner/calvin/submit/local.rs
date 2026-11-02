@@ -38,7 +38,7 @@ pub(super) fn synthetic_returning_response(payload_bytes: Vec<u8>) -> Response {
         watermark_lsn: Lsn::ZERO,
         error_code: None,
         stage_vote: None,
-        read_versions: crate::types::ReadVersions::new(),
+        read_vshards: crate::types::ReadShards::new(),
         write_set: Vec::new(),
     }
 }
@@ -56,38 +56,55 @@ pub(crate) fn raise_metadata_floor(state: &SharedState, tx_class: &mut TxClass) 
     tx_class.metadata_floor = tx_class.metadata_floor.max(floor);
 }
 
-/// Stamp the incarnation this node's catalog holds for every user collection
-/// `plans` name. `plans` are `tx_class`'s decoded plans. The coordinator
-/// stamps first, against the catalog it planned with. A forwarded submit
-/// arrives stamped and keeps its stamps.
+/// Stamp the incarnation this node's catalogs hold for every user collection
+/// and every array `plans` name. `plans` are `tx_class`'s decoded plans. The
+/// coordinator stamps first, against the catalogs it planned with. A
+/// forwarded submit arrives stamped and keeps its stamps.
 pub(crate) fn stamp_incarnations(
     state: &SharedState,
     tx_class: &mut TxClass,
     plans: &[PhysicalPlan],
 ) -> crate::Result<()> {
+    use nodedb_cluster::calvin::types::{CalvinIncarnation, IncarnationKind};
+
     // A split class was stamped by its coordinator before the split, and no
     // longer carries its plans in `plans`.
     if !tx_class.incarnations.is_empty() || tx_class.is_multi_part() {
         return Ok(());
     }
-    let mut named = std::collections::BTreeSet::new();
-    for plan in plans {
-        // Array cell writes route by the array's own incarnation.
-        if matches!(plan, PhysicalPlan::Array(_) | PhysicalPlan::ClusterArray(_)) {
-            continue;
-        }
-        named.extend(plan.named_collections().into_iter().map(str::to_owned));
-    }
+    let named =
+        crate::control::planner::calvin::incarnation_names::incarnation_names(plans, |plan| {
+            plan.named_collections()
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        });
     let catalog = state.credentials.catalog();
+    let mirror =
+        crate::control::array_catalog::named_incarnation::read_mirror(&state.array_catalog);
     let tenant_id = tx_class.tenant_id.as_u64();
     let mut incarnations = Vec::with_capacity(named.len());
-    for collection in named {
-        let incarnation = catalog.incarnation_of(tx_class.database_id, tenant_id, &collection)?;
-        incarnations.push(nodedb_cluster::calvin::types::CalvinIncarnation {
+    for (collection, kind) in named {
+        let incarnation = match kind {
+            IncarnationKind::Collection => {
+                catalog.incarnation_of(tx_class.database_id, tenant_id, &collection)?
+            }
+            IncarnationKind::Array => {
+                crate::control::array_catalog::named_incarnation::array_incarnation_of(
+                    &mirror,
+                    tx_class.tenant_id,
+                    tx_class.database_id,
+                    &collection,
+                )
+            }
+        };
+        incarnations.push(CalvinIncarnation {
             collection,
             incarnation,
+            kind,
         });
     }
+    drop(mirror);
     tx_class.set_incarnations(incarnations);
     Ok(())
 }

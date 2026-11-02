@@ -126,9 +126,7 @@ mod tests {
             retention_registry: None,
             array_catalog: None,
             credentials: None,
-            wal: None,
             surrogate_assigner: Arc::clone(assigner),
-            cluster_enabled: true,
             bitemporal_retention_registry: None,
             max_vector_dim: 0,
             database_id: DatabaseId::DEFAULT,
@@ -140,6 +138,7 @@ mod tests {
             broadcast_threshold_bytes: 0,
             shuffle_agg_threshold: 0,
             prefetched: Default::default(),
+            reads_txn_snapshot: false,
         }
     }
 

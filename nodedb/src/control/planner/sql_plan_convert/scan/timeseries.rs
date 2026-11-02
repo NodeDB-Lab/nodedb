@@ -12,7 +12,7 @@ use super::super::aggregate::{
     agg_expr_to_pair, extract_computed_columns, extract_projection_names,
 };
 use super::super::expr::convert_sort_keys;
-use super::super::filter::serialize_filters;
+use super::super::filter::{serialize_filters, serialize_timeseries_filters};
 use super::super::scan_params::TimeseriesScanParams;
 use super::super::value::{InstantForm, row_to_msgpack_with, write_msgpack_array_header};
 use crate::control::planner::sql_plan_convert::valid_time_point;
@@ -54,7 +54,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_timeseries_scan(
         .collect::<crate::Result<_>>()?;
     let collection_key = nodedb_types::CollectionKey::from_bare(ctx.database_id, collection);
     let qualified_collection = nodedb_types::QualifiedCollection::new(ctx.database_id, collection);
-    let filter_bytes = serialize_filters(filters)?;
+    let filter_bytes = serialize_timeseries_filters(filters)?;
     let having_bytes = serialize_filters(having)?;
     let agg_pairs: Vec<(String, String)> = aggregates
         .iter()
