@@ -133,7 +133,6 @@ pub fn replay_sync_hwm_records(
             | RecordType::ChangePosition
             | RecordType::RestorePoint
             // None of these carries a sync HWM.
-            | RecordType::GraphNodeCascade
             | RecordType::GraphEdgeCut
             | RecordType::SnapshotInstalled
             | RecordType::WriteGroup

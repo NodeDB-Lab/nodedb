@@ -56,14 +56,12 @@ impl ColumnarConflictPolicy {
 
 /// Decoded fields of a `TimeseriesBatch` WAL record.
 pub(crate) struct DecodedBatchRecord {
-    /// `Some("columnar")` / `Some("timeseries")` for tagged records, `None`
-    /// for the untagged 2-tuple shape.
-    pub kind: Option<String>,
+    /// `"columnar"` for a map record, `"timeseries"` for an ingest tuple.
+    pub kind: String,
     pub collection: String,
     pub payload: Vec<u8>,
     pub provenance: Option<nodedb_types::sync::wire::SyncProvenance>,
-    /// Present in the six-element timeseries tuple. The shorter tuple shapes
-    /// carry none, and replay refuses a timeseries record without one.
+    /// Present in the six-element timeseries tuple. A map record carries none.
     pub format: Option<String>,
     /// Non-empty only for map-shaped columnar records.
     pub surrogates: Vec<nodedb_types::Surrogate>,
@@ -76,11 +74,14 @@ pub(crate) struct DecodedBatchRecord {
     /// The system-time ordinal of a bitemporal columnar insert's first row.
     /// `None` for every other record shape.
     pub system_from: Option<i64>,
+    /// The stamps of each row of a RESTORE re-issue, index-aligned with the
+    /// payload rows. Empty for every other record.
+    pub restored_versions: Vec<nodedb_types::columnar::RestoredVersion>,
 }
 
 impl DecodedBatchRecord {
     fn tuple(
-        kind: Option<String>,
+        kind: String,
         collection: String,
         payload: Vec<u8>,
         provenance: Option<nodedb_types::sync::wire::SyncProvenance>,
@@ -97,6 +98,7 @@ impl DecodedBatchRecord {
             conflict_policy: Vec::new(),
             default_timestamp_ms,
             system_from: None,
+            restored_versions: Vec::new(),
         }
     }
 }
@@ -105,12 +107,13 @@ type ProvenanceField = Option<nodedb_types::sync::wire::SyncProvenance>;
 
 /// Decode a `TimeseriesBatch` WAL payload into its logical fields.
 ///
-/// Tries the map form and the longest tuple forms first. The map form is
-/// unambiguous from the tuple forms, and zerompk enforces tuple arity.
+/// Two shapes decode: the map-shaped `ColumnarWalRecord`, and the six-element
+/// timeseries ingest tuple. zerompk enforces tuple arity, so every other
+/// shape fails.
 pub(crate) fn decode_batch_record(payload: &[u8]) -> Result<DecodedBatchRecord, ()> {
     if let Ok(rec) = zerompk::from_msgpack::<nodedb_types::columnar::ColumnarWalRecord>(payload) {
         return Ok(DecodedBatchRecord {
-            kind: Some(rec.kind),
+            kind: rec.kind,
             collection: rec.collection,
             payload: rec.payload,
             provenance: rec.provenance,
@@ -119,13 +122,14 @@ pub(crate) fn decode_batch_record(payload: &[u8]) -> Result<DecodedBatchRecord, 
             conflict_policy: rec.conflict_policy,
             default_timestamp_ms: None,
             system_from: rec.system_from,
+            restored_versions: rec.restored_versions,
         });
     }
     zerompk::from_msgpack::<(String, String, Vec<u8>, ProvenanceField, String, i64)>(payload)
         .map(
             |(kind, collection, payload, provenance, format, default_ms)| {
                 DecodedBatchRecord::tuple(
-                    Some(kind),
+                    kind,
                     collection,
                     payload,
                     provenance,
@@ -134,31 +138,5 @@ pub(crate) fn decode_batch_record(payload: &[u8]) -> Result<DecodedBatchRecord, 
                 )
             },
         )
-        .or_else(|_| {
-            zerompk::from_msgpack::<(String, String, Vec<u8>, ProvenanceField)>(payload).map(
-                |(kind, collection, payload, provenance)| {
-                    DecodedBatchRecord::tuple(
-                        Some(kind),
-                        collection,
-                        payload,
-                        provenance,
-                        None,
-                        None,
-                    )
-                },
-            )
-        })
-        .or_else(|_| {
-            zerompk::from_msgpack::<(String, String, Vec<u8>)>(payload).map(
-                |(kind, collection, payload)| {
-                    DecodedBatchRecord::tuple(Some(kind), collection, payload, None, None, None)
-                },
-            )
-        })
-        .or_else(|_| {
-            zerompk::from_msgpack::<(String, Vec<u8>)>(payload).map(|(collection, payload)| {
-                DecodedBatchRecord::tuple(None, collection, payload, None, None, None)
-            })
-        })
         .map_err(|_| ())
 }

@@ -47,6 +47,9 @@ impl WalAppender<'_> {
         self.append_record(RecordType::LogBatch, tid, vs, db, p)
     }
 
+    /// Append an array cell put. It is a row-write record: replay keeps the
+    /// stamps of a restored write's cells, so it carries the event source
+    /// its write ran with.
     pub fn append_array_put(
         &self,
         tid: TenantId,
@@ -54,9 +57,11 @@ impl WalAppender<'_> {
         db: DatabaseId,
         p: &[u8],
     ) -> crate::Result<Lsn> {
-        self.append_record(RecordType::ArrayPut, tid, vs, db, p)
+        self.append_row_record(RecordType::ArrayPut, tid, vs, db, p)
     }
 
+    /// Append an array cell delete. It carries its write's event source, as
+    /// [`Self::append_array_put`] does.
     pub fn append_array_delete(
         &self,
         tid: TenantId,
@@ -64,6 +69,6 @@ impl WalAppender<'_> {
         db: DatabaseId,
         p: &[u8],
     ) -> crate::Result<Lsn> {
-        self.append_record(RecordType::ArrayDelete, tid, vs, db, p)
+        self.append_row_record(RecordType::ArrayDelete, tid, vs, db, p)
     }
 }

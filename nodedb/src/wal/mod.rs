@@ -22,12 +22,17 @@ pub(crate) use crdt_payload::{
 };
 pub use manager::WalManager;
 pub use redo::{
-    CalvinStamp, CapturedEntry, CarriedRedoStream, CascadedEdge, ContinuedRedo,
-    CrossShardAppliedKey, EVERY_ROW, EdgeCutRedo, EdgeDeleteRedo, EdgePutRedo, GroupMembership,
-    NodeCascadeRedo, NodeLabelRedo, OriginAppend, PublishPosition, RedoChunkHeader, RedoChunkPiece,
-    RedoChunkRecord, RedoPublish, RedoRecord, RedoRowChange, RedoRowKind, RedoRowSource,
-    RedoStreamId, RedoSubRecord, RowSourceIndex, SplitRedo, WriteGroup, WriteGroupRecord,
-    WriteSetCapture, split_redo,
+    ARRAY_RESTORE, ArrayRestoreRedo, COLUMNAR_RESTORE, CalvinStamp, CapturedEntry,
+    CarriedRedoStream, ColumnarRestoreRedo, ColumnarRestoreVersion, ContinuedRedo,
+    CrossShardAppliedKey, DocumentDeleteRedo, DocumentPutRedo, DocumentPutStamp, EVERY_ROW,
+    EdgeCutRedo, EdgeDeleteRedo, EdgePutRedo, GroupMembership, KV_RESTORE, KvRestoreLive,
+    KvRestoreRedo, KvRestoreVersion, NodeLabelRedo, OriginAppend, PublishPosition, RedoChunkHeader,
+    RedoChunkPiece, RedoChunkRecord, RedoPublish, RedoRecord, RedoRowChange, RedoRowKind,
+    RedoRowSource, RedoStreamId, RedoSubRecord, RowSourceIndex, SplitRedo,
+    TIMESERIES_ENDED_PARTITION, TIMESERIES_RESTORE, TIMESERIES_SERIES_CATALOG,
+    TimeseriesEndedPartitionRedo, TimeseriesRestoreRedo, TimeseriesSeriesCatalogRedo,
+    VECTOR_RESTORE, VectorRestoreLive, VectorRestoreNode, VectorRestoreRedo, WriteGroup,
+    WriteGroupRecord, WriteSetCapture, split_redo,
 };
 pub use replay::SyncHwmReplayMaps;
 pub use replay::SyncHwmReplayStats;

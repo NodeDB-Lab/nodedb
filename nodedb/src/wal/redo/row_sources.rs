@@ -42,7 +42,6 @@ pub struct RedoRowSource {
     pub event_source: u8,
     /// The rows of the group. Empty: every row of the collection.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[msgpack(default)]
     pub rows: Vec<String>,
 }
 

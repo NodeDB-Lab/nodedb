@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! The record group of one write, and the node cascade sub-record.
+//! The record group of one write.
 //!
 //! A write that stores rows its apply decides journals them after apply, in
 //! one or more `WriteGroup` part records. Every part names the write's
@@ -59,8 +59,6 @@ pub struct WriteGroup {
     pub parts: u32,
     /// On a continuation of a record whole at append: how many continuations
     /// the record has. `0` on every other record.
-    #[serde(default)]
-    #[msgpack(default)]
     pub closed: u32,
 }
 
@@ -147,7 +145,6 @@ pub struct WriteGroupRecord {
     /// for one WAL record: the row metadata its events read (see
     /// [`super::continuation`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[msgpack(default)]
     pub redo: Option<super::continuation::ContinuedRedo>,
 }
 
@@ -165,47 +162,6 @@ impl WriteGroupRecord {
             detail: format!("write group record decode: {e}"),
         })
     }
-}
-
-/// One edge a node cascade tombstoned, at the ordinal of its tombstone.
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-)]
-#[msgpack(map)]
-pub struct CascadedEdge {
-    pub collection: String,
-    pub src: String,
-    pub label: String,
-    pub dst: String,
-    /// The ordinal of the edge's tombstone. Replay writes the tombstone at
-    /// it and never stamps a new one.
-    pub system_from: i64,
-}
-
-/// The payload of a `GraphNodeCascade` sub-record: every edge one document
-/// delete's node cascade tombstoned, each at its own ordinal.
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-)]
-#[msgpack(map)]
-pub struct NodeCascadeRedo {
-    /// The deleted node. Its identity binding goes with its edges.
-    pub node: String,
-    pub edges: Vec<CascadedEdge>,
 }
 
 /// The groups a stream of `WriteGroup` records names, and which of them are

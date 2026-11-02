@@ -138,12 +138,10 @@ impl WalManager {
     }
 
     /// Anchor every record recovered at open that no persisted anchor covers.
-    ///
-    /// Boot calls this once after [`Self::replay`] and before any append, so
-    /// the WAL frontier is the last recovered LSN.
+    /// Boot calls this once after [`Self::replay`].
     pub fn anchor_recovered_tail(&self) {
-        let last_recovered = self.next_lsn().as_u64().saturating_sub(1);
-        self.time_anchors.cover_recovered(last_recovered);
+        self.time_anchors
+            .cover_recovered(self.recovered_through().as_u64());
     }
 
     /// Replay all committed records from the WAL.
@@ -165,6 +163,22 @@ impl WalManager {
         let records = Self::without_aborted_writes(records)?;
         info!(records = records.len(), "WAL replay complete");
         Ok(records)
+    }
+
+    /// Replay every committed record from the WAL, refused writes included.
+    ///
+    /// For the change-position ledger only. A refused forward record still
+    /// names the write's origin: the write journals its rows as group parts
+    /// and an abort marker, and every event rebuilt from those parts names
+    /// the origin LSN. The ledger must position that LSN, so it reads the
+    /// forward record the filtered [`Self::replay`] drops.
+    pub fn replay_with_refused(&self) -> crate::Result<Vec<WalRecord>> {
+        let records = nodedb_wal::segmented::replay_all_segments(
+            &self.wal_dir,
+            self.encryption_ring.as_ref(),
+        )
+        .map_err(crate::Error::Wal)?;
+        self.without_time_anchors(records)
     }
 
     /// Replay committed records from the WAL starting at `from_lsn`.
@@ -273,6 +287,30 @@ mod tests {
                 payload,
             )
             .expect("append")
+    }
+
+    /// The recovered end is the log as it opened. An append after open,
+    /// readable or not, never moves it.
+    #[test]
+    fn the_recovered_end_is_fixed_at_open() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("wal");
+
+        let last = {
+            let wal = WalManager::open_for_testing(&path).expect("open wal");
+            assert_eq!(wal.recovered_through(), Lsn::ZERO);
+            put(&wal, b"a");
+            put(&wal, b"b");
+            wal.sync().expect("sync");
+            assert_eq!(wal.recovered_through(), Lsn::ZERO);
+            // The sync logs a time anchor, so the last record is not a put.
+            Lsn::new(wal.next_lsn().as_u64() - 1)
+        };
+
+        let wal = WalManager::open_for_testing(&path).expect("reopen wal");
+        assert_eq!(wal.recovered_through(), last);
+        put(&wal, b"c");
+        assert_eq!(wal.recovered_through(), last);
     }
 
     #[test]

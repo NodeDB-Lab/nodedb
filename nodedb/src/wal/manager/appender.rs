@@ -20,6 +20,11 @@
 //! carries the write's commit instant, which the caller names with
 //! [`WalAppender::with_commit_hlc`]. Every other record carries the node's HLC
 //! at its append.
+//!
+//! A record of a write that stamps system time carries the write's
+//! system-time ordinal, which the caller names with
+//! [`WalAppender::with_system_ordinal`]. The live apply and every replay of
+//! the record stamp that ordinal.
 
 use std::sync::Mutex;
 
@@ -67,6 +72,9 @@ pub struct WalAppender<'a> {
     /// The commit HLC every record carries. `None` stamps each record with the
     /// node's HLC at its append.
     commit_hlc: Option<u64>,
+    /// The system-time ordinal every record carries.
+    /// `nodedb_wal::NO_SYSTEM_ORDINAL` until the caller names one.
+    system_ordinal: i64,
     /// Collects every record this appender writes, when set.
     sink: Option<&'a dyn AppendSink>,
 }
@@ -81,6 +89,7 @@ impl WalManager {
             apply_key,
             event_source: nodedb_wal::NO_EVENT_SOURCE,
             commit_hlc: None,
+            system_ordinal: nodedb_wal::NO_SYSTEM_ORDINAL,
             sink: None,
         }
     }
@@ -97,6 +106,7 @@ impl WalManager {
             apply_key,
             event_source: nodedb_wal::NO_EVENT_SOURCE,
             commit_hlc: None,
+            system_ordinal: nodedb_wal::NO_SYSTEM_ORDINAL,
             sink: Some(sink),
         }
     }
@@ -121,6 +131,16 @@ impl WalAppender<'_> {
     pub fn with_commit_hlc(self, commit_hlc: u64) -> Self {
         Self {
             commit_hlc: Some(commit_hlc),
+            ..self
+        }
+    }
+
+    /// This appender, with every record carrying `ordinal`: the system-time
+    /// ordinal the write the records belong to stamps. `None` leaves the
+    /// records without one.
+    pub fn with_system_ordinal(self, ordinal: Option<i64>) -> Self {
+        Self {
+            system_ordinal: ordinal.unwrap_or(nodedb_wal::NO_SYSTEM_ORDINAL),
             ..self
         }
     }
@@ -166,6 +186,7 @@ impl WalAppender<'_> {
             database_id: database_id.as_u64(),
             event_source: nodedb_wal::NO_EVENT_SOURCE,
             commit_hlc: self.record_hlc(),
+            system_ordinal: self.system_ordinal,
         };
         self.append_target(target, tenant_id, vshard_id, database_id, payload)
     }
@@ -195,6 +216,7 @@ impl WalAppender<'_> {
             database_id: database_id.as_u64(),
             event_source: self.event_source,
             commit_hlc: self.record_hlc(),
+            system_ordinal: self.system_ordinal,
         };
         self.append_target(target, tenant_id, vshard_id, database_id, payload)
     }
