@@ -3,20 +3,34 @@
 //! Columnar engine (Plain / Timeseries / Spatial) source-to-target row copy.
 //!
 //! Drives the source `ColumnarOp::MaterializeScan` cursor to completion, and
-//! for each non-tombstoned, not-yet-copied row dispatches a
-//! `ColumnarOp::Insert { intent: InsertIfAbsent }` against target with a
-//! fresh surrogate. Calls the reaper at the end to flip the collection status
+//! copies each non-tombstoned, not-yet-copied row into the target under a
+//! bound surrogate. Calls the reaper at the end to flip the collection status
 //! to `Materialized` and clear `cloned_from`.
+//!
+//! Every copy keeps its source version's system-time ordinal: the clone holds
+//! the same logical version the source holds, so a snapshot that read the row
+//! through the source reads the same row from the clone.
+//!
+//! - A plain or spatial target takes each page as one `ColumnarOp::Insert`
+//!   of intent `Restore`. Each row's `restored_versions` entry carries its
+//!   source ordinal and the clone-copy marker: the row installs only where
+//!   its key holds no version.
+//! - A timeseries target takes each page as one `TimeseriesOp::Ingest` of
+//!   format `msgpack-clone-copy`. Each row carries its source ordinal in
+//!   `_ts_system`, and the install keeps it.
 //!
 //! ## Idempotency / restart-safety
 //!
-//! Resume after a crash works because every step is observable:
+//! A clone of a columnar-family collection refuses every client write until
+//! it is materialized, so the materializer is the target's only writer.
 //!   - Tombstones in `clone_tombstones` filter deleted source rows (keyed on
 //!     the synthetic surrogate produced by the Data Plane scan).
 //!   - Copy-up entries in `clone_copyups` filter rows already written by the
 //!     CoW write path.
-//!   - `InsertIfAbsent` intent silently skips rows already written by a prior
-//!     materializer pass.
+//!   - A plain or spatial row already copied keeps its key bound, so a
+//!     re-run installs nothing for it.
+//!   - A timeseries row has no key to probe. A run truncates the target
+//!     before its first page, so a re-run copies every row once.
 //!
 //! ## Profile coverage
 //!
@@ -24,8 +38,11 @@
 //! storage layer. A single `ColumnarOp::MaterializeScan` handler (and this
 //! Control Plane loop) serves all three profiles.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
+use nodedb_types::columnar::RestoredVersion;
+use nodedb_types::columnar::schema::TS_SYSTEM;
+use nodedb_types::value::Value;
 use nodedb_types::{DatabaseId, Lsn, RlsWriteCheck, Surrogate, TenantId};
 
 use super::dispatch::dispatch_to_owner;
@@ -34,6 +51,7 @@ use super::status::{check_bound_surrogates, checkpoint_progress, mark_materializ
 use crate::control::planner::sql_plan_convert::convert::db_qualified;
 use crate::control::security::catalog::{StoredCollection, SystemCatalog};
 use crate::control::state::SharedState;
+use crate::engine::timeseries::resolved_ingest::CLONE_COPY_INGEST_FORMAT;
 use nodedb_physical::physical_plan::document::UpdateValue;
 use nodedb_physical::physical_plan::{
     ColumnarInsertIntent, ColumnarOp, PhysicalPlan, TimeseriesOp,
@@ -111,6 +129,9 @@ struct ColumnarCopy<'a> {
 impl ColumnarCopy<'_> {
     /// Copy every source page, with a progress checkpoint after each one.
     async fn run(&self) -> crate::Result<()> {
+        if self.coll.collection_type.is_timeseries() {
+            self.truncate_target().await?;
+        }
         let mut cursor: Vec<u8> = Vec::new();
         let mut copied: u64 = 0;
         let mut total_seen: u64 = 0;
@@ -144,32 +165,59 @@ impl ColumnarCopy<'_> {
         Ok(())
     }
 
+    /// Clear the timeseries target, so a re-run after a crash copies every
+    /// source row once. The target holds only rows an earlier run copied.
+    async fn truncate_target(&self) -> crate::Result<()> {
+        let plan = PhysicalPlan::Timeseries(TimeseriesOp::Truncate {
+            collection: nodedb_types::QualifiedCollection::new(self.db_id, &self.coll.name),
+            restart_identity: false,
+        });
+        dispatch_to_owner(
+            self.state,
+            self.tenant_id,
+            self.db_id,
+            self.target_qualified,
+            plan,
+        )
+        .await?;
+        Ok(())
+    }
+
     /// The rows of one page still to copy. A row deleted from the clone (CoW
     /// tombstone) or already copied up by the CoW write path is skipped.
-    fn pending_rows(&self, entries: Vec<(u32, Vec<u8>)>) -> crate::Result<Vec<(u32, Vec<u8>)>> {
+    fn pending_rows(&self, entries: Vec<ScannedRow>) -> crate::Result<Vec<ScannedRow>> {
         let mut pending = Vec::with_capacity(entries.len());
-        for (source_surrogate, value_bytes) in entries {
-            if self.tombstoned.contains(&source_surrogate)
+        for row in entries {
+            if self.tombstoned.contains(&row.source_surrogate)
                 || self
                     .catalog
-                    .get_clone_copyup(self.target_qualified, source_surrogate)?
+                    .is_clone_tombstoned(self.target_qualified, row.source_surrogate)?
+                || self
+                    .catalog
+                    .get_clone_copyup(self.target_qualified, row.source_surrogate)?
                     .is_some()
             {
                 continue;
             }
-            pending.push((source_surrogate, value_bytes));
+            pending.push(row);
         }
         Ok(pending)
     }
 
-    /// Bind target surrogates for `pending` and insert each row into the
+    /// Bind target surrogates for `pending` and copy the page into the
     /// target. Returns the rows copied.
-    async fn copy_rows(&self, pending: Vec<(u32, Vec<u8>)>) -> crate::Result<u64> {
+    async fn copy_rows(&self, mut pending: Vec<ScannedRow>) -> crate::Result<u64> {
+        if pending.is_empty() {
+            return Ok(0);
+        }
         // Target surrogates for the page in one batch at the target
         // collection's home. Each keys on the source surrogate's bytes, so the
         // allocation is deterministic across retries: the source surrogate
         // encodes (segment_id, row_idx) and is unique per source row.
-        let keys: Vec<[u8; 4]> = pending.iter().map(|(s, _)| s.to_be_bytes()).collect();
+        let keys: Vec<[u8; 4]> = pending
+            .iter()
+            .map(|row| row.source_surrogate.to_be_bytes())
+            .collect();
         let key_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
         let target_surrogates =
             crate::control::server::surrogate_exchange::assign_surrogates_routed(
@@ -192,79 +240,157 @@ impl ColumnarCopy<'_> {
             target_surrogates.len(),
             pending.len(),
         )?;
-        let mut copied = 0;
-        for ((_, value_bytes), target_surrogate) in pending.into_iter().zip(target_surrogates) {
-            let plan = self.insert_plan(value_bytes, target_surrogate);
-            dispatch_to_owner(
-                self.state,
-                self.tenant_id,
-                self.db_id,
-                self.target_qualified,
-                plan,
-            )
-            .await?;
-            copied += 1;
-        }
+        let mut rows: Vec<(ScannedRow, Surrogate)> =
+            pending.drain(..).zip(target_surrogates).collect();
+        // The versions install ascending by their ordinals.
+        rows.sort_by_key(|(row, _)| row.sys_from);
+        let copied = rows.len() as u64;
+        let plan = if self.coll.collection_type.is_timeseries() {
+            self.ingest_plan(rows)?
+        } else {
+            self.restore_plan(rows)?
+        };
+        dispatch_to_owner(
+            self.state,
+            self.tenant_id,
+            self.db_id,
+            self.target_qualified,
+            plan,
+        )
+        .await?;
         Ok(copied)
     }
 
-    /// The plan that inserts one row into the target unless it is present.
-    ///
-    /// A timeseries target uses `TimeseriesOp::Ingest` (msgpack array format)
-    /// so rows land in `columnar_memtables`, which the timeseries scan path
-    /// reads. Plain / Spatial use `ColumnarOp::Insert` into
-    /// `columnar_engines`.
-    fn insert_plan(&self, value_bytes: Vec<u8>, target_surrogate: Surrogate) -> PhysicalPlan {
-        // Wrap the value_bytes (msgpack Value::Object) in a msgpack array
-        // so the Insert / Ingest handler can decode it as a row sequence.
-        let payload = wrap_in_array(value_bytes);
-        let collection = nodedb_types::QualifiedCollection::new(self.db_id, &self.coll.name);
-        if self.coll.collection_type.is_timeseries() {
-            // Format "msgpack" = msgpack array-of-maps (same layout as SQL
-            // VALUES ingest produced by the planner).
-            PhysicalPlan::Timeseries(TimeseriesOp::Ingest {
-                collection,
-                payload,
-                format: "msgpack".into(),
-                wal_lsn: None,
-                surrogates: vec![target_surrogate],
-                provenance: None,
-                // `materialize_one` (walker.rs) already refused this
-                // materialization if either side carried an RLS policy,
-                // so no policy applies to source or target here — this
-                // reflects a check that ran, not an assumption.
-                rls_write_check: RlsWriteCheck::NoPolicyApplies,
-                returning: None,
-                rls_filters: Vec::new(),
-            })
-        } else {
-            PhysicalPlan::Columnar(ColumnarOp::Insert {
-                collection,
-                payload,
-                format: "msgpack".into(),
-                intent: ColumnarInsertIntent::InsertIfAbsent,
-                on_conflict_updates: Vec::<(String, UpdateValue)>::new(),
-                surrogates: vec![target_surrogate],
-                schema_bytes: Vec::new(),
-                provenance: None,
-                wal_lsn: None,
-                system_from: None,
-                // `materialize_one` (walker.rs) already refused this
-                // materialization if either side carried an RLS policy,
-                // so no policy applies to source or target here — this
-                // reflects a check that ran, not an assumption.
-                rls_write_check: RlsWriteCheck::NoPolicyApplies,
-                // Internal row copy — nothing is projected back and no
-                // caller identity's reads are being gated.
-                returning: None,
-                rls_filters: Vec::new(),
-            })
+    /// One page as a plain or spatial `Restore` insert: each row at its
+    /// source ordinal, open, and installed only where its key holds no
+    /// version.
+    fn restore_plan(&self, rows: Vec<(ScannedRow, Surrogate)>) -> crate::Result<PhysicalPlan> {
+        let mut values = Vec::with_capacity(rows.len());
+        let mut surrogates = Vec::with_capacity(rows.len());
+        let mut versions = Vec::with_capacity(rows.len());
+        for (row, target_surrogate) in rows {
+            let sys_from = row
+                .sys_from
+                .ok_or_else(|| self.unstamped(row.source_surrogate))?;
+            values.push(row.value_bytes);
+            surrogates.push(target_surrogate);
+            versions.push(RestoredVersion {
+                sys_from,
+                sys_to: None,
+                clone_copy: true,
+            });
+        }
+        Ok(PhysicalPlan::Columnar(ColumnarOp::Insert {
+            collection: nodedb_types::QualifiedCollection::new(self.db_id, &self.coll.name),
+            payload: msgpack_array(values),
+            format: "msgpack".into(),
+            intent: ColumnarInsertIntent::Restore,
+            on_conflict_updates: Vec::<(String, UpdateValue)>::new(),
+            surrogates,
+            schema_bytes: Vec::new(),
+            provenance: None,
+            wal_lsn: None,
+            system_from: None,
+            restored_versions: versions,
+            // `materialize_one` (walker.rs) already refused this
+            // materialization if either side carried an RLS policy, so no
+            // policy applies to source or target here — this reflects a check
+            // that ran, not an assumption.
+            rls_write_check: RlsWriteCheck::NoPolicyApplies,
+            // Internal row copy — nothing is projected back and no caller
+            // identity's reads are being gated.
+            returning: None,
+            rls_filters: Vec::new(),
+        }))
+    }
+
+    /// One page as a timeseries clone-copy ingest: each row carries its
+    /// source ordinal in `_ts_system`, which the install keeps.
+    fn ingest_plan(&self, rows: Vec<(ScannedRow, Surrogate)>) -> crate::Result<PhysicalPlan> {
+        let mut values = Vec::with_capacity(rows.len());
+        let mut surrogates = Vec::with_capacity(rows.len());
+        for (row, target_surrogate) in rows {
+            let sys_from = row
+                .sys_from
+                .ok_or_else(|| self.unstamped(row.source_surrogate))?;
+            values.push(with_system_ordinal(&row.value_bytes, sys_from)?);
+            surrogates.push(target_surrogate);
+        }
+        Ok(PhysicalPlan::Timeseries(TimeseriesOp::Ingest {
+            collection: nodedb_types::QualifiedCollection::new(self.db_id, &self.coll.name),
+            payload: msgpack_array(values),
+            format: CLONE_COPY_INGEST_FORMAT.into(),
+            wal_lsn: None,
+            surrogates,
+            provenance: None,
+            // `materialize_one` (walker.rs) already refused this
+            // materialization if either side carried an RLS policy, so no
+            // policy applies to source or target here — this reflects a check
+            // that ran, not an assumption.
+            rls_write_check: RlsWriteCheck::NoPolicyApplies,
+            returning: None,
+            rls_filters: Vec::new(),
+        }))
+    }
+
+    fn unstamped(&self, source_surrogate: u32) -> crate::Error {
+        crate::Error::Storage {
+            engine: "clone_materializer".into(),
+            detail: format!(
+                "source row {source_surrogate} of '{}' carries no version stamp",
+                self.source_qualified
+            ),
         }
     }
 }
 
-/// `(source_surrogate_u32, value_bytes)` returned by one scan page.
-type ScanPage = (Vec<(u32, Vec<u8>)>, Vec<u8>);
+/// One row a source scan page returned.
+struct ScannedRow {
+    source_surrogate: u32,
+    value_bytes: Vec<u8>,
+    /// The system-time ordinal of the source version read. `None` for a
+    /// timeseries row that stores no `_ts_system`.
+    sys_from: Option<i64>,
+}
+
+/// `value_bytes`, a MessagePack row map, with `_ts_system` set to `ordinal`.
+fn with_system_ordinal(value_bytes: &[u8], ordinal: i64) -> crate::Result<Vec<u8>> {
+    let mut fields: HashMap<String, Value> = match nodedb_types::value_from_msgpack(value_bytes) {
+        Ok(Value::Object(fields)) => fields,
+        Ok(_) => {
+            return Err(crate::Error::Serialization {
+                format: "msgpack".into(),
+                detail: "timeseries clone copy: a scanned row is not a map".into(),
+            });
+        }
+        Err(e) => {
+            return Err(crate::Error::Serialization {
+                format: "msgpack".into(),
+                detail: format!("timeseries clone copy: a scanned row does not decode: {e}"),
+            });
+        }
+    };
+    fields.insert(TS_SYSTEM.to_string(), Value::Integer(ordinal));
+    nodedb_types::value_to_msgpack(&Value::Object(fields)).map_err(|e| {
+        crate::Error::Serialization {
+            format: "msgpack".into(),
+            detail: format!("timeseries clone copy: encode a row: {e}"),
+        }
+    })
+}
+
+/// MessagePack rows, each already an encoded map, as one MessagePack array.
+fn msgpack_array(rows: Vec<Vec<u8>>) -> Vec<u8> {
+    let mut out = Vec::with_capacity(rows.iter().map(Vec::len).sum::<usize>() + 5);
+    nodedb_query::msgpack_scan::write_array_header(&mut out, rows.len());
+    for row in rows {
+        out.extend_from_slice(&row);
+    }
+    out
+}
+
+/// The rows of one scan page and the cursor of the next page.
+type ScanPage = (Vec<ScannedRow>, Vec<u8>);
 
 /// Run one source-side `MaterializeScan` round-trip.
 async fn scan_source_page(
@@ -286,7 +412,7 @@ async fn scan_source_page(
 }
 
 /// Parse the msgpack payload emitted by `execute_columnar_materialize_scan`:
-///   `[next_cursor: bin, entries: [[surrogate: u32, value_bytes: bin], ...]]`.
+///   `[next_cursor: bin, entries: [[surrogate: u32, value_bytes: bin, sys_from: int | nil], ...]]`.
 fn parse_materialize_scan_payload(payload: &[u8]) -> crate::Result<ScanPage> {
     use nodedb_query::msgpack_scan;
 
@@ -314,28 +440,29 @@ fn parse_materialize_scan_payload(payload: &[u8]) -> crate::Result<ScanPage> {
     // each complete entry has been structurally consumed from `payload`.
     let mut entries = Vec::new();
     for _ in 0..entry_count {
-        let (pair_len, mut pair_off) =
+        let (entry_len, mut field_off) =
             msgpack_scan::array_header(payload, entry_off).ok_or_else(bad)?;
-        if pair_len != 2 {
+        if entry_len != 3 {
             return Err(bad());
         }
-        let surrogate = msgpack_scan::read_u32_advance(payload, &mut pair_off).ok_or_else(bad)?;
-        let value = msgpack_scan::read_bin_advance(payload, &mut pair_off)
+        let source_surrogate =
+            msgpack_scan::read_u32_advance(payload, &mut field_off).ok_or_else(bad)?;
+        let value_bytes = msgpack_scan::read_bin_advance(payload, &mut field_off)
             .ok_or_else(bad)?
             .to_vec();
-        entries.push((surrogate, value));
-        entry_off = pair_off;
+        let sys_from = if msgpack_scan::read_null(payload, field_off) {
+            None
+        } else {
+            Some(msgpack_scan::read_i64(payload, field_off).ok_or_else(bad)?)
+        };
+        field_off = msgpack_scan::skip_value(payload, field_off).ok_or_else(bad)?;
+        entries.push(ScannedRow {
+            source_surrogate,
+            value_bytes,
+            sys_from,
+        });
+        entry_off = field_off;
     }
 
     Ok((entries, next_cursor))
-}
-
-/// Wrap a single msgpack Value::Object blob in a msgpack fixarray of length 1
-/// so the columnar insert handler can decode it as `Vec<Value>`.
-fn wrap_in_array(value_bytes: Vec<u8>) -> Vec<u8> {
-    // fixarray header for 1 element: 0x91
-    let mut out = Vec::with_capacity(1 + value_bytes.len());
-    out.push(0x91);
-    out.extend_from_slice(&value_bytes);
-    out
 }

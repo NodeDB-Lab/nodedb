@@ -28,6 +28,7 @@ use crate::event::EventSource;
 use crate::types::{DatabaseId, TenantId, VShardId};
 use crate::wal::RedoRecord;
 
+use super::super::target::RestoreMark;
 use super::labels::{HomedLabels, label_weight};
 use super::units::{CollectionEdges, CollectionUnits, EdgeUnit, RowUnit};
 
@@ -44,7 +45,7 @@ type SeenIdentities = HashSet<(String, Vec<u8>)>;
 /// Split `units` into batch-sized groups, in order. A unit never splits.
 /// `weight` names a unit's count toward [`MAX_UNITS_PER_BATCH`] and its
 /// encoded size.
-fn batch_units<T>(units: Vec<T>, weight: impl Fn(&T) -> (usize, usize)) -> Vec<Vec<T>> {
+pub(super) fn batch_units<T>(units: Vec<T>, weight: impl Fn(&T) -> (usize, usize)) -> Vec<Vec<T>> {
     let mut batches = Vec::new();
     let mut current: Vec<T> = Vec::new();
     let (mut count, mut bytes) = (0usize, 0usize);
@@ -84,21 +85,35 @@ fn push_identities(
     }
 }
 
-/// One batch of rows of the collection stored as `stored`, on `vshard_id`.
+/// One batch of rows of the collection stored as `stored`, on `vshard_id`,
+/// of a RESTORE whose cut is `restore_cut`.
 fn row_batch(
     stored: &str,
     vshard_id: VShardId,
     batch: Vec<RowUnit>,
+    restore_cut: i64,
 ) -> crate::Result<RestoredRedo> {
     let mut ops = Vec::new();
     let mut row_changes = Vec::new();
     let mut rows = Vec::new();
+    let mut kv_keys = Vec::new();
+    let mut columnar_keys = Vec::new();
+    let mut vector_rows = Vec::new();
+    let mut timeseries: Vec<String> = Vec::new();
     let mut identities = Vec::new();
     let mut seen = HashSet::new();
     for unit in batch {
         ops.extend(unit.ops);
         row_changes.extend(unit.changes);
         rows.extend(unit.rows);
+        kv_keys.extend(unit.kv_keys);
+        columnar_keys.extend(unit.columnar_keys);
+        vector_rows.extend(unit.vector_rows);
+        for collection in unit.timeseries {
+            if !timeseries.contains(&collection) {
+                timeseries.push(collection);
+            }
+        }
         push_identities(&mut identities, &mut seen, unit.identities);
     }
     let rows_redo = RedoRecord {
@@ -117,16 +132,22 @@ fn row_batch(
         vshard: vshard_id.as_u32(),
         rows_redo,
         rows,
+        kv_keys,
         edges: Vec::new(),
         node_labels: Vec::new(),
+        arrays: Vec::new(),
+        columnar_keys,
+        vector_rows,
+        timeseries,
         collections: vec![stored.to_string()],
         identities,
+        restore_cut,
     })
 }
 
-/// One batch of edge versions of the collection stored as `stored`, as one
-/// plan per home: each version on every home it lives on, in order.
-fn edge_batch(stored: &str, batch: Vec<EdgeUnit>) -> Vec<RestoredRedo> {
+/// One batch of edges of the collection stored as `stored`, as one plan per
+/// home: every version of each edge on every home it lives on, in order.
+fn edge_batch(stored: &str, batch: Vec<EdgeUnit>, restore_cut: i64) -> Vec<RestoredRedo> {
     let mut homes: BTreeMap<VShardId, (RestoredRedo, SeenIdentities)> = BTreeMap::new();
     for unit in batch {
         for home in unit.homes.iter() {
@@ -136,15 +157,21 @@ fn edge_batch(stored: &str, batch: Vec<EdgeUnit>) -> Vec<RestoredRedo> {
                         vshard: home.as_u32(),
                         rows_redo: Vec::new(),
                         rows: Vec::new(),
+                        kv_keys: Vec::new(),
                         edges: Vec::new(),
                         node_labels: Vec::new(),
+                        arrays: Vec::new(),
+                        columnar_keys: Vec::new(),
+                        vector_rows: Vec::new(),
+                        timeseries: Vec::new(),
                         collections: vec![stored.to_string()],
                         identities: Vec::new(),
+                        restore_cut,
                     },
                     HashSet::new(),
                 )
             });
-            plan.edges.push(unit.version.clone());
+            plan.edges.extend(unit.versions.iter().cloned());
             push_identities(&mut plan.identities, seen, unit.identities.clone());
         }
     }
@@ -153,7 +180,7 @@ fn edge_batch(stored: &str, batch: Vec<EdgeUnit>) -> Vec<RestoredRedo> {
 
 /// Commit `plans` as one Calvin transaction of RESTORE `restore_id`, and
 /// wait until it committed.
-async fn commit_batch(
+pub(super) async fn commit_batch(
     state: &SharedState,
     tenant_id: TenantId,
     database_id: DatabaseId,
@@ -184,7 +211,7 @@ async fn commit_batch(
 
 /// A machinery failure with the restore's context. A classified error keeps
 /// its class.
-fn in_context(e: crate::Error, what: &str) -> crate::Error {
+pub(super) fn in_context(e: crate::Error, what: &str) -> crate::Error {
     if crate::error_classify::is_unclassified_failure(&e) {
         crate::Error::Internal {
             detail: format!("restore: re-issuing {what} failed: {e}"),
@@ -194,12 +221,12 @@ fn in_context(e: crate::Error, what: &str) -> crate::Error {
     }
 }
 
-/// Commit every row unit of `units` in order, marked under `restore_id`.
+/// Commit every row unit of `units` in order, marked under `restore`.
 /// Returns the transactions committed.
 pub(super) async fn commit_collection(
     state: &SharedState,
     tenant_id: TenantId,
-    restore_id: u64,
+    restore: RestoreMark,
     units: CollectionUnits,
 ) -> crate::Result<usize> {
     let CollectionUnits {
@@ -211,15 +238,19 @@ pub(super) async fn commit_collection(
     let stored = nodedb_types::QualifiedCollection::new(database_id, &collection);
     let mut transactions = 0usize;
     for batch in batch_units(units, |unit| (unit.ops.len(), unit.byte_len())) {
-        let plan = row_batch(stored.as_str(), vshard_id, batch)?;
+        let plan = row_batch(stored.as_str(), vshard_id, batch, restore.cut)?;
         super::super::durable::log_reissue_step(
             state,
             "redo",
             stored.as_str(),
             vshard_id,
-            plan.rows.len(),
+            plan.rows.len()
+                + plan.kv_keys.len()
+                + plan.columnar_keys.len()
+                + plan.vector_rows.len()
+                + plan.timeseries.len(),
         );
-        commit_batch(state, tenant_id, database_id, restore_id, vec![plan])
+        commit_batch(state, tenant_id, database_id, restore.id, vec![plan])
             .await
             .map_err(|e| {
                 in_context(
@@ -233,13 +264,13 @@ pub(super) async fn commit_collection(
 }
 
 /// Commit every edge version of `edges` in order, marked under
-/// `restore_id`. Each transaction writes a batch of versions on every home
+/// `restore`. Each transaction writes a batch of versions on every home
 /// they live on, so an error never leaves a version on one home only.
 /// Returns the transactions committed.
 pub(super) async fn commit_edges(
     state: &SharedState,
     tenant_id: TenantId,
-    restore_id: u64,
+    restore: RestoreMark,
     edges: CollectionEdges,
 ) -> crate::Result<usize> {
     let CollectionEdges {
@@ -249,9 +280,9 @@ pub(super) async fn commit_edges(
     } = edges;
     let stored = nodedb_types::QualifiedCollection::new(database_id, &collection);
     let mut transactions = 0usize;
-    for batch in batch_units(units, |unit| (1, unit.byte_len())) {
-        let versions = batch.len();
-        let plans = edge_batch(stored.as_str(), batch);
+    for batch in batch_units(units, |unit| (unit.versions.len(), unit.byte_len())) {
+        let versions = batch.iter().map(|unit| unit.versions.len()).sum();
+        let plans = edge_batch(stored.as_str(), batch, restore.cut);
         if let Some(first) = plans.first() {
             super::super::durable::log_reissue_step(
                 state,
@@ -261,7 +292,7 @@ pub(super) async fn commit_edges(
                 versions,
             );
         }
-        commit_batch(state, tenant_id, database_id, restore_id, plans)
+        commit_batch(state, tenant_id, database_id, restore.id, plans)
             .await
             .map_err(|e| in_context(e, &format!("edges of '{collection}'")))?;
         transactions += 1;
@@ -270,13 +301,13 @@ pub(super) async fn commit_edges(
 }
 
 /// Commit every restored node of `homed` in `database_id`, marked under
-/// `restore_id`: one batch of a home's nodes per transaction. Returns the
+/// `restore`: one batch of a home's nodes per transaction. Returns the
 /// transactions committed.
 pub(super) async fn commit_labels(
     state: &SharedState,
     tenant_id: TenantId,
     database_id: DatabaseId,
-    restore_id: u64,
+    restore: RestoreMark,
     homed: HomedLabels,
 ) -> crate::Result<usize> {
     let mut transactions = 0usize;
@@ -293,12 +324,18 @@ pub(super) async fn commit_labels(
                 vshard: vshard_id.as_u32(),
                 rows_redo: Vec::new(),
                 rows: Vec::new(),
+                kv_keys: Vec::new(),
                 edges: Vec::new(),
                 node_labels: batch,
+                arrays: Vec::new(),
+                columnar_keys: Vec::new(),
+                vector_rows: Vec::new(),
+                timeseries: Vec::new(),
                 collections: Vec::new(),
                 identities: Vec::new(),
+                restore_cut: restore.cut,
             };
-            commit_batch(state, tenant_id, database_id, restore_id, vec![plan])
+            commit_batch(state, tenant_id, database_id, restore.id, vec![plan])
                 .await
                 .map_err(|e| {
                     in_context(e, &format!("node labels to vShard {}", vshard_id.as_u32()))
@@ -333,22 +370,30 @@ mod tests {
             }],
             changes: Vec::new(),
             rows: Vec::new(),
+            kv_keys: Vec::new(),
+            columnar_keys: Vec::new(),
+            vector_rows: Vec::new(),
+            timeseries: Vec::new(),
         }
     }
 
-    fn edge(dst: &str, system_from: i64) -> EdgeUnit {
+    /// The edge `n0 -> dst` with one version at each of `system_from`.
+    fn edge_versions(dst: &str, system_from: &[i64]) -> EdgeUnit {
         EdgeUnit {
-            version: RestoredEdgeVersion {
-                collection: "follows".into(),
-                src_id: "n0".into(),
-                label: "L".into(),
-                dst_id: dst.into(),
-                src_surrogate: 1,
-                dst_surrogate: 2,
-                system_from,
-                properties: Some(Vec::new()),
-                valid_time: Some((0, i64::MAX)),
-            },
+            versions: system_from
+                .iter()
+                .map(|&system_from| RestoredEdgeVersion {
+                    collection: "follows".into(),
+                    src_id: "n0".into(),
+                    label: "L".into(),
+                    dst_id: dst.into(),
+                    src_surrogate: 1,
+                    dst_surrogate: 2,
+                    system_from,
+                    properties: Some(Vec::new()),
+                    valid_time: Some((0, i64::MAX)),
+                })
+                .collect(),
             identities: vec![
                 CarriedIdentity {
                     collection: "follows".into(),
@@ -363,6 +408,10 @@ mod tests {
             ],
             homes: RecordHomes::edge("n0", dst),
         }
+    }
+
+    fn edge(dst: &str, system_from: i64) -> EdgeUnit {
+        edge_versions(dst, &[system_from])
     }
 
     fn cross_shard_peer() -> String {
@@ -403,9 +452,11 @@ mod tests {
             "c",
             VShardId::new(3),
             vec![unit(1, 1, "a"), unit(1, 1, "a")],
+            77,
         )
         .expect("row batch");
         assert_eq!(plan.vshard, 3);
+        assert_eq!(plan.restore_cut, 77, "the batch carries the RESTORE's cut");
         assert_eq!(plan.identities.len(), 1);
         let redo = RedoRecord::from_bytes(&plan.rows_redo).expect("decode rows");
         assert_eq!(redo.ops.len(), 2);
@@ -418,7 +469,7 @@ mod tests {
     fn a_cross_shard_edge_batch_writes_both_homes() {
         let peer = cross_shard_peer();
         let homes = RecordHomes::edge("n0", &peer);
-        let plans = edge_batch("follows", vec![edge(&peer, 1), edge(&peer, 2)]);
+        let plans = edge_batch("follows", vec![edge_versions(&peer, &[1, 2])], i64::MAX);
         let mut want: Vec<u32> = homes.iter().map(VShardId::as_u32).collect();
         want.sort();
         let targets: Vec<u32> = plans.iter().map(|plan| plan.vshard).collect();
@@ -430,9 +481,30 @@ mod tests {
         }
     }
 
+    /// Every version of one edge lands in one batch: a unit never splits,
+    /// so a later batch never meets a version an earlier batch of the
+    /// RESTORE wrote.
+    #[test]
+    fn an_edges_versions_never_split_across_batches() {
+        let many: Vec<i64> = (0..MAX_UNITS_PER_BATCH as i64).collect();
+        let units = vec![
+            edge_versions("a", &[1]),
+            edge_versions("b", &many),
+            edge_versions("c", &[1]),
+        ];
+        let batches = batch_units(units, |unit: &EdgeUnit| {
+            (unit.versions.len(), unit.byte_len())
+        });
+        let sizes: Vec<Vec<usize>> = batches
+            .iter()
+            .map(|batch| batch.iter().map(|unit| unit.versions.len()).collect())
+            .collect();
+        assert_eq!(sizes, vec![vec![1], vec![MAX_UNITS_PER_BATCH], vec![1]]);
+    }
+
     #[test]
     fn a_same_shard_edge_batch_writes_one_home() {
-        let plans = edge_batch("follows", vec![edge("n0", 1)]);
+        let plans = edge_batch("follows", vec![edge("n0", 1)], i64::MAX);
         assert_eq!(plans.len(), 1);
         assert_eq!(
             plans[0].vshard,
@@ -445,7 +517,7 @@ mod tests {
     #[test]
     fn a_restore_transaction_locks_its_edges_on_both_homes() {
         let peer = cross_shard_peer();
-        let plans = edge_batch("follows", vec![edge(&peer, 1)]);
+        let plans = edge_batch("follows", vec![edge(&peer, 1)], i64::MAX);
         let tasks: Vec<PhysicalTask> = plans
             .into_iter()
             .map(|plan| PhysicalTask {

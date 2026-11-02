@@ -8,32 +8,25 @@
 //! apply log. Every replica links each row from the target head. The target is
 //! empty, so the links it derives equal the source's.
 //!
+//! Each row installs at its source version's own stamps: the clone holds the
+//! same logical version the source holds, so a snapshot that read the row
+//! through the source reads the same row from the clone.
+//!
 //! A re-run after a crash sends the same rows in the same order. A row already
 //! in the target is kept as installed, and the rest link after it.
 
 use std::collections::HashSet;
 
-use nodedb_physical::physical_plan::RedoOrigin;
-use nodedb_types::sync::wire::SyncProvenance;
 use nodedb_types::{CollectionKey, DatabaseId, Surrogate, TenantId};
-use nodedb_wal::record::RecordType;
 
+use crate::control::clone::copy::{CopyTarget, DocCopy, commit_doc_copies};
 use crate::control::planner::sql_plan_convert::convert::db_qualified;
 use crate::control::security::catalog::{StoredCollection, SystemCatalog};
 use crate::control::state::SharedState;
-use crate::control::surrogate::CarriedIdentity;
-use crate::control::wal_replication::transaction_redo::{
-    RedoTarget, TransactionRedoPayload, propose_transaction_redo,
-};
-use crate::event::EventSource;
+use crate::types::DocVersionStamp;
 use crate::types::hash_chain::CHAIN_SEQ_FIELD;
-use crate::types::{HomedRecord, RecordHomes};
-use crate::wal::{RedoRecord, RedoRowChange, RedoRowKind, RedoSubRecord};
 
-use super::document::{SourcePage, scan_page};
-
-/// Most rows one relink record carries.
-const ROWS_PER_RECORD: usize = 512;
+use super::document::{SourcePage, SourceRow, scan_page};
 
 /// One scanned source row, before its target surrogate is bound.
 struct ScannedRow {
@@ -41,15 +34,7 @@ struct ScannedRow {
     document_id: String,
     pk_bytes: Vec<u8>,
     body: Vec<u8>,
-}
-
-/// One source row, ready to copy under its bound target surrogate.
-struct ChainedRow {
-    seq: u64,
-    document_id: String,
-    pk_bytes: Vec<u8>,
-    target_surrogate: Surrogate,
-    body: Vec<u8>,
+    stamp: DocVersionStamp,
 }
 
 fn clone_error(detail: String) -> crate::Error {
@@ -90,14 +75,30 @@ pub(super) async fn materialize_chained_collection(
             raw_bodies: true,
         };
         let (entries, next_cursor) = scan_page(state, page, None).await?;
-        for (doc_id_hex, source_surrogate, body) in entries {
+        for row in entries {
+            let SourceRow {
+                doc_id_hex,
+                source_surrogate,
+                body,
+                stamp,
+            } = row;
+            // The catalog is read per row, so a tombstone recorded while the
+            // copy runs counts.
             if tombstoned.contains(&source_surrogate)
+                || catalog.is_clone_tombstoned(&target_qualified, source_surrogate)?
                 || catalog
                     .get_clone_copyup(&target_qualified, source_surrogate)?
                     .is_some()
             {
                 continue;
             }
+            // An autocommit scan reads committed versions only, each stamped.
+            let stamp = stamp.ok_or_else(|| {
+                clone_error(format!(
+                    "row {doc_id_hex} of hash-chained '{source_qualified}' carries no version \
+                     stamp"
+                ))
+            })?;
             let doc = nodedb_types::json_from_msgpack(&body).map_err(|e| {
                 clone_error(format!(
                     "row {doc_id_hex} of hash-chained '{source_qualified}' does not decode: {e}"
@@ -140,6 +141,7 @@ pub(super) async fn materialize_chained_collection(
                 document_id: String::from_utf8_lossy(&pk_bytes).into_owned(),
                 pk_bytes,
                 body,
+                stamp,
             });
         }
         if next_cursor.is_empty() {
@@ -164,105 +166,33 @@ pub(super) async fn materialize_chained_collection(
         ))
     })?;
     super::status::check_bound_surrogates(&target_qualified, bound.len(), scanned.len())?;
-    let mut rows: Vec<ChainedRow> = scanned
+    let mut rows: Vec<(u64, DocCopy)> = scanned
         .into_iter()
         .zip(bound)
-        .map(|(row, target_surrogate)| ChainedRow {
-            seq: row.seq,
-            document_id: row.document_id,
-            pk_bytes: row.pk_bytes,
-            target_surrogate,
-            body: row.body,
+        .map(|(row, target_surrogate)| {
+            (
+                row.seq,
+                DocCopy {
+                    document_id: row.document_id,
+                    pk_bytes: row.pk_bytes,
+                    target_surrogate,
+                    body: row.body,
+                    stamp: row.stamp,
+                },
+            )
         })
         .collect();
-    rows.sort_by_key(|row| row.seq);
-
-    let target = RedoTarget {
-        tenant_id,
-        database_id: db_id,
-        vshard_id: RecordHomes::of(HomedRecord::Row(target_key)).owner(),
-    };
-    let stored = nodedb_types::QualifiedCollection::new(db_id, &coll.name);
+    rows.sort_by_key(|(seq, _)| *seq);
     let copied = rows.len() as u64;
-    let mut pending = rows.into_iter().peekable();
-    while pending.peek().is_some() {
-        let batch: Vec<ChainedRow> = pending.by_ref().take(ROWS_PER_RECORD).collect();
-        let payload = relink_payload(stored.as_str(), &coll.name, batch)?;
-        commit_relink(state, target, &payload).await?;
-    }
-    Ok(copied)
-}
-
-/// One batch as a relink record: each row a document put carrying its
-/// source link, in position order.
-fn relink_payload(
-    stored: &str,
-    bare: &str,
-    batch: Vec<ChainedRow>,
-) -> crate::Result<TransactionRedoPayload> {
-    let mut ops = Vec::with_capacity(batch.len());
-    let mut identities = Vec::with_capacity(batch.len());
-    // Each relinked row installs in the clone as a new row.
-    let mut row_changes = Vec::with_capacity(batch.len());
-    for row in batch {
-        row_changes.push(RedoRowChange {
-            collection: stored.to_string(),
-            row: row.document_id.as_str().to_owned(),
-            kind: RedoRowKind::Insert,
-        });
-        let prov: Option<SyncProvenance> = None;
-        let payload = zerompk::to_msgpack_vec(&(
-            stored,
-            row.document_id.as_str(),
-            row.body,
-            prov,
-            row.target_surrogate.as_u32(),
-        ))
-        .map_err(|e| crate::Error::Serialization {
-            format: "msgpack".into(),
-            detail: format!("clone relink: encode document put: {e}"),
-        })?;
-        ops.push(RedoSubRecord {
-            record_type: RecordType::Put as u32,
-            payload,
-        });
-        identities.push(CarriedIdentity {
-            collection: bare.to_string(),
-            pk_bytes: row.pk_bytes,
-            surrogate: row.target_surrogate,
-        });
-    }
-    Ok(TransactionRedoPayload {
-        redo: RedoRecord {
-            version: 1,
-            ops,
-            calvin_stamp: None,
-            cross_shard_applied: None,
-            row_sources: Vec::new(),
-            publishes: Vec::new(),
-            row_changes,
-            // The materializer writes as the system, which holds no role.
-            user_roles: Vec::new(),
+    commit_doc_copies(
+        state,
+        CopyTarget {
+            tenant_id,
+            database_id: db_id,
+            collection: &coll.name,
         },
-        collections: vec![stored.to_string()],
-        sum_targets: Vec::new(),
-        identities,
-        // The rows passed their rules when the source first wrote them, and
-        // a copy fires no AFTER trigger.
-        event_source: EventSource::Restore,
-        origin: RedoOrigin::Restore,
-        calvin: None,
-    })
-}
-
-/// Commit one relink record and wait until it is durable and installed here.
-async fn commit_relink(
-    state: &SharedState,
-    target: RedoTarget,
-    payload: &TransactionRedoPayload,
-) -> crate::Result<()> {
-    let deadline = crate::control::server::shared::session::StatementDeadline::of_statement(state)
-        .tokio_instant();
-    propose_transaction_redo(state, target, payload, deadline).await?;
-    Ok(())
+        rows.into_iter().map(|(_, copy)| copy).collect(),
+    )
+    .await?;
+    Ok(copied)
 }

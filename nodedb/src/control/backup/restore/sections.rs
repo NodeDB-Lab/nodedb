@@ -78,8 +78,6 @@ pub(in crate::control::backup) fn append_snapshot(
     // Destructure exhaustively so a new field fails to compile here rather
     // than being dropped from the restore.
     let TenantDataSnapshot {
-        documents,
-        indexes,
         edges,
         vectors,
         kv_tables,
@@ -87,6 +85,9 @@ pub(in crate::control::backup) fn append_snapshot(
         crdt_constraints,
         timeseries,
         flushed_ts_segments,
+        // The restore installs the catalogs before it re-issues any row, so
+        // every re-issued row keeps the `_ts_series` id it had.
+        ts_series_catalogs,
         columnar_engines,
         vector_params,
         index_configs,
@@ -100,6 +101,12 @@ pub(in crate::control::backup) fn append_snapshot(
         documents_versioned,
         indexes_versioned,
         vector_multi_documents,
+        // The restore installs every vector node at its span.
+        vector_versions,
+        // The restore re-issues the rows as new writes, which rebuild these
+        // indexes. The source's index images serve Raft installs only.
+        sparse_vectors: _,
+        spatial_indexes: _,
         arrays,
         metadata_floor,
         // A backup carries no cut: it serves Raft installs only.
@@ -121,15 +128,14 @@ pub(in crate::control::backup) fn append_snapshot(
         tenant_edge_cuts: _,
         tenant_edge_applied: _,
     } = snap;
-    into.documents.extend(documents);
     // Several nodes can list one index's members; the re-issue reads the
     // union.
     into.vector_multi_documents.extend(vector_multi_documents);
-    into.indexes.extend(indexes);
     into.documents_versioned.extend(documents_versioned);
     into.indexes_versioned.extend(indexes_versioned);
     into.edges.extend(edges);
     into.vectors.extend(vectors);
+    into.vector_versions.extend(vector_versions);
     into.vector_params.extend(vector_params);
     into.index_configs.extend(index_configs);
     into.kv_tables.extend(kv_tables);
@@ -139,6 +145,7 @@ pub(in crate::control::backup) fn append_snapshot(
     into.crdt_constraints.extend(crdt_constraints);
     into.timeseries.extend(timeseries);
     into.flushed_ts_segments.extend(flushed_ts_segments);
+    into.ts_series_catalogs.extend(ts_series_catalogs);
     into.columnar_engines.extend(columnar_engines);
     into.surrogate_pk.extend(surrogate_pk);
     into.arrays.extend(arrays);

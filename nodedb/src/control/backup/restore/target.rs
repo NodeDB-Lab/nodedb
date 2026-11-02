@@ -23,6 +23,20 @@ pub(crate) struct DatabaseTarget {
     /// own writes. `0` for a re-issue that is no RESTORE: its writes mark as
     /// user writes.
     pub restore_id: u64,
+    /// The closed cut the RESTORE takes effect at (`restore::cut`). A
+    /// destination version above it is a write that followed the RESTORE,
+    /// and stays current. `i64::MAX` for a re-issue that is no RESTORE: it
+    /// sets the backup's state over every destination version.
+    pub restore_cut: i64,
+}
+
+/// What every re-issued write of one RESTORE carries: its id and its cut.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RestoreMark {
+    /// See [`DatabaseTarget::restore_id`].
+    pub id: u64,
+    /// See [`DatabaseTarget::restore_cut`].
+    pub cut: i64,
 }
 
 /// A restored collection's names in the destination database.
@@ -51,6 +65,14 @@ fn malformed(key: &str, why: &str) -> crate::Error {
 }
 
 impl DatabaseTarget {
+    /// The mark every re-issued write of this target carries.
+    pub fn mark(&self) -> RestoreMark {
+        RestoreMark {
+            id: self.restore_id,
+            cut: self.restore_cut,
+        }
+    }
+
     /// The destination names of a collection the source Data Plane stored
     /// as `source_stored`.
     pub fn resolve(&self, source_stored: &str) -> crate::Result<RestoredName> {
@@ -110,6 +132,7 @@ mod tests {
         source: DatabaseId::new(1025),
         dest: DatabaseId::new(2048),
         restore_id: 0,
+        restore_cut: i64::MAX,
     };
 
     #[test]
@@ -137,6 +160,7 @@ mod tests {
             source: DatabaseId::DEFAULT,
             dest: DatabaseId::DEFAULT,
             restore_id: 0,
+            restore_cut: i64::MAX,
         };
         let name = target
             .resolve("orders")

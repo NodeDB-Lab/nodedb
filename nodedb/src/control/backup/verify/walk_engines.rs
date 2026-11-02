@@ -5,14 +5,16 @@
 //! Timeseries and columnar rows decode with the same decoders RESTORE re-issues
 //! them from, so a row restore writes hashes the same on both sides.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use loro::{LoroDoc, LoroValue};
 use nodedb_types::backup_envelope::VerifiedPart;
+use nodedb_types::columnar::RestoredVersion;
 use nodedb_types::surrogate::Surrogate;
+use nodedb_types::value::Value;
 
 use crate::Error;
-use crate::control::backup::restore::columnar_reissue::decode_snapshot_live_rows;
+use crate::control::backup::restore::columnar_reissue::decode_snapshot_versions;
 use crate::control::backup::restore::timeseries_reissue::decode_timeseries_live_rows;
 use crate::control::backup::restore::vector_reissue::split_vector_coll_key;
 use crate::types::TsFlushedCollectionBlob;
@@ -20,8 +22,8 @@ use crate::types::TsFlushedCollectionBlob;
 use super::canonical::{Row, RowHasher, key_hash};
 use super::walk::Walk;
 
-/// One KV table's rows, in the KV snapshot shape.
-type KvRows = Vec<crate::engine::kv::hash_table::KvSnapshotRow>;
+/// One KV table, in the KV snapshot shape.
+type KvTable = crate::engine::kv::hash_table::KvSnapshotTable;
 
 /// One vector index's export rows: `(node_id, vector, surrogate)`.
 type VectorRows = Vec<(u32, Vec<f32>, Option<Surrogate>)>;
@@ -29,7 +31,7 @@ type VectorRows = Vec<(u32, Vec<f32>, Option<Surrogate>)>;
 /// How a vector row is keyed.
 const VECTOR_BOUND: u8 = b'p';
 /// A vector with no surrogate. Every stored vector is bound, so a capture that
-/// holds one is corrupt, and RESTORE refuses it (`group_restored_vectors`).
+/// holds one is corrupt, and RESTORE refuses it.
 const VECTOR_UNBOUND: u8 = b'u';
 /// A vector whose surrogate binds no primary key.
 const VECTOR_UNKEYED: u8 = b's';
@@ -49,29 +51,70 @@ impl Walk<'_> {
     ) -> Result<(), Error> {
         for (table_key, bytes) in tables {
             let bare = self.bare(self.scoped_rest(table_key)?);
-            let rows: KvRows =
+            let table: KvTable =
                 zerompk::from_msgpack(bytes).map_err(|e| decode_error("KV table", &bare, e))?;
-            // The surrogate is not hashed: RESTORE binds each row in the
-            // destination catalog, so source and destination identities differ.
-            for (key, value, expire_at_ms, _surrogate) in rows {
+            // Every version of a key hashes under the key and its start
+            // ordinal, live or ended alike: RESTORE installs each version at
+            // its ordinal, and a version live in the backup can end in the
+            // destination at a later write. The end ordinal and the TTL
+            // deadline stay out of the hash. The surrogate does too: RESTORE
+            // binds each key in the destination catalog. The key's current
+            // state rides on its newest version: the live value, or absent.
+            let live_keys: HashSet<Vec<u8>> = table.rows.iter().map(|r| r.key.clone()).collect();
+            for row in table.rows {
+                let crate::engine::kv::hash_table::KvSnapshotRow {
+                    key,
+                    value,
+                    expire_at_ms,
+                    sys_from,
+                    ..
+                } = row;
                 let row_key: [&[u8]; 1] = [key.as_slice()];
-                let mut hasher = RowHasher::new(VerifiedPart::KeyValue, &row_key);
-                hasher.bytes(b'v', &value);
+                let mut state = RowHasher::state(VerifiedPart::KeyValue, &row_key);
+                state.bytes(b'v', &value);
                 sink(Row {
                     collection: bare.clone(),
                     part: VerifiedPart::KeyValue,
                     key: Some(key_hash(VerifiedPart::KeyValue, &row_key)),
-                    hash: hasher.finish(),
+                    hash: kv_version_hash(&row_key, &value, sys_from),
                     expire_at_ms,
+                    stamp: Some(sys_from),
+                    state: Some(state.finish()),
                 });
+            }
+            for key_history in table.history {
+                let row_key: [&[u8]; 1] = [key_history.key.as_slice()];
+                let absent = !live_keys.contains(&key_history.key);
+                let newest = key_history.versions.iter().map(|v| v.sys_from).max();
+                for version in key_history.versions {
+                    let state = (absent && Some(version.sys_from) == newest).then(|| {
+                        let mut state = RowHasher::state(VerifiedPart::KeyValue, &row_key);
+                        state.bytes(b'x', &[]);
+                        state.finish()
+                    });
+                    sink(Row {
+                        collection: bare.clone(),
+                        part: VerifiedPart::KeyValue,
+                        key: Some(key_hash(VerifiedPart::KeyValue, &row_key)),
+                        hash: kv_version_hash(&row_key, &version.value, version.sys_from),
+                        expire_at_ms: 0,
+                        stamp: Some(version.sys_from),
+                        state,
+                    });
+                }
             }
         }
         Ok(())
     }
 
+    /// Each index's live vectors. A vector whose surrogate binds a primary
+    /// key is a version of that key, stamped with its node's start: RESTORE
+    /// installs each node at its start. `history` carries the starts, keyed
+    /// like `indexes`. A node no history names starts at `i64::MIN`.
     pub(super) fn vectors(
         &self,
         indexes: &[(String, Vec<u8>)],
+        history: &[(String, Vec<u8>)],
         sink: &mut dyn FnMut(Row),
     ) -> Result<(), Error> {
         for (index_key, bytes) in indexes {
@@ -79,7 +122,15 @@ impl Walk<'_> {
             let bare = self.bare(stored);
             let rows: VectorRows =
                 zerompk::from_msgpack(bytes).map_err(|e| decode_error("vector index", &bare, e))?;
-            for (_node_id, vector, surrogate) in rows {
+            let starts: HashMap<u32, i64> = match history.iter().find(|(k, _)| k == index_key) {
+                Some((_, bytes)) => {
+                    let history: crate::types::VectorIndexHistory = zerompk::from_msgpack(bytes)
+                        .map_err(|e| decode_error("vector history", &bare, e))?;
+                    history.live_starts.into_iter().collect()
+                }
+                None => HashMap::new(),
+            };
+            for (node_id, vector, surrogate) in rows {
                 let bound = surrogate
                     .filter(|s| *s != Surrogate::ZERO)
                     .map(|s| self.binds.pk(&bare, s.as_u32()));
@@ -93,12 +144,18 @@ impl Walk<'_> {
                 let mut hasher = RowHasher::new(VerifiedPart::Vectors, &key);
                 let data: Vec<u8> = vector.iter().flat_map(|v| v.to_le_bytes()).collect();
                 hasher.bytes(b'f', &data);
+                // A bound row is a version of its key. An unbound or unkeyed
+                // vector names no key of its own.
+                let stamp = (kind[0] == VECTOR_BOUND)
+                    .then(|| starts.get(&node_id).copied().unwrap_or(i64::MIN));
                 sink(Row {
                     collection: bare.clone(),
                     part: VerifiedPart::Vectors,
                     key: Some(key_hash(VerifiedPart::Vectors, &key)),
                     hash: hasher.finish(),
                     expire_at_ms: 0,
+                    stamp,
+                    state: None,
                 });
             }
         }
@@ -143,11 +200,50 @@ impl Walk<'_> {
             let bare = self.bare(self.scoped_rest(key)?);
             let snap: nodedb_columnar::ColumnarEngineSnapshot = zerompk::from_msgpack(bytes)
                 .map_err(|e| decode_error("columnar snapshot", &bare, e))?;
-            let decoded = decode_snapshot_live_rows(&bare, snap, self.kek)?;
-            for row in decoded.rows {
-                let mut hasher = RowHasher::new(VerifiedPart::Columnar, &[]);
-                hasher.value(&row)?;
-                sink(keyless(bare.clone(), VerifiedPart::Columnar, hasher));
+            let decoded = decode_snapshot_versions(&bare, snap, self.kek)?;
+            // Each version is a version of its key, the surrogate its rows
+            // carry: RESTORE installs every version of a key under one
+            // surrogate. The key's current state rides on its newest
+            // version: the open row, or absent.
+            let mut newest: HashMap<Surrogate, (i64, usize)> = HashMap::new();
+            for (index, (surrogate, version)) in
+                decoded.surrogates.iter().zip(&decoded.versions).enumerate()
+            {
+                let held = newest
+                    .entry(*surrogate)
+                    .or_insert((version.sys_from, index));
+                if version.sys_from >= held.0 {
+                    *held = (version.sys_from, index);
+                }
+            }
+            for (index, ((row, version), surrogate)) in decoded
+                .rows
+                .iter()
+                .zip(&decoded.versions)
+                .zip(&decoded.surrogates)
+                .enumerate()
+            {
+                let surrogate_bytes = surrogate.as_u32().to_le_bytes();
+                let row_key: [&[u8]; 1] = [&surrogate_bytes];
+                let state = if newest.get(surrogate).map(|(_, at)| *at) == Some(index) {
+                    let mut state = RowHasher::state(VerifiedPart::Columnar, &row_key);
+                    match version.sys_to {
+                        None => state.value(row)?,
+                        Some(_) => state.bytes(b'x', &[]),
+                    }
+                    Some(state.finish())
+                } else {
+                    None
+                };
+                sink(Row {
+                    collection: bare.clone(),
+                    part: VerifiedPart::Columnar,
+                    key: Some(key_hash(VerifiedPart::Columnar, &row_key)),
+                    hash: columnar_version_hasher(row, version)?.finish(),
+                    expire_at_ms: 0,
+                    stamp: Some(version.sys_from),
+                    state,
+                });
             }
         }
         Ok(())
@@ -173,6 +269,8 @@ impl Walk<'_> {
                     key: Some(key_hash(VerifiedPart::Crdt, key)),
                     hash: hasher.finish(),
                     expire_at_ms: 0,
+                    stamp: None,
+                    state: None,
                 });
             };
             match doc.get_deep_value() {
@@ -195,6 +293,28 @@ impl Walk<'_> {
     }
 }
 
+/// The hash of one KV version: its key, its value and its start ordinal.
+fn kv_version_hash(key: &[&[u8]], value: &[u8], sys_from: i64) -> [u8; 32] {
+    let mut hasher = RowHasher::new(VerifiedPart::KeyValue, key);
+    hasher.bytes(b'v', value);
+    hasher.int(b's', sys_from);
+    hasher.finish()
+}
+
+/// The hash input of one columnar row version: its cells and its stamps.
+/// RESTORE installs each version at its stamps, so a version restored at
+/// another system time does not verify.
+fn columnar_version_hasher(row: &Value, version: &RestoredVersion) -> Result<RowHasher, Error> {
+    let mut hasher = RowHasher::new(VerifiedPart::Columnar, &[]);
+    hasher.value(row)?;
+    hasher.int(b'f', version.sys_from);
+    match version.sys_to {
+        Some(sys_to) => hasher.int(b't', sys_to),
+        None => hasher.bytes(b'o', &[]),
+    }
+    Ok(hasher)
+}
+
 fn keyless(collection: String, part: VerifiedPart, hasher: RowHasher) -> Row {
     Row {
         collection,
@@ -202,5 +322,43 @@ fn keyless(collection: String, part: VerifiedPart, hasher: RowHasher) -> Row {
         key: None,
         hash: hasher.finish(),
         expire_at_ms: 0,
+        stamp: None,
+        state: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+
+    fn digest(row: &Value, sys_from: i64, sys_to: Option<i64>) -> [u8; 32] {
+        columnar_version_hasher(
+            row,
+            &RestoredVersion {
+                sys_from,
+                sys_to,
+                clone_copy: false,
+            },
+        )
+        .expect("hash")
+        .finish()
+    }
+
+    /// The digest of a columnar row covers its stamps: a version restored
+    /// at another `sys_from` or `sys_to` does not verify.
+    #[test]
+    fn a_columnar_digest_covers_the_version_stamps() {
+        let row = Value::Object(HashMap::from([
+            ("id".to_string(), Value::Integer(1)),
+            ("v".to_string(), Value::Integer(10)),
+        ]));
+        let base = digest(&row, 10, Some(20));
+        assert_eq!(base, digest(&row, 10, Some(20)));
+        assert_ne!(base, digest(&row, 11, Some(20)), "sys_from differs");
+        assert_ne!(base, digest(&row, 10, Some(21)), "sys_to differs");
+        assert_ne!(base, digest(&row, 10, None), "an open version differs");
+        assert_ne!(digest(&row, 10, None), digest(&row, 11, None));
     }
 }

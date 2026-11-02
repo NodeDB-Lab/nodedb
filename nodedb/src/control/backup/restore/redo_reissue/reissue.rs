@@ -55,7 +55,7 @@ pub(in crate::control::backup::restore) async fn reissue_rows_and_edges(
     let documents = document_units(state, rows.documents)?;
     for collection in documents {
         stats.documents += collection.units.iter().map(|u| u.ops.len()).sum::<usize>();
-        stats.records += commit_collection(state, tenant, target.restore_id, collection).await?;
+        stats.records += commit_collection(state, tenant, target.mark(), collection).await?;
     }
     // Fails the re-issue after the rows committed and before any edge.
     crate::fail_point_err!(
@@ -73,9 +73,9 @@ pub(in crate::control::backup::restore) async fn reissue_rows_and_edges(
     // absolute per home (a versioned edge key, a first-wins bind), so a
     // retry rewrites both homes to the same state.
     for collection in edges {
-        stats.records += commit_edges(state, tenant, target.restore_id, collection).await?;
+        stats.records += commit_edges(state, tenant, target.mark(), collection).await?;
     }
     let labels = label_units(tenant_id, rows.node_labels, rows.node_label_versions)?;
-    stats.records += commit_labels(state, tenant, target.dest, target.restore_id, labels).await?;
+    stats.records += commit_labels(state, tenant, target.dest, target.mark(), labels).await?;
     Ok(stats)
 }

@@ -122,10 +122,9 @@ fn restored_collection_names(
     merged: &TenantDataSnapshot,
 ) -> BTreeSet<String> {
     let mut stored: Vec<&str> = Vec::new();
-    let db_tenant_scoped: [&[(String, Vec<u8>)]; 5] = [
-        &merged.documents,
+    let db_tenant_scoped: [&[(String, Vec<u8>)]; 4] = [
         &merged.documents_versioned,
-        &merged.indexes,
+        &merged.indexes_versioned,
         &merged.vectors,
         &merged.timeseries,
     ];
@@ -158,16 +157,16 @@ mod collection_name_tests {
         source: DatabaseId::DEFAULT,
         dest: DatabaseId::DEFAULT,
         restore_id: 0,
+        restore_cut: i64::MAX,
     };
 
     #[test]
     fn every_section_names_its_collection() {
         let snap = TenantDataSnapshot {
-            documents: vec![("0:7:users:0000002a".into(), vec![])],
-            documents_versioned: vec![(
-                "0:7:ledger:0000002a\x0000000000000000000001".into(),
-                vec![],
-            )],
+            documents_versioned: vec![
+                ("0:7:users:0000002a\x0000000000000000000001".into(), vec![]),
+                ("0:7:ledger:0000002a\x0000000000000000000001".into(), vec![]),
+            ],
             vectors: vec![("0:7:embeddings".into(), vec![])],
             kv_tables: vec![("0:7:sessions".into(), vec![])],
             edges: vec![(
@@ -193,9 +192,13 @@ mod collection_name_tests {
             source: DatabaseId::new(1025),
             dest: DatabaseId::new(1030),
             restore_id: 0,
+            restore_cut: i64::MAX,
         };
         let snap = TenantDataSnapshot {
-            documents: vec![("1025:7:1025/users:0000002a".into(), vec![])],
+            documents_versioned: vec![(
+                "1025:7:1025/users:0000002a\x0000000000000000000001".into(),
+                vec![],
+            )],
             kv_tables: vec![("1025:7:1025/sessions".into(), vec![])],
             ..Default::default()
         };
@@ -208,7 +211,10 @@ mod collection_name_tests {
     #[test]
     fn another_tenants_key_names_nothing() {
         let snap = TenantDataSnapshot {
-            documents: vec![("0:8:users:0000002a".into(), vec![])],
+            documents_versioned: vec![(
+                "0:8:users:0000002a\x0000000000000000000001".into(),
+                vec![],
+            )],
             ..Default::default()
         };
         assert!(restored_collection_names(7, DEFAULT_TARGET, &snap).is_empty());

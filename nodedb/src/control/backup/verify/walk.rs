@@ -7,14 +7,17 @@
 //! do. A canonical row drops everything a restore re-derives:
 //!
 //! * a document is keyed by its client identity, never by its surrogate;
-//! * a document version keeps its valid time but drops its system time;
+//! * a document version keeps its system time and valid time;
 //! * a hash-chained document drops its chain fields;
 //! * an edge is keyed by its endpoints and label, without its system time or
 //!   valid time;
-//! * a vector is keyed by the primary key its surrogate binds;
-//! * a timeseries row drops its server-stamped system column, and a columnar
-//!   row drops its surrogate;
-//! * a KV row drops its TTL deadline from the hash;
+//! * a vector is keyed by the primary key its surrogate binds, a version of
+//!   it stamped with its node's start;
+//! * a timeseries row drops its server-stamped system column;
+//! * a columnar row version is keyed by its surrogate and keeps its
+//!   `sys_from` and `sys_to`;
+//! * a KV version keeps its start ordinal and drops its end ordinal and its
+//!   TTL deadline from the hash;
 //! * an array cell version drops its surrogate.
 
 use std::collections::{BTreeMap, HashMap};
@@ -103,10 +106,10 @@ impl Walk<'_> {
         snap: &TenantDataSnapshot,
         sink: &mut dyn FnMut(Row),
     ) -> Result<(), Error> {
-        self.documents(&snap.documents, &snap.documents_versioned, sink)?;
+        self.documents(&snap.documents_versioned, sink)?;
         self.edges(&snap.edges, sink)?;
         self.kv_tables(&snap.kv_tables, sink)?;
-        self.vectors(&snap.vectors, sink)?;
+        self.vectors(&snap.vectors, &snap.vector_versions, sink)?;
         self.timeseries(&snap.timeseries, &snap.flushed_ts_segments, sink)?;
         self.columnar(&snap.columnar_engines, sink)?;
         self.crdt(&snap.crdt_state, sink)?;
@@ -181,14 +184,21 @@ mod tests {
         tallies
     }
 
+    /// One live version of a `people` row at system time 100.
     fn doc(surrogate: u32, city: &str) -> (String, Vec<u8>) {
         let body = Value::Object(HashMap::from([(
             "city".to_string(),
             Value::String(city.into()),
         )]));
+        let body = nodedb_types::value_to_msgpack(&body).expect("encode");
         (
-            format!("0:{TENANT}:people:{surrogate:08x}"),
-            nodedb_types::value_to_msgpack(&body).expect("encode"),
+            format!("0:{TENANT}:people:{surrogate:08x}\x00{:020}", 100),
+            crate::engine::sparse::btree_versioned::encode_value(
+                crate::engine::sparse::btree_versioned::TAG_LIVE,
+                i64::MIN,
+                i64::MAX,
+                &body,
+            ),
         )
     }
 
@@ -213,7 +223,7 @@ mod tests {
     #[test]
     fn the_digest_ignores_order_surrogates_and_system_time() {
         let source = TenantDataSnapshot {
-            documents: vec![doc(0x2a, "paris"), doc(0x2b, "rome")],
+            documents_versioned: vec![doc(0x2a, "paris"), doc(0x2b, "rome")],
             edges: vec![edge("alice", "bob", 100)],
             vectors: vec![vectors(vec![
                 (0, vec![1.0, 0.0], Some(Surrogate::new(0x2a))),
@@ -224,7 +234,7 @@ mod tests {
         let source_binds: [(&str, u32, &[u8]); 2] =
             [("people", 0x2a, b"alice"), ("people", 0x2b, b"bob")];
         let restored = TenantDataSnapshot {
-            documents: vec![doc(0x91, "rome"), doc(0x90, "paris")],
+            documents_versioned: vec![doc(0x91, "rome"), doc(0x90, "paris")],
             edges: vec![edge("alice", "bob", 9_999)],
             vectors: vec![vectors(vec![
                 (7, vec![0.0, 1.0], Some(Surrogate::new(0x91))),
@@ -245,15 +255,15 @@ mod tests {
     fn the_digest_sees_a_changed_row() {
         let binds: [(&str, u32, &[u8]); 2] = [("people", 0x2a, b"alice"), ("people", 0x2b, b"bob")];
         let base = TenantDataSnapshot {
-            documents: vec![doc(0x2a, "paris"), doc(0x2b, "rome")],
+            documents_versioned: vec![doc(0x2a, "paris"), doc(0x2b, "rome")],
             ..Default::default()
         };
         let moved = TenantDataSnapshot {
-            documents: vec![doc(0x2a, "paris"), doc(0x2b, "oslo")],
+            documents_versioned: vec![doc(0x2a, "paris"), doc(0x2b, "oslo")],
             ..Default::default()
         };
         let swapped = TenantDataSnapshot {
-            documents: vec![doc(0x2a, "rome"), doc(0x2b, "paris")],
+            documents_versioned: vec![doc(0x2a, "rome"), doc(0x2b, "paris")],
             ..Default::default()
         };
         let base_tallies = tallies(&base, &binds);

@@ -18,9 +18,9 @@ pub use progress::CloneMaterializerHandle;
 pub use walker::{MaterializeParams, force_materialize, materialize_database, run_scheduled_sweep};
 
 // Shared with the `INSERT ... SELECT` orchestrator (local dispatch, source
-// scan) and the clone copy-up (owner-routed replicated write).
+// scan).
 pub(crate) use dispatch::{
     dispatch_local, dispatch_local_on_vshard, dispatch_on_this_node, dispatch_resolve_pass,
-    dispatch_to_owner,
 };
-pub(crate) use document::scan_source_page;
+pub(crate) use document::{SourceRow, clone_scope, read_source_row, scan_source_page};
+pub(crate) use kv::{SourceKey, read_source_key};

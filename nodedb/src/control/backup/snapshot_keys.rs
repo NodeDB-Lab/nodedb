@@ -167,6 +167,10 @@ pub fn extract_db_scoped_collection(key: &str, tenant_id: u64) -> Option<&str> {
 ///   `source_vshards` — the node owning the collection keeps it, every other
 ///   node drops it (captured exactly once, never duplicated).
 /// - `arrays` by the vShard each blob's cells route to.
+/// - `vector_versions` like `vectors`: the restore installs every vector
+///   node at its span.
+/// - the index image sections (`sparse_vectors`, `spatial_indexes`) are
+///   dropped: the restore rebuilds those indexes.
 pub fn retain_tenant_data_for_vshards(
     snap: &mut TenantDataSnapshot,
     tenant_id: u64,
@@ -182,14 +186,18 @@ pub fn retain_tenant_data_for_vshards(
     let in_group_db_scoped =
         |key: &str| extract_db_scoped_collection(key, tenant_id).is_some_and(owned_row);
 
-    snap.documents.retain(|(k, _)| in_group_db_tenant_scoped(k));
-    snap.indexes.retain(|(k, _)| in_group_db_tenant_scoped(k));
     snap.documents_versioned
         .retain(|(k, _)| in_group_db_tenant_scoped(k));
     snap.indexes_versioned
         .retain(|(k, _)| in_group_db_tenant_scoped(k));
     snap.vectors.retain(|(k, _)| in_group_db_tenant_scoped(k));
+    snap.vector_versions
+        .retain(|(k, _)| in_group_db_tenant_scoped(k));
     snap.timeseries
+        .retain(|(k, _)| in_group_db_tenant_scoped(k));
+    // A backup keeps each catalog with its collection's rows, so restored
+    // rows keep their series ids.
+    snap.ts_series_catalogs
         .retain(|(k, _)| in_group_db_tenant_scoped(k));
     snap.flushed_ts_segments
         .retain(|b| in_group_db_scoped(&b.collection_key));
@@ -208,6 +216,11 @@ pub fn retain_tenant_data_for_vshards(
     snap.edge_hidden.clear();
     snap.edge_cuts.clear();
     snap.edge_applied.clear();
+    // The RESTORE installs every vector node at its span, so the vector
+    // history travels with its index. It re-issues the rows as new writes,
+    // which rebuild the sparse and spatial indexes: their images stay behind.
+    snap.sparse_vectors.clear();
+    snap.spatial_indexes.clear();
     // A node's labels home by the node, whatever collection its edges live
     // in. The source of that home keeps them.
     let owned_node =

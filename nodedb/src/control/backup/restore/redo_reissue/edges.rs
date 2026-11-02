@@ -100,7 +100,7 @@ fn node_identity(
     })
 }
 
-/// One edge version of the collection `name` as a unit.
+/// One edge version of the collection `name` as a unit of that version alone.
 fn edge_unit(
     resolved: &NodeSurrogates,
     name: &RestoredName,
@@ -131,7 +131,7 @@ fn edge_unit(
     let src = node_identity(resolved, collection, src_id)?;
     let dst = node_identity(resolved, collection, dst_id)?;
     Ok(EdgeUnit {
-        version: RestoredEdgeVersion {
+        versions: vec![RestoredEdgeVersion {
             collection: name.stored.to_string(),
             src_id: src_id.to_string(),
             label: label.to_string(),
@@ -141,16 +141,31 @@ fn edge_unit(
             system_from,
             properties,
             valid_time,
-        },
+        }],
         homes: RecordHomes::edge(src_id, dst_id),
         identities: vec![src, dst],
     })
 }
 
+/// Append the one-version unit `unit` to `units`: onto the last unit when it
+/// holds the same edge, else as a unit of its own. `units` arrive in key
+/// order, so an edge's versions are adjacent.
+fn push_version(units: &mut Vec<EdgeUnit>, unit: EdgeUnit) {
+    if let Some(last) = units.last_mut()
+        && let Some(version) = unit.versions.first()
+        && last.holds_edge_of(version)
+    {
+        last.versions.extend(unit.versions);
+        return;
+    }
+    units.push(unit);
+}
+
 /// Every restored edge version of `tenant_id` in one database, one unit per
-/// version, grouped by edge collection in key order: each edge's versions in
-/// system-time order. The edge section of a database's data section holds
-/// that database's edges only.
+/// edge, grouped by edge collection in key order. A unit holds every version
+/// of its edge in system-time order: the versioned key sorts an edge's
+/// versions together, by their zero-padded `system_from`. The edge section
+/// of a database's data section holds that database's edges only.
 ///
 /// Returns the number of distinct edge versions and the grouped units.
 pub(super) async fn edge_units(
@@ -182,7 +197,7 @@ pub(super) async fn edge_units(
         let (stored, ..) = parse_versioned_edge_key(key).ok_or_else(|| malformed(key))?;
         let name = target.resolve(stored)?;
         let unit = edge_unit(&resolved, &name, key, value)?;
-        grouped.entry(name.bare).or_default().push(unit);
+        push_version(grouped.entry(name.bare).or_default(), unit);
     }
     let versions = by_key.len();
     let collections = grouped
@@ -194,4 +209,50 @@ pub(super) async fn edge_units(
         })
         .collect();
     Ok((versions, collections))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn one(dst: &str, system_from: i64) -> EdgeUnit {
+        EdgeUnit {
+            versions: vec![RestoredEdgeVersion {
+                collection: "follows".into(),
+                src_id: "a".into(),
+                label: "L".into(),
+                dst_id: dst.into(),
+                src_surrogate: 1,
+                dst_surrogate: 2,
+                system_from,
+                properties: Some(Vec::new()),
+                valid_time: Some((0, i64::MAX)),
+            }],
+            identities: Vec::new(),
+            homes: RecordHomes::edge("a", dst),
+        }
+    }
+
+    /// Adjacent versions of one edge join one unit, in order. Another edge
+    /// opens a unit of its own.
+    #[test]
+    fn an_edges_versions_form_one_unit() {
+        let mut units = Vec::new();
+        for unit in [one("b", 1), one("b", 2), one("c", 1), one("c", 3)] {
+            push_version(&mut units, unit);
+        }
+        let shape: Vec<(String, Vec<i64>)> = units
+            .iter()
+            .map(|unit| {
+                (
+                    unit.versions[0].dst_id.clone(),
+                    unit.versions.iter().map(|v| v.system_from).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            vec![("b".into(), vec![1, 2]), ("c".into(), vec![1, 3])]
+        );
+    }
 }
