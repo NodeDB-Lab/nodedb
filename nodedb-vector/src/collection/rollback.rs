@@ -117,6 +117,7 @@ impl VectorCollection {
             {
                 self.surrogate_to_local.remove(&surrogate);
             }
+            self.versions.forget(id);
         }
         self.growing
             .truncate((mark.next_id - self.growing_base_id) as usize);

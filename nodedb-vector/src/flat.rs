@@ -138,6 +138,22 @@ impl FlatIndex {
         self.search_filtered_offset_with_metric(query, top_k, bitmap, id_offset, self.metric)
     }
 
+    /// Exact search of the vectors `filter` admits under `metric`. Local id
+    /// `i` is tested as global id `i + id_offset`. A soft-deleted vector is
+    /// scored only when `filter` revives it.
+    pub fn search_admitting(
+        &self,
+        query: &[f32],
+        top_k: usize,
+        metric: DistanceMetric,
+        filter: &crate::visibility::NodeFilter<'_>,
+        id_offset: u32,
+    ) -> Result<Vec<SearchResult>, VectorError> {
+        self.scan_admitting(query, top_k, metric, &|i: u32, deleted: bool| {
+            filter.admits(i.saturating_add(id_offset), deleted)
+        })
+    }
+
     /// Exact scan of every live vector under `metric`, restricted to ids
     /// whose `local + offset` is in the filter when one is given.
     fn scan(
@@ -147,6 +163,22 @@ impl FlatIndex {
         metric: DistanceMetric,
         filter: Option<(&RoaringBitmap, u32)>,
     ) -> Result<Vec<SearchResult>, VectorError> {
+        self.scan_admitting(query, top_k, metric, &|i: u32, deleted: bool| {
+            !deleted
+                && filter
+                    .is_none_or(|(bitmap, id_offset)| bitmap.contains(i.saturating_add(id_offset)))
+        })
+    }
+
+    /// Exact scan of the vectors `admit` accepts under `metric`. `admit`
+    /// takes a local id and whether the vector is soft-deleted.
+    fn scan_admitting<A: Fn(u32, bool) -> bool>(
+        &self,
+        query: &[f32],
+        top_k: usize,
+        metric: DistanceMetric,
+        admit: &A,
+    ) -> Result<Vec<SearchResult>, VectorError> {
         check_dim(self.dim, query.len())?;
         let n = self.len();
         if n == 0 || top_k == 0 {
@@ -155,12 +187,7 @@ impl FlatIndex {
 
         let mut candidates: Vec<SearchResult> = Vec::with_capacity(n.min(top_k * 2));
         for i in 0..n {
-            if self.deleted[i] {
-                continue;
-            }
-            if let Some((bitmap, id_offset)) = filter
-                && !bitmap.contains((i as u32).saturating_add(id_offset))
-            {
+            if !admit(i as u32, self.deleted[i]) {
                 continue;
             }
             let start = i * self.dim;

@@ -145,7 +145,7 @@ fn search_sealed(
 }
 
 /// Shift segment-local result ids to global ids and append them.
-fn push_shifted(all: &mut Vec<SearchResult>, results: Vec<SearchResult>, base_id: u32) {
+pub(super) fn push_shifted(all: &mut Vec<SearchResult>, results: Vec<SearchResult>, base_id: u32) {
     all.extend(results.into_iter().map(|mut r| {
         r.id += base_id;
         r
@@ -153,7 +153,7 @@ fn push_shifted(all: &mut Vec<SearchResult>, results: Vec<SearchResult>, base_id
 }
 
 /// Order merged results by distance and keep the `top_k` nearest.
-fn finish(mut all: Vec<SearchResult>, top_k: usize) -> Vec<SearchResult> {
+pub(super) fn finish(mut all: Vec<SearchResult>, top_k: usize) -> Vec<SearchResult> {
     all.sort_by(|a, b| {
         a.distance
             .partial_cmp(&b.distance)
@@ -553,6 +553,7 @@ mod tests {
         let codec = Sq8Codec::calibrate(&refs, dim).unwrap();
         let sq8_data: Vec<u8> = vecs.iter().flat_map(|v| codec.quantize(v)).collect();
         sealed.sq8 = Some((codec, sq8_data));
+        sealed.remeasure();
     }
 
     #[test]

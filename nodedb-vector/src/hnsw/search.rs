@@ -110,6 +110,28 @@ impl HnswIndex {
         self.search_filtered_offset(query, k, ef, &bitmap, id_offset)
     }
 
+    /// K-NN search admitting the nodes `filter` admits. `id_offset` is added
+    /// to local node ids before `filter` tests them. A soft-deleted node
+    /// enters the results only when `filter` revives it. A search at a
+    /// past system-time cut reads ended nodes this way.
+    pub fn search_admitting(
+        &self,
+        query: &[f32],
+        k: usize,
+        ef: usize,
+        filter: &crate::visibility::NodeFilter<'_>,
+        id_offset: u32,
+    ) -> Result<Vec<SearchResult>, VectorError> {
+        check_dim(self.dim, query.len())?;
+        // An index whose every node is deleted answers only when the filter
+        // revives a deleted node.
+        if self.nodes.is_empty() || (self.is_empty() && !filter.admits_deleted()) {
+            return Ok(Vec::new());
+        }
+        let admit = |id: u32, deleted: bool| filter.admits(id.saturating_add(id_offset), deleted);
+        self.search_with_admit(query, k, ef.max(k).min(MAX_EF), &admit)
+    }
+
     /// Greedy descent to layer 1, then a beam search of width `ef` at layer
     /// 0, restricted to `filter` when one is given.
     fn search_inner(
@@ -124,6 +146,25 @@ impl HnswIndex {
         if self.is_empty() {
             return Ok(Vec::new());
         }
+        let admit = |id: u32, deleted: bool| {
+            !deleted
+                && match filter {
+                    Some(f) => f.contains(id + id_offset),
+                    None => true,
+                }
+        };
+        self.search_with_admit(query, k, ef, &admit)
+    }
+
+    /// Greedy descent to layer 1, then a beam search of width `ef` at layer
+    /// 0 whose results are the nodes `admit` accepts.
+    fn search_with_admit<A: Fn(u32, bool) -> bool>(
+        &self,
+        query: &[f32],
+        k: usize,
+        ef: usize,
+        admit: &A,
+    ) -> Result<Vec<SearchResult>, VectorError> {
         let Some(ep) = self.entry_point else {
             return Ok(Vec::new());
         };
@@ -140,7 +181,7 @@ impl HnswIndex {
         }
 
         // Phase 2: Beam search at layer 0.
-        let results = search_layer(self, &probe, current_ep, ef, 0, filter, id_offset);
+        let results = search_layer_with(self, &probe, current_ep, ef, 0, admit);
 
         Ok(results
             .into_iter()
@@ -182,6 +223,27 @@ pub(crate) fn search_layer(
     filter: Option<&RoaringBitmap>,
     id_offset: u32,
 ) -> Vec<Candidate> {
+    let admit = |id: u32, deleted: bool| {
+        !deleted
+            && match filter {
+                Some(f) => f.contains(id + id_offset),
+                None => true,
+            }
+    };
+    search_layer_with(index, probe, entry_point, ef, layer, &admit)
+}
+
+/// [`search_layer`] whose results are the nodes `admit` accepts. `admit`
+/// takes a local node id and whether the node is soft-deleted. Every node
+/// is still traversed for graph connectivity.
+pub(crate) fn search_layer_with<A: Fn(u32, bool) -> bool>(
+    index: &HnswIndex,
+    probe: &Probe<'_>,
+    entry_point: u32,
+    ef: usize,
+    layer: usize,
+    admit: &A,
+) -> Vec<Candidate> {
     let metric = index.params.metric;
     let mut arena = index.arena.borrow_mut();
 
@@ -206,15 +268,7 @@ pub(crate) fn search_layer(
 
     let mut res_vec = std::mem::take(&mut arena.results);
 
-    let passes_filter = |id: u32| -> bool {
-        if index.nodes[id as usize].deleted {
-            return false;
-        }
-        match filter {
-            Some(f) => f.contains(id + id_offset),
-            None => true,
-        }
-    };
+    let passes_filter = |id: u32| -> bool { admit(id, index.nodes[id as usize].deleted) };
 
     if ep_dist.is_some() && passes_filter(entry_point) {
         res_vec.push(ep_candidate);

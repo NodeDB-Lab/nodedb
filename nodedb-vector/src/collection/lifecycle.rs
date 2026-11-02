@@ -109,8 +109,7 @@ pub struct VectorCollection {
     /// one gating its siblings. Per-apply advancement lands in
     /// [`Self::applied_wal_lsn`] instead, and is folded into this field at
     /// checkpoint save time. `0` means "no write recorded" (a fresh
-    /// collection or a legacy checkpoint predating this field), which never
-    /// gates replay.
+    /// collection), which never gates replay.
     pub(crate) checkpoint_wal_lsn: u64,
     /// Running max of WAL LSNs applied to this collection's in-memory state
     /// since the last checkpoint load. Advanced by [`Self::note_checkpoint_lsn`]
@@ -125,6 +124,9 @@ pub struct VectorCollection {
     pub(crate) builds_completed: u64,
     /// HNSW builds that failed since the collection was opened.
     pub(crate) builds_failed: u64,
+    /// System-time spans of the nodes: which node of each row a search at a
+    /// past cut reads (see `versions`).
+    pub(crate) versions: super::versions::VectorVersions,
 }
 
 impl VectorCollection {
@@ -181,6 +183,7 @@ impl VectorCollection {
             applied_wal_lsn: 0,
             builds_completed: 0,
             builds_failed: 0,
+            versions: super::versions::VectorVersions::default(),
         }
     }
 

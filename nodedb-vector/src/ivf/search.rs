@@ -43,6 +43,35 @@ impl IvfPqIndex {
         metric: DistanceMetric,
         filter: Option<&RoaringBitmap>,
     ) -> Result<Vec<SearchResult>, VectorError> {
+        self.search_admit(query, top_k, metric, &|id: u32, deleted: bool| {
+            !deleted && filter.is_none_or(|f| f.contains(id))
+        })
+    }
+
+    /// The `top_k` entries `filter` admits nearest to `query` under
+    /// `metric`. A soft-deleted entry is scored only when `filter` revives
+    /// it. Fails as [`Self::search`].
+    pub fn search_admitting(
+        &self,
+        query: &[f32],
+        top_k: usize,
+        metric: DistanceMetric,
+        filter: &crate::visibility::NodeFilter<'_>,
+    ) -> Result<Vec<SearchResult>, VectorError> {
+        self.search_admit(query, top_k, metric, &|id: u32, deleted: bool| {
+            filter.admits(id, deleted)
+        })
+    }
+
+    /// The `top_k` entries `admit` accepts nearest to `query` under
+    /// `metric`. `admit` takes an entry id and whether it is soft-deleted.
+    fn search_admit<A: Fn(u32, bool) -> bool>(
+        &self,
+        query: &[f32],
+        top_k: usize,
+        metric: DistanceMetric,
+        admit: &A,
+    ) -> Result<Vec<SearchResult>, VectorError> {
         check_dim(self.dim, query.len())?;
         let Some(pq) = &self.pq else {
             return Ok(Vec::new());
@@ -69,7 +98,7 @@ impl IvfPqIndex {
             }
             let table = pq.build_distance_table(&residual(query, &self.centroids[cell_idx]))?;
             for (pos, &id) in cell.ids.iter().enumerate() {
-                if self.deleted.contains(id) || filter.is_some_and(|f| !f.contains(id)) {
+                if !admit(id, self.deleted.contains(id)) {
                     continue;
                 }
                 let code = &cell.codes[pos * m..(pos + 1) * m];

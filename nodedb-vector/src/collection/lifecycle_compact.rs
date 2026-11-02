@@ -32,6 +32,7 @@ impl VectorCollection {
         self.surrogate_to_local.clear();
         self.multi_doc_map.clear();
         self.payload.clear_rows();
+        self.versions.clear();
         dropped
     }
 
@@ -60,23 +61,66 @@ impl VectorCollection {
         self.codec_dispatch = None;
     }
 
+    /// Tombstoned nodes that [`Self::compact`] removes: every tombstone of
+    /// the sealed segments and the IVF-PQ index but the ended nodes a
+    /// retained cut still reads. A history purge raises it.
+    pub fn removable_tombstone_count(&self) -> usize {
+        let ivf = self.ivf.as_ref().map_or(0, |ivf| {
+            let retained = self.versions.retained_in(0, u32::MAX as usize).len();
+            ivf.tombstone_count()
+                .saturating_sub(usize::try_from(retained).unwrap_or(usize::MAX))
+        });
+        let sealed: usize = self
+            .sealed
+            .iter()
+            .map(|seg| {
+                let retained = self
+                    .versions
+                    .retained_in(seg.base_id, seg.index.len())
+                    .len();
+                seg.index
+                    .tombstone_count()
+                    .saturating_sub(usize::try_from(retained).unwrap_or(usize::MAX))
+            })
+            .sum();
+        ivf + sealed
+    }
+
     /// Compact sealed segments and the IVF-PQ index by removing tombstoned
-    /// nodes.
+    /// nodes. An ended node a past cut still reads stays (see `versions`).
     ///
-    /// Rewrites `surrogate_map` and `multi_doc_map` for every sealed
-    /// segment so that global ids continue to resolve to the correct
+    /// Rewrites `surrogate_map`, `multi_doc_map` and the node spans for every
+    /// sealed segment so that global ids continue to resolve to the correct
     /// surrogate after local-id renumbering. IVF-PQ entries keep their ids.
     pub fn compact(&mut self) -> usize {
-        let mut total_removed = self.ivf.as_mut().map_or(0, |ivf| ivf.compact());
+        let mut total_removed = match self.ivf.as_mut() {
+            Some(ivf) => {
+                let retain = self.versions.retained_in(0, u32::MAX as usize);
+                ivf.compact_retaining(&retain)
+            }
+            None => 0,
+        };
         for seg in &mut self.sealed {
             let base_id = seg.base_id;
-            let (removed, id_map) = seg.index.compact_with_map();
+            let retain = self.versions.retained_in(base_id, seg.index.len());
+            let (removed, id_map) = seg.index.compact_with_map_retaining(&retain);
             total_removed += removed;
             if removed == 0 {
                 continue;
             }
+            seg.remeasure();
 
             let segment_end = base_id as u64 + id_map.len() as u64;
+            self.versions.remap(|old| {
+                if (old as u64) >= base_id as u64 && (old as u64) < segment_end {
+                    match id_map[(old - base_id) as usize] {
+                        u32::MAX => None,
+                        new_local => Some(base_id + new_local),
+                    }
+                } else {
+                    Some(old)
+                }
+            });
             let global_keys: Vec<u32> = self
                 .surrogate_map
                 .keys()
@@ -165,6 +209,12 @@ impl VectorCollection {
         for seg in &self.sealed {
             let vectors = seg.index.export_vectors()?;
             for (i, vec_data) in vectors.into_iter().enumerate() {
+                // A soft-deleted node is no live vector: an ended version
+                // travels with its span (`export_ended_nodes`), and a dropped
+                // one is gone.
+                if seg.index.is_deleted(i as u32) {
+                    continue;
+                }
                 let vid = seg.base_id + i as u32;
                 let surrogate = self.surrogate_map.get(&vid).copied();
                 result.push((vid, vec_data, surrogate));
