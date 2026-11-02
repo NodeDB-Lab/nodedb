@@ -64,6 +64,7 @@ fn calvin_static(epoch: u64, plans: Vec<PhysicalPlan>) -> PhysicalPlan {
         epoch_system_ms: 1_700_000_000_000,
         versioned_reads: vec![],
         body_plans: vec![],
+        snapshot_ordinal: None,
     })
 }
 
@@ -116,6 +117,8 @@ fn stage_then_install(
             reply: answer.reply,
             user_write: true,
         }),
+        reads: Vec::new(),
+        snapshot_ordinal: None,
     }));
     request.wal_lsn = Some(nodedb::types::Lsn::new(epoch * 10));
     tx.try_push(BridgeRequest::unfloored(request)).unwrap();
@@ -161,6 +164,7 @@ fn kv_get_in(coll: &str, key: &[u8]) -> PhysicalPlan {
         key: key.to_vec(),
         rls_filters: Vec::new(),
         surrogate_ceiling: None,
+        system_time: nodedb_types::SystemTimeScope::Current,
     })
 }
 

@@ -3,19 +3,16 @@
 // Note: bypasses WebSocket transport and live cluster; exercises
 // coord-to-shard routing logic and op-log isolation directly.
 //
-// Phase I (distributed Origin, multi-Raft, vshard_for_array_coord) is not
-// yet implemented. This test file:
+// The shard routing here is a stand-in formula. Origin routes a cell by
+// `array_vshard_for_tile` of its tile key. This test file:
 //
 //   1. Verifies that the stub shard-routing formula (tile_id → shard_id) is
 //      deterministic, consistent, and partitions coords correctly.
 //   2. Verifies that ops placed in one shard's InMemoryOpLog do not appear in
 //      another shard's log — exercising the routing isolation property that
-//      Phase I must maintain.
+//      real routing maintains.
 //   3. Exercises the AckVector + collapse_below interaction across two
 //      independent shard logs, confirming that each shard GCs independently.
-//
-// When Phase I is wired, replace the stub routing with real
-// `nodedb_cluster::vshard_for_array_coord` calls.
 
 use nodedb_array::sync::ack::AckVector;
 use nodedb_array::sync::gc::{MockSnapshotSink, collapse_below};
@@ -31,7 +28,7 @@ use nodedb_test_support::array_sync::{hlc, rep};
 
 /// Minimal coord-to-shard mapping.
 /// `shard = (tile_x % num_shards)` where `tile_x = coord_x / tile_extent`.
-/// Real routing in Phase I uses `nodedb_cluster::vshard_for_array_coord`.
+/// Origin routes by `nodedb_types::array_route::array_vshard_for_tile`.
 fn shard_id(coord_x: i64, tile_extent: i64, num_shards: u32) -> u32 {
     let tile = coord_x / tile_extent;
     (tile.unsigned_abs() % num_shards as u64) as u32

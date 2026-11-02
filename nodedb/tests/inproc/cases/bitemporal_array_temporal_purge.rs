@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! End-to-end integration tests for `ArrayEngine::temporal_purge`.
+//! End-to-end integration tests for `ArrayEngine::purge_array_versions_below`.
 //!
 //! Each test builds a fresh `ArrayEngine` in a temp directory, writes
-//! cells with explicit `system_from_ms` values, calls `temporal_purge`,
+//! cells with explicit `system_from_ms` values, calls `purge_array_versions_below`,
 //! and asserts the resulting state via `ceiling_for_coord` /
 //! `scan_tiles_at` / the manifest.
 //!
@@ -66,6 +66,7 @@ fn open_engine(dir: &TempDir) -> ArrayEngine {
 fn put(e: &mut ArrayEngine, x: i64, v: i64, sys_ms: i64, lsn: u64) {
     e.put_cells(
         &aid(),
+        0,
         vec![ArrayPutCell {
             coord: vec![CoordValue::Int64(x)],
             attrs: vec![CellValue::Int64(v)],
@@ -93,7 +94,7 @@ fn flush_if_full(e: &mut ArrayEngine, lsn: u64) {
 }
 
 fn erase(e: &mut ArrayEngine, x: i64, sys_ms: i64, lsn: u64) {
-    e.gdpr_erase_cell(&aid(), vec![CoordValue::Int64(x)], sys_ms, lsn)
+    e.gdpr_erase_cell(&aid(), 0, vec![CoordValue::Int64(x)], sys_ms, lsn)
         .unwrap();
     flush_if_full(e, lsn);
 }
@@ -118,15 +119,10 @@ fn live_val(r: &CeilingResult) -> i64 {
 // ── test 1 ────────────────────────────────────────────────────────────────────
 
 /// Write three system-time versions of cell x=0 at T=100, T=200, T=300.
-/// Purge with cutoff=250: only T=100 is both below the cutoff and
-/// superseded by T=200 (which is also below the cutoff and is the newest
-/// outside-horizon version). After purge:
-/// - Ceiling at sys=150 returns the synthetic ceiling tile's value
-///   (T=200's value, the newest-below-cutoff record), because the
-///   purge collapses all outside-horizon versions into a single ceiling
-///   tile placed just below the cutoff.
-/// - Ceiling at sys=350 returns T=300's value (in-horizon, untouched).
-/// - The total dropped count must be ≥ 1 (tile-versions dropped).
+/// Purge below horizon 250: T=100 is superseded by T=200, which is at or
+/// below the horizon, so T=100 goes. T=200 is the version a read at the
+/// horizon sees, so it stays, carried in one ceiling tile stamped 250.
+/// T=300 sits above the horizon and stays untouched.
 #[test]
 fn temporal_purge_drops_superseded_versions_end_to_end() {
     let dir = TempDir::new().unwrap();
@@ -143,49 +139,29 @@ fn temporal_purge_drops_superseded_versions_end_to_end() {
         "setup: expected 3 segments before purge"
     );
 
-    // Purge with cutoff=250: T=100 and T=200 are outside the horizon,
-    // T=300 is inside (300 >= 250). The planner collapses T=100 and T=200
-    // into a single ceiling tile containing the value from T=200 (newest).
-    let dropped = e.temporal_purge(TENANT, DATABASE, ARRAY_NAME, 250).unwrap();
-    assert!(
-        dropped >= 1,
-        "at least one tile-version must be dropped; got {dropped}"
+    let dropped = e
+        .purge_array_versions_below(TENANT, DATABASE, ARRAY_NAME, 250)
+        .unwrap();
+    assert_eq!(
+        dropped, 2,
+        "both versions at or below the horizon are rewritten"
     );
 
-    // After purge, ceiling at sys=350 must see T=300's value (in-horizon).
-    let r350 = ceiling(&e, 0, 350);
-    assert_eq!(live_val(&r350), 300, "sys=350 must return T=300 value");
-
-    // After purge, ceiling at sys=240 (below both T=100 and T=200)
-    // must return the synthetic ceiling (newest-below-cutoff is T=200,
-    // so ceiling tile carries v=200). The ceiling tile is placed at
-    // system_from_ms = cutoff - 1 = 249 by plan.rs. A scan at sys=240
-    // is below 249, so it will either return the ceiling tile (if 249
-    // was placed above 240) or return NotFound/truncated. The plan places
-    // the ceiling at `horizon_ms - 1` = 249, which is ≥ 240, so the
-    // ceiling IS accessible at sys=240.
-    //
-    // Actually: ceiling scan at sys=240 looks for the newest version with
-    // system_from_ms ≤ 240. The ceiling tile has system_from_ms=249 which
-    // is > 240, so it is NOT accessible at sys=240 — the query predates
-    // all data (truncated). We verify the correct in-horizon read instead.
-    let r_max = ceiling(&e, 0, i64::MAX);
+    // The version visible at the horizon stays, at the horizon.
+    assert_eq!(live_val(&ceiling(&e, 0, 250)), 200, "sys=250 sees T=200");
+    assert_eq!(live_val(&ceiling(&e, 0, 299)), 200, "sys=299 sees T=200");
+    assert_eq!(live_val(&ceiling(&e, 0, 350)), 300, "sys=350 sees T=300");
     assert_eq!(
-        live_val(&r_max),
+        live_val(&ceiling(&e, 0, i64::MAX)),
         300,
         "sys=MAX must still return T=300 value after purge"
     );
 
-    // No ceiling tile is materialised here because the in-horizon T=300
-    // version already covers coord x=0 — `merge_for_retention` excludes
-    // coords covered by an inside-horizon tile from the ceiling. So a
-    // historical AS_OF query below the cutoff returns NotFound, which is
-    // the correct semantics: audit history outside the retention horizon
-    // is not guaranteed for coords already covered in-horizon.
+    // History below the horizon is gone.
     let r_249 = ceiling(&e, 0, 249);
     assert!(
         matches!(r_249, CeilingResult::NotFound),
-        "sys=249 below cutoff with in-horizon coverage: {r_249:?}"
+        "sys=249 is below the horizon: {r_249:?}"
     );
 }
 
@@ -193,24 +169,24 @@ fn temporal_purge_drops_superseded_versions_end_to_end() {
 
 /// REGRESSION TEST for the cell-loss bug.
 ///
-/// Cell A (x=0) written at T=100. Cell B (x=4, different coord, but same
-/// Hilbert prefix due to same tile extent region) written at T=200.
-/// With cutoff=250 both versions are outside the horizon. The purge plan
-/// must carry BOTH A and B into the synthetic ceiling tile.
+/// Cell A (x=0) written at T=100. Cell B (x=1, a different coord in the
+/// same tile [0,4)) written at T=200. Horizon 250 places both tile-versions
+/// at or below it, so purge collapses them into one ceiling tile stamped
+/// 250. The ceiling must carry BOTH A and B.
 ///
-/// Without cell-level merge, the plan would see tile-version T=100 as
-/// "superseded" by T=200 at the tile-version level and drop it,
-/// silently losing cell A which only appears in T=100.
+/// Without cell-level merge, the plan would treat tile-version T=100 as
+/// superseded by T=200 at the tile-version level and drop it, silently
+/// losing cell A, which appears only in T=100.
 #[test]
 fn temporal_purge_preserves_cells_with_no_newer_version() {
     let dir = TempDir::new().unwrap();
     let mut e = open_engine(&dir);
 
-    // x=0 and x=4 are in the same tile-extent region [0,4).
+    // x=0 and x=1 share the tile [0,4).
     // Cell A: only in T=100 tile-version.
     put(&mut e, 0, 10, 100, 1);
     // Cell B: only in T=200 tile-version.
-    put(&mut e, 4, 20, 200, 2);
+    put(&mut e, 1, 20, 200, 2);
 
     assert_eq!(
         e.store(&aid()).unwrap().manifest().segments.len(),
@@ -218,28 +194,54 @@ fn temporal_purge_preserves_cells_with_no_newer_version() {
         "setup: expected 2 segments"
     );
 
-    let dropped = e.temporal_purge(TENANT, DATABASE, ARRAY_NAME, 250).unwrap();
-    // Two tile-versions exist (T=100 and T=200), both outside horizon=250.
-    // Both are dropped and replaced by a single ceiling tile.
-    assert!(
-        dropped >= 1,
-        "at least one tile-version dropped; got {dropped}"
+    let dropped = e
+        .purge_array_versions_below(TENANT, DATABASE, ARRAY_NAME, 250)
+        .unwrap();
+    assert_eq!(
+        dropped, 2,
+        "both tile-versions at or below the horizon collapse into one ceiling"
     );
 
-    // CRITICAL: both cells must remain readable after purge.
-    let a = ceiling(&e, 0, i64::MAX);
-    assert!(
-        matches!(a, CeilingResult::Live(_)),
-        "cell A (x=0) must survive purge: {a:?}"
-    );
-    assert_eq!(live_val(&a), 10, "cell A value must be preserved");
+    // Both cells stay readable at the horizon and above.
+    for sys in [250, i64::MAX] {
+        let a = ceiling(&e, 0, sys);
+        assert_eq!(live_val(&a), 10, "cell A at sys={sys}");
+        let b = ceiling(&e, 1, sys);
+        assert_eq!(live_val(&b), 20, "cell B at sys={sys}");
+    }
 
-    let b = ceiling(&e, 4, i64::MAX);
-    assert!(
-        matches!(b, CeilingResult::Live(_)),
-        "cell B (x=4) must survive purge: {b:?}"
-    );
-    assert_eq!(live_val(&b), 20, "cell B value must be preserved");
+    // History below the horizon is gone for both cells.
+    for x in [0, 1] {
+        let r = ceiling(&e, x, 249);
+        assert!(
+            matches!(r, CeilingResult::NotFound),
+            "x={x} at sys=249 is below the horizon: {r:?}"
+        );
+    }
+}
+
+/// Cell A (x=0) at T=100 and cell B (x=4) at T=200 sit in different tiles.
+/// Each tile holds one live version at or below horizon 250 and no
+/// successor, so that version already is the state at the horizon. Purge
+/// drops nothing, and both versions keep their original stamps.
+#[test]
+fn temporal_purge_keeps_lone_versions_in_distinct_tiles() {
+    let dir = TempDir::new().unwrap();
+    let mut e = open_engine(&dir);
+
+    put(&mut e, 0, 10, 100, 1); // tile [0,4)
+    put(&mut e, 4, 20, 200, 2); // tile [4,8)
+
+    let dropped = e
+        .purge_array_versions_below(TENANT, DATABASE, ARRAY_NAME, 250)
+        .unwrap();
+    assert_eq!(dropped, 0, "no version has a successor: nothing to purge");
+
+    assert_eq!(live_val(&ceiling(&e, 0, 100)), 10, "A stays at its stamp");
+    assert_eq!(live_val(&ceiling(&e, 0, i64::MAX)), 10);
+    assert_eq!(live_val(&ceiling(&e, 4, 200)), 20, "B stays at its stamp");
+    assert_eq!(live_val(&ceiling(&e, 4, i64::MAX)), 20);
+    assert!(matches!(ceiling(&e, 4, 199), CeilingResult::NotFound));
 }
 
 // ── test 3 ────────────────────────────────────────────────────────────────────
@@ -258,7 +260,9 @@ fn temporal_purge_drops_gdpr_erased_cells_outright() {
     e.flush(&aid(), nodedb::types::replay_stamp::ReplayStamp::through(3))
         .unwrap(); // ensure erasure tile-version lands in a segment
 
-    let dropped = e.temporal_purge(TENANT, DATABASE, ARRAY_NAME, 250).unwrap();
+    let dropped = e
+        .purge_array_versions_below(TENANT, DATABASE, ARRAY_NAME, 250)
+        .unwrap();
     // Both tile-versions are outside horizon=250 and are candidates for
     // dropping. The GdprErased version is the newest → ceiling for x=0
     // is empty. The entire segment(s) may be removed if no other cells
@@ -312,7 +316,7 @@ fn temporal_purge_wal_payload_roundtrip_array_engine() {
 
 // ── test 5 ────────────────────────────────────────────────────────────────────
 
-/// Idempotency: running `temporal_purge` twice with the same cutoff must
+/// Idempotency: running `purge_array_versions_below` twice with the same cutoff must
 /// not drop anything on the second call, and the live cell state must be
 /// identical after both calls.
 #[test]
@@ -328,7 +332,7 @@ fn temporal_purge_idempotent_on_re_run() {
 
     // First run: drops the two outside-horizon tile-versions.
     let d1 = e
-        .temporal_purge(TENANT, DATABASE, ARRAY_NAME, cutoff)
+        .purge_array_versions_below(TENANT, DATABASE, ARRAY_NAME, cutoff)
         .unwrap();
     assert!(d1 >= 1, "first purge must drop ≥1 tile-version; got {d1}");
 
@@ -337,7 +341,7 @@ fn temporal_purge_idempotent_on_re_run() {
 
     // Second run: nothing left to drop.
     let d2 = e
-        .temporal_purge(TENANT, DATABASE, ARRAY_NAME, cutoff)
+        .purge_array_versions_below(TENANT, DATABASE, ARRAY_NAME, cutoff)
         .unwrap();
     assert_eq!(d2, 0, "second purge with same cutoff must drop nothing");
 
@@ -351,7 +355,7 @@ fn temporal_purge_idempotent_on_re_run() {
 
 // ── test 6 ────────────────────────────────────────────────────────────────────
 
-/// `temporal_purge` for a non-existent array must return `Ok(0)` without
+/// `purge_array_versions_below` for a non-existent array must return `Ok(0)` without
 /// panicking. The array may have been dropped between the scheduler's
 /// planning step and execution.
 #[test]
@@ -361,7 +365,7 @@ fn temporal_purge_no_op_when_array_missing() {
     let mut e = ArrayEngine::new(ArrayEngineConfig::new(dir.path().to_path_buf())).unwrap();
 
     let count = e
-        .temporal_purge(TENANT, DATABASE, "nonexistent", 99_999)
+        .purge_array_versions_below(TENANT, DATABASE, "nonexistent", 99_999)
         .unwrap();
     assert_eq!(count, 0, "purge on missing array must return Ok(0)");
 }

@@ -13,8 +13,16 @@ use nodedb::event::wal_replay::replay_wal_to_events;
 use nodedb::types::{DatabaseId, Lsn, TenantId, VShardId};
 use nodedb::wal::manager::{NO_APPLY_KEY, WalManager};
 
+/// A document put payload in the shape the write path journals.
 fn document_put(id: &str) -> Vec<u8> {
-    zerompk::to_msgpack_vec(&("orders", id, b"row".to_vec())).expect("encode put")
+    zerompk::to_msgpack_vec(&(
+        "orders",
+        id,
+        b"row".to_vec(),
+        None::<nodedb_types::sync::wire::SyncProvenance>,
+        9u32,
+    ))
+    .expect("encode put")
 }
 
 #[test]

@@ -70,6 +70,7 @@ fn open_engine_with_threshold(dir: &TempDir, flush_threshold: usize) -> ArrayEng
 fn put_cell(e: &mut ArrayEngine, x: i64, v: i64, sys: i64, lsn: u64) {
     e.put_cells(
         &aid(),
+        0,
         vec![ArrayPutCell {
             coord: vec![CoordValue::Int64(x)],
             attrs: vec![CellValue::Int64(v)],
@@ -99,6 +100,7 @@ fn flush_if_full(e: &mut ArrayEngine, lsn: u64) {
 fn tombstone_cell(e: &mut ArrayEngine, x: i64, sys: i64, lsn: u64) {
     e.delete_cells(
         &aid(),
+        0,
         vec![ArrayDeleteCell {
             coord: vec![CoordValue::Int64(x)],
             system_from_ms: sys,
@@ -111,7 +113,7 @@ fn tombstone_cell(e: &mut ArrayEngine, x: i64, sys: i64, lsn: u64) {
 }
 
 fn erase_cell(e: &mut ArrayEngine, x: i64, sys: i64, lsn: u64) {
-    e.gdpr_erase_cell(&aid(), vec![CoordValue::Int64(x)], sys, lsn)
+    e.gdpr_erase_cell(&aid(), 0, vec![CoordValue::Int64(x)], sys, lsn)
         .unwrap();
     flush_if_full(e, lsn);
 }
@@ -215,7 +217,7 @@ fn gdpr_erasure_persists_through_flush_and_blocks_reads() {
 
     // Compact until stable.
     loop {
-        if !e.maybe_compact(&aid(), None, 0).unwrap() {
+        if !e.maybe_compact(&aid(), None).unwrap() {
             break;
         }
     }
@@ -304,7 +306,7 @@ fn gdpr_erasure_physically_dropped_outside_retention_horizon() {
     );
 
     loop {
-        if !e.maybe_compact(&aid(), None, 0).unwrap() {
+        if !e.maybe_compact(&aid(), None).unwrap() {
             break;
         }
     }

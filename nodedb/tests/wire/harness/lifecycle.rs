@@ -32,6 +32,19 @@ impl TestServer {
         Self::connect_and_build(spawned, dir, AuthMode::Trust).await
     }
 
+    /// Spawn a single-core server whose version cleanup runs every 200 ms
+    /// with a history window of about 12 s (`TuningOverrides`).
+    pub async fn start_with_fast_version_cleanup() -> Self {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spawned = process::spawn(
+            dir.path(),
+            AuthMode::Trust,
+            TuningOverrides::fast_version_cleanup(),
+            1,
+        );
+        Self::connect_and_build(spawned, dir, AuthMode::Trust).await
+    }
+
     /// Spawn a single-core server in pgwire password mode (SCRAM-SHA-256)
     /// with the credential lockout policy enabled (`5` failures -> `300s`).
     /// The harness user `nodedb` keeps password `nodedb`.

@@ -160,6 +160,7 @@ fn unfiltered_facet_counts_multiple_fields() {
             filters: Vec::new(),
             fields: vec!["brand".into(), "color".into()],
             limit_per_facet: 0,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
 
@@ -210,6 +211,7 @@ fn filtered_facet_counts() {
             filters: filter_bytes,
             fields: vec!["color".into(), "size".into()],
             limit_per_facet: 0,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
 
@@ -253,6 +255,7 @@ fn zero_match_filter_returns_empty_facets() {
             filters: filter_bytes,
             fields: vec!["color".into()],
             limit_per_facet: 0,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
 
@@ -279,6 +282,7 @@ fn limit_per_facet_truncates() {
             filters: Vec::new(),
             fields: vec!["brand".into()],
             limit_per_facet: 2,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
 
@@ -308,6 +312,7 @@ fn facet_on_field_without_index_falls_back_to_scan() {
             filters: Vec::new(),
             fields: vec!["price".into()],
             limit_per_facet: 0,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
 
@@ -389,6 +394,7 @@ fn facet_single_field() {
             filters: Vec::new(),
             fields: vec!["size".into()],
             limit_per_facet: 0,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
 

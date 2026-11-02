@@ -84,7 +84,7 @@ fn make_request(plan: PhysicalPlan) -> Request {
         wal_lsn: None,
         resolved_now_ms: None,
         commit_hlc: None,
-        entry_version: None,
+        system_ordinal: None,
         admission: nodedb::bridge::envelope::Admission::Admitted,
     }
 }
@@ -249,6 +249,7 @@ fn columnar_insert_byte_identical() {
                 provenance: None,
                 wal_lsn: None,
                 system_from: None,
+                restored_versions: Vec::new(),
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 returning: None,
                 rls_filters: Vec::new(),

@@ -84,7 +84,7 @@ fn spawn_fake_data_plane(mut data_side: CoreChannelDataSide) {
                         partial: false,
                         payload,
                         watermark_lsn: Lsn::ZERO,
-                        read_versions: nodedb::types::ReadVersions::new(),
+                        read_vshards: nodedb::types::ReadShards::new(),
                         error_code: None,
                         stage_vote: None,
                         write_set: Vec::new(),

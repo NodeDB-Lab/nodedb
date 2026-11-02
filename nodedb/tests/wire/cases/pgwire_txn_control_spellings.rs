@@ -115,24 +115,31 @@ async fn rollback_work_to_savepoint_recovers_aborted_block() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn begin_applies_isolation_policy() {
+async fn begin_accepts_every_isolation_level() {
     let server = TestServer::start().await;
+    for level in [
+        "SERIALIZABLE",
+        "REPEATABLE READ",
+        "READ COMMITTED",
+        "READ UNCOMMITTED",
+    ] {
+        server
+            .client
+            .simple_query(&format!("START TRANSACTION ISOLATION LEVEL {level}"))
+            .await
+            .unwrap_or_else(|e| panic!("{level} runs serializable: {e}"));
+        server
+            .client
+            .simple_query("END TRANSACTION")
+            .await
+            .expect("end transaction");
+    }
     let refused = server
         .client
-        .simple_query("START TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+        .simple_query("START TRANSACTION DEFERRABLE")
         .await
-        .expect_err("SERIALIZABLE must be refused");
+        .expect_err("DEFERRABLE must be refused");
     assert_code(&refused, "0A000");
-    server
-        .client
-        .simple_query("START TRANSACTION ISOLATION LEVEL READ COMMITTED, READ WRITE")
-        .await
-        .expect("READ COMMITTED runs under Snapshot Isolation");
-    server
-        .client
-        .simple_query("END TRANSACTION")
-        .await
-        .expect("end transaction");
 }
 
 /// A prepared backup COPY executed in an aborted block gets 25P02 instead of

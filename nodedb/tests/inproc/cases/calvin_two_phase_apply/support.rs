@@ -17,11 +17,13 @@ use nodedb_types::QualifiedCollection;
 use nodedb_types::Surrogate;
 use nodedb_types::calvin::VersionedReadEntry;
 
-/// The version a single-node write at WAL LSN `lsn` records: no data-group
-/// entry applied it, so its version is its LSN on top of an empty vShard.
-pub(super) fn local_version(lsn: u64) -> nodedb_types::WriteVersion {
-    nodedb_types::WriteVersion::local_after(nodedb_types::WriteVersion::ZERO, lsn)
-}
+/// A snapshot every seeded version sits above: a read taken at it predates
+/// every seed.
+pub(super) const BEFORE_SEED: i64 = -1;
+
+/// A snapshot every seeded version sits at or below: a read taken at it
+/// observed every seed.
+pub(super) const AFTER_SEED: i64 = i64::MAX;
 
 /// The vShard a Calvin participant writes `collection` on: the collection's
 /// home vShard.
@@ -74,7 +76,7 @@ pub(super) fn make_request(plan: PhysicalPlan, vshard: u32, wal_lsn: Option<Lsn>
         wal_lsn,
         resolved_now_ms: None,
         commit_hlc: None,
-        entry_version: None,
+        system_ordinal: None,
         admission: nodedb::bridge::envelope::Admission::Admitted,
     }
 }
@@ -141,14 +143,16 @@ pub(super) fn stamped_install(
             reply: answer.reply,
             user_write: true,
         }),
+        reads: Vec::new(),
+        snapshot_ordinal: None,
     })
 }
 
-/// A write committed through the Calvin path to seed a write version.
+/// A write committed through the Calvin path to seed a stored version.
 pub(super) struct CalvinSeed<'a> {
     pub(super) epoch: u64,
     pub(super) vshard: u32,
-    /// The collection `plans` write; the install records its floor at `lsn`.
+    /// The collection `plans` write; the install notes it at `lsn`.
     pub(super) collection: &'a str,
     pub(super) plans: Vec<PhysicalPlan>,
     pub(super) lsn: u64,
@@ -222,6 +226,7 @@ pub(super) fn kv_get(coll: &str, key: &[u8]) -> PhysicalPlan {
         key: key.to_vec(),
         rls_filters: Vec::new(),
         surrogate_ceiling: None,
+        system_time: nodedb_types::SystemTimeScope::Current,
     })
 }
 
@@ -232,7 +237,7 @@ pub(super) fn doc_value() -> Vec<u8> {
     zerompk::to_msgpack_vec(&nodedb_types::Value::Object(obj)).unwrap()
 }
 
-/// A minimal document `PointInsert` plan, used to record a write-version at a
+/// A minimal document `PointInsert` plan, used to store a version at a
 /// specific surrogate (the document engine's per-key identity).
 pub(super) fn doc_insert(coll: &str, document_id: &str, surrogate: u32) -> PhysicalPlan {
     PhysicalPlan::Document(DocumentOp::PointInsert {
@@ -248,6 +253,7 @@ pub(super) fn doc_insert(coll: &str, document_id: &str, surrogate: u32) -> Physi
     })
 }
 
+/// The static stage of a transaction with no snapshot.
 pub(super) fn stage_static(
     epoch: u64,
     position: u32,
@@ -262,6 +268,27 @@ pub(super) fn stage_static(
         epoch_system_ms: 0,
         versioned_reads,
         body_plans: Vec::new(),
+        snapshot_ordinal: None,
+    })
+}
+
+/// The static stage of a transaction whose reads all observed `snapshot`.
+pub(super) fn stage_static_at(
+    epoch: u64,
+    position: u32,
+    plans: Vec<PhysicalPlan>,
+    versioned_reads: Vec<VersionedReadEntry>,
+    snapshot: i64,
+) -> PhysicalPlan {
+    PhysicalPlan::Meta(MetaOp::CalvinExecuteStatic {
+        epoch,
+        position,
+        tenant_id: TenantId::new(1),
+        plans,
+        epoch_system_ms: 0,
+        versioned_reads,
+        body_plans: Vec::new(),
+        snapshot_ordinal: Some(snapshot),
     })
 }
 

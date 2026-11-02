@@ -2,44 +2,40 @@
 
 //! Integration tests for the corrupt-segment quarantine subsystem.
 //!
-//! Tests cover the registry's two-strike logic, startup-scan rebuild,
+//! Tests cover the registry's two-strike logic, re-detection after a restart,
 //! per-engine open wrappers, and the HTTP/metrics snapshot surfaces.
 
 use std::sync::Arc;
 
 use nodedb::storage::quarantine::{
-    QuarantineEngine, QuarantineRegistry, SegmentKey,
-    engines::{ColumnarOrQuarantine, FtsOrQuarantine, VectorOrQuarantine},
+    CollectionScope, QuarantineCountKey, QuarantineEngine, QuarantineError, QuarantineRegistry,
+    SegmentKey,
+    engines::{ColumnarOrQuarantine, FtsOrQuarantine, FtsSegmentRef, VectorOrQuarantine},
 };
+
+fn columnar_key(collection: &str, segment_id: u64) -> SegmentKey {
+    SegmentKey::Columnar {
+        scope: CollectionScope::new(1, 1, collection),
+        segment_id,
+    }
+}
 
 // ── Registry: two-strike logic ───────────────────────────────────────────────
 
 #[test]
 fn quarantine_registry_first_strike_returns_ok() {
     let reg = QuarantineRegistry::new();
-    let k = SegmentKey {
-        engine: QuarantineEngine::Columnar,
-        collection: "c".into(),
-        segment_id: "1".into(),
-    };
-    assert!(reg.record_failure(k, "crc", None).is_ok());
+    assert!(reg.record_failure(columnar_key("c", 1), "crc").is_ok());
 }
 
 #[test]
 fn quarantine_registry_second_strike_returns_quarantined() {
     let reg = QuarantineRegistry::new();
-    let k = SegmentKey {
-        engine: QuarantineEngine::Columnar,
-        collection: "c".into(),
-        segment_id: "2".into(),
-    };
-    reg.record_failure(k.clone(), "crc", None).unwrap();
-    let err = reg.record_failure(k, "crc", None).unwrap_err();
+    let k = columnar_key("c", 2);
+    reg.record_failure(k.clone(), "crc").unwrap();
+    let err = reg.record_failure(k, "crc").unwrap_err();
     assert!(
-        matches!(
-            err,
-            nodedb::storage::quarantine::QuarantineError::SegmentQuarantined { .. }
-        ),
+        matches!(err, QuarantineError::SegmentQuarantined { .. }),
         "{err}"
     );
 }
@@ -47,35 +43,31 @@ fn quarantine_registry_second_strike_returns_quarantined() {
 #[test]
 fn quarantine_registry_success_resets_strikes() {
     let reg = QuarantineRegistry::new();
-    let k = SegmentKey {
-        engine: QuarantineEngine::Fts,
-        collection: "c".into(),
+    let k = SegmentKey::Fts {
+        scope: CollectionScope::new(1, 1, "c"),
+        field: None,
         segment_id: "3".into(),
     };
-    reg.record_failure(k.clone(), "crc", None).unwrap();
+    reg.record_failure(k.clone(), "crc").unwrap();
     reg.record_success(&k);
     // First failure after reset is strike 1 again — not quarantined.
-    assert!(reg.record_failure(k, "crc", None).is_ok());
+    assert!(reg.record_failure(k, "crc").is_ok());
 }
 
 #[test]
 fn quarantine_registry_quarantined_ignores_success_call() {
     let reg = QuarantineRegistry::new();
-    let k = SegmentKey {
-        engine: QuarantineEngine::Vector,
-        collection: "c".into(),
+    let k = SegmentKey::Vector {
+        scope: CollectionScope::new(1, 1, "c"),
         segment_id: "4".into(),
     };
-    reg.record_failure(k.clone(), "crc", None).unwrap();
-    reg.record_failure(k.clone(), "crc", None).unwrap_err();
+    reg.record_failure(k.clone(), "crc").unwrap();
+    reg.record_failure(k.clone(), "crc").unwrap_err();
     // success() must NOT lift the quarantine.
     reg.record_success(&k);
-    let err = reg.record_failure(k, "crc", None).unwrap_err();
+    let err = reg.record_failure(k, "crc").unwrap_err();
     assert!(
-        matches!(
-            err,
-            nodedb::storage::quarantine::QuarantineError::SegmentQuarantined { .. }
-        ),
+        matches!(err, QuarantineError::SegmentQuarantined { .. }),
         "{err}"
     );
 }
@@ -83,20 +75,19 @@ fn quarantine_registry_quarantined_ignores_success_call() {
 #[test]
 fn quarantine_registry_concurrent_second_strike_both_see_quarantined() {
     let reg = Arc::new(QuarantineRegistry::new());
-    let k = SegmentKey {
-        engine: QuarantineEngine::Raft,
-        collection: "c".into(),
-        segment_id: "5".into(),
+    let k = SegmentKey::Raft {
+        group_id: 3,
+        last_included_index: 5,
     };
     // Pre-seed one strike so both threads compete for the second.
-    reg.record_failure(k.clone(), "first", None).unwrap();
+    reg.record_failure(k.clone(), "first").unwrap();
 
     let r1 = Arc::clone(&reg);
     let k1 = k.clone();
     let r2 = Arc::clone(&reg);
     let k2 = k.clone();
-    let t1 = std::thread::spawn(move || r1.record_failure(k1, "second", None));
-    let t2 = std::thread::spawn(move || r2.record_failure(k2, "second", None));
+    let t1 = std::thread::spawn(move || r1.record_failure(k1, "second"));
+    let t2 = std::thread::spawn(move || r2.record_failure(k2, "second"));
 
     assert!(t1.join().unwrap().is_err());
     assert!(t2.join().unwrap().is_err());
@@ -104,35 +95,36 @@ fn quarantine_registry_concurrent_second_strike_both_see_quarantined() {
     assert_eq!(reg.quarantined_snapshot().len(), 1);
 }
 
-// ── Startup-scan rebuild ─────────────────────────────────────────────────────
+// ── Restart: quarantine is re-derived from the corrupt bytes ─────────────────
 
+/// Quarantine lives for one process run. A restart starts with an empty
+/// registry. The corrupt bytes are unchanged, so two reads quarantine the
+/// segment again under the same key.
 #[test]
-fn quarantine_rebuild_from_dir_restores_quarantine() {
-    let tmp = tempfile::tempdir().unwrap();
-    let ts = 1_700_000_000_123u64;
-    std::fs::write(tmp.path().join(format!("seg10.quarantined.{ts}")), b"").unwrap();
+fn quarantine_restart_rederives_quarantine_from_corrupt_bytes() {
+    use nodedb::storage::quarantine::engines::open_segment_with_quarantine;
 
-    let reg = QuarantineRegistry::new();
-    reg.rebuild_from_dir(QuarantineEngine::Columnar, tmp.path(), &|fname| {
-        let stem = fname.split(".quarantined.").next()?;
-        Some(("mydb".to_string(), stem.to_string()))
-    });
+    let scope = CollectionScope::new(1, 1, "coll");
+    let before = Arc::new(QuarantineRegistry::new());
+    open_segment_with_quarantine(&before, &[], &scope, 1).ok();
+    assert!(matches!(
+        open_segment_with_quarantine(&before, &[], &scope, 1),
+        Err(ColumnarOrQuarantine::Quarantined(_))
+    ));
 
-    let k = SegmentKey {
-        engine: QuarantineEngine::Columnar,
-        collection: "mydb".into(),
-        segment_id: "seg10".into(),
-    };
-    let err = reg.record_failure(k, "crc", None).unwrap_err();
-    assert!(
-        matches!(
-            err,
-            nodedb::storage::quarantine::QuarantineError::SegmentQuarantined {
-                quarantined_at_unix_ms,
-                ..
-            } if quarantined_at_unix_ms == ts
-        ),
-        "{err}"
+    let after = Arc::new(QuarantineRegistry::new());
+    assert!(after.quarantined_snapshot().is_empty());
+    assert!(matches!(
+        open_segment_with_quarantine(&after, &[], &scope, 1),
+        Err(ColumnarOrQuarantine::Columnar(_))
+    ));
+    assert!(matches!(
+        open_segment_with_quarantine(&after, &[], &scope, 1),
+        Err(ColumnarOrQuarantine::Quarantined(_))
+    ));
+    assert_eq!(
+        after.quarantined_snapshot()[0].key,
+        before.quarantined_snapshot()[0].key
     );
 }
 
@@ -145,10 +137,11 @@ fn quarantine_columnar_corrupt_segment_two_strike_quarantine() {
     // Empty bytes → TruncatedSegment (a CRC-class error), easiest way to
     // trigger the quarantine path without building a full columnar segment.
     let reg = Arc::new(QuarantineRegistry::new());
+    let scope = CollectionScope::new(1, 1, "coll");
 
     assert!(
         matches!(
-            open_segment_with_quarantine(&reg, &[], "coll", "seg1"),
+            open_segment_with_quarantine(&reg, &[], &scope, 1),
             Err(ColumnarOrQuarantine::Columnar(_))
         ),
         "first strike must return ColumnarError"
@@ -156,7 +149,7 @@ fn quarantine_columnar_corrupt_segment_two_strike_quarantine() {
 
     assert!(
         matches!(
-            open_segment_with_quarantine(&reg, &[], "coll", "seg1"),
+            open_segment_with_quarantine(&reg, &[], &scope, 1),
             Err(ColumnarOrQuarantine::Quarantined(_))
         ),
         "second strike must return SegmentQuarantined"
@@ -164,8 +157,7 @@ fn quarantine_columnar_corrupt_segment_two_strike_quarantine() {
 
     let snap = reg.quarantined_snapshot();
     assert_eq!(snap.len(), 1);
-    assert_eq!(snap[0].engine, "columnar");
-    assert_eq!(snap[0].collection, "coll");
+    assert_eq!(snap[0].key, columnar_key("coll", 1));
 }
 
 #[test]
@@ -173,24 +165,25 @@ fn quarantine_columnar_other_segments_still_readable_after_one_quarantine() {
     use nodedb::storage::quarantine::engines::open_segment_with_quarantine;
 
     let reg = Arc::new(QuarantineRegistry::new());
+    let scope = CollectionScope::new(1, 1, "coll");
 
-    // Quarantine "seg1".
+    // Quarantine segment 1.
     assert!(matches!(
-        open_segment_with_quarantine(&reg, &[], "coll", "seg1"),
+        open_segment_with_quarantine(&reg, &[], &scope, 1),
         Err(ColumnarOrQuarantine::Columnar(_))
     ));
     assert!(matches!(
-        open_segment_with_quarantine(&reg, &[], "coll", "seg1"),
+        open_segment_with_quarantine(&reg, &[], &scope, 1),
         Err(ColumnarOrQuarantine::Quarantined(_))
     ));
 
-    // "seg2" with the same bad bytes is still at first strike (different segment_id).
+    // Segment 2 with the same bad bytes is still at first strike.
     assert!(
         matches!(
-            open_segment_with_quarantine(&reg, &[], "coll", "seg2"),
+            open_segment_with_quarantine(&reg, &[], &scope, 2),
             Err(ColumnarOrQuarantine::Columnar(_))
         ),
-        "seg2 must be first-strike ColumnarError, not quarantined"
+        "segment 2 must be first-strike ColumnarError, not quarantined"
     );
 }
 
@@ -198,19 +191,25 @@ fn quarantine_columnar_other_segments_still_readable_after_one_quarantine() {
 
 #[test]
 fn quarantine_fts_corrupt_segment_two_strike_quarantine() {
-    use nodedb::storage::quarantine::engines::open_fts_segment_with_quarantine;
+    use nodedb::storage::quarantine::engines::validate_fts_segment_bytes;
 
     let reg = Arc::new(QuarantineRegistry::new());
+    let scope = CollectionScope::new(1, 1, "ftscoll");
+    let segment = FtsSegmentRef {
+        scope: &scope,
+        field: None,
+        segment_id: "s1",
+    };
 
     // Empty → Truncated.
     assert!(matches!(
-        open_fts_segment_with_quarantine(&reg, vec![], "ftscoll", "s1"),
+        validate_fts_segment_bytes(&reg, vec![], &segment),
         Err(FtsOrQuarantine::Segment(_))
     ));
 
     assert!(
         matches!(
-            open_fts_segment_with_quarantine(&reg, vec![], "ftscoll", "s1"),
+            validate_fts_segment_bytes(&reg, vec![], &segment),
             Err(FtsOrQuarantine::Quarantined(_))
         ),
         "second strike must return Quarantined"
@@ -219,10 +218,10 @@ fn quarantine_fts_corrupt_segment_two_strike_quarantine() {
     assert_eq!(reg.quarantined_snapshot().len(), 1);
 }
 
-// ── Vector engine: corrupt CRC on file → quarantine + rename ────────────────
+// ── Vector engine: corrupt CRC on file → quarantine, file untouched ─────────
 
 #[test]
-fn quarantine_vector_corrupt_crc_quarantines_and_renames_file() {
+fn quarantine_vector_corrupt_crc_quarantines_and_keeps_file() {
     use nodedb::storage::quarantine::engines::{
         VectorQuarantineOpen, open_vector_segment_with_quarantine,
     };
@@ -234,6 +233,7 @@ fn quarantine_vector_corrupt_crc_quarantines_and_renames_file() {
     let good_path = tmp.path().join("good.seg");
     let corrupt_path = tmp.path().join("corrupt.seg");
     let memory = super::support::memory::test_scoped_memory(EngineId::Vector);
+    let scope = CollectionScope::new(1, 1, "vecdb");
 
     let v = vec![1.0f32, 2.0, 3.0];
     MmapVectorSegment::create(tmp.path(), "good.seg", 3, &[&v], &memory).unwrap();
@@ -246,56 +246,40 @@ fn quarantine_vector_corrupt_crc_quarantines_and_renames_file() {
 
     let reg = Arc::new(QuarantineRegistry::new());
     let policy = VectorSegmentDropPolicy::keep_resident();
+    let open = |path: &std::path::Path, segment_id: &str| {
+        open_vector_segment_with_quarantine(VectorQuarantineOpen {
+            registry: &reg,
+            path,
+            policy,
+            scope: &scope,
+            segment_id,
+            memory: &memory,
+        })
+    };
 
     assert!(
         matches!(
-            open_vector_segment_with_quarantine(VectorQuarantineOpen {
-                registry: &reg,
-                path: &corrupt_path,
-                policy,
-                collection: "vecdb",
-                segment_id: "s1",
-                memory: &memory,
-            }),
+            open(&corrupt_path, "s1"),
             Err(VectorOrQuarantine::Vector(VectorError::SegmentIo(_)))
         ),
         "first strike must be a SegmentIo VectorError"
     );
-
     assert!(
         matches!(
-            open_vector_segment_with_quarantine(VectorQuarantineOpen {
-                registry: &reg,
-                path: &corrupt_path,
-                policy,
-                collection: "vecdb",
-                segment_id: "s1",
-                memory: &memory,
-            }),
+            open(&corrupt_path, "s1"),
             Err(VectorOrQuarantine::Quarantined(_))
         ),
         "second strike must be Quarantined"
     );
 
-    // File must have been renamed.
-    let renamed_count = std::fs::read_dir(tmp.path())
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_name().to_string_lossy().contains(".quarantined."))
-        .count();
-    assert_eq!(renamed_count, 1, "exactly one .quarantined.* file expected");
-
-    // Good segment still readable (is_ok checked by verifying no err).
+    // The segment file keeps its name.
     assert!(
-        open_vector_segment_with_quarantine(VectorQuarantineOpen {
-            registry: &reg,
-            path: &good_path,
-            policy,
-            collection: "vecdb",
-            segment_id: "s2",
-            memory: &memory,
-        })
-        .is_ok(),
+        corrupt_path.exists(),
+        "the corrupt file must not be renamed"
+    );
+
+    assert!(
+        open(&good_path, "s2").is_ok(),
         "good segment must remain readable"
     );
 }
@@ -311,19 +295,15 @@ fn quarantine_http_snapshot_empty_before_any_quarantine() {
 #[test]
 fn quarantine_http_snapshot_returns_entry_after_second_strike() {
     let reg = QuarantineRegistry::new();
-    let k = SegmentKey {
-        engine: QuarantineEngine::Columnar,
-        collection: "httpcoll".into(),
-        segment_id: "seg99".into(),
-    };
-    reg.record_failure(k.clone(), "crc", None).unwrap();
-    reg.record_failure(k, "crc", None).unwrap_err();
+    let k = columnar_key("httpcoll", 99);
+    reg.record_failure(k.clone(), "crc").unwrap();
+    reg.record_failure(k.clone(), "crc").unwrap_err();
 
     let snap = reg.quarantined_snapshot();
     assert_eq!(snap.len(), 1);
-    assert_eq!(snap[0].engine, "columnar");
-    assert_eq!(snap[0].collection, "httpcoll");
-    assert_eq!(snap[0].segment_id, "seg99");
+    assert_eq!(snap[0].key, k);
+    assert_eq!(snap[0].key.engine(), QuarantineEngine::Columnar);
+    assert_eq!(snap[0].key.segment_label(), "99");
     assert_eq!(snap[0].strikes, 2);
 }
 
@@ -332,35 +312,43 @@ fn quarantine_http_snapshot_returns_entry_after_second_strike() {
 #[test]
 fn quarantine_metrics_active_counts_reflect_state() {
     let reg = QuarantineRegistry::new();
+    let scope = CollectionScope::new(4, 9, "mc");
 
-    let k1 = SegmentKey {
-        engine: QuarantineEngine::Columnar,
-        collection: "mc".into(),
-        segment_id: "s1".into(),
+    let k1 = SegmentKey::Columnar {
+        scope: scope.clone(),
+        segment_id: 1,
     };
-    let k2 = SegmentKey {
-        engine: QuarantineEngine::Fts,
-        collection: "mc".into(),
+    let k2 = SegmentKey::Fts {
+        scope: scope.clone(),
+        field: Some("body".into()),
         segment_id: "s1".into(),
     };
     // Quarantine both.
-    reg.record_failure(k1.clone(), "crc", None).unwrap();
-    reg.record_failure(k1, "crc", None).unwrap_err();
-    reg.record_failure(k2.clone(), "crc", None).unwrap();
-    reg.record_failure(k2, "crc", None).unwrap_err();
+    reg.record_failure(k1.clone(), "crc").unwrap();
+    reg.record_failure(k1, "crc").unwrap_err();
+    reg.record_failure(k2.clone(), "crc").unwrap();
+    reg.record_failure(k2, "crc").unwrap_err();
 
     let active = reg.active_counts();
-    assert_eq!(
-        *active.get(&("columnar".into(), "mc".into())).unwrap_or(&0),
-        1
-    );
-    assert_eq!(*active.get(&("fts".into(), "mc".into())).unwrap_or(&0), 1);
+    let count = |engine| {
+        *active
+            .get(&QuarantineCountKey {
+                engine,
+                scope: Some(scope.clone()),
+            })
+            .unwrap_or(&0)
+    };
+    assert_eq!(count(QuarantineEngine::Columnar), 1);
+    assert_eq!(count(QuarantineEngine::Fts), 1);
 
     let mut out = String::new();
     nodedb::control::metrics::SystemMetrics::prometheus_segment_quarantine_active(
         &mut out, &active,
     );
     assert!(out.contains("nodedb_segments_quarantined_active"), "{out}");
-    assert!(out.contains(r#"engine="columnar""#), "{out}");
+    assert!(
+        out.contains(r#"engine="columnar",database_id="4",tenant_id="9",collection="mc""#),
+        "{out}"
+    );
     assert!(out.contains("nodedb_segments_quarantined_total"), "{out}");
 }

@@ -137,6 +137,7 @@ fn bulk_update_returns_affected_count() {
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             resolved_sum_targets: Vec::new(),
             declared_primary_key: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
 
@@ -191,6 +192,7 @@ fn conditional_decrement_stops_at_zero() {
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 resolved_sum_targets: Vec::new(),
                 declared_primary_key: None,
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
         );
 
@@ -247,6 +249,7 @@ fn bulk_update_zero_match_returns_zero_affected() {
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             resolved_sum_targets: Vec::new(),
             declared_primary_key: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
 
@@ -290,6 +293,7 @@ fn bulk_update_returning_returns_updated_documents() {
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             resolved_sum_targets: Vec::new(),
             declared_primary_key: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
 
@@ -332,6 +336,7 @@ fn bulk_update_returning_zero_match_returns_affected_zero() {
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             resolved_sum_targets: Vec::new(),
             declared_primary_key: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
 
@@ -459,6 +464,7 @@ fn a_transaction_does_not_abort_on_zero_row_update() {
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 resolved_sum_targets: Vec::new(),
                 declared_primary_key: None,
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Document(DocumentOp::BulkUpdate {
                 collection: nodedb_types::QualifiedCollection::new(
@@ -479,6 +485,7 @@ fn a_transaction_does_not_abort_on_zero_row_update() {
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 resolved_sum_targets: Vec::new(),
                 declared_primary_key: None,
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
         ],
         10,

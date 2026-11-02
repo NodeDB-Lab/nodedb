@@ -60,6 +60,10 @@ pub(super) struct TuningOverrides {
     /// `http://localhost:<port>`. The token and wrapped-key files live in
     /// the data directory.
     pub(super) vault_port: Option<u16>,
+    /// Runs the version cleanup pass every 200 ms with a short history
+    /// window: `txn_snapshot_max_age_secs = 2` and 5 s statement deadlines,
+    /// so a superseded version leaves about 12 s after its successor.
+    pub(super) fast_version_cleanup: bool,
 }
 
 impl TuningOverrides {
@@ -124,6 +128,14 @@ impl TuningOverrides {
         }
     }
 
+    /// Boot with a fast version cleanup and a short history window.
+    pub(super) fn fast_version_cleanup() -> Self {
+        Self {
+            fast_version_cleanup: true,
+            ..Self::default()
+        }
+    }
+
     /// Boot with a lowered vector seal threshold.
     pub(super) fn vector_seal_threshold(vectors: usize) -> Self {
         Self {
@@ -155,6 +167,12 @@ pub(super) fn write_config(dir: &Path, auth_mode: AuthMode, tuning: TuningOverri
     // production drain outlives the harness's 20s SIGTERM patience, so the
     // server would be force-killed instead of exiting gracefully.
     toml.push_str("\n[tuning.network]\ndrain_timeout_secs = 2\n");
+    if tuning.fast_version_cleanup {
+        toml.push_str(
+            "txn_snapshot_max_age_secs = 5\ndefault_deadline_secs = 5\ncopy_deadline_secs = 5\n\
+             \n[tuning.version_cleanup]\ninterval_ms = 200\n",
+        );
+    }
     if let Some(threshold) = tuning.columnar_flush_threshold {
         toml.push_str(&format!(
             "\n[tuning.query]\ncolumnar_flush_threshold = {threshold}\n"

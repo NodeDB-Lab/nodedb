@@ -152,7 +152,7 @@ fn genomics_variant_reclassification_bitemporal() {
         // Write in batches of 20, one WAL LSN per batch.
         for (i, chunk) in cells.chunks(20).enumerate() {
             let lsn = (i as u64) + 1;
-            e.put_cells(&aid(), chunk.to_vec(), lsn).unwrap();
+            e.put_cells(&aid(), 0, chunk.to_vec(), lsn).unwrap();
         }
     }
 
@@ -164,7 +164,7 @@ fn genomics_variant_reclassification_bitemporal() {
         let cells: Vec<ArrayPutCell> = (0_i64..20)
             .map(|s| variant_cell(s, 0 /* benign */, day_30_ms, day_1_ms))
             .collect();
-        e.put_cells(&aid(), cells, 10).unwrap();
+        e.put_cells(&aid(), 0, cells, 10).unwrap();
     }
 
     let store = e.store(&aid()).unwrap();

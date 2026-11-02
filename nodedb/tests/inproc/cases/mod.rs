@@ -64,7 +64,7 @@ mod catalog_integrity_checks;
 mod catalog_integrity_verify;
 mod catalog_orphan_recovery_policy;
 mod catalog_recovery_check;
-mod catalog_schema_evolution;
+mod catalog_strict_decode;
 mod cdc_arc_fanout;
 mod cdc_drop_observability;
 mod cdc_registry_index;

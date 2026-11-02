@@ -40,6 +40,7 @@ fn aid() -> ArrayId {
 fn put_cell(e: &mut ArrayEngine, x: i64, v: i64, sys_ms: i64, lsn: u64) {
     e.put_cells(
         &aid(),
+        0,
         vec![ArrayPutCell {
             coord: vec![CoordValue::Int64(x)],
             attrs: vec![CellValue::Int64(v)],
@@ -95,7 +96,7 @@ fn ceiling_at_horizon_resolves_correctly_after_compaction() {
         .sum();
     let _ = store;
 
-    let merged = e.maybe_compact(&aid(), None, 0).unwrap();
+    let merged = e.maybe_compact(&aid(), None).unwrap();
     assert!(merged);
     assert_eq!(e.store(&aid()).unwrap().manifest().segments.len(), 1);
 
@@ -256,6 +257,7 @@ fn slice_with_valid_time_filter_falls_back() {
 
     e.put_cells(
         &aid(),
+        0,
         vec![ArrayPutCell {
             coord: vec![CoordValue::Int64(0)],
             attrs: vec![CellValue::Int64(1)],
@@ -269,6 +271,7 @@ fn slice_with_valid_time_filter_falls_back() {
     .unwrap();
     e.put_cells(
         &aid(),
+        0,
         vec![ArrayPutCell {
             coord: vec![CoordValue::Int64(0)],
             attrs: vec![CellValue::Int64(2)],
@@ -336,6 +339,7 @@ fn valid_time_filter_works_after_flush() {
 
     e.put_cells(
         &aid(),
+        0,
         vec![ArrayPutCell {
             coord: vec![CoordValue::Int64(0)],
             attrs: vec![CellValue::Int64(1)],
@@ -351,6 +355,7 @@ fn valid_time_filter_works_after_flush() {
 
     e.put_cells(
         &aid(),
+        0,
         vec![ArrayPutCell {
             coord: vec![CoordValue::Int64(0)],
             attrs: vec![CellValue::Int64(2)],

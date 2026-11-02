@@ -90,6 +90,7 @@ fn rrf_fusion_mathematically_correct() {
             vector_field: String::new(),
             text_field: None,
             filters: Vec::new(),
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
     assert_eq!(resp_equal.status, Status::Ok);
@@ -119,6 +120,7 @@ fn rrf_fusion_mathematically_correct() {
             vector_field: String::new(),
             text_field: None,
             filters: Vec::new(),
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
     assert_eq!(resp_vec_heavy.status, Status::Ok);

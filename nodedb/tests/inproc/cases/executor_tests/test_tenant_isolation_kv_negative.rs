@@ -74,6 +74,7 @@ fn kv_cross_tenant_put_does_not_overwrite() {
             key: b"shared_key".to_vec(),
             rls_filters: Vec::new(),
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
     assert_eq!(resp_a.status, Status::Ok);
@@ -156,6 +157,7 @@ fn kv_cross_tenant_delete_does_not_affect_owner() {
             key: b"sess_xyz".to_vec(),
             rls_filters: Vec::new(),
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
     assert_eq!(resp_a.status, Status::Ok);

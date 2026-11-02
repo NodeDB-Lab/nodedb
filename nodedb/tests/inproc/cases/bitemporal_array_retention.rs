@@ -44,6 +44,7 @@ fn aid() -> ArrayId {
 fn put_cell(e: &mut ArrayEngine, x: i64, v: i64, sys_ms: i64, lsn: u64) {
     e.put_cells(
         &aid(),
+        0,
         vec![ArrayPutCell {
             coord: vec![CoordValue::Int64(x)],
             attrs: vec![CellValue::Int64(v)],
@@ -73,6 +74,7 @@ fn flush_if_full(e: &mut ArrayEngine, lsn: u64) {
 fn delete_cell(e: &mut ArrayEngine, x: i64, sys_ms: i64, lsn: u64) {
     e.delete_cells(
         &aid(),
+        0,
         vec![ArrayDeleteCell {
             coord: vec![CoordValue::Int64(x)],
             system_from_ms: sys_ms,
@@ -85,14 +87,18 @@ fn delete_cell(e: &mut ArrayEngine, x: i64, sys_ms: i64, lsn: u64) {
 }
 
 fn gdpr_erase(e: &mut ArrayEngine, x: i64, sys_ms: i64, lsn: u64) {
-    e.gdpr_erase_cell(&aid(), vec![CoordValue::Int64(x)], sys_ms, lsn)
+    e.gdpr_erase_cell(&aid(), 0, vec![CoordValue::Int64(x)], sys_ms, lsn)
         .unwrap();
     flush_if_full(e, lsn);
 }
 
+/// Compact until the picker stops, keeping history back to
+/// `now_ms - audit_retain_ms`. The test stamps are the ordinals the horizon
+/// compares against.
 fn compact_all(e: &mut ArrayEngine, audit_retain_ms: Option<i64>, now_ms: i64) {
+    let horizon = audit_retain_ms.map(|retain_ms| now_ms - retain_ms);
     loop {
-        if !e.maybe_compact(&aid(), audit_retain_ms, now_ms).unwrap() {
+        if !e.maybe_compact(&aid(), horizon).unwrap() {
             break;
         }
     }

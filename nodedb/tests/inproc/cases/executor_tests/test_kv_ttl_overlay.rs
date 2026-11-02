@@ -307,6 +307,7 @@ fn staged_expire_with_zero_ttl_makes_key_appear_absent_to_in_tx_get() {
             key: b"k".to_vec(),
             rls_filters: Vec::new(),
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
     assert_eq!(resp.status, Status::Ok);
@@ -352,6 +353,7 @@ fn staged_expire_with_zero_ttl_makes_key_appear_absent_to_in_tx_get() {
             key: b"k".to_vec(),
             rls_filters: Vec::new(),
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
     assert_eq!(

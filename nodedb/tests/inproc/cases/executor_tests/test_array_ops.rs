@@ -129,6 +129,7 @@ fn array_contains_filter() {
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             resolved_sum_targets: Vec::new(),
             declared_primary_key: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
 
@@ -171,6 +172,7 @@ fn array_contains_all_filter() {
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             resolved_sum_targets: Vec::new(),
             declared_primary_key: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
 
@@ -213,6 +215,7 @@ fn array_overlap_filter() {
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             resolved_sum_targets: Vec::new(),
             declared_primary_key: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
 
@@ -247,6 +250,7 @@ fn array_agg_aggregate() {
                 param: None,
             }],
             filters: Vec::new(),
+            system_time: nodedb_types::SystemTimeScope::Current,
             having: Vec::new(),
             limit: 100,
             sub_group_by: Vec::new(),
@@ -357,6 +361,7 @@ fn no_match_returns_zero() {
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             resolved_sum_targets: Vec::new(),
             declared_primary_key: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
 

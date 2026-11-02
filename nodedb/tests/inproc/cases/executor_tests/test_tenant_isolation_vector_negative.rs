@@ -56,6 +56,7 @@ fn vector_cross_tenant_insert_does_not_contaminate_search() {
             skip_payload_fetch: false,
             payload_filters: Vec::new(),
             metric: DistanceMetric::L2,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
     assert_eq!(resp_baseline.status, Status::Ok);
@@ -104,6 +105,7 @@ fn vector_cross_tenant_insert_does_not_contaminate_search() {
             skip_payload_fetch: false,
             payload_filters: Vec::new(),
             metric: DistanceMetric::L2,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
     assert_eq!(resp_after.status, Status::Ok);

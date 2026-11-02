@@ -174,6 +174,7 @@ fn inline_hash_join_honors_qualified_left_keys() {
                 limit: None,
                 offset: 0,
                 distinct: false,
+                system_time: nodedb_types::SystemTimeScope::Current,
             }))),
             right_input: Some(Box::new(PhysicalPlan::Query(QueryOp::ProviderScan {
                 provider: None,
@@ -187,6 +188,7 @@ fn inline_hash_join_honors_qualified_left_keys() {
                 limit: None,
                 offset: 0,
                 distinct: false,
+                system_time: nodedb_types::SystemTimeScope::Current,
             }))),
             left_bitmap: None,
             right_bitmap: None,

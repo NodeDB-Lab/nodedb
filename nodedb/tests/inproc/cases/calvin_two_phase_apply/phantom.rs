@@ -12,11 +12,10 @@ use nodedb_types::calvin::{EngineTag, ReadKeyIdent, VersionedReadEntry};
 use super::support::*;
 
 /// Phantom-insert proof for the KV engine: a Point read observed a key as
-/// ABSENT at LSN 5; a concurrent INSERT of that EXACT key commits at LSN 8.
-/// The KV read-key identity is the raw key bytes — the same identity the
-/// insert writes under — so the per-key write-version check catches the
-/// phantom: validating the stale absent-read against the now-present key
-/// aborts the stage.
+/// ABSENT at a snapshot below every seed. A concurrent INSERT of that EXACT
+/// key commits above the snapshot. The KV read-key identity is the raw key
+/// bytes, the identity the insert writes under. The key's stored version
+/// ordinal sits above the snapshot, so validation aborts the stage.
 #[test]
 fn absent_kv_key_phantom_insert_causes_abort() {
     let (mut core, mut tx, mut rx, _dir) = make_core();
@@ -25,17 +24,16 @@ fn absent_kv_key_phantom_insert_causes_abort() {
         .vshard()
         .as_u32();
 
-    // The key was absent when read at (the then-current watermark) LSN 5 — no
-    // write is seeded yet.
+    // The key was absent when read at the snapshot: no write is seeded yet.
     let absent_read = VersionedReadEntry {
         engine: EngineTag::Kv,
         collection: "phantomkv".to_string(),
         key: ReadKeyIdent::Point(KeyRepr::KvKey(Box::from(b"newkey".as_slice()))),
-        read_version: local_version(5),
         home_vshard: None,
     };
 
-    // Concurrently, the exact same key is inserted and commits at LSN 8.
+    // Concurrently, the exact same key is inserted and commits above the
+    // snapshot.
     let insert = commit_calvin(
         &mut core,
         &mut tx,
@@ -62,17 +60,18 @@ fn absent_kv_key_phantom_insert_causes_abort() {
         "phantom insert must commit: {insert:?}"
     );
 
-    // Validating the (now stale) absent-read against the current write index
-    // must abort: the insert at LSN 8 is AFTER the read at LSN 5.
+    // Validating the stale absent-read must abort: the inserted key's version
+    // ordinal sits above the read's snapshot.
     let staged = send(
         &mut core,
         &mut tx,
         &mut rx,
-        stage_static(
+        stage_static_at(
             10,
             0,
             vec![kv_put("phantomtarget", b"tk", b"tv")],
             vec![absent_read],
+            BEFORE_SEED,
         ),
         phantom_vshard,
         None,
@@ -86,15 +85,13 @@ fn absent_kv_key_phantom_insert_causes_abort() {
 }
 
 /// Absent-DOCUMENT phantom safety: a document `PointGet` on an absent document
-/// cannot record `Point(KeyRepr::Surrogate(s))`, because the placeholder
-/// surrogate `s` a miss carries is allocated from a monotonic counter unrelated
-/// to `document_id` — it never coincides with the freshly-minted surrogate a
-/// subsequent INSERT of that `document_id` receives, so a per-key OCC check
-/// would never catch the phantom. The capture layer therefore degrades an
-/// absent document read to `Predicate` (collection floor). A concurrent INSERT
-/// into that collection advances the collection's version past the read's, so
-/// `WriteVersionIndex::read_is_valid` (predicate branch) judges the stale read
-/// invalid and the stage VOTES ABORT — collection-granular phantom safety.
+/// cannot record `Point(KeyRepr::Surrogate(s))`. The placeholder surrogate `s`
+/// a miss carries never coincides with the surrogate a later INSERT of that
+/// `document_id` receives, so a per-key check never catches the phantom. The
+/// capture layer therefore degrades an absent document read to `Predicate`.
+/// A concurrent INSERT into that collection stores a version ordinal above
+/// the read's snapshot. Validation of the predicate reads the collection's
+/// newest ordinal, judges the read stale, and the stage VOTES ABORT.
 #[test]
 fn absent_document_phantom_insert_is_caught() {
     let (mut core, mut tx, mut rx, _dir) = make_core();
@@ -104,19 +101,17 @@ fn absent_document_phantom_insert_is_caught() {
         .as_u32();
 
     // The document was absent when read: capture degraded the miss to a
-    // collection-scoped predicate on "phantomdocs" at the version of LSN 5.
+    // collection-scoped predicate on "phantomdocs" at the snapshot.
     let absent_doc_read = VersionedReadEntry {
         engine: EngineTag::Document,
         collection: "phantomdocs".to_string(),
         key: ReadKeyIdent::Predicate,
-        read_version: local_version(5),
         home_vshard: None,
     };
 
     // Concurrently, a document with the same document_id the read targeted is
-    // actually inserted -- allocated a freshly-minted surrogate (42), committing
-    // at LSN 8. Its collection floor advance (phantomdocs -> 8) is what the
-    // predicate read validates against.
+    // inserted under a fresh surrogate (42), and commits above the snapshot.
+    // Its version ordinal is what the predicate read validates against.
     const NEWLY_ALLOCATED_SURROGATE: u32 = 42;
     let insert = commit_calvin(
         &mut core,
@@ -140,18 +135,18 @@ fn absent_document_phantom_insert_is_caught() {
         "phantom insert must commit: {insert:?}"
     );
 
-    // Validate the stale absent-read: the predicate check sees the phantomdocs
-    // collection floor (LSN 8) is AFTER the read (LSN 5), so the read is no
-    // longer current and the stage must abort.
+    // Validate the stale absent-read: the newest ordinal of phantomdocs sits
+    // above the read's snapshot, so the stage must abort.
     let staged = send(
         &mut core,
         &mut tx,
         &mut rx,
-        stage_static(
+        stage_static_at(
             11,
             0,
             vec![kv_put("docphantomtarget", b"tk", b"tv")],
             vec![absent_doc_read],
+            BEFORE_SEED,
         ),
         doc_vshard,
         None,
@@ -161,16 +156,16 @@ fn absent_document_phantom_insert_is_caught() {
         staged.stage_vote,
         Some(StageVote::SerializationConflict),
         "a phantom insert into a collection observed absent must abort the stage \
-         vote via the collection floor"
+         vote via the collection's newest ordinal"
     );
 }
 
 /// No-over-abort companion to `absent_document_phantom_insert_is_caught`: the
-/// collection-floor degrade must NOT abort every absent-read transaction. An
-/// absent document read (predicate on "phantomdocs" at LSN 5) stays valid when
-/// no insert lands in THAT collection — a concurrent insert into an UNRELATED
-/// collection advances only its own floor, leaving phantomdocs at zero, so the
-/// stale read is still current and the stage VOTES COMMIT.
+/// predicate degrade must NOT abort every absent-read transaction. An absent
+/// document read (predicate on "phantomdocs") stays valid when no insert
+/// lands in THAT collection. A concurrent insert into an UNRELATED collection
+/// stores versions of that collection only. Phantomdocs holds no version above
+/// the snapshot, so the stage VOTES COMMIT.
 #[test]
 fn absent_document_read_without_matching_insert_still_commits() {
     let (mut core, mut tx, mut rx, _dir) = make_core();
@@ -183,12 +178,11 @@ fn absent_document_read_without_matching_insert_still_commits() {
         engine: EngineTag::Document,
         collection: "phantomdocs".to_string(),
         key: ReadKeyIdent::Predicate,
-        read_version: local_version(5),
         home_vshard: None,
     };
 
-    // A concurrent insert into a DIFFERENT collection commits at LSN 8. It
-    // advances only "othercoll"'s floor; phantomdocs is untouched.
+    // A concurrent insert into a DIFFERENT collection commits above the
+    // snapshot. Phantomdocs is untouched.
     const UNRELATED_SURROGATE: u32 = 42;
     let insert = commit_calvin(
         &mut core,
@@ -208,17 +202,18 @@ fn absent_document_read_without_matching_insert_still_commits() {
         "unrelated insert must commit: {insert:?}"
     );
 
-    // The predicate read on phantomdocs is still current: its collection floor
-    // never advanced past the read's version, so the stage must commit.
+    // The predicate read on phantomdocs is still current: no version of it
+    // sits above the snapshot, so the stage must commit.
     let staged = send(
         &mut core,
         &mut tx,
         &mut rx,
-        stage_static(
+        stage_static_at(
             11,
             0,
             vec![kv_put("docphantomtarget", b"tk", b"tv")],
             vec![absent_doc_read],
+            BEFORE_SEED,
         ),
         doc_vshard,
         None,

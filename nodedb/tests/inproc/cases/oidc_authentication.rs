@@ -68,7 +68,7 @@ pub(super) async fn spawn_static_jwks(body: String) -> String {
 
 #[derive(zerompk::ToMessagePack)]
 #[msgpack(map)]
-struct LegacyOidcProvider {
+struct ProviderWithoutTenant {
     provider_name: String,
     issuer: String,
     jwks_uri: String,
@@ -417,15 +417,13 @@ async fn catalog_providers_with_shared_issuer_route_by_audience() {
     assert_eq!(identity.tenant_id.as_u64(), 43);
 }
 
-#[tokio::test]
-async fn catalog_provider_without_tenant_binding_is_rejected() {
-    let issuer = "https://legacy-idp.example/";
-    let (jwks, token) = signed_jwt_fixture(issuer, "nodedb-api", 999);
-    let jwks_uri = spawn_static_jwks(jwks).await;
-    let legacy = LegacyOidcProvider {
-        provider_name: "legacy_idp".into(),
-        issuer: issuer.into(),
-        jwks_uri,
+/// A provider record without `tenant_id` fails to decode.
+#[test]
+fn catalog_provider_without_tenant_binding_does_not_decode() {
+    let unbound = ProviderWithoutTenant {
+        provider_name: "unbound_idp".into(),
+        issuer: "https://unbound-idp.example/".into(),
+        jwks_uri: "http://localhost:1/jwks.json".into(),
         audience: Some("nodedb-api".into()),
         claim_mapping: vec![
             nodedb::control::security::catalog::oidc_providers::StoredClaimMappingRule {
@@ -438,25 +436,14 @@ async fn catalog_provider_without_tenant_binding_is_rejected() {
         ],
         created_at_lsn: 0,
     };
-    let encoded = zerompk::to_msgpack_vec(&legacy).expect("legacy provider must serialize");
-    let provider = zerompk::from_msgpack(&encoded).expect("legacy provider must deserialize");
-
-    let state = state_with_registry(loopback_jwks_config()).await;
-    state
-        .credentials
-        .catalog()
-        .put_oidc_provider(&provider)
-        .expect("legacy provider fixture must persist");
-
-    let err = verify_bearer_token(&state, &forged_signature(&token), PEER, SESSION)
-        .await
-        .expect_err("an unauthenticated token must fail before tenant-binding validation");
-    assert_generic_oidc_authentication_failure(err);
-
-    let err = verify_bearer_token(&state, &token, PEER, SESSION)
-        .await
-        .expect_err("an unbound persisted provider must fail closed");
-    assert!(matches!(err, nodedb::Error::OidcProviderTenantUnbound));
+    let encoded = zerompk::to_msgpack_vec(&unbound).expect("unbound provider must serialize");
+    assert!(
+        zerompk::from_msgpack::<
+            nodedb::control::security::catalog::oidc_providers::StoredOidcProvider,
+        >(&encoded)
+        .is_err(),
+        "a provider record without tenant_id must not decode"
+    );
 }
 
 #[test]

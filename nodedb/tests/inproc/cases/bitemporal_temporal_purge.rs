@@ -68,15 +68,21 @@ fn edge_store_end_to_end_purge() {
             .unwrap();
     }
 
-    // Cutoff 150 ms: only v@100 is both < cutoff AND superseded.
+    // Cutoff 150 ms: v@100 is the version visible at 150, so it stays.
     let purged = store
         .purge_superseded_versions(0, tid, "friends", /* cutoff_system_ms */ 150)
         .unwrap();
-    assert_eq!(purged, 1, "only v@100 is both below cutoff and superseded");
+    assert_eq!(purged, 0, "v@100 is the version visible at 150 and stays");
+
+    // Cutoff 250 ms: v@200 replaced v@100 at or below it, so v@100 goes.
+    let purged = store
+        .purge_superseded_versions(0, tid, "friends", 250)
+        .unwrap();
+    assert_eq!(purged, 1, "v@100 is dropped, v@200 and v@300 are kept");
 
     // Idempotent.
     let purged2 = store
-        .purge_superseded_versions(0, tid, "friends", 150)
+        .purge_superseded_versions(0, tid, "friends", 250)
         .unwrap();
     assert_eq!(purged2, 0);
 }
@@ -106,6 +112,11 @@ fn document_strict_end_to_end_purge() {
 
     let (docs, idx) = eng
         .purge_superseded_document_versions(0, 1, "users", 150)
+        .unwrap();
+    assert_eq!(docs, 0, "v@100 is the version visible at 150 and stays");
+    assert_eq!(idx, 0);
+    let (docs, idx) = eng
+        .purge_superseded_document_versions(0, 1, "users", 250)
         .unwrap();
     assert_eq!(docs, 1, "v@100 is dropped, v@200 + v@300 preserved");
     assert_eq!(idx, 0, "no secondary index versions written in this test");

@@ -165,27 +165,35 @@ async fn begin_and_commit_spellings_open_and_close_a_block() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn refused_isolation_level_answers_0a000() {
+async fn every_isolation_level_opens_a_block() {
     let server = NativeTestServer::start().await;
     let (mut stream, _ack) = do_handshake(server.addr, &HelloFrame::current())
         .await
         .expect("handshake");
 
-    let refused = send_sql(
-        &mut stream,
-        1,
-        "START TRANSACTION ISOLATION LEVEL SERIALIZABLE",
-    )
-    .await;
-    assert_eq!(error_code(&refused), "0A000", "{refused:?}");
-    let message = refused.error.map(|e| e.message).unwrap_or_default();
-    assert_eq!(
-        message,
-        "BEGIN ISOLATION LEVEL SERIALIZABLE is not supported; NodeDB enforces Snapshot Isolation"
-    );
+    let mut seq = 1;
+    for level in [
+        "SERIALIZABLE",
+        "REPEATABLE READ",
+        "READ COMMITTED",
+        "READ UNCOMMITTED",
+    ] {
+        let begun = send_sql(
+            &mut stream,
+            seq,
+            &format!("START TRANSACTION ISOLATION LEVEL {level}"),
+        )
+        .await;
+        assert!(begun.error.is_none(), "{level}: {begun:?}");
+        let ended = send_sql(&mut stream, seq + 1, "COMMIT").await;
+        assert!(ended.error.is_none(), "{level}: {ended:?}");
+        seq += 2;
+    }
 
-    // The refusal opens no block.
-    let outside = send_sql(&mut stream, 2, "SAVEPOINT s1").await;
+    // DEFERRABLE is refused and opens no block.
+    let refused = send_sql(&mut stream, seq, "START TRANSACTION DEFERRABLE").await;
+    assert_eq!(error_code(&refused), "0A000", "{refused:?}");
+    let outside = send_sql(&mut stream, seq + 1, "SAVEPOINT s1").await;
     assert_eq!(error_code(&outside), "25P01", "{outside:?}");
 
     server.shutdown().await;

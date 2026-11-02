@@ -83,6 +83,7 @@ fn multi_core_broadcast_inner_join() {
             sort_keys: Vec::new(),
             match_pattern: None,
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
 
@@ -134,6 +135,7 @@ fn multi_core_broadcast_inner_join() {
                 limit: None,
                 offset: 0,
                 distinct: false,
+                system_time: nodedb_types::SystemTimeScope::Current,
             }))),
             left_bitmap: None,
             right_bitmap: None,
@@ -241,6 +243,7 @@ fn multi_core_broadcast_left_join() {
             sort_keys: Vec::new(),
             match_pattern: None,
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
 
@@ -280,6 +283,7 @@ fn multi_core_broadcast_left_join() {
                 limit: None,
                 offset: 0,
                 distinct: false,
+                system_time: nodedb_types::SystemTimeScope::Current,
             }))),
             left_bitmap: None,
             right_bitmap: None,
@@ -413,6 +417,7 @@ fn multi_core_broadcast_merge_simulation() {
         sort_keys: Vec::new(),
         match_pattern: None,
         surrogate_ceiling: None,
+        system_time: nodedb_types::SystemTimeScope::Current,
     });
     let payload0 = send_ok(
         &mut core0.core,
@@ -467,6 +472,7 @@ fn multi_core_broadcast_merge_simulation() {
                 limit: None,
                 offset: 0,
                 distinct: false,
+                system_time: nodedb_types::SystemTimeScope::Current,
             }))),
             left_bitmap: None,
             right_bitmap: None,

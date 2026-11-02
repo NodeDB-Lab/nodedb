@@ -2,8 +2,8 @@
 
 //! Integration tests for warm-tier storage via `object_store::ObjectStore`.
 //!
-//! Exercises snapshot write/read/delete and quarantine record/rebuild against
-//! both in-memory and local-filesystem backends. Remote (MinIO/S3) verification
+//! Exercises snapshot write/read/delete against both in-memory and
+//! local-filesystem backends. Remote (MinIO/S3) verification
 //! is an operational concern left to infrastructure-level CI.
 
 use std::sync::Arc;
@@ -155,55 +155,6 @@ async fn snapshot_write_read_local_filesystem() {
     assert!(manifest_path.exists(), "manifest must exist on disk");
 }
 
-// ── Quarantine: record + rebuild via InMemory ────────────────────────────────
-
-#[tokio::test]
-async fn quarantine_record_and_rebuild_in_memory() {
-    use nodedb::storage::quarantine::{QuarantineEngine, QuarantineRegistry, SegmentKey};
-
-    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-
-    // Simulate a quarantine entry by manually inserting a `.quarantined.<ts>` key.
-    let ts = 1_700_001_000_000u64;
-    let key_path = object_store::path::Path::from(format!("seg7.quarantined.{ts}"));
-    store
-        .put(&key_path, object_store::PutPayload::from(b"".as_ref()))
-        .await
-        .unwrap();
-
-    // Rebuild registry from the store.
-    let reg = QuarantineRegistry::new();
-    reg.rebuild_from_store(QuarantineEngine::Fts, &store, &|fname| {
-        let stem = fname.split(".quarantined.").next()?;
-        Some(("testcoll".to_string(), stem.to_string()))
-    })
-    .await;
-
-    // The registry must immediately block reads on the rebuilt key.
-    let k = SegmentKey {
-        engine: QuarantineEngine::Fts,
-        collection: "testcoll".into(),
-        segment_id: "seg7".into(),
-    };
-    let err = reg.record_failure(k, "crc", None).unwrap_err();
-    assert!(
-        matches!(
-            err,
-            nodedb::storage::quarantine::QuarantineError::SegmentQuarantined {
-                quarantined_at_unix_ms, ..
-            } if quarantined_at_unix_ms == ts
-        ),
-        "unexpected error: {err}"
-    );
-
-    // Snapshot surface must list the quarantined segment.
-    let snap = reg.quarantined_snapshot();
-    assert_eq!(snap.len(), 1);
-    assert_eq!(snap[0].engine, "fts");
-    assert_eq!(snap[0].collection, "testcoll");
-    assert_eq!(snap[0].segment_id, "seg7");
-}
-
 // ── Snapshot bytes round-trip through InMemory ObjectStore ──────────────────
 //
 // Verifies that create_base_snapshot writes the manifest under the snapshot
@@ -323,42 +274,4 @@ async fn snapshot_bytes_roundtrip_write_and_restore() {
     let segments = nodedb_wal::segment::discover_segments(&data_dir.join("wal")).unwrap();
     assert_eq!(segments.len(), 1);
     assert_eq!(segments[0].first_lsn, 100);
-}
-
-// ── Quarantine: rebuild with multiple engines and keys ───────────────────────
-
-#[tokio::test]
-async fn quarantine_rebuild_multi_engine() {
-    use nodedb::storage::quarantine::{QuarantineEngine, QuarantineRegistry, SegmentKey};
-
-    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let ts = 1_700_002_000_000u64;
-
-    // Put two quarantined keys for different engines.
-    for key_name in &["seg_a.quarantined.", "seg_b.quarantined."] {
-        let path = object_store::path::Path::from(format!("{key_name}{ts}"));
-        store
-            .put(&path, object_store::PutPayload::from(b"".as_ref()))
-            .await
-            .unwrap();
-    }
-
-    let reg = QuarantineRegistry::new();
-    reg.rebuild_from_store(QuarantineEngine::Columnar, &store, &|fname| {
-        let stem = fname.split(".quarantined.").next()?;
-        Some(("col".to_string(), stem.to_string()))
-    })
-    .await;
-
-    assert_eq!(reg.quarantined_snapshot().len(), 2);
-
-    // Both segments must be blocked.
-    for seg_id in &["seg_a", "seg_b"] {
-        let k = SegmentKey {
-            engine: QuarantineEngine::Columnar,
-            collection: "col".into(),
-            segment_id: seg_id.to_string(),
-        };
-        assert!(reg.record_failure(k, "crc", None).is_err());
-    }
 }

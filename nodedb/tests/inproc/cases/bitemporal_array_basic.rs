@@ -59,6 +59,7 @@ fn open_engine(dir: &TempDir) -> ArrayEngine {
 fn put_cell(e: &mut ArrayEngine, x: i64, v: i64, sys: i64, vf: i64, vu: i64, lsn: u64) {
     e.put_cells(
         &aid(),
+        0,
         vec![ArrayPutCell {
             coord: vec![CoordValue::Int64(x)],
             attrs: vec![CellValue::Int64(v)],
@@ -75,6 +76,7 @@ fn put_cell(e: &mut ArrayEngine, x: i64, v: i64, sys: i64, vf: i64, vu: i64, lsn
 fn delete_cell(e: &mut ArrayEngine, x: i64, sys: i64, lsn: u64) {
     e.delete_cells(
         &aid(),
+        0,
         vec![ArrayDeleteCell {
             coord: vec![CoordValue::Int64(x)],
             system_from_ms: sys,

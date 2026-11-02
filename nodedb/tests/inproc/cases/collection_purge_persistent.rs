@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Aggregation gate: after `purge_collection` / `delete_all_for_collection`
+//! Aggregation gate: after `purge_collection` / `delete_all_versioned_for_collection`
 //! on each persistent engine, the engine's own lookup surface returns
 //! zero hits for the purged `(tenant, collection)` pair while siblings
 //! in the same tenant and same-name collections in other tenants stay
@@ -34,16 +34,18 @@ fn key(n: u32) -> StorageKey {
 fn sparse_engine_purge_leaves_no_documents_for_collection() {
     let (_tmp, sparse) = open_sparse();
     let doc_bytes = b"{\"k\":1}".to_vec();
-    sparse.put(DB, TENANT, "keep", &key(1), &doc_bytes).unwrap();
     sparse
-        .put(DB, TENANT, "purge_me", &key(1), &doc_bytes)
+        .put(DB, TENANT, "keep", &key(1), &doc_bytes, 1)
         .unwrap();
     sparse
-        .put(DB, TENANT, "purge_me", &key(2), &doc_bytes)
+        .put(DB, TENANT, "purge_me", &key(1), &doc_bytes, 1)
+        .unwrap();
+    sparse
+        .put(DB, TENANT, "purge_me", &key(2), &doc_bytes, 1)
         .unwrap();
 
     let (docs_removed, _idx_removed) = sparse
-        .delete_all_for_collection(DB, TENANT, "purge_me")
+        .delete_all_versioned_for_collection(DB, TENANT, "purge_me")
         .unwrap();
     assert_eq!(docs_removed, 2);
 
@@ -66,10 +68,12 @@ fn sparse_engine_purge_leaves_no_documents_for_collection() {
 fn sparse_engine_cross_tenant_isolation() {
     let (_tmp, sparse) = open_sparse();
     let doc_bytes = b"{\"k\":1}".to_vec();
-    sparse.put(DB, 1, "docs", &key(1), &doc_bytes).unwrap();
-    sparse.put(DB, 2, "docs", &key(1), &doc_bytes).unwrap();
+    sparse.put(DB, 1, "docs", &key(1), &doc_bytes, 1).unwrap();
+    sparse.put(DB, 2, "docs", &key(1), &doc_bytes, 1).unwrap();
 
-    let (removed, _) = sparse.delete_all_for_collection(DB, 1, "docs").unwrap();
+    let (removed, _) = sparse
+        .delete_all_versioned_for_collection(DB, 1, "docs")
+        .unwrap();
     assert_eq!(removed, 1);
     assert!(sparse.get(DB, 1, "docs", &key(1)).unwrap().is_none());
     assert!(

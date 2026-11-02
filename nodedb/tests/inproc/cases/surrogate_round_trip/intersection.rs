@@ -70,6 +70,7 @@ pub(super) fn assert_bitmap_intersection(
             skip_payload_fetch: false,
             payload_filters: Vec::new(),
             metric: DistanceMetric::L2,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
     let all_vec_surs = extract_vector_surrogates(&all_vec);
@@ -98,6 +99,7 @@ pub(super) fn assert_bitmap_intersection(
             skip_payload_fetch: false,
             payload_filters: Vec::new(),
             metric: DistanceMetric::L2,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
     let filtered_vec_surs = extract_vector_surrogates(&filtered_vec);

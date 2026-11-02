@@ -264,7 +264,6 @@ fn classify(entry: &CatalogEntry) -> VariantClass {
         CatalogEntry::DeleteTopicWithConsumerGroups { .. } => VariantClass::Exempt,
         CatalogEntry::PutConsumerGroupIfAbsent(_) => VariantClass::Exempt,
         CatalogEntry::DeleteConsumerGroup { .. } => VariantClass::Exempt,
-        CatalogEntry::MigrateConsumerGroupStream { .. } => VariantClass::Exempt,
         // Committed offsets are cursor state on an existing consumer group.
         // The apply path only raises them and writes no StoredOwner row.
         CatalogEntry::CommitConsumerOffsets { .. } => VariantClass::Exempt,
