@@ -124,6 +124,10 @@ pub fn spawn_core(
             // restored collections take its seal threshold.
             core.set_vector_tuning(compaction_config.vector);
 
+            // 2g. The commit snapshot window, before any apply: every replica
+            // refuses a commit whose snapshot trails its ordinal past it.
+            core.set_commit_snapshot_window(compaction_config.commit_snapshot_window);
+
             // 3 → 3b → 4. Boot recovery runs in exactly this order and no other:
             // restore the checkpoints, THEN seed the catalog state, THEN replay
             // the WAL. Each checkpoint restores state as of the LSN it was

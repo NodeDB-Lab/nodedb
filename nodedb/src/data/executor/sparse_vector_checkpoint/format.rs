@@ -18,7 +18,7 @@ use crate::types::replay_stamp::ReplayStamp;
 /// A manifest stamped with any other version is refused rather than misparsed.
 /// Refusing costs a WAL replay; misparsing would install indexes built from
 /// bytes this build cannot read.
-pub(crate) const SPARSE_VECTOR_CKPT_FORMAT_VERSION: u16 = 3;
+pub(crate) const SPARSE_VECTOR_CKPT_FORMAT_VERSION: u16 = 1;
 
 /// Names the live generation. Writing this file is what publishes a checkpoint.
 #[derive(

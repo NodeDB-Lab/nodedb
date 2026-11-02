@@ -42,6 +42,14 @@ pub(super) fn replay_wal_and_rebuild_indexes(
     // consults the merged set.
     core.replay_all_wal(wal_records, num_cores, tombstones)?;
 
+    // The document history the store kept across the restart, plus every
+    // version replay wrote, is charged to the document budget before the
+    // first write reaches the write gate.
+    core.recharge_all_document_history()?;
+    // The columnar row-version history and every vector, sparse-vector, and
+    // R-tree index replay rebuilt are charged the same way.
+    core.recharge_all_history();
+
     // Crash-recovery backstop: rebuild the HNSW by re-indexing
     // every document from the durable redb `sparse` store. The WAL is
     // not crash-durable, so on a hard crash it may be empty on reopen
@@ -55,6 +63,11 @@ pub(super) fn replay_wal_and_rebuild_indexes(
     // not yet built queues on the builder thread, so search uses the built
     // indexes again without waiting for a write.
     core.settle_vector_collections_after_boot();
+
+    // Every store now holds what the checkpoints and the WAL hold. The
+    // newest-ordinal cache starts empty, so each value a commit validates
+    // against is read from these stores, the same on every replica.
+    core.forget_newest_ordinals();
 
     // The in-memory R-tree spatial index needs no separate backstop here.
     // A document collection's geometry is indexed by the same

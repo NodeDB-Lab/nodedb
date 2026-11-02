@@ -186,7 +186,10 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let core = open_core(dir.path());
-        core.sparse.put_raw("1:docs:d1", b"hello").unwrap();
+        let d1 = nodedb_types::StorageKey::for_surrogate(Surrogate::new(7));
+        core.sparse
+            .put(DB.as_u64(), tid().as_u64(), "docs", &d1, b"hello", 1)
+            .unwrap();
         core.inverted
             .index_document(
                 DB.as_u64(),
@@ -199,7 +202,11 @@ mod tests {
 
         let (_dir, restored) = restore_and_boot(&capture(core));
         assert_eq!(
-            restored.sparse.get_raw("1:docs:d1").unwrap().as_deref(),
+            restored
+                .sparse
+                .get(DB.as_u64(), tid().as_u64(), "docs", &d1)
+                .unwrap()
+                .as_deref(),
             Some(b"hello".as_slice())
         );
         let hits = restored
@@ -320,6 +327,7 @@ mod tests {
                 .insert_with_surrogate(
                     &[Value::Integer(id), Value::String(format!("row-{id}"))],
                     Surrogate::new(surrogate),
+                    id,
                 )
                 .unwrap();
         }
@@ -385,6 +393,7 @@ mod tests {
         core.array_engine
             .put_cells(
                 &id,
+                0,
                 vec![crate::engine::array::wal::ArrayPutCell {
                     coord: vec![CoordValue::Int64(1)],
                     attrs: vec![CellValue::Int64(7)],
@@ -514,10 +523,22 @@ mod tests {
                 space: nodedb_types::BboxSpace::Planar,
             },
         );
-        rtree.insert(crate::engine::spatial::RTreeEntry {
-            id: 1,
-            bbox: nodedb_types::BoundingBox::new(0.0, 0.0, 1.0, 1.0),
-        });
+        rtree.insert_at(
+            crate::engine::spatial::RTreeEntry {
+                id: 1,
+                bbox: nodedb_types::BoundingBox::new(5.0, 5.0, 6.0, 6.0),
+            },
+            10,
+        );
+        rtree.end_at(1, "d1", 20);
+        rtree.insert_at(
+            crate::engine::spatial::RTreeEntry {
+                id: 1,
+                bbox: nodedb_types::BoundingBox::new(0.0, 0.0, 1.0, 1.0),
+            },
+            20,
+        );
+        let history = rtree.history_rows();
         let key = (DB, tid(), "places".to_string(), "geom".to_string());
         core.spatial_indexes.insert(key.clone(), rtree);
 
@@ -530,6 +551,11 @@ mod tests {
                 space: nodedb_types::BboxSpace::Planar,
             }),
             "the SRID survives the snapshot"
+        );
+        assert_eq!(
+            restored.spatial_indexes.get(&key).map(|t| t.history_rows()),
+            Some(history),
+            "the system-time history survives the snapshot"
         );
     }
 
@@ -644,6 +670,7 @@ mod tests {
         core.array_engine
             .put_cells(
                 &id,
+                0,
                 vec![crate::engine::array::wal::ArrayPutCell {
                     coord: vec![CoordValue::Int64(1)],
                     attrs: vec![CellValue::Int64(7)],
