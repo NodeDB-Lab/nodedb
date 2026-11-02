@@ -18,6 +18,9 @@ pub(in crate::data::executor) enum DocScanMode {
     AsOf {
         system_as_of: Option<i64>,
         valid_at_ms: Option<i64>,
+        /// True for a transaction snapshot read: the reading transaction's
+        /// staged writes merge on top of the versions at `system_as_of`.
+        merge_overlay: bool,
     },
     /// Every system-time version of every document (`AS OF SYSTEM TIME NULL`
     /// audit log), each row carrying the synthetic `_ts_*` temporal columns.
@@ -25,11 +28,20 @@ pub(in crate::data::executor) enum DocScanMode {
 }
 
 impl DocScanMode {
-    /// The current-time read is the only mode that folds this transaction's
-    /// staging overlay onto the base result — temporal reads never see staged
-    /// (current-version-only) writes.
+    /// True for a current-time read.
     pub(in crate::data::executor) fn is_current(&self) -> bool {
         matches!(self, DocScanMode::Current)
+    }
+
+    /// True when the read folds this transaction's staging overlay onto the
+    /// base result: a current-time read and a transaction snapshot read. A
+    /// historical read never sees staged writes.
+    pub(in crate::data::executor) fn merges_txn_overlay(&self) -> bool {
+        match self {
+            DocScanMode::Current => true,
+            DocScanMode::AsOf { merge_overlay, .. } => *merge_overlay,
+            DocScanMode::AllVersions { .. } => false,
+        }
     }
 }
 

@@ -37,6 +37,9 @@ pub(in crate::data::executor) struct PartialAggregateStateParams<'a> {
     pub tid: u64,
     pub collection: &'a str,
     pub input: Option<&'a nodedb_physical::physical_plan::PhysicalPlan>,
+    /// The scope the per-shard scan of `collection` reads at. Ignored when
+    /// `input` is set.
+    pub system_time: nodedb_types::SystemTimeScope,
     pub group_by: &'a [GroupKeySpec],
     pub aggregates: &'a [AggregateSpec],
     pub filters: &'a [u8],
@@ -56,6 +59,7 @@ impl CoreLoop {
             tid,
             collection,
             input,
+            system_time,
             group_by,
             aggregates,
             filters,
@@ -64,8 +68,18 @@ impl CoreLoop {
         // per-shard scan of the named collection. Both read exactly as
         // `execute_aggregate` reads them: a child error or an undecodable
         // payload fails the producer.
+        // A scope other than `Current` folds the engine's own scan at it.
         let docs = match input {
             Some(sub_plan) => self.input_docs(task, sub_plan),
+            None if !system_time.is_current() => {
+                let scan = self.scoped_aggregate_scan(
+                    task.request.database_id.as_u64(),
+                    tid,
+                    collection,
+                    system_time,
+                );
+                self.input_docs(task, &scan)
+            }
             None => self.scan_for_aggregate(task, tid, collection),
         };
         let docs = match docs {

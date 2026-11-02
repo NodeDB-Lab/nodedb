@@ -27,6 +27,8 @@ pub struct LateralLoopParams<'a> {
     pub projection: &'a [JoinProjection],
     pub left_join: bool,
     pub outer_row_cap: usize,
+    /// The scope every inner scan reads at.
+    pub inner_system_time: nodedb_types::SystemTimeScope,
 }
 
 impl CoreLoop {
@@ -108,6 +110,7 @@ impl CoreLoop {
                         filter_bytes,
                         &[],
                         usize::MAX,
+                        p.inner_system_time,
                     )),
                     Err(code) => return self.response_error(p.task, code),
                 }

@@ -21,12 +21,12 @@ pub(in crate::data::executor) struct BackfillIndexParams<'a> {
 }
 
 impl CoreLoop {
-    /// Backfill an index: scan every document in the collection and
-    /// populate sparse-index entries for the given field. Atomic — one
-    /// write transaction covers the whole backfill and UNIQUE
-    /// violations abort it, leaving the index empty (the caller's
-    /// Building→Ready flip is skipped, so readers never see a
-    /// partial-index view).
+    /// Backfill an index: walk every version of every document in the
+    /// collection and populate versioned index entries for the given field.
+    /// Atomic — one write transaction covers the whole backfill, and a
+    /// UNIQUE violation among the current rows aborts it before any entry is
+    /// written, leaving the index empty (the caller's Building→Ready flip is
+    /// skipped, so readers never see a partial-index view).
     pub(in crate::data::executor) fn execute_backfill_index(
         &mut self,
         task: &ExecutionTask,
@@ -78,24 +78,6 @@ impl CoreLoop {
             None => None,
         };
 
-        // Snapshot existing documents outside the write txn. 1,000,000
-        // cap matches the Data Plane's other collection-wide scans; rows
-        // beyond this are handled by a future chunked backfill (see
-        // `scan_documents_chunked`).
-        // Each row at its current version: a bitemporal collection holds its
-        // rows only as versions.
-        let docs = match self.current_rows(
-            task.request.database_id.as_u64(),
-            tid,
-            collection,
-            1_000_000,
-        ) {
-            Ok(d) => d,
-            Err(e) => {
-                return self.response_error(task, crate::bridge::envelope::ErrorCode::from(e));
-            }
-        };
-
         // The encoding of these stored bodies is resolved from the collection's
         // registered kind, never sniffed from the bytes: a strict collection
         // stores Binary Tuples and a vector-primary one stores tagged sidecars,
@@ -107,14 +89,58 @@ impl CoreLoop {
             crate::types::TenantId::new(tid),
             collection,
         );
+        let database_id = task.request.database_id.as_u64();
 
-        // Deduplicate-unique-as-we-go: track `(normalized_value → doc_id)`
-        // so a dup within the existing set is flagged before we ever
-        // touch the index table.
-        let mut seen: std::collections::HashMap<
-            String,
-            crate::engine::document::store::StorageKey,
-        > = std::collections::HashMap::new();
+        // A UNIQUE index judges the current version of every row before any
+        // entry is written: a duplicate among them refuses the backfill and
+        // leaves the index empty. Rows stream one at a time, so no row count
+        // caps the judgement.
+        if unique {
+            let mut seen: std::collections::HashMap<
+                String,
+                crate::engine::document::store::StorageKey,
+            > = std::collections::HashMap::new();
+            let judged =
+                self.for_each_current_row(database_id, tid, collection, |doc_id, bytes| {
+                    // A row skipped here is a row the finished index permanently
+                    // omits, and the index is then reported as built.
+                    let doc = decode_scanned_document(bytes, body_format.as_format_ref())?;
+                    // Partial-index predicate: only rows for which the predicate
+                    // is explicitly true are indexed (Postgres partial-index
+                    // semantics).
+                    if let Some(ref p) = parsed_predicate
+                        && !p.evaluate_json(&doc, &crs)
+                    {
+                        return Ok(std::ops::ControlFlow::Continue(()));
+                    }
+                    for raw in
+                        crate::engine::document::store::extract_index_values(&doc, path, is_array)
+                    {
+                        let stored = if case_insensitive {
+                            raw.to_lowercase()
+                        } else {
+                            raw
+                        };
+                        if let Some(prev) = seen.get(&stored)
+                            && prev != doc_id
+                        {
+                            return Err(crate::Error::DataPlane(
+                                crate::bridge::envelope::ErrorCode::Internal {
+                                    detail: format!(
+                                        "unique index backfill: duplicate value '{stored}' on \
+                                     '{path}' (existing '{prev}', new '{doc_id}')"
+                                    ),
+                                },
+                            ));
+                        }
+                        seen.insert(stored, *doc_id);
+                    }
+                    Ok(std::ops::ControlFlow::Continue(()))
+                });
+            if let Err(e) = judged {
+                return self.response_error(task, crate::bridge::envelope::ErrorCode::from(e));
+            }
+        }
 
         let txn = match self.sparse.begin_write() {
             Ok(t) => t,
@@ -123,94 +149,21 @@ impl CoreLoop {
             }
         };
 
-        // Index keys are accumulated here and written in one sorted pass after
-        // the scan; see the bulk insert below.
-        let mut pending_keys: Vec<String> = Vec::with_capacity(docs.len());
-        // A bitemporal collection's lookups read the versioned index, which
-        // the history walk below fills. The current rows still judge UNIQUE.
-        let bitemporal = self.is_bitemporal(task.request.database_id.as_u64(), tid, collection);
-
-        for (doc_id, bytes) in &docs {
-            // A row skipped here is a row the finished index permanently omits,
-            // and the index is then reported as built — every later lookup on
-            // that row's value silently misses it.
-            let doc = match decode_scanned_document(bytes, body_format.as_format_ref()) {
-                Ok(doc) => doc,
-                Err(e) => return self.response_error(task, e),
-            };
-            // Partial-index predicate: skip rows that don't satisfy
-            // the `WHERE` clause. `evaluate` treats NULL / non-bool as
-            // false (Postgres partial-index semantics), so only rows
-            // for which the predicate is explicitly true are indexed.
-            if let Some(ref p) = parsed_predicate
-                && !p.evaluate_json(&doc, &crs)
-            {
-                continue;
-            }
-            let values = crate::engine::document::store::extract_index_values(&doc, path, is_array);
-            for raw in values {
-                let stored = if case_insensitive {
-                    raw.to_lowercase()
-                } else {
-                    raw
-                };
-                if unique
-                    && let Some(prev) = seen.get(&stored)
-                    && prev != doc_id
-                {
-                    return self.response_error(
-                        task,
-                        crate::bridge::envelope::ErrorCode::Internal {
-                            detail: format!(
-                                "unique index backfill: duplicate value '{stored}' on '{path}' \
-                                 (existing '{prev}', new '{doc_id}')"
-                            ),
-                        },
-                    );
-                }
-                if unique {
-                    seen.insert(stored.clone(), *doc_id);
-                }
-                if bitemporal {
-                    continue;
-                }
-                pending_keys.push(crate::engine::sparse::btree_index::index_key_for(
-                    crate::engine::sparse::btree_index::IndexEntryTxn {
-                        database_id: task.request.database_id.as_u64(),
-                        tenant_id: tid,
-                        collection,
-                        field: path,
-                        value: &stored,
-                        document_id: doc_id,
-                    },
-                ));
-            }
-        }
-
-        // One sorted pass instead of a descent per value. The scan yields
-        // documents in id order while the index is ordered by value, so the
-        // per-entry path re-enters the tree at a random position for every key
-        // it writes. Buffering the keys and writing them in order turns the
-        // whole backfill into a single forward walk.
-        if let Err(e) = self.sparse.index_put_sorted_in_txn(&txn, &mut pending_keys) {
-            return self.response_error(task, crate::bridge::envelope::ErrorCode::from(e));
-        }
-        // Every version of every row, each at its own system time.
-        if bitemporal
-            && let Err(e) = self.backfill_versioned_index(
-                &txn,
-                &super::index_backfill_versions::VersionedBackfill {
-                    database_id: task.request.database_id.as_u64(),
-                    tid,
-                    collection,
-                    path,
-                    is_array,
-                    case_insensitive,
-                    predicate: parsed_predicate.as_ref(),
-                    body_format: body_format.as_format_ref(),
-                },
-            )
-        {
+        // Every version of every row, each at its own system time, so a
+        // lookup at any cut finds each row by the values it held then.
+        if let Err(e) = self.backfill_versioned_index(
+            &txn,
+            &super::index_backfill_versions::VersionedBackfill {
+                database_id,
+                tid,
+                collection,
+                path,
+                is_array,
+                case_insensitive,
+                predicate: parsed_predicate.as_ref(),
+                body_format: body_format.as_format_ref(),
+            },
+        ) {
             return self.response_error(task, crate::bridge::envelope::ErrorCode::from(e));
         }
 
@@ -228,7 +181,7 @@ impl CoreLoop {
 
     /// Drop all secondary index entries for a field across the entire collection.
     ///
-    /// Removes the field's plain and versioned index entries.
+    /// Removes every version of the field's index entries.
     /// Returns `{"removed": N}` as the response payload.
     pub(in crate::data::executor) fn execute_drop_document_index(
         &mut self,
@@ -244,21 +197,11 @@ impl CoreLoop {
             "drop document index"
         );
 
-        // Both index tables: a bitemporal collection keeps its entries in the
-        // versioned index, any other in the plain one. The other table holds
-        // nothing for the field, so its removal finds no entry.
-        // Both removals share one write transaction, so the field leaves both
-        // tables together or neither.
+        // Every version of every entry of the field leaves in one write
+        // transaction.
         let database_id = task.request.database_id.as_u64();
         let removed = self.sparse.begin_write().and_then(|txn| {
-            let plain = self.sparse.delete_index_entries_for_field_in_txn(
-                &txn,
-                database_id,
-                tid,
-                collection,
-                field,
-            )?;
-            let versioned = self.sparse.versioned_index_drop_field_in_txn(
+            let removed = self.sparse.versioned_index_drop_field_in_txn(
                 &txn,
                 database_id,
                 tid,
@@ -269,7 +212,7 @@ impl CoreLoop {
                 engine: "sparse".into(),
                 detail: format!("drop index commit: {e}"),
             })?;
-            Ok(plain + versioned)
+            Ok(removed)
         });
         match removed {
             Ok(removed) => {

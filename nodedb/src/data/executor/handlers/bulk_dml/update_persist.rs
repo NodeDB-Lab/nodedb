@@ -21,25 +21,19 @@ use crate::data::executor::enforcement::images::RowImages;
 use crate::data::executor::enforcement::materialized_sum::apply::TargetWrite;
 use crate::data::executor::enforcement::write_hook::{self, HookCtx};
 use crate::data::executor::enforcement::{funnel, images};
-use crate::data::executor::handlers::point::update_reindex::{
-    BitemporalUpdateReindex, NonbitemporalUpdateReindex,
-};
+use crate::data::executor::handlers::point::update_reindex::UpdateReindex;
 
 /// What landing one bulk-UPDATE row produced for the caller to account for.
 pub(super) struct PersistedBulkUpdateRow {
-    /// The `(field, value)` tuples the index diff touched, for the caller to
-    /// publish into the per-index write-value substrate — that recording
-    /// describes a durable write, so it belongs after the commit, never before.
-    pub(super) touched: Vec<(String, String)>,
     /// Target rows this row's materialized-sum bindings updated, for the caller
     /// to turn into durable redo entries.
     pub(super) target_writes: Vec<TargetWrite>,
 }
 
 impl CoreLoop {
-    /// Write one bulk-UPDATE row's post-image, reconcile its plain `INDEXES`
-    /// entries, and fold its materialized-sum deltas — committing all three
-    /// together.
+    /// Write one bulk-UPDATE row's post-image as a new version, reconcile
+    /// its index entries, and fold its materialized-sum deltas — committing
+    /// all three together.
     ///
     /// Any failure is an `Err` and fails the statement: the row's write, its
     /// index diff, its full-text postings, an enforcement rejection, or the
@@ -47,23 +41,22 @@ impl CoreLoop {
     /// nothing behind. A row is never skipped, because a skipped row would
     /// report a smaller affected count than the predicate matched.
     ///
-    /// `bitemporal_sys_from` is `Some` on a bitemporal collection. The row
-    /// then lands as a new version valid for all time, with the versioned
-    /// index diff, through the same write the point update lands.
+    /// The row lands at `p.sys_from` through the same write the point update
+    /// lands. `old_doc` is the row's pre-image: the old side of the index
+    /// diff and of the materialized-sum fold.
     pub(super) fn persist_bulk_update_row(
         &mut self,
-        p: NonbitemporalUpdateReindex<'_>,
+        p: UpdateReindex<'_>,
+        old_doc: &serde_json::Value,
         hook: &HookCtx<'_>,
-        bitemporal_sys_from: Option<i64>,
     ) -> crate::Result<PersistedBulkUpdateRow> {
         // Hoisted before the transaction opens: the images below borrow them,
         // and a collection that declares no image-folding enforcement must not
         // pay for the fold at all.
-        let doc_id = *p.storage_key;
+        let doc_id = *p.doc_id;
         // Copies of the borrows, not of the documents: they outlive `p`'s move
         // into the reindex below because they borrow the caller's images, not
         // the params struct.
-        let old_doc: &serde_json::Value = p.old_doc;
         let new_doc: &serde_json::Value = p.new_doc;
         let folds = write_hook::folds_images(self, hook);
 
@@ -74,26 +67,15 @@ impl CoreLoop {
             collection: p.collection,
             surrogate: doc_id.surrogate(),
             new_doc,
+            ordinal: p.sys_from,
         };
-        let touched = match bitemporal_sys_from {
-            Some(sys_from) => self.bitemporal_update_reindex(
-                &txn,
-                BitemporalUpdateReindex {
-                    database_id: p.database_id,
-                    tid: p.tid,
-                    collection: p.collection,
-                    doc_id: p.storage_key,
-                    sys_from,
-                    valid_from_ms: i64::MIN,
-                    valid_until_ms: i64::MAX,
-                    new_body: p.new_body,
-                    index_paths: p.index_paths,
-                    old_doc: Some(old_doc),
-                    new_doc,
-                },
-            )?,
-            None => self.nonbitemporal_update_reindex(&txn, p)?,
-        };
+        self.update_reindex(
+            &txn,
+            UpdateReindex {
+                old_doc: Some(old_doc),
+                ..p
+            },
+        )?;
         // The row's postings follow its new text in the same transaction.
         self.update_reindex_text(&txn, text)?;
 
@@ -126,9 +108,6 @@ impl CoreLoop {
             engine: "sparse".into(),
             detail: format!("bulk update commit of row {doc_id}: {e}"),
         })?;
-        Ok(PersistedBulkUpdateRow {
-            touched,
-            target_writes,
-        })
+        Ok(PersistedBulkUpdateRow { target_writes })
     }
 }

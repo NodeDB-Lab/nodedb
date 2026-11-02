@@ -59,6 +59,9 @@ pub(in crate::data::executor) struct MergeParams<'a> {
     /// Declared `PRIMARY KEY` column of a schemaless target, `None`
     /// otherwise. `Some` makes `build_update_doc`'s post-image guard run.
     pub declared_primary_key: Option<&'a str>,
+    /// The ordinal the target rows are read at: `None` for each row's
+    /// current version, `Some` for a transaction block's snapshot.
+    pub target_cut: Option<i64>,
 }
 
 impl CoreLoop {

@@ -17,8 +17,8 @@ use crate::data::executor::handlers::partial_refusal::{
     refusal_after_partial_apply, refusal_after_rows,
 };
 use crate::data::executor::handlers::point::update_reindex::UpdateBody;
+use crate::data::executor::handlers::point::update_reindex_secondary::UpdateSecondaryReindex;
 use crate::data::executor::handlers::point::update_reindex_text::UpdateTextReindex;
-use crate::data::executor::handlers::point::update_reindex_vector::UpdateVectorReindex;
 use crate::data::executor::handlers::returning_doc;
 use crate::data::executor::handlers::transaction::stage_write::stored_row_identity;
 use crate::data::executor::task::ExecutionTask;
@@ -49,9 +49,9 @@ pub(in crate::data::executor) struct WriteResolvedRowsCtx<'a> {
     /// The target collection's declared `PRIMARY KEY` column, when it has one.
     pub declared_primary_key: Option<&'a str>,
     pub want_returning: bool,
-    /// The system time every new version lands at on a bitemporal target,
-    /// `None` on any other. The collect pass encoded the post-images at it.
-    pub bitemporal_sys_from: Option<i64>,
+    /// The system time every new version lands at. The collect pass encoded
+    /// the post-images at it.
+    pub sys_from: i64,
 }
 
 impl CoreLoop {
@@ -73,7 +73,7 @@ impl CoreLoop {
             strict_schema,
             declared_primary_key,
             want_returning,
-            bitemporal_sys_from,
+            sys_from,
         } = ctx;
         let is_strict = strict_schema.is_some();
         let database_id = task.request.database_id.as_u64();
@@ -177,10 +177,10 @@ impl CoreLoop {
                         storage_key: &storage_key,
                         current_bytes: &old_body,
                         updated_bytes: &updated_bytes,
-                        bitemporal_sys_from,
+                        sys_from,
                     },
                 )
-                .and_then(|touched| {
+                .and_then(|()| {
                     self.update_reindex_text(
                         &row_txn,
                         UpdateTextReindex {
@@ -189,17 +189,14 @@ impl CoreLoop {
                             collection: target_collection,
                             surrogate: storage_key.surrogate(),
                             new_doc: &doc,
+                            ordinal: sys_from,
                         },
                     )
-                    .map(|()| touched)
                 });
-            let touched = match stored {
-                Ok(touched) => touched,
-                Err(e) => {
-                    let code = refusal_after_rows(affected, e);
-                    return Err(self.refusal_with_landed_rows(task, code, write_set));
-                }
-            };
+            if let Err(e) = stored {
+                let code = refusal_after_rows(affected, e);
+                return Err(self.refusal_with_landed_rows(task, code, write_set));
+            }
             {
                 let enforcement = write_hook::run(
                     self,
@@ -239,19 +236,6 @@ impl CoreLoop {
                     );
                     return Err(self.refusal_with_landed_rows(task, code, write_set));
                 }
-                // Index write-versions are published only once the write they
-                // describe is durable.
-                if let Some(stamp) = self.task_write_stamp(task)
-                    && !touched.is_empty()
-                {
-                    self.note_index_write_values(
-                        crate::types::DatabaseId::new(database_id),
-                        crate::types::TenantId::new(tid),
-                        target_collection,
-                        &touched,
-                        stamp,
-                    );
-                }
                 // The identity is the one INSERT minted: the declared primary
                 // key when the collection declares one, else the decimal
                 // surrogate. The event and the redo entry journal the same
@@ -274,8 +258,8 @@ impl CoreLoop {
                         identity: row_identity.clone(),
                     },
                     &updated_bytes,
-                    // A versioned row landed at the statement's system time.
-                    bitemporal_sys_from,
+                    // The row's version landed at the statement's system time.
+                    sys_from,
                 );
                 match image {
                     Ok(image) => write_set.push(image),
@@ -291,6 +275,7 @@ impl CoreLoop {
                     tid,
                     target_collection,
                     &storage_key,
+                    sys_from,
                     &updated_bytes,
                 );
                 // Emit an update event per affected row to the Event Plane, so
@@ -313,20 +298,20 @@ impl CoreLoop {
                     &updated_bytes,
                     Some(&old_body),
                 );
-                // Re-index the row's vectors from the new body (soft-delete the
-                // old HNSW node + insert the new one, keyed by the stable
-                // surrogate). A no-op unless the collection has a vector field.
-                if has_vectors
-                    && let Err(e) = self.update_reindex_vector_indexes(UpdateVectorReindex {
-                        database_id,
-                        tid,
-                        collection: target_collection,
-                        storage_key,
-                        new_body: &updated_bytes,
-                        is_strict,
-                        has_vectors,
-                    })
-                {
+                // Re-index the row's vectors and sparse vectors from the new
+                // body, as a point update does: the old versions end at
+                // `sys_from` and the new ones start there. Each half is a no-op
+                // unless the collection declares that kind of field.
+                if let Err(e) = self.update_reindex_vector_and_sparse(UpdateSecondaryReindex {
+                    database_id,
+                    tid,
+                    collection: target_collection,
+                    storage_key,
+                    new_body: &updated_bytes,
+                    is_strict,
+                    has_vectors,
+                    sys_from,
+                }) {
                     // The row's body already committed.
                     let code = refusal_after_partial_apply(e.into());
                     return Err(self.refusal_with_landed_rows(task, code, write_set));
@@ -384,7 +369,7 @@ mod tests {
     /// The surrogates the `note` index names for `value`.
     fn note_owners(core: &CoreLoop, database_id: u64, value: &str) -> Vec<u32> {
         DocumentEngine::new(&core.sparse, database_id, TID)
-            .index_lookup(COLLECTION, "note", value, false)
+            .index_lookup(COLLECTION, "note", value, None)
             .expect("index lookup")
             .iter()
             .map(|key| key.surrogate().as_u32())
@@ -429,7 +414,14 @@ mod tests {
                 strict_schema: None,
                 declared_primary_key: None,
                 want_returning: false,
-                bitemporal_sys_from: None,
+                sys_from: core
+                    .row_version_ordinal(
+                        database_id,
+                        TID,
+                        COLLECTION,
+                        &StorageKey::for_surrogate(Surrogate(1)),
+                    )
+                    .expect("ordinal"),
             },
             vec![resolved_row(1, old)],
         );
@@ -529,7 +521,8 @@ mod tests {
                     strict_schema: None,
                     config_key: &config_key,
                     declared_primary_key: None,
-                    bitemporal_sys_from: Some(STATEMENT_MS),
+                    target_cut: None,
+                    sys_from: STATEMENT_MS,
                 },
             )
             .expect("collect");
@@ -545,7 +538,7 @@ mod tests {
                 strict_schema: None,
                 declared_primary_key: None,
                 want_returning: false,
-                bitemporal_sys_from: Some(STATEMENT_MS),
+                sys_from: STATEMENT_MS,
             },
             rows,
         );
@@ -568,17 +561,10 @@ mod tests {
             .expect("read as of")
             .expect("the earlier version");
         assert_eq!(note(before), serde_json::json!("old"));
-        assert!(
-            core.sparse
-                .get(database_id, TID, COLLECTION, &row)
-                .expect("read plain store")
-                .is_none(),
-            "a bitemporal row never lands in the plain store"
-        );
 
         let owners = |value: &str| -> Vec<u32> {
             DocumentEngine::new(&core.sparse, database_id, TID)
-                .index_lookup(COLLECTION, "note", value, true)
+                .index_lookup(COLLECTION, "note", value, None)
                 .expect("index lookup")
                 .iter()
                 .map(|key| key.surrogate().as_u32())
@@ -593,7 +579,7 @@ mod tests {
         assert!(
             matches!(
                 &outcome.write_set[0].effect,
-                RowEffect::Put { version: Some(version), .. } if version.sys_from == STATEMENT_MS
+                RowEffect::Put { version, .. } if version.sys_from == STATEMENT_MS
             ),
             "the write set carries the new version: {:?}",
             outcome.write_set
@@ -639,6 +625,7 @@ mod tests {
                     COLLECTION,
                     &StorageKey::for_surrogate(Surrogate(surrogate)),
                     &doc_format::encode_to_msgpack(row),
+                    1,
                 )
                 .expect("seed row");
         }
@@ -657,7 +644,7 @@ mod tests {
                 strict_schema: None,
                 declared_primary_key: None,
                 want_returning: false,
-                bitemporal_sys_from: None,
+                sys_from: 2,
             },
             rows,
         );
@@ -687,5 +674,124 @@ mod tests {
             let doc = doc_format::decode_document(&stored).expect("row decodes");
             assert_eq!(doc.get("note"), Some(&serde_json::json!("old")));
         }
+    }
+
+    /// UPDATE ... FROM that rewrites a strict row's sparse vector re-indexes
+    /// it at the statement's system time, as a point update does: a current
+    /// read scores the new literal and a read below the statement the old.
+    #[test]
+    fn a_rewritten_sparse_vector_is_reindexed_at_the_statement_ordinal() {
+        use crate::data::executor::handlers::point::insert::PointInsertParams;
+        use crate::engine::vector::sparse::search::dot_product_topk_at;
+        use nodedb_types::columnar::{ColumnDef, ColumnType};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _req, _resp) = make_core_with_dir(dir.path());
+        let task = make_default_task();
+        let database_id = task.request.database_id.as_u64();
+        let schema = StrictSchema::new(vec![
+            ColumnDef::required("_rowid", ColumnType::Int64),
+            ColumnDef::nullable("note", ColumnType::String),
+            ColumnDef::nullable("terms", ColumnType::SparseVector),
+        ])
+        .expect("schema");
+        let config = CollectionConfig::new(COLLECTION).with_storage_mode(
+            nodedb_physical::physical_plan::StorageMode::Strict {
+                schema: schema.clone(),
+            },
+        );
+        let config_key = (
+            DatabaseId::new(database_id),
+            TenantId::new(TID),
+            COLLECTION.to_string(),
+        );
+        core.doc_configs.insert(config_key.clone(), config);
+
+        let surrogate = Surrogate(1);
+        let key = StorageKey::for_surrogate(surrogate);
+        let inserted = core.execute_point_insert(PointInsertParams {
+            task: &task,
+            tid: TID,
+            collection: COLLECTION,
+            document_id: "r1",
+            surrogate,
+            value: &doc_format::encode_to_msgpack(
+                &serde_json::json!({"note": "old", "terms": "{3:1.0}"}),
+            ),
+            if_absent: false,
+            returning: None,
+            rls_filters: &[],
+            resolved_sum_targets: &[],
+            deferred_sum_targets: &[],
+        });
+        assert_eq!(
+            inserted.status,
+            crate::bridge::envelope::Status::Ok,
+            "seed row"
+        );
+        let old_body = core
+            .sparse
+            .versioned_get_current(database_id, TID, COLLECTION, &key)
+            .expect("read")
+            .expect("the seed row is stored");
+        let mut doc = {
+            let config = core.doc_configs.get(&config_key).expect("config");
+            core.decode_stored_document(config, &old_body)
+                .expect("decode")
+        };
+        if let Some(fields) = doc.as_object_mut() {
+            fields.insert("terms".into(), serde_json::json!("{3:4.0}"));
+        }
+        let ndb: nodedb_types::Value = doc.clone().into();
+        let body =
+            crate::data::executor::strict_format::value_to_binary_tuple(&ndb, &schema, COLLECTION)
+                .expect("encode");
+        let sys_from = core
+            .row_version_ordinal(database_id, TID, COLLECTION, &key)
+            .expect("ordinal");
+
+        let outcome = core.write_resolved_update_from_join_rows(
+            &task,
+            WriteResolvedRowsCtx {
+                tid: TID,
+                target_collection: COLLECTION,
+                resolved_sum_targets: &[],
+                has_vectors: false,
+                strict_schema: Some(&schema),
+                declared_primary_key: None,
+                want_returning: false,
+                sys_from,
+            },
+            vec![ResolvedUpdateRow {
+                key,
+                body,
+                old_body,
+                doc,
+            }],
+        );
+        assert!(outcome.is_ok(), "the update must apply");
+
+        let sparse_key = CoreLoop::sparse_index_key(database_id, TID, COLLECTION, "terms");
+        let index = core
+            .sparse_vector_indexes
+            .get(&sparse_key)
+            .expect("sparse index");
+        let query = nodedb_types::SparseVector::from_entries(vec![(3, 1.0)]).expect("query");
+        let score_at = |at: i64| -> Vec<f32> {
+            dot_product_topk_at(index, &query, 10, at)
+                .into_iter()
+                .map(|r| r.score)
+                .collect()
+        };
+        assert_eq!(
+            score_at(sys_from),
+            vec![4.0],
+            "the new literal from the statement on"
+        );
+        assert_eq!(
+            score_at(sys_from - 1),
+            vec![1.0],
+            "the old literal below it"
+        );
     }
 }

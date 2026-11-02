@@ -45,9 +45,9 @@ pub(in crate::data::executor) struct ProjectUpdateRows<'a> {
     /// Declared `PRIMARY KEY` column of a schemaless collection, `None`
     /// otherwise. `Some` makes the post-image guard below run.
     pub(in crate::data::executor) declared_primary_key: Option<&'a str>,
-    /// The system time of the new versions on a bitemporal collection,
-    /// `None` on any other. A bitemporal strict tuple carries it in its
-    /// reserved slot.
+    /// The system time of the new versions. A `bitemporal=true` strict
+    /// tuple carries it in its reserved slot. Any other body ignores it.
+    /// `None` when the caller projects images it does not write.
     pub(in crate::data::executor) bitemporal_sys_from: Option<i64>,
 }
 

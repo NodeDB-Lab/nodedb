@@ -22,6 +22,7 @@ pub(in crate::data::executor) mod exec;
 pub(in crate::data::executor) mod input_docs;
 mod invalidate;
 pub(in crate::data::executor::handlers) mod rows;
+mod scoped_input;
 pub(in crate::data::executor) mod shuffle_merge;
 pub(in crate::data::executor) mod state_emit;
 mod streaming;

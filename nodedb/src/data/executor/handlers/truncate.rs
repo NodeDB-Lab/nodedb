@@ -28,10 +28,9 @@ pub(in crate::data::executor) struct TruncateParams<'a> {
 impl CoreLoop {
     /// TRUNCATE: delete all documents in a collection without filter scanning.
     ///
-    /// Removes every row's current version. A plain collection deletes each
-    /// row. A bitemporal collection closes each row with a tombstone version
-    /// and keeps its history. Cascades to the inverted index, secondary
-    /// indexes, and document cache. The
+    /// Closes every row's current version with a tombstone version and keeps
+    /// its history. Cascades to the inverted index, secondary indexes, and
+    /// document cache. The
     /// collection's graph edges are cut by `TruncateEdges`. Returns
     /// `{"truncated": N}` payload.
     ///
@@ -54,8 +53,7 @@ impl CoreLoop {
         } = params;
         debug!(core = self.core_id, %collection, "truncate");
 
-        // Every row's current version: the newest version of each row on a
-        // bitemporal collection, the plain table on any other.
+        // Every row with a live current version.
         let database_id = task.request.database_id.as_u64();
         let all_ids = match self.current_row_keys(database_id, tid, collection) {
             Ok(keys) => keys,
@@ -118,16 +116,12 @@ impl CoreLoop {
             Err(e) => return self.response_error(task, e),
         }
 
-        // A bitemporal row is closed, never erased: its history stays readable
-        // until the retention purge. One system time closes every row, so the
-        // TRUNCATE removes them at one instant, as a `DELETE` with no `WHERE`.
-        let bitemporal_sys_from = if self.is_bitemporal(database_id, tid, collection) {
-            match self.rows_version_ordinal(database_id, tid, collection, &all_ids) {
-                Ok(ordinal) => Some(ordinal),
-                Err(e) => return self.response_error(task, ErrorCode::from(e)),
-            }
-        } else {
-            None
+        // A row is closed, never erased: its history stays readable until
+        // the purge. One system time closes every row, so the TRUNCATE
+        // removes them at one instant, as a `DELETE` with no `WHERE`.
+        let sys_from = match self.rows_version_ordinal(database_id, tid, collection, &all_ids) {
+            Ok(ordinal) => ordinal,
+            Err(e) => return self.response_error(task, ErrorCode::from(e)),
         };
         let scope = TruncateScope {
             task,
@@ -138,34 +132,31 @@ impl CoreLoop {
             declared_primary_key,
             strict_schema: strict_schema.as_ref(),
             has_vectors,
-            bitemporal_sys_from,
+            sys_from,
         };
         // Each document leaves with full cascade, one transaction per row.
         let mut progress = TruncateProgress::default();
         for storage_key in &all_ids {
             if let Err(code) = self.truncate_row(&scope, storage_key, &mut progress) {
-                return self.truncate_refusal(
-                    task,
-                    tid,
-                    collection,
-                    code,
-                    &progress.removed,
-                    progress.write_set,
-                );
+                return self.truncate_refusal(&scope, code, &progress.removed, progress.write_set);
             }
         }
         let TruncateProgress {
             truncated,
             write_set,
-            removed: _,
+            removed,
         } = progress;
 
-        // Every row is removed: empty the collection's inverted index in one
-        // purge. Its analyzer, language, and fuzzy configuration stay.
-        if let Err(e) = self.inverted.clear_collection(
+        // Every row is removed: each row's text version ends at the
+        // tombstones' system time, so a read at an earlier cut still matches
+        // it. The collection's analyzer, language, and fuzzy configuration
+        // stay.
+        if let Err(e) = self.inverted.remove_documents(
             database_id,
             crate::types::TenantId::new(tid),
             collection,
+            &removed,
+            scope.sys_from,
         ) {
             // The rows are removed, but the index still holds their text. That
             // cannot be undone here, so the core fail-stops, as in
@@ -210,18 +201,18 @@ impl CoreLoop {
     /// Restart replay applies the journalled removals and rebuilds the index.
     fn truncate_refusal(
         &mut self,
-        task: &ExecutionTask,
-        tid: u64,
-        collection: &str,
+        scope: &super::truncate_row::TruncateScope<'_>,
         code: ErrorCode,
         removed: &[nodedb_types::Surrogate],
         write_set: Vec<WriteSetEntry>,
     ) -> Response {
+        let (task, collection) = (scope.task, scope.collection);
         if let Err(e) = self.inverted.remove_documents(
             task.request.database_id.as_u64(),
-            crate::types::TenantId::new(tid),
+            crate::types::TenantId::new(scope.tid),
             collection,
             removed,
+            scope.sys_from,
         ) {
             self.fail_stop_core(
                 FailStopCause::PostInstallFailed,
@@ -393,7 +384,7 @@ mod tests {
         assert!(current_x.is_empty(), "the index tombstones every value");
 
         // Each removal journals its tombstone at one statement system time.
-        let stamps: Vec<Option<i64>> = response
+        let stamps: Vec<i64> = response
             .write_set
             .iter()
             .filter_map(|entry| match entry.effect {
@@ -402,8 +393,8 @@ mod tests {
             })
             .collect();
         assert_eq!(stamps.len(), 3);
-        let first = stamps[0].expect("a versioned tombstone");
+        let first = stamps[0];
         assert!(first > SEEDED_AT);
-        assert!(stamps.iter().all(|stamp| *stamp == Some(first)));
+        assert!(stamps.iter().all(|stamp| *stamp == first));
     }
 }

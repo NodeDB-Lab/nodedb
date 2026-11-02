@@ -80,6 +80,8 @@ pub(crate) struct NestedLoopJoinParams<'a> {
     pub left_input: Option<&'a nodedb_physical::physical_plan::PhysicalPlan>,
     /// Coordinator-resolved rows for the right side; `None` scans locally.
     pub right_input: Option<&'a nodedb_physical::physical_plan::PhysicalPlan>,
+    /// The scope a by-name side reads at. Only `Current` scans locally.
+    pub system_time: &'a nodedb_types::SystemTimeScope,
 }
 
 /// Sort-merge join: O((N+M)·log N) equi-join with optional pre-sorted inputs.
@@ -103,6 +105,8 @@ pub(crate) struct SortMergeJoinParams<'a> {
     pub left_input: Option<&'a nodedb_physical::physical_plan::PhysicalPlan>,
     /// Coordinator-resolved rows for the right side; `None` scans locally.
     pub right_input: Option<&'a nodedb_physical::physical_plan::PhysicalPlan>,
+    /// The scope a by-name side reads at. Only `Current` scans locally.
+    pub system_time: &'a nodedb_types::SystemTimeScope,
 }
 
 // ── Test helpers ─────────────────────────────────────────────────────────────
@@ -145,7 +149,7 @@ fn make_dummy_task() -> ExecutionTask {
         wal_lsn: None,
         resolved_now_ms: None,
         commit_hlc: None,
-        entry_version: None,
+        system_ordinal: None,
         admission: crate::bridge::envelope::Admission::Exempt(
             crate::bridge::envelope::ExemptReason::Read,
         ),

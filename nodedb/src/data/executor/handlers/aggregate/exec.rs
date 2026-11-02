@@ -22,6 +22,9 @@ pub(in crate::data::executor) struct AggregateExecInputs<'a> {
     pub tid: u64,
     pub collection: &'a str,
     pub input: Option<&'a nodedb_physical::physical_plan::PhysicalPlan>,
+    /// The scope the per-shard scan of `collection` reads at. Ignored when
+    /// `input` is set: the sub-plan carries its own scope.
+    pub system_time: nodedb_types::SystemTimeScope,
     pub group_by: &'a [GroupKeySpec],
     pub aggregates: &'a [AggregateSpec],
     pub filters: &'a [u8],
@@ -43,6 +46,7 @@ impl CoreLoop {
             tid,
             collection,
             input,
+            system_time,
             group_by,
             aggregates,
             filters,
@@ -53,6 +57,25 @@ impl CoreLoop {
             grouping_sets,
             sort_keys,
         } = inputs;
+
+        // A per-shard read at any scope other than `Current` folds the
+        // engine's own scan at that scope: the versions visible at the
+        // scope's ordinal, with a transaction snapshot's staged writes. The
+        // current-state fast paths below read the newest version only.
+        let scoped_scan;
+        let input = match input {
+            Some(sub_plan) => Some(sub_plan),
+            None if !system_time.is_current() => {
+                scoped_scan = self.scoped_aggregate_scan(
+                    task.request.database_id.as_u64(),
+                    tid,
+                    collection,
+                    system_time,
+                );
+                Some(&scoped_scan)
+            }
+            None => None,
+        };
 
         debug!(core = self.core_id, %collection, has_input = input.is_some(), group_fields = group_by.len(), aggs = aggregates.len(), "aggregate");
 
@@ -268,6 +291,7 @@ mod tests {
                 ann_options: Default::default(),
                 skip_payload_fetch: false,
                 payload_filters: Vec::new(),
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             deadline: Instant::now() + Duration::from_secs(5),
             priority: Priority::Normal,
@@ -282,7 +306,7 @@ mod tests {
             wal_lsn: None,
             resolved_now_ms: None,
             commit_hlc: None,
-            entry_version: None,
+            system_ordinal: None,
             admission: Admission::Exempt(ExemptReason::Read),
         })
     }
@@ -307,6 +331,7 @@ mod tests {
             tid: 1,
             collection: "kvcoll",
             input: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
             group_by: &[],
             aggregates,
             filters: &[],
@@ -428,5 +453,39 @@ mod tests {
 
         let response = core.execute_aggregate(inputs);
         assert_eq!(response.status, Status::Error);
+    }
+
+    /// A per-shard aggregate at a transaction snapshot folds the KV scan at
+    /// the snapshot, never the cached current-state count.
+    #[test]
+    fn a_snapshot_aggregate_reads_the_engine_scan_at_its_scope() {
+        let (mut core, _dir) = open_core();
+        put_kv_row(&mut core, b"k1");
+        let scope = nodedb_types::SystemTimeScope::TxnSnapshot {
+            ordinal: 42,
+            cut_marker: 0,
+        };
+        let plan = core.scoped_aggregate_scan(0, 1, "kvcoll", scope);
+        let PhysicalPlan::Kv(nodedb_physical::physical_plan::KvOp::Scan { system_time, .. }) = plan
+        else {
+            panic!("a KV collection reads a KV scan");
+        };
+        assert_eq!(system_time, scope);
+        let unknown = core.scoped_aggregate_scan(0, 1, "docs", scope);
+        assert!(matches!(
+            unknown,
+            PhysicalPlan::Document(nodedb_physical::physical_plan::DocumentOp::Scan { .. })
+        ));
+
+        let task = make_task();
+        let aggregates = vec![count_star()];
+        let mut inputs = count_star_inputs(&task, &aggregates);
+        inputs.system_time = scope;
+        let response = core.execute_aggregate(inputs);
+        assert_eq!(response.status, Status::Ok);
+        assert!(
+            core.aggregate_cache.is_empty(),
+            "a snapshot aggregate never fills the current-state cache"
+        );
     }
 }

@@ -1,19 +1,25 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! Cursor-paginated document scan for the clone materializer. Returns
-//! `(doc_id_hex, surrogate_u32, value_bytes)` triples plus a next-cursor.
-//! `doc_id` is the hex-encoded surrogate; `value_bytes` is always standard
-//! MessagePack — Binary Tuple and vector-primary sidecar sources are
-//! transcoded here so consumers never re-decide the source format. `value_bytes`
-//! also carries the row identity under the collection's identity column via
-//! `sparse_row_to_doc`, so a Control-Plane filter sees the same identity the
-//! read paths produce. A `raw_bodies` scan adds no identity: the clone
-//! materializer copies the stored contents, which a `HASH_CHAIN` link covers
-//! and a strict schema accepts.
-//! Payload: `[next_cursor: bin, entries: [[doc_id, surrogate, value], ...]]`.
+//! `(doc_id_hex, surrogate_u32, value_bytes, stamp)` entries plus a
+//! next-cursor. `doc_id` is the hex-encoded surrogate; `value_bytes` is always
+//! standard MessagePack — Binary Tuple and vector-primary sidecar sources are
+//! transcoded here so consumers never re-decide the source format.
+//! `value_bytes` also carries the row identity under the collection's identity
+//! column via `sparse_row_to_doc`, so a Control-Plane filter sees the same
+//! identity the read paths produce. A `raw_bodies` scan adds no identity: the
+//! clone materializer copies the stored contents, which a `HASH_CHAIN` link
+//! covers and a strict schema accepts.
+//!
+//! `stamp` is the system-time ordinal and valid interval of the version read.
+//! A clone copy installs at exactly these stamps. A row a transaction overlay
+//! staged carries nil: it is no committed version.
+//!
+//! Payload: `[next_cursor: bin, entries: [[doc_id, surrogate, value, stamp], ...]]`.
 
-use nodedb_types::StorageKey;
-use redb::{ReadableDatabase, ReadableTable};
+use std::collections::HashMap;
+
+use nodedb_types::{StorageKey, Surrogate};
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
@@ -21,10 +27,9 @@ use crate::data::executor::handlers::transaction::overlay::SidecarRowShape;
 use crate::data::executor::scan_normalize::{sparse_body_to_msgpack, sparse_row_to_doc};
 use crate::data::executor::sparse_body_format::SparseBodyFormat;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::sparse::btree::{DOCUMENTS, KeyedTable, invalid_storage_key_err};
-use crate::engine::sparse::btree_versioned::VersionedScanParams;
-use crate::engine::sparse::scan_stop::never_stop;
-use crate::types::{DatabaseId, TenantId};
+use crate::engine::sparse::btree::{KeyedTable, invalid_storage_key_err};
+use crate::engine::sparse::btree_versioned::{StampedScan, StampedVersion};
+use crate::types::{DatabaseId, DocVersionStamp, TenantId};
 
 /// One page of a document materialize scan: the fields of
 /// `DocumentOp::MaterializeScan`, with the tenant it runs under.
@@ -39,9 +44,23 @@ pub(in crate::data::executor) struct DocumentMaterializeScan<'a> {
     /// The system-time ordinal cut the plan's millisecond converts to.
     /// `None` reads the current rows.
     pub system_as_of: Option<i64>,
+    /// True for a current read and a transaction snapshot read: the
+    /// transaction's staged writes merge on top of the rows read.
+    pub merge_overlay: bool,
     /// Copy the stored bodies as they are, with no `id` field added.
     pub raw_bodies: bool,
+    /// The one row to read in place of a page after `cursor`.
+    pub only_row: Option<Surrogate>,
 }
+
+/// One row of a page, with the stamps of the version it came from.
+type PageRow = (StorageKey, Vec<u8>, Option<DocVersionStamp>);
+
+/// One base row's key and body.
+type PageBody = (StorageKey, Vec<u8>);
+
+/// One base row's key and the stamps of its version.
+type PageStamp = (StorageKey, DocVersionStamp);
 
 impl CoreLoop {
     /// Execute a cursor-paginated raw document scan for the clone materializer.
@@ -56,7 +75,9 @@ impl CoreLoop {
             cursor,
             count,
             system_as_of,
+            merge_overlay,
             raw_bodies,
+            only_row,
         } = scan;
         // Quiesce gate: same contract as the standard scan.
         let _scan_guard = match self.acquire_scan_guard(task, tid, collection) {
@@ -68,46 +89,60 @@ impl CoreLoop {
         // tombstone/supersede rows spanning pages, collect the whole base set
         // (ignoring the page cap) and return it un-paginated. Autocommit
         // callers (`txn_id == None`) keep cursor-paginated base-only behavior.
-        let txn_id = task.request.txn_id;
+        // A historical read never sees the overlay.
+        let txn_id = if merge_overlay {
+            task.request.txn_id
+        } else {
+            None
+        };
         let page = BasePage {
             database_id: task.request.database_id.as_u64(),
             tid,
             collection,
             cursor,
             limit: if txn_id.is_none() { count } else { usize::MAX },
+            only_row,
         };
 
-        // A bitemporal collection stores its rows as versions: the scan reads
-        // each row's version as of `system_as_of`, or its current version
-        // when unset. A system-time cut on any other collection is refused,
-        // as the SQL planner refuses `FOR SYSTEM_TIME` on one.
-        let base = if self.is_bitemporal(page.database_id, tid, collection) {
-            self.materialize_versioned_rows(&page, system_as_of)
-        } else if system_as_of.is_some() {
-            Err(crate::bridge::envelope::ErrorCode::BadRequest {
-                detail: format!(
-                    "a materialize scan AS OF SYSTEM TIME requires a bitemporal collection; \
-                     '{collection}' was not created WITH bitemporal = true"
-                ),
-            })
-        } else {
-            self.materialize_live_rows(&page)
-        };
-        let mut entries = match base {
-            Ok(entries) => entries,
+        // Every collection stores its rows as versions: the scan reads each
+        // row's version as of `system_as_of`, or its current version when
+        // unset.
+        let base = match self.materialize_versioned_rows(&page, system_as_of) {
+            Ok(base) => base,
             Err(code) => return self.response_error(task, code),
         };
-        let last_key = entries.last().map(|(key, _)| *key);
+        let base_len = base.len();
+        let last_key = base.last().map(|row| row.doc_id);
+        let (mut rows, stamps): (Vec<PageBody>, Vec<PageStamp>) = base
+            .into_iter()
+            .map(|v| {
+                let stamp = DocVersionStamp {
+                    sys_from: v.sys_from,
+                    valid_from_ms: v.valid_from_ms,
+                    valid_until_ms: v.valid_until_ms,
+                };
+                ((v.doc_id, v.body), (v.doc_id, stamp))
+            })
+            .unzip();
 
         // Fold the staging overlay into the base set: a staged tombstone
         // hides its row, a staged put replaces or appends. The source ships
         // all rows unfiltered, so the merge predicate is collect-all.
-        let next_cursor: Vec<u8> = if let Some(txn_id) = txn_id {
+        let (mut entries, next_cursor): (Vec<PageRow>, Vec<u8>) = if let Some(txn_id) = txn_id {
             let coll_key: (DatabaseId, TenantId, String) = (
                 task.request.database_id,
                 TenantId::new(tid),
                 collection.to_string(),
             );
+            // A row keeps its stamp only while its body is the base body: a
+            // staged put that replaced it is no committed version.
+            let base_rows: HashMap<StorageKey, (DocVersionStamp, Vec<u8>)> = stamps
+                .into_iter()
+                .zip(rows.iter())
+                .map(|((key, stamp), (_, body))| (key, (stamp, body.clone())))
+                .collect();
+            let in_scope =
+                |key: &StorageKey, _: &[u8]| only_row.is_none_or(|row| key.surrogate() == row);
             // A vector-primary row stages its vector with its sidecar; its
             // merge yields the stored sidecar, normalized below like base.
             let vector_primary = matches!(
@@ -119,23 +154,42 @@ impl CoreLoop {
                     txn_id,
                     &coll_key,
                     SidecarRowShape::Stored,
-                    &mut entries,
-                    &|_, _| true,
+                    &mut rows,
+                    &in_scope,
                 ) {
                     return self.response_error(task, e);
                 }
             } else {
-                self.merge_overlay_into_scan(txn_id, &coll_key, &mut entries, &|_, _| true);
+                self.merge_overlay_into_scan(txn_id, &coll_key, &mut rows, &in_scope);
             }
+            let entries = rows
+                .into_iter()
+                .map(|(key, body)| {
+                    let stamp = base_rows
+                        .get(&key)
+                        .filter(|(_, base_body)| *base_body == body)
+                        .map(|(stamp, _)| *stamp);
+                    (key, body, stamp)
+                })
+                .collect();
             // The whole set is returned in one response; the scan is complete.
-            Vec::new()
-        } else if entries.len() < count {
-            // Next-cursor is the last doc_id_hex seen; empty = scan complete.
-            Vec::new()
+            (entries, Vec::new())
         } else {
-            last_key
-                .map(|k| k.to_string().into_bytes())
-                .unwrap_or_default()
+            let entries = rows
+                .into_iter()
+                .zip(stamps)
+                .map(|((key, body), (_, stamp))| (key, body, Some(stamp)))
+                .collect();
+            // Next-cursor is the last doc_id_hex seen; empty = scan complete.
+            // A one-row read is complete.
+            let next_cursor = if only_row.is_some() || base_len < count {
+                Vec::new()
+            } else {
+                last_key
+                    .map(|k| k.to_string().into_bytes())
+                    .unwrap_or_default()
+            };
+            (entries, next_cursor)
         };
 
         // Normalize every body to standard msgpack and inject its identity
@@ -149,7 +203,7 @@ impl CoreLoop {
             self.identity_column(task.request.database_id.as_u64(), tid, collection);
         // A raw body goes out as stored, with no `id` added: the clone
         // materializer copies the exact stored contents.
-        for (key, value) in &mut entries {
+        for (key, value, _) in &mut entries {
             *value = if raw_bodies {
                 sparse_body_to_msgpack(value, format_ref).into_owned()
             } else {
@@ -169,9 +223,15 @@ impl CoreLoop {
                 TenantId::new(tid),
                 collection.to_string(),
             );
-            for (key, value) in &mut entries {
+            for (key, value, _) in &mut entries {
                 let with_vector = self
-                    .current_primary_vector(txn_id, &coll_key, &field, key.surrogate())
+                    .current_primary_vector(
+                        txn_id,
+                        &coll_key,
+                        &field,
+                        key.surrogate(),
+                        system_as_of,
+                    )
                     .and_then(|vector| {
                         crate::data::executor::handlers::vector_row_column::with_vector_column(
                             value, &field, &vector,
@@ -184,11 +244,11 @@ impl CoreLoop {
             }
         }
 
-        // Encode response: [next_cursor: bin, entries: [[str, u32, bin], ...]]
+        // Encode response: [next_cursor: bin, entries: [[str, u32, bin, stamp], ...]]
         let mut payload = Vec::with_capacity(
             entries
                 .iter()
-                .map(|(_, v)| 8 + 4 + v.len() + 12)
+                .map(|(_, v, _)| 8 + 4 + v.len() + 12 + 28)
                 .sum::<usize>()
                 + next_cursor.len()
                 + 16,
@@ -196,70 +256,40 @@ impl CoreLoop {
         nodedb_query::msgpack_scan::write_array_header(&mut payload, 2);
         write_bin(&mut payload, &next_cursor);
         nodedb_query::msgpack_scan::write_array_header(&mut payload, entries.len());
-        for (key, value) in &entries {
-            nodedb_query::msgpack_scan::write_array_header(&mut payload, 3);
+        for (key, value, stamp) in &entries {
+            nodedb_query::msgpack_scan::write_array_header(&mut payload, 4);
             write_str(&mut payload, key.to_string().as_bytes());
             write_u32(&mut payload, key.surrogate().as_u32());
             write_bin(&mut payload, value);
+            DocVersionStamp::write(stamp.as_ref(), &mut payload);
         }
 
         self.response_with_payload(task, payload)
     }
 
-    /// One page of a current-only collection's rows, read from the live
-    /// document table after the cursor.
-    fn materialize_live_rows(&self, page: &BasePage<'_>) -> Result<BaseRows, ErrorCode> {
-        let internal = |what: &str, e: &dyn std::fmt::Display| ErrorCode::Internal {
-            detail: format!("materialize_scan {what}: {e}"),
-        };
-        let prefix =
-            crate::engine::sparse::btree::coll_prefix(page.database_id, page.tid, page.collection);
-        let prefix_end = format!("{prefix}\u{ffff}");
-        // Cursor is the last doc_id_hex seen; `\x00` after it makes the scan
-        // resume AFTER it.
-        let range_start = if page.cursor.is_empty() {
-            prefix.clone()
-        } else {
-            let cursor_str = String::from_utf8_lossy(page.cursor);
-            format!("{prefix}{cursor_str}\x00")
-        };
-
-        let read_txn = self
-            .sparse
-            .db()
-            .begin_read()
-            .map_err(|e| internal("begin_read", &e))?;
-        let table = read_txn
-            .open_table(DOCUMENTS)
-            .map_err(|e| internal("open_table", &e))?;
-        let range = table
-            .range(range_start.as_str()..prefix_end.as_str())
-            .map_err(|e| internal("range", &e))?;
-
-        let mut entries = Vec::with_capacity(page.limit.min(256));
-        for row in range {
-            if entries.len() >= page.limit {
-                break;
-            }
-            let row = row.map_err(|e| internal("row", &e))?;
-            let full_key = row.0.value();
-            let rest = full_key.strip_prefix(&prefix).unwrap_or(full_key);
-            let key = StorageKey::parse(rest).ok_or_else(|| {
-                invalid_storage_key_err(KeyedTable::Documents, page.collection, rest)
-            })?;
-            entries.push((key, row.1.value().to_vec()));
-        }
-        Ok(entries)
-    }
-
-    /// One page of a bitemporal collection's rows after the cursor: each
-    /// row's version as of `system_as_of`, its current version when unset.
-    /// A row deleted before the cut, or created after it, is absent.
+    /// One page of the collection's rows after the cursor, or the one row
+    /// the page names: each row's version as of `system_as_of`, its current
+    /// version when unset. A row deleted before the cut, or created after
+    /// it, is absent.
     fn materialize_versioned_rows(
         &self,
         page: &BasePage<'_>,
         system_as_of: Option<i64>,
-    ) -> Result<BaseRows, ErrorCode> {
+    ) -> Result<Vec<StampedVersion>, ErrorCode> {
+        if let Some(row) = page.only_row {
+            let doc_id = StorageKey::for_surrogate(row);
+            return self
+                .sparse
+                .versioned_get_stamped(
+                    page.database_id,
+                    page.tid,
+                    page.collection,
+                    &doc_id,
+                    system_as_of,
+                )
+                .map(|version| version.into_iter().collect())
+                .map_err(ErrorCode::from);
+        }
         let after = if page.cursor.is_empty() {
             None
         } else {
@@ -273,25 +303,19 @@ impl CoreLoop {
             })?)
         };
         self.sparse
-            .versioned_scan_as_of_after(
-                VersionedScanParams {
+            .versioned_scan_stamped_after(
+                StampedScan {
                     database_id: page.database_id,
                     tenant: page.tid,
                     coll: page.collection,
                     sys_cutoff: system_as_of,
-                    valid_at_ms: None,
                     limit: page.limit,
                 },
                 after.as_ref(),
-                &|_: &StorageKey, _: &[u8]| true,
-                &never_stop,
             )
             .map_err(ErrorCode::from)
     }
 }
-
-/// The base rows of one page, in doc-id order.
-type BaseRows = Vec<(StorageKey, Vec<u8>)>;
 
 /// Where one page of base rows is read.
 struct BasePage<'a> {
@@ -303,6 +327,8 @@ struct BasePage<'a> {
     cursor: &'a [u8],
     /// Rows the page holds at most.
     limit: usize,
+    /// The one row to read in place of a page.
+    only_row: Option<Surrogate>,
 }
 
 /// Append a msgpack `bin` value to `out`.
@@ -394,6 +420,15 @@ mod tests {
     }
 
     fn scan(core: &CoreLoop, collection: &str, system_as_of: Option<i64>) -> Response {
+        scan_rows(core, collection, system_as_of, None)
+    }
+
+    fn scan_rows(
+        core: &CoreLoop,
+        collection: &str,
+        system_as_of: Option<i64>,
+        only_row: Option<Surrogate>,
+    ) -> Response {
         core.execute_document_materialize_scan(
             &make_default_task(),
             DocumentMaterializeScan {
@@ -402,13 +437,16 @@ mod tests {
                 cursor: &[],
                 count: 16,
                 system_as_of,
+                merge_overlay: system_as_of.is_none(),
                 raw_bodies: true,
+                only_row,
             },
         )
     }
 
-    /// The `state` field of every row one scan page returned, in order.
-    fn states(response: &Response) -> Vec<String> {
+    /// The `state` field and the stamp of every row one scan page returned,
+    /// in order.
+    fn stamped_states(response: &Response) -> Vec<(String, Option<DocVersionStamp>)> {
         assert_eq!(response.status, Status::Ok, "{:?}", response.error_code);
         let payload: &[u8] = response.payload.as_ref();
         let (outer, mut off) = msgpack_scan::array_header(payload, 0).expect("page");
@@ -417,15 +455,63 @@ mod tests {
         let (count, mut off) = msgpack_scan::array_header(payload, off).expect("entries");
         let mut states = Vec::new();
         for _ in 0..count {
-            let (_, mut entry) = msgpack_scan::array_header(payload, off).expect("entry");
+            let (len, mut entry) = msgpack_scan::array_header(payload, off).expect("entry");
+            assert_eq!(len, 4);
             msgpack_scan::read_str_advance(payload, &mut entry).expect("doc id");
             msgpack_scan::read_u32_advance(payload, &mut entry).expect("surrogate");
             let body = msgpack_scan::read_bin_advance(payload, &mut entry).expect("body");
             let doc = nodedb_types::json_from_msgpack(body).expect("decode body");
-            states.push(doc["state"].as_str().expect("state field").to_string());
+            let stamp = DocVersionStamp::read(payload, &mut entry).expect("stamp");
+            states.push((
+                doc["state"].as_str().expect("state field").to_string(),
+                stamp,
+            ));
             off = entry;
         }
         states
+    }
+
+    /// The `state` field of every row one scan page returned, in order.
+    fn states(response: &Response) -> Vec<String> {
+        stamped_states(response)
+            .into_iter()
+            .map(|(state, _)| state)
+            .collect()
+    }
+
+    /// Each row carries the stamps of the version the cut reads, and a
+    /// one-row read answers that row alone.
+    #[test]
+    fn each_row_carries_the_stamps_of_the_version_read() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (mut core, _req_tx, _resp_rx) = make_core_with_dir(dir.path());
+        register(&mut core, COLL, false);
+        put_version(&core, 7, 1_000, "old");
+        put_version(&core, 7, 3_000, "new");
+        put_version(&core, 8, 2_000, "other");
+        let stamp = |sys_from| {
+            Some(DocVersionStamp {
+                sys_from,
+                valid_from_ms: i64::MIN,
+                valid_until_ms: i64::MAX,
+            })
+        };
+
+        assert_eq!(
+            stamped_states(&scan(&core, COLL, Some(2_500))),
+            [
+                ("old".to_string(), stamp(1_000)),
+                ("other".to_string(), stamp(2_000))
+            ]
+        );
+        assert_eq!(
+            stamped_states(&scan_rows(&core, COLL, None, Some(Surrogate::new(7)))),
+            [("new".to_string(), stamp(3_000))]
+        );
+        assert!(
+            stamped_states(&scan_rows(&core, COLL, Some(500), Some(Surrogate::new(7)))).is_empty(),
+            "a row the cut does not see is absent"
+        );
     }
 
     #[test]
@@ -459,17 +545,39 @@ mod tests {
         assert_eq!(states(&scan(&core, COLL, Some(first + 2))), ["new"]);
     }
 
+    /// Every collection keeps versions, so a system-time cut on a collection
+    /// without `bitemporal=true` reads each row's version visible at the cut:
+    /// across an overwrite, a delete, and a re-insert.
     #[test]
-    fn a_system_time_cut_on_a_current_only_collection_is_refused() {
+    fn a_system_time_cut_on_a_non_bitemporal_collection_reads_at_the_cut() {
         let dir = tempfile::tempdir().expect("temp dir");
         let (mut core, _req_tx, _resp_rx) = make_core_with_dir(dir.path());
-        register(&mut core, "plain", false);
+        register(&mut core, COLL, false);
+        put_version(&core, 7, 1_000, "old");
+        put_version(&core, 7, 3_000, "new");
+        core.sparse
+            .versioned_tombstone(
+                DatabaseId::DEFAULT.as_u64(),
+                TID,
+                COLL,
+                &StorageKey::for_surrogate(Surrogate::new(7)),
+                5_000,
+            )
+            .expect("versioned tombstone");
+        put_version(&core, 7, 7_000, "back");
 
-        let response = scan(&core, "plain", Some(2_000));
-        assert_eq!(response.status, Status::Error);
-        assert!(matches!(
-            response.error_code.as_deref(),
-            Some(ErrorCode::BadRequest { .. })
-        ));
+        assert!(
+            states(&scan(&core, COLL, Some(500))).is_empty(),
+            "a row created after the cut is absent"
+        );
+        assert_eq!(states(&scan(&core, COLL, Some(1_000))), ["old"]);
+        assert_eq!(states(&scan(&core, COLL, Some(2_999))), ["old"]);
+        assert_eq!(states(&scan(&core, COLL, Some(3_000))), ["new"]);
+        assert!(
+            states(&scan(&core, COLL, Some(6_000))).is_empty(),
+            "a row deleted at or before the cut is absent"
+        );
+        assert_eq!(states(&scan(&core, COLL, Some(7_000))), ["back"]);
+        assert_eq!(states(&scan(&core, COLL, None)), ["back"]);
     }
 }

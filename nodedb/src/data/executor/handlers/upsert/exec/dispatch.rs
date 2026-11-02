@@ -106,11 +106,6 @@ impl CoreLoop {
             }
         });
 
-        // Computed once for the whole statement: the schemaless half of this
-        // check is an unindexed `vector_params` scan, so it must not be paid
-        // per branch. Gates the overwrite branch's removal of the prior HNSW
-        // node; a non-vector collection pays nothing.
-        let has_vectors = self.collection_has_vectors(database_id, tid, collection);
         let key = nodedb_types::StorageKey::for_surrogate(surrogate);
         // Whether the row already exists, at its current version.
         let existing = self.current_row_body(database_id, tid, collection, &key);
@@ -130,7 +125,6 @@ impl CoreLoop {
                     rls_filters,
                     database_id,
                     hook_ctx: &hook_ctx,
-                    has_vectors,
                     strict_schema: strict_schema.as_ref(),
                     current_bytes,
                 },
@@ -226,6 +220,7 @@ mod tests {
                 TARGET,
                 &nodedb_types::StorageKey::for_surrogate(T1),
                 &doc_format::encode_to_msgpack(&seed),
+                core.bitemporal_ordinal(),
             )
             .expect("seed target row");
         core

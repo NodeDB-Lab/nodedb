@@ -54,20 +54,16 @@ pub(in crate::data::executor) struct PointDeleteParams<'a> {
 pub(in crate::data::executor) struct PointDeleteOutcome {
     /// Prior stored bytes when a row was actually removed, else `None`.
     pub prior_value: Option<Vec<u8>>,
-    /// System-time key the bitemporal tombstone row (and its versioned index
-    /// tombstones) were appended at. `Some(t)` on the bitemporal branch,
-    /// `None` on the plain delete branch.
-    pub bitemporal_sys_from: Option<i64>,
-    /// `(field, value)` pairs whose versioned index tombstones this op wrote
-    /// at `bitemporal_sys_from`. Empty when not bitemporal / none written.
-    pub bitemporal_index_tuples: Vec<(String, String)>,
-    /// `(field, value)` pairs the plain (non-bitemporal) secondary-index
-    /// cascade removed for this document. Captured unconditionally (the cascade
-    /// runs for both autocommit and transactional callers) so a transactional
-    /// caller can re-insert them on rollback — closing the pre-existing hole
-    /// where a rolled-back DELETE never restored its secondary-index entries.
-    /// Empty on the bitemporal path (which has no plain INDEXES entries).
-    pub secondary_index_tuples: Vec<(String, String)>,
+    /// System-time ordinal the tombstone version (and its index tombstones)
+    /// were appended at. `Some` exactly when a live row was closed.
+    pub version_sys_from: Option<i64>,
+    /// `(field, value)` pairs whose index tombstones this op wrote at
+    /// `version_sys_from`. A transactional caller removes them on rollback.
+    pub index_tuples: Vec<(String, String)>,
+    /// `Some` when the delete installed its tombstone below the row's newest
+    /// version: the index entries it wrote at its successor's ordinal. Such
+    /// a delete ran no cascade.
+    pub history: Option<super::history_install::SuccessorIndexWrites>,
     /// Undo entries for the in-memory cascades, in the order they ran:
     /// - `SpatialDelete` for each R-tree entry and `spatial_doc_map` record
     ///   removed
@@ -85,16 +81,15 @@ pub(in crate::data::executor) struct PointDeleteOutcome {
 impl CoreLoop {
     /// Apply a PointDelete within an externally-owned WriteTransaction.
     ///
-    /// Handles the bitemporal-aware tombstone/versioned-index-tombstone
-    /// branch, the non-bitemporal overwrite-delete branch, and all cascades
-    /// (inverted index, secondary indexes, spatial R-tree, node-deleted
-    /// bookkeeping, doc cache invalidation). The node's graph edges are
+    /// Appends the tombstone version and the index tombstones, and runs all
+    /// cascades (inverted index, spatial R-tree, node-deleted bookkeeping,
+    /// doc cache invalidation). The node's graph edges are
     /// tombstoned by the transaction's own `EdgeDelete` tasks. Does NOT
     /// commit the transaction.
     ///
-    /// Every redb write this performs on the sparse database — the row removal
-    /// or bitemporal tombstone, the versioned index tombstones, the inverted
-    /// index removal, and the plain secondary-index cascade — goes into `txn`.
+    /// Every redb write this performs on the sparse database — the tombstone
+    /// version, the index tombstones, and the inverted index removal — goes
+    /// into `txn`.
     /// That is what makes the row and the indexes that describe it one
     /// all-or-nothing durable unit, and it is also required: those cascades
     /// share the sparse engine's redb database, which permits exactly one
@@ -110,8 +105,8 @@ impl CoreLoop {
     /// RETURNING payloads — those stay with the caller.
     ///
     /// Returns a [`PointDeleteOutcome`] capturing the prior stored bytes
-    /// (present when a row was actually removed) plus the bitemporal system
-    /// time and versioned index tombstone tuples written, so a transactional
+    /// (present when a row was actually removed) plus the tombstone's system
+    /// time and the index tombstone tuples written, so a transactional
     /// caller can build a fully-reversible undo entry. A caller that drops
     /// `txn` uncommitted after `Ok` reverses `memory_undo` with
     /// `abandon_write`.
@@ -120,7 +115,6 @@ impl CoreLoop {
         txn: &WriteTransaction,
         params: PointDeleteParams<'_>,
     ) -> crate::Result<PointDeleteOutcome> {
-        let crs = self.crs_context();
         let PointDeleteParams {
             database_id,
             tid,
@@ -135,10 +129,9 @@ impl CoreLoop {
 
         let storage_key = crate::engine::document::store::StorageKey::for_surrogate(surrogate);
         // A stamp in `apply_scope.bitemporal_stamps` (a committed redo delete)
-        // forces the versioned branch at the EXACT resolve-time system time,
-        // so every replica and every restart tombstones the same version key.
-        // Absent an override, derive bitemporality from config and mint the
-        // system time here.
+        // fixes the tombstone at the EXACT resolve-time system time, so every
+        // replica and every restart tombstones the same version key. Absent a
+        // stamp the delete takes its ordinal here.
         let carried_sys_from = self
             .apply_scope
             .bitemporal_stamps
@@ -152,109 +145,90 @@ impl CoreLoop {
             collection.to_string(),
         );
 
-        // On bitemporal collections: append a doc tombstone + versioned
-        // index tombstones for every current field value. `prior` is the
-        // pre-delete body so the Event Plane sees `old_value` correctly.
-        // Current-state-only indexes (text, graph, spatial, vector) are
-        // still cascaded below — they track "what exists now" regardless
-        // of bitemporal history.
-        let mut bitemporal_sys_from: Option<i64> = None;
-        let mut bitemporal_index_tuples: Vec<(String, String)> = Vec::new();
-        let prior = if bitemporal {
-            let prior =
-                self.sparse
-                    .versioned_get_current(database_id, tid, collection, &storage_key)?;
-            if let Some(ref body) = prior {
-                if enforce && let Some(config) = self.doc_configs.get(&config_key) {
-                    run_delete_enforcement(
-                        self,
-                        database_id,
-                        tid,
-                        collection,
-                        config,
-                        Some(body),
-                        resolved_targets,
-                    )?;
-                }
-                let sys_from = match carried_sys_from {
-                    Some(sys_from) => sys_from,
-                    None => self.row_version_ordinal(database_id, tid, collection, &storage_key)?,
-                };
-                bitemporal_sys_from = Some(sys_from);
-                // The tombstone version, plus an index tombstone for every
-                // current value, so a lookup at or after `sys_from` skips
-                // this row.
-                bitemporal_index_tuples = self.tombstone_version_in_txn(
-                    txn,
-                    super::delete_version::VersionTombstone {
-                        database_id,
-                        tid,
-                        collection,
-                        storage_key: &storage_key,
-                        current_body: body,
-                        sys_from,
-                    },
-                )?;
-            }
-            prior
-        } else {
-            if enforce && let Some(config) = self.doc_configs.get(&config_key) {
-                let old_value = self
-                    .sparse
-                    .get(database_id, tid, collection, &storage_key)?;
+        // A carried stamp below the row's newest version installs a history
+        // tombstone only.
+        if let Some(sys_from) = carried_sys_from
+            && let Some(slot) =
+                self.history_slot_in_txn(txn, database_id, tid, collection, &storage_key, sys_from)?
+        {
+            if enforce
+                && slot.predecessor.is_some()
+                && let Some(config) = self.doc_configs.get(&config_key)
+            {
                 run_delete_enforcement(
                     self,
                     database_id,
                     tid,
                     collection,
                     config,
-                    old_value.as_deref(),
+                    slot.predecessor.as_deref(),
                     resolved_targets,
                 )?;
             }
-            self.sparse
-                .delete_in_txn(txn, database_id, tid, collection, &storage_key)?
-        };
+            return self.apply_history_delete(
+                txn,
+                super::history_install::HistoryDelete {
+                    database_id,
+                    tid,
+                    collection,
+                    storage_key: &storage_key,
+                    sys_from,
+                    slot,
+                },
+            );
+        }
 
-        // Capture the plain secondary-index `(field, value)` tuples this
-        // document contributed, BEFORE cascade 2 wipes them, so a transactional
-        // caller can restore them on rollback. Only the non-bitemporal path
-        // writes plain INDEXES entries (bitemporal uses versioned tombstones
-        // above), so gate on `!bitemporal`. Applies the same predicate +
-        // case-insensitive folding the forward secondary-index write uses.
-        let mut secondary_index_tuples: Vec<(String, String)> = Vec::new();
-        // `prior` is the STORED blob of the just-deleted row: MessagePack for
-        // schemaless collections, Binary Tuple for strict ones. Decode through
-        // the storage-mode-aware helper so strict tx-DELETEs also capture the
-        // real removed index tuples for rollback restore.
-        if !bitemporal
-            && let Some(ref body) = prior
+        // Append a tombstone version and an index tombstone for every value
+        // the closed version held. `prior` is the pre-delete body so the
+        // Event Plane sees `old_value` correctly. Current-state-only indexes
+        // (text, graph, spatial, vector) are cascaded below.
+        let prior = self
+            .sparse
+            .get_in_txn(txn, database_id, tid, collection, &storage_key)?;
+        // A bitemporal delete judges only a row that exists. Any other
+        // delete judges whatever is stored.
+        if enforce
+            && (prior.is_some() || !bitemporal)
             && let Some(config) = self.doc_configs.get(&config_key)
         {
-            // A body that will not decode yields no rollback tuples, so a later
-            // rollback would restore the row with its secondary-index entries
-            // permanently missing. Fail the delete instead.
-            let doc = self.decode_stored_document(config, body)?;
-            for path in config.index_paths.clone() {
-                if let Some(ref pred) = path.predicate
-                    && !pred.evaluate_json(&doc, &crs)
-                {
-                    continue;
-                }
-                for v in crate::engine::document::store::extract_index_values(
-                    &doc,
-                    &path.path,
-                    path.is_array,
-                ) {
-                    let value = if path.case_insensitive {
-                        v.to_lowercase()
-                    } else {
-                        v
-                    };
-                    secondary_index_tuples.push((path.path.clone(), value));
-                }
-            }
+            run_delete_enforcement(
+                self,
+                database_id,
+                tid,
+                collection,
+                config,
+                prior.as_deref(),
+                resolved_targets,
+            )?;
         }
+        let mut version_sys_from: Option<i64> = None;
+        let mut index_tuples: Vec<(String, String)> = Vec::new();
+        if let Some(ref body) = prior {
+            let sys_from = match carried_sys_from {
+                Some(sys_from) => sys_from,
+                None => self.row_version_ordinal(database_id, tid, collection, &storage_key)?,
+            };
+            version_sys_from = Some(sys_from);
+            // A `body` that does not decode fails the delete: its index
+            // entries left live keep the row findable by its old values.
+            index_tuples = self.tombstone_version_in_txn(
+                txn,
+                super::delete_version::VersionTombstone {
+                    database_id,
+                    tid,
+                    collection,
+                    storage_key: &storage_key,
+                    current_body: body,
+                    sys_from,
+                },
+            )?;
+        }
+        // The system time the row's index entries end at: the tombstone's,
+        // or a fresh one when no row was stored.
+        let index_ordinal = match version_sys_from {
+            Some(sys_from) => sys_from,
+            None => self.bitemporal_ordinal(),
+        };
 
         // Cascade 1: Remove from full-text inverted index. The inverted
         // index was populated by `apply_point_put` with the substrate row
@@ -274,27 +248,10 @@ impl CoreLoop {
                 tid: crate::types::TenantId::new(tid),
                 collection,
                 surrogate,
+                ordinal: index_ordinal,
             },
         ) {
             warn!(core = self.core_id, %collection, %document_id, error = %e, "inverted index removal failed; rejecting the delete");
-            return Err(e);
-        }
-
-        // Cascade 2: Remove secondary index entries for this document.
-        // Secondary indexes use key format "{tenant}:{collection}:{field}:{value}:{doc_id}".
-        // We scan and delete all entries ending with this doc_id.
-        //
-        // Propagated for the same reason as cascade 1: a partial removal
-        // committed alongside the row would leave index entries asserting a
-        // row that no longer exists, and nothing later re-derives them.
-        if let Err(e) = self.sparse.delete_indexes_for_document_in_txn(
-            txn,
-            database_id,
-            tid,
-            collection,
-            &storage_key,
-        ) {
-            warn!(core = self.core_id, %collection, %document_id, error = %e, "secondary index cascade failed; rejecting the delete");
             return Err(e);
         }
 
@@ -321,6 +278,7 @@ impl CoreLoop {
             tid,
             collection,
             SpatialEntryId::from_storage_key(storage_key),
+            index_ordinal,
             &mut memory_undo,
         );
 
@@ -337,8 +295,8 @@ impl CoreLoop {
             });
         }
 
-        // Cascade 4 (CORE, UNCONDITIONAL): soft-delete any HNSW vector entries
-        // this document produced. Runs for BOTH autocommit and transactional
+        // Cascade 4 (CORE, UNCONDITIONAL): end, at the tombstone's ordinal,
+        // any HNSW vector entries this document produced. Runs for BOTH autocommit and transactional
         // callers — leaving them behind orphans the vector index forever (a
         // deleted doc keeps scoring in KNN). The reverse map `vector_doc_map`
         // was populated by `apply_point_put_vector_indexes` under the same hex
@@ -350,9 +308,15 @@ impl CoreLoop {
         // looked up by its exact key rather than scanning the whole map on
         // every delete. Shared with the PointUpdate re-index path.
         memory_undo.extend(
-            self.remove_document_vector_indexes(database_id, tid, collection, storage_key)
-                .into_iter()
-                .map(VectorIndexDelta::into_delete_undo),
+            self.remove_document_vector_indexes(
+                database_id,
+                tid,
+                collection,
+                storage_key,
+                index_ordinal,
+            )
+            .into_iter()
+            .map(VectorIndexDelta::into_delete_undo),
         );
 
         // Sparse inverted-index cleanup, mirroring the dense-vector cascade
@@ -364,6 +328,7 @@ impl CoreLoop {
             tid,
             collection,
             storage_key,
+            index_ordinal,
             &mut memory_undo,
         );
 
@@ -379,9 +344,9 @@ impl CoreLoop {
 
         Ok(PointDeleteOutcome {
             prior_value: prior,
-            bitemporal_sys_from,
-            bitemporal_index_tuples,
-            secondary_index_tuples,
+            version_sys_from,
+            index_tuples,
+            history: None,
             memory_undo,
         })
     }

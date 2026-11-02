@@ -116,23 +116,11 @@ impl CoreLoop {
         // would otherwise leak vector nodes that keep scoring in KNN search.
         let has_vectors = self.collection_has_vectors(database_id, tid, collection);
 
-        // Secondary-index paths for this collection, hoisted once. The delete
-        // cascade below (`delete_indexes_for_document`) is a prefix scan that
-        // does NOT return the removed `(field, value)` tuples, and the index
-        // keys are `:`-delimited with values that may themselves contain `:` —
-        // so parsing them back out is unsafe. The removed tuples are instead
-        // recomputed from the pre-delete document via `index_tuples_for_doc`.
         let config_key = (
             task.request.database_id,
             crate::types::TenantId::new(tid),
             collection.to_string(),
         );
-        let index_paths: Vec<crate::engine::document::store::IndexPath> = self
-            .doc_configs
-            .get(&config_key)
-            .map(|c| c.index_paths.clone())
-            .unwrap_or_default();
-
         // The stored pre-image is a Binary Tuple on a strict collection and
         // MessagePack otherwise. Hoisted once for the whole statement so the
         // per-row decode below picks the matching decoder — the MessagePack
@@ -229,70 +217,61 @@ impl CoreLoop {
         } else {
             Vec::new()
         };
-        // Removed rows whose text has not left the inverted index yet. It
-        // leaves in batches, one write transaction each.
-        let mut pending_text: Vec<nodedb_types::Surrogate> = Vec::new();
-        // One system time closes every matched row of a bitemporal
-        // collection, so the statement removes them at one instant.
-        let bitemporal_sys_from = if self.is_bitemporal(database_id, tid, collection) {
-            match self.rows_version_ordinal(database_id, tid, collection, &apply_ids) {
-                Ok(ordinal) => Some(ordinal),
-                Err(e) => return self.response_error(task, ErrorCode::from(e)),
-            }
-        } else {
-            None
+        // One system time closes every matched row, so the statement removes
+        // them at one instant.
+        let sys_from = match self.rows_version_ordinal(database_id, tid, collection, &apply_ids) {
+            Ok(ordinal) => ordinal,
+            Err(e) => return self.response_error(task, ErrorCode::from(e)),
         };
+        // Removed rows whose text has not left the inverted index yet. It
+        // leaves in batches, one write transaction each, ending each row's
+        // text version at the statement's system time.
+        let mut pending_text = super::delete_cascade::PendingText::at(sys_from);
         for storage_key in &apply_ids {
-            // Capture pre-deletion snapshot if RETURNING was requested, or if
-            // the collection is indexed (needed to recompute the removed
-            // secondary-index tuples below — the delete cascade's prefix scan
-            // cannot safely return them).
+            // Capture the pre-deletion snapshot if RETURNING was requested.
             // `None` means the row was already gone. A row that IS there but
-            // will not decode is a different answer: it would silently drop out
-            // of RETURNING and, worse, contribute no removed index tuples, so
-            // its old secondary-index entries would survive the delete.
-            // A read error is a refusal too: read as an absent row, it drops
-            // the row from RETURNING and keeps its index values unrecorded.
-            let pre_delete_doc: Option<serde_json::Value> =
-                if returning.is_some() || !index_paths.is_empty() {
-                    let decoded = self
-                        .current_row_body(database_id, tid, collection, storage_key)
-                        .and_then(|stored| {
-                            stored
-                                .map(|bytes| {
-                                    returning_doc::from_stored_json(
-                                        &bytes,
-                                        &storage_key.to_identity(),
-                                        strict_schema.as_ref(),
-                                        &identity_column,
-                                    )
-                                })
-                                .transpose()
-                        });
-                    match decoded {
-                        Ok(doc) => doc,
-                        Err(e) => {
-                            let code = refusal_after_rows(affected, e);
-                            return self.bulk_delete_refusal(
-                                task,
-                                tid,
-                                collection,
-                                code,
-                                &mut pending_text,
-                                write_set,
-                            );
-                        }
+            // will not decode is a different answer: it would silently drop
+            // out of RETURNING. A read error is a refusal too: read as an
+            // absent row, it drops the row from RETURNING.
+            let pre_delete_doc: Option<serde_json::Value> = if returning.is_some() {
+                let decoded = self
+                    .current_row_body(database_id, tid, collection, storage_key)
+                    .and_then(|stored| {
+                        stored
+                            .map(|bytes| {
+                                returning_doc::from_stored_json(
+                                    &bytes,
+                                    &storage_key.to_identity(),
+                                    strict_schema.as_ref(),
+                                    &identity_column,
+                                )
+                            })
+                            .transpose()
+                    });
+                match decoded {
+                    Ok(doc) => doc,
+                    Err(e) => {
+                        let code = refusal_after_rows(affected, e);
+                        return self.bulk_delete_refusal(
+                            task,
+                            tid,
+                            collection,
+                            code,
+                            &mut pending_text,
+                            write_set,
+                        );
                     }
-                } else {
-                    None
-                };
+                }
+            } else {
+                None
+            };
 
             // The removal and the materialized-sum deltas it owes share ONE
             // transaction, so a debited target row can never outlive a removal
             // that did not commit. The stored bytes the removal hands back are
             // the row's only pre-image and the cheapest one available — the
-            // separate `pre_delete_doc` read above exists for RETURNING and the
-            // index diff, and is not widened for this.
+            // separate `pre_delete_doc` read above exists for RETURNING, and is
+            // not widened for this.
             let row_txn = match self.sparse.begin_write() {
                 Ok(txn) => txn,
                 Err(e) => {
@@ -317,7 +296,7 @@ impl CoreLoop {
                     tid,
                     collection,
                     storage_key,
-                    bitemporal_sys_from,
+                    sys_from,
                 },
             ) {
                 Ok(removed) => removed,
@@ -392,7 +371,7 @@ impl CoreLoop {
             // as it stood before the delete.
             write_set.extend(write_hook::target_write_set(&target_writes));
             if let Some(bytes) = deleted_bytes.as_deref() {
-                let cascaded = self.bulk_delete_row_cascade(
+                self.bulk_delete_row_cascade(
                     BulkDeleteRowCascade {
                         task,
                         database_id,
@@ -400,11 +379,10 @@ impl CoreLoop {
                         collection,
                         storage_key: *storage_key,
                         deleted_bytes: bytes,
-                        tombstone_sys_from: removed.tombstone_sys_from,
+                        tombstone_sys_from: sys_from,
                         strict_schema: strict_schema.as_ref(),
                         declared_primary_key,
                         has_vectors,
-                        index_paths: &index_paths,
                         pre_delete_doc,
                         returning: returning.is_some(),
                     },
@@ -413,20 +391,6 @@ impl CoreLoop {
                 );
                 affected += 1;
                 pending_text.push(storage_key.surrogate());
-                // The row is removed and journalled: its index cleanup error
-                // fails the statement after its pending text leaves the
-                // inverted index.
-                if let Err(e) = cascaded {
-                    let code = refusal_after_rows(affected, ErrorCode::from(e));
-                    return self.bulk_delete_refusal(
-                        task,
-                        tid,
-                        collection,
-                        code,
-                        &mut pending_text,
-                        write_set,
-                    );
-                }
                 let flush = TextFlush::full_batch(tid, collection, affected);
                 if let Err(code) = self.flush_deleted_text_at(task, flush, &mut pending_text) {
                     return self.refusal_with_landed_rows(task, code, write_set);
@@ -496,6 +460,7 @@ mod tests {
                 COLLECTION,
                 &StorageKey::for_surrogate(Surrogate(surrogate)),
                 &doc_format::encode_to_msgpack(&row),
+                core.bitemporal_ordinal(),
             )
             .expect("seed row");
     }

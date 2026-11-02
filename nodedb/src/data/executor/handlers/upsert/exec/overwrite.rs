@@ -10,7 +10,7 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::redo_image::submitted_row_image;
 use crate::data::executor::enforcement::chain_guard::{AbandonedWrite, abandon_write};
 use crate::data::executor::enforcement::write_hook::{self, HookCtx, ImageBody, WriteImages};
-use crate::data::executor::handlers::point::apply_put::{PointPutParams, VectorIndexDelta};
+use crate::data::executor::handlers::point::apply_put::PointPutParams;
 use crate::data::executor::handlers::rls_write_gate;
 use crate::data::executor::handlers::transaction::undo::UndoEntry;
 use crate::data::executor::task::ExecutionTask;
@@ -32,7 +32,6 @@ pub(super) struct OverwriteCtx<'a> {
     pub rls_filters: &'a [u8],
     pub database_id: u64,
     pub hook_ctx: &'a HookCtx<'a>,
-    pub has_vectors: bool,
     pub strict_schema: Option<&'a StrictSchema>,
     /// The row's current stored bytes, already read by the probe in
     /// `execute_upsert` — this branch never re-reads it.
@@ -60,7 +59,6 @@ impl CoreLoop {
             rls_filters,
             database_id,
             hook_ctx,
-            has_vectors,
             strict_schema,
             current_bytes,
         } = ctx;
@@ -120,20 +118,10 @@ impl CoreLoop {
             }
         };
 
-        // The surrogate is stable across an overwrite and
-        // `insert_with_surrogate` APPENDS an HNSW node rather than
-        // replacing one, so the prior embedding has to come out before
-        // the write below puts the new one in — otherwise KNN keeps
-        // scoring both. No-op when `has_vectors` is false. The removal is
-        // in memory, so an abort below puts the prior nodes back.
+        // The put below ends every prior vector node of the row at the new
+        // version's ordinal and inserts the new ones there. Its in-memory
+        // undo joins this list, so an abort puts the prior nodes back.
         let mut memory_undo: Vec<UndoEntry> = Vec::new();
-        if has_vectors {
-            memory_undo.extend(
-                self.remove_document_vector_indexes(database_id, tid, collection, storage_key)
-                    .into_iter()
-                    .map(VectorIndexDelta::into_delete_undo),
-            );
-        }
         let mut outcome = match self.apply_point_put(
             &txn,
             PointPutParams {
@@ -228,21 +216,8 @@ impl CoreLoop {
             return self.response_error(task, e);
         }
 
-        // Record the committed row's version and its touched index values,
-        // as a point put does.
+        // Record the committed row's version, as a point put does.
         self.note_surrogate_write(task, tid, collection, surrogate.as_u32());
-        if let Some(stamp) = self.task_write_stamp(task) {
-            let mut tuples = std::mem::take(&mut outcome.secondary_index_added);
-            tuples.append(&mut outcome.secondary_index_removed);
-            tuples.append(&mut outcome.bitemporal_index_tuples);
-            self.note_index_write_values(
-                task.request.database_id,
-                crate::types::TenantId::new(tid),
-                collection,
-                &tuples,
-                stamp,
-            );
-        }
 
         // `current_bytes` is the pre-merge stored row, already read
         // above — thread it to the Event Plane as `old_value` so the
@@ -279,7 +254,7 @@ impl CoreLoop {
             surrogate.as_u32(),
             document_identity,
             merged_body,
-            outcome.bitemporal_sys_from,
+            outcome.version_sys_from,
         )];
         // Derived target rows live in a different collection, so each
         // carries its own `Some(collection)` and homes to that

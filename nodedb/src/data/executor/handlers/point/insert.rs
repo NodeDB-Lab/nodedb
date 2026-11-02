@@ -12,7 +12,7 @@ use tracing::debug;
 
 use crate::bridge::envelope::{Response, WriteSetEntry};
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::core_loop::redo_image::versioned_point_images;
+use crate::data::executor::core_loop::redo_image::{submitted_row_image, versioned_point_images};
 use crate::data::executor::enforcement::chain_guard::{self, AbandonedWrite, ChainGuard};
 use crate::data::executor::enforcement::write_hook::{self, HookCtx, ImageBody, WriteImages};
 use crate::data::executor::handlers::point::apply_put::PointPutParams;
@@ -111,19 +111,9 @@ impl CoreLoop {
         // this check and our insert commit. Probe uses `document_id` as
         // the row key, which is how the primary key is encoded for strict
         // and schemaless collections alike (see `dml::convert_insert`).
-        let bitemporal = self.is_bitemporal(database_id, tid, collection);
-        let exists_result = if bitemporal {
-            self.sparse.versioned_exists_current_in_txn(
-                &txn,
-                database_id,
-                tid,
-                collection,
-                &storage_key,
-            )
-        } else {
+        let exists_result =
             self.sparse
-                .exists_in_txn(&txn, database_id, tid, collection, &storage_key)
-        };
+                .exists_in_txn(&txn, database_id, tid, collection, &storage_key);
         match exists_result {
             Ok(true) => {
                 // Drop the txn without committing — no-op on redb. The chain
@@ -185,8 +175,6 @@ impl CoreLoop {
 
         // `apply_point_put` returns prior bytes if any — for PointInsert that
         // is `None` because the probe above already rejected the conflict case.
-        // The outcome's index tuples are consumed below to record touched
-        // secondary-index values.
         let mut outcome = match self.apply_point_put(
             &txn,
             PointPutParams {
@@ -301,26 +289,10 @@ impl CoreLoop {
 
         self.note_surrogate_write(task, tid, collection, surrogate.as_u32());
 
-        // The exact bytes storage now holds, taken before the index tuples are
-        // consumed below. A `RETURNING` projection reads these rather than
-        // `value`, so it reports the generated columns and injected `_rowid`
-        // the encode pipeline added on the way to disk.
+        // The exact bytes storage holds. A `RETURNING` projection reads
+        // these rather than `value`, so it reports the generated columns and
+        // injected `_rowid` the encode pipeline added on the way to disk.
         let stored_value = std::mem::take(&mut outcome.stored_value);
-
-        // Record the touched secondary-index values into the per-index
-        // write-value substrate (added ∪ removed ∪ bitemporal tuples).
-        if let Some(stamp) = self.task_write_stamp(task) {
-            let mut tuples = outcome.secondary_index_added;
-            tuples.extend(outcome.secondary_index_removed);
-            tuples.extend(outcome.bitemporal_index_tuples);
-            self.note_index_write_values(
-                task.request.database_id,
-                crate::types::TenantId::new(tid),
-                collection,
-                &tuples,
-                stamp,
-            );
-        }
 
         // Implicit graph-edge extraction now lives on the Control Plane
         // (`control/planner/implicit_edges/`): a `_from`/`_to` document is
@@ -359,14 +331,14 @@ impl CoreLoop {
             // The row was inserted: exactly one row affected.
             self.response_affected(task, 1)
         };
-        // A versioned row's key was decided here, so its stamped image
+        // The row's version key was decided here, so its stamped image
         // replaces the unstamped pre-dispatch record.
-        if let Some(sys_from) = outcome.bitemporal_sys_from {
-            response.write_set = versioned_point_images(
-                WriteSetEntry::put(surrogate.as_u32(), document_identity, value.to_vec()),
-                sys_from,
-            );
-        }
+        response.write_set = versioned_point_images(submitted_row_image(
+            surrogate.as_u32(),
+            document_identity,
+            value.to_vec(),
+            outcome.version_sys_from,
+        ));
         response.write_set.extend(target_write_set);
         response
     }
@@ -446,6 +418,7 @@ mod tests {
                 TARGET,
                 &nodedb_types::StorageKey::for_surrogate(T1),
                 &doc_format::encode_to_msgpack(&seed),
+                core.bitemporal_ordinal(),
             )
             .expect("seed target row");
         core

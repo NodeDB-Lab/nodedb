@@ -145,7 +145,22 @@ impl CoreLoop {
             crate::types::TenantId::new(tid),
             collection.to_string(),
         );
-        self.doc_configs.insert(config_key, config);
+        let last_value_cache = timeseries.map(|schema| schema.last_value_cache);
+        self.doc_configs.insert(config_key.clone(), config);
+
+        // `SET LAST_VALUE_CACHE` travels on the registration: turning it on
+        // builds the cache from the stored rows, turning it off drops it.
+        if let Some(enabled) = last_value_cache
+            && let Err(e) = self.sync_last_value_cache(&config_key, enabled)
+        {
+            warn!(
+                core = self.core_id,
+                %collection,
+                error = %e,
+                "last-value cache did not build on register"
+            );
+            return self.response_error(task, ErrorCode::from(e));
+        }
 
         // The tenant's CRDT engine derives the collection's Loro peer id from
         // its incarnation. An engine created later binds it from

@@ -45,6 +45,7 @@ impl CoreLoop {
             rls_write_check,
             resolved_sum_targets,
             declared_primary_key,
+            target_cut,
         } = params;
 
         debug!(
@@ -114,16 +115,14 @@ impl CoreLoop {
             }
         };
 
-        // A bitemporal target reads each row's current version and lands a new
+        // The target reads each row's version at `target_cut` and lands a new
         // version at one system time for the whole statement, as a point
         // update does for its row.
-        let mut bitemporal_sys_from = self
-            .is_bitemporal(task.request.database_id.as_u64(), tid, target_collection)
-            .then(|| self.bitemporal_ordinal());
+        let mut sys_from = self.bitemporal_ordinal();
 
         // Scan the target, join, evaluate assignments, encode the post-image —
         // without writing. Shared by both the resolve pass and write path.
-        let collect_rows = |core: &Self, bitemporal_sys_from: Option<i64>| {
+        let collect_rows = |core: &Self, sys_from: i64| {
             core.collect_update_from_join_rows(super::update_from_join_collect::CollectUpdateRows {
                 task,
                 tid,
@@ -136,10 +135,11 @@ impl CoreLoop {
                 strict_schema: strict_schema.as_ref(),
                 config_key: &config_key,
                 declared_primary_key,
-                bitemporal_sys_from,
+                sys_from,
+                target_cut,
             })
         };
-        let mut rows = match collect_rows(&*self, bitemporal_sys_from) {
+        let mut rows = match collect_rows(&*self, sys_from) {
             Ok(r) => r,
             Err(e) => {
                 return self.response_error(task, ErrorCode::from(e));
@@ -149,10 +149,10 @@ impl CoreLoop {
         // The statement's ordinal rises above the newest stored version of
         // every matched row. A raised ordinal re-encodes the post-images,
         // which carry it.
-        if let Some(base) = bitemporal_sys_from {
+        {
             let keys: Vec<StorageKey> = rows.iter().map(|row| row.key).collect();
             let raised = match self.raised_rows_ordinal(
-                base,
+                sys_from,
                 task.request.database_id.as_u64(),
                 tid,
                 target_collection,
@@ -161,9 +161,9 @@ impl CoreLoop {
                 Ok(ordinal) => ordinal,
                 Err(e) => return self.response_error(task, ErrorCode::from(e)),
             };
-            if raised != base {
-                bitemporal_sys_from = Some(raised);
-                rows = match collect_rows(&*self, bitemporal_sys_from) {
+            if raised != sys_from {
+                sys_from = raised;
+                rows = match collect_rows(&*self, sys_from) {
                     Ok(r) => r,
                     Err(e) => return self.response_error(task, ErrorCode::from(e)),
                 };
@@ -258,7 +258,7 @@ impl CoreLoop {
                 strict_schema: strict_schema.as_ref(),
                 declared_primary_key,
                 want_returning: returning.is_some(),
-                bitemporal_sys_from,
+                sys_from,
             },
             rows,
         ) {

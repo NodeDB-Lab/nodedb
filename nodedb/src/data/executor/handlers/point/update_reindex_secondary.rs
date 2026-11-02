@@ -3,10 +3,11 @@
 //! Re-index a just-updated row into the secondary vector and sparse indexes.
 //!
 //! The body rewrite on the update path (`sparse.put` /
-//! `bitemporal_update_reindex`) reconciles storage plus the btree / FTS /
+//! `update_reindex`) reconciles storage plus the btree / FTS /
 //! graph overlays, but touches neither the HNSW vector index nor the sparse
 //! inverted index. Both are maintained here, together, so a caller cannot
-//! remember one and forget the other.
+//! remember one and forget the other. The row's multi-vector documents end
+//! here too.
 
 use crate::data::executor::core_loop::CoreLoop;
 use crate::engine::document::store::StorageKey;
@@ -23,6 +24,9 @@ pub(in crate::data::executor) struct UpdateSecondaryReindex<'a> {
     /// Precomputed by the caller so a loop over N rows pays the
     /// `vector_params`-scanning check once, not once per row.
     pub has_vectors: bool,
+    /// The system-time ordinal of the row version the update wrote. The
+    /// row's prior vector nodes end there and its new ones start there.
+    pub sys_from: i64,
 }
 
 impl CoreLoop {
@@ -44,6 +48,7 @@ impl CoreLoop {
             new_body: p.new_body,
             is_strict: p.is_strict,
             has_vectors: p.has_vectors,
+            sys_from: p.sys_from,
         })?;
 
         let has_sparse = self.collection_has_sparse(p.database_id, p.tid, p.collection);
@@ -55,7 +60,19 @@ impl CoreLoop {
             new_body: p.new_body,
             is_strict: p.is_strict,
             has_sparse,
+            sys_from: p.sys_from,
         })?;
+
+        // A body carries no multi-vector document, so the update ends the
+        // row's documents at `sys_from`, as a delete does. The row is
+        // committed, so the removal deltas go unused.
+        self.end_document_multi_vectors(
+            p.database_id,
+            p.tid,
+            p.collection,
+            p.storage_key,
+            p.sys_from,
+        );
         Ok(())
     }
 }

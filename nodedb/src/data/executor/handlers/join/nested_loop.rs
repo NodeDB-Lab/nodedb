@@ -35,6 +35,7 @@ impl CoreLoop {
             right_rls_filters,
             left_input,
             right_input,
+            system_time,
         } = p;
         debug!(
             core = self.core_id,
@@ -60,6 +61,7 @@ impl CoreLoop {
                 collection: left_collection,
                 input: left_input,
                 rls_filters: left_rls_filters,
+                system_time,
             },
             scan_limit,
         ) {
@@ -82,6 +84,7 @@ impl CoreLoop {
                 collection: right_collection,
                 input: right_input,
                 rls_filters: right_rls_filters,
+                system_time,
             },
             scan_limit,
         ) {

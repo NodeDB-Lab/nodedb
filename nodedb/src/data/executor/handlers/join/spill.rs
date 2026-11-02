@@ -3,7 +3,10 @@
 //! Framed partition spill writer for the grace-hash join.
 //!
 //! Wraps [`UringWriter`] with a simple length-prefixed framing layer so that
-//! many discrete msgpack rows can be stored in a single spill file.
+//! many discrete msgpack rows can be stored in a single spill file. When no
+//! io_uring ring opens (a platform without it, or a ring or locked-memory
+//! limit reached under load) the writer appends through a buffered file
+//! instead, so a partition always spills and the join keeps its memory bound.
 //!
 //! ## Framing format
 //!
@@ -23,9 +26,29 @@
 //! time) by [`super::grace_repartition::FrameStreamReader`], never as a whole
 //! buffer.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::data::io::uring_writer::UringWriter;
+
+/// Where a spill writer's bytes go.
+enum SpillBackend {
+    // Boxed: the writer carries an io_uring ring and a staging buffer, far
+    // larger than the file variant.
+    Uring(Box<UringWriter>),
+    File {
+        out: std::io::BufWriter<std::fs::File>,
+        path: PathBuf,
+    },
+}
+
+/// A spill write error, naming the file.
+fn spill_io_error(path: &Path, action: &str, error: std::io::Error) -> crate::Error {
+    crate::Error::Storage {
+        engine: "spill".into(),
+        detail: format!("spill file {}: {action}: {error}", path.display()),
+    }
+}
 
 // ── Writer ────────────────────────────────────────────────────────────────────
 
@@ -42,17 +65,36 @@ use crate::data::io::uring_writer::UringWriter;
 /// let path = w.finish()?;
 /// ```
 pub(super) struct SpillPartitionWriter {
-    writer: UringWriter,
+    backend: SpillBackend,
 }
 
 impl SpillPartitionWriter {
-    /// Create a new partition spill file at `path`.
-    ///
-    /// Returns `None` if io_uring is unavailable or the file cannot be
-    /// created, mirroring [`UringWriter::new`]'s fallback convention.
-    pub(super) fn create(path: &Path) -> Option<Self> {
-        let writer = UringWriter::new(path)?;
-        Some(Self { writer })
+    /// Create a new partition spill file at `path`, through io_uring when a
+    /// ring opens, else through a buffered file. A file that cannot be
+    /// created is an error.
+    pub(super) fn create(path: &Path) -> crate::Result<Self> {
+        if let Some(writer) = UringWriter::new(path) {
+            return Ok(Self {
+                backend: SpillBackend::Uring(Box::new(writer)),
+            });
+        }
+        let file = std::fs::File::create(path).map_err(|e| spill_io_error(path, "create", e))?;
+        Ok(Self {
+            backend: SpillBackend::File {
+                out: std::io::BufWriter::new(file),
+                path: path.to_path_buf(),
+            },
+        })
+    }
+
+    /// Append `bytes` to the spill file.
+    fn append(&mut self, bytes: &[u8]) -> crate::Result<()> {
+        match &mut self.backend {
+            SpillBackend::Uring(writer) => writer.append(bytes),
+            SpillBackend::File { out, path } => out
+                .write_all(bytes)
+                .map_err(|e| spill_io_error(path, "write", e)),
+        }
     }
 
     /// Write one msgpack row into the spill file with a 4-byte LE length prefix.
@@ -79,18 +121,24 @@ impl SpillPartitionWriter {
 
         // Write 4-byte little-endian length prefix.
         let len_bytes = (row.len() as u32).to_le_bytes();
-        self.writer.append(&len_bytes)?;
+        self.append(&len_bytes)?;
 
-        // Write the row body (zero-length rows are legal; UringWriter::append
-        // returns Ok(()) immediately for empty slices).
-        self.writer.append(row)?;
+        // Write the row body. A zero-length row is legal.
+        self.append(row)?;
 
         Ok(())
     }
 
     /// Flush and close the writer, returning the spill file path.
     pub(super) fn finish(self) -> crate::Result<PathBuf> {
-        self.writer.finish()
+        match self.backend {
+            SpillBackend::Uring(writer) => (*writer).finish(),
+            SpillBackend::File { out, path } => {
+                out.into_inner()
+                    .map_err(|e| spill_io_error(&path, "flush", e.into_error()))?;
+                Ok(path)
+            }
+        }
     }
 }
 

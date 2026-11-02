@@ -5,9 +5,9 @@
 
 use tracing::debug;
 
-use crate::bridge::envelope::{Response, WriteSetEntry};
+use crate::bridge::envelope::Response;
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::core_loop::redo_image::versioned_point_images;
+use crate::data::executor::core_loop::redo_image::{submitted_row_image, versioned_point_images};
 use crate::data::executor::enforcement::chain_guard::{self, AbandonedWrite, ChainGuard};
 use crate::data::executor::enforcement::write_hook::{self, HookCtx, ImageBody, WriteImages};
 use crate::data::executor::handlers::point::apply_put::PointPutParams;
@@ -203,21 +203,6 @@ impl CoreLoop {
         // Record the committed write's version against its surrogate + collection.
         self.note_surrogate_write(task, tid, collection, surrogate.as_u32());
 
-        // Record the touched secondary-index values into the per-index
-        // write-value substrate (added ∪ removed ∪ bitemporal tuples).
-        if let Some(stamp) = self.task_write_stamp(task) {
-            let mut tuples = std::mem::take(&mut prior.secondary_index_added);
-            tuples.append(&mut prior.secondary_index_removed);
-            tuples.append(&mut prior.bitemporal_index_tuples);
-            self.note_index_write_values(
-                task.request.database_id,
-                crate::types::TenantId::new(tid),
-                collection,
-                &tuples,
-                stamp,
-            );
-        }
-
         self.checkpoint_coordinator.mark_dirty("sparse", 1);
 
         // Emit write event to Event Plane. Insert vs Update is derived
@@ -252,14 +237,14 @@ impl CoreLoop {
             // An upsert always writes the row, whether or not one was there before.
             self.response_affected(task, 1)
         };
-        // A versioned row's key was decided here, so its stamped image
+        // The row's version key was decided here, so its stamped image
         // replaces the unstamped pre-dispatch record.
-        if let Some(sys_from) = prior.bitemporal_sys_from {
-            response.write_set = versioned_point_images(
-                WriteSetEntry::put(surrogate.as_u32(), document_identity, value.to_vec()),
-                sys_from,
-            );
-        }
+        response.write_set = versioned_point_images(submitted_row_image(
+            surrogate.as_u32(),
+            document_identity,
+            value.to_vec(),
+            prior.version_sys_from,
+        ));
         response.write_set.extend(target_write_set);
         response
     }
@@ -334,6 +319,7 @@ mod tests {
                 TARGET,
                 &nodedb_types::StorageKey::for_surrogate(T1),
                 &doc_format::encode_to_msgpack(&seed),
+                core.bitemporal_ordinal(),
             )
             .expect("seed target row");
         core

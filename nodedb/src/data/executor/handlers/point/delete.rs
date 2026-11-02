@@ -182,20 +182,6 @@ impl CoreLoop {
         // matched nothing changes no state and creates no OCC conflict.
         if prior.is_some() {
             self.note_surrogate_write(task, tid, collection, surrogate.as_u32());
-
-            // Record the removed secondary-index values into the per-index
-            // write-value substrate (plain cascade ∪ bitemporal tombstones).
-            if let Some(stamp) = self.task_write_stamp(task) {
-                let mut tuples = outcome.secondary_index_tuples;
-                tuples.extend(outcome.bitemporal_index_tuples);
-                self.note_index_write_values(
-                    task.request.database_id,
-                    crate::types::TenantId::new(tid),
-                    collection,
-                    &tuples,
-                    stamp,
-                );
-            }
         }
 
         // Emit delete event to Event Plane if the row actually existed.
@@ -209,11 +195,12 @@ impl CoreLoop {
         // entry replaces the unstamped pre-dispatch record. Then one entry per
         // target row this delete debited: the statement's own record names
         // only the removed row.
-        let mut write_set = match (prior.is_some(), outcome.bitemporal_sys_from) {
-            (true, Some(sys_from)) => versioned_point_images(
-                WriteSetEntry::delete(surrogate.as_u32(), document_identity.clone()),
+        let mut write_set = match (prior.is_some(), outcome.version_sys_from) {
+            (true, Some(sys_from)) => versioned_point_images(WriteSetEntry::delete(
+                surrogate.as_u32(),
+                document_identity.clone(),
                 sys_from,
-            ),
+            )),
             _ => Vec::new(),
         };
         write_set.extend(target_write_set);
@@ -438,6 +425,7 @@ mod tests {
                 TARGET,
                 &nodedb_types::StorageKey::for_surrogate(T1),
                 &doc_format::encode_to_msgpack(&seed),
+                core.bitemporal_ordinal(),
             )
             .expect("seed target row");
         core
@@ -676,7 +664,7 @@ mod tests {
 
         let target_key = nodedb_types::StorageKey::for_surrogate(T1);
         core.sparse
-            .delete(DB, TID, TARGET, &target_key)
+            .delete(DB, TID, TARGET, &target_key, core.bitemporal_ordinal())
             .expect("drop the target row");
         core.doc_cache.invalidate(DB, TID, TARGET, &target_key);
 
@@ -781,7 +769,7 @@ mod tests {
 
         let target_key = nodedb_types::StorageKey::for_surrogate(T1);
         core.sparse
-            .delete(DB, TID, TARGET, &target_key)
+            .delete(DB, TID, TARGET, &target_key, core.bitemporal_ordinal())
             .expect("drop the target row");
         core.doc_cache.invalidate(DB, TID, TARGET, &target_key);
 

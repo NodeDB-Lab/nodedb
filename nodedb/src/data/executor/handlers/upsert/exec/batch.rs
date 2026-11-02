@@ -26,7 +26,7 @@ use crate::data::executor::enforcement::chain_guard::{
 use crate::data::executor::enforcement::materialized_sum::apply::TargetWrite;
 use crate::data::executor::enforcement::unique::SubmittedWrite;
 use crate::data::executor::enforcement::write_hook::{self, HookCtx, ImageBody, WriteImages};
-use crate::data::executor::handlers::point::apply_put::{PointPutParams, VectorIndexDelta};
+use crate::data::executor::handlers::point::apply_put::PointPutParams;
 use crate::data::executor::handlers::transaction::undo::UndoEntry;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::document::store::{RowIdentity, StorageKey};
@@ -182,7 +182,6 @@ impl CoreLoop {
             deferred_sum_targets: &[],
             wal_lsn: task.wal_lsn(),
         };
-        let has_vectors = self.collection_has_vectors(database_id, tid, collection);
         let txn = match self.sparse.begin_write() {
             Ok(t) => t,
             Err(e) => return self.response_error(task, ErrorCode::from(e)),
@@ -196,7 +195,6 @@ impl CoreLoop {
         let mut balanced_entries = Vec::new();
         let mut page_undo: Vec<UndoEntry> = Vec::new();
         let mut page_targets: Vec<TargetWrite> = Vec::new();
-        let mut row_index_tuples: Vec<Vec<(String, String)>> = Vec::new();
         // The stored body of each key, parallel to `keys`.
         let mut stored: Vec<Vec<u8>> = Vec::with_capacity(keys.len());
         let mut written_keys: Vec<StorageKey> = Vec::with_capacity(keys.len());
@@ -204,31 +202,14 @@ impl CoreLoop {
         for key in &keys {
             let storage_key = StorageKey::for_surrogate(key.surrogate);
             written_keys.push(storage_key);
-            match &key.committed {
-                // An absent key is INSERT-shaped, so it is a chain link.
-                None => {
-                    if let Err(e) = chain.chain_insert(self, key.surrogate, &key.post) {
-                        failure = Some(e);
-                        break;
-                    }
-                }
-                // The surrogate is stable across an overwrite, and a put
-                // APPENDS an HNSW node, so the prior embedding comes out
-                // first. The removal is in memory, so an abort puts it back.
-                Some(_) => {
-                    if has_vectors {
-                        page_undo.extend(
-                            self.remove_document_vector_indexes(
-                                database_id,
-                                tid,
-                                collection,
-                                storage_key,
-                            )
-                            .into_iter()
-                            .map(VectorIndexDelta::into_delete_undo),
-                        );
-                    }
-                }
+            // An absent key is INSERT-shaped, so it is a chain link. On an
+            // overwrite the put ends the row's prior vector nodes at the new
+            // version's ordinal, and its undo joins the page's.
+            if key.committed.is_none()
+                && let Err(e) = chain.chain_insert(self, key.surrogate, &key.post)
+            {
+                failure = Some(e);
+                break;
             }
             let guards = match &key.assigned {
                 Some(assigned) => {
@@ -292,14 +273,8 @@ impl CoreLoop {
                 key.surrogate.as_u32(),
                 key.identity.clone(),
                 key.post.clone(),
-                outcome.bitemporal_sys_from,
+                outcome.version_sys_from,
             ));
-            if task.wal_lsn().is_some() {
-                let mut tuples = std::mem::take(&mut outcome.secondary_index_added);
-                tuples.append(&mut outcome.secondary_index_removed);
-                tuples.append(&mut outcome.bitemporal_index_tuples);
-                row_index_tuples.push(tuples);
-            }
             stored.push(outcome.stored_value);
         }
 
@@ -339,17 +314,6 @@ impl CoreLoop {
 
         for key in &keys {
             self.note_surrogate_write(task, tid, collection, key.surrogate.as_u32());
-        }
-        if let Some(stamp) = self.task_write_stamp(task) {
-            for tuples in &row_index_tuples {
-                self.note_index_write_values(
-                    task.request.database_id,
-                    crate::types::TenantId::new(tid),
-                    collection,
-                    tuples,
-                    stamp,
-                );
-            }
         }
         self.checkpoint_coordinator.mark_dirty("sparse", keys.len());
         for (key, body) in keys.iter().zip(&stored) {

@@ -5,6 +5,7 @@
 
 pub(in crate::data::executor::handlers::point) mod core;
 pub(in crate::data::executor) mod enforce;
+pub(in crate::data::executor::handlers::point) mod history;
 pub(in crate::data::executor::handlers::point) mod index;
 pub(in crate::data::executor::handlers::point) mod sparse;
 pub(in crate::data::executor) mod stored_body;
@@ -13,5 +14,6 @@ pub(in crate::data::executor::handlers::point) mod vector;
 
 pub(in crate::data::executor) use enforce::PutEnforcement;
 pub(in crate::data::executor) use index::SpatialEntryId;
+pub(in crate::data::executor) use sparse::SparseIndexPut;
 pub(in crate::data::executor) use types::{PointPutOutcome, PointPutParams, map_enforcement_error};
 pub(in crate::data::executor) use vector::{VectorIndexDelta, VectorIndexPutParams};

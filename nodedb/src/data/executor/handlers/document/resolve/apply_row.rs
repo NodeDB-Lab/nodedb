@@ -3,7 +3,7 @@
 //! Landing one already-decided document mutation.
 //!
 //! Each arm runs the same write the live handler runs for the same row, then
-//! the event and index write-versions once it commits. Nothing here
+//! the event and write note once it commits. Nothing here
 //! recomputes an image or re-decides a policy — both were settled by resolve.
 
 use nodedb_physical::physical_plan::ResolvedSumTarget;
@@ -17,7 +17,7 @@ use crate::data::executor::enforcement::chain_guard::{
 };
 use crate::data::executor::enforcement::write_hook::{self, HookCtx, ImageBody, WriteImages};
 use crate::data::executor::handlers::point::apply_delete::PointDeleteParams;
-use crate::data::executor::handlers::point::apply_put::{PointPutParams, VectorIndexDelta};
+use crate::data::executor::handlers::point::apply_put::PointPutParams;
 use crate::data::executor::handlers::transaction::undo::UndoEntry;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::document::store::{RowIdentity, StorageKey};
@@ -68,7 +68,6 @@ impl CoreLoop {
         // The resolve pass carried the identity INSERT minted for this row;
         // the event and the redo entry both name the row by it.
         let row_identity = RowIdentity::from_user_key(document_id);
-        let has_vectors = self.collection_has_vectors(database_id, tid, collection);
 
         // A row absent before this write is a link of a HASH_CHAIN target.
         let mut chain = ChainGuard::begin(self, database_id, tid, collection);
@@ -85,17 +84,10 @@ impl CoreLoop {
             }
         };
 
-        // HNSW insert appends rather than replaces, so the prior embedding
-        // must come out first or KNN keeps scoring both. The removal is in
-        // memory, so an abort below puts the prior nodes back.
+        // The put below ends the row's prior vector nodes at the new
+        // version's ordinal. Its in-memory undo joins this list, so an abort
+        // puts the prior nodes back.
         let mut memory_undo: Vec<UndoEntry> = Vec::new();
-        if has_vectors && precondition.is_some() {
-            memory_undo.extend(
-                self.remove_document_vector_indexes(database_id, tid, collection, storage_key)
-                    .into_iter()
-                    .map(VectorIndexDelta::into_delete_undo),
-            );
-        }
         let mut outcome = match self.apply_point_put(
             &txn,
             PointPutParams {
@@ -212,20 +204,6 @@ impl CoreLoop {
         }
         self.checkpoint_coordinator.mark_dirty("sparse", 1);
 
-        // Same post-commit index bookkeeping `execute_point_update` runs.
-        if let Some(stamp) = self.task_write_stamp(task) {
-            let mut tuples = std::mem::take(&mut outcome.secondary_index_added);
-            tuples.append(&mut outcome.secondary_index_removed);
-            tuples.append(&mut outcome.bitemporal_index_tuples);
-            self.note_index_write_values(
-                task.request.database_id,
-                crate::types::TenantId::new(tid),
-                collection,
-                &tuples,
-                stamp,
-            );
-        }
-
         let stored_bytes = outcome.stored_value;
         self.emit_put_event(
             task,
@@ -245,7 +223,7 @@ impl CoreLoop {
                 surrogate.as_u32(),
                 row_identity,
                 value.to_vec(),
-                outcome.bitemporal_sys_from,
+                outcome.version_sys_from,
             )
             .in_collection(collection.to_string()),
         ];
@@ -356,17 +334,6 @@ impl CoreLoop {
 
         if let Some(prior_bytes) = outcome.prior_value.as_deref() {
             self.note_surrogate_write(task, tid, collection, surrogate.as_u32());
-            if let Some(stamp) = self.task_write_stamp(task) {
-                let mut tuples = outcome.secondary_index_tuples;
-                tuples.extend(outcome.bitemporal_index_tuples);
-                self.note_index_write_values(
-                    task.request.database_id,
-                    crate::types::TenantId::new(tid),
-                    collection,
-                    &tuples,
-                    stamp,
-                );
-            }
             self.emit_document_delete_event(
                 task,
                 tid,
@@ -378,12 +345,13 @@ impl CoreLoop {
         // The removal, journalled after apply, naming its own collection,
         // then the target rows its debit rewrote.
         let mut write_set = Vec::with_capacity(target_write_set.len() + 1);
-        if outcome.prior_value.is_some() {
+        // A tombstone ordinal exists exactly when a live row was closed.
+        if let (Some(_), Some(sys_from)) = (&outcome.prior_value, outcome.version_sys_from) {
             write_set.push(
                 removed_row_image(
                     surrogate.as_u32(),
                     RowIdentity::from_user_key(document_id),
-                    outcome.bitemporal_sys_from,
+                    sys_from,
                 )
                 .in_collection(collection.to_string()),
             );

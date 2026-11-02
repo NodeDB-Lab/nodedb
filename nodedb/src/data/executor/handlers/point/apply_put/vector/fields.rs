@@ -117,6 +117,28 @@ impl CoreLoop {
             .map(|(_name, dim)| *dim)
     }
 
+    /// The `vector_params` / `index_configs` key the index of `field` takes
+    /// its config from when a put creates it: the field-qualified key, or the
+    /// bare collection key for the schemaless default field when only the
+    /// bare key is registered.
+    pub(in crate::data::executor) fn vector_field_config_key(
+        &self,
+        database_id: u64,
+        tid: u64,
+        collection: &str,
+        field: &str,
+    ) -> (nodedb_types::DatabaseId, crate::types::TenantId, String) {
+        let qualified = Self::vector_index_key(database_id, tid, collection, field);
+        let strict = !self
+            .strict_vector_fields(database_id, tid, collection)
+            .is_empty();
+        if strict || field != DEFAULT_VECTOR_FIELD || self.vector_params.contains_key(&qualified) {
+            qualified
+        } else {
+            Self::vector_index_key(database_id, tid, collection, "")
+        }
+    }
+
     /// Whether `collection` has any vector fields — strict-schema `Vector(dim)`
     /// columns OR schemaless fields registered via `vector_params` or declared
     /// as `VECTOR(n)` columns. Combines

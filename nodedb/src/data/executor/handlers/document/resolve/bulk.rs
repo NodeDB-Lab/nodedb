@@ -14,7 +14,7 @@
 use nodedb_physical::physical_plan::{
     DocumentResolveOutcome, ResolvedSumTarget, ReturningSpec, UpdateValue,
 };
-use nodedb_types::RlsWriteCheck;
+use nodedb_types::{RlsWriteCheck, SystemTimeScope};
 
 use super::context::{
     ResolveResult, ResolvedPut, affected_payload, delete_mutation, put_mutation,
@@ -44,6 +44,9 @@ pub(super) struct ResolveBulkUpdate<'a> {
     /// Declared `PRIMARY KEY` column of a schemaless collection, `None`
     /// otherwise — see `ProjectUpdateRows::declared_primary_key`.
     pub declared_primary_key: Option<&'a str>,
+    /// The scope the predicate matches rows at — see
+    /// `DocumentOp::BulkUpdate::system_time`.
+    pub system_time: &'a SystemTimeScope,
 }
 
 /// Borrowed arguments for [`CoreLoop::resolve_bulk_delete`].
@@ -55,6 +58,9 @@ pub(super) struct ResolveBulkDelete<'a> {
     pub rls_filters: &'a [u8],
     pub rls_write_check: &'a RlsWriteCheck,
     pub resolved_sum_targets: &'a [ResolvedSumTarget],
+    /// The scope the predicate matches rows at — see
+    /// `DocumentOp::BulkDelete::system_time`.
+    pub system_time: &'a SystemTimeScope,
 }
 
 impl CoreLoop {
@@ -74,6 +80,7 @@ impl CoreLoop {
             rls_write_check,
             resolved_sum_targets,
             declared_primary_key,
+            system_time,
         } = args;
         let ctx = self.doc_resolve_ctx(task, tid, collection);
         let config_key = (
@@ -89,7 +96,7 @@ impl CoreLoop {
         }
 
         let filters = decode_bulk_filters(filter_bytes).map_err(ErrorCode::from)?;
-        let matched = self.resolve_matched_rows(task, &ctx, collection, &filters)?;
+        let matched = self.resolve_matched_rows(task, &ctx, collection, &filters, system_time)?;
 
         // The same projection the live handler runs before it writes anything,
         // so the resolve and the apply agree on each row's post-image.
@@ -172,10 +179,11 @@ impl CoreLoop {
             rls_filters,
             rls_write_check,
             resolved_sum_targets,
+            system_time,
         } = args;
         let ctx = self.doc_resolve_ctx(task, tid, collection);
         let filters = decode_bulk_filters(filter_bytes).map_err(ErrorCode::from)?;
-        let matched = self.resolve_matched_rows(task, &ctx, collection, &filters)?;
+        let matched = self.resolve_matched_rows(task, &ctx, collection, &filters, system_time)?;
 
         let mut mutations = Vec::with_capacity(matched.len());
         let mut rows: Vec<(RowIdentity, Vec<u8>)> = Vec::new();

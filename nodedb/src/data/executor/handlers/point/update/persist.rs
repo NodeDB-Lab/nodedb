@@ -37,13 +37,9 @@ pub(in crate::data::executor) struct PointUpdatePersist<'a> {
     pub(in crate::data::executor) current_bytes: &'a [u8],
     /// The row as it will be stored.
     pub(in crate::data::executor) updated_bytes: &'a [u8],
-    pub(in crate::data::executor) bitemporal: bool,
+    /// The system-time ordinal of the new version.
     pub(in crate::data::executor) sys_from: i64,
     pub(in crate::data::executor) wal_lsn: Option<Lsn>,
-    /// The stamp the update's index values record under, `None` without a
-    /// WAL record.
-    pub(in crate::data::executor) write_stamp:
-        Option<crate::data::executor::core_loop::write_index::WriteStamp>,
     /// `(target collection, join-key value)` → target row surrogate for every
     /// materialized-sum target this update may touch — BOTH sides when the
     /// update moves a row between targets by changing its join key. Resolved on
@@ -71,10 +67,8 @@ impl CoreLoop {
             storage_key,
             current_bytes,
             updated_bytes,
-            bitemporal,
             sys_from,
             wal_lsn,
-            write_stamp,
             resolved_sum_targets,
         } = params;
 
@@ -100,7 +94,7 @@ impl CoreLoop {
         // total without the row that moved it.
         let txn = self.sparse.begin_write()?;
 
-        let touched = self.update_body_in_txn(
+        self.update_body_in_txn(
             &txn,
             super::super::update_reindex::UpdateBody {
                 config_key,
@@ -110,7 +104,7 @@ impl CoreLoop {
                 storage_key,
                 current_bytes,
                 updated_bytes,
-                bitemporal_sys_from: bitemporal.then_some(sys_from),
+                sys_from,
             },
         )?;
 
@@ -131,6 +125,7 @@ impl CoreLoop {
                     collection,
                     surrogate: storage_key.surrogate(),
                     new_doc,
+                    ordinal: sys_from,
                 },
             )?;
         }
@@ -171,20 +166,6 @@ impl CoreLoop {
             engine: "sparse".into(),
             detail: format!("point update commit: {e}"),
         })?;
-
-        // Index write-versions are published only once the write they describe
-        // is durable.
-        if let Some(stamp) = write_stamp
-            && !touched.is_empty()
-        {
-            self.note_index_write_values(
-                DatabaseId::new(database_id),
-                TenantId::new(tid),
-                collection,
-                &touched,
-                stamp,
-            );
-        }
 
         Ok(target_write_set)
     }

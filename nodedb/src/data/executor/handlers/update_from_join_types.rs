@@ -67,4 +67,7 @@ pub(in crate::data::executor) struct UpdateFromJoinParams<'a> {
     /// otherwise. `Some` makes `collect_update_from_join_rows`'s post-image
     /// guard run.
     pub declared_primary_key: Option<&'a str>,
+    /// The ordinal the target rows are matched at: `None` for each row's
+    /// current version, `Some` for a transaction block's snapshot.
+    pub target_cut: Option<i64>,
 }

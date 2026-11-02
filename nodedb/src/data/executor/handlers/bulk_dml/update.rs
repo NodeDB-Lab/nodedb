@@ -8,7 +8,7 @@ use crate::data::executor::core_loop::redo_image::WriteSetRow;
 use crate::data::executor::enforcement::unique::PostImage;
 use crate::data::executor::enforcement::write_hook;
 use crate::data::executor::handlers::partial_refusal::refusal_after_partial_apply;
-use crate::data::executor::handlers::point::update_reindex::NonbitemporalUpdateReindex;
+use crate::data::executor::handlers::point::update_reindex::UpdateReindex;
 use crate::data::executor::handlers::point::update_reindex_secondary::UpdateSecondaryReindex;
 use crate::data::executor::handlers::returning_doc;
 use crate::data::executor::handlers::returning_rows;
@@ -141,22 +141,17 @@ impl CoreLoop {
         // the stale pre-update embedding in the same process.
         let has_vectors = self.collection_has_vectors(database_id, tid, collection);
 
-        // One system time stamps every new version of a bitemporal
-        // collection, so the statement writes its rows at one instant.
-        let bitemporal_sys_from = if self.is_bitemporal(database_id, tid, collection) {
-            match self.rows_version_ordinal(database_id, tid, collection, &apply_ids) {
-                Ok(ordinal) => Some(ordinal),
-                Err(e) => return self.response_error(task, ErrorCode::from(e)),
-            }
-        } else {
-            None
+        // One system time stamps every new version, so the statement writes
+        // its rows at one instant.
+        let sys_from = match self.rows_version_ordinal(database_id, tid, collection, &apply_ids) {
+            Ok(ordinal) => ordinal,
+            Err(e) => return self.response_error(task, ErrorCode::from(e)),
         };
 
         // The secondary-index paths for this collection, cloned once for the
         // whole statement. Each row's primary write reconciles them in the
         // row's transaction, so a value the UPDATE changed can't leave a stale
-        // index entry pointing at the old value. A bitemporal collection
-        // reconciles the versioned index, any other the plain `INDEXES`.
+        // index entry pointing at the old value.
         let index_paths = self
             .doc_configs
             .get(&config_key)
@@ -188,7 +183,7 @@ impl CoreLoop {
             updates,
             strict_schema: strict_schema.as_ref(),
             declared_primary_key,
-            bitemporal_sys_from,
+            bitemporal_sys_from: Some(sys_from),
         }) {
             Ok(projected) => projected,
             Err(e) => return self.response_error(task, e),
@@ -250,16 +245,20 @@ impl CoreLoop {
             // transaction the row's body and index diff commit in, so a
             // credited target can never outlive the row that caused it.
             let persisted = self.persist_bulk_update_row(
-                NonbitemporalUpdateReindex {
+                UpdateReindex {
                     database_id,
                     tid,
                     collection,
-                    storage_key: &storage_key,
+                    doc_id: &storage_key,
+                    sys_from,
+                    valid_from_ms: i64::MIN,
+                    valid_until_ms: i64::MAX,
                     new_body: &updated_bytes,
                     index_paths: &index_paths,
-                    old_doc: &old_doc_json,
+                    old_doc: Some(&old_doc_json),
                     new_doc: &doc,
                 },
+                &old_doc_json,
                 &write_hook::HookCtx {
                     database_id,
                     tid,
@@ -268,10 +267,9 @@ impl CoreLoop {
                     deferred_sum_targets: &[],
                     wal_lsn: task.wal_lsn(),
                 },
-                bitemporal_sys_from,
             );
-            let (touched, target_writes) = match persisted {
-                Ok(persisted) => (persisted.touched, persisted.target_writes),
+            let target_writes = match persisted {
+                Ok(persisted) => persisted.target_writes,
                 // A row that fails is NOT skipped: skipping it would report
                 // a smaller affected count as the truth while the rest of
                 // the predicate's matches were rewritten. The row's own
@@ -292,8 +290,8 @@ impl CoreLoop {
                 storage_key,
             );
             // The row's post-image, then one durable redo entry per derived
-            // target row, naming the TARGET collection. A bitemporal version
-            // carries its system time, so replay lands the same version.
+            // target row, naming the TARGET collection. The version carries
+            // its system time, so replay lands the same version.
             let image = self.stored_row_image(
                 WriteSetRow {
                     database_id,
@@ -303,7 +301,7 @@ impl CoreLoop {
                     identity: row_identity.clone(),
                 },
                 &updated_bytes,
-                bitemporal_sys_from,
+                sys_from,
             );
             match image {
                 Ok(image) => write_set.push(image),
@@ -314,27 +312,16 @@ impl CoreLoop {
                 }
             }
             write_set.extend(write_hook::target_write_set(&target_writes));
-            // Published only after the commit succeeded — the same
-            // ordering the reindex helper used when it owned the
-            // transaction.
-            if let Some(stamp) = self.task_write_stamp(task) {
-                self.note_index_write_values(
-                    task.request.database_id,
-                    crate::types::TenantId::new(tid),
-                    collection,
-                    &touched,
-                    stamp,
-                );
-            }
             self.doc_cache.put(
                 task.request.database_id.as_u64(),
                 tid,
                 collection,
                 &storage_key,
+                sys_from,
                 &updated_bytes,
             );
-            // Record the committed row's write version against its
-            // surrogate + collection.
+            // Note the committed row's write against its surrogate +
+            // collection.
             let surrogate = storage_key.surrogate();
             self.note_surrogate_write(task, tid, collection, surrogate.as_u32());
             // Re-index the row's dense vectors and sparse-vector postings
@@ -349,6 +336,7 @@ impl CoreLoop {
                 new_body: &updated_bytes,
                 is_strict: strict_schema.is_some(),
                 has_vectors,
+                sys_from,
             }) {
                 // The row's body already committed.
                 let code = refusal_after_partial_apply(ErrorCode::from(e));
@@ -440,6 +428,7 @@ mod tests {
                 COLLECTION,
                 &StorageKey::for_surrogate(Surrogate(surrogate)),
                 &doc_format::encode_to_msgpack(&row),
+                core.bitemporal_ordinal(),
             )
             .expect("seed row");
     }
