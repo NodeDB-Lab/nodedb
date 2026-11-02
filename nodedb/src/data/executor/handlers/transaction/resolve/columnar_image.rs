@@ -20,16 +20,17 @@
 //!   nothing.
 //! * A staged TRUNCATE → the `ColumnarTruncate` record ahead of the rows.
 //!   The truncate removes every base row, so rows after it carry no base key.
-//!   On a bitemporal collection the record carries the transaction's ordinal,
-//!   and the truncate closes every current key at it, raised per key.
+//!   The record carries the transaction's ordinal, and the truncate ends
+//!   every current key at it, raised per key.
 //!
 //! Rows are emitted in surrogate order, so two resolves of one transaction
 //! produce byte-identical records.
 //!
-//! In a bitemporal collection every row carries the stamp its resolve fixed
-//! (`ColumnarImageWalRow::system_from`, see `columnar_ordinal`). A put's
-//! image takes it as its `_ts_system`. Replay closes a base key the write
-//! removes with a tombstone at it and keeps the base row as history.
+//! Every row carries the stamp its resolve fixed
+//! (`ColumnarImageWalRow::system_from`, see `columnar_ordinal`), and replay
+//! versions the row at it. In a bitemporal collection a put's image takes it
+//! as its `_ts_system`, and replay closes a base key the write removes with
+//! a tombstone at it. Every collection keeps the base row as history.
 //!
 //! Session and Calvin transactions both stage every columnar write, so both
 //! resolve here.
@@ -106,12 +107,12 @@ pub(super) struct ColumnarCollectionImages<'a> {
     /// core, which is legal only when the transaction staged no put.
     pub schema: Option<&'a ColumnarSchema>,
     pub schema_bytes: &'a [u8],
-    /// The stamp of each staged row by surrogate, for a bitemporal
-    /// collection. `None` for any other collection.
+    /// The stamp of each staged row by surrogate. `None` when the
+    /// collection has no engine on this core.
     pub stamps: Option<&'a BTreeMap<u32, i64>>,
-    /// The transaction's ordinal, for a bitemporal collection: a staged
-    /// truncate closes every current key at it, raised per key. `None` for
-    /// any other collection.
+    /// The transaction's ordinal: a staged truncate ends every current key
+    /// at it, raised per key. `None` when the collection has no engine on
+    /// this core.
     pub txn_ordinal: Option<i64>,
 }
 

@@ -14,6 +14,7 @@ use super::stage_kv_predicate::{StageKvPredicateDeleteParams, StageKvPredicateUp
 use crate::bridge::envelope::Response;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::transaction::overlay::Staged;
+use crate::data::executor::handlers::write_match_cut::write_match_cut;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::{DatabaseId, TenantId, TxnId};
 
@@ -127,6 +128,7 @@ impl CoreLoop {
             // Predicate DML staged like Document `BulkUpdate`/`BulkDelete`:
             // the row set resolves against BASE ∪ OVERLAY. Same `RETURNING`
             // treatment as `Delete`.
+            // The match reads at the plan's scope: the block's snapshot.
             KvOp::PredicateUpdate {
                 collection,
                 filters,
@@ -134,29 +136,43 @@ impl CoreLoop {
                 rls_write_check,
                 returning: _,
                 rls_filters: _,
-            } => self.stage_kv_predicate_update(StageKvPredicateUpdateParams {
-                task,
-                tid,
-                txn_id,
-                collection: collection.as_str(),
-                filter_bytes: filters,
-                updates,
-                rls_write_check,
-            }),
+                system_time,
+            } => match write_match_cut(system_time, "a KV predicate UPDATE") {
+                Ok(system_as_of) => {
+                    self.stage_kv_predicate_update(StageKvPredicateUpdateParams {
+                        task,
+                        tid,
+                        txn_id,
+                        collection: collection.as_str(),
+                        filter_bytes: filters,
+                        updates,
+                        rls_write_check,
+                        system_as_of,
+                    })
+                }
+                Err(e) => self.response_error(task, e),
+            },
             KvOp::PredicateDelete {
                 collection,
                 filters,
                 rls_write_check,
                 returning: _,
                 rls_filters: _,
-            } => self.stage_kv_predicate_delete(StageKvPredicateDeleteParams {
-                task,
-                tid,
-                txn_id,
-                collection: collection.as_str(),
-                filter_bytes: filters,
-                rls_write_check,
-            }),
+                system_time,
+            } => match write_match_cut(system_time, "a KV predicate DELETE") {
+                Ok(system_as_of) => {
+                    self.stage_kv_predicate_delete(StageKvPredicateDeleteParams {
+                        task,
+                        tid,
+                        txn_id,
+                        collection: collection.as_str(),
+                        filter_bytes: filters,
+                        rls_write_check,
+                        system_as_of,
+                    })
+                }
+                Err(e) => self.response_error(task, e),
+            },
             KvOp::BatchPut { .. }
             | KvOp::Incr { .. }
             | KvOp::IncrFloat { .. }
@@ -417,7 +433,7 @@ mod tests {
             wal_lsn: None,
             resolved_now_ms: None,
             commit_hlc: None,
-            entry_version: None,
+            system_ordinal: None,
             admission: Admission::Exempt(ExemptReason::Read),
         };
         ExecutionTask::new(request)
@@ -501,6 +517,7 @@ mod tests {
                 key: b"k1",
                 rls_filters: &[],
                 surrogate_ceiling: None,
+                system_time: nodedb_types::SystemTimeScope::Current,
             },
         );
         assert_eq!(resp.status, Status::Ok);
@@ -538,6 +555,7 @@ mod tests {
                 key: b"k1",
                 rls_filters: &[],
                 surrogate_ceiling: None,
+                system_time: nodedb_types::SystemTimeScope::Current,
             },
         );
         assert_eq!(resp.status, Status::Ok);

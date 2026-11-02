@@ -132,9 +132,9 @@ impl TxnOverlay {
             .insert(surrogate, stamp);
     }
 
-    /// Look up the resolve-time bitemporal stamp for `surrogate` in the given
-    /// collection. `Some` only for a `bitemporal=true` collection's staged
-    /// `Put` whose stamp was assigned at resolve.
+    /// Look up the resolve-time version stamp for `surrogate` in the given
+    /// collection. `Some` for every staged put and tombstone once its
+    /// resolve pinned the stamp.
     pub fn get_bitemporal(
         &self,
         coll_key: &(DatabaseId, TenantId, String),

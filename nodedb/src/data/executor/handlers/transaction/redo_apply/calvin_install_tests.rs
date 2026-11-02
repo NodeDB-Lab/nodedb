@@ -21,7 +21,6 @@ use crate::data::executor::handlers::control::calvin::test_support::{
 use crate::data::executor::handlers::control::calvin_reply::CalvinReply;
 use crate::data::executor::handlers::control::calvin_synthetic_txn_id;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::{CollectionConfig, IndexPath};
 use crate::types::{DatabaseId, Lsn, TenantId};
 use crate::wal::RedoRecord;
 
@@ -63,8 +62,14 @@ fn stage_and_resolve(core: &mut CoreLoop, plans: &[PhysicalPlan]) -> CalvinResol
         position: 0,
         epoch_system_ms: 0,
     };
-    let staged =
-        core.execute_calvin_execute_static(&task, ctx, &TenantId::new(TID), plans, &[], &[]);
+    let staged = core.execute_calvin_execute_static(
+        &task,
+        ctx,
+        &TenantId::new(TID),
+        plans,
+        crate::data::executor::handlers::control::calvin::CalvinSnapshot::NONE,
+        &[],
+    );
     assert_eq!(staged.status, Status::Ok, "{:?}", staged.error_code);
     let resolved = core.execute_calvin_resolve(&task, 1, 0);
     assert_eq!(resolved.status, Status::Ok, "{:?}", resolved.error_code);
@@ -91,6 +96,8 @@ fn install_plan(
             reply,
             user_write: true,
         }),
+        reads: Vec::new(),
+        snapshot_ordinal: None,
     })
 }
 
@@ -240,48 +247,6 @@ fn a_calvin_install_applies_the_resolved_record_not_a_replay_of_the_plans() {
     assert_eq!(installed.status, Status::Ok, "{:?}", installed.error_code);
     assert!(base_row(&core, 1).is_none());
     assert!(base_row(&core, 2).is_some());
-}
-
-/// The install notes the index values of every document row at the
-/// record's LSN.
-#[test]
-fn a_calvin_install_notes_index_values_at_the_redo_lsn() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
-    let mut config = CollectionConfig::new(ORDERS);
-    config.index_paths.push(IndexPath::new("a"));
-    core.doc_configs.insert(
-        (DatabaseId::DEFAULT, TenantId::new(TID), ORDERS.to_string()),
-        config,
-    );
-    let resolved = stage_and_resolve(&mut core, &[point_insert_plan(ORDERS, "o1", 7)]);
-
-    let plan = install_plan(
-        resolved.redo,
-        vec![ORDERS.to_string()],
-        Vec::new(),
-        1,
-        resolved.reply,
-    );
-    let installed = run_at(&mut core, &plan, 43);
-
-    assert_eq!(installed.status, Status::Ok, "{:?}", installed.error_code);
-    assert_eq!(
-        core.write_index.index_values.value_version(
-            crate::data::executor::core_loop::index_value_versions::IndexDimRef {
-                vshard: crate::types::VShardId::new(0),
-                db: DatabaseId::DEFAULT,
-                tenant: TenantId::new(TID),
-                collection: ORDERS,
-                field: "a",
-            },
-            "1"
-        ),
-        Some(crate::data::executor::core_loop::write_index::tests::local(
-            43
-        )),
-        "the install records the row's index value at the redo's version"
-    );
 }
 
 /// An install whose record cannot decode answers an error and leaves

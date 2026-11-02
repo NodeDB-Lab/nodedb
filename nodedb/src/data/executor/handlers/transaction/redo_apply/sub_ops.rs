@@ -4,16 +4,15 @@
 //! before and after the replay arms run.
 //!
 //! The decoders accept exactly the payload shapes the transaction resolver
-//! emits and the replay arms decode: a document `Put` is the 5-tuple or the
-//! bitemporal 8-tuple, a document `Delete` the 4-tuple or the bitemporal
-//! 5-tuple, a KV write carries its leading `"kv_*"` discriminator. KV and
+//! emits and the replay arms decode. A document `Put` / `Delete` decodes
+//! through `crate::wal::DocumentPutRedo` / `crate::wal::DocumentDeleteRedo`.
+//! A KV write carries its leading `"kv_*"` discriminator. KV and
 //! graph `Put` / `Delete` payloads never decode as a document tuple, and
 //! document payloads never decode as KV.
 
-use nodedb_types::sync::wire::SyncProvenance;
 use nodedb_wal::record::RecordType;
 
-use crate::wal::RedoSubRecord;
+use crate::wal::{DocumentDeleteRedo, DocumentPutRedo, RedoSubRecord};
 
 /// A document write inside a redo record.
 pub(super) enum RedoDocOp {
@@ -22,6 +21,8 @@ pub(super) enum RedoDocOp {
         /// The post-image as MessagePack.
         value: Vec<u8>,
         surrogate: u32,
+        /// A clone copy: it installs only where its row holds no version.
+        clone_copy: bool,
     },
     Delete {
         collection: String,
@@ -43,20 +44,6 @@ impl RedoDocOp {
     }
 }
 
-type BitemporalPut = (
-    String,
-    String,
-    Vec<u8>,
-    Option<SyncProvenance>,
-    u32,
-    i64,
-    i64,
-    i64,
-);
-type PlainPut = (String, String, Vec<u8>, Option<SyncProvenance>, u32);
-type BitemporalDelete = (String, String, Option<SyncProvenance>, u32, i64);
-type PlainDelete = (String, String, Option<SyncProvenance>, u32);
-
 /// The document writes in `ops`, in record order.
 pub(super) fn document_ops(ops: &[RedoSubRecord]) -> Vec<RedoDocOp> {
     ops.iter().filter_map(document_op).collect()
@@ -64,29 +51,18 @@ pub(super) fn document_ops(ops: &[RedoSubRecord]) -> Vec<RedoDocOp> {
 
 fn document_op(sub: &RedoSubRecord) -> Option<RedoDocOp> {
     match RecordType::from_raw(sub.record_type) {
-        Some(RecordType::Put) => zerompk::from_msgpack::<BitemporalPut>(&sub.payload)
-            .map(|(collection, _, value, _, surrogate, _, _, _)| (collection, value, surrogate))
-            .or_else(|_| {
-                zerompk::from_msgpack::<PlainPut>(&sub.payload)
-                    .map(|(collection, _, value, _, surrogate)| (collection, value, surrogate))
+        Some(RecordType::Put) => DocumentPutRedo::decode(&sub.payload).map(|put| RedoDocOp::Put {
+            collection: put.collection,
+            value: put.value,
+            surrogate: put.surrogate,
+            clone_copy: put.clone_copy,
+        }),
+        Some(RecordType::Delete) => {
+            DocumentDeleteRedo::decode(&sub.payload).map(|delete| RedoDocOp::Delete {
+                collection: delete.collection,
+                surrogate: delete.surrogate,
             })
-            .ok()
-            .map(|(collection, value, surrogate)| RedoDocOp::Put {
-                collection,
-                value,
-                surrogate,
-            }),
-        Some(RecordType::Delete) => zerompk::from_msgpack::<BitemporalDelete>(&sub.payload)
-            .map(|(collection, _, _, surrogate, _)| (collection, surrogate))
-            .or_else(|_| {
-                zerompk::from_msgpack::<PlainDelete>(&sub.payload)
-                    .map(|(collection, _, _, surrogate)| (collection, surrogate))
-            })
-            .ok()
-            .map(|(collection, surrogate)| RedoDocOp::Delete {
-                collection,
-                surrogate,
-            }),
+        }
         _ => None,
     }
 }
@@ -122,13 +98,31 @@ fn kv_op(sub: &RedoSubRecord) -> Option<RedoKvOp> {
                 collection,
                 key,
                 value,
-            }),
+            })
+            .or_else(|| restored_live_put(&sub.payload)),
         Some(RecordType::Delete) => zerompk::from_msgpack::<KvDelete>(&sub.payload)
             .ok()
             .filter(|(disc, ..)| disc == "kv_delete")
             .map(|(_, collection, keys)| RedoKvOp::Delete { collection, keys }),
         _ => None,
     }
+}
+
+/// The live row of a restored KV key, as the put its install publishes. A
+/// key the backup holds deleted publishes nothing, and neither does a clone
+/// copy.
+fn restored_live_put(payload: &[u8]) -> Option<RedoKvOp> {
+    let restored = crate::wal::KvRestoreRedo::decode(payload)?;
+    // A clone copy changes nothing a reader of the clone sees.
+    if restored.clone_copy {
+        return None;
+    }
+    let live = restored.live?;
+    Some(RedoKvOp::Put {
+        collection: restored.collection,
+        key: restored.key,
+        value: live.value,
+    })
 }
 
 /// A graph node-label delta inside a redo record.
@@ -161,6 +155,7 @@ pub(super) fn label_ops(ops: &[RedoSubRecord]) -> Vec<RedoLabelOp> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nodedb_types::sync::wire::SyncProvenance;
 
     fn sub(record_type: RecordType, payload: Vec<u8>) -> RedoSubRecord {
         RedoSubRecord {
@@ -171,11 +166,21 @@ mod tests {
 
     #[test]
     fn document_and_kv_shapes_decode_to_their_own_kind_only() {
-        let doc_put =
-            zerompk::to_msgpack_vec(&("docs", "d1", vec![1u8, 2], None::<SyncProvenance>, 7u32))
-                .expect("encode doc put");
-        let doc_delete = zerompk::to_msgpack_vec(&("docs", "d2", None::<SyncProvenance>, 8u32))
-            .expect("encode doc delete");
+        // A redo carries every document write stamped.
+        let doc_put = zerompk::to_msgpack_vec(&(
+            "docs",
+            "d1",
+            vec![1u8, 2],
+            None::<SyncProvenance>,
+            7u32,
+            40i64,
+            i64::MIN,
+            i64::MAX,
+        ))
+        .expect("encode doc put");
+        let doc_delete =
+            zerompk::to_msgpack_vec(&("docs", "d2", None::<SyncProvenance>, 8u32, 41i64))
+                .expect("encode doc delete");
         let kv_put = zerompk::to_msgpack_vec(&(
             "kv_put",
             "kvs",

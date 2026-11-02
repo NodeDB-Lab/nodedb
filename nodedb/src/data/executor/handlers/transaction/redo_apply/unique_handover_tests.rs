@@ -83,7 +83,7 @@ fn install(core: &mut CoreLoop, lsn: u64, ops: Vec<RedoSubRecord>) -> Response {
 /// The surrogates the unique index names for `code`.
 fn owners(core: &CoreLoop, code: &str) -> Vec<u32> {
     let mut owners: Vec<u32> = DocumentEngine::new(&core.sparse, 0, TID)
-        .index_lookup(COLL, "code", code, false)
+        .index_lookup(COLL, "code", code, None)
         .expect("index lookup")
         .iter()
         .map(|key| key.surrogate().as_u32())
@@ -116,12 +116,16 @@ fn seeded(dir: &std::path::Path) -> (CoreLoop, Box<dyn std::any::Any>, Box<dyn s
 
 #[test]
 fn a_swap_in_one_record_installs_in_either_write_order() {
-    for ops in [
-        vec![put(1, "B"), put(2, "A")],
-        vec![put(2, "A"), put(1, "B")],
-    ] {
+    for row_1_first in [true, false] {
         let dir = tempfile::tempdir().expect("tempdir");
         let (mut core, _req, _resp) = seeded(dir.path());
+        // The swap's sub-records are built after the seed, so their stamps
+        // sit above the seed's, as a later commit's stamps do.
+        let ops = if row_1_first {
+            vec![put(1, "B"), put(2, "A")]
+        } else {
+            vec![put(2, "A"), put(1, "B")]
+        };
         assert_ok(&install(&mut core, 20, ops));
         assert_eq!(owners(&core, "A"), vec![2]);
         assert_eq!(owners(&core, "B"), vec![1]);

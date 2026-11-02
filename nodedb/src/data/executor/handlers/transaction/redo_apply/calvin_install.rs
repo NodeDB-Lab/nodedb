@@ -69,8 +69,12 @@ impl CoreLoop {
         // What each resolved timeseries batch of the record stored: the
         // reply answers the install's counts and stored rows.
         let mut ts_installs = Vec::new();
+        // Every KV write of the slice stamps the transaction's ordinal, which
+        // every replica derives alike.
+        let kv_scope = self.kv_engine.open_write_scope(Some(txn_ordinal));
         let mut response =
             self.install_committed_redo_into(task, tid, committed, origin, &mut ts_installs);
+        self.kv_engine.close_write_scope(kv_scope);
         if response.status != Status::Ok {
             return response;
         }

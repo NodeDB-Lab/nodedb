@@ -19,7 +19,7 @@ use nodedb_physical::physical_plan::{RedoSumTargets, ResolvedSumTarget};
 use nodedb_types::RowIdentity;
 
 use crate::bridge::envelope::ErrorCode;
-use crate::data::executor::core_loop::write_index::{KeyRepr, WriteStamp};
+use crate::data::executor::core_loop::write_note::{KeyRepr, WriteStamp};
 use crate::data::executor::enforcement::materialized_sum::apply::TargetWrite;
 use crate::data::executor::handlers::transaction::undo::UndoEntry;
 use crate::event::WriteOp;
@@ -54,9 +54,8 @@ pub(in crate::data::executor) struct AppliedDocWrite {
     pub old_value: Option<Vec<u8>>,
     /// The MessagePack body this write installed. `None` for a delete.
     pub new_body: Option<Vec<u8>>,
-    /// Every `(field, value)` index entry the write added, removed, or
-    /// versioned.
-    pub index_tuples: Vec<(String, String)>,
+    /// Whether the write emits a change event. A clone copy emits none.
+    pub emits_event: bool,
 }
 
 /// Which pass over a committed redo record drives the arms.
@@ -100,9 +99,9 @@ pub(in crate::data::executor) struct RedoApplyScope {
     pub(in crate::data::executor) ts_installs: Vec<TsInstalled>,
     /// Events the install's writes raised, sent once it succeeded.
     pub(in crate::data::executor) pending_events: Vec<crate::event::WriteEvent>,
-    /// Write versions the install's writes produced, published once the
-    /// record settled.
-    pub(in crate::data::executor) write_versions: Vec<DeferredWriteVersion>,
+    /// Write notes the install's writes produced, published once the record
+    /// settled.
+    pub(in crate::data::executor) deferred_notes: Vec<DeferredNote>,
     /// Who committed the record: a restore's document puts carry their
     /// source chain link, which the install relinks instead of refusing.
     pub(in crate::data::executor) origin: nodedb_physical::physical_plan::RedoOrigin,
@@ -116,17 +115,17 @@ pub(in crate::data::executor) struct TsInstalled {
     pub images: Vec<Vec<u8>>,
 }
 
-/// One write version an install pass holds back until the record settles.
-pub(in crate::data::executor) struct DeferredWriteVersion {
+/// One write note an install pass holds back until the record settles.
+pub(in crate::data::executor) struct DeferredNote {
     pub db: crate::types::DatabaseId,
     pub tenant: crate::types::TenantId,
     pub collection: String,
     pub stamp: WriteStamp,
-    pub kind: DeferredWriteKind,
+    pub kind: DeferredNoteKind,
 }
 
-/// What a held-back write version records.
-pub(in crate::data::executor) enum DeferredWriteKind {
+/// What a held-back write note records.
+pub(in crate::data::executor) enum DeferredNoteKind {
     /// A write to one key (`Some`), or to the collection only (`None`).
     Row(Option<KeyRepr>),
     /// A write that removed every row of the collection.
@@ -158,7 +157,7 @@ impl RedoApplyScope {
             timeseries_written: Vec::new(),
             ts_installs: Vec::new(),
             pending_events: Vec::new(),
-            write_versions: Vec::new(),
+            deferred_notes: Vec::new(),
             origin: nodedb_physical::physical_plan::RedoOrigin::Commit,
         }
     }
@@ -172,9 +171,9 @@ impl RedoApplyScope {
         self
     }
 
-    /// Hold back one write version until the record settles. The validate
-    /// pass writes nothing, so it holds nothing.
-    pub(in crate::data::executor) fn defer_write_version(
+    /// Hold back one write note until the record settles. The validate pass
+    /// writes nothing, so it holds nothing.
+    pub(in crate::data::executor) fn defer_write(
         &mut self,
         db: crate::types::DatabaseId,
         tenant: crate::types::TenantId,
@@ -183,12 +182,12 @@ impl RedoApplyScope {
         stamp: WriteStamp,
     ) {
         if self.pass == RedoApplyPass::Install {
-            self.write_versions.push(DeferredWriteVersion {
+            self.deferred_notes.push(DeferredNote {
                 db,
                 tenant,
                 collection: collection.to_string(),
                 stamp,
-                kind: DeferredWriteKind::Row(key),
+                kind: DeferredNoteKind::Row(key),
             });
         }
     }
@@ -203,12 +202,12 @@ impl RedoApplyScope {
         stamp: WriteStamp,
     ) {
         if self.pass == RedoApplyPass::Install {
-            self.write_versions.push(DeferredWriteVersion {
+            self.deferred_notes.push(DeferredNote {
                 db,
                 tenant,
                 collection: collection.to_string(),
                 stamp,
-                kind: DeferredWriteKind::Wipe,
+                kind: DeferredNoteKind::Wipe,
             });
         }
     }
@@ -236,14 +235,6 @@ impl RedoApplyScope {
 /// The applied-write record of one materialized-sum target row.
 pub(in crate::data::executor) fn target_doc_write(target: &TargetWrite) -> AppliedDocWrite {
     let outcome = &target.outcome;
-    let mut index_tuples = Vec::with_capacity(
-        outcome.secondary_index_added.len()
-            + outcome.secondary_index_removed.len()
-            + outcome.bitemporal_index_tuples.len(),
-    );
-    index_tuples.extend_from_slice(&outcome.secondary_index_added);
-    index_tuples.extend_from_slice(&outcome.secondary_index_removed);
-    index_tuples.extend_from_slice(&outcome.bitemporal_index_tuples);
     AppliedDocWrite {
         collection: target.collection.clone(),
         identity: target.identity.clone(),
@@ -254,6 +245,6 @@ pub(in crate::data::executor) fn target_doc_write(target: &TargetWrite) -> Appli
         },
         old_value: outcome.prior_value.clone(),
         new_body: Some(target.body.clone()),
-        index_tuples,
+        emits_event: true,
     }
 }

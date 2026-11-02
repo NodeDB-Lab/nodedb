@@ -139,6 +139,7 @@ fn kv_predicate_delete() -> PhysicalPlan {
         rls_write_check: RlsWriteCheck::NoPolicyApplies,
         returning: None,
         rls_filters: Vec::new(),
+        system_time: nodedb_types::SystemTimeScope::Current,
     })
 }
 
@@ -515,41 +516,62 @@ fn a_committed_record_carrying_a_raw_crdt_delta_is_refused_before_any_write() {
     assert!(!crdt_row_present(&core), "nothing was written");
 }
 
-// ── Write versions and watermark ─────────────────────────────────────────
+// ── Watermark ────────────────────────────────────────────────────────────
 
 #[test]
-fn a_refused_install_publishes_no_write_version_and_no_watermark() {
+fn a_refused_install_publishes_no_watermark() {
     use crate::types::Lsn;
-    let point = nodedb_types::calvin::ReadKeyIdent::Point(crate::types::KeyRepr::Surrogate(41));
     let committed = run(&[document_insert()], false, |_| {});
     assert_eq!(committed.core.watermark, Lsn::new(200));
-    // The install runs on the default task's vShard 0 and applies no
-    // data-group entry, so its version is its WAL LSN there.
-    let vshard = crate::types::VShardId::new(0);
-    let before_install = crate::data::executor::core_loop::write_index::tests::local(199);
-    assert!(!committed.core.write_index.read_is_valid(
-        DatabaseId::DEFAULT,
-        TenantId::new(TID),
-        vshard,
-        "notes",
-        &point,
-        before_install,
-    ));
 
     let refused = run(&[document_insert()], true, |_| {});
     assert!(
         refused.core.watermark < Lsn::new(200),
         "the rolled-back install leaves the watermark where it was"
     );
-    assert!(
-        refused.core.write_index.read_is_valid(
-            DatabaseId::DEFAULT,
-            TenantId::new(TID),
-            vshard,
-            "notes",
-            &point,
-            before_install,
-        ),
-        "the rolled-back install publishes no write version"
+}
+
+/// A rolled-back install leaves the newest-ordinal cache answering the
+/// value it held before: its keyed notes never published, and the rollback
+/// makes the cache recompute from the restored storage. A committed install
+/// raises it to the row's stored version.
+#[test]
+fn a_refused_install_leaves_the_newest_ordinal_cache_unchanged() {
+    use crate::data::executor::core_loop::newest_ordinals::{SliceKey, collection_vshard};
+    let key = SliceKey {
+        vshard: collection_vshard(DatabaseId::DEFAULT, "notes"),
+        db: DatabaseId::DEFAULT,
+        tenant: TenantId::new(TID),
+        collection: Box::from("notes"),
+    };
+    let warm = |core: &mut CoreLoop| {
+        let newest = core
+            .slice_newest(key.vshard, key.db, key.tenant, &key.collection)
+            .expect("read stores");
+        assert_eq!(newest, None, "an empty collection holds no version");
+    };
+
+    let mut refused = run(&[document_insert()], true, warm);
+    assert_eq!(
+        refused
+            .core
+            .slice_newest(key.vshard, key.db, key.tenant, &key.collection)
+            .expect("read stores"),
+        None,
+        "the rolled-back install raised nothing"
     );
+
+    let committed = run(&[document_insert()], false, warm);
+    let stored = committed
+        .core
+        .sparse
+        .versioned_latest_sys_from(
+            0,
+            TID,
+            "notes",
+            &nodedb_types::StorageKey::for_surrogate(Surrogate::new(41)),
+        )
+        .expect("read row");
+    assert!(stored.is_some(), "the install wrote the row");
+    assert_eq!(committed.core.newest_ordinals.slice(&key), Some(stored));
 }

@@ -19,6 +19,50 @@ use super::UndoError;
 use super::document::UndoDocumentContext;
 
 impl CoreLoop {
+    /// Restore a deleted document's text during DELETE rollback: the text
+    /// version the delete ended at `delete_ordinal` is live again. A delete
+    /// that kept no history re-indexes the restored body instead
+    /// ([`Self::reindex_restored_document_fts`]).
+    pub(super) fn restore_deleted_document_fts(
+        &self,
+        ctx: UndoDocumentContext<'_>,
+        surrogate: nodedb_types::Surrogate,
+        old_value: &[u8],
+        delete_ordinal: i64,
+    ) -> Result<(), UndoError> {
+        let restored = self
+            .inverted
+            .undo_text_version(
+                ctx.database_id,
+                crate::types::TenantId::new(ctx.tid),
+                ctx.collection,
+                surrogate,
+                delete_ordinal,
+            )
+            .map_err(|e| {
+                let err = UndoError::failed(
+                    ctx.entry_index,
+                    format!(
+                        "fts version restore on {}/{}",
+                        ctx.collection, ctx.document_id
+                    ),
+                    e,
+                );
+                error!(
+                    core = self.core_id,
+                    entry_index = ctx.entry_index,
+                    collection = %ctx.collection,
+                    error = %err,
+                    "transaction undo: FTS version restore failed; shard state unknown"
+                );
+                err
+            })?;
+        if restored {
+            return Ok(());
+        }
+        self.reindex_restored_document_fts(ctx, surrogate, old_value)
+    }
+
     /// Re-index a restored document's text into the inverted index during
     /// DELETE rollback. Decodes the restored body through the storage-mode-aware
     /// helper (strict → Binary Tuple, schemaless → MessagePack) so both modes

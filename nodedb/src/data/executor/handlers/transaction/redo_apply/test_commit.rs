@@ -226,8 +226,17 @@ impl CoreLoop {
     }
 }
 
+/// A fresh version stamp, above every stamp this process handed out before.
+/// Every document redo sub-record a producer writes carries one.
+pub(in crate::data::executor) fn test_stamp() -> i64 {
+    static CLOCK: std::sync::LazyLock<nodedb_types::OrdinalClock> =
+        std::sync::LazyLock::new(nodedb_types::OrdinalClock::new);
+    CLOCK.next_ordinal()
+}
+
 /// The redo sub-record of a document put: `(collection, document_id, body,
-/// provenance, surrogate)`.
+/// provenance, surrogate, sys_from, valid_from_ms, valid_until_ms)`, stamped
+/// at a fresh [`test_stamp`].
 pub(in crate::data::executor) fn doc_put_sub_record(
     collection: &str,
     document_id: &str,
@@ -242,13 +251,16 @@ pub(in crate::data::executor) fn doc_put_sub_record(
             body.to_vec(),
             None::<nodedb_types::sync::wire::SyncProvenance>,
             surrogate,
+            test_stamp(),
+            i64::MIN,
+            i64::MAX,
         ))
         .expect("encode document put"),
     }
 }
 
 /// The redo sub-record of a document delete: `(collection, document_id,
-/// provenance, surrogate)`.
+/// provenance, surrogate, sys_from)`, stamped at a fresh [`test_stamp`].
 pub(in crate::data::executor) fn doc_delete_sub_record(
     collection: &str,
     document_id: &str,
@@ -261,6 +273,7 @@ pub(in crate::data::executor) fn doc_delete_sub_record(
             document_id,
             None::<nodedb_types::sync::wire::SyncProvenance>,
             surrogate,
+            test_stamp(),
         ))
         .expect("encode document delete"),
     }

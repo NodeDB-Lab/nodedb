@@ -343,6 +343,8 @@ impl CoreLoop {
                 ));
             }
         };
-        self.columnar_txn_matching_rows(task, tid, txn_id, collection, &filter_bytes)
+        // A resolved row set names rows by primary key: each key's current
+        // row with the staged writes on top.
+        self.columnar_txn_matching_rows(task, tid, txn_id, collection, &filter_bytes, None)
     }
 }

@@ -2,10 +2,8 @@
 
 //! KV undo entry application logic.
 
-use crate::data::executor::core_loop::CoreLoop;
-use crate::engine::kv::current_ms;
-
 use super::{UndoEntry, UndoError};
+use crate::data::executor::core_loop::CoreLoop;
 
 fn kv_key<'a>(
     did: u64,
@@ -36,55 +34,29 @@ impl CoreLoop {
                 prior,
             } => self
                 .kv_engine
-                .reinstate_entry(
-                    kv_key(did, tid, &collection, &key),
-                    prior.as_ref(),
-                    current_ms(),
-                )
-                .map_err(|e| UndoError::failed(entry_index, "reinstating a KV entry", e)),
+                .restore_key_version(kv_key(did, tid, &collection, &key), prior.as_ref())
+                .map_err(|e| UndoError::failed(entry_index, "reversing a KV write", e)),
             UndoEntry::KvDelete {
                 collection,
                 key,
                 prior,
             } => self
                 .kv_engine
-                .restore_entry_image(kv_key(did, tid, &collection, &key), &prior, current_ms())
-                .map_err(|e| UndoError::failed(entry_index, "restoring a deleted KV entry", e)),
-            UndoEntry::KvTtl {
-                collection,
-                key,
-                prior_expire_at_ms,
-            } => {
-                if prior_expire_at_ms == crate::engine::kv::entry::NO_EXPIRY {
-                    self.kv_engine.persist(did, tid, &collection, &key);
-                } else {
-                    self.kv_engine.expire_with_absolute_expiry(
-                        did,
-                        tid,
-                        &collection,
-                        &key,
-                        prior_expire_at_ms,
-                    );
-                }
-                Ok(())
-            }
+                .restore_key_version(kv_key(did, tid, &collection, &key), Some(&prior))
+                .map_err(|e| UndoError::failed(entry_index, "reversing a KV delete", e)),
             UndoEntry::KvTruncate { collection, rows } => {
                 // Every write after the truncate was reversed first, so the
-                // collection holds what the truncate left. Empty it and
-                // reinstall every row it held.
-                let now_ms = current_ms();
-                self.kv_engine.truncate(did, tid, &collection);
+                // collection holds what the truncate left: no live row, and
+                // one ended version per row it removed.
                 for row in rows {
+                    let image = crate::engine::kv::KvEntryImage {
+                        value: row.value,
+                        expire_at_ms: row.expire_at_ms,
+                        surrogate: row.surrogate,
+                        sys_from: row.sys_from,
+                    };
                     self.kv_engine
-                        .restore_entry_image(
-                            kv_key(did, tid, &collection, &row.key),
-                            &crate::engine::kv::KvEntryImage {
-                                value: row.value,
-                                expire_at_ms: row.expire_at_ms,
-                                surrogate: row.surrogate,
-                            },
-                            now_ms,
-                        )
+                        .restore_key_version(kv_key(did, tid, &collection, &row.key), Some(&image))
                         .map_err(|e| {
                             UndoError::failed(
                                 entry_index,
@@ -93,6 +65,15 @@ impl CoreLoop {
                             )
                         })?;
                 }
+                Ok(())
+            }
+            UndoEntry::KvHistory {
+                collection,
+                key,
+                prior,
+            } => {
+                self.kv_engine
+                    .replace_key_history(did, tid, &collection, &key, prior);
                 Ok(())
             }
             _ => Err(UndoError::mismatch(
@@ -388,5 +369,142 @@ mod tests {
                 .entry_image(DB, TID, "cache", b"k", current_ms()),
             Some(before)
         );
+    }
+
+    /// A rolled-back TRUNCATE leaves every secondary and sorted index
+    /// registered and holding the rows it held before.
+    #[test]
+    fn a_rolled_back_truncate_refills_every_index() {
+        use crate::engine::kv::sorted_index::key::{SortColumn, SortDirection, SortKeyEncoder};
+        use crate::engine::kv::sorted_index::manager::SortedIndexDef;
+        use crate::engine::kv::sorted_index::window::WindowConfig;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        let now_ms = current_ms();
+        core.kv_engine
+            .register_index(crate::engine::kv::RegisterIndexParams {
+                database_id: DB,
+                tenant_id: TID,
+                collection: "leaders",
+                field: "region",
+                field_position: 0,
+                backfill: true,
+                now_ms,
+            });
+        core.kv_engine.register_sorted_index(
+            DB,
+            TID,
+            "leaders",
+            SortedIndexDef {
+                name: "lb".into(),
+                collection: "leaders".into(),
+                key_column: "player_id".into(),
+                encoder: SortKeyEncoder::new(vec![SortColumn {
+                    name: "score".into(),
+                    direction: SortDirection::Desc,
+                }]),
+                window: WindowConfig::none(),
+            },
+        );
+        for (key, score) in [("p1", 10), ("p2", 30)] {
+            let value = nodedb_types::json_to_msgpack(&serde_json::json!({
+                "player_id": key,
+                "region": "eu",
+                "score": score,
+            }))
+            .expect("encode row");
+            core.kv_engine
+                .put(crate::engine::kv::KvPutParams {
+                    database_id: DB,
+                    tenant_id: TID,
+                    collection: "leaders",
+                    key: key.as_bytes(),
+                    value: &value,
+                    ttl_ms: 0,
+                    now_ms,
+                    surrogate: crate::engine::kv::test_support::row_surrogate(key.as_bytes()),
+                })
+                .expect("a bound row writes");
+        }
+        let region = nodedb_types::Value::String("eu".into());
+        let indexed = |core: &CoreLoop| {
+            let mut keys = core
+                .kv_engine
+                .index_lookup_eq(DB, TID, "leaders", "region", &region);
+            keys.sort();
+            keys
+        };
+        let before = indexed(&core);
+        assert_eq!(before.len(), 2);
+        let ranked_before = core.kv_engine.sorted_index_top_k(DB, TID, "lb", 10, now_ms);
+
+        let rows = core.kv_engine.export_collection(DB, TID, "leaders");
+        core.kv_engine.truncate(DB, TID, "leaders");
+        assert!(indexed(&core).is_empty(), "the truncate empties the index");
+        assert_eq!(
+            core.kv_engine.sorted_index_top_k(DB, TID, "lb", 10, now_ms),
+            Some(Vec::new())
+        );
+
+        core.rollback_undo_log(
+            DB,
+            TID,
+            vec![UndoEntry::KvTruncate {
+                collection: "leaders".into(),
+                rows,
+            }],
+        )
+        .expect("rollback");
+
+        assert_eq!(indexed(&core), before);
+        assert_eq!(
+            core.kv_engine.sorted_index_top_k(DB, TID, "lb", 10, now_ms),
+            ranked_before
+        );
+        assert_eq!(
+            ranked_before.map(|ranked| ranked.len()),
+            Some(2),
+            "both rows rank again"
+        );
+    }
+
+    /// A rolled-back overwrite at a fixed apply ordinal leaves the key's
+    /// newest ordinal and history as before, so a retry of the same record
+    /// does not see the rolled-back write as a newer version.
+    #[test]
+    fn a_rolled_back_overwrite_leaves_no_version_at_the_apply_ordinal() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        let scope = core.kv_engine.open_write_scope(Some(100));
+        put_kv(&mut core, "cache", b"k", b"old", 0);
+        core.kv_engine.close_write_scope(scope);
+        let prior = core.kv_engine.stored_image(DB, TID, "cache", b"k");
+
+        let scope = core.kv_engine.open_write_scope(Some(500));
+        put_kv(&mut core, "cache", b"k", b"new", 0);
+        core.rollback_undo_log(
+            DB,
+            TID,
+            vec![UndoEntry::KvPut {
+                collection: "cache".into(),
+                key: b"k".to_vec(),
+                prior: prior.clone(),
+            }],
+        )
+        .expect("rollback");
+        core.kv_engine.close_write_scope(scope);
+
+        assert_eq!(
+            core.kv_engine.key_newest_ordinal(DB, TID, "cache", b"k"),
+            Some(100)
+        );
+        assert!(
+            core.kv_engine
+                .key_history(DB, TID, "cache", b"k")
+                .is_empty(),
+            "no phantom version"
+        );
+        assert_eq!(core.kv_engine.stored_image(DB, TID, "cache", b"k"), prior);
     }
 }

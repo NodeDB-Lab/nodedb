@@ -43,6 +43,9 @@ pub(in crate::data::executor) struct CommittedDocWrite<'a> {
     pub document_id: &'a str,
     pub surrogate: u32,
     pub record_lsn: u64,
+    /// The write is a clone copy: a source row's version, which changes
+    /// nothing a reader of the clone sees, so it emits no event.
+    pub clone_copy: bool,
 }
 
 impl CoreLoop {
@@ -183,8 +186,15 @@ impl CoreLoop {
                 new: ImageBody::Submitted(value),
             },
         };
-        let mut target_writes = match write_hook::run(self, &txn, &hook_ctx, images) {
-            Ok(enforcement) => enforcement.target_writes,
+        // A version installed below the row's newest version folds nothing:
+        // the newer version's write folded from this one's image already.
+        let fold = if outcome.history.is_some() {
+            Ok(Vec::new())
+        } else {
+            write_hook::run(self, &txn, &hook_ctx, images).map(|e| e.target_writes)
+        };
+        let mut target_writes = match fold {
+            Ok(target_writes) => target_writes,
             Err(error) => {
                 return Err(abort_after_apply(
                     self,
@@ -206,9 +216,6 @@ impl CoreLoop {
         }
         self.checkpoint_coordinator.mark_dirty("sparse", 1);
 
-        let mut index_tuples = outcome.secondary_index_added.clone();
-        index_tuples.extend(outcome.secondary_index_removed.iter().cloned());
-        index_tuples.extend(outcome.bitemporal_index_tuples.iter().cloned());
         self.record_committed_doc_write(AppliedDocWrite {
             collection: row.collection.to_string(),
             identity: RowIdentity::from_user_key(row.document_id),
@@ -221,7 +228,7 @@ impl CoreLoop {
             // The submitted body, before any hash-chain wrapping: the image a
             // client wrote, as the materialized-sum fold reads it too.
             new_body: Some(value.to_vec()),
-            index_tuples,
+            emits_event: !row.clone_copy,
         });
         if self.recording_redo_undo() {
             let mut undo = Vec::new();
@@ -271,8 +278,11 @@ impl CoreLoop {
         )?;
         // An abort below drops `txn` uncommitted, which reverses the durable
         // writes only. `abandon_write` reverses the in-memory cascades.
+        // A history tombstone folds nothing: the newer version's write
+        // folded from the closed image already.
+        let folds = outcome.history.is_none();
         let mut target_writes = match outcome.prior_value {
-            Some(ref old) => match write_hook::run(
+            Some(ref old) if folds => match write_hook::run(
                 self,
                 &txn,
                 &hook_ctx,
@@ -290,7 +300,7 @@ impl CoreLoop {
                     ));
                 }
             },
-            None => Vec::new(),
+            _ => Vec::new(),
         };
         if let Err(error) = commit_row(txn) {
             let undo = std::mem::take(&mut outcome.memory_undo);
@@ -305,8 +315,6 @@ impl CoreLoop {
         self.checkpoint_coordinator.mark_dirty("sparse", 1);
 
         let removed = outcome.prior_value.clone();
-        let mut index_tuples = outcome.secondary_index_tuples.clone();
-        index_tuples.extend(outcome.bitemporal_index_tuples.iter().cloned());
         // A delete that removed no row can still have cascaded side effects to
         // reverse, so its undo is recorded either way.
         if self.recording_redo_undo() {
@@ -331,7 +339,7 @@ impl CoreLoop {
             op: WriteOp::Delete,
             old_value: Some(old_value),
             new_body: None,
-            index_tuples,
+            emits_event: true,
         });
         self.record_committed_targets(target_writes);
         Ok(true)

@@ -60,10 +60,11 @@ impl CoreLoop {
         task: &ExecutionTask,
         scope: &mut RedoApplyScope,
     ) -> Result<(), ErrorCode> {
-        self.finalize_timeseries_truncates(&scope.undo);
         self.finalize_vector_truncates(&mut scope.undo);
         self.settle_filled_vector_collections();
         for key in std::mem::take(&mut scope.columnar_written) {
+            // The install's versions join the collection's history charge.
+            self.recharge_columnar_history(&key);
             let collection = key.2.clone();
             self.flush_columnar_memtable_if_needed(task, &key, &collection)
                 .map_err(|response| {
@@ -83,6 +84,21 @@ impl CoreLoop {
                 .map_err(|e| ErrorCode::Internal {
                     detail: format!("array '{}' threshold flush failed: {e}", array_id.name),
                 })?;
+        }
+        // The record's document versions and index entries are stored. The
+        // tenant's charge takes them, so the next write gate sees the
+        // history this record added, on a Calvin slice as on any commit.
+        if let Err(e) =
+            self.recharge_document_history(task.request.database_id, task.request.tenant_id)
+        {
+            // The record installed. The charge keeps its prior value until
+            // the next write recharges it.
+            crate::diag::history_charge_stale(&e, "redo install");
+            tracing::warn!(
+                core = self.core_id,
+                error = %e,
+                "document history recharge after a redo install failed; the prior charge stays"
+            );
         }
         Ok(())
     }

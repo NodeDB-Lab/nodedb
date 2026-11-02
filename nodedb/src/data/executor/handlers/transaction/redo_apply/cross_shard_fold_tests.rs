@@ -81,6 +81,7 @@ fn put_row(core: &mut CoreLoop, collection: &str, surrogate: Surrogate, doc: &se
             collection,
             &StorageKey::for_surrogate(surrogate),
             &doc_format::encode_to_msgpack(doc),
+            core.bitemporal_ordinal(),
         )
         .expect("seed row");
 }

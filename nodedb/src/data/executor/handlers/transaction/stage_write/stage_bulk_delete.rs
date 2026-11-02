@@ -42,6 +42,9 @@ pub(in crate::data::executor) struct StageBulkDeleteParams<'a> {
     /// The rows the Control Plane read at this statement. `None` when the
     /// plan carries none.
     pub prediction: Option<TxnPrediction<'a>>,
+    /// The cut BASE is matched at: `None` for each row's current version,
+    /// `Some` for the block's snapshot ordinal.
+    pub system_as_of: Option<i64>,
 }
 
 impl CoreLoop {
@@ -63,15 +66,16 @@ impl CoreLoop {
             declared_primary_key,
             returning,
             prediction,
+            system_as_of,
         } = params;
         let database_id = task.request.database_id;
         let coll_key: (DatabaseId, TenantId, String) =
             (database_id, TenantId::new(tid), collection.to_string());
 
-        // The BASE ∪ OVERLAY matching set, BASE read at each row's current
-        // version.
+        // The BASE ∪ OVERLAY matching set, BASE read at the match's cut: the
+        // block's snapshot, or each row's current version.
         let rows = match decode_bulk_filters(filter_bytes)
-            .and_then(|filters| self.txn_matching_rows(txn_id, &coll_key, &filters))
+            .and_then(|filters| self.txn_matching_rows(txn_id, &coll_key, &filters, system_as_of))
         {
             Ok(rows) => rows,
             Err(e) => return self.response_error(task, e),
@@ -167,10 +171,18 @@ mod tests {
     use crate::data::executor::core_loop::CoreLoop;
     use crate::data::executor::core_loop::tests::{make_core_with_dir, make_default_task};
     use crate::data::executor::doc_format;
+    use crate::data::executor::handlers::transaction::overlay::Staged;
     use crate::data::executor::task::ExecutionTask;
     use crate::types::{TenantId, TxnId};
 
     fn delete_all(predicted: Option<Vec<u32>>) -> PhysicalPlan {
+        delete_all_at(predicted, nodedb_types::SystemTimeScope::Current)
+    }
+
+    fn delete_all_at(
+        predicted: Option<Vec<u32>>,
+        system_time: nodedb_types::SystemTimeScope,
+    ) -> PhysicalPlan {
         PhysicalPlan::Document(DocumentOp::BulkDelete {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "orders"),
             filters: Vec::new(),
@@ -181,10 +193,16 @@ mod tests {
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             resolved_sum_targets: Vec::new(),
             declared_primary_key: None,
+            system_time,
         })
     }
 
     fn seed(core: &mut CoreLoop, task: &ExecutionTask, surrogate: u32) {
+        let ordinal = core.bitemporal_ordinal();
+        seed_at(core, task, surrogate, ordinal);
+    }
+
+    fn seed_at(core: &mut CoreLoop, task: &ExecutionTask, surrogate: u32, ordinal: i64) {
         let body = doc_format::encode_to_msgpack(&serde_json::json!({"a": "1"}));
         core.sparse
             .put(
@@ -193,8 +211,90 @@ mod tests {
                 "orders",
                 &nodedb_types::StorageKey::for_surrogate(Surrogate::new(surrogate)),
                 &body,
+                ordinal,
             )
             .expect("seed row");
+    }
+
+    /// Inside a block a predicate delete matches the rows visible at the
+    /// block's snapshot plus the block's staged writes. A row committed after
+    /// the snapshot is not matched, and the current-state match sees it.
+    #[test]
+    fn a_snapshot_delete_matches_the_snapshot_and_the_staged_rows() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _tx, _rx): (CoreLoop, _, _) = make_core_with_dir(dir.path());
+        let txn_id = TxnId::new(8);
+        let mut request = make_default_task().request;
+        request.txn_id = Some(txn_id);
+        let task = ExecutionTask::new(request);
+        let tid = task.request.tenant_id.as_u64();
+        seed_at(&mut core, &task, 1, 100);
+        // A concurrent commit after the snapshot at 150.
+        seed_at(&mut core, &task, 2, 200);
+        let coll_key = (
+            task.request.database_id,
+            TenantId::new(tid),
+            "orders".to_string(),
+        );
+        let staged = doc_format::encode_to_msgpack(&serde_json::json!({"a": "2"}));
+        let identity = nodedb_types::StorageKey::for_surrogate(Surrogate::new(3)).to_identity();
+        core.txn_overlay_mut(txn_id)
+            .insert_put(coll_key.clone(), 3, &identity, staged);
+
+        let snapshot = nodedb_types::SystemTimeScope::TxnSnapshot {
+            ordinal: 150,
+            cut_marker: 0,
+        };
+        let staged_delete = core.execute_stage_write(&task, tid, &delete_all_at(None, snapshot));
+        assert_eq!(
+            staged_delete.status,
+            Status::Ok,
+            "{:?}",
+            staged_delete.error_code
+        );
+        let overlay = core.txn_overlays.get(&txn_id).expect("overlay");
+        assert_eq!(overlay.get(&coll_key, 1), Some(&Staged::Tombstone));
+        assert_eq!(overlay.get(&coll_key, 3), Some(&Staged::Tombstone));
+        assert_eq!(
+            overlay.get(&coll_key, 2),
+            None,
+            "a row committed after the snapshot is not matched"
+        );
+
+        // The prediction a block reads at its snapshot holds at the stage.
+        let other = TxnId::new(9);
+        let mut request = make_default_task().request;
+        request.txn_id = Some(other);
+        let other_task = ExecutionTask::new(request);
+        let held =
+            core.execute_stage_write(&other_task, tid, &delete_all_at(Some(vec![1]), snapshot));
+        assert_eq!(held.status, Status::Ok, "{:?}", held.error_code);
+        let mut request = make_default_task().request;
+        request.txn_id = Some(TxnId::new(11));
+        let fresh_task = ExecutionTask::new(request);
+        let current = core.execute_stage_write(&fresh_task, tid, &delete_all(Some(vec![1])));
+        assert_eq!(
+            current.error_code.as_deref(),
+            Some(&ErrorCode::OllpRetryRequired),
+            "the current state holds the later commit too"
+        );
+    }
+
+    /// A predicate write never matches committed history.
+    #[test]
+    fn a_historical_scope_refuses_the_stage() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _tx, _rx): (CoreLoop, _, _) = make_core_with_dir(dir.path());
+        let mut request = make_default_task().request;
+        request.txn_id = Some(TxnId::new(10));
+        let task = ExecutionTask::new(request);
+        let tid = task.request.tenant_id.as_u64();
+        let pinned = nodedb_types::SystemTimeScope::Pinned {
+            ordinal: 150,
+            cut_marker: 0,
+        };
+        let refused = core.execute_stage_write(&task, tid, &delete_all_at(None, pinned));
+        assert_eq!(refused.status, Status::Error);
     }
 
     /// A predicate delete whose carried prediction misses a matching row

@@ -28,6 +28,7 @@ pub(in crate::data::executor) mod calvin_fold_tests;
 mod calvin_install;
 #[cfg(test)]
 mod calvin_install_tests;
+mod clone_copy;
 #[cfg(test)]
 mod cross_shard_fold_tests;
 mod document;
@@ -37,6 +38,7 @@ mod events;
 mod install_refusal_tests;
 mod passes;
 mod settle;
+mod snapshot_check;
 mod state;
 mod sub_ops;
 #[cfg(test)]
@@ -44,7 +46,8 @@ pub(in crate::data::executor) mod test_commit;
 #[cfg(test)]
 mod unique_handover_tests;
 mod validate;
+mod write_keys;
 
 pub(in crate::data::executor) use document::CommittedDocWrite;
-pub(in crate::data::executor) use entry::CommittedRedo;
+pub(in crate::data::executor) use entry::{CommittedRedo, RedoSnapshot};
 pub(in crate::data::executor) use state::{RedoApplyPass, RedoApplyState, TsInstalled};

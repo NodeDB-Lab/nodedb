@@ -17,6 +17,11 @@
 //! edge version does in `edge_ordinal`. A row lives on one home,
 //! and every earlier writer of it flushed before this resolve, so every
 //! replica raises alike.
+//!
+//! A session resolve's stamp is provisional. No ordinal reservation covers
+//! it, so the write funnel raises every stamp of the record below the
+//! record's reserved ordinal to that ordinal before it appends the record
+//! (`wal::redo::stamp_floor`). A Calvin resolve's stamp is final.
 
 use std::collections::BTreeMap;
 
@@ -41,12 +46,12 @@ impl CoreLoop {
         }
     }
 
-    /// Pin the resolve-time bitemporal stamp once, in the overlay sidecar,
+    /// Pin the resolve-time version stamp once, in the overlay sidecar,
     /// for every put AND tombstone `txn_id` staged in `collection`, so the
     /// redo carries it and every apply (install, replica, restart) writes
-    /// the same version key. A collection that is not bitemporal stamps
-    /// nothing. Deterministic doc-id order keeps replicas resolving the same
-    /// transaction in sync.
+    /// the same version key. Every document collection keeps versions, so
+    /// every one stamps. Deterministic doc-id order keeps replicas resolving
+    /// the same transaction in sync.
     pub(super) fn pin_doc_stamps(
         &mut self,
         database_id: DatabaseId,
@@ -55,9 +60,6 @@ impl CoreLoop {
         collection: &str,
         txn_ordinal: i64,
     ) -> crate::Result<()> {
-        if !self.is_bitemporal(database_id.as_u64(), tid, collection) {
-            return Ok(());
-        }
         let coll_key = (database_id, TenantId::new(tid), collection.to_string());
         let mut writes: Vec<(&RowIdentity, u32)> = match self.txn_overlays.get(&txn_id) {
             Some(overlay) => overlay
@@ -100,8 +102,7 @@ impl CoreLoop {
 
     /// The tombstone ordinal of every base row a staged TRUNCATE of
     /// `collection` removes, keyed by surrogate: the transaction's ordinal,
-    /// raised above the row's newest stored version. `None` when the
-    /// collection is not bitemporal.
+    /// raised above the row's newest stored version.
     pub(super) fn truncated_row_ordinals(
         &self,
         database_id: DatabaseId,
@@ -109,10 +110,7 @@ impl CoreLoop {
         collection: &str,
         rows: &[(StorageKey, Vec<u8>)],
         txn_ordinal: i64,
-    ) -> crate::Result<Option<BTreeMap<u32, i64>>> {
-        if !self.is_bitemporal(database_id.as_u64(), tid, collection) {
-            return Ok(None);
-        }
+    ) -> crate::Result<BTreeMap<u32, i64>> {
         let mut ordinals = DocOrdinals::new(
             &self.sparse,
             database_id.as_u64(),
@@ -124,7 +122,7 @@ impl CoreLoop {
         for (key, _body) in rows {
             stamps.insert(key.surrogate().as_u32(), ordinals.for_row(key)?);
         }
-        Ok(Some(stamps))
+        Ok(stamps)
     }
 }
 

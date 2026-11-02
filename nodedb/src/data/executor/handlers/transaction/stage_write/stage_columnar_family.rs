@@ -12,6 +12,7 @@ use super::{
 };
 use crate::bridge::envelope::Response;
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::handlers::write_match_cut::write_match_cut;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::TxnId;
 
@@ -47,35 +48,46 @@ impl CoreLoop {
                 rls_write_check,
             }),
             // Predicate DELETE/UPDATE staged at statement time: the affected
-            // set resolves against base ∪ overlay; commit replay durably applies.
+            // set resolves against base at the plan's match scope (the block's
+            // snapshot) ∪ overlay. Commit replay durably applies.
             ColumnarOp::Delete {
                 collection,
                 filters,
                 system_from: _,
                 rls_write_check,
-            } => self.stage_columnar_delete(StageColumnarDeleteParams {
-                task,
-                tid,
-                txn_id,
-                collection: collection.as_str(),
-                filter_bytes: filters,
-                rls_write_check,
-            }),
+                system_time,
+            } => match write_match_cut(system_time, "a columnar predicate DELETE") {
+                Ok(system_as_of) => self.stage_columnar_delete(StageColumnarDeleteParams {
+                    task,
+                    tid,
+                    txn_id,
+                    collection: collection.as_str(),
+                    filter_bytes: filters,
+                    rls_write_check,
+                    system_as_of,
+                }),
+                Err(e) => self.response_error(task, e),
+            },
             ColumnarOp::Update {
                 collection,
                 filters,
                 updates,
                 system_from: _,
                 rls_write_check,
-            } => self.stage_columnar_update(StageColumnarUpdateParams {
-                task,
-                tid,
-                txn_id,
-                collection: collection.as_str(),
-                filter_bytes: filters,
-                updates,
-                rls_write_check,
-            }),
+                system_time,
+            } => match write_match_cut(system_time, "a columnar predicate UPDATE") {
+                Ok(system_as_of) => self.stage_columnar_update(StageColumnarUpdateParams {
+                    task,
+                    tid,
+                    txn_id,
+                    collection: collection.as_str(),
+                    filter_bytes: filters,
+                    updates,
+                    rls_write_check,
+                    system_as_of,
+                }),
+                Err(e) => self.response_error(task, e),
+            },
             // Resolved-row-set UPDATE/DELETE: staging locates each shipped PK
             // in base ∪ overlay rather than re-evaluating a predicate.
             ColumnarOp::ResolvedUpdate {

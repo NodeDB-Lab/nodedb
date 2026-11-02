@@ -51,9 +51,9 @@ pub struct CollectionOverlay {
     /// consulted by non-KV engines. See [`StagedTtl`].
     pub(super) ttl_by_surrogate: HashMap<u32, StagedTtl>,
     /// Bitemporal stamp per surrogate — sibling to `by_surrogate`, written at
-    /// COMMIT resolve time for `bitemporal=true` document `Put`s and read back
-    /// by the commit-time base install so redo and install share one stamp.
-    /// See [`BitemporalStamp`]. Never consulted by non-bitemporal collections.
+    /// COMMIT resolve time for every staged document write and read back by
+    /// the commit-time base install so redo and install share one stamp.
+    /// See [`BitemporalStamp`].
     pub(super) bitemporal_by_surrogate: HashMap<u32, BitemporalStamp>,
     /// Primary key (MessagePack) of the base row a staged columnar write
     /// displaced, per surrogate. Recorded when a statement first stages a

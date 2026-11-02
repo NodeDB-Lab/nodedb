@@ -30,8 +30,14 @@ const ACCOUNT: &str = "a1";
 pub(super) const TARGET_SURROGATE: Surrogate = Surrogate(4242);
 const LSN: u64 = 70;
 
+/// The system-time ordinal of the seeded target row. Every core this file
+/// builds seeds the row at this one version key, below every ordinal a live
+/// write stamps. A restarted core holds the durable seed at the version key
+/// the live core wrote it at, never at a later one.
+const SEED_ORDINAL: i64 = 1_000;
+
 /// A core whose source collection folds `amount` into the target's
-/// `balance`, with the target row seeded at 100.
+/// `balance`, with the target row seeded at 100 at [`SEED_ORDINAL`].
 pub(in crate::data::executor) fn core_with_sum(
     dir: &std::path::Path,
 ) -> (CoreLoop, Box<dyn std::any::Any>) {
@@ -45,6 +51,7 @@ pub(in crate::data::executor) fn core_with_sum(
             TARGET,
             &nodedb_types::StorageKey::for_surrogate(TARGET_SURROGATE),
             &doc_format::encode_to_msgpack(&seed),
+            SEED_ORDINAL,
         )
         .expect("seed target row");
     (core, Box::new((req, resp)))

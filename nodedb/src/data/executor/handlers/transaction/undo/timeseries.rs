@@ -1,20 +1,19 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! Timeseries undo: the pre-image capture of an ingest, and the undo of a
-//! `TRUNCATE` inside a transaction batch, which reinstalls the in-memory
-//! state `execute_timeseries_truncate` moved out and renames the partition
-//! directory back to its live name.
+//! `TRUNCATE` inside a transaction batch, which reopens the partitions the
+//! truncate ended and puts back its stamps, its aggregate image, and the
+//! caches it dropped.
 //!
-//! Removing the truncate's fresh directory and the rename back are the
-//! durable steps. Either failing is fatal to the rollback (`Err` →
-//! `RollbackFailed`): the memory state would say the rows exist while the
-//! partitions sit under the aside name, and the next scan would answer from
-//! half a collection.
+//! Reopening the partitions, the stamps and the image are the durable
+//! steps. Any of them failing is fatal to the rollback (`Err` →
+//! `RollbackFailed`): the collection would answer as truncated while the
+//! batch that truncated it rolled back.
 
 use crate::data::executor::core_loop::CoreLoop;
 use crate::types::{DatabaseId, TenantId};
 
-use super::{TimeseriesIngestUndo, TimeseriesTruncateUndo, UndoError};
+use super::{TimeseriesEndedInstallUndo, TimeseriesIngestUndo, TimeseriesTruncateUndo, UndoError};
 
 impl CoreLoop {
     /// The complete in-memory pre-image of a timeseries collection before an
@@ -48,49 +47,58 @@ impl CoreLoop {
     ) -> Result<(), UndoError> {
         let TimeseriesTruncateUndo {
             collection_key,
-            original_dir: original,
-            moved_dir,
-            memtable,
-            memtable_mem,
-            registry,
+            ended,
+            replay_stamp,
+            stamp_file,
+            cagg_image,
+            newest_truncate,
             last_value_cache,
             series_catalog,
-            replay_stamp,
         } = undo;
+        let (database_id, tenant_id, collection) = collection_key.clone();
 
-        // The live name holds the truncate's fresh directory, and any rows a
-        // later sub-plan wrote there, which the reverse-order rollback has
-        // already withdrawn.
-        if original.exists()
-            && let Err(e) = std::fs::remove_dir_all(&original)
-        {
+        if let Err(e) = self.reopen_ts_partitions(&collection_key, &ended) {
             return Err(UndoError::failed(
                 entry_index,
-                format!("timeseries truncate undo: remove {}", original.display()),
+                format!("timeseries truncate undo: reopen the partitions of '{collection}'"),
                 e,
             ));
         }
-        if let Some(moved) = moved_dir
-            && let Err(e) = std::fs::rename(&moved, &original)
+        if let Err(e) = self.restore_truncate_stamps(
+            &collection_key,
+            crate::data::executor::handlers::timeseries::truncate::PriorStamps {
+                memory: replay_stamp,
+                file: stamp_file,
+            },
+        ) {
+            return Err(UndoError::failed(
+                entry_index,
+                format!("timeseries truncate undo: restore the stamp of '{collection}'"),
+                e,
+            ));
+        }
+        if let Some(image) = cagg_image
+            && let Err(e) = self.put_back_cagg_image(
+                database_id.as_u64(),
+                tenant_id.as_u64(),
+                &collection,
+                &image,
+            )
         {
             return Err(UndoError::failed(
                 entry_index,
                 format!(
-                    "timeseries truncate undo: rename {} back to {}",
-                    moved.display(),
-                    original.display()
+                    "timeseries truncate undo: write back the aggregate image of '{collection}'"
                 ),
                 e,
             ));
         }
 
-        reinstall(&mut self.columnar_memtables, &collection_key, memtable);
         reinstall(
-            &mut self.columnar_memtable_mem,
+            &mut self.ts_newest_truncate,
             &collection_key,
-            memtable_mem,
+            newest_truncate,
         );
-        reinstall(&mut self.ts_registries, &collection_key, registry);
         reinstall(
             &mut self.ts_last_value_caches,
             &collection_key,
@@ -101,16 +109,39 @@ impl CoreLoop {
             &collection_key,
             series_catalog,
         );
-        reinstall(&mut self.ts_replay.stamps, &collection_key, replay_stamp);
-        // The directory back in place carries the aggregates' image. Reset
-        // them so the maintenance tick reloads it and folds what it lacks.
-        let (database_id, tenant_id, collection) = &collection_key;
+        // The image is back on disk. Reset the aggregates so the maintenance
+        // tick reloads it and folds the reopened partitions it lacks.
         self.continuous_agg_mgr.reset_for_source(
             database_id.as_u64(),
             tenant_id.as_u64(),
-            collection,
+            &collection,
         );
         Ok(())
+    }
+
+    /// Undo the install of an ended partition: the partition leaves the
+    /// registry and its directory leaves the disk. Fatal when the directory
+    /// does not leave: a later read before its end would still see the rows.
+    pub(super) fn apply_undo_ts_ended_install(
+        &mut self,
+        entry_index: usize,
+        undo: TimeseriesEndedInstallUndo,
+    ) -> Result<(), UndoError> {
+        let TimeseriesEndedInstallUndo {
+            collection_key,
+            partition_key,
+        } = undo;
+        self.remove_ts_ended_partition(&collection_key, &partition_key)
+            .map_err(|e| {
+                UndoError::failed(
+                    entry_index,
+                    format!(
+                        "timeseries ended-partition undo: remove partition {} of '{}'",
+                        partition_key.dir_name, collection_key.2
+                    ),
+                    e,
+                )
+            })
     }
 }
 

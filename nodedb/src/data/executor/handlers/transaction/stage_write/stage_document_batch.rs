@@ -287,6 +287,7 @@ mod tests {
                 collection,
                 &StorageKey::for_surrogate(Surrogate::new(surrogate)),
                 &body,
+                core.bitemporal_ordinal(),
             )
             .expect("seed row");
     }

@@ -173,6 +173,7 @@ mod tests {
             projection: Vec::new(),
             rls_filters: Vec::new(),
             prefilter: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         };
         let mut ops = Vec::new();
         serialize_spatial_op(&op, &mut ops).expect("serialize scan");
