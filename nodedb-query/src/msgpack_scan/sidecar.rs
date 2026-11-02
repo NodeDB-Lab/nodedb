@@ -356,9 +356,11 @@ pub fn field_index_from_sidecar(buf: &[u8]) -> Option<SidecarFieldIndex<'_>> {
         });
     }
 
-    // Entries are already sorted (build_sidecar sorts before writing).
-    // Re-sort defensively in case the buffer was built by an older version.
-    entries.sort_unstable_by_key(|e| e.field_hash);
+    // `build_sidecar` sorts the entries before writing. Lookups binary-search
+    // them, so an unsorted table is a malformed buffer.
+    if !entries.is_sorted_by_key(|e| e.field_hash) {
+        return None;
+    }
 
     let msgpack = &buf[..msgpack_len];
     Some(SidecarFieldIndex { entries, msgpack })

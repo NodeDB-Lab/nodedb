@@ -15,23 +15,13 @@ use super::index::CsrIndex;
 use crate::GraphError;
 
 /// Magic header for rkyv-serialized CSR snapshots (6 bytes).
-const RKYV_MAGIC: &[u8; 6] = b"RKCS2\0";
-/// Current format version for rkyv-serialized CSR snapshots.
+const RKYV_MAGIC: &[u8; 6] = b"RKCS1\0";
+/// Format version for rkyv-serialized CSR snapshots.
 ///
-/// Bumped to `2` when per-edge collection tags were added (parallel
-/// `out_collections` / `in_collections` arrays + collection interning). A v1
-/// snapshot has no collection axis and is rejected; the CSR is instead rebuilt
-/// from the collection-scoped durable edge store.
-///
-/// Bumped to `3` when per-node surrogates joined the snapshot. They were
-/// previously dropped on checkpoint and left at zero on restore, on the theory
-/// that later `EdgePut`s would refill them. That is wrong: the surrogate is the
-/// node's global, WAL-durable identity, and any read keyed on it — a
-/// cross-engine bitmap intersection, a surrogate-seeded traversal — answers
-/// with an empty set until an unrelated write happens to touch the node. A v2
-/// snapshot is rejected for the same reason v1 is, and takes the same recovery
-/// path: rebuild from the durable edge store.
-pub const CSR_FORMAT_VERSION: u8 = 3;
+/// A snapshot carries per-edge collection tags and per-node surrogates. A
+/// snapshot of any other version is rejected. The CSR then rebuilds from the
+/// collection-scoped durable edge store.
+pub const CSR_FORMAT_VERSION: u8 = 1;
 
 /// Errors during CSR checkpoint operations.
 #[derive(Debug, thiserror::Error)]
@@ -63,8 +53,7 @@ struct CsrSnapshotRkyv {
     buffer_in_collections: Vec<Vec<u32>>,
     /// Deleted-edge identities `(src, label, dst, collection)`. Collection is
     /// part of the key so per-collection copies of a shared triple tombstone
-    /// independently. The v2 snapshot already carries the collection axis, so
-    /// widening this key needs no new format version.
+    /// independently.
     deleted: Vec<(u32, u32, u32, u32)>,
     /// Per-node global surrogate, parallel to `nodes`. `0` means the node has
     /// no surrogate bound. The reverse map is rebuilt from this on load rather
@@ -124,8 +113,8 @@ impl CsrIndex {
     ///
     /// Returns:
     /// - `Ok(Some(index))` — successfully decoded.
-    /// - `Ok(None)` — buffer does not start with the magic header (no legacy
-    ///   format exists for CSR; callers should treat this as an invalid buffer).
+    /// - `Ok(None)` — buffer does not start with the magic header. Callers
+    ///   must treat this as an invalid buffer.
     /// - `Err(CsrCheckpointError::UnsupportedVersion)` — magic matches but the
     ///   version byte is not `CSR_FORMAT_VERSION`.
     pub fn from_checkpoint(
@@ -472,7 +461,7 @@ mod tests {
             .checkpoint_to_bytes()
             .expect("test governor ceiling covers this reservation");
         // Magic at bytes[0..6].
-        assert_eq!(&bytes[0..6], b"RKCS2\0");
+        assert_eq!(&bytes[0..6], b"RKCS1\0");
         // Version byte at bytes[6].
         assert_eq!(bytes[6], super::CSR_FORMAT_VERSION);
         // rkyv payload follows immediately.

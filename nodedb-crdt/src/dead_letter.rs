@@ -84,12 +84,10 @@ pub struct DeadLetter {
     /// The peer that produced this delta.
     pub peer_id: u64,
 
-    /// The authenticated user_id that submitted this delta (0 = unauthenticated/legacy).
-    #[serde(default)]
+    /// The authenticated user_id that submitted this delta (0 = unauthenticated).
     pub user_id: u64,
 
     /// The tenant this delta belongs to (0 = system).
-    #[serde(default)]
     pub tenant_id: u64,
 
     /// The raw delta bytes that were rejected.
@@ -125,7 +123,6 @@ pub struct DeadLetter {
     /// The log position of the record whose apply rejected this delta, once
     /// the applier binds it. One record yields at most one entry, so a
     /// re-applied record never adds a second.
-    #[serde(default)]
     pub source_lsn: Option<u64>,
 }
 
