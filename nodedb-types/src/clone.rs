@@ -45,11 +45,7 @@ pub struct CloneOrigin {
     /// at clone-create time.  KV bindings allocated AFTER this value
     /// belong strictly to source-side writes that must not be visible
     /// from the resulting clone — the lazy KV read path uses this
-    /// ceiling to filter source-delegated rows.  `None` on legacy clones
-    /// created before this field existed (no isolation enforced —
-    /// matches the prior behaviour).
-    #[serde(default)]
-    #[msgpack(default)]
+    /// ceiling to filter source-delegated rows. `None` means no ceiling.
     pub kv_surrogate_ceiling: Option<u32>,
 }
 

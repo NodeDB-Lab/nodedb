@@ -12,6 +12,7 @@ mod promql;
 mod scheduler;
 mod shutdown;
 mod startup;
+mod version_cleanup;
 
 pub use bitemporal::BitemporalTuning;
 pub use calvin::CalvinTuning;
@@ -32,3 +33,4 @@ pub use startup::{
     DEFAULT_DATA_GROUP_RECOVERY_TIMEOUT_MS, DEFAULT_RAFT_READY_TIMEOUT_MS,
     DataGroupRecoveryTimeout, RaftReadyTimeout, StartupTuning,
 };
+pub use version_cleanup::VersionCleanupTuning;

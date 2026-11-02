@@ -19,9 +19,7 @@ pub struct HnswParams {
     pub ef_construction: usize,
     /// Distance metric for similarity computation.
     pub metric: DistanceMetric,
-    /// On-disk + in-memory vector storage dtype. Defaults to F32 for
-    /// backward compatibility with indexes created before this field existed.
-    #[serde(default)]
+    /// On-disk + in-memory vector storage dtype.
     pub dtype: VectorStorageDtype,
 }
 

@@ -269,13 +269,7 @@ impl ToMessagePack for ErrorDetails {
                 write1(writer, TAG_CANNOT_CLONE_MIRROR, database)
             }
             ErrorDetails::CloneDependency { dependents } => {
-                writer.write_array_len(2)?;
-                writer.write_u16(TAG_CLONE_DEPENDENCY)?;
-                writer.write_array_len(dependents.len())?;
-                for dep in dependents {
-                    dep.write(writer)?;
-                }
-                Ok(())
+                write1(writer, TAG_CLONE_DEPENDENCY, dependents)
             }
             ErrorDetails::ClonePredatesQueryTime {
                 as_of_lsn,

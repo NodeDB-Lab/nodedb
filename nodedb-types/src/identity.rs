@@ -3,9 +3,9 @@
 //! Plane-neutral row identity.
 //!
 //! [`KeyRepr`] is the single representation of a row's identity within a
-//! collection, shared across planes and crates: the Data-Plane per-core
-//! write-version index keys committed writes by it, the Control-Plane
-//! transaction read-set keys observed reads by it, and the replicated Calvin
+//! collection, shared across planes and crates: the Data-Plane write notes
+//! key committed writes by it, the Control-Plane transaction read-set keys
+//! observed reads by it, and the replicated Calvin
 //! `TxClass` carries it in its versioned read-set. Because read keys and write
 //! keys must compare in one namespace — and because that namespace now travels
 //! over the sequencer Raft log — the type lives in the shared `nodedb-types`

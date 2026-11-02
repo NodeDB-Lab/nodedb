@@ -52,7 +52,7 @@
 // |  45 | Bridge                    |
 // |  46 | Dispatch                  |
 // |  47 | Internal                  |
-// |  48 | UnsupportedOpcode         |
+// |  48 | (unassigned)              |
 // |  49 | HandshakeFailed           |
 // |  50 | TenantVectorDimExceeded   |
 // |  51 | TenantGraphDepthExceeded  |
@@ -137,7 +137,6 @@ pub(super) const TAG_ARRAY: u16 = 44;
 pub(super) const TAG_BRIDGE: u16 = 45;
 pub(super) const TAG_DISPATCH: u16 = 46;
 pub(super) const TAG_INTERNAL: u16 = 47;
-pub(super) const TAG_UNSUPPORTED_OPCODE: u16 = 48;
 pub(super) const TAG_HANDSHAKE_FAILED: u16 = 49;
 pub(super) const TAG_TENANT_VECTOR_DIM_EXCEEDED: u16 = 50;
 pub(super) const TAG_TENANT_GRAPH_DEPTH_EXCEEDED: u16 = 51;

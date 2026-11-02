@@ -29,13 +29,9 @@ pub struct ColumnarTruncateWalRecord {
     /// The system-time ordinal at which a truncate of a bitemporal columnar
     /// collection closes every current key, raised per key above its bound
     /// row. `None` for any other truncate.
-    #[msgpack(default)]
-    #[serde(default)]
     pub system_from: Option<i64>,
     /// Erase every row and version even on a bitemporal collection: the
     /// clear a backup restore runs before it reinstalls every version.
-    #[msgpack(default)]
-    #[serde(default)]
     pub erase_history: bool,
 }
 

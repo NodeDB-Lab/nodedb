@@ -6,11 +6,8 @@
 ///
 /// `post_image_msgpack` encodes `Option<Value>` with zerompk. `None` represents
 /// a target row absent after a valid delete; it is distinct from `Some(Null)`.
-///
-/// Map-encoded so fields can be added with `#[msgpack(default)]` and payloads
-/// written by an older peer still decode without a migration.
 #[derive(Debug, Clone, PartialEq, zerompk::ToMessagePack, zerompk::FromMessagePack)]
-#[msgpack(map, allow_unknown_fields)]
+#[msgpack(map)]
 pub struct CrdtPreviewResult {
     /// Canonical zerompk encoding of the validated target post-image.
     pub post_image_msgpack: Vec<u8>,
@@ -29,6 +26,5 @@ pub struct CrdtPreviewResult {
     /// A delta that trims entirely contributed nothing — the shape both an
     /// idempotent replay and a peer-id collision take — and without this count
     /// the second is indistinguishable from the first at the session boundary.
-    #[msgpack(default)]
     pub trimmed_ops: u64,
 }

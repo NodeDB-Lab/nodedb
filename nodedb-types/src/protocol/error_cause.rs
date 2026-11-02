@@ -29,7 +29,6 @@ pub struct ErrorCausePayload {
     pub message: String,
     /// Structured details of the cause, when it had any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[msgpack(default)]
     pub details: Option<ErrorDetails>,
 }
 

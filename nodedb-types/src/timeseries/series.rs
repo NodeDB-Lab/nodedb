@@ -114,6 +114,25 @@ impl SeriesCatalog {
         self.entries.remove(&id).is_some()
     }
 
+    /// Every registration: `(id, key, rehash attempt)`.
+    pub fn entries(&self) -> impl Iterator<Item = (SeriesId, &SeriesKey, u64)> {
+        self.entries
+            .iter()
+            .map(|(id, (key, attempt))| (*id, key, *attempt))
+    }
+
+    /// Install a registration read back from disk. Returns `false` and
+    /// installs nothing when `id` already names another key.
+    pub fn install(&mut self, id: SeriesId, key: SeriesKey, rehash_attempt: u64) -> bool {
+        match self.entries.get(&id) {
+            Some((existing, _)) => *existing == key,
+            None => {
+                self.entries.insert(id, (key, rehash_attempt));
+                true
+            }
+        }
+    }
+
     /// Look up a SeriesId to get its canonical key.
     pub fn get(&self, id: SeriesId) -> Option<&SeriesKey> {
         self.entries.get(&id).map(|(k, _)| k)
@@ -174,6 +193,19 @@ mod catalog_tests {
         );
         assert_eq!(k1, k2);
         assert_eq!(k1.to_series_id(0), k2.to_series_id(0));
+    }
+
+    /// A registration read back keeps its id and attempt, and a key that
+    /// resolves after it finds the same id.
+    #[test]
+    fn an_installed_registration_resolves_to_its_id() {
+        let mut catalog = SeriesCatalog::new();
+        let key = SeriesKey::new("cpu", vec![("host".into(), "a".into())]);
+        let id = key.to_series_id(0);
+        assert!(catalog.install(id, key.clone(), 0));
+        assert!(!catalog.install(id, SeriesKey::new("mem", vec![]), 0));
+        assert_eq!(catalog.resolve(&key), id);
+        assert_eq!(catalog.entries().collect::<Vec<_>>(), vec![(id, &key, 0)]);
     }
 
     #[test]

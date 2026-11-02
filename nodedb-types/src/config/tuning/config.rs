@@ -15,6 +15,7 @@ use super::promql::PromqlTuning;
 use super::scheduler::SchedulerTuning;
 use super::shutdown::ShutdownTuning;
 use super::startup::StartupTuning;
+use super::version_cleanup::VersionCleanupTuning;
 
 /// Top-level tuning configuration.
 ///
@@ -60,6 +61,8 @@ pub struct TuningConfig {
     pub promql: PromqlTuning,
     #[serde(default)]
     pub startup: StartupTuning,
+    #[serde(default)]
+    pub version_cleanup: VersionCleanupTuning,
 }
 
 impl TuningConfig {

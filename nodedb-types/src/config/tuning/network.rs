@@ -56,6 +56,29 @@ pub struct NetworkTuning {
     /// filling Control-Plane RAM.
     #[serde(default = "default_max_query_result_bytes")]
     pub max_query_result_bytes: u64,
+    /// The oldest snapshot, in seconds, a transaction block reads at. A
+    /// statement of a block whose snapshot is older fails with SQLSTATE
+    /// `40001`, and the client retries the block. The cleanup horizon also
+    /// stops waiting for a node it cannot reach once its snapshots are this
+    /// old. Set via `[tuning.network] txn_snapshot_max_age_secs`.
+    #[serde(default = "default_txn_snapshot_max_age_secs")]
+    pub txn_snapshot_max_age_secs: u64,
+}
+
+impl NetworkTuning {
+    /// The longest any statement reads at one snapshot: the snapshot age
+    /// limit, plus the longest statement deadline, plus the clock skew
+    /// bound. A snapshot older than this serves no statement on any node.
+    ///
+    /// Every node of a cluster must run one value. The cleanup horizon and
+    /// the commit check of every replica rely on it: a commit whose snapshot
+    /// is older than this below its own ordinal is refused on every replica.
+    pub fn snapshot_max_hold(&self) -> std::time::Duration {
+        let longest_deadline = self.default_deadline_secs.max(self.copy_deadline_secs);
+        std::time::Duration::from_secs(self.txn_snapshot_max_age_secs)
+            .saturating_add(std::time::Duration::from_secs(longest_deadline))
+            .saturating_add(std::time::Duration::from_nanos(crate::MAX_CLOCK_SKEW_NS))
+    }
 }
 
 impl Default for NetworkTuning {
@@ -70,6 +93,7 @@ impl Default for NetworkTuning {
             drain_timeout_secs: default_drain_timeout_secs(),
             max_frame_size: default_max_frame_size(),
             max_query_result_bytes: default_max_query_result_bytes(),
+            txn_snapshot_max_age_secs: default_txn_snapshot_max_age_secs(),
         }
     }
 }
@@ -103,6 +127,10 @@ fn default_max_query_result_bytes() -> u64 {
     // preventing an unbounded result-set from pinning Control-Plane
     // RAM. Configurable via `[tuning.network] max_query_result_bytes`.
     1024 * 1024 * 1024
+}
+
+fn default_txn_snapshot_max_age_secs() -> u64 {
+    300
 }
 
 /// WAL writer and double-write buffer tuning.

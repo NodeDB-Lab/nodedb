@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 #[derive(
     Debug, Clone, Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack,
 )]
-#[msgpack(map, allow_unknown_fields)]
+#[msgpack(map)]
 pub struct StoredVectorIndexParams {
     /// Database that owns the collection.
     pub database_id: u64,
@@ -41,8 +41,6 @@ pub struct StoredVectorIndexParams {
     pub ivf_nprobe: usize,
     /// Stamped at propose time on every put; fences a replayed delete to
     /// the incarnation it targeted.
-    #[msgpack(default)]
-    #[serde(default)]
     pub modification_hlc: crate::hlc::Hlc,
 }
 

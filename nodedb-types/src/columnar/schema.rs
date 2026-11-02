@@ -58,7 +58,6 @@ pub struct StrictSchema {
     /// in `columns` like any other field; the flag preserves the intent
     /// across catalog round-trips.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    #[msgpack(default)]
     pub bitemporal: bool,
 }
 
@@ -123,6 +122,12 @@ pub const BITEMPORAL_RESERVED_COLUMNS: [&str; 3] = [
 pub const TS_SYSTEM: &str = "_ts_system";
 pub const TS_VALID_FROM: &str = "_ts_valid_from";
 pub const TS_VALID_UNTIL: &str = "_ts_valid_until";
+
+/// The series id of a timeseries row: the id the collection's series
+/// catalog gave the row's metric and tags at ingest. Every timeseries row
+/// stores it, so a flushed row names its series without its metric. It is
+/// the engine's own column and never reaches a reader.
+pub const TS_SERIES: &str = "_ts_series";
 
 /// Single source of truth for "is this a reserved internal strict-tuple
 /// bitemporal column that must be hidden from user-facing projections

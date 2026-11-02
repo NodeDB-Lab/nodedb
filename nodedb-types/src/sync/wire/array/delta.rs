@@ -22,14 +22,11 @@ pub struct ArrayDeltaMsg {
     pub array: String,
     /// A single zerompk-encoded `ArrayOp`. Decoded by `nodedb-array::sync::op_codec`.
     pub op_payload: Vec<u8>,
-    /// Stable identity of the originating producer. 0 for legacy clients.
-    #[serde(default)]
+    /// Stable identity of the originating producer.
     pub producer_id: u64,
     /// Monotonic epoch counter incremented on every producer restart.
-    #[serde(default)]
     pub epoch: u64,
     /// Per-stream monotonic sequence number within the epoch.
-    #[serde(default)]
     pub seq: u64,
 }
 

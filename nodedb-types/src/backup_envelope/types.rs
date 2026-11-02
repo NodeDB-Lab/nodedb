@@ -14,12 +14,11 @@ pub const MAGIC: &[u8; 4] = b"NDBB";
 /// [`DatabaseDataSection`], and the metadata sections name the database of
 /// each entry. Every envelope carries one `SECTION_ORIGIN_VERIFICATION`
 /// section. An envelope of any other version is refused.
-pub const VERSION: u8 = 3;
+pub const VERSION: u8 = 1;
 
 /// Header is fixed-size — 52 bytes (48 framed + 4 crc).
 ///
-/// The header grew by 8 bytes when `tenant_id` was widened from u32 to u64
-/// (format v1, pre-launch format break).
+/// `tenant_id` in the header is a u64.
 pub const HEADER_LEN: usize = 52;
 /// Per-section framing overhead: origin(8) + len(4) + crc(4).
 pub const SECTION_OVERHEAD: usize = 16;
@@ -125,7 +124,7 @@ pub struct SourceTombstoneEntry {
 
 /// Single PK→surrogate binding carried in a `SECTION_ORIGIN_SURROGATE_PK`
 /// section. The outer container is `Vec<SurrogateBindBlob>` msgpack-encoded into
-/// the section body. Mirrors one row of the source catalog's `surrogate_pk_v3`
+/// the section body. Mirrors one row of the source catalog's `surrogate_pk`
 /// table for one `(database_id, tenant_id, collection)`; rebound on the restore
 /// side so PK point-lookups resolve.
 #[derive(Debug, Clone, PartialEq, Eq, zerompk::ToMessagePack, zerompk::FromMessagePack)]

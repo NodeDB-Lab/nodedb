@@ -59,9 +59,6 @@ impl Default for SyncOutcome {
 ///
 /// Serialized via zerompk into `Response.payload`; the Control Plane decodes
 /// this to populate the engine-specific wire ack message.
-///
-/// Map-encoded so fields can be added with `#[msgpack(default)]` and older
-/// payloads still decode without a migration.
 #[derive(
     Debug,
     Clone,

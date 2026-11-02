@@ -69,10 +69,9 @@ pub struct ColumnDef {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub generated_deps: Vec<String>,
     /// Schema version at which this column was added. Original columns have
-    /// version 1 (the default). Columns added via `ALTER ADD COLUMN` record
-    /// the schema version after the bump so the reader can build a physical
-    /// sub-schema for tuples written under older versions.
-    #[serde(default = "default_added_at_version")]
+    /// version 1. Columns added via `ALTER ADD COLUMN` record the schema
+    /// version after the bump so the reader can build a physical sub-schema
+    /// for tuples written under earlier schema versions.
     pub added_at_version: u32,
     /// The declared width of an `Int64` column. Storage stays 8 bytes.
     /// `SMALLINT` and `INTEGER` bound every stored value and narrow the wire
@@ -84,10 +83,6 @@ pub struct ColumnDef {
     /// `None` is `DOUBLE PRECISION`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub float_width: Option<FloatWidth>,
-}
-
-fn default_added_at_version() -> u32 {
-    1
 }
 
 impl ColumnDef {

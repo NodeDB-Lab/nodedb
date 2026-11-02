@@ -11,6 +11,7 @@ pub mod image_wal_record;
 pub mod int_width;
 pub mod profile;
 pub mod resolved_dml_wal_record;
+pub mod restored_version;
 pub mod schema;
 pub mod truncate_wal_record;
 pub mod wal_record;
@@ -29,6 +30,7 @@ pub use image_wal_record::{COLUMNAR_IMAGE_KIND, ColumnarImageWalRecord, Columnar
 pub use int_width::IntWidth;
 pub use profile::{ColumnarProfile, DocumentMode};
 pub use resolved_dml_wal_record::{ColumnarResolvedDmlWalRecord, ColumnarResolvedDmlWalRow};
+pub use restored_version::RestoredVersion;
 pub use schema::{
     BITEMPORAL_RESERVED_COLUMNS, BITEMPORAL_SYSTEM_FROM, BITEMPORAL_VALID_FROM,
     BITEMPORAL_VALID_UNTIL, ColumnarSchema, DroppedColumn, SchemaError, SchemaOps, StrictSchema,

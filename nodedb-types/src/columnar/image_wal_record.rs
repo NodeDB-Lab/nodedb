@@ -45,8 +45,6 @@ pub struct ColumnarImageWalRow {
     /// stamp of the tombstone that closes the base key when the write removes
     /// it (a delete, or an update that changes the key). `None` for a
     /// collection that is not bitemporal.
-    #[msgpack(default)]
-    #[serde(default)]
     pub system_from: Option<i64>,
 }
 

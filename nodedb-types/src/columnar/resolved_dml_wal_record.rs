@@ -62,8 +62,6 @@ pub struct ColumnarResolvedDmlWalRecord {
     /// raised above the key's bound row at apply. Replay stamps what the
     /// live write stamped. `None` for a writer that leaves the stamp to the
     /// apply.
-    #[serde(default)]
-    #[msgpack(default)]
     pub system_from: Option<i64>,
 }
 

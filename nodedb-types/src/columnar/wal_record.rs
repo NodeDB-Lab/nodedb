@@ -3,26 +3,14 @@
 //! Columnar WAL record payload.
 //!
 //! The plain-columnar engine carries a per-row global [`Surrogate`] (the
-//! cross-engine `u32` identity). Earlier WAL records encoded only
-//! `(kind, collection, payload, provenance)` as a msgpack **array tuple** and
-//! dropped the surrogates, so on restart replay re-derived them as `None` and
-//! the identity changed across the crash boundary — a durability bug.
+//! cross-engine `u32` identity). [`ColumnarWalRecord`] persists the
+//! surrogates alongside the row bytes. The `surrogates` vector is **parallel
+//! to the rows** encoded in `payload`: `surrogates[i]` is the surrogate for the
+//! i-th row. It is empty when the insert carried no surrogates. Replay then
+//! leaves the rows unbound, as the live insert did.
 //!
-//! [`ColumnarWalRecord`] persists the surrogates alongside the row bytes. The
-//! `surrogates` vector is **parallel to the rows** encoded in `payload`:
-//! `surrogates[i]` is the surrogate for the i-th row. It may be empty (the
-//! sync/CRDT columnar path does not currently carry surrogates), in which case
-//! replay falls back to allocating fresh identity exactly as before.
-//!
-//! ## Backward compatibility
-//!
-//! The new record is encoded as a msgpack **map** (`#[msgpack(map)]`), whereas
-//! legacy on-disk records are msgpack **arrays** (the 4-tuple). The two wire
-//! shapes are mutually distinguishable, so the replay decoder first attempts
-//! [`ColumnarWalRecord`] and falls back to the legacy tuple on failure, treating
-//! the surrogates as empty for old records. The `#[msgpack(default)]` on
-//! `surrogates` additionally lets a future map-encoded record that omits the
-//! field decode with an empty vector.
+//! The record is a msgpack **map** (`#[msgpack(map)]`). It decodes only with
+//! every field present.
 
 use serde::{Deserialize, Serialize};
 
@@ -52,28 +40,24 @@ pub struct ColumnarWalRecord {
     /// MessagePack-encoded rows (`Value::Array([Value::Object, ...])`).
     pub payload: Vec<u8>,
     /// Optional sync idempotency context.
-    #[serde(default)]
-    #[msgpack(default)]
     pub provenance: Option<SyncProvenance>,
     /// Per-row surrogates, parallel to the rows in `payload`. Empty when the
-    /// originating path does not carry cross-engine identity (e.g. sync/CRDT).
-    #[serde(default)]
-    #[msgpack(default)]
+    /// originating insert carries no cross-engine identity.
     pub surrogates: Vec<Surrogate>,
     /// What a row whose primary key already exists does, encoded by the
     /// writer that knows the insert's conflict intent and `ON CONFLICT`
     /// assignments. Empty for a plain insert, which replaces the row. Replay
     /// decides each row the way the live insert did.
-    #[serde(default)]
-    #[msgpack(default)]
     pub conflict_policy: Vec<u8>,
     /// System-time ordinal of the first row of a bitemporal insert. Row `i`
     /// of `payload` stamps `system_from + i`. Replay stamps the ordinals the
     /// live insert stamped. `None` for a collection that is not bitemporal,
     /// and for a writer that leaves the stamp to the apply.
-    #[serde(default)]
-    #[msgpack(default)]
     pub system_from: Option<i64>,
+    /// The stamps of each row of a RESTORE re-issue, index-aligned with the
+    /// rows in `payload`. Replay installs each row at exactly these stamps.
+    /// Empty for every other insert.
+    pub restored_versions: Vec<super::RestoredVersion>,
 }
 
 #[cfg(test)]
@@ -96,6 +80,18 @@ mod tests {
             surrogates: vec![Surrogate::new(10), Surrogate::new(11), Surrogate::new(12)],
             conflict_policy: Vec::new(),
             system_from: Some(1_700_000_000_000_000_007),
+            restored_versions: vec![
+                super::super::RestoredVersion {
+                    sys_from: 5,
+                    sys_to: Some(9),
+                    clone_copy: false,
+                },
+                super::super::RestoredVersion {
+                    sys_from: 9,
+                    sys_to: None,
+                    clone_copy: false,
+                },
+            ],
         };
 
         let bytes = zerompk::to_msgpack_vec(&rec).expect("encode ColumnarWalRecord");
@@ -111,6 +107,7 @@ mod tests {
             vec![Surrogate::new(10), Surrogate::new(11), Surrogate::new(12)]
         );
         assert_eq!(decoded.system_from, Some(1_700_000_000_000_000_007));
+        assert_eq!(decoded.restored_versions, rec.restored_versions);
     }
 
     #[test]
@@ -123,6 +120,7 @@ mod tests {
             surrogates: Vec::new(),
             conflict_policy: Vec::new(),
             system_from: None,
+            restored_versions: Vec::new(),
         };
         let bytes = zerompk::to_msgpack_vec(&rec).expect("encode");
         let decoded: ColumnarWalRecord = zerompk::from_msgpack(&bytes).expect("decode");
@@ -131,23 +129,20 @@ mod tests {
     }
 
     #[test]
-    fn legacy_tuple_does_not_decode_as_map_record() {
-        // A legacy 4-tuple is a msgpack ARRAY; decoding it as the map-shaped
-        // ColumnarWalRecord must fail so the replay decoder can fall back to
-        // the legacy tuple decode.
+    fn a_tuple_does_not_decode_as_a_record() {
         let prov: Option<SyncProvenance> = None;
-        let legacy = zerompk::to_msgpack_vec(&(
+        let tuple = zerompk::to_msgpack_vec(&(
             "columnar".to_string(),
             "metrics".to_string(),
             vec![1u8, 2, 3],
             prov,
         ))
-        .expect("encode legacy tuple");
+        .expect("encode tuple");
 
-        let as_map: Result<ColumnarWalRecord, _> = zerompk::from_msgpack(&legacy);
+        let as_map: Result<ColumnarWalRecord, _> = zerompk::from_msgpack(&tuple);
         assert!(
             as_map.is_err(),
-            "legacy array tuple must not decode as map-shaped ColumnarWalRecord"
+            "an array tuple must not decode as a record"
         );
     }
 }
