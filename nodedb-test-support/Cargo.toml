@@ -40,6 +40,7 @@ serde_json = { workspace = true }
 sonic-rs = { workspace = true }
 zerompk = { workspace = true }
 bytes = { workspace = true }
+crc32c = { workspace = true }
 futures = { workspace = true }
 smallvec = { workspace = true }
 uuid = { workspace = true }

@@ -155,10 +155,10 @@ impl SyncTestClient {
         let push = DeltaPushMsg {
             collection: collection.to_string(),
             document_id: document_id.to_string(),
+            checksum: crc32c::crc32c(&delta),
             delta,
             peer_id,
             mutation_id,
-            checksum: 0,
             device_valid_time_ms: None,
             producer_id: self.producer_id,
             epoch: self.epoch,

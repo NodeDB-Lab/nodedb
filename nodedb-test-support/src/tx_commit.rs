@@ -84,6 +84,8 @@ pub fn commit_plans(
                 sum_targets: redo_sum_targets(&plans),
                 origin: nodedb_physical::physical_plan::RedoOrigin::Commit,
                 calvin: None,
+                reads: Vec::new(),
+                snapshot_ordinal: None,
             }));
             install.wal_lsn = Some(Lsn::new(lsn));
             send_request(core, tx, rx, install)
