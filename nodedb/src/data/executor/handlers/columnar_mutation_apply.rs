@@ -16,7 +16,8 @@ use nodedb_types::columnar::ColumnarSchema;
 
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::columnar_write::{
-    GeometryIndexDelta, RemovedSpatialEntry, row_values_to_object, schema_has_geometry,
+    GeometryIndexDelta, RemovedColumnarRow, RemovedSpatialEntry, row_values_to_object,
+    schema_has_geometry,
 };
 use crate::data::executor::handlers::transaction::undo::UndoEntry;
 use crate::data::executor::handlers::transaction::undo::memory::abort_error;
@@ -42,11 +43,13 @@ pub(in crate::data::executor) enum ColumnarDeleteMode {
     /// stamped as an UPDATE stamps: the Calvin transaction's ordinal, else
     /// `system_from`, else a fresh one, raised above the key's newest stored
     /// version. The closed version stays as history. Any other collection
-    /// marks the row deleted.
+    /// ends the bound row at that ordinal, raised above its `sys_from`.
     Close { system_from: Option<i64> },
-    /// Mark the bound row deleted in every collection. A transaction's
-    /// row-image install removes the base rows it displaced this way.
-    Erase,
+    /// End the bound row in every collection, at the Calvin transaction's
+    /// ordinal, else `system_from`, else a fresh one. The ended row stays as
+    /// history. A transaction's row-image install removes the base rows it
+    /// displaced this way.
+    Erase { system_from: Option<i64> },
 }
 
 /// What [`CoreLoop::apply_columnar_delete_pks`] changed, for the caller's
@@ -128,6 +131,10 @@ impl CoreLoop {
         // system time, raised above its key's bound row, before any row
         // changes.
         let stamped;
+        // A row of a collection that is not bitemporal versions at the
+        // statement's ordinal, which the engine raises per key. A
+        // bitemporal row versions at the `_ts_system` stamped below.
+        let stamp = self.columnar_system_ordinal(system_from, 0);
         let rows = if schema.is_bitemporal() {
             let mut owned = rows.to_vec();
             self.stamp_columnar_update_rows(key, schema, &mut owned, system_from)?;
@@ -201,10 +208,14 @@ impl CoreLoop {
                             flushed_row_surrogate(&self.columnar_flushed_surrogates, key, loc)
                         });
                     let updated = match &closing {
-                        Some(tombstone) => {
-                            engine.update_closing(old_pk, new_row, tombstone, flushed_surrogate)
-                        }
-                        None => engine.update(old_pk, new_row, flushed_surrogate),
+                        Some(tombstone) => engine.update_closing(
+                            old_pk,
+                            new_row,
+                            tombstone,
+                            flushed_surrogate,
+                            stamp,
+                        ),
+                        None => engine.update(old_pk, new_row, flushed_surrogate, stamp),
                     };
                     updated
                         .map(|_| (old_location, new_pk_bytes, displaced_entry))
@@ -240,8 +251,12 @@ impl CoreLoop {
             }
             if has_geometry {
                 if let Some(row) = &pre_image {
+                    let removed = RemovedColumnarRow {
+                        row,
+                        sys_to: self.columnar_row_end(key, old_location),
+                    };
                     spatial_removed.extend(self.remove_columnar_row_spatial_entries(
-                        key.0, key.1, collection, schema, row,
+                        key.0, key.1, collection, schema, removed,
                     ));
                 }
                 let delta = match self.index_columnar_geometry_columns(
@@ -278,7 +293,7 @@ impl CoreLoop {
     }
 
     /// Remove the keys `pks` binds, as `mode` says: `MutationEngine::close`
-    /// or `MutationEngine::delete`. For a collection with geometry columns
+    /// or `MutationEngine::delete`. A removed row stays as history. For a collection with geometry columns
     /// each row's R-tree entries go too. When `undo_log` is `Some`, every
     /// in-memory change this makes is recorded on it.
     ///
@@ -295,11 +310,14 @@ impl CoreLoop {
         mode: ColumnarDeleteMode,
         undo_log: Option<&mut Vec<UndoEntry>>,
     ) -> crate::Result<ColumnarDeleteOutcome> {
-        if let ColumnarDeleteMode::Close { system_from } = mode
-            && schema.is_bitemporal()
-        {
-            return self.apply_columnar_close_pks(key, schema, pks, system_from, undo_log);
-        }
+        let system_from = match mode {
+            ColumnarDeleteMode::Close { system_from } if schema.is_bitemporal() => {
+                return self.apply_columnar_close_pks(key, schema, pks, system_from, undo_log);
+            }
+            ColumnarDeleteMode::Close { system_from }
+            | ColumnarDeleteMode::Erase { system_from } => system_from,
+        };
+        let stamp = self.columnar_system_ordinal(system_from, 0);
         let has_geometry = schema_has_geometry(schema);
         let collection = key.2.as_str();
         let mut outcome = ColumnarDeleteOutcome {
@@ -318,7 +336,7 @@ impl CoreLoop {
                     // binding.
                     let location = engine.pk_index().get(&pk_bytes).copied();
                     engine
-                        .delete(pk)
+                        .delete(pk, stamp)
                         .map(|_| location)
                         .map_err(crate::Error::from)
                 }
@@ -338,9 +356,13 @@ impl CoreLoop {
                 outcome.restored.push((pk_bytes, loc));
             }
             if let Some(row) = &pre_image {
-                spatial_removed.extend(
-                    self.remove_columnar_row_spatial_entries(key.0, key.1, collection, schema, row),
-                );
+                let removed = RemovedColumnarRow {
+                    row,
+                    sys_to: self.columnar_row_end(key, location),
+                };
+                spatial_removed.extend(self.remove_columnar_row_spatial_entries(
+                    key.0, key.1, collection, schema, removed,
+                ));
             }
         }
 
@@ -438,7 +460,11 @@ mod tests {
         );
         let mut engine = nodedb_columnar::MutationEngine::new("m".to_string(), schema());
         engine
-            .insert_with_surrogate(&[Value::Integer(1), Value::Integer(10)], Surrogate::new(42))
+            .insert_with_surrogate(
+                &[Value::Integer(1), Value::Integer(10)],
+                Surrogate::new(42),
+                1,
+            )
             .expect("insert");
         let segment_id = engine.next_segment_id();
         let sidecar = engine.memtable_surrogates().to_vec();
@@ -487,10 +513,10 @@ mod tests {
         );
         let mut engine = nodedb_columnar::MutationEngine::new("m".to_string(), schema());
         engine
-            .insert(&[Value::Integer(1), Value::Integer(10)])
+            .insert(&[Value::Integer(1), Value::Integer(10)], 1)
             .expect("insert");
         engine
-            .insert(&[Value::Integer(2), Value::Integer(20)])
+            .insert(&[Value::Integer(2), Value::Integer(20)], 1)
             .expect("insert");
         core.columnar_engines.insert(key.clone(), engine);
         key

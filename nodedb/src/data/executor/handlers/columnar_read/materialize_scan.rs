@@ -11,15 +11,18 @@
 //! single handler covers all three columnar profiles — Plain, Timeseries, and
 //! Spatial — because they share the same `MutationEngine` storage layer.
 //!
-//! A bitemporal collection emits, per primary key, the version a read at the
-//! cut answers: the newest at or below it, and nothing for a key a delete
-//! closed by then.
+//! Every collection emits, per primary key, the version a read at the cut
+//! answers: the newest at or below it, and nothing for a key a delete
+//! ended by then. Without a cut it emits current rows.
 //!
 //! ## Response payload (msgpack)
 //! ```text
 //! [ next_cursor: bin,
-//!   entries: [ [surrogate: u32, value_bytes: bin], ... ] ]
+//!   entries: [ [surrogate: u32, value_bytes: bin, sys_from: int | nil], ... ] ]
 //! ```
+//! `sys_from` is the system-time ordinal of the row version read. A clone
+//! copy installs at exactly that ordinal. A timeseries row without a stored
+//! `_ts_system` carries nil.
 //! `next_cursor` encodes the last-seen row position as an 8-byte big-endian
 //! `(segment_id: u32, row_index: u32)` pair so the scan can resume across
 //! round-trips. `segment_id == 0` means the row came from the active memtable.
@@ -27,8 +30,12 @@
 
 use nodedb_types::value::Value;
 
+use nodedb_columnar::VersionCut;
+use nodedb_columnar::pk_index::RowLocation;
+
 use crate::bridge::envelope::Response;
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::handlers::columnar_read::flushed_segment::SegmentBlocks;
 use crate::data::executor::task::ExecutionTask;
 
 impl CoreLoop {
@@ -74,21 +81,18 @@ impl CoreLoop {
         };
 
         let schema = engine.schema().clone();
-        let ts_system_idx = schema.ts_system_idx();
-        // `_ts_system` stores a system-time ordinal: the millisecond cutoff
-        // reads at the last ordinal of its millisecond.
-        let system_as_of = system_as_of_ms.map(nodedb_types::ms_to_ordinal_upper);
-        let version_gate = match self.columnar_version_gate(&columnar_key, system_as_of, false) {
-            Ok(gate) => gate,
-            Err(e) => return self.response_error(task, e),
-        };
+        // The millisecond cutoff reads at the last ordinal of its
+        // millisecond. Without one the clone reads current rows.
+        let cut = system_as_of_ms
+            .map(nodedb_types::ms_to_ordinal_upper)
+            .map_or(VersionCut::Current, VersionCut::At);
 
         // Cursor encodes (segment_id: u32 BE, row_index: u32 BE).
         // segment_id == 0 means "memtable" (position within memtable rows).
         // segment_id >= 1 means "flushed segment N" (1-based).
         let (start_segment, start_row) = parse_cursor(cursor);
 
-        let mut entries: Vec<(u32, Vec<u8>)> = Vec::with_capacity(count.min(256));
+        let mut entries: Vec<(u32, Vec<u8>, Option<i64>)> = Vec::with_capacity(count.min(256));
         let mut last_segment: u32 = start_segment;
         let mut last_row: u32 = start_row;
 
@@ -113,18 +117,24 @@ impl CoreLoop {
         'seg_loop: for (seg_idx, seg_bytes) in segments_to_scan.iter().enumerate() {
             let seg_id = (seg_idx as u32) + 1; // 1-based
 
-            // Skip segments already fully consumed by a prior page.
-            if seg_id < start_segment {
+            // Skip segments already fully consumed by a prior page, and
+            // segments whose every row was created after the cut.
+            if seg_id < start_segment || engine.segment_skippable(u64::from(seg_id), cut) {
                 continue;
             }
 
             // A segment that does not read refuses the scan. Skipping it
             // would hand the materializer a clone without its rows.
             let segment = match self.decode_flushed_segment(
-                collection,
+                &columnar_key,
                 u64::from(seg_id),
                 seg_bytes,
                 schema.columns.len(),
+                SegmentBlocks::Visible {
+                    engine,
+                    cut,
+                    predicates: &[],
+                },
                 "columnar_materialize_scan",
             ) {
                 Ok(segment) => segment,
@@ -139,9 +149,6 @@ impl CoreLoop {
                 0
             };
 
-            // Check for delete bitmap.
-            let delete_bm = engine.delete_bitmap(seg_id as u64);
-
             // Resolve the per-row surrogate sidecar for this segment.
             // `columnar_flushed_surrogates` is indexed by `seg_idx` (0-based),
             // in lockstep with `columnar_flushed_segments`.
@@ -151,23 +158,13 @@ impl CoreLoop {
                 .and_then(|segs| segs.get(seg_idx));
 
             for row_idx in first_row_in_seg..row_count {
-                // Skip tombstoned rows.
-                if delete_bm.is_some_and(|bm| bm.is_deleted(row_idx as u32)) {
+                // A row the cut does not see: ended for a current read,
+                // outside its interval for a read at an ordinal. A block the
+                // read did not decode holds no such row.
+                if !segment.holds_row(row_idx)
+                    || !engine.row_visible(u64::from(seg_id), row_idx as u32, cut)
+                {
                     continue;
-                }
-
-                // Bitemporal system-time filter.
-                if let (Some(ts_idx), Some(cutoff)) = (ts_system_idx, system_as_of) {
-                    let ts_val =
-                        match segment.cell(ts_idx, row_idx, &schema.columns[ts_idx].column_type) {
-                            Ok(v) => v,
-                            Err(e) => return self.response_error(task, e),
-                        };
-                    if let Value::Integer(ts) = ts_val
-                        && ts > cutoff
-                    {
-                        continue;
-                    }
                 }
 
                 // Build a Value::Object for this row.
@@ -175,9 +172,6 @@ impl CoreLoop {
                     Ok(row) => row,
                     Err(e) => return self.response_error(task, e),
                 };
-                if version_gate.as_ref().is_some_and(|gate| !gate.admits(&row)) {
-                    continue;
-                }
                 let map: std::collections::HashMap<String, Value> = schema
                     .columns
                     .iter()
@@ -206,7 +200,11 @@ impl CoreLoop {
                     .map(|s| s.as_u32())
                     .unwrap_or_else(|| encode_seg_row_as_u32(seg_id, row_idx as u32));
 
-                entries.push((surrogate_u32, value_bytes));
+                entries.push((
+                    surrogate_u32,
+                    value_bytes,
+                    Some(row_sys_from(engine, u64::from(seg_id), row_idx as u32)),
+                ));
                 last_segment = seg_id;
                 last_row = (row_idx + 1) as u32; // exclusive next position
 
@@ -229,28 +227,21 @@ impl CoreLoop {
                 0
             };
 
-            let rows_with_surrogates: Vec<(Option<nodedb_types::Surrogate>, Vec<Value>)> =
+            // Rows the cut sees, each with its physical memtable index, so
+            // the cursor resumes at the next physical row.
+            let rows_with_surrogates: Vec<(u32, Option<nodedb_types::Surrogate>, Vec<Value>)> =
                 match engine
-                    .scan_memtable_rows_with_surrogates()
-                    .skip(memtable_start_row)
+                    .scan_memtable_versions(cut)
+                    .filter(|scanned| {
+                        !matches!(scanned, Ok((idx, _, _)) if (*idx as usize) < memtable_start_row)
+                    })
                     .collect::<Result<_, _>>()
                 {
                     Ok(rows) => rows,
                     Err(e) => return self.response_error(task, crate::Error::from(e)),
                 };
 
-            for (mt_idx, (row_surrogate, row)) in rows_with_surrogates.iter().enumerate() {
-                // Bitemporal system-time filter.
-                if let (Some(ts_idx), Some(cutoff)) = (ts_system_idx, system_as_of)
-                    && let Some(Value::Integer(ts)) = row.get(ts_idx)
-                    && *ts > cutoff
-                {
-                    continue;
-                }
-                if version_gate.as_ref().is_some_and(|gate| !gate.admits(row)) {
-                    continue;
-                }
-
+            for (mt_idx, row_surrogate, row) in rows_with_surrogates.iter() {
                 // Build Value::Object.
                 let mut map = std::collections::HashMap::new();
                 for (col_idx, col_def) in schema.columns.iter().enumerate() {
@@ -263,14 +254,18 @@ impl CoreLoop {
                     Err(e) => return self.response_error(task, e),
                 };
 
-                let abs_row = memtable_start_row + mt_idx;
+                let abs_row = *mt_idx as usize;
                 let surrogate_u32: u32 = row_surrogate.map(|s| s.as_u32()).unwrap_or_else(|| {
                     // No recorded surrogate — use a hash-based synthetic value.
                     // segment_id=0 (memtable), row position in lower 24 bits.
                     (abs_row as u32) | 0x8000_0000
                 });
 
-                entries.push((surrogate_u32, value_bytes));
+                entries.push((
+                    surrogate_u32,
+                    value_bytes,
+                    Some(row_sys_from(engine, engine.memtable_segment_id(), *mt_idx)),
+                ));
                 last_segment = 0;
                 last_row = (abs_row + 1) as u32;
 
@@ -291,6 +286,18 @@ impl CoreLoop {
     }
 }
 
+/// The system-time ordinal of the row at `row` of segment `segment_id`. A
+/// row with no recorded stamp reads at every cut, as `row_visible` judges
+/// it, so it carries the lowest ordinal.
+fn row_sys_from(engine: &nodedb_columnar::MutationEngine, segment_id: u64, row: u32) -> i64 {
+    engine
+        .sys_from_at(RowLocation {
+            segment_id,
+            row_index: row,
+        })
+        .unwrap_or(i64::MIN)
+}
+
 /// Encode one materialized row as MessagePack value bytes, the format the
 /// Insert handler reads.
 fn encode_row(row: &Value) -> crate::Result<Vec<u8>> {
@@ -302,11 +309,10 @@ fn encode_row(row: &Value) -> crate::Result<Vec<u8>> {
 
 /// Encode `(seg_id, row_idx)` as a compact 32-bit tag.
 ///
-/// This is the **fallback** used only for flushed-segment rows that have no
-/// recorded surrogate in `columnar_flushed_surrogates` (e.g. segments restored
-/// from a backup predating the surrogate sidecar). Current data carries real
-/// per-row surrogates that match the tombstone/copyup write side exactly; this
-/// path is exercised only for legacy-restored segments.
+/// This is the tag for flushed-segment rows that have no recorded surrogate
+/// in `columnar_flushed_surrogates`: rows of an insert that carried none.
+/// Every other row carries a real surrogate that matches the
+/// tombstone/copyup write side exactly.
 ///
 /// Packs `seg_id` in the upper 16 bits and `row_idx` in the lower 16 bits.
 pub(super) fn encode_seg_row_as_u32(seg_id: u32, row_idx: u32) -> u32 {
@@ -340,20 +346,24 @@ pub(super) fn encode_cursor(segment_id: u32, row_index: u32) -> Vec<u8> {
 pub(super) fn build_response(
     core: &CoreLoop,
     task: &ExecutionTask,
-    entries: Vec<(u32, Vec<u8>)>,
+    entries: Vec<(u32, Vec<u8>, Option<i64>)>,
     next_cursor: Vec<u8>,
 ) -> Response {
     let mut payload = Vec::with_capacity(
-        entries.iter().map(|(_, v)| v.len() + 8).sum::<usize>() + next_cursor.len() + 16,
+        entries.iter().map(|(_, v, _)| v.len() + 17).sum::<usize>() + next_cursor.len() + 16,
     );
 
     nodedb_query::msgpack_scan::write_array_header(&mut payload, 2);
     write_bin(&mut payload, &next_cursor);
     nodedb_query::msgpack_scan::write_array_header(&mut payload, entries.len());
-    for (surrogate, value_bytes) in &entries {
-        nodedb_query::msgpack_scan::write_array_header(&mut payload, 2);
+    for (surrogate, value_bytes, sys_from) in &entries {
+        nodedb_query::msgpack_scan::write_array_header(&mut payload, 3);
         write_u32(&mut payload, *surrogate);
         write_bin(&mut payload, value_bytes);
+        match sys_from {
+            Some(sys_from) => nodedb_query::msgpack_scan::write_i64(&mut payload, *sys_from),
+            None => nodedb_query::msgpack_scan::write_null(&mut payload),
+        }
     }
 
     if entries.is_empty() && next_cursor.is_empty() {
@@ -450,7 +460,7 @@ mod tests {
             wal_lsn: None,
             resolved_now_ms: None,
             commit_hlc: None,
-            entry_version: None,
+            system_ordinal: None,
             admission: crate::bridge::envelope::Admission::Exempt(
                 crate::bridge::envelope::ExemptReason::Read,
             ),
@@ -472,7 +482,7 @@ mod tests {
         let mut engine = MutationEngine::new(collection.to_string(), schema());
         for (id, val, surr) in rows {
             engine
-                .insert_with_surrogate(&[Value::Integer(*id), Value::Integer(*val)], *surr)
+                .insert_with_surrogate(&[Value::Integer(*id), Value::Integer(*val)], *surr, *id)
                 .expect("insert_with_surrogate");
         }
 
@@ -524,10 +534,15 @@ mod tests {
         for _ in 0..entry_count {
             let (pair_len, mut pair_off) =
                 msgpack_scan::array_header(payload, entry_off).expect("pair array");
-            assert_eq!(pair_len, 2);
+            assert_eq!(pair_len, 3);
             let surrogate =
                 msgpack_scan::read_u32_advance(payload, &mut pair_off).expect("surrogate u32");
             let _value = msgpack_scan::read_bin_advance(payload, &mut pair_off).expect("value bin");
+            assert!(
+                msgpack_scan::read_i64(payload, pair_off).is_some(),
+                "a columnar row carries its version stamp"
+            );
+            pair_off = msgpack_scan::skip_value(payload, pair_off).expect("stamp");
             surrogates.push(surrogate);
             entry_off = pair_off;
         }
@@ -601,6 +616,7 @@ mod tests {
                 .insert_with_surrogate(
                     &[Value::Integer(id), Value::Integer(id * 100)],
                     Surrogate::new(surr),
+                    1,
                 )
                 .expect("memtable insert");
         }

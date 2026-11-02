@@ -4,8 +4,7 @@
 //! resolution, and the row-level `MutationEngine` insert call.
 
 use nodedb_columnar::{BatchConflict, BatchRow};
-use nodedb_types::columnar::ColumnarSchema;
-use nodedb_types::columnar::schema::{TS_SYSTEM, TS_VALID_FROM, TS_VALID_UNTIL};
+use nodedb_types::columnar::{ColumnarSchema, RestoredVersion};
 use nodedb_types::surrogate::Surrogate;
 use nodedb_types::value::Value;
 
@@ -17,6 +16,7 @@ use crate::data::executor::task::ExecutionTask;
 use nodedb_physical::physical_plan::ColumnarInsertIntent;
 use nodedb_physical::physical_plan::document::UpdateValue;
 
+use super::restore_ingest::schema_row_values;
 use super::schema::{ndb_field_to_value, row_values_to_object};
 use super::system_stamp::RowStampInput;
 
@@ -32,6 +32,10 @@ pub(in crate::data::executor) struct RowIngestParams<'a> {
     pub on_conflict_updates: &'a [(String, UpdateValue)],
     pub surrogates: &'a [Surrogate],
     pub ndb_rows: &'a [nodedb_types::Value],
+    /// The stamps of each row of a RESTORE re-issue, index-aligned with
+    /// `ndb_rows` (`ColumnarOp::Insert::restored_versions`). Empty for every
+    /// other insert.
+    pub restored_versions: &'a [RestoredVersion],
     /// Compiled row-level-security WRITE predicate carried by the plan. A real
     /// predicate only for the ON CONFLICT DO UPDATE shape, whose merged
     /// post-image the Control Plane could not see; a plain insert's rows were
@@ -70,24 +74,34 @@ impl CoreLoop {
     /// stage applies nothing. Returns the accepted row count (and, on
     /// request, the stored post-images), or `Err(Response)` on the first
     /// error.
+    ///
+    /// A RESTORE re-issue installs each row at its carried stamps instead
+    /// (`install_restored_columnar_rows`).
     pub(in crate::data::executor) fn insert_columnar_rows(
         &mut self,
         task: &ExecutionTask,
         params: RowIngestParams<'_>,
     ) -> Result<RowIngestOutcome, Response> {
-        let resolved = self.resolve_columnar_rows(task, &params)?;
+        let intent = match params.intent {
+            ColumnarInsertIntent::Restore => {
+                return self.install_restored_columnar_rows(task, &params);
+            }
+            ColumnarInsertIntent::Insert => StampedIntent::Insert,
+            ColumnarInsertIntent::InsertIfAbsent => StampedIntent::InsertIfAbsent,
+            ColumnarInsertIntent::Put => StampedIntent::Put,
+            ColumnarInsertIntent::InsertUnique => StampedIntent::InsertUnique,
+        };
+        let resolved = self.resolve_columnar_rows(task, &params, intent)?;
         let RowIngestParams {
             engine_key,
-            intent,
             collect_stored_rows,
             ..
         } = params;
         let conflict = match intent {
-            ColumnarInsertIntent::InsertIfAbsent => BatchConflict::Skip,
-            ColumnarInsertIntent::InsertUnique
-            | ColumnarInsertIntent::Insert
-            | ColumnarInsertIntent::Put
-            | ColumnarInsertIntent::Restore => BatchConflict::Upsert,
+            StampedIntent::InsertIfAbsent => BatchConflict::Skip,
+            StampedIntent::InsertUnique | StampedIntent::Insert | StampedIntent::Put => {
+                BatchConflict::Upsert
+            }
         };
 
         let Some(engine) = self.columnar_engines.get_mut(engine_key) else {
@@ -101,6 +115,7 @@ impl CoreLoop {
         let batch = resolved.iter().map(|row| BatchRow {
             values: &row.values,
             surrogate: row.surrogate,
+            stamp: row.stamp,
         });
         let results = match engine.insert_batch(batch, conflict) {
             Ok(results) => results,
@@ -140,13 +155,13 @@ impl CoreLoop {
         &self,
         task: &ExecutionTask,
         params: &RowIngestParams<'_>,
+        intent: StampedIntent,
     ) -> Result<Vec<ResolvedRow>, Response> {
         let RowIngestParams {
             engine_key,
             schema,
             bitemporal,
             system_from,
-            intent,
             on_conflict_updates,
             surrogates,
             ndb_rows,
@@ -154,8 +169,8 @@ impl CoreLoop {
             ..
         } = *params;
         let mut resolved: Vec<ResolvedRow> = Vec::with_capacity(ndb_rows.len());
-        let merging = intent == ColumnarInsertIntent::Put && !on_conflict_updates.is_empty();
-        let unique = intent == ColumnarInsertIntent::InsertUnique;
+        let merging = intent == StampedIntent::Put && !on_conflict_updates.is_empty();
+        let unique = intent == StampedIntent::InsertUnique;
         // Primary key → values of the latest earlier row of this batch. Kept
         // only for the intents whose checks read it: a merge reads the prior
         // row, and a unique insert reads the key alone.
@@ -178,42 +193,24 @@ impl CoreLoop {
                 ));
             };
 
-            // Build Value slice in schema order. For bitemporal
-            // collections, the three reserved columns are auto-populated
-            // when absent from the user payload: `_ts_system` is always
-            // stamped with a system-time ordinal (clients cannot forge
-            // system time; only a restore keeps the stamp its row carries),
-            // `_ts_valid_from` / `_ts_valid_until` default to the open
-            // interval `[i64::MIN, i64::MAX)` if missing.
-            let mut values: Vec<Value> = match schema
-                .columns
-                .iter()
-                .map(|col| match col.name.as_str() {
-                    TS_SYSTEM if bitemporal => Ok(Value::Integer(0)),
-                    TS_VALID_FROM if bitemporal => Ok(match obj.get(TS_VALID_FROM) {
-                        Some(Value::Integer(i)) => Value::Integer(*i),
-                        _ => Value::Integer(i64::MIN),
-                    }),
-                    TS_VALID_UNTIL if bitemporal => Ok(match obj.get(TS_VALID_UNTIL) {
-                        Some(Value::Integer(i)) => Value::Integer(*i),
-                        _ => Value::Integer(i64::MAX),
-                    }),
-                    _ => ndb_field_to_value(obj.get(&col.name), col),
-                })
-                .collect::<Result<Vec<Value>, crate::Error>>()
-            {
+            // Build Value slice in schema order. A bitemporal row's
+            // `_ts_system` is stamped below with a system-time ordinal:
+            // clients cannot forge system time.
+            let mut values: Vec<Value> = match schema_row_values(schema, bitemporal, obj) {
                 Ok(v) => v,
                 Err(e) => return Err(self.response_error(task, ErrorCode::from(e))),
             };
-            if bitemporal {
+            // Every row's version takes a system-time ordinal. A bitemporal
+            // row stamps it into `_ts_system` by the bitemporal rule. Any
+            // other row takes its run's ordinal, which the engine raises per
+            // key.
+            let stamp = if bitemporal {
                 let stamp = match self.columnar_row_stamp(
                     RowStampInput {
                         engine_key,
                         schema,
-                        intent,
                         system_from,
                         row_idx,
-                        incoming: obj,
                         values: &values,
                     },
                     &mut batch_stamps,
@@ -224,7 +221,10 @@ impl CoreLoop {
                 if let Some(slot) = schema.ts_system_idx().and_then(|idx| values.get_mut(idx)) {
                     *slot = Value::Integer(stamp);
                 }
-            }
+                stamp
+            } else {
+                self.columnar_system_ordinal(system_from, row_idx)
+            };
 
             let pk_bytes = if merging || unique {
                 let engine = match self.columnar_engines.get(engine_key) {
@@ -253,7 +253,7 @@ impl CoreLoop {
             // Resolve the actual row to write: merged for ON CONFLICT DO
             // UPDATE, plain otherwise.
             let final_values: Vec<Value> = match intent {
-                ColumnarInsertIntent::Put if merging => {
+                StampedIntent::Put if merging => {
                     // A prior row that does not read refuses the statement:
                     // merging against "no prior row" would insert a
                     // duplicate key.
@@ -281,11 +281,10 @@ impl CoreLoop {
                         }
                     }
                 }
-                ColumnarInsertIntent::Put
-                | ColumnarInsertIntent::Insert
-                | ColumnarInsertIntent::InsertIfAbsent
-                | ColumnarInsertIntent::InsertUnique
-                | ColumnarInsertIntent::Restore => values,
+                StampedIntent::Put
+                | StampedIntent::Insert
+                | StampedIntent::InsertIfAbsent
+                | StampedIntent::InsertUnique => values,
             };
 
             // The row that will actually exist afterwards is decided here, not
@@ -342,6 +341,7 @@ impl CoreLoop {
             resolved.push(ResolvedRow {
                 values: final_values,
                 surrogate: surrogates.get(row_idx).copied(),
+                stamp,
             });
         }
         Ok(resolved)
@@ -403,10 +403,23 @@ pub(in crate::data::executor) fn keep_fresh_system_stamp(
     }
 }
 
+/// The intent of a batch the stamp rule stamps: every
+/// [`ColumnarInsertIntent`] but a RESTORE re-issue, which installs each row
+/// at its carried stamps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StampedIntent {
+    Insert,
+    InsertIfAbsent,
+    Put,
+    InsertUnique,
+}
+
 /// One batch row resolved to the values it writes.
 struct ResolvedRow {
     values: Vec<Value>,
     surrogate: Option<Surrogate>,
+    /// The system-time ordinal the row's version starts from.
+    stamp: i64,
 }
 
 #[cfg(test)]
@@ -475,6 +488,7 @@ mod tests {
                 schema_bytes: &schema,
                 provenance: None,
                 system_from: None,
+                restored_versions: &[],
                 rls_write_check: &RlsWriteCheck::already_decided_elsewhere(),
                 returning: None,
                 rls_filters: &[],
@@ -567,6 +581,7 @@ mod tests {
                 schema_bytes: &schema,
                 provenance: None,
                 system_from: None,
+                restored_versions: &[],
                 rls_write_check: &RlsWriteCheck::already_decided_elsewhere(),
                 returning: None,
                 rls_filters: &[],

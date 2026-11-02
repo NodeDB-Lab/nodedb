@@ -28,34 +28,17 @@ impl CoreLoop {
     ) -> Response {
         info!(core = self.core_id, tenant_id, "starting tenant purge");
 
-        // 1. Sparse engine: documents + secondary indexes (persistent, redb).
-        // A tenant lives in exactly one database, so the purge is scoped by
-        // (database_id, tenant_id).
+        // 1. Sparse engine: every document version and index entry version of
+        // every collection of this tenant (persistent, redb). A tenant lives
+        // in exactly one database, so the purge is scoped by
+        // (database_id, tenant_id). A tenant re-created under the same id
+        // cannot resurrect dropped rows.
         let database_id = task.request.database_id.as_u64();
-        let (mut docs, mut idxs) = match self.sparse.delete_all_for_tenant(database_id, tenant_id) {
-            Ok(counts) => counts,
-            Err(e) => {
-                warn!(tenant_id, error = %e, "sparse purge failed");
-                return self.response_error(
-                    task,
-                    ErrorCode::Internal {
-                        detail: format!("sparse purge: {e}"),
-                    },
-                );
-            }
-        };
-
-        // 1b. Sparse engine: bitemporal versioned document + index history for
-        // every collection of this tenant. Cleared unconditionally so a tenant
-        // re-created under the same id cannot resurrect dropped versioned rows.
-        match self
+        let (docs, idxs) = match self
             .sparse
             .delete_all_versioned_for_tenant(database_id, tenant_id)
         {
-            Ok((v_docs, v_idxs)) => {
-                docs += v_docs;
-                idxs += v_idxs;
-            }
+            Ok(counts) => counts,
             Err(e) => {
                 warn!(tenant_id, error = %e, "sparse versioned purge failed");
                 return self.response_error(
@@ -65,7 +48,7 @@ impl CoreLoop {
                     },
                 );
             }
-        }
+        };
 
         // 2. Graph engine: edges in redb. DB-scoped — a tenant's graph in
         // database A must not be purged by a purge in database B.
@@ -132,6 +115,8 @@ impl CoreLoop {
             self.columnar_memtables.retain(|(_, t, _), _| *t != tid_key);
             self.columnar_memtable_mem
                 .retain(|(_, t, _), _| *t != tid_key);
+            // The tenant's document versions are gone, so their charge goes.
+            self.document_history_mem.retain(|(_, t), _| *t != tid_key);
             self.ts_registries.retain(|(_, t, _), _| *t != tid_key);
             self.ts_replay.stamps.retain(|(_, t, _), _| *t != tid_key);
             self.ts_last_value_caches
@@ -205,6 +190,8 @@ impl CoreLoop {
         // Lockstep: drop the surrogate sidecar for the same keys.
         self.columnar_flushed_surrogates
             .retain(|(_, t, _), _| *t != tid_key);
+        // The purged collections' row-version history releases its charge.
+        self.recharge_all_columnar_history();
 
         info!(
             core = self.core_id,

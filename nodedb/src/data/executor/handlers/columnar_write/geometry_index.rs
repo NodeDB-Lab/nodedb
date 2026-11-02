@@ -29,7 +29,7 @@ pub(in crate::data::executor) struct GeometryIndexDelta {
 /// of another type index nothing: the memtable refuses that type. A form
 /// that does not parse, or an SRID `crs` does not define, fails, so an
 /// index never misses a stored geometry.
-fn cell_geometry(
+pub(in crate::data::executor) fn cell_geometry(
     value: &Value,
     crs: &nodedb_crs::CrsContext<'_>,
 ) -> crate::Result<Option<SridGeometry>> {
@@ -44,10 +44,10 @@ impl CoreLoop {
     /// Check that every geometry cell of `ndb_rows` can join its column's
     /// R-tree. Changes nothing.
     ///
-    /// A non-empty index admits only its own SRID. An empty or absent index
-    /// takes the SRID of the batch's first geometry, and every later
-    /// geometry of the column must match it. The first refusal returns
-    /// `Error::MixedSrid`.
+    /// An index holding a live or an ended entry admits only its own SRID.
+    /// Any other index takes the SRID of the batch's first geometry, and
+    /// every later geometry of the column must match it. The first refusal
+    /// returns `Error::MixedSrid`.
     pub(in crate::data::executor) fn check_columnar_geometry_srids(
         &self,
         task: &ExecutionTask,
@@ -67,7 +67,7 @@ impl CoreLoop {
             let mut fixed: Option<Srid> = self
                 .spatial_indexes
                 .get(&index_key)
-                .filter(|rtree| !rtree.is_empty())
+                .filter(|rtree| !rtree.holds_nothing())
                 .map(|rtree| rtree.srid());
             for row in ndb_rows {
                 let Value::Object(obj) = row else {
@@ -152,12 +152,17 @@ impl CoreLoop {
             // document twice. Mirrors `apply_point_put_spatial`'s use of
             // the same helper. The removed tuples are reported so a
             // transactional caller can put them back on rollback.
+            // The entry starts where the row's stored version starts, and a
+            // prior entry of the `id` ends there.
+            let sys_from =
+                self.columnar_row_start(&(db_id, tid, collection.to_string()), schema, obj);
             let spatial_entry_id = SpatialEntryId::from_user_id(&doc_id);
             delta.removed.extend(self.remove_document_spatial_indexes(
                 db_id.as_u64(),
                 tid.as_u64(),
                 collection,
                 spatial_entry_id,
+                sys_from,
             ));
             for &col_idx in &geom_cols {
                 let col_def = &schema.columns[col_idx];
@@ -192,7 +197,10 @@ impl CoreLoop {
                         index_srid: m.index.code(),
                         row_srid: m.entry.code(),
                     })?;
-                rtree.insert(crate::engine::spatial::RTreeEntry { id: entry_id, bbox });
+                rtree.insert_at(
+                    crate::engine::spatial::RTreeEntry { id: entry_id, bbox },
+                    sys_from,
+                );
                 self.spatial_doc_map.insert(
                     (
                         db_id,
@@ -209,6 +217,33 @@ impl CoreLoop {
         Ok(delta)
     }
 
+    /// The system-time ordinal the stored version of row `obj` of columnar
+    /// engine `key` starts at: the version its primary key binds.
+    /// [`nodedb_spatial::rtree::UNVERSIONED`] when the engine holds no such
+    /// version or no stamp for it: its R-tree entry is then visible at every
+    /// cut.
+    fn columnar_row_start(
+        &self,
+        key: &(nodedb_types::DatabaseId, crate::types::TenantId, String),
+        schema: &ColumnarSchema,
+        obj: &std::collections::HashMap<String, Value>,
+    ) -> i64 {
+        let Some(engine) = self.columnar_engines.get(key) else {
+            return nodedb_spatial::rtree::UNVERSIONED;
+        };
+        let values: Vec<Value> = schema
+            .columns
+            .iter()
+            .map(|c| obj.get(&c.name).cloned().unwrap_or(Value::Null))
+            .collect();
+        engine
+            .encode_pk_from_row(&values)
+            .ok()
+            .and_then(|pk| engine.pk_index().get(&pk).copied())
+            .and_then(|loc| engine.sys_from_at(loc))
+            .unwrap_or(nodedb_spatial::rtree::UNVERSIONED)
+    }
+
     /// Record a geometry-index pass on `undo_log` so a rollback reverses
     /// it: the removed entries re-insert, the inserted entries delete. The
     /// entries are pushed removed-first, so the reverse-order rollback
@@ -218,14 +253,8 @@ impl CoreLoop {
         delta: GeometryIndexDelta,
     ) {
         use crate::data::executor::handlers::transaction::undo::UndoEntry;
-        for (key, entry_id, bbox, document_id, srid) in delta.removed {
-            undo_log.push(UndoEntry::SpatialDelete {
-                key,
-                entry_id,
-                bbox,
-                document_id,
-                srid,
-            });
+        for removed in delta.removed {
+            undo_log.push(removed.into_undo());
         }
         for (key, entry_id) in delta.inserted {
             undo_log.push(UndoEntry::SpatialInsert { key, entry_id });

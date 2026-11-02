@@ -3,6 +3,7 @@
 //! Schema inference, field coercion, bitemporal column injection, and
 //! schema-ordered row <-> object conversion.
 
+use nodedb_types::DEFAULT_IDENTITY_COLUMN;
 use nodedb_types::columnar::schema::{TS_SYSTEM, TS_VALID_FROM, TS_VALID_UNTIL};
 use nodedb_types::columnar::{ColumnDef, ColumnType, ColumnarSchema};
 use nodedb_types::value::Value;
@@ -157,12 +158,21 @@ pub(in crate::data::executor) fn coerce_columnar_row(
 /// before the boot-time schema seed. Types come from the row's own values;
 /// a column's *name* says nothing about its type, so a column called
 /// `timestamp` holding a string is a string column.
+///
+/// The schema always carries a primary key: the row's `id` column, else a
+/// required `id` String column. A collection with no catalog schema still
+/// carries the planner's `id` identity column in every row, so a row with no
+/// `id` is refused at insert rather than stored in an engine with no key.
 pub(in crate::data::executor) fn infer_schema_from_value(row: &Value) -> ColumnarSchema {
     let obj = match row {
         Value::Object(m) => m,
         _ => {
             return ColumnarSchema {
-                columns: vec![ColumnDef::required("value", ColumnType::Float64)],
+                columns: vec![
+                    ColumnDef::required(DEFAULT_IDENTITY_COLUMN, ColumnType::String)
+                        .with_primary_key(),
+                    ColumnDef::nullable("value", ColumnType::Float64),
+                ],
                 version: 1,
             };
         }
@@ -189,13 +199,16 @@ pub(in crate::data::executor) fn infer_schema_from_value(row: &Value) -> Columna
         }
     }
 
-    if columns.is_empty() {
-        columns.push(ColumnDef::required("value", ColumnType::Float64));
+    if !columns.iter().any(|column| column.primary_key) {
+        columns.insert(
+            0,
+            ColumnDef::required(DEFAULT_IDENTITY_COLUMN, ColumnType::String).with_primary_key(),
+        );
     }
 
-    // Valid by construction: the names are the keys of one map, the key
-    // column is required, the list is never empty, and no inferred type is a
-    // vector.
+    // Valid by construction: the names are the keys of one map, no key is
+    // `id` when the synthesized key joins, the key column is required, and no
+    // inferred type is a vector.
     ColumnarSchema {
         columns,
         version: 1,
@@ -394,6 +407,31 @@ mod tests {
         assert_eq!(column_type(&schema, "emb"), ColumnType::Json);
         assert_eq!(column_type(&schema, "meta"), ColumnType::Json);
         assert_eq!(column_type(&schema, "raw"), ColumnType::Bytes);
+    }
+
+    /// A row with no `id` still infers a keyed schema: a required `id`
+    /// String key joins first, so no engine is ever keyless.
+    #[test]
+    fn a_row_without_id_infers_a_synthesized_key() {
+        let row = Value::Object(HashMap::from([(
+            "name".to_string(),
+            Value::String("x".into()),
+        )]));
+        let schema = infer_schema_from_value(&row);
+        let key: Vec<&str> = schema
+            .columns
+            .iter()
+            .filter(|c| c.primary_key)
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(key, vec![DEFAULT_IDENTITY_COLUMN]);
+        assert!(ColumnarSchema::new(schema.columns.clone()).is_ok());
+        assert!(
+            infer_schema_from_value(&Value::Integer(1))
+                .columns
+                .iter()
+                .any(|c| c.primary_key)
+        );
     }
 
     /// A base schema that already lists the reserved temporal columns keeps

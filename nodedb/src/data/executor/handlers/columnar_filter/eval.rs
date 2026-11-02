@@ -79,7 +79,7 @@ pub(crate) fn eval_filters_sparse(
                     }
                 }
             }
-            ColumnType::Symbol => {
+            ColumnType::Symbol | ColumnType::Text => {
                 eval_symbol_filter(src, col_pos, col_data, f, indices, &mut mask)?;
             }
         }
@@ -229,7 +229,7 @@ pub(crate) fn eval_filters_bitmask(
                     _ => return None,
                 }
             }
-            ColumnType::Symbol => {
+            ColumnType::Symbol | ColumnType::Text => {
                 let filter_str = f.value.as_str()?;
                 let dict = src.symbol_dict(col_pos)?;
                 let ColumnData::Symbol(ids) = col_data else {

@@ -25,32 +25,11 @@ impl CoreLoop {
         );
         let mut snapshot = TenantDataSnapshot::default();
 
-        // 1. Sparse engine: documents + indexes. Keys carry the leading
-        // `{database_id}:` component; restore re-inserts them verbatim.
+        // 1. Sparse engine: every document version and every index entry
+        // version, history and tombstones included. Keys carry the leading
+        // `{database_id}:` component; restore re-inserts them verbatim, so
+        // every version keeps its system time.
         let database_id = task.request.database_id.as_u64();
-        match self.sparse.scan_all_for_tenant(database_id, tenant_id) {
-            Ok(docs) => snapshot.documents = docs,
-            Err(e) => {
-                return self.response_error(
-                    task,
-                    ErrorCode::Internal {
-                        detail: format!("snapshot: sparse doc scan failed: {e}"),
-                    },
-                );
-            }
-        }
-        match self.sparse.scan_indexes_for_tenant(database_id, tenant_id) {
-            Ok(idx) => snapshot.indexes = idx,
-            Err(e) => {
-                return self.response_error(
-                    task,
-                    ErrorCode::Internal {
-                        detail: format!("snapshot: sparse index scan failed: {e}"),
-                    },
-                );
-            }
-        }
-        // A `bitemporal=true` collection writes only the versioned tables.
         match self
             .sparse
             .scan_versioned_documents_for_tenant(database_id, tenant_id)
@@ -183,8 +162,6 @@ impl CoreLoop {
 
         info!(
             tenant_id,
-            documents = snapshot.documents.len(),
-            indexes = snapshot.indexes.len(),
             documents_versioned = snapshot.documents_versioned.len(),
             indexes_versioned = snapshot.indexes_versioned.len(),
             edges = snapshot.edges.len(),
@@ -368,8 +345,8 @@ impl CoreLoop {
                 .unwrap_or(&[]);
 
             // Cross-engine surrogate sidecar, keyed identically to the segment
-            // bytes. Absent for collections that never flushed surrogate-bearing
-            // rows; defaults to empty so the snapshot still round-trips.
+            // bytes and held in lockstep with them. Both are absent for a
+            // collection that never flushed.
             let flushed_surrogates: &[Vec<Option<nodedb_types::Surrogate>>] = self
                 .columnar_flushed_surrogates
                 .get(&(*eng_db, *eng_tid, collection.clone()))

@@ -12,12 +12,15 @@ pub mod geometry_index;
 pub mod geometry_remove;
 pub mod insert;
 pub mod read_prior;
+pub mod restore_ingest;
 pub mod row_ingest;
 pub mod schema;
 pub mod system_stamp;
 
 pub(in crate::data::executor) use geometry_index::GeometryIndexDelta;
-pub(in crate::data::executor) use geometry_remove::{RemovedSpatialEntry, schema_has_geometry};
+pub(in crate::data::executor) use geometry_remove::{
+    RemovedColumnarRow, RemovedSpatialEntry, schema_has_geometry,
+};
 pub(in crate::data::executor) use insert::ColumnarInsertParams;
 pub(in crate::data::executor) use row_ingest::keep_fresh_system_stamp;
 pub(in crate::data::executor) use schema::{

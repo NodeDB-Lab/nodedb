@@ -172,19 +172,6 @@ impl CoreLoop {
             }
         }
 
-        // Aside partition directories a committed timeseries truncate could
-        // not remove at finalize: retry on every maintenance call.
-        if !self.ts_truncate_backlog.is_empty() {
-            let pending = self.retry_ts_truncate_backlog();
-            if pending > 0 {
-                tracing::warn!(
-                    core = self.core_id,
-                    pending,
-                    "timeseries truncate backlog still pending after retry"
-                );
-            }
-        }
-
         // Continuous aggregates: load images, backfill, and fold pending
         // refresh cuts. Bounded per call by the fold budget.
         {
@@ -213,30 +200,22 @@ impl CoreLoop {
             }
         }
 
-        // KV expiry wheel tick: process expired keys on every maintenance call.
-        // Bounded by the per-tick reap budget internally — safe for the reactor.
-        // Expired keys are emitted as structured log events for CDC visibility.
+        // KV expiry wheel tick: hand every expired entry to the due set.
+        // Bounded by the per-tick budget internally — safe for the reactor.
+        // The core reaps nothing here: the data group's leader proposes each
+        // reap through write admission, and every replica applies it at the
+        // same log position (`engine::kv::engine::expiry_due`).
         {
             let now_ms = crate::engine::kv::current_ms();
-            let expired_keys = self.kv_engine.tick_expiry(now_ms);
-            if !expired_keys.is_empty() {
+            let moved = self.kv_engine.collect_due_expiries(now_ms);
+            if moved > 0 {
                 tracing::debug!(
                     core = self.core_id,
-                    reaped = expired_keys.len(),
+                    moved,
+                    due = self.kv_engine.due_len(),
                     backlog = self.kv_engine.expiry_backlog(),
                     "kv expiry wheel tick"
                 );
-
-                for ek in &expired_keys {
-                    info!(
-                        target: "nodedb::kv::expired",
-                        database_id = ek.database_id,
-                        tenant_id = ek.tenant_id,
-                        collection = %ek.collection,
-                        key_len = ek.key.len(),
-                        "kv key expired"
-                    );
-                }
             }
         }
 
@@ -248,10 +227,6 @@ impl CoreLoop {
             return !flush_plan.is_empty();
         }
         self.maintenance.last_maintenance = Some(now);
-        // Horizon-GC the per-core last-write-LSN version index: evict entries
-        // far below the watermark and enforce the entry-count backstop. Rides
-        // the compaction interval — no dedicated timer.
-        self.gc_write_index();
         // Lease-GC abandoned per-transaction staging overlays (client vanished,
         // teardown dispatch failed, or vShard leader moved mid-txn). Bounded by
         // a per-tick budget internally. Rides the compaction interval.

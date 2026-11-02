@@ -26,7 +26,7 @@ pub(super) fn row_system_time(
 ///
 /// Rows from non-bitemporal collections have no `_ts_system` column and
 /// all three indices are `None`; the function returns `true` unconditionally.
-pub(super) fn bitemporal_row_visible(
+pub(in crate::data::executor) fn bitemporal_row_visible(
     row: &[nodedb_types::value::Value],
     ts_system_idx: Option<usize>,
     ts_valid_from_idx: Option<usize>,

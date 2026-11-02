@@ -9,18 +9,36 @@ use nodedb_types::value::Value;
 
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::point::apply_put::SpatialEntryId;
+use crate::data::executor::handlers::transaction::undo::UndoEntry;
 use crate::data::executor::spatial_key::SpatialIndexKey;
 
-/// One R-tree entry the cascade removed: enough to re-insert it on undo
-/// (`UndoEntry::SpatialDelete`): the index key, entry id, bbox, reverse-map
-/// document id, and the SRID of the tree it left.
-pub(in crate::data::executor) type RemovedSpatialEntry = (
-    SpatialIndexKey,
-    u64,
-    nodedb_types::BoundingBox,
-    String,
-    crate::engine::spatial::TreeSrid,
-);
+/// One R-tree entry a write removed: enough to put it back on undo
+/// (`UndoEntry::SpatialDelete`).
+pub(in crate::data::executor) struct RemovedSpatialEntry {
+    pub key: SpatialIndexKey,
+    pub entry_id: u64,
+    pub bbox: nodedb_types::BoundingBox,
+    /// The reverse-map document id.
+    pub document_id: String,
+    /// The SRID of the tree the entry left.
+    pub srid: crate::engine::spatial::TreeSrid,
+    /// The system-time ordinal the entry ended at.
+    pub sys_to: i64,
+}
+
+impl RemovedSpatialEntry {
+    /// The undo entry that puts this entry back.
+    pub(in crate::data::executor) fn into_undo(self) -> UndoEntry {
+        UndoEntry::SpatialDelete {
+            key: self.key,
+            entry_id: self.entry_id,
+            bbox: self.bbox,
+            document_id: self.document_id,
+            srid: self.srid,
+            sys_to: self.sys_to,
+        }
+    }
+}
 
 /// Whether `schema` declares at least one `Geometry` column, i.e. whether
 /// the collection's rows can carry R-tree entries at all.
@@ -49,25 +67,52 @@ pub(in crate::data::executor) fn columnar_row_spatial_entry_id(
 
 impl CoreLoop {
     /// Remove every per-field R-tree entry and reverse-map record of the
-    /// columnar row `row` (schema order). A no-op for a schema with no
-    /// geometry column. Returns the removed entries for a transactional
-    /// caller to reverse.
+    /// columnar row `row` (schema order), ending each at `sys_to`, the
+    /// system-time ordinal the write ended the row at. A no-op for a schema
+    /// with no geometry column. Returns the removed entries for a
+    /// transactional caller to reverse.
     pub(in crate::data::executor) fn remove_columnar_row_spatial_entries(
         &mut self,
         db_id: nodedb_types::DatabaseId,
         tid: crate::types::TenantId,
         collection: &str,
         schema: &ColumnarSchema,
-        row: &[Value],
+        removed: RemovedColumnarRow<'_>,
     ) -> Vec<RemovedSpatialEntry> {
         if !schema_has_geometry(schema) {
             return Vec::new();
         }
-        let Some(entry_id) = columnar_row_spatial_entry_id(schema, row) else {
+        let Some(entry_id) = columnar_row_spatial_entry_id(schema, removed.row) else {
             return Vec::new();
         };
-        self.remove_document_spatial_indexes(db_id.as_u64(), tid.as_u64(), collection, entry_id)
+        self.remove_document_spatial_indexes(
+            db_id.as_u64(),
+            tid.as_u64(),
+            collection,
+            entry_id,
+            removed.sys_to,
+        )
     }
+
+    /// The system-time ordinal the write ended the row at `location` of
+    /// columnar engine `key` at. [`nodedb_spatial::rtree::UNVERSIONED`] when
+    /// the row keeps no end: its R-tree entry then leaves without history.
+    pub(in crate::data::executor) fn columnar_row_end(
+        &self,
+        key: &crate::data::executor::handlers::columnar_mutation_apply::ColumnarEngineKey,
+        location: Option<nodedb_columnar::pk_index::RowLocation>,
+    ) -> i64 {
+        location
+            .and_then(|loc| self.columnar_engines.get(key)?.sys_to_at(loc))
+            .unwrap_or(nodedb_spatial::rtree::UNVERSIONED)
+    }
+}
+
+/// A columnar row a write ended: its pre-image in schema order and the
+/// ordinal the write ended it at.
+pub(in crate::data::executor) struct RemovedColumnarRow<'a> {
+    pub row: &'a [Value],
+    pub sys_to: i64,
 }
 
 #[cfg(test)]

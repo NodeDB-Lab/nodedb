@@ -14,7 +14,10 @@ use super::columnar_mutation_apply::{
     push_removed_spatial_undo,
 };
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::handlers::columnar_write::{RemovedSpatialEntry, schema_has_geometry};
+use crate::data::executor::handlers::columnar_write::system_stamp::stored_stamp;
+use crate::data::executor::handlers::columnar_write::{
+    RemovedColumnarRow, RemovedSpatialEntry, schema_has_geometry,
+};
 use crate::data::executor::handlers::transaction::undo::UndoEntry;
 
 /// The tombstone that closes `bound`, the row a key is bound to: a copy of
@@ -196,10 +199,19 @@ impl CoreLoop {
                         .and_then(|loc| {
                             flushed_row_surrogate(&self.columnar_flushed_surrogates, key, loc)
                         });
-                    engine
-                        .close(tombstone, flushed_surrogate)
-                        .map(|_| location)
-                        .map_err(crate::Error::from)
+                    // The tombstone's version starts at its `_ts_system`.
+                    match stored_stamp(schema, tombstone) {
+                        Some(stamp) => engine
+                            .close(tombstone, flushed_surrogate, stamp)
+                            .map(|_| location)
+                            .map_err(crate::Error::from),
+                        None => Err(crate::Error::Internal {
+                            detail: format!(
+                                "bitemporal columnar '{collection}': a tombstone carries no \
+                                 integer _ts_system"
+                            ),
+                        }),
+                    }
                 }
                 None => Err(engine_missing(collection)),
             };
@@ -217,9 +229,13 @@ impl CoreLoop {
                 outcome.restored.push((pk_bytes, loc));
             }
             if let Some(row) = &pre_image {
-                spatial_removed.extend(
-                    self.remove_columnar_row_spatial_entries(key.0, key.1, collection, schema, row),
-                );
+                let removed = RemovedColumnarRow {
+                    row,
+                    sys_to: self.columnar_row_end(key, location),
+                };
+                spatial_removed.extend(self.remove_columnar_row_spatial_entries(
+                    key.0, key.1, collection, schema, removed,
+                ));
             }
         }
 
@@ -250,6 +266,15 @@ mod tests {
         .expect("valid")
     }
 
+    /// Every version the memtable keeps, ended ones included.
+    fn all_versions(engine: &nodedb_columnar::MutationEngine) -> Vec<Vec<Value>> {
+        engine
+            .scan_memtable_versions(nodedb_columnar::VersionCut::All)
+            .map(|r| r.map(|(_, _, values)| values))
+            .collect::<Result<_, _>>()
+            .expect("read")
+    }
+
     fn version(ts: i64, id: i64, v: i64) -> Vec<Value> {
         vec![
             Value::Integer(ts),
@@ -269,7 +294,7 @@ mod tests {
         let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
         let key: ColumnarEngineKey = (DatabaseId::DEFAULT, TenantId::new(1), "bt".to_string());
         let mut engine = nodedb_columnar::MutationEngine::new("bt".to_string(), schema());
-        engine.insert(&version(100, 1, 10)).expect("insert");
+        engine.insert(&version(100, 1, 10), 0).expect("insert");
         core.columnar_engines.insert(key.clone(), engine);
 
         let mut undo = Vec::new();
@@ -289,10 +314,7 @@ mod tests {
 
         let pk = encode_pk(&Value::Integer(1));
         let engine = core.columnar_engines.get(&key).expect("engine");
-        let rows: Vec<Vec<Value>> = engine
-            .scan_memtable_rows()
-            .collect::<Result<_, _>>()
-            .expect("read");
+        let rows = all_versions(engine);
         let tombstone = vec![
             Value::Integer(101),
             Value::Integer(i64::MIN),
@@ -315,6 +337,14 @@ mod tests {
         assert_eq!(engine.memtable().row_count(), 1);
         assert_eq!(engine.pk_index().get(&pk).map(|loc| loc.row_index), Some(0));
         assert_eq!(engine.closed_location(&pk), None);
+        assert_eq!(
+            engine
+                .scan_memtable_rows()
+                .collect::<Result<Vec<_>, _>>()
+                .expect("read"),
+            vec![version(100, 1, 10)],
+            "the closed version is current again"
+        );
     }
 
     /// A key-changing update of a bitemporal key closes the old key with a
@@ -325,7 +355,7 @@ mod tests {
         let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
         let key: ColumnarEngineKey = (DatabaseId::DEFAULT, TenantId::new(1), "bt".to_string());
         let mut engine = nodedb_columnar::MutationEngine::new("bt".to_string(), schema());
-        engine.insert(&version(100, 1, 10)).expect("insert");
+        engine.insert(&version(100, 1, 10), 0).expect("insert");
         core.columnar_engines.insert(key.clone(), engine);
 
         core.apply_columnar_update_rows(
@@ -339,10 +369,7 @@ mod tests {
         .expect("update");
 
         let engine = core.columnar_engines.get(&key).expect("engine");
-        let rows: Vec<Vec<Value>> = engine
-            .scan_memtable_rows()
-            .collect::<Result<_, _>>()
-            .expect("read");
+        let rows = all_versions(engine);
         let tombstone = vec![
             Value::Integer(101),
             Value::Integer(i64::MIN),

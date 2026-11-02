@@ -8,10 +8,12 @@
 //! `keys` holds the snapshot-key parsing helpers shared across engines (and,
 //! for the scoped `"{db}:{tid}:{collection}"` key parser, by
 //! `restore_segments.rs`). `text` indexes
-//! the restored rows' full-text postings.
+//! the restored rows' full-text postings. `index_images` installs the vector
+//! history, sparse vector indexes and spatial R-trees.
 
 mod edges;
 mod engines;
+mod index_images;
 mod keys;
 mod node_labels;
 mod tenant_snapshot;

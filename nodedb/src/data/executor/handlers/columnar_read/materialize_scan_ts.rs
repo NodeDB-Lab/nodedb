@@ -35,13 +35,17 @@
 //! These ranges are disjoint (bit 31 distinguishes memtable from partition
 //! rows) so no collisions can occur within a single collection.
 //!
-//! ## `system_as_of_ms` handling
+//! ## System time
 //!
-//! Timeseries collections do not normally have a `_ts_system` column (their
-//! time axis is the user-supplied TIME_KEY, not a bitemporal system column).
-//! If a `_ts_system` column is present and `system_as_of_ms` is `Some(cutoff)`,
-//! rows where `_ts_system > cutoff` are skipped.  For normal timeseries (no
-//! `_ts_system`), the cutoff has no effect.
+//! Every timeseries row stores `_ts_system`: the system-time ordinal of the
+//! batch that wrote it. `system_as_of_ms` is a millisecond cut. The scan
+//! reads at its last ordinal (`ms_to_ordinal_upper`), so a row whose stored
+//! ordinal is above `ms_to_ordinal_upper(system_as_of_ms)` is skipped.
+//!
+//! An emitted row renders `_ts_system` as the raw scan does: a bitemporal
+//! collection (one with `_ts_valid_from`) shows the ordinal's millisecond,
+//! and every other collection drops the column, since there it is the
+//! engine's version stamp, not a declared column.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -49,6 +53,7 @@ use std::path::PathBuf;
 use nodedb_types::value::Value;
 
 use super::materialize_scan::{build_response, encode_cursor};
+use super::materialize_scan_ts_row::{RowShape, encode_row_map, system_time};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::timeseries::cell_read::{TsCell, read_ts_cell};
 use crate::data::executor::handlers::timeseries::partition_read::{
@@ -78,8 +83,11 @@ impl CoreLoop {
 
         // Cursor: (segment_id, row_index).  segment_id == 0 → memtable phase.
         let (start_segment, start_row) = parse_cursor_ts(cursor);
+        // Stored `_ts_system` cells are ordinals: the millisecond cut reads
+        // at the last ordinal of its millisecond.
+        let cutoff_ordinal = system_as_of_ms.map(nodedb_types::ms_to_ordinal_upper);
 
-        let mut entries: Vec<(u32, Vec<u8>)> = Vec::with_capacity(count.min(256));
+        let mut entries: Vec<(u32, Vec<u8>, Option<i64>)> = Vec::with_capacity(count.min(256));
         let mut last_segment: u32 = start_segment;
         let mut last_row: u32 = start_row;
 
@@ -90,24 +98,26 @@ impl CoreLoop {
             && !mt.is_empty()
         {
             let schema = mt.schema();
-            let ts_system_idx = schema.ts_system_idx();
-            let col_count = schema.columns.len();
+            let shape = RowShape::of(&schema.columns, schema.ts_system_idx());
             let row_count = mt.row_count() as usize;
             let first_row = start_row as usize;
 
             for row_idx in first_row..row_count {
-                // `system_as_of_ms` filter: skip rows newer than the cutoff.
-                if let (Some(sys_idx), Some(cutoff)) = (ts_system_idx, system_as_of_ms) {
-                    let ts_val = match memtable_system_time(mt, sys_idx, row_idx) {
-                        Ok(ts) => ts,
+                let ordinal = match shape.system_idx {
+                    Some(sys_idx) => match memtable_system_time(mt, sys_idx, row_idx) {
+                        Ok(ordinal) => Some(ordinal),
                         Err(e) => return self.response_error(task, e),
-                    };
-                    if ts_val > cutoff {
-                        continue;
-                    }
+                    },
+                    None => None,
+                };
+                // System-time cut: skip rows stamped above the cut ordinal.
+                if let (Some(ordinal), Some(cutoff)) = (ordinal, cutoff_ordinal)
+                    && ordinal > cutoff
+                {
+                    continue;
                 }
 
-                let value_bytes = match encode_ts_memtable_row(mt, col_count, row_idx) {
+                let value_bytes = match encode_ts_memtable_row(mt, shape, row_idx) {
                     Ok(b) => b,
                     Err(e) => return self.response_error(task, e),
                 };
@@ -115,7 +125,7 @@ impl CoreLoop {
                 // Surrogate: bit 31 set (memtable) | lower 31 bits = row_idx.
                 let surrogate: u32 = 0x8000_0000 | (row_idx as u32 & 0x7FFF_FFFF);
 
-                entries.push((surrogate, value_bytes));
+                entries.push((surrogate, value_bytes, ordinal));
                 last_segment = 0;
                 last_row = (row_idx + 1) as u32;
 
@@ -134,10 +144,14 @@ impl CoreLoop {
             && entries.len() < count
             && let Some(registry) = self.ts_registries.get(&engine_key)
         {
-            // Collect partitions sorted by start-timestamp (BTreeMap order).
+            // Collect partitions sorted by start-timestamp (BTreeMap order). A
+            // partition a TRUNCATE ended at or below the cut holds no row the
+            // clone reads. It keeps its id, so a cursor stays stable.
+            let at = cutoff_ordinal;
             let partition_dirs: Vec<(usize, PathBuf)> = registry
                 .iter()
                 .enumerate()
+                .filter(|(_, (_start_ts, entry))| entry.meta.open_at(at))
                 .map(|(i, (_start_ts, entry))| {
                     let part_id = i + 1; // 1-based (usize)
                     let dir =
@@ -181,7 +195,7 @@ impl CoreLoop {
                     Err(e) => return self.response_error(task, e),
                 };
 
-                let ts_system_idx = schema.ts_system_idx();
+                let shape = RowShape::of(&schema.columns, schema.ts_system_idx());
 
                 // Determine row count from the timestamp column.
                 let row_count = match col_data.get(schema.timestamp_idx).and_then(|d| d.as_ref()) {
@@ -213,17 +227,21 @@ impl CoreLoop {
                     schema_columns: &schema.columns,
                     col_data: &col_data,
                     sym_dicts: &sym_dicts,
+                    shape,
                 };
                 for row_idx in first_row_in_part..row_count {
-                    // `system_as_of_ms` filter.
-                    if let (Some(sys_idx), Some(cutoff)) = (ts_system_idx, system_as_of_ms) {
-                        let ts_val = match partition.system_time(sys_idx, row_idx) {
-                            Ok(ts) => ts,
+                    let ordinal = match shape.system_idx {
+                        Some(sys_idx) => match partition.system_time(sys_idx, row_idx) {
+                            Ok(ordinal) => Some(ordinal),
                             Err(e) => return self.response_error(task, e),
-                        };
-                        if ts_val > cutoff {
-                            continue;
-                        }
+                        },
+                        None => None,
+                    };
+                    // System-time cut: skip rows stamped above the cut ordinal.
+                    if let (Some(ordinal), Some(cutoff)) = (ordinal, cutoff_ordinal)
+                        && ordinal > cutoff
+                    {
+                        continue;
                     }
 
                     let value_bytes = match partition.encode_row(row_idx) {
@@ -234,7 +252,7 @@ impl CoreLoop {
                     // Surrogate: (part_id & 0xFFFF) << 16 | (row_idx & 0xFFFF).
                     let surrogate: u32 = encode_ts_part_surrogate(*part_id as u32, row_idx as u32);
 
-                    entries.push((surrogate, value_bytes));
+                    entries.push((surrogate, value_bytes, ordinal));
                     last_segment = *part_id as u32;
                     last_row = (row_idx + 1) as u32;
 
@@ -299,15 +317,22 @@ pub(super) fn encode_ts_part_surrogate(part_id_1based: u32, row_idx: u32) -> u32
 /// be encoded, fails the scan: a skipped row is a silently short result.
 fn encode_ts_memtable_row(
     mt: &crate::engine::timeseries::columnar_memtable::ColumnarMemtable,
-    col_count: usize,
+    shape: RowShape,
     row_idx: usize,
 ) -> crate::Result<Vec<u8>> {
-    let mut map: HashMap<String, Value> = HashMap::with_capacity(col_count);
     let schema = mt.schema();
+    let mut map: HashMap<String, Value> = HashMap::with_capacity(schema.columns.len());
 
     for (col_idx, (col_name, _)) in schema.columns.iter().enumerate() {
-        let cell = memtable_cell(mt, col_idx, row_idx)?;
-        map.insert(col_name.clone(), cell_to_value(cell, col_name)?);
+        let value = shape.emitted_value(
+            col_idx,
+            col_name,
+            || memtable_cell(mt, col_idx, row_idx),
+            || memtable_system_time(mt, col_idx, row_idx),
+        )?;
+        if let Some(value) = value {
+            map.insert(col_name.clone(), value);
+        }
     }
 
     encode_row_map(map, row_idx)
@@ -352,6 +377,7 @@ struct PartitionCells<'a> {
     schema_columns: &'a [(String, ColumnType)],
     col_data: &'a [Option<ColumnData>],
     sym_dicts: &'a HashMap<usize, nodedb_types::timeseries::SymbolDictionary>,
+    shape: RowShape,
 }
 
 impl PartitionCells<'_> {
@@ -398,50 +424,16 @@ impl PartitionCells<'_> {
     fn encode_row(&self, row_idx: usize) -> crate::Result<Vec<u8>> {
         let mut map: HashMap<String, Value> = HashMap::with_capacity(self.schema_columns.len());
         for (col_i, (col_name, _)) in self.schema_columns.iter().enumerate() {
-            let cell = self.cell(col_i, row_idx)?;
-            map.insert(col_name.clone(), cell_to_value(cell, col_name)?);
+            let value = self.shape.emitted_value(
+                col_i,
+                col_name,
+                || self.cell(col_i, row_idx),
+                || self.system_time(col_i, row_idx),
+            )?;
+            if let Some(value) = value {
+                map.insert(col_name.clone(), value);
+            }
         }
         encode_row_map(map, row_idx)
-    }
-}
-
-/// Serialize one row map to msgpack bytes.
-fn encode_row_map(map: HashMap<String, Value>, row_idx: usize) -> crate::Result<Vec<u8>> {
-    nodedb_types::value_to_msgpack(&Value::Object(map)).map_err(|e| crate::Error::Serialization {
-        format: "msgpack".into(),
-        detail: format!("timeseries materialize scan row {row_idx}: {e}"),
-    })
-}
-
-/// The error for a stored millisecond count that no instant can carry.
-fn instant_read_error(column: &str, e: nodedb_types::NdbDateTimeError) -> crate::Error {
-    crate::Error::Internal {
-        detail: format!("timeseries column {column}: {e}"),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Column-to-Value converters
-// ---------------------------------------------------------------------------
-
-/// The `Value` a timeseries cell of column `column` emits.
-fn cell_to_value(cell: TsCell<'_>, column: &str) -> crate::Result<Value> {
-    Ok(match cell {
-        TsCell::Null => Value::Null,
-        TsCell::Time(kind, millis) => kind
-            .cell_value(millis)
-            .map_err(|e| instant_read_error(column, e))?,
-        TsCell::Float(f) => Value::Float(f),
-        TsCell::Int(n) => Value::Integer(n),
-        TsCell::Symbol(s) => Value::String(s.to_string()),
-    })
-}
-
-/// The millisecond system time a `_ts_system` cell holds. `None` for any
-/// cell other than a time or an integer.
-fn system_time(cell: TsCell<'_>) -> Option<i64> {
-    match cell {
-        TsCell::Time(_, millis) | TsCell::Int(millis) => Some(millis),
-        TsCell::Null | TsCell::Float(_) | TsCell::Symbol(_) => None,
     }
 }

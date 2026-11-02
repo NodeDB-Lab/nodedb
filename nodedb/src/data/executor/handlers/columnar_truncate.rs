@@ -10,10 +10,16 @@
 //! so an abort reinstalls them exactly — every bitemporal version, every
 //! tombstone. Segment ids stay monotonic (`MutationEngine::truncate`).
 //!
-//! A bitemporal collection keeps its history instead: the truncate closes
-//! every current key with a tombstone version at one statement ordinal,
-//! raised per key, as a DELETE with no filter closes them. A backup restore
-//! erases a bitemporal collection whole (`TruncateHistory::Erase`).
+//! A TRUNCATE keeps the history instead: it ends every current key at one
+//! statement ordinal, raised per key, as a DELETE with no filter ends them,
+//! so a read at an earlier ordinal still sees the rows. A bitemporal
+//! collection closes each key with a tombstone version. A purge removes the
+//! history later. Only a backup restore erases a collection whole
+//! (`TruncateHistory::Erase`).
+//!
+//! Every columnar engine carries a primary key: the catalog schema always
+//! names one, and an inferred schema synthesizes `id`
+//! (`infer_schema_from_value`).
 
 use tracing::debug;
 
@@ -31,9 +37,10 @@ use crate::data::executor::task::ExecutionTask;
 /// How a truncate treats a bitemporal collection's history.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::data::executor) enum TruncateHistory {
-    /// Close every current key of a bitemporal collection with a tombstone
-    /// stamped as a DELETE stamps (see `ColumnarDeleteMode::Close`). A
-    /// collection that is not bitemporal, or has no primary key, is erased.
+    /// End every current key stamped as a DELETE stamps (see
+    /// `ColumnarDeleteMode::Close`): a bitemporal collection closes each key
+    /// with a tombstone, any other collection ends each row. Every version
+    /// stays as history.
     Close { system_from: Option<i64> },
     /// Erase every row and version, bitemporal or not.
     Erase,
@@ -64,11 +71,7 @@ impl CoreLoop {
         let db = task.request.database_id;
         let tid = task.request.tenant_id;
         let key = (db, tid, collection.to_string());
-        if let TruncateHistory::Close { system_from } = history
-            && let Some(engine) = self.columnar_engines.get(&key)
-            && engine.schema().is_bitemporal()
-            && !engine.pk_col_indices().is_empty()
-        {
+        if let TruncateHistory::Close { system_from } = history {
             return self.close_columnar_collection(task, &key, system_from, undo_log);
         }
 
@@ -128,9 +131,10 @@ impl CoreLoop {
         self.truncate_response(task, truncated)
     }
 
-    /// Truncate the bitemporal collection at `key` by closing every current
-    /// key with a tombstone version, as a DELETE with no filter closes them.
-    /// Every version stays as history. Reports the number of keys closed.
+    /// Truncate the collection at `key` by ending every current key, as a
+    /// DELETE with no filter ends them: a bitemporal key closes with a
+    /// tombstone version. Every version stays as history. Reports the number
+    /// of keys ended.
     fn close_columnar_collection(
         &mut self,
         task: &ExecutionTask,
@@ -176,7 +180,7 @@ impl CoreLoop {
         self.checkpoint_coordinator.mark_dirty("columnar", closed);
         self.note_collection_write(task, collection);
         self.invalidate_aggregate_cache_for_collection(key.0.as_u64(), key.1.as_u64(), collection);
-        debug!(core = self.core_id, %collection, closed, "bitemporal columnar truncate complete");
+        debug!(core = self.core_id, %collection, closed, "versioned columnar truncate complete");
         self.truncate_response(task, closed)
     }
 }
@@ -252,6 +256,7 @@ mod tests {
                 schema_bytes: &schema,
                 provenance: None,
                 system_from: None,
+                restored_versions: &[],
                 rls_write_check: &RlsWriteCheck::already_decided_elsewhere(),
                 returning: None,
                 rls_filters: &[],
@@ -312,6 +317,16 @@ mod tests {
         seed(&mut core, &task, vec![point_row("z", 9.0, 9.0)]);
         assert_eq!(live_rows(&core), 1);
         assert_eq!(rtree_entries(&core), 1);
+
+        // The truncated rows stay as history: an all-versions read sees
+        // every row the collection ever held.
+        let engine = core.columnar_engines.get(&key()).expect("engine");
+        assert_eq!(
+            engine
+                .scan_memtable_versions(nodedb_columnar::VersionCut::All)
+                .count(),
+            3
+        );
     }
 
     #[test]
@@ -348,9 +363,6 @@ mod tests {
         assert_eq!(resp.status, Status::Ok);
         assert_eq!(live_rows(&core), 0);
         assert_eq!(rtree_entries(&core), 0);
-        // A later sub-plan in the same batch writes into the empty engine.
-        seed(&mut core, &task, vec![point_row("z", 9.0, 9.0)]);
-        assert_eq!(live_rows(&core), 1);
 
         core.rollback_undo_log(0, TID, undo).expect("rollback");
         assert_eq!(live_rows(&core), 2, "pre-truncate rows are back");
@@ -361,7 +373,7 @@ mod tests {
         );
         assert!(
             core.spatial_doc_map.values().all(|d| d == "a" || d == "b"),
-            "the post-truncate row's entry is gone: {:?}",
+            "only the pre-truncate rows hold entries: {:?}",
             core.spatial_doc_map
         );
     }
@@ -397,25 +409,23 @@ mod tests {
         fn seeded_core(dir: &std::path::Path) -> (CoreLoop, impl Sized, impl Sized) {
             let (mut core, tx, rx) = make_core_with_dir(dir);
             let mut engine = nodedb_columnar::MutationEngine::new(COLLECTION.to_string(), schema());
-            engine.insert(&version(100, 1, 10)).expect("insert");
-            engine.insert(&version(200, 2, 20)).expect("insert");
+            engine.insert(&version(100, 1, 10), 0).expect("insert");
+            engine.insert(&version(200, 2, 20), 0).expect("insert");
             core.columnar_engines.insert(key(), engine);
             (core, tx, rx)
         }
 
         /// The id and value each row a read at `cut` emits, sorted.
         fn read(core: &CoreLoop, cut: Option<i64>) -> Vec<(i64, i64)> {
-            let gate = core
-                .columnar_version_gate(&key(), cut, false)
-                .expect("gate")
-                .expect("bitemporal");
+            let cut = cut.map_or(
+                nodedb_columnar::VersionCut::Current,
+                nodedb_columnar::VersionCut::At,
+            );
             let engine = core.columnar_engines.get(&key()).expect("engine");
             let mut out: Vec<(i64, i64)> = engine
-                .scan_memtable_rows()
-                .map(|row| row.expect("read"))
-                .filter(|row| gate.admits(row))
-                .map(|row| match (&row[3], &row[4]) {
-                    (Value::Integer(id), Value::Integer(v)) => (*id, *v),
+                .scan_memtable_versions(cut)
+                .map(|row| match row.expect("read").2.as_slice() {
+                    [_, _, _, Value::Integer(id), Value::Integer(v)] => (*id, *v),
                     other => panic!("unexpected cells {other:?}"),
                 })
                 .collect();
@@ -445,8 +455,8 @@ mod tests {
             assert_eq!(engine.memtable().row_count(), 4, "2 versions, 2 tombstones");
             assert_eq!(engine.live_row_count(), 0);
             let stamps: Vec<i64> = engine
-                .scan_memtable_rows()
-                .map(|row| match row.expect("read").first() {
+                .scan_memtable_versions(nodedb_columnar::VersionCut::All)
+                .map(|row| match row.expect("read").2.first() {
                     Some(Value::Integer(ts)) => *ts,
                     other => panic!("no stamp: {other:?}"),
                 })
