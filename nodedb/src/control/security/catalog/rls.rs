@@ -18,7 +18,7 @@
 //! policy whatever happens: a row that cannot be compiled installs as a
 //! restrictive deny-all so it can never widen access.
 
-use nodedb_types::{CollectionKey, CollectionKeyError};
+use nodedb_types::CollectionKey;
 use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 use tracing::error;
 
@@ -36,8 +36,6 @@ pub(super) const RLS_POLICIES: TableDefinition<&str, &[u8]> =
     TableDefinition::new("_system.rls_policies");
 
 /// Catalog-shape RLS policy.
-///
-/// Map-encoded (`#[msgpack(map)]`) so a field can carry `#[msgpack(default)]`.
 #[derive(zerompk::ToMessagePack, zerompk::FromMessagePack, Debug, Clone)]
 #[msgpack(map)]
 pub struct StoredRlsPolicy {
@@ -49,9 +47,7 @@ pub struct StoredRlsPolicy {
     /// Qualified with the owning database ID — the lookup key. Never
     /// shown to a user; see `display_collection`.
     pub collection: String,
-    /// The collection name as the user wrote it, unqualified.
-    /// Falls back to `collection` when empty.
-    #[msgpack(default)]
+    /// The collection name as the user wrote it, unqualified. Never empty.
     pub display_collection: String,
     pub name: String,
     /// 0 = Read, 1 = Write, 2 = All.
@@ -120,6 +116,7 @@ impl StoredRlsPolicy {
         };
         let on_deny: DenyMode = sonic_rs::from_str(&self.on_deny_json)
             .map_err(|e| catalog_err("deser deny mode", e))?;
+        let display_name = self.display_name()?;
         let compiled_predicate = if self.predicate_text.is_empty() {
             None
         } else {
@@ -127,14 +124,14 @@ impl StoredRlsPolicy {
                 catalog,
                 DatabaseId::new(self.database_id),
                 self.tenant_id,
-                self.display_name(),
+                display_name,
             )?;
             Some(compile_policy_predicate(&self.predicate_text, &columns)?)
         };
         Ok(RlsPolicy {
             name: self.name.clone(),
             collection: self.collection.clone(),
-            display_collection: self.display_name().to_string(),
+            display_collection: display_name.to_string(),
             tenant_id: self.tenant_id,
             policy_type,
             compiled_predicate,
@@ -175,7 +172,7 @@ impl StoredRlsPolicy {
         RlsPolicy {
             name: self.name.clone(),
             collection: self.collection.clone(),
-            display_collection: self.display_name().to_string(),
+            display_collection: self.display_collection.clone(),
             tenant_id: self.tenant_id,
             // An invalid tag cannot say which path the policy governs, so
             // the deny-all governs both.
@@ -202,28 +199,26 @@ impl StoredRlsPolicy {
     }
 
     /// The catalog key of the policy's collection: its database and bare name.
-    ///
-    /// A row written before `display_collection` existed carries only the
-    /// qualified `collection`, so the qualifier is stripped from that.
-    pub(crate) fn collection_key(&self) -> Result<CollectionKey<'_>, CollectionKeyError> {
-        let database_id = DatabaseId::new(self.database_id);
-        if self.display_collection.is_empty() {
-            CollectionKey::from_qualified_str(database_id, &self.collection)
-        } else {
-            Ok(CollectionKey::from_bare(
-                database_id,
-                &self.display_collection,
-            ))
-        }
+    pub(crate) fn collection_key(&self) -> crate::Result<CollectionKey<'_>> {
+        Ok(CollectionKey::from_bare(
+            DatabaseId::new(self.database_id),
+            self.display_name()?,
+        ))
     }
 
-    /// The unqualified collection name, falling back to `collection`.
-    fn display_name(&self) -> &str {
+    /// The unqualified collection name. Every writer stores it, so an empty
+    /// name marks a malformed row.
+    fn display_name(&self) -> crate::Result<&str> {
         if self.display_collection.is_empty() {
-            &self.collection
-        } else {
-            &self.display_collection
+            return Err(catalog_err(
+                "deser rls",
+                format!(
+                    "policy '{}' on '{}' has an empty display_collection",
+                    self.name, self.collection
+                ),
+            ));
         }
+        Ok(&self.display_collection)
     }
 
     fn redb_key(&self) -> String {
@@ -405,6 +400,21 @@ mod tests {
 
         assert!(catalog.delete_rls_policy(1, "users", "p1").unwrap());
         assert!(catalog.get_rls_policy(1, "users", "p1").unwrap().is_none());
+    }
+
+    /// A row without a display name is malformed and does not compile.
+    #[test]
+    fn a_row_without_display_name_is_refused() {
+        let catalog = make_catalog();
+        let mut stored = StoredRlsPolicy::from_runtime(
+            &sample_policy(1, "users", "p1"),
+            DatabaseId::DEFAULT,
+            "",
+        )
+        .unwrap();
+        stored.display_collection.clear();
+        assert!(stored.to_runtime(&catalog).is_err());
+        assert!(stored.collection_key().is_err());
     }
 
     #[test]

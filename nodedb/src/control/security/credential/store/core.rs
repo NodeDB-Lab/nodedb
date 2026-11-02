@@ -438,11 +438,11 @@ mod tests {
         let path = dir.path().join("system.redb");
         let salt = generate_scram_salt().expect("generate scram salt");
         let password_hash = hash_password_argon2("", &Argon2Config::default())
-            .expect("hash empty password for legacy persisted user");
+            .expect("hash empty password for the seeded user");
         let stored_hash = password_hash.clone();
         let scram_salted_password = compute_scram_salted_password("", &salt);
 
-        // Direct seeding preserves a structurally valid legacy record for
+        // Direct seeding writes a structurally valid record for
         // CredentialStore::open to validate.
         let catalog = SystemCatalog::open(&path).expect("open persistent system catalog");
         catalog

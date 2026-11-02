@@ -19,20 +19,17 @@ use super::types::{SystemCatalog, catalog_err};
     serde::Serialize,
     serde::Deserialize,
 )]
-#[msgpack(map, allow_unknown_fields)]
+#[msgpack(map)]
 pub struct StoredClaimMappingRule {
     /// Name of the JWT claim to inspect (e.g. `"org_id"`, `"groups"`).
     pub claim_name: String,
     /// Expected claim value. Use `"*"` to match any non-empty value.
     pub claim_value: String,
     /// Default database ID for sessions matched by this rule. `None` = no override.
-    #[msgpack(default)]
     pub default_database: Option<u64>,
     /// Additional database IDs accessible to sessions matched by this rule.
-    #[msgpack(default)]
     pub add_databases: Vec<u64>,
     /// Additional role names granted to sessions matched by this rule.
-    #[msgpack(default)]
     pub add_roles: Vec<String>,
 }
 
@@ -45,7 +42,7 @@ pub struct StoredClaimMappingRule {
     serde::Serialize,
     serde::Deserialize,
 )]
-#[msgpack(map, allow_unknown_fields)]
+#[msgpack(map)]
 pub struct StoredOidcProvider {
     /// Human-readable name; also the catalog key.
     pub provider_name: String,
@@ -54,15 +51,10 @@ pub struct StoredOidcProvider {
     /// JWKS endpoint URI. Fetched by `JwksRegistry`.
     pub jwks_uri: String,
     /// Expected `aud` claim value. `None` = skip audience validation.
-    #[msgpack(default)]
     pub audience: Option<String>,
-    /// Tenant bound to this provider. `None` preserves compatibility with
-    /// records written before tenant binding was introduced.
-    #[msgpack(default)]
-    #[serde(default)]
-    pub tenant_id: Option<u64>,
+    /// Tenant bound to this provider.
+    pub tenant_id: u64,
     /// Ordered claim-mapping rules evaluated at login to derive databases and roles.
-    #[msgpack(default)]
     pub claim_mapping: Vec<StoredClaimMappingRule>,
     /// WAL LSN at which this provider was created or last altered.
     pub created_at_lsn: u64,

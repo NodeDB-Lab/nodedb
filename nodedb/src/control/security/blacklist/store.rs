@@ -373,9 +373,8 @@ impl BlacklistStore {
         match addr.parse::<IpAddr>() {
             Ok(parsed) => self.remove_entry(&format!("ip:{parsed}")),
             // Not a valid address, so no canonical form exists and nothing
-            // could have been stored under one. Try the raw string anyway so a
-            // legacy entry predating add-time validation can still be removed.
-            Err(_) => self.remove_entry(&format!("ip:{addr}")),
+            // could have been stored under one.
+            Err(_) => Ok(false),
         }
     }
 
@@ -654,6 +653,14 @@ mod tests {
 
         assert!(store.unblacklist_ip("2001:0db8::1").expect("lift the ban"));
         assert!(store.check_ip("2001:db8::1").is_none());
+    }
+
+    /// The add path refuses an invalid address, so no entry exists under one.
+    /// Removing it reports that nothing was removed.
+    #[test]
+    fn unblacklist_invalid_address_removes_nothing() {
+        let store = BlacklistStore::new();
+        assert!(!store.unblacklist_ip("not-an-ip").expect("no error"));
     }
 
     #[test]

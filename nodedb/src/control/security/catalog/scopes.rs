@@ -7,14 +7,13 @@ use redb::{ReadableDatabase, ReadableTable};
 
 /// Serializable scope definition for redb storage.
 #[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
-#[msgpack(map, allow_unknown_fields)]
+#[msgpack(map)]
 pub struct StoredScope {
     /// Scope name (e.g., "profile:read", "orders:write").
     pub name: String,
     /// What this scope grants: `[("read", "user_profiles"), ("read", "user_settings")]`.
     pub grants: Vec<(String, String)>,
     /// Included sub-scopes (composition): `["profile:read", "settings:read"]`.
-    #[msgpack(default)]
     pub includes: Vec<String>,
     pub created_by: String,
     pub created_at: u64,
@@ -22,7 +21,7 @@ pub struct StoredScope {
 
 /// Serializable scope grant for redb storage.
 #[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
-#[msgpack(map, allow_unknown_fields)]
+#[msgpack(map)]
 pub struct StoredScopeGrant {
     pub scope_name: String,
     /// Grantee type: "user", "role", "org", "team".
@@ -32,13 +31,10 @@ pub struct StoredScopeGrant {
     pub granted_by: String,
     pub granted_at: u64,
     /// Unix timestamp when this grant expires. 0 = no expiry.
-    #[msgpack(default)]
     pub expires_at: u64,
     /// Grace period in seconds before hard cutoff after expiry.
-    #[msgpack(default)]
     pub grace_period_secs: u64,
     /// Action on expiry: "revoke_all", "grant:<scope_name>", or empty (just expire).
-    #[msgpack(default)]
     pub on_expire_action: String,
     /// JSON-serialized `Vec<GrantCondition>` (sonic_rs), empty when the
     /// grant is unconditional.
@@ -47,7 +43,6 @@ pub struct StoredScopeGrant {
     /// zerompk's derive cannot encode, so the list is flattened to one JSON
     /// string and the record as a whole stays msgpack — the same shape
     /// `StoredRedactionPolicy::rules_json` uses for the same reason.
-    #[msgpack(default)]
     pub conditions_json: String,
 }
 

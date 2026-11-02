@@ -3,7 +3,7 @@
 //! Persisted API-key identity.
 
 #[derive(zerompk::ToMessagePack, zerompk::FromMessagePack, Debug, Clone)]
-#[msgpack(map, allow_unknown_fields)]
+#[msgpack(map)]
 pub struct StoredApiKey {
     pub key_id: String,
     pub secret_hash: Vec<u8>,
@@ -13,8 +13,6 @@ pub struct StoredApiKey {
     pub expires_at: u64,
     pub is_revoked: bool,
     pub created_at: u64,
-    #[msgpack(default)]
     pub scope: Vec<String>,
-    #[msgpack(default)]
     pub accessible_databases: Vec<u64>,
 }

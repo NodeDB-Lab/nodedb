@@ -2,8 +2,6 @@
 
 //! Consumer group metadata operations for the system catalog.
 
-use std::collections::HashMap;
-
 use redb::{ReadableDatabase, ReadableTable};
 
 use super::types::{CONSUMER_GROUPS, SystemCatalog, catalog_err};
@@ -11,7 +9,7 @@ use crate::event::cdc::consumer_group::ConsumerGroupDef;
 use crate::types::DatabaseId;
 
 impl SystemCatalog {
-    /// Store a consumer group definition under an unambiguous v2 key.
+    /// Store a consumer group definition under its unambiguous key.
     pub fn put_consumer_group(&self, def: &ConsumerGroupDef) -> crate::Result<()> {
         let key = group_key(def.database_id, def.tenant_id, &def.stream_name, &def.name);
         let bytes =
@@ -87,9 +85,7 @@ impl SystemCatalog {
         else {
             return Ok(None);
         };
-        decode_consumer_group(value.value())
-            .map(Some)
-            .ok_or_else(|| catalog_err("deser consumer_group", key))
+        decode_consumer_group(value.value()).map(Some)
     }
 
     /// Delete a consumer group.
@@ -119,43 +115,6 @@ impl SystemCatalog {
         Ok(existed)
     }
 
-    /// Move a legacy bare-topic group definition to its canonical stream key.
-    /// The caller must establish that `legacy_stream` names a topic before
-    /// invoking this; ordinary change-stream names are never rewritten.
-    pub fn migrate_consumer_group_stream(
-        &self,
-        def: &ConsumerGroupDef,
-        legacy_stream: &str,
-    ) -> crate::Result<()> {
-        let mut canonical = def.clone();
-        canonical.stream_name = format!("topic:{legacy_stream}");
-        let canonical_key = group_key(
-            canonical.database_id,
-            canonical.tenant_id,
-            &canonical.stream_name,
-            &canonical.name,
-        );
-        let legacy_key = group_key(def.database_id, def.tenant_id, legacy_stream, &def.name);
-        let bytes = zerompk::to_msgpack_vec(&canonical)
-            .map_err(|e| catalog_err("serialize consumer_group", e))?;
-        let write_txn = self
-            .db
-            .begin_write()
-            .map_err(|e| catalog_err("write txn", e))?;
-        {
-            let mut table = write_txn
-                .open_table(CONSUMER_GROUPS)
-                .map_err(|e| catalog_err("open consumer_groups", e))?;
-            table
-                .insert(canonical_key.as_str(), bytes.as_slice())
-                .map_err(|e| catalog_err("insert consumer_group", e))?;
-            let _ = table
-                .remove(legacy_key.as_str())
-                .map_err(|e| catalog_err("delete consumer_group", e))?;
-        }
-        write_txn.commit().map_err(|e| catalog_err("commit", e))
-    }
-
     /// Load every durable consumer group definition.
     pub fn load_all_consumer_groups(&self) -> crate::Result<Vec<ConsumerGroupDef>> {
         let read_txn = self
@@ -166,65 +125,29 @@ impl SystemCatalog {
             .open_table(CONSUMER_GROUPS)
             .map_err(|e| catalog_err("open consumer_groups", e))?;
 
-        let mut groups = HashMap::new();
-        let mut range = table
+        let mut groups = Vec::new();
+        for entry in table
             .range(..)
-            .map_err(|e| catalog_err("range consumer_groups", e))?;
-        while let Some(Ok((_, value))) = range.next() {
-            if let Some(def) = decode_consumer_group(value.value()) {
-                let identity = (
-                    def.database_id,
-                    def.tenant_id,
-                    def.stream_name.clone(),
-                    def.name.clone(),
-                );
-                groups.insert(identity, def);
-            }
+            .map_err(|e| catalog_err("range consumer_groups", e))?
+        {
+            let (_, value) = entry.map_err(|e| catalog_err("read consumer_group", e))?;
+            groups.push(decode_consumer_group(value.value())?);
         }
-        Ok(groups.into_values().collect())
+        Ok(groups)
     }
 }
 
 fn group_key(database_id: DatabaseId, tenant_id: u64, stream: &str, group: &str) -> String {
     format!(
-        "v2:{}:{tenant_id}:{}:{stream}:{}:{group}",
+        "{}:{tenant_id}:{}:{stream}:{}:{group}",
         database_id.as_u64(),
         stream.len(),
         group.len()
     )
 }
 
-/// Positional wire shape written before consumer groups adopted map encoding.
-#[derive(zerompk::FromMessagePack, zerompk::ToMessagePack)]
-#[msgpack(array)]
-struct LegacyConsumerGroupDef {
-    tenant_id: u64,
-    name: String,
-    stream_name: String,
-    owner: String,
-    created_at: u64,
-}
-
-impl From<LegacyConsumerGroupDef> for ConsumerGroupDef {
-    fn from(legacy: LegacyConsumerGroupDef) -> Self {
-        Self {
-            tenant_id: legacy.tenant_id,
-            name: legacy.name,
-            stream_name: legacy.stream_name,
-            owner: legacy.owner,
-            created_at: legacy.created_at,
-            database_id: DatabaseId::DEFAULT,
-            modification_hlc: nodedb_types::Hlc::ZERO,
-        }
-    }
-}
-
-pub(super) fn decode_consumer_group(bytes: &[u8]) -> Option<ConsumerGroupDef> {
-    zerompk::from_msgpack(bytes).ok().or_else(|| {
-        zerompk::from_msgpack::<LegacyConsumerGroupDef>(bytes)
-            .ok()
-            .map(ConsumerGroupDef::from)
-    })
+pub(super) fn decode_consumer_group(bytes: &[u8]) -> crate::Result<ConsumerGroupDef> {
+    zerompk::from_msgpack(bytes).map_err(|e| catalog_err("deser consumer_group", e))
 }
 
 #[cfg(test)]

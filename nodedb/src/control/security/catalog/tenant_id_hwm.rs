@@ -10,9 +10,9 @@
 //! surrogate identity uses; see [`super::surrogate_hwm`].
 //!
 //! Auto-allocation derives the next id from the max of this counter
-//! and the ids actually present in `_system.tenants`, so a database
-//! whose tenants predate the counter self-heals on first allocation
-//! instead of colliding with an existing tenant.
+//! and the ids actually present in `_system.tenants`. A stored tenant the
+//! counter does not cover, such as one a restored backup brings, then never
+//! collides with a new allocation.
 
 use redb::ReadableTable;
 

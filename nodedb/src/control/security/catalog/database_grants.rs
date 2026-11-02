@@ -117,7 +117,7 @@ impl SystemCatalog {
     }
 
     /// Return the distinct set of database IDs that a user has any grant on.
-    /// Always includes `DatabaseId::DEFAULT` to match the legacy floor.
+    /// Always includes `DatabaseId::DEFAULT`.
     pub fn list_user_grant_databases(&self, user_id: u64) -> crate::Result<Vec<DatabaseId>> {
         let txn = self
             .db

@@ -17,15 +17,10 @@ use nodedb_types::Hlc;
 /// Data Plane's struct layout (the runtime type carries
 /// SIMD/quantization tuning that has no place in the catalog).
 #[derive(zerompk::ToMessagePack, zerompk::FromMessagePack, Debug, Clone)]
-#[msgpack(map, allow_unknown_fields)]
+#[msgpack(map)]
 pub struct StoredContinuousAggregate {
     /// Owning database. Scopes the catalog key so an aggregate named
     /// identically in two databases never collides on disk.
-    ///
-    /// `#[msgpack(default)]`: rows persisted before database scoping decode
-    /// with `0` (`DatabaseId::DEFAULT`) — the database those legacy rows
-    /// lived in — so no migration is required.
-    #[msgpack(default)]
     pub database_id: u64,
     pub tenant_id: u64,
     pub name: String,
@@ -36,9 +31,7 @@ pub struct StoredContinuousAggregate {
     pub owner: String,
     pub created_at: u64,
     /// Monotonic descriptor version. See `StoredCollection::descriptor_version`.
-    #[msgpack(default)]
     pub descriptor_version: u64,
     /// HLC assigned by the metadata applier.
-    #[msgpack(default)]
     pub modification_hlc: Hlc,
 }

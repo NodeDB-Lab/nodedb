@@ -9,7 +9,7 @@ pub struct StoredTenant {
     pub created_at: u64,
     pub is_active: bool,
     /// Authoritative principal that receives objects when an owner is dropped.
-    /// Empty only for rows written before this field existed.
+    /// `CREATE TENANT` always names one.
     pub admin_username: String,
 }
 
@@ -27,7 +27,7 @@ impl zerompk::ToMessagePack for StoredTenant {
 impl<'de> zerompk::FromMessagePack<'de> for StoredTenant {
     fn read<R: zerompk::Read<'de>>(reader: &mut R) -> zerompk::Result<Self> {
         let len = reader.read_array_len()?;
-        if len != 4 && len != 5 {
+        if len != 5 {
             return Err(zerompk::Error::ArrayLengthMismatch {
                 expected: 5,
                 actual: len,
@@ -38,11 +38,7 @@ impl<'de> zerompk::FromMessagePack<'de> for StoredTenant {
             name: zerompk::FromMessagePack::read(reader)?,
             created_at: zerompk::FromMessagePack::read(reader)?,
             is_active: zerompk::FromMessagePack::read(reader)?,
-            admin_username: if len == 5 {
-                zerompk::FromMessagePack::read(reader)?
-            } else {
-                String::new()
-            },
+            admin_username: zerompk::FromMessagePack::read(reader)?,
         })
     }
 }
@@ -51,8 +47,9 @@ impl<'de> zerompk::FromMessagePack<'de> for StoredTenant {
 mod tests {
     use super::*;
 
+    /// A four-field tenant row without `admin_username`.
     #[derive(zerompk::ToMessagePack)]
-    struct LegacyStoredTenant {
+    struct TenantWithoutAdmin {
         tenant_id: u64,
         name: String,
         created_at: u64,
@@ -60,18 +57,31 @@ mod tests {
     }
 
     #[test]
-    fn legacy_rows_decode_with_an_empty_admin() {
-        let bytes = zerompk::to_msgpack_vec(&LegacyStoredTenant {
+    fn a_row_without_admin_is_refused() {
+        let bytes = zerompk::to_msgpack_vec(&TenantWithoutAdmin {
             tenant_id: 7,
-            name: "legacy".to_string(),
+            name: "acme".to_string(),
             created_at: 11,
             is_active: true,
         })
         .unwrap();
 
-        let tenant: StoredTenant = zerompk::from_msgpack(&bytes).unwrap();
-        assert_eq!(tenant.tenant_id, 7);
-        assert_eq!(tenant.name, "legacy");
-        assert!(tenant.admin_username.is_empty());
+        assert!(zerompk::from_msgpack::<StoredTenant>(&bytes).is_err());
+    }
+
+    #[test]
+    fn a_full_row_round_trips() {
+        let tenant = StoredTenant {
+            tenant_id: 7,
+            name: "acme".to_string(),
+            created_at: 11,
+            is_active: true,
+            admin_username: "admin".to_string(),
+        };
+        let bytes = zerompk::to_msgpack_vec(&tenant).unwrap();
+        assert_eq!(
+            zerompk::from_msgpack::<StoredTenant>(&bytes).unwrap(),
+            tenant
+        );
     }
 }

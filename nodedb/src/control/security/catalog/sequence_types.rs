@@ -10,7 +10,7 @@
 /// The database segment scopes the row: two databases in one tenant can hold a
 /// same-named sequence, and a shared key lets one hand out the other's numbers.
 #[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
-#[msgpack(map, allow_unknown_fields)]
+#[msgpack(map)]
 pub struct StoredSequence {
     pub database_id: u64,
     pub tenant_id: u64,
@@ -36,19 +36,14 @@ pub struct StoredSequence {
     pub created_at: u64,
     /// Format template tokens (e.g. `[Literal("INV-"), Year2, Literal("-"), Seq{5}]`).
     /// When `Some`, `nextval()` returns a formatted string instead of raw i64.
-    #[msgpack(default)]
     pub format_template: Option<Vec<crate::control::sequence::FormatToken>>,
     /// Reset scope — when the counter auto-resets to START.
-    #[msgpack(default)]
     pub reset_scope: crate::control::sequence::ResetScope,
     /// GAP_FREE mode: serialize nextval through a mutex, recycle on rollback.
-    #[msgpack(default)]
     pub gap_free: bool,
     /// Monotonic descriptor version, stamped by the metadata applier.
-    #[msgpack(default)]
     pub descriptor_version: u64,
     /// HLC stamped by the metadata applier at commit time.
-    #[msgpack(default)]
     pub modification_hlc: nodedb_types::Hlc,
 }
 
@@ -122,7 +117,7 @@ impl StoredSequence {
 /// `"{database_id}:{tenant_id}:{name}"` — the same key as the definition in
 /// `_system.sequences`, so counter and definition share one identity.
 #[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
-#[msgpack(map, allow_unknown_fields)]
+#[msgpack(map)]
 pub struct SequenceState {
     pub database_id: u64,
     pub tenant_id: u64,
@@ -136,7 +131,6 @@ pub struct SequenceState {
     pub epoch: u64,
     /// Current period key for reset scope (e.g. "2026-04", "2026-Q2").
     /// Empty string means no period tracking (ResetScope::Never).
-    #[msgpack(default)]
     pub period_key: String,
 }
 

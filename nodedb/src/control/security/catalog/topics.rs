@@ -126,7 +126,8 @@ impl SystemCatalog {
         Ok(existed)
     }
 
-    /// Return all canonical and legacy consumer-group names attached to a topic.
+    /// Return every consumer-group name attached to a topic's `topic:<name>`
+    /// stream.
     ///
     /// Callers use this before the cross-database offset cleanup so the offset
     /// store can be durably cleared before the catalog transaction commits.
@@ -150,12 +151,10 @@ impl SystemCatalog {
             .map_err(|e| catalog_err("range consumer_groups", e))?
         {
             let (_, value) = entry.map_err(|e| catalog_err("read consumer_group", e))?;
-            let Some(group) = decode_consumer_group(value.value()) else {
-                continue;
-            };
+            let group = decode_consumer_group(value.value())?;
             if group.database_id == database_id
                 && group.tenant_id == tenant_id
-                && (group.stream_name == canonical || group.stream_name == name)
+                && group.stream_name == canonical
             {
                 names.insert(group.name);
             }
@@ -163,8 +162,8 @@ impl SystemCatalog {
         Ok(names.into_iter().collect())
     }
 
-    /// Delete a topic, its messages, and every canonical or legacy topic
-    /// consumer-group definition in one redb transaction. Offset deletion is
+    /// Delete a topic, its messages, and every consumer-group definition on
+    /// its `topic:<name>` stream in one redb transaction. Offset deletion is
     /// intentionally coordinated by the caller before this transaction: the
     /// offset store is a separate database and this method must never expose a
     /// successful DROP with stale cursors left behind.
@@ -227,12 +226,10 @@ impl SystemCatalog {
                 .map_err(|e| catalog_err("range consumer_groups", e))?
             {
                 let (key, value) = entry.map_err(|e| catalog_err("read consumer_group", e))?;
-                let Some(group) = decode_consumer_group(value.value()) else {
-                    continue;
-                };
+                let group = decode_consumer_group(value.value())?;
                 if group.database_id == database_id
                     && group.tenant_id == tenant_id
-                    && (group.stream_name == canonical || group.stream_name == name)
+                    && group.stream_name == canonical
                 {
                     keys.push(key.value().to_owned());
                 }
@@ -315,7 +312,7 @@ pub(super) fn validate_topic_identity(
 
 pub(super) fn topic_key(database_id: DatabaseId, tenant_id: u64, name: &str) -> String {
     format!(
-        "v2/{:016x}/{:016x}/{:08x}/{}",
+        "{:016x}/{:016x}/{:08x}/{}",
         database_id.as_u64(),
         tenant_id,
         name.len(),
@@ -323,38 +320,8 @@ pub(super) fn topic_key(database_id: DatabaseId, tenant_id: u64, name: &str) -> 
     )
 }
 
-/// Positional wire shape written before topics adopted map encoding.
-#[derive(zerompk::FromMessagePack, zerompk::ToMessagePack)]
-#[msgpack(array)]
-struct LegacyTopicDef {
-    tenant_id: u64,
-    name: String,
-    retention: crate::event::cdc::stream_def::RetentionConfig,
-    owner: String,
-    created_at: u64,
-}
-
-impl From<LegacyTopicDef> for TopicDef {
-    fn from(legacy: LegacyTopicDef) -> Self {
-        Self {
-            tenant_id: legacy.tenant_id,
-            name: legacy.name,
-            retention: legacy.retention,
-            owner: legacy.owner,
-            created_at: legacy.created_at,
-            database_id: DatabaseId::DEFAULT,
-            last_sequence: 0,
-            last_lsn: 0,
-            last_epoch: 0,
-            modification_hlc: nodedb_types::Hlc::ZERO,
-        }
-    }
-}
-
 pub(super) fn decode_topic(bytes: &[u8]) -> crate::Result<TopicDef> {
-    zerompk::from_msgpack(bytes)
-        .or_else(|_| zerompk::from_msgpack::<LegacyTopicDef>(bytes).map(TopicDef::from))
-        .map_err(|e| catalog_err("decode topic", e))
+    zerompk::from_msgpack(bytes).map_err(|e| catalog_err("decode topic", e))
 }
 
 #[cfg(test)]
@@ -551,7 +518,7 @@ mod tests {
     }
 
     #[test]
-    fn topic_drop_transaction_removes_canonical_and_legacy_groups() {
+    fn topic_drop_transaction_removes_topic_groups_and_keeps_stream_groups() {
         let (_dir, catalog) = catalog();
         let database_id = DatabaseId::new(7);
         catalog
@@ -580,9 +547,9 @@ mod tests {
         assert_eq!(
             catalog
                 .topic_consumer_group_names(database_id, 1, "events")
-                .expect("names")
-                .len(),
-            2
+                .expect("names"),
+            vec!["group_topic_events".to_string()],
+            "a group on the change stream of the same name is not a topic group"
         );
         assert!(
             catalog
@@ -600,6 +567,17 @@ mod tests {
                 .topic_consumer_group_names(database_id, 1, "events")
                 .expect("names")
                 .is_empty()
+        );
+        let remaining: Vec<String> = catalog
+            .load_all_consumer_groups()
+            .expect("groups")
+            .into_iter()
+            .map(|group| group.stream_name)
+            .collect();
+        assert_eq!(
+            remaining,
+            vec!["events".to_string()],
+            "DROP TOPIC must keep the change stream's group"
         );
     }
 

@@ -3,28 +3,37 @@
 //! Resolution of the authoritative principal that receives orphaned ownership.
 
 use super::SystemCatalog;
+use super::auth_types::StoredTenant;
+
+/// The admin a stored tenant row names. `CREATE TENANT` always names one, so
+/// an empty name is a corrupt row.
+fn named_admin(tenant: &StoredTenant) -> crate::Result<&str> {
+    if tenant.admin_username.is_empty() {
+        return Err(crate::Error::Storage {
+            engine: "catalog".into(),
+            detail: format!("tenant {} row names no admin", tenant.tenant_id),
+        });
+    }
+    Ok(&tenant.admin_username)
+}
 
 impl SystemCatalog {
     /// Return the designated lifecycle administrator for a persisted tenant.
-    /// Legacy rows derive the historical `<tenant_name>_admin` identity.
     pub fn authoritative_tenant_admin(&self, tenant_id: u64) -> crate::Result<Option<String>> {
-        Ok(self
+        let Some(tenant) = self
             .load_all_tenants()?
             .into_iter()
             .find(|tenant| tenant.tenant_id == tenant_id)
-            .map(|tenant| {
-                if tenant.admin_username.is_empty() {
-                    format!("{}_admin", tenant.name)
-                } else {
-                    tenant.admin_username
-                }
-            }))
+        else {
+            return Ok(None);
+        };
+        Ok(Some(named_admin(&tenant)?.to_string()))
     }
 
     /// Resolve a valid administrative principal for `tenant_id`, excluding the
-    /// identity being removed. New tenant rows name the principal explicitly;
-    /// legacy/default tenants fall back deterministically to an active tenant
-    /// admin, then an active superuser in the same tenant.
+    /// identity being removed. A stored tenant row names the principal
+    /// explicitly. A tenant with no stored row falls back deterministically to
+    /// an active tenant admin, then an active superuser in the same tenant.
     pub fn resolve_ownership_fallback(
         &self,
         tenant_id: u64,
@@ -41,11 +50,8 @@ impl SystemCatalog {
                 .then_with(|| left.username.cmp(&right.username))
         });
 
-        if let Some(admin_username) = tenant
-            .as_ref()
-            .map(|tenant| tenant.admin_username.as_str())
-            .filter(|username| !username.is_empty())
-        {
+        if let Some(tenant) = tenant.as_ref() {
+            let admin_username = named_admin(tenant)?;
             return Ok(users
                 .iter()
                 .find(|user| {

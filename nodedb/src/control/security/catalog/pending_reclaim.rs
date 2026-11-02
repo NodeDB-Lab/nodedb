@@ -30,11 +30,10 @@ use super::types::{PENDING_RECLAIM, StoredCollection, SystemCatalog, catalog_err
 
 /// One queue entry: "engine storage purge for this collection is still owed".
 #[derive(zerompk::ToMessagePack, zerompk::FromMessagePack, Debug, Clone)]
-#[msgpack(map, allow_unknown_fields)]
+#[msgpack(map)]
 pub struct StoredPendingReclaim {
     /// Database the collection lived in. The purge dispatch keys the
     /// Data-Plane vShard by this id.
-    #[msgpack(default)]
     pub database_id: u64,
     pub tenant_id: u64,
     pub name: String,
@@ -44,18 +43,14 @@ pub struct StoredPendingReclaim {
     /// Unix-epoch nanoseconds when this entry was first recorded.
     pub enqueued_at_ns: u64,
     /// Last error the worker observed, if any. Empty = not yet retried.
-    #[msgpack(default)]
     pub last_error: String,
     /// Number of purge attempts this entry has survived (post-first-failure).
-    #[msgpack(default)]
     pub attempts: u32,
     /// Incarnation the reclaim targets. For a purge: the collection row's
     /// `modification_hlc` when the reclaim was queued, `None` when no row
     /// existed then. For a cancelled create: the create's own clock.
-    #[msgpack(default)]
     pub target_hlc: Option<Hlc>,
     /// The entry tears down a cancelled create, which never committed a row.
-    #[msgpack(default)]
     pub cancelled_create: bool,
 }
 

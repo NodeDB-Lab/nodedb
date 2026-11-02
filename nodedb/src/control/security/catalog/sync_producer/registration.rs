@@ -19,7 +19,7 @@ pub const SYNC_PRODUCERS: redb::TableDefinition<&str, &[u8]> =
 
 /// Persisted state for a single Lite client's sync producer.
 #[derive(zerompk::ToMessagePack, zerompk::FromMessagePack, Debug, Clone, PartialEq)]
-#[msgpack(map, allow_unknown_fields)]
+#[msgpack(map)]
 pub struct StoredProducerRegistration {
     /// Stable, monotonic, per-database u64 identity for this Lite client's
     /// write stream.  Allocated from `_system.sync_producer_hwm` and never

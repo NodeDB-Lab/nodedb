@@ -21,7 +21,7 @@ pub(super) use super::types::LOCKOUT_STATE as LOCKOUT_STATE_TABLE;
 /// in diagnostic queries. A `None` means no IP was available (e.g. in-process
 /// auth paths).
 #[derive(zerompk::ToMessagePack, zerompk::FromMessagePack, Debug, Clone)]
-#[msgpack(map, allow_unknown_fields)]
+#[msgpack(map)]
 pub struct StoredLockoutRecord {
     /// Number of consecutive failed login attempts since the last success.
     pub failed_count: u32,
@@ -30,7 +30,6 @@ pub struct StoredLockoutRecord {
     /// Epoch millisecond of the most recent failure.
     pub last_failure_ms: u64,
     /// Canonical text form of the IP address of the most recent failure.
-    #[msgpack(default)]
     pub last_failure_ip: Option<String>,
 }
 

@@ -4,9 +4,8 @@
 //!
 //! Key format: `"{database_id}:{tenant_id}:{index_name}"`. Every read that
 //! spans more than one index scans the `"{database_id}:{tenant_id}:"` prefix,
-//! so an index is always found under the database that owns its collection —
-//! not under a fixed database 0 the way the legacy per-kind ownership rows
-//! were filed.
+//! so an index is always found under the database that owns its collection,
+//! never under a fixed database 0.
 
 use super::index_record::{IndexKind, StoredIndexRecord};
 use super::types::{INDEX_REGISTRY, SystemCatalog, catalog_err};
