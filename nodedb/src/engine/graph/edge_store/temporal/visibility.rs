@@ -157,6 +157,21 @@ where
             .unwrap_or_default())
     }
 
+    /// Every cut of `collection` at or below `horizon` but the newest one.
+    /// No read at or above `horizon` consults them: such a read takes the
+    /// newest cut at or below its own system time.
+    pub(in crate::engine::graph::edge_store) fn cuts_shadowed_at(
+        &mut self,
+        db: u64,
+        tid: u64,
+        collection: &str,
+        horizon: i64,
+    ) -> crate::Result<Vec<i64>> {
+        let cuts = self.cuts_of(db, tid, collection)?;
+        let below = cuts.partition_point(|&cut| cut <= horizon);
+        Ok(cuts[..below.saturating_sub(1)].to_vec())
+    }
+
     /// The newest cut of `collection` at or below `as_of`.
     pub(in crate::engine::graph::edge_store) fn cut_at(
         &mut self,

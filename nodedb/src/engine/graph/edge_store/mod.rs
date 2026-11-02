@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 pub mod cascade;
+pub mod history_bytes;
 pub mod node_identity;
+pub mod node_label_purge;
 pub mod node_label_snapshot;
 pub mod node_labels;
 pub mod purge;
@@ -19,8 +21,8 @@ pub use scan::TenantEdgeScan;
 pub use stats::CollectionStats;
 pub use store::{Direction, Edge, EdgeRecord, EdgeStore};
 pub use temporal::{
-    CutEdge, EdgeCountChange, EdgeCutInstall, EdgeFlip, EdgePropertyReader, EdgeRef,
-    EdgeValuePayload, EdgeVersionWrite, GDPR_ERASURE_SENTINEL, NeighborsAsOfParams,
+    CutEdge, EdgeCountChange, EdgeCutInstall, EdgeFlip, EdgePropertyReader, EdgePurgeCount,
+    EdgeRef, EdgeValuePayload, EdgeVersionWrite, GDPR_ERASURE_SENTINEL, NeighborsAsOfParams,
     SYSTEM_TIME_WIDTH, TOMBSTONE_SENTINEL, VersionStamp, edge_version_prefix, is_gdpr_erasure,
     is_sentinel, is_tombstone, parse_versioned_edge_key, versioned_edge_key,
 };

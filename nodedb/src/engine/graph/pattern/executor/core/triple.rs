@@ -865,7 +865,14 @@ pub(in crate::engine::graph::pattern::executor) mod tests {
         use nodedb_types::StorageKey;
         let bytes = nodedb_types::value_to_msgpack(&doc).unwrap();
         sparse
-            .put(0, 1, "col", &StorageKey::for_surrogate(surrogate), &bytes)
+            .put(
+                0,
+                1,
+                "col",
+                &StorageKey::for_surrogate(surrogate),
+                &bytes,
+                1,
+            )
             .unwrap();
     }
 
