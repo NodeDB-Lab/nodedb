@@ -66,7 +66,9 @@ pub fn detect_i64_codec(values: &[i64]) -> ColumnCodec {
     let mut prev_delta: Option<i64> = None;
 
     for i in 1..sample.len() {
-        let delta = sample[i] - sample[i - 1];
+        // Wrapping, as the Delta and DoubleDelta encoders compute it: values
+        // further apart than `i64::MAX` are legal column data.
+        let delta = sample[i].wrapping_sub(sample[i - 1]);
         if let Some(pd) = prev_delta
             && delta == pd
         {
@@ -212,5 +214,13 @@ mod tests {
         assert_eq!(detect_i64_codec(&[]), ColumnCodec::Delta);
         assert_eq!(detect_i64_codec(&[42]), ColumnCodec::Delta);
         assert_eq!(detect_f64_codec(&[]), ColumnCodec::Gorilla);
+    }
+
+    #[test]
+    fn extreme_i64_values_do_not_overflow() {
+        let values = [i64::MIN, i64::MAX, 0, i64::MAX, i64::MIN];
+        assert_eq!(detect_i64_codec(&values), ColumnCodec::Delta);
+        let open_bounds = [5, i64::MAX, i64::MAX, -3];
+        assert_eq!(detect_i64_codec(&open_bounds), ColumnCodec::Delta);
     }
 }

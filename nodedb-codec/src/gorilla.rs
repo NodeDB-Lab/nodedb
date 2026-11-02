@@ -345,7 +345,7 @@ pub fn decode_f64(data: &[u8]) -> Result<Vec<f64>, CodecError> {
 /// Encode a slice of i64 timestamps using Gorilla (value channel unused).
 ///
 /// For timestamps, prefer `DoubleDelta` codec — it compresses ~4x better.
-/// This function exists for backward compatibility with V1 segments.
+/// The array tile encoder writes its timestamp columns with this function.
 pub fn encode_timestamps(timestamps: &[i64]) -> Vec<u8> {
     let mut enc = GorillaEncoder::new();
     for &ts in timestamps {
