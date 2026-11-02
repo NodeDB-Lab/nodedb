@@ -15,7 +15,7 @@ use super::super::collection;
 use super::super::maintenance;
 use super::super::tree_ops;
 use super::super::version_history;
-use super::route_tokens::RouteTokens;
+use super::route_tokens::{RouteTokens, mentions};
 
 pub(super) async fn try_string(
     state: &SharedState,
@@ -273,6 +273,9 @@ fn restore_forbidden_in_transaction(txn_ctx: &DmlTxnCtx<'_>) -> bool {
 /// `SELECT ... FROM <collection> AT VERSION '<checkpoint>' ...`: the clause
 /// follows the collection name.
 fn is_select_at_version(sql: &str) -> bool {
+    if !mentions(sql, "VERSION") {
+        return false;
+    }
     let tokens = RouteTokens::new(sql);
     tokens.leads_with(&["SELECT"])
         && tokens
@@ -282,12 +285,18 @@ fn is_select_at_version(sql: &str) -> bool {
 
 /// `RESTORE <collection> SET VERSION = '<checkpoint>' ...`.
 fn is_restore_set_version(sql: &str) -> bool {
+    if !mentions(sql, "RESTORE") {
+        return false;
+    }
     let tokens = RouteTokens::new(sql);
     tokens.leads_with(&["RESTORE"]) && tokens.phrase_at(tokens.skip_name(1), &["SET", "VERSION"])
 }
 
 /// `ALTER COLLECTION <collection> SET VECTOR METADATA ON <column> ...`.
 fn is_set_vector_metadata(sql: &str) -> bool {
+    if !mentions(sql, "METADATA") {
+        return false;
+    }
     let tokens = RouteTokens::new(sql);
     tokens.leads_with(&["ALTER", "COLLECTION"])
         && tokens.phrase_at(tokens.skip_name(2), &["SET", "VECTOR", "METADATA", "ON"])
@@ -305,6 +314,9 @@ enum VectorIndexClause {
 /// [<name>] ON <target> <clause>`. The handler resolves the index from the
 /// target either way.
 fn alter_vector_index_clause(sql: &str) -> Option<VectorIndexClause> {
+    if !mentions(sql, "VECTOR") {
+        return None;
+    }
     let tokens = RouteTokens::new(sql);
     if !tokens.leads_with(&["ALTER", "VECTOR", "INDEX"]) {
         return None;

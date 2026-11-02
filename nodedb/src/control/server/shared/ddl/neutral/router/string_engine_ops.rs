@@ -32,7 +32,7 @@ use super::super::timeseries;
 use super::super::transfer;
 use super::super::weighted_pick;
 use super::helpers::{extract_last_value_args, extract_last_values_arg};
-use super::route_tokens::RouteTokens;
+use super::route_tokens::{RouteTokens, mentions};
 
 pub(super) async fn try_string(
     state: &SharedState,
@@ -365,6 +365,9 @@ fn crdt_transaction_error() -> DdlError {
 /// `SELECT * FROM RANGE(<index>, <min>, <max>)`, the sorted-index range read.
 /// A top-level `BETWEEN` marks a standard SQL range instead.
 fn is_sorted_index_range(sql: &str) -> bool {
+    if !mentions(sql, "RANGE") {
+        return false;
+    }
     let tokens = RouteTokens::new(sql);
     tokens.leads_with(&["SELECT", "*", "FROM", "RANGE", "("]) && !tokens.has_word_from(0, "BETWEEN")
 }
@@ -372,6 +375,9 @@ fn is_sorted_index_range(sql: &str) -> bool {
 /// `CONVERT COLLECTION <name> TO <target>`, or `CONVERT <name> TO <target>`,
 /// which the handler refuses for its missing `COLLECTION` keyword.
 fn is_convert_collection(sql: &str) -> bool {
+    if !mentions(sql, "CONVERT") {
+        return false;
+    }
     let tokens = RouteTokens::new(sql);
     tokens.leads_with(&["CONVERT", "COLLECTION"])
         || (tokens.leads_with(&["CONVERT"]) && tokens.phrase_at(tokens.skip_name(1), &["TO"]))
