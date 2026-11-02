@@ -45,6 +45,9 @@ pub(super) struct BodySource<'a> {
     /// The system-time ordinal the bodies are read at. `None` reads the
     /// current version.
     pub at: Option<i64>,
+    /// When set, a candidate carries only these fields of its body: the ones
+    /// the residual filter reads. `None` attaches whole bodies.
+    pub filter_columns: Option<&'a [String]>,
 }
 
 /// The ranked hits and the window width that produced them.
@@ -52,6 +55,12 @@ pub(super) struct WindowHits {
     pub hits: Vec<VectorSearchHit>,
     pub fetch_k: usize,
 }
+
+/// Candidates a first window asks for per wanted hit when the index scans
+/// flat. A flat scan ranks every vector whatever the window, so the width
+/// costs only the bodies it attaches, and one pass covers a filter that
+/// passes one candidate in this many.
+const FLAT_WINDOW_PER_HIT: usize = 20;
 
 impl CoreLoop {
     /// Rank `fetch_k` candidates and attach their bodies.
@@ -77,6 +86,9 @@ impl CoreLoop {
             Some(_) => window.collection.len(),
         };
         let crs = self.crs_context();
+        if !residual.is_empty() && window.collection.scans_flat_only() {
+            fetch_k = fetch_k.max(top_k.saturating_mul(FLAT_WINDOW_PER_HIT));
+        }
         let mut ranked_before: HashMap<u32, VectorSearchHit> = HashMap::new();
         loop {
             let ef = effective_ef(window.ef_search, fetch_k);
@@ -109,14 +121,27 @@ impl CoreLoop {
             for r in &ranked {
                 let hit = match ranked_before.remove(&r.id) {
                     Some(hit) => hit,
-                    None => self.attach_body(
-                        bodies.database_id,
-                        bodies.tid,
-                        bodies.collection,
-                        bodies.attach,
-                        bodies.at,
-                        build_search_hit(Some(window.collection), r.id, r.distance),
-                    )?,
+                    None => {
+                        let built = build_search_hit(Some(window.collection), r.id, r.distance);
+                        match bodies.filter_columns {
+                            Some(columns) => self.attach_filter_body(
+                                bodies.database_id,
+                                bodies.tid,
+                                bodies.collection,
+                                columns,
+                                bodies.at,
+                                built,
+                            )?,
+                            None => self.attach_body(
+                                bodies.database_id,
+                                bodies.tid,
+                                bodies.collection,
+                                bodies.attach,
+                                bodies.at,
+                                built,
+                            )?,
+                        }
+                    }
                 };
                 hits.push(hit);
             }

@@ -49,20 +49,7 @@ impl CoreLoop {
         let Some(key) = hit.id.storage_key() else {
             return Ok(hit);
         };
-        let body = match at {
-            // The row at its current version, so a bitemporal collection
-            // attaches.
-            None => self.current_row_body(database_id, tid, collection, &key)?,
-            Some(ordinal) => self.sparse.versioned_get_as_of(
-                database_id,
-                tid,
-                collection,
-                &key,
-                Some(ordinal),
-                None,
-            )?,
-        };
-        if let Some(bytes) = body {
+        if let Some(bytes) = self.row_body_at(database_id, tid, collection, &key, at)? {
             let format = self.sparse_body_format(
                 crate::types::DatabaseId::new(database_id),
                 crate::types::TenantId::new(tid),
@@ -76,6 +63,63 @@ impl CoreLoop {
                     format.as_format_ref(),
                 )
                 .into_owned(),
+            );
+        }
+        Ok(hit)
+    }
+
+    /// The stored body of `key` at `at`, or its current version for `None`.
+    /// A current read takes the row at its current version, so a bitemporal
+    /// collection attaches.
+    fn row_body_at(
+        &self,
+        database_id: u64,
+        tid: u64,
+        collection: &str,
+        key: &nodedb_types::StorageKey,
+        at: Option<i64>,
+    ) -> crate::Result<Option<Vec<u8>>> {
+        match at {
+            None => self.current_row_body(database_id, tid, collection, key),
+            Some(ordinal) => Ok(self.sparse.versioned_get_as_of(
+                database_id,
+                tid,
+                collection,
+                key,
+                Some(ordinal),
+                None,
+            )?),
+        }
+    }
+
+    /// [`Self::attach_body`] for a candidate the residual filter has yet to
+    /// pass. A strict body decodes only `columns`, the fields the filter
+    /// reads, so a candidate the filter drops never pays for its other
+    /// columns. Any other body format attaches whole.
+    pub(in crate::data::executor) fn attach_filter_body(
+        &self,
+        database_id: u64,
+        tid: u64,
+        collection: &str,
+        columns: &[String],
+        at: Option<i64>,
+        mut hit: super::super::response_codec::VectorSearchHit,
+    ) -> crate::Result<super::super::response_codec::VectorSearchHit> {
+        let format = self.sparse_body_format(
+            crate::types::DatabaseId::new(database_id),
+            crate::types::TenantId::new(tid),
+            collection,
+        );
+        let crate::data::executor::sparse_body_format::SparseBodyFormat::Strict(schema) = &format
+        else {
+            return self.attach_body(database_id, tid, collection, true, at, hit);
+        };
+        let Some(key) = hit.id.storage_key() else {
+            return Ok(hit);
+        };
+        if let Some(bytes) = self.row_body_at(database_id, tid, collection, &key, at)? {
+            hit.body = crate::data::executor::strict_format::binary_tuple_columns_to_msgpack(
+                &bytes, schema, columns,
             );
         }
         Ok(hit)
@@ -360,6 +404,11 @@ impl CoreLoop {
             } else {
                 std::borrow::Cow::Owned(residual.iter().chain(&cut_payload).cloned().collect())
             };
+        // Outside a transaction the filter drops candidates here, so they
+        // carry only the fields it reads. A transaction's hits keep whole
+        // bodies for the Control Plane to filter after the staged merge.
+        let filter_columns = (attach && !window_residual.is_empty() && overlay_txn.is_none())
+            .then(|| nodedb_query::scan_filter::ScanFilter::referenced_fields(&window_residual));
         let window = self.rank_window(
             &SearchWindow {
                 collection: collection_ref,
@@ -375,6 +424,7 @@ impl CoreLoop {
                 collection,
                 attach: attach || !cut_payload.is_empty(),
                 at: cut.at,
+                filter_columns: filter_columns.as_deref(),
             },
             &window_residual,
             top_k,
@@ -421,6 +471,26 @@ impl CoreLoop {
             );
             top_k
         };
+        // The hits that passed the filter carry whole bodies.
+        if filter_columns.is_some() {
+            hits = match hits
+                .into_iter()
+                .map(|hit| {
+                    self.attach_body(
+                        task.request.database_id.as_u64(),
+                        tid,
+                        collection,
+                        true,
+                        cut.at,
+                        hit,
+                    )
+                })
+                .collect::<crate::Result<Vec<_>>>()
+            {
+                Ok(whole) => whole,
+                Err(e) => return self.response_error(task, e),
+            };
+        }
         // Read-your-own-writes for vector search: fold this transaction's
         // staged vector inserts into the base HNSW/IVF result before
         // truncation, so a vector inserted earlier in the same transaction
