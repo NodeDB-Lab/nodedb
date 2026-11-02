@@ -4,4 +4,4 @@ pub mod execute;
 pub mod plan;
 
 pub use execute::execute;
-pub use plan::{PurgePlan, SegmentPurgeAction, plan};
+pub use plan::{CeilingTile, PurgePlan, SegmentPurgeAction, plan};

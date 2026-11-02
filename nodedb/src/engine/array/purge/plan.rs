@@ -36,7 +36,16 @@ pub struct SegmentPurgeAction {
     /// are being dropped. A ceiling tile is placed on the earliest-flushed
     /// segment that hosts any tile for its prefix, so exactly one segment
     /// gets the ceiling for each prefix.
-    pub emit_ceiling_tiles: Vec<(TileId, SparseTile)>,
+    pub emit_ceiling_tiles: Vec<CeilingTile>,
+}
+
+/// One synthetic ceiling tile version a purge appends.
+pub struct CeilingTile {
+    pub tile_id: TileId,
+    /// The placement of the newest version the ceiling collapses: the
+    /// ceiling stands for that version.
+    pub placement: u32,
+    pub tile: SparseTile,
 }
 
 /// Full purge plan for one array at a given horizon.
@@ -48,14 +57,20 @@ pub struct PurgePlan {
     pub cells_carried_forward: usize,
 }
 
-/// Compute the purge plan for an array whose store is `store` and whose
-/// bitemporal horizon is `horizon_ms`.
+/// Compute the purge plan for an array whose store is `store` at the
+/// system-time ordinal `horizon`.
 ///
-/// `horizon_ms` must already be the absolute system-time cutoff (i.e.
-/// `now_ms - audit_retain_ms`). This function does **not** recompute it.
+/// Every segment tile version at or below `horizon` is dropped. Per prefix,
+/// one ceiling tile stamped `horizon` carries each coordinate's newest row
+/// at or below `horizon`: the version a read at `horizon` sees. So every
+/// version a newer version at or below the horizon supersedes goes, and the
+/// version visible at the horizon stays. A coordinate whose newest row at or
+/// below the horizon is a tombstone leaves the store entirely, unless the
+/// memtable still holds a version of its prefix at or below the horizon that
+/// the tombstone hides.
 pub fn plan(
     store: &ArrayStore,
-    horizon_ms: i64,
+    horizon: i64,
     schema: &ArraySchema,
 ) -> Result<PurgePlan, ArrayError> {
     if store.manifest().segments.is_empty() {
@@ -71,6 +86,7 @@ pub fn plan(
         segment_id: String,
         flush_lsn: u64,
         tile_id: TileId,
+        placement: u32,
     }
 
     let mut all_entries: Vec<TaggedEntry> = Vec::new();
@@ -85,6 +101,7 @@ pub fn plan(
                 segment_id: seg_ref.id.clone(),
                 flush_lsn: seg_ref.flush_lsn,
                 tile_id: entry.tile_id,
+                placement: entry.placement,
             });
         }
     }
@@ -99,7 +116,7 @@ pub fn plan(
     // ── Step 2: Check whether any tile is out-of-horizon. If none, no-op. ──────
     let any_outside = all_entries
         .iter()
-        .any(|e| e.tile_id.system_from_ms < horizon_ms);
+        .any(|e| e.tile_id.system_from_ms <= horizon);
     if !any_outside {
         return Ok(PurgePlan {
             segment_actions: Vec::new(),
@@ -107,37 +124,32 @@ pub fn plan(
         });
     }
 
-    // ── Step 3: Group entries by hilbert_prefix. ─────────────────────────────
-    // For each prefix, build: inside list, outside list (newest→oldest), and
-    // the earliest-flushed segment id for the ceiling host.
+    // ── Step 3: Group the versions at or below the horizon by
+    //   hilbert_prefix. Versions above it stay as they are. ──────────────────
     struct PrefixGroup {
-        /// (flush_lsn, segment_id, tile_id) for in-horizon versions.
-        inside: Vec<(u64, String, TileId)>,
-        /// (flush_lsn, segment_id, tile_id) for out-of-horizon versions.
-        outside: Vec<(u64, String, TileId)>,
+        /// (flush_lsn, segment_id, tile_id, placement) for versions at or
+        /// below the horizon.
+        outside: Vec<(u64, String, TileId, u32)>,
     }
 
     let mut by_prefix: HashMap<u64, PrefixGroup> = HashMap::new();
-    for e in &all_entries {
-        let g = by_prefix
+    for e in all_entries
+        .iter()
+        .filter(|e| e.tile_id.system_from_ms <= horizon)
+    {
+        by_prefix
             .entry(e.tile_id.hilbert_prefix)
             .or_insert_with(|| PrefixGroup {
-                inside: Vec::new(),
                 outside: Vec::new(),
-            });
-        if e.tile_id.system_from_ms >= horizon_ms {
-            g.inside
-                .push((e.flush_lsn, e.segment_id.clone(), e.tile_id));
-        } else {
-            g.outside
-                .push((e.flush_lsn, e.segment_id.clone(), e.tile_id));
-        }
+            })
+            .outside
+            .push((e.flush_lsn, e.segment_id.clone(), e.tile_id, e.placement));
     }
 
     // ── Step 4: Per-prefix retention decision. ───────────────────────────────
     // Maps segment_id → (drop_tile_ids, ceiling_tiles).
     let mut seg_drops: HashMap<String, HashSet<TileId>> = HashMap::new();
-    let mut seg_ceilings: HashMap<String, Vec<(TileId, SparseTile)>> = HashMap::new();
+    let mut seg_ceilings: HashMap<String, Vec<CeilingTile>> = HashMap::new();
     let mut total_cells_carried: usize = 0;
 
     for (prefix, group) in &mut by_prefix {
@@ -145,34 +157,22 @@ pub fn plan(
             continue;
         }
 
-        // Collect coord keys present in any in-horizon tile version.
-        let mut inhorizon_coord_keys: HashSet<Vec<u8>> = HashSet::new();
-        for (_, seg_id, tile_id) in &group.inside {
-            let handle = match store.segments.get(seg_id) {
-                Some(h) => h,
-                None => continue,
-            };
-            let reader = handle.reader();
-            let tile_idx = match reader.tiles().iter().position(|e| e.tile_id == *tile_id) {
-                Some(i) => i,
-                None => continue,
-            };
-            let payload = reader.read_tile(tile_idx)?;
-            if let TilePayload::Sparse(tile) = &payload {
-                for row in decode_sparse_rows(tile)? {
-                    inhorizon_coord_keys.insert(row.coord_key);
-                }
-            }
-        }
+        // A memtable version of this prefix at or below the horizon is
+        // older state a dropped tombstone would expose: keep tombstones then.
+        let memtable_below = store
+            .memtable
+            .iter_tile_versions(*prefix, horizon)
+            .next()
+            .is_some();
 
         // Sort outside-horizon versions newest → oldest.
         group
             .outside
-            .sort_by_key(|(_, _, tid)| std::cmp::Reverse(tid.system_from_ms));
+            .sort_by_key(|(_, _, tid, _)| std::cmp::Reverse(tid.system_from_ms));
 
         // Accumulate ceiling: coord_key → DecodedRow.
         let mut ceiling: HashMap<Vec<u8>, DecodedRow> = HashMap::new();
-        for (_, seg_id, tile_id) in &group.outside {
+        for (_, seg_id, tile_id, _) in &group.outside {
             let handle = match store.segments.get(seg_id) {
                 Some(h) => h,
                 None => continue,
@@ -185,16 +185,25 @@ pub fn plan(
             let payload = reader.read_tile(tile_idx)?;
             if let TilePayload::Sparse(tile) = &payload {
                 for row in decode_sparse_rows(tile)? {
-                    if inhorizon_coord_keys.contains(&row.coord_key) {
-                        continue;
-                    }
                     ceiling.entry(row.coord_key.clone()).or_insert(row);
                 }
             }
         }
 
+        // A lone version at or below the horizon that holds only live rows
+        // is already the state at the horizon: nothing to purge.
+        let changes = group.outside.len() > 1
+            || ceiling.values().any(|row| match row.kind {
+                RowKind::GdprErased => true,
+                RowKind::Tombstone => !memtable_below,
+                RowKind::Live => false,
+            });
+        if !changes {
+            continue;
+        }
+
         // All outside tile-versions are dropped from their owning segments.
-        for (_, seg_id, tile_id) in &group.outside {
+        for (_, seg_id, tile_id, _) in &group.outside {
             seg_drops
                 .entry(seg_id.clone())
                 .or_default()
@@ -210,6 +219,7 @@ pub fn plan(
         for (_key, row) in ceiling_rows {
             match row.kind {
                 RowKind::GdprErased => {}
+                RowKind::Tombstone if !memtable_below => {}
                 RowKind::Tombstone => {
                     builder.push_row(SparseRow::sentinel(&row.coord, RowKind::Tombstone))?;
                     cells_in_ceiling += 1;
@@ -233,18 +243,26 @@ pub fn plan(
         if cells_in_ceiling > 0 {
             total_cells_carried += cells_in_ceiling;
             let ceiling_tile = builder.build();
-            // Place ceiling just below the horizon so it sorts before all
-            // in-horizon tiles for this prefix (mirrors compaction merger).
-            let ceiling_sys_ms = horizon_ms.saturating_sub(1);
-            let ceiling_tile_id = TileId::new(*prefix, ceiling_sys_ms);
+            // The ceiling is the state at the horizon. Every kept version of
+            // this prefix sits above it (mirrors compaction merger).
+            let ceiling_tile_id = TileId::new(*prefix, horizon);
+            // The ceiling stands for the newest collapsed version, so it
+            // keeps that version's placement.
+            let placement = group
+                .outside
+                .first()
+                .map(|(_, _, _, placement)| *placement)
+                .ok_or_else(|| ArrayError::SegmentCorruption {
+                    detail: "plan: prefix group has no outside-horizon version".into(),
+                })?;
 
             // Host: earliest-flushed segment among all outside-horizon versions
             // for this prefix (lowest flush_lsn wins; among ties, smallest id).
             let host_seg_id = group
                 .outside
                 .iter()
-                .min_by_key(|(lsn, sid, _)| (*lsn, sid.clone()))
-                .map(|(_, sid, _)| sid.clone())
+                .min_by_key(|(lsn, sid, _, _)| (*lsn, sid.clone()))
+                .map(|(_, sid, _, _)| sid.clone())
                 .ok_or_else(|| ArrayError::SegmentCorruption {
                     detail: "plan: prefix group has no outside-horizon version".into(),
                 })?;
@@ -252,7 +270,11 @@ pub fn plan(
             seg_ceilings
                 .entry(host_seg_id)
                 .or_default()
-                .push((ceiling_tile_id, ceiling_tile));
+                .push(CeilingTile {
+                    tile_id: ceiling_tile_id,
+                    placement,
+                    tile: ceiling_tile,
+                });
         }
     }
 
@@ -324,6 +346,7 @@ mod tests {
         engine
             .put_cells(
                 &test_aid(),
+                0,
                 vec![ArrayPutCell {
                     coord: vec![CoordValue::Int64(x)],
                     attrs: vec![CellValue::Int64(v)],

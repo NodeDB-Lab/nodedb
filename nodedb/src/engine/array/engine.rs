@@ -239,20 +239,26 @@ impl ArrayEngine {
             .ok_or_else(|| ArrayEngineError::UnknownArray(format!("{:?}", id)))
     }
 
-    /// Drop superseded tile-versions older than `cutoff_system_ms` for the
-    /// array named `array_id`.
+    /// Purge the history of the array named `array_id` below the
+    /// system-time ordinal `horizon`.
+    ///
+    /// Every version a newer version at or below `horizon` supersedes goes.
+    /// The version of each cell a read at `horizon` sees stays, so every read
+    /// at or above the horizon answers as before. A cell whose version at the
+    /// horizon is a tombstone leaves the store entirely. See
+    /// [`super::purge::plan`] for the segment-level rule.
     ///
     /// `tenant_id` and `database_id` identify the array's catalog namespace.
     ///
     /// Returns the number of tile-versions dropped. Returns `Ok(0)` when the
     /// array is not open (idempotent — array may have been dropped between
     /// schedule and execution).
-    pub fn temporal_purge(
+    pub fn purge_array_versions_below(
         &mut self,
         tenant_id: nodedb_types::TenantId,
         database_id: nodedb_types::DatabaseId,
         array_id: &str,
-        cutoff_system_ms: i64,
+        horizon: i64,
     ) -> ArrayEngineResult<u64> {
         let aid = ArrayId::in_database(tenant_id, database_id, array_id);
         // Idempotent: array may not be open on this core.
@@ -267,7 +273,7 @@ impl ArrayEngine {
 
         let plan = {
             let store = self.store(&aid)?;
-            super::purge::plan(store, cutoff_system_ms, &schema)?
+            super::purge::plan(store, horizon, &schema)?
         };
 
         if plan.segment_actions.is_empty() {
@@ -289,7 +295,7 @@ fn drop_tombstone_dir(dir: &std::path::Path) -> PathBuf {
 /// separators and traversal components out of the path.
 pub(super) fn array_dir(root: &std::path::Path, id: &ArrayId) -> PathBuf {
     let encoded_name = hex::encode(&id.name);
-    root.join("arrays-v2")
+    root.join("arrays")
         .join(format!("d{}", id.database_id.as_u64()))
         .join(format!("t{}", id.tenant_id.as_u64()))
         .join(encoded_name)
@@ -313,6 +319,7 @@ mod tests {
         e.open_array(aid(), schema(), 0xC0FFEE).unwrap();
         e.put_cells(
             &aid(),
+            0,
             vec![ArrayPutCell {
                 coord: vec![CoordValue::Int64(4), CoordValue::Int64(4)],
                 attrs: vec![CellValue::Int64(99)],

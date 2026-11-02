@@ -34,6 +34,9 @@ pub struct ArrayStore {
     /// At-rest encryption key for SEGA segment envelopes. When `Some`,
     /// all segment opens use AES-256-GCM decryption.
     pub(super) kek: Option<WalEncryptionKey>,
+    /// The newest tile-version stamp any segment or the memtable holds under
+    /// each placement, at or above the true newest.
+    pub(super) newest_stamps: HashMap<u32, i64>,
 }
 
 impl ArrayStore {
@@ -76,6 +79,13 @@ impl ArrayStore {
             }
             segments.insert(seg.id.clone(), h);
         }
+        let mut newest_stamps = HashMap::new();
+        for handle in segments.values() {
+            super::versions::merge_newest_stamps(
+                &mut newest_stamps,
+                super::versions::segment_newest_stamps(handle),
+            );
+        }
         Ok(Self {
             root,
             schema,
@@ -85,6 +95,7 @@ impl ArrayStore {
             segments,
             next_segment_seq: max_seq + 1,
             kek,
+            newest_stamps,
         })
     }
 

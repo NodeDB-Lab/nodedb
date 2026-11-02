@@ -18,31 +18,37 @@ impl ArrayEngine {
     /// Never flushes. A flush must stamp the records its segment holds, and
     /// only the caller knows them: it checks [`Self::needs_flush`] and
     /// flushes with its core's replay stamp.
+    ///
+    /// `placement` is the vShard whose write stores the cells. Every tile
+    /// version the cells write carries it.
     pub fn put_cells(
         &mut self,
         id: &ArrayId,
+        placement: u32,
         cells: Vec<ArrayPutCell>,
         wal_lsn: u64,
     ) -> ArrayEngineResult<()> {
         if cells.is_empty() {
             return Ok(());
         }
-        stamp_put_cells(self.store_mut(id)?, cells, wal_lsn)
+        stamp_put_cells(self.store_mut(id)?, placement, cells, wal_lsn)
     }
 
     /// Stamps memtable tombstones (or GDPR erasure markers) with a
     /// caller-supplied LSN. Each cell in `cells` independently selects
-    /// the sentinel byte via its `erasure` flag.
+    /// the sentinel byte via its `erasure` flag. Every tile version the
+    /// cells write carries `placement`, as [`Self::put_cells`] does.
     pub fn delete_cells(
         &mut self,
         id: &ArrayId,
+        placement: u32,
         cells: Vec<super::wal::ArrayDeleteCell>,
         wal_lsn: u64,
     ) -> ArrayEngineResult<()> {
         if cells.is_empty() {
             return Ok(());
         }
-        stamp_delete_cells(self.store_mut(id)?, cells, wal_lsn)
+        stamp_delete_cells(self.store_mut(id)?, placement, cells, wal_lsn)
     }
 
     /// GDPR-erase a single cell at `(array, coord, system_from_ms)`.
@@ -58,6 +64,7 @@ impl ArrayEngine {
     pub fn gdpr_erase_cell(
         &mut self,
         id: &ArrayId,
+        placement: u32,
         coord: Vec<nodedb_array::types::coord::value::CoordValue>,
         system_from_ms: i64,
         wal_lsn: u64,
@@ -65,6 +72,7 @@ impl ArrayEngine {
         use super::wal::ArrayDeleteCell;
         self.delete_cells(
             id,
+            placement,
             vec![ArrayDeleteCell {
                 coord,
                 system_from_ms,
@@ -85,6 +93,7 @@ impl ArrayEngine {
 /// directly so write ordering is identical to the live dispatch path.
 pub(crate) fn stamp_put_cells(
     store: &mut ArrayStore,
+    placement: u32,
     cells: Vec<ArrayPutCell>,
     lsn: u64,
 ) -> ArrayEngineResult<()> {
@@ -110,6 +119,7 @@ pub(crate) fn stamp_put_cells(
     schema.check_cells(cells.iter().map(|c| c.attrs.as_slice()))?;
     let mut tiles = nodedb_array::tile::TilePrefixMemo::new();
     for c in cells {
+        store.note_version_stamp(placement, c.system_from_ms);
         store.memtable.put_cell_keyed(
             &schema,
             &mut tiles,
@@ -120,6 +130,7 @@ pub(crate) fn stamp_put_cells(
                 system_from_ms: c.system_from_ms,
                 valid_from_ms: c.valid_from_ms,
                 valid_until_ms: c.valid_until_ms,
+                placement,
                 lsn,
             },
         )?;
@@ -129,19 +140,21 @@ pub(crate) fn stamp_put_cells(
 
 pub(crate) fn stamp_delete_cells(
     store: &mut ArrayStore,
+    placement: u32,
     cells: Vec<super::wal::ArrayDeleteCell>,
     lsn: u64,
 ) -> ArrayEngineResult<()> {
     let schema = store.schema().clone();
     for c in cells {
+        store.note_version_stamp(placement, c.system_from_ms);
         if c.erasure {
             store
                 .memtable
-                .erase_cell(&schema, c.coord, c.system_from_ms, lsn)?;
+                .erase_cell(&schema, c.coord, c.system_from_ms, placement, lsn)?;
         } else {
             store
                 .memtable
-                .delete_cell(&schema, c.coord, c.system_from_ms, lsn)?;
+                .delete_cell(&schema, c.coord, c.system_from_ms, placement, lsn)?;
         }
     }
     Ok(())
@@ -187,7 +200,7 @@ mod tests {
             valid_from_ms: 0,
             valid_until_ms: i64::MAX,
         }];
-        e.put_cells(&aid(), cells, 42).unwrap();
+        e.put_cells(&aid(), 0, cells, 42).unwrap();
         let seg = e
             .flush(&aid(), crate::types::replay_stamp::ReplayStamp::through(43))
             .unwrap()
@@ -215,7 +228,7 @@ mod tests {
             valid_until_ms: i64::MAX,
         };
         assert!(
-            e.put_cells(&aid(), vec![cell(1, 7), cell(2, 0)], 1)
+            e.put_cells(&aid(), 0, vec![cell(1, 7), cell(2, 0)], 1)
                 .is_err()
         );
         assert_eq!(e.store(&aid()).unwrap().memtable.stats().cell_count, 0);
@@ -239,6 +252,7 @@ mod tests {
         let err = e
             .put_cells(
                 &aid(),
+                0,
                 vec![
                     cell(1, CellValue::Int64(1)),
                     cell(2, CellValue::Float64(2.0)),

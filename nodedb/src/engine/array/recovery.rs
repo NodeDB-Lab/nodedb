@@ -38,6 +38,9 @@ pub struct RecoveryStats {
 /// One WAL record presented to the engine during recovery. The Origin
 /// caller decodes the raw [`nodedb_wal::WalRecord`] payload via zerompk
 /// and dispatches to the appropriate variant.
+///
+/// The caller stamps every cell with the system-time ordinal of its apply
+/// before it hands the record over: a record carries no version stamp.
 pub enum RecoveryRecord {
     Put {
         lsn: u64,
@@ -76,21 +79,10 @@ impl<'a> Recovery<'a> {
                     self.stats.puts_skipped += 1;
                     return Ok(());
                 }
+                // Every cell carries the tile-version stamp the caller
+                // decided for this apply. Recovery writes it as given.
                 let cells: Vec<ArrayPutCell> = payload.cells;
-                // Invariant: every cell's `system_from_ms` must be the
-                // leader-stamped value from the WAL payload. The recovery
-                // path MUST NOT call `HlcClock::now()` or any wall-clock
-                // function to derive a replacement — that would cause the
-                // replay to assign a different stamp than the leader did,
-                // breaking cross-replica consistency at any `system_as_of`
-                // cutoff that falls between the two stamps.
-                debug_assert!(
-                    cells.iter().all(|c| c.system_from_ms > 0),
-                    "recovery: ArrayPutCell.system_from_ms must be the leader-stamped \
-                     value (> 0), not a default — check that the WAL decoder does not \
-                     zero-fill this field on version mismatch"
-                );
-                stamp_put_cells(self.store, cells, lsn)?;
+                stamp_put_cells(self.store, payload.vshard_id, cells, lsn)?;
                 self.stats.puts_applied += 1;
             }
             RecoveryRecord::Delete { lsn, payload } => {
@@ -98,15 +90,8 @@ impl<'a> Recovery<'a> {
                     self.stats.deletes_skipped += 1;
                     return Ok(());
                 }
-                // Same invariant for deletes: `system_from_ms` is the
-                // tombstone version key; it must come from the WAL payload,
-                // not from the local clock.
-                debug_assert!(
-                    payload.cells.iter().all(|c| c.system_from_ms > 0),
-                    "recovery: ArrayDeleteCell.system_from_ms must be the leader-stamped \
-                     value (> 0), not a default"
-                );
-                stamp_delete_cells(self.store, payload.cells, lsn)?;
+                // Every tombstone carries the stamp the caller decided.
+                stamp_delete_cells(self.store, payload.vshard_id, payload.cells, lsn)?;
                 self.stats.deletes_applied += 1;
             }
             RecoveryRecord::Flush { .. } => {}

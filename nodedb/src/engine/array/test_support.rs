@@ -48,6 +48,7 @@ pub(super) fn aid() -> ArrayId {
 pub(super) fn put_one(e: &mut ArrayEngine, x: i64, y: i64, v: i64, lsn: u64) {
     e.put_cells(
         &aid(),
+        0,
         vec![ArrayPutCell {
             coord: vec![CoordValue::Int64(x), CoordValue::Int64(y)],
             attrs: vec![CellValue::Int64(v)],

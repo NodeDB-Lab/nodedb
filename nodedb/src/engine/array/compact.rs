@@ -11,15 +11,14 @@ impl ArrayEngine {
     /// Run compaction on the array if the picker chooses one. Returns
     /// `true` if a merge happened.
     ///
-    /// `audit_retain_ms` is the per-array retention window in milliseconds.
-    /// `now_ms` is the wall-clock epoch-milliseconds at compaction start.
-    /// Pass `now_ms = 0` and `audit_retain_ms = None` to disable retention
-    /// (keeps all tile versions).
+    /// `retention_horizon` is the system-time ordinal the array's audit
+    /// retention keeps history back to. A merge with a horizon collapses
+    /// every version its inputs supersede at or below it and keeps the
+    /// version visible at it. `None` keeps every tile version.
     pub fn maybe_compact(
         &mut self,
         id: &ArrayId,
-        audit_retain_ms: Option<i64>,
-        now_ms: i64,
+        retention_horizon: Option<i64>,
     ) -> ArrayEngineResult<bool> {
         let plan = match CompactionPicker::pick(self.store(id)?) {
             Some(p) => p,
@@ -37,8 +36,7 @@ impl ArrayEngine {
             &plan.inputs,
             output_id,
             plan.output_level,
-            audit_retain_ms,
-            now_ms,
+            retention_horizon,
         )?;
         let store = self.store_mut(id)?;
         let removed = out.removed.clone();
@@ -75,7 +73,7 @@ mod tests {
             .unwrap();
         }
         assert_eq!(e.store(&aid()).unwrap().manifest().segments.len(), 4);
-        let merged = e.maybe_compact(&aid(), None, 0).unwrap();
+        let merged = e.maybe_compact(&aid(), None).unwrap();
         assert!(merged);
         let m = e.store(&aid()).unwrap().manifest();
         assert_eq!(m.segments.len(), 1);
