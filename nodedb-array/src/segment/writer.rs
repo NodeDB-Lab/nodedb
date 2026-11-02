@@ -33,22 +33,49 @@ impl SegmentWriter {
         }
     }
 
-    pub fn append_sparse(&mut self, tile_id: TileId, tile: &SparseTile) -> ArrayResult<()> {
+    /// Append a sparse tile version stored under `placement` (see
+    /// [`TileEntry::placement`]).
+    pub fn append_sparse(
+        &mut self,
+        tile_id: TileId,
+        placement: u32,
+        tile: &SparseTile,
+    ) -> ArrayResult<()> {
         let mut payload = Vec::new();
         crate::codec::tile_encode::encode_sparse_tile(tile, &mut payload)?;
-        self.append_framed(tile_id, TileKind::Sparse, &payload, tile.mbr.clone())
+        self.append_framed(
+            tile_id,
+            placement,
+            TileKind::Sparse,
+            &payload,
+            tile.mbr.clone(),
+        )
     }
 
-    pub fn append_dense(&mut self, tile_id: TileId, tile: &DenseTile) -> ArrayResult<()> {
+    /// Append a dense tile version stored under `placement` (see
+    /// [`TileEntry::placement`]).
+    pub fn append_dense(
+        &mut self,
+        tile_id: TileId,
+        placement: u32,
+        tile: &DenseTile,
+    ) -> ArrayResult<()> {
         let payload = zerompk::to_msgpack_vec(tile).map_err(|e| ArrayError::SegmentCorruption {
             detail: format!("dense tile encode failed: {e}"),
         })?;
-        self.append_framed(tile_id, TileKind::Dense, &payload, tile.mbr.clone())
+        self.append_framed(
+            tile_id,
+            placement,
+            TileKind::Dense,
+            &payload,
+            tile.mbr.clone(),
+        )
     }
 
     fn append_framed(
         &mut self,
         tile_id: TileId,
+        placement: u32,
         kind: TileKind,
         payload: &[u8],
         mbr: crate::tile::mbr::TileMBR,
@@ -71,6 +98,7 @@ impl SegmentWriter {
         let framed_len = BlockFraming::encode(payload, &mut self.buf);
         self.entries.push(TileEntry::new(
             tile_id,
+            placement,
             kind,
             offset,
             framed_len as u32,
@@ -173,9 +201,9 @@ mod tests {
     fn writer_round_trip_via_footer() {
         let s = schema();
         let mut w = SegmentWriter::new(0x1234);
-        w.append_sparse(TileId::snapshot(1), &sparse_tile(&s))
+        w.append_sparse(TileId::snapshot(1), 0, &sparse_tile(&s))
             .unwrap();
-        w.append_sparse(TileId::snapshot(2), &sparse_tile(&s))
+        w.append_sparse(TileId::snapshot(2), 9, &sparse_tile(&s))
             .unwrap();
         let bytes = finish_plain(w).unwrap();
         let footer = SegmentFooter::decode(&bytes).unwrap();
@@ -183,6 +211,9 @@ mod tests {
         assert_eq!(footer.tiles.len(), 2);
         assert_eq!(footer.tiles[0].tile_id.hilbert_prefix, 1);
         assert_eq!(footer.tiles[1].tile_id.hilbert_prefix, 2);
+        // Each tile version keeps the placement it was stored under.
+        assert_eq!(footer.tiles[0].placement, 0);
+        assert_eq!(footer.tiles[1].placement, 9);
     }
 
     #[test]
@@ -197,10 +228,10 @@ mod tests {
     fn writer_rejects_non_monotonic_tile_ids() {
         let s = schema();
         let mut w = SegmentWriter::new(0x1234);
-        w.append_sparse(TileId::new(2, 100), &sparse_tile(&s))
+        w.append_sparse(TileId::new(2, 100), 0, &sparse_tile(&s))
             .unwrap();
         let err = w
-            .append_sparse(TileId::new(1, 100), &sparse_tile(&s))
+            .append_sparse(TileId::new(1, 100), 0, &sparse_tile(&s))
             .unwrap_err();
         assert!(
             matches!(err, crate::error::ArrayError::SegmentCorruption { .. }),
@@ -212,9 +243,9 @@ mod tests {
     fn writer_allows_same_prefix_different_system_times() {
         let s = schema();
         let mut w = SegmentWriter::new(0x1234);
-        w.append_sparse(TileId::new(5, 100), &sparse_tile(&s))
+        w.append_sparse(TileId::new(5, 100), 0, &sparse_tile(&s))
             .unwrap();
-        w.append_sparse(TileId::new(5, 200), &sparse_tile(&s))
+        w.append_sparse(TileId::new(5, 200), 0, &sparse_tile(&s))
             .unwrap();
         let bytes = finish_plain(w).unwrap();
         let footer = SegmentFooter::decode(&bytes).unwrap();
@@ -231,7 +262,7 @@ mod tests {
     fn array_segment_encrypted_at_rest() {
         let s = schema();
         let mut w = SegmentWriter::new(0xCAFE);
-        w.append_sparse(TileId::snapshot(1), &sparse_tile(&s))
+        w.append_sparse(TileId::snapshot(1), 0, &sparse_tile(&s))
             .unwrap();
         let kek = test_kek();
         let bytes = w.finish(Some(&kek)).unwrap();
@@ -247,7 +278,7 @@ mod tests {
         // when presented without a KEK.
         let s = schema();
         let mut w = SegmentWriter::new(0xBEEF);
-        w.append_sparse(TileId::snapshot(1), &sparse_tile(&s))
+        w.append_sparse(TileId::snapshot(1), 0, &sparse_tile(&s))
             .unwrap();
         let kek = test_kek();
         let encrypted = w.finish(Some(&kek)).unwrap();
@@ -265,7 +296,7 @@ mod tests {
         // when presented with a KEK (encryption enforcement).
         let s = schema();
         let mut w = SegmentWriter::new(0xDEAD);
-        w.append_sparse(TileId::snapshot(1), &sparse_tile(&s))
+        w.append_sparse(TileId::snapshot(1), 0, &sparse_tile(&s))
             .unwrap();
         let plaintext = w.finish(None).unwrap();
         let kek = test_kek();
@@ -284,9 +315,9 @@ mod tests {
         // SegmentReader::open_with_kek path.
         let s = schema();
         let mut w = SegmentWriter::new(0x1234);
-        w.append_sparse(TileId::new(1, 100), &sparse_tile(&s))
+        w.append_sparse(TileId::new(1, 100), 0, &sparse_tile(&s))
             .unwrap();
-        w.append_sparse(TileId::new(2, 200), &sparse_tile(&s))
+        w.append_sparse(TileId::new(2, 200), 0, &sparse_tile(&s))
             .unwrap();
         let kek = test_kek();
         let encrypted = w.finish(Some(&kek)).unwrap();
@@ -301,7 +332,7 @@ mod tests {
         let s = schema();
         let mut w = SegmentWriter::new(0xABCD);
         for i in 1u64..=5 {
-            w.append_sparse(TileId::new(i, i as i64 * 100), &sparse_tile(&s))
+            w.append_sparse(TileId::new(i, i as i64 * 100), 0, &sparse_tile(&s))
                 .unwrap();
         }
         let kek = test_kek();

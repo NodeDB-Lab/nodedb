@@ -169,14 +169,20 @@ impl SparseTile {
 
     /// Decode the `RowKind` for the given row index.
     ///
-    /// Returns [`RowKind::Live`] when `row_kinds` is empty (forward-compat
-    /// with pre-v4 data still in memory during migration) or when the row
-    /// index is out of range.
+    /// `row_kinds` is parallel to `surrogates`. A row index past it is a
+    /// malformed tile.
     pub fn row_kind(&self, row: usize) -> ArrayResult<RowKind> {
-        match self.row_kinds.get(row) {
-            None => Ok(RowKind::Live),
-            Some(&b) => RowKind::from_u8(b),
-        }
+        let kind =
+            self.row_kinds
+                .get(row)
+                .copied()
+                .ok_or_else(|| ArrayError::SegmentCorruption {
+                    detail: format!(
+                        "tile row {row} is past the row-kind column of {} rows",
+                        self.row_kinds.len()
+                    ),
+                })?;
+        RowKind::from_u8(kind)
     }
 
     /// The surrogate `row` holds: `Some` for a stored live cell, `None` for a

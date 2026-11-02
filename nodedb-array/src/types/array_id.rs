@@ -6,10 +6,6 @@ use serde::{Deserialize, Serialize};
 
 use nodedb_types::{DatabaseId, TenantId};
 
-fn default_database_id() -> DatabaseId {
-    DatabaseId::DEFAULT
-}
-
 /// Logical handle to an array within a tenant and database. The tuple
 /// `(tenant_id, database_id, name)` is the canonical storage/catalog key;
 /// `name` remains the user-visible identifier.
@@ -26,15 +22,13 @@ fn default_database_id() -> DatabaseId {
 )]
 pub struct ArrayId {
     pub tenant_id: TenantId,
-    /// Database scope. Missing fields in legacy persisted descriptors decode
-    /// as the built-in default database.
-    #[serde(default = "default_database_id")]
+    /// Database scope.
     pub database_id: DatabaseId,
     pub name: String,
 }
 
 impl ArrayId {
-    /// Construct a legacy/default-database identifier.
+    /// Construct an identifier in the default database.
     pub fn new(tenant_id: TenantId, name: impl Into<String>) -> Self {
         Self::in_database(tenant_id, DatabaseId::DEFAULT, name)
     }

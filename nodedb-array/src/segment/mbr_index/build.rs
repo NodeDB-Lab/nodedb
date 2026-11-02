@@ -146,7 +146,7 @@ mod tests {
             nnz: 1,
             attr_stats: vec![AttrStats::AllNull { null_count: 0 }],
         };
-        TileEntry::new(TileId::snapshot(tid), TileKind::Sparse, 0, 0, mbr)
+        TileEntry::new(TileId::snapshot(tid), 0, TileKind::Sparse, 0, 0, mbr)
     }
 
     fn pred(lo: i64, hi: i64) -> MbrQueryPredicate {
