@@ -13,18 +13,7 @@ impl<'a> DocumentEngine<'a> {
         collection: &str,
         doc_id: &StorageKey,
     ) -> crate::Result<Option<serde_json::Value>> {
-        let bytes_opt = if self.is_bitemporal(collection) {
-            self.sparse.versioned_get_current(
-                self.database_id,
-                self.tenant_id,
-                collection,
-                doc_id,
-            )?
-        } else {
-            self.sparse
-                .get(self.database_id, self.tenant_id, collection, doc_id)?
-        };
-        match bytes_opt {
+        match self.get_raw(collection, doc_id)? {
             Some(bytes) => {
                 let rmpv_val = crate::util::bounded_msgpack::read_value(&bytes).map_err(|e| {
                     crate::Error::Serialization {
@@ -40,13 +29,8 @@ impl<'a> DocumentEngine<'a> {
 
     /// Get raw MessagePack bytes (zero-copy path for DataFusion UDFs).
     pub fn get_raw(&self, collection: &str, doc_id: &StorageKey) -> crate::Result<Option<Vec<u8>>> {
-        if self.is_bitemporal(collection) {
-            self.sparse
-                .versioned_get_current(self.database_id, self.tenant_id, collection, doc_id)
-        } else {
-            self.sparse
-                .get(self.database_id, self.tenant_id, collection, doc_id)
-        }
+        self.sparse
+            .versioned_get_current(self.database_id, self.tenant_id, collection, doc_id)
     }
 }
 
