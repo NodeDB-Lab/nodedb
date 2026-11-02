@@ -54,7 +54,8 @@ pub enum CatalogEntry {
         database_id: u64,
         tenant_id: u64,
         name: String,
-        /// Prior committed version + 1. `0` is the pre-stamping compat sentinel.
+        /// Prior committed version + 1. `0` marks an entry the stamp has not
+        /// yet set.
         /// Frozen at propose time — an apply-time stamp diverges across replicas.
         descriptor_version: u64,
         /// Drop time, and the instant retention measures from.
@@ -511,7 +512,7 @@ pub enum CatalogEntry {
     /// Create-only consumer-group row in `_system.consumer_groups`. The leader
     /// reports the duplicate; apply stays idempotent under replay.
     PutConsumerGroupIfAbsent(Box<ConsumerGroupDef>),
-    /// Drops the canonical row, and the legacy unscoped row under DEFAULT.
+    /// Drops the group row.
     DeleteConsumerGroup {
         database_id: u64,
         tenant_id: u64,
@@ -520,13 +521,6 @@ pub enum CatalogEntry {
         /// Incarnation this delete targets, frozen at propose time from the
         /// stored row. `Hlc::ZERO` applies unfenced.
         target_hlc: nodedb_types::Hlc,
-    },
-    /// Re-keys a bare-topic group row onto its canonical `topic:<name>` stream.
-    /// `def` carries the row as the canonical key stores it; `legacy_stream` is
-    /// the bare topic name of the row it replaces.
-    MigrateConsumerGroupStream {
-        def: Box<ConsumerGroupDef>,
-        legacy_stream: String,
     },
 
     // ── Version-history checkpoint ─────────────────────────────────

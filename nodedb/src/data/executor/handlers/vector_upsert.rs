@@ -346,8 +346,6 @@ mod tests {
         Admission, ExemptReason, PhysicalPlan, Priority, Request, Status,
     };
     use crate::data::executor::core_loop::CoreLoop;
-    use crate::data::executor::core_loop::write_index::tests::local;
-    use crate::data::executor::core_loop::write_index::{CollKey, KeyRepr, WriteKey};
     use crate::types::{DatabaseId, Lsn, ReadConsistency, RequestId, TenantId, TraceId, VShardId};
     use nodedb_bridge::buffer::RingBuffer;
     use nodedb_physical::physical_plan::VectorOp;
@@ -405,6 +403,7 @@ mod tests {
                 ann_options: Default::default(),
                 skip_payload_fetch: false,
                 payload_filters: Vec::new(),
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             deadline: Instant::now() + Duration::from_secs(5),
             priority: Priority::Normal,
@@ -419,7 +418,7 @@ mod tests {
             wal_lsn: Some(Lsn::new(lsn)),
             resolved_now_ms: None,
             commit_hlc: None,
-            entry_version: None,
+            system_ordinal: None,
             admission: Admission::Exempt(ExemptReason::Read),
         })
     }
@@ -456,7 +455,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_upsert_populates_write_version_index_surrogate_and_floor() {
+    fn direct_upsert_notes_its_write() {
         let mut h = make_core();
         let task = make_task_with_lsn(21);
         let surrogate = Surrogate::new(7);
@@ -470,29 +469,10 @@ mod tests {
         );
         assert_eq!(response.status, Status::Ok);
 
-        let key = WriteKey {
-            vshard: VShardId::new(0),
-            db: DatabaseId::DEFAULT,
-            tenant: TenantId::new(1),
-            collection: Box::from("primary_docs"),
-            key: KeyRepr::Surrogate(surrogate.as_u32()),
-        };
         assert_eq!(
-            h.core.write_index.key_version(&key),
-            Some(local(21)),
-            "direct upsert must populate the per-key (surrogate) write-version index"
-        );
-
-        let coll_key = CollKey {
-            vshard: VShardId::new(0),
-            db: DatabaseId::DEFAULT,
-            tenant: TenantId::new(1),
-            collection: Box::from("primary_docs"),
-        };
-        assert_eq!(
-            h.core.write_index.collection_version(&coll_key),
-            Some(local(21)),
-            "direct upsert must advance the collection write version"
+            h.core.watermark,
+            Lsn::new(21),
+            "direct upsert must note its write"
         );
     }
 

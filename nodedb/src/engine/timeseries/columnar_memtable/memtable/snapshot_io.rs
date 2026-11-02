@@ -87,8 +87,9 @@ impl ColumnarMemtable {
             snap.symbol_dicts.into_iter().collect();
         let series_row_counts: HashMap<SeriesId, u64> =
             snap.series_row_counts.into_iter().collect();
-        let memory_bytes: usize =
-            columns.iter().map(|c| c.memory_bytes()).sum::<usize>() + symbol_dicts.len() * 256;
+        let memory_bytes: usize = columns.iter().map(|c| c.memory_bytes()).sum::<usize>()
+            + symbol_dicts.len() * 256
+            + super::table::dictionary_string_bytes(&symbol_dicts);
 
         Ok(Self {
             schema,

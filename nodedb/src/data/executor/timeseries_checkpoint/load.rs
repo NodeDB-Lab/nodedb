@@ -45,11 +45,6 @@ impl CoreLoop {
         if !ts_root.exists() {
             return Ok(());
         }
-        // An aside directory is the remains of a truncate whose WAL record
-        // precedes it; replay re-applies the truncate, so the aside rows are
-        // never wanted.
-        crate::data::executor::handlers::timeseries::remove_truncating_leftovers(&ts_root)?;
-
         let mut loaded = 0usize;
         let mut partitions = 0usize;
         for (database_id, tenant_id, collection) in enumerate_ts_collections(&ts_root) {
@@ -113,6 +108,9 @@ impl CoreLoop {
         )?;
         let registry = read_registry(&ts_dir, self.segment_keks.ts_segment_kek.as_ref())?;
         let stamp = super::stamp::read_collection_ts_stamp(&ts_dir, &registry)?;
+        // Replay resolves the rows still in the WAL against the catalog the
+        // flushed rows were stamped under.
+        self.load_ts_series_catalog(&key, &ts_dir)?;
         let merged = match self.ts_replay.stamps.get(&key) {
             Some(held) => held.union(&stamp),
             None => stamp,
@@ -127,6 +125,13 @@ impl CoreLoop {
             let config = ColumnarMemtableConfig::from_tuning(&self.ts_tuning);
             self.columnar_memtables
                 .insert(key.clone(), ColumnarMemtable::new(schema, config));
+        }
+        // A batch written after the restart stamps above every flushed row:
+        // the newest flushed system-time ordinal folds into the shared clock.
+        for (_, entry) in registry.iter() {
+            if entry.meta.max_system_ts > 0 {
+                self.observe_bitemporal_ordinal(entry.meta.max_system_ts);
+            }
         }
         if registry.partition_count() > 0 {
             info!(
@@ -180,11 +185,6 @@ fn enumerate_ts_collections(ts_root: &std::path::Path) -> Vec<(DatabaseId, Tenan
                 let Some(collection) = coll_dir.file_name().to_str().map(|s| s.to_string()) else {
                     continue;
                 };
-                // Never a collection: a truncate's aside directory.
-                if crate::data::executor::handlers::timeseries::is_truncating_leftover(&collection)
-                {
-                    continue;
-                }
                 // A non-default database qualifies its collections as
                 // `{database_id}/{name}`, so their directories sit one level
                 // deeper, under the database id.
@@ -209,8 +209,7 @@ fn enumerate_ts_collections(ts_root: &std::path::Path) -> Vec<(DatabaseId, Tenan
 }
 
 /// The bare names of the collection directories under `dir`, the directory a
-/// non-default database's qualified collections live in. Aside directories
-/// of a truncate are skipped.
+/// non-default database's qualified collections live in.
 fn qualified_collections(dir: &std::path::Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -219,7 +218,6 @@ fn qualified_collections(dir: &std::path::Path) -> Vec<String> {
         .flatten()
         .filter(|entry| entry.path().is_dir())
         .filter_map(|entry| entry.file_name().to_str().map(str::to_string))
-        .filter(|name| !crate::data::executor::handlers::timeseries::is_truncating_leftover(name))
         .collect()
 }
 
@@ -347,7 +345,6 @@ mod tests {
         let ts_root = dir.path().join("ts");
         let qualified = ts_root.join("1025").join("1").join("1025");
         std::fs::create_dir_all(qualified.join("metrics")).expect("mkdir");
-        std::fs::create_dir_all(qualified.join("metrics.truncating-9")).expect("mkdir");
 
         let found = enumerate_ts_collections(&ts_root);
         assert_eq!(

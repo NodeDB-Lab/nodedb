@@ -12,7 +12,7 @@ use crate::bridge::envelope::PhysicalPlan;
 use crate::control::array_catalog::ArrayCatalogEntry;
 use crate::engine::array::wal::{ArrayDeleteCell, ArrayPutCell};
 use crate::types::TenantId;
-use nodedb_physical::physical_plan::{ArrayOp, ClusterArrayOp};
+use nodedb_physical::physical_plan::ClusterArrayOp;
 use nodedb_types::Surrogate;
 
 use super::super::convert::ConvertContext;
@@ -119,98 +119,57 @@ pub(in super::super) fn convert_insert_array(
     let aid = ArrayId::in_database(tenant_id, ctx.database_id, name);
     let key = ctx.collection_key(name);
     let vshard = key.vshard();
-    let system_now_ms = chrono::Utc::now().timestamp_millis();
+    // A cell's valid time opens at the statement's wall-clock instant. Its
+    // system time is the ordinal the owning core's apply stamps: the plan
+    // carries none (`ArrayPutCell::system_from_ms` stays 0).
+    let valid_now_ms = chrono::Utc::now().timestamp_millis();
     let kept = ctx.prefetched.array_keys(key, rows);
 
-    if ctx.cluster_enabled {
-        let mut partitioned: Vec<(u64, Vec<u8>)> = Vec::with_capacity(rows.len());
-        let mut tiles = TilePrefixMemo::new();
-        for (index, row) in rows.iter().enumerate() {
-            let (coord, surrogate) = cell_identity(kept, index, row, &schema, key, ctx)?;
-            let attrs = coerce_attrs(&row.attrs, &schema)?;
-            // A cell routes by its tile's key, the key a slice's shard
-            // fan-out and each shard's tile filter use.
-            let tile_key =
-                tiles
-                    .cell_prefix(&schema, &coord)
-                    .map_err(|e| crate::Error::PlanError {
-                        detail: format!("INSERT INTO ARRAY {name}: tile key: {e}"),
-                    })?;
-            let cell = ArrayPutCell {
-                coord,
-                attrs,
-                surrogate,
-                system_from_ms: system_now_ms,
-                valid_from_ms: system_now_ms,
-                valid_until_ms: i64::MAX,
-            };
-            let cell_bytes =
-                zerompk::to_msgpack_vec(&cell).map_err(|e| crate::Error::Serialization {
-                    format: "msgpack".into(),
-                    detail: format!("array put cell encode: {e}"),
-                })?;
-            partitioned.push((tile_key, cell_bytes));
-        }
-        let array_id_msgpack =
-            zerompk::to_msgpack_vec(&aid).map_err(|e| crate::Error::Serialization {
-                format: "msgpack".into(),
-                detail: format!("array id encode: {e}"),
-            })?;
-        return Ok(vec![PhysicalTask {
-            tenant_id,
-            vshard_id: vshard,
-            database_id: ctx.database_id,
-            plan: PhysicalPlan::ClusterArray(ClusterArrayOp::Put {
-                array_id: aid,
-                array_id_msgpack,
-                cells: partitioned,
-                // A routing wrapper carries no LSN of its own: the coordinator
-                // fans these cells out to the owning shards and each owner's
-                // apply mints the redo — and the LSN — for the cells it holds.
-                wal_lsn: 0,
-                prefix_bits: entry.prefix_bits,
-            }),
-            post_set_op: PostSetOp::None,
-            txn_id: None,
-        }]);
-    }
-
-    // Single-node path: bundle all cells into one msgpack blob.
-    let mut cells: Vec<ArrayPutCell> = Vec::with_capacity(rows.len());
+    let mut partitioned: Vec<(u64, Vec<u8>)> = Vec::with_capacity(rows.len());
+    let mut tiles = TilePrefixMemo::new();
     for (index, row) in rows.iter().enumerate() {
         let (coord, surrogate) = cell_identity(kept, index, row, &schema, key, ctx)?;
         let attrs = coerce_attrs(&row.attrs, &schema)?;
-        cells.push(ArrayPutCell {
+        // A cell routes by its tile's key, the key a slice's shard
+        // fan-out and each shard's tile filter use.
+        let tile_key = tiles
+            .cell_prefix(&schema, &coord)
+            .map_err(|e| crate::Error::PlanError {
+                detail: format!("INSERT INTO ARRAY {name}: tile key: {e}"),
+            })?;
+        let cell = ArrayPutCell {
             coord,
             attrs,
             surrogate,
-            system_from_ms: system_now_ms,
-            valid_from_ms: system_now_ms,
+            system_from_ms: 0,
+            valid_from_ms: valid_now_ms,
             valid_until_ms: i64::MAX,
-        });
+        };
+        let cell_bytes =
+            zerompk::to_msgpack_vec(&cell).map_err(|e| crate::Error::Serialization {
+                format: "msgpack".into(),
+                detail: format!("array put cell encode: {e}"),
+            })?;
+        partitioned.push((tile_key, cell_bytes));
     }
-    let cells_msgpack =
-        zerompk::to_msgpack_vec(&cells).map_err(|e| crate::Error::Serialization {
+    let array_id_msgpack =
+        zerompk::to_msgpack_vec(&aid).map_err(|e| crate::Error::Serialization {
             format: "msgpack".into(),
-            detail: format!("array put cells encode: {e}"),
+            detail: format!("array id encode: {e}"),
         })?;
-
     Ok(vec![PhysicalTask {
         tenant_id,
         vshard_id: vshard,
         database_id: ctx.database_id,
-        plan: PhysicalPlan::Array(ArrayOp::Put {
+        plan: PhysicalPlan::ClusterArray(ClusterArrayOp::Put {
             array_id: aid,
-            cells_msgpack,
-            // Stamped by the write funnel with the LSN of the redo record it
-            // appends for this write, so the live tile version equals the one
-            // replay rebuilds from that record's header. The planner must not
-            // allocate one: it appends nothing, so any LSN it picked will name
-            // a record that does not exist.
+            array_id_msgpack,
+            cells: partitioned,
+            // A routing wrapper carries no LSN of its own: the coordinator
+            // fans these cells out to the owning shards and each owner's
+            // apply mints the redo — and the LSN — for the cells it holds.
             wal_lsn: 0,
-            provenance: None,
-            // Single node: the task's vShard holds every tile.
-            vshard_id: vshard.as_u32(),
+            prefix_bits: entry.prefix_bits,
         }),
         post_set_op: PostSetOp::None,
         txn_id: None,
@@ -246,80 +205,48 @@ pub(in super::super) fn convert_delete_array(
 
     let aid = ArrayId::in_database(tenant_id, ctx.database_id, name);
     let vshard = ctx.collection_key(name).vshard();
-    let system_now_ms = chrono::Utc::now().timestamp_millis();
+    // The tombstone's system time is the ordinal the owning core's apply
+    // stamps: the plan carries none (`ArrayDeleteCell::system_from_ms`
+    // stays 0).
 
-    if ctx.cluster_enabled {
-        let mut partitioned: Vec<(u64, Vec<u8>)> = Vec::with_capacity(coords.len());
-        let mut tiles = TilePrefixMemo::new();
-        for row in coords {
-            let typed = coerce_coords(row, &schema)?;
-            let tile_key =
-                tiles
-                    .cell_prefix(&schema, &typed)
-                    .map_err(|e| crate::Error::PlanError {
-                        detail: format!("DELETE FROM ARRAY {name}: tile key: {e}"),
-                    })?;
-            let cell = ArrayDeleteCell {
-                coord: typed,
-                system_from_ms: system_now_ms,
-                erasure: false,
-            };
-            let cell_bytes =
-                zerompk::to_msgpack_vec(&cell).map_err(|e| crate::Error::Serialization {
-                    format: "msgpack".into(),
-                    detail: format!("array delete cell encode: {e}"),
-                })?;
-            partitioned.push((tile_key, cell_bytes));
-        }
-        let array_id_msgpack =
-            zerompk::to_msgpack_vec(&aid).map_err(|e| crate::Error::Serialization {
-                format: "msgpack".into(),
-                detail: format!("array id encode: {e}"),
-            })?;
-        return Ok(vec![PhysicalTask {
-            tenant_id,
-            vshard_id: vshard,
-            database_id: ctx.database_id,
-            plan: PhysicalPlan::ClusterArray(ClusterArrayOp::Delete {
-                array_id: aid,
-                array_id_msgpack,
-                coords: partitioned,
-                // See `convert_insert_array`: the owning shard's apply mints the
-                // redo, so the routing wrapper carries no LSN.
-                wal_lsn: 0,
-                prefix_bits: entry.prefix_bits,
-            }),
-            post_set_op: PostSetOp::None,
-            txn_id: None,
-        }]);
-    }
-
-    // Single-node path: bundle all cells into one msgpack blob.
-    let mut cells: Vec<ArrayDeleteCell> = Vec::with_capacity(coords.len());
+    let mut partitioned: Vec<(u64, Vec<u8>)> = Vec::with_capacity(coords.len());
+    let mut tiles = TilePrefixMemo::new();
     for row in coords {
-        cells.push(ArrayDeleteCell {
-            coord: coerce_coords(row, &schema)?,
-            system_from_ms: system_now_ms,
+        let typed = coerce_coords(row, &schema)?;
+        let tile_key = tiles
+            .cell_prefix(&schema, &typed)
+            .map_err(|e| crate::Error::PlanError {
+                detail: format!("DELETE FROM ARRAY {name}: tile key: {e}"),
+            })?;
+        let cell = ArrayDeleteCell {
+            coord: typed,
+            system_from_ms: 0,
             erasure: false,
-        });
+        };
+        let cell_bytes =
+            zerompk::to_msgpack_vec(&cell).map_err(|e| crate::Error::Serialization {
+                format: "msgpack".into(),
+                detail: format!("array delete cell encode: {e}"),
+            })?;
+        partitioned.push((tile_key, cell_bytes));
     }
-    let coords_msgpack =
-        zerompk::to_msgpack_vec(&cells).map_err(|e| crate::Error::Serialization {
+    let array_id_msgpack =
+        zerompk::to_msgpack_vec(&aid).map_err(|e| crate::Error::Serialization {
             format: "msgpack".into(),
-            detail: format!("array delete cells encode: {e}"),
+            detail: format!("array id encode: {e}"),
         })?;
     Ok(vec![PhysicalTask {
         tenant_id,
         vshard_id: vshard,
         database_id: ctx.database_id,
-        plan: PhysicalPlan::Array(ArrayOp::Delete {
+        plan: PhysicalPlan::ClusterArray(ClusterArrayOp::Delete {
             array_id: aid,
-            coords_msgpack,
-            // Stamped by the write funnel — see `convert_insert_array`.
+            array_id_msgpack,
+            coords: partitioned,
+            // See `convert_insert_array`: the owning shard's apply mints the
+            // redo, so the routing wrapper carries no LSN.
             wal_lsn: 0,
-            provenance: None,
-            // Single node: the task's vShard holds every tile.
-            vshard_id: vshard.as_u32(),
+            prefix_bits: entry.prefix_bits,
         }),
         post_set_op: PostSetOp::None,
         txn_id: None,

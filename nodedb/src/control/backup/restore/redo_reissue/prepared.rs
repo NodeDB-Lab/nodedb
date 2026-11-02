@@ -33,14 +33,9 @@ pub(in crate::control::backup::restore) struct PreparedRows {
 pub(super) struct PendingRow {
     pub(super) key: StorageKey,
     pub(super) identity: RowIdentity,
-    pub(super) body: PendingBody,
-}
-
-/// A row's MessagePack body, or every version of a bitemporal row with the
-/// body of each live version.
-pub(super) enum PendingBody {
-    Current(Vec<u8>),
-    Versions(Vec<(VersionStamp, Option<Vec<u8>>)>),
+    /// Every version of the row in system-time order, with the MessagePack
+    /// body of each live version. A tombstone carries `None`.
+    pub(super) versions: Vec<(VersionStamp, Option<Vec<u8>>)>,
 }
 
 impl PreparedRows {
@@ -96,22 +91,14 @@ pub(super) fn document_units(
             };
             let raw = surrogate.as_u32();
             let stored = collection.stored.as_str();
-            let (ops, ends_live) = match row.body {
-                PendingBody::Current(value) => {
-                    (vec![document_put(stored, pk, value, raw, None)?], true)
-                }
-                PendingBody::Versions(versions) => {
-                    let ends_live = versions.last().is_some_and(|(_, body)| body.is_some());
-                    let mut ops = Vec::with_capacity(versions.len());
-                    for (stamp, body) in versions {
-                        ops.push(match body {
-                            Some(value) => document_put(stored, pk, value, raw, Some(stamp))?,
-                            None => document_tombstone(stored, pk, raw, stamp.sys_from)?,
-                        });
-                    }
-                    (ops, ends_live)
-                }
-            };
+            let ends_live = row.versions.last().is_some_and(|(_, body)| body.is_some());
+            let mut ops = Vec::with_capacity(row.versions.len());
+            for (stamp, body) in row.versions {
+                ops.push(match body {
+                    Some(value) => document_put(stored, pk, value, raw, stamp)?,
+                    None => document_tombstone(stored, pk, raw, stamp.sys_from)?,
+                });
+            }
             // A restored row that ends live installs as a new row. One whose
             // last version is a tombstone ends absent and publishes nothing.
             let changes = if ends_live {
@@ -132,6 +119,10 @@ pub(super) fn document_units(
                     document_id: pk.to_owned(),
                     surrogate: raw,
                 }],
+                kv_keys: Vec::new(),
+                columnar_keys: Vec::new(),
+                vector_rows: Vec::new(),
+                timeseries: Vec::new(),
             });
         }
         out.push(CollectionUnits::rows(

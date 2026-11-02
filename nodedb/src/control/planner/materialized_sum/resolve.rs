@@ -40,9 +40,10 @@ use crate::types::{DatabaseId, TenantId, TraceId, TxnId};
 /// homed on the target (deferral recorded by removing the join value from
 /// the source op's resolution — see [`super::settle`]).
 ///
-/// The returned [`ReadSetEntry`]s cover the folded images; the caller must
-/// union them into the dispatch read-set so Calvin OCC aborts the
-/// statement on concurrent source writes, before any row moves.
+/// The returned [`ReadSetEntry`]s cover the folded images, each at the cut
+/// its read took; the caller must union them into the dispatch read-set so
+/// the apply aborts the statement on concurrent source writes, before any
+/// row moves.
 ///
 /// `read_txn` is the open transaction the statement runs in, `None` outside a
 /// transaction block. Every source read goes through its staging overlay, so
@@ -155,7 +156,7 @@ pub async fn resolve_materialized_sum_targets(
                         source_collection: collection,
                         images: &images.images,
                         source_row: Some(scope.surrogate),
-                        read_version: images.read_version,
+                        observed_at: images.observed_at,
                         crs: &crs,
                     };
                     let mut settlement = settle_cross_shard_images(

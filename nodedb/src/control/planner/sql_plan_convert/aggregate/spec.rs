@@ -42,11 +42,13 @@ pub(in crate::control::planner::sql_plan_convert) fn inline_join_side(
     // Plain current-state user-collection scan side: handled via the parent
     // HashJoin's `left_collection` / `right_collection` by name. Catalog
     // scans fall through to conversion so we embed their ProviderScan. A scan
-    // under `FOR SYSTEM_TIME` / `FOR VALID_TIME` is converted and embedded
-    // too, since only the engine scan carries the temporal scope.
+    // under `FOR SYSTEM_TIME` / `FOR VALID_TIME`, or inside a transaction
+    // block that reads its snapshot, is converted and embedded too, since
+    // only the engine scan carries the system-time scope.
     if let SqlPlan::Scan { temporal, .. } = plan
         && !plan_is_provider(plan)
         && !temporal.is_temporal()
+        && !ctx.reads_txn_snapshot
     {
         return Ok(None);
     }
@@ -102,13 +104,15 @@ fn plan_is_provider(plan: &SqlPlan) -> bool {
 /// db-qualified name as before.
 pub(in crate::control::planner::sql_plan_convert) fn join_side_collection(
     plan: &SqlPlan,
-    database_id: crate::types::DatabaseId,
+    ctx: &ConvertContext,
 ) -> String {
+    let database_id = ctx.database_id;
     // An input-sourced join side carries no routing collection; its rows come
-    // from `left_input` / `right_input`. A temporal scan side is embedded
-    // (see `inline_join_side`), so it names no collection either.
+    // from `left_input` / `right_input`. A temporal scan side, and every scan
+    // side of a transaction snapshot read, is embedded (see
+    // `inline_join_side`), so it names no collection either.
     if let SqlPlan::Scan { temporal, .. } = plan
-        && temporal.is_temporal()
+        && (temporal.is_temporal() || ctx.reads_txn_snapshot)
     {
         return String::new();
     }
@@ -414,6 +418,7 @@ pub(in crate::control::planner::sql_plan_convert) fn build_input_sourced_aggrega
             // The child carries its own WHERE / ProviderScan filters; the
             // aggregate node applies none of its own.
             filters: Vec::new(),
+            system_time: nodedb_types::SystemTimeScope::Current,
             having: having_bytes,
             limit,
             sub_group_by: Vec::new(),

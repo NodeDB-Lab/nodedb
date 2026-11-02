@@ -23,6 +23,7 @@ fn calvin_execute_static_round_trip_msgpack() {
         epoch_system_ms: 0,
         versioned_reads: vec![],
         body_plans: vec![],
+        snapshot_ordinal: None,
     };
 
     let plan = PhysicalPlan::Meta(op.clone());
@@ -60,6 +61,7 @@ fn calvin_execute_static_and_active_are_distinct_variants() {
         epoch_system_ms: 0,
         versioned_reads: vec![],
         body_plans: vec![],
+        snapshot_ordinal: None,
     };
     let passive_op = MetaOp::CalvinExecutePassive {
         epoch: 1,

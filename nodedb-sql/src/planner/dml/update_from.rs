@@ -17,7 +17,7 @@ use super::update_delete::convert_assignments;
 use crate::engine_rules::{self, UpdateFromParams};
 use crate::error::{Result, SqlError};
 use crate::parser::normalize::{normalize_ident, normalize_object_name_checked};
-use crate::resolver::columns::{BareColumn, ResolvedTable, TableScope};
+use crate::resolver::columns::{BareColumn, ColumnNaming, ResolvedTable, TableScope};
 use crate::types::*;
 
 /// Plan `UPDATE target SET ... FROM src WHERE target.col = src.col ...`.
@@ -128,7 +128,12 @@ pub(super) fn plan_update_from(
         info: source_info.clone(),
     })?;
 
-    let assigns = convert_assignments(&update.assignments, &target_scope, &join_scope)?;
+    // The SET values read the merged row: target fields bare, source fields
+    // keyed `<source_ref>.column`.
+    let value_scope = join_scope
+        .clone()
+        .with_column_naming(ColumnNaming::JoinWriteRow);
+    let assigns = convert_assignments(&update.assignments, &target_scope, &value_scope)?;
 
     // Split the WHERE clause into the one equi-join predicate linking target
     // and source (required), the conjuncts over the source only, and the
@@ -545,6 +550,40 @@ mod tests {
             panic!("expected a source scan");
         };
         assert!(filters.is_empty());
+    }
+
+    /// A SET value reads the merged row: a target column bare, a source
+    /// column under the source's reference name, however the statement
+    /// qualifies it.
+    #[test]
+    fn set_values_name_the_merged_row_fields() {
+        let target_read =
+            plan("UPDATE t SET v = t.v FROM s AS src WHERE t.id = src.id").expect("plans");
+        let SqlPlan::UpdateFrom { assignments, .. } = target_read else {
+            panic!("expected UpdateFrom, got {target_read:?}");
+        };
+        assert!(
+            matches!(
+                &assignments[0].1,
+                SqlExpr::Column { table: None, name } if name == "v"
+            ),
+            "a target-qualified column reads the bare target field: {:?}",
+            assignments[0].1
+        );
+
+        let source_read =
+            plan("UPDATE t SET v = src.v FROM s AS src WHERE t.id = src.id").expect("plans");
+        let SqlPlan::UpdateFrom { assignments, .. } = source_read else {
+            panic!("expected UpdateFrom, got {source_read:?}");
+        };
+        assert!(
+            matches!(
+                &assignments[0].1,
+                SqlExpr::Column { table: Some(table), name } if table == "src" && name == "v"
+            ),
+            "a source column reads the source's merged-row field: {:?}",
+            assignments[0].1
+        );
     }
 
     #[test]

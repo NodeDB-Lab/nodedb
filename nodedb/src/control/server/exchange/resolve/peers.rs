@@ -93,23 +93,23 @@ pub(super) fn distinct_data_node_count(routing: &RoutingTable) -> usize {
 }
 
 /// Send one `ShuffleProduceRequest` and map the reply / RPC error to a typed
-/// coordinator error, returning the producer's observed read versions on a
-/// clean produce. Fail-fast: a producer-reported terminal error aborts. Shared
-/// by both the shuffle-JOIN and shuffle-AGGREGATE resolvers, which each fold
-/// the returned versions over their producers.
+/// coordinator error, returning the vShards the producer read on a clean
+/// produce. Fail-fast: a producer-reported terminal error aborts. Shared by
+/// both the shuffle-JOIN and shuffle-AGGREGATE resolvers, which each fold the
+/// returned vShards over their producers.
 pub(super) async fn send_produce(
     transport: &nodedb_cluster::NexarTransport,
     node: u64,
     req: ShuffleProduceRequest,
-) -> crate::Result<crate::types::ReadVersions> {
+) -> crate::Result<crate::types::ReadShards> {
     match transport
         .send_rpc(node, RaftRpc::ShuffleProduceRequest(req))
         .await
     {
         Ok(RaftRpc::ShuffleProduceResponse(ShuffleProduceResponse {
             error: None,
-            read_versions,
-        })) => Ok(crate::types::ReadVersions::from_wire(&read_versions)),
+            read_vshards,
+        })) => Ok(crate::types::ReadShards::from_wire(&read_vshards)),
         Ok(RaftRpc::ShuffleProduceResponse(ShuffleProduceResponse { error: Some(e), .. })) => {
             Err(crate::Error::Internal {
                 detail: format!("shuffle produce failed on node {node}: {e:?}"),

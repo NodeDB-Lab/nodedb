@@ -181,12 +181,15 @@ pub(super) fn bind_filter_outer(
     }
 }
 
-/// Build a `DocumentOp::Scan` physical plan for the inner collection.
+/// Build a `DocumentOp::Scan` physical plan for the inner collection, read
+/// at `system_time`: the LATERAL join's inner scope. The scan runs under the
+/// join's task, so a transaction snapshot merges the task's staged writes.
 pub(super) fn build_scan_plan(
     collection: &str,
     filter_bytes: Vec<u8>,
     order_by: &[nodedb_physical::physical_plan::SortKeySpec],
     limit: usize,
+    system_time: nodedb_types::SystemTimeScope,
 ) -> PhysicalPlan {
     PhysicalPlan::Document(DocumentOp::Scan {
         collection: nodedb_types::QualifiedCollection::from_stored(collection.to_string()),
@@ -200,7 +203,7 @@ pub(super) fn build_scan_plan(
         projection: Vec::new(),
         computed_columns: Vec::new(),
         window_functions: Vec::new(),
-        system_time: nodedb_types::SystemTimeScope::Current,
+        system_time,
         valid_at_ms: None,
         prefilter: None,
     })

@@ -191,14 +191,6 @@ pub(super) fn describe_entry(e: &catalog_entry::CatalogEntry) -> (String, u64, S
             0,
             String::new(),
         ),
-        E::MigrateConsumerGroupStream { def, legacy_stream } => (
-            format!(
-                "consumer_group:{}:{}:{legacy_stream}:{}",
-                def.database_id, def.tenant_id, def.name
-            ),
-            0,
-            String::new(),
-        ),
         E::PutBackupScheduleMark(m) => (
             format!("backup_schedule:{}:{:016x}", m.job, m.incarnation),
             0,

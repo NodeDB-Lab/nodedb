@@ -108,6 +108,7 @@ impl CoreLoop {
                     .is_some_and(|engine| engine.memtable().is_empty());
                 if still_empty {
                     self.columnar_engines.remove(&engine_key);
+                    self.recharge_columnar_history(&engine_key);
                 }
             }
         }

@@ -246,6 +246,11 @@ pub fn error_to_sqlstate(err: &crate::Error) -> (&'static str, &'static str, Str
         crate::Error::CalvinSerializationConflict => {
             ("ERROR", sqlstate::SERIALIZATION_FAILURE, err.to_string())
         }
+        // A block whose snapshot outlived the age limit retries at a fresh
+        // snapshot.
+        crate::Error::TxnSnapshotTooOld { .. } => {
+            ("ERROR", sqlstate::SERIALIZATION_FAILURE, err.to_string())
+        }
         // A participant error aborted the transaction before any read-set was
         // validated, so it is NOT a serialization conflict. TRANSACTION_ROLLBACK
         // (40000) keeps it in the retryable class 40 without claiming 40001.
@@ -384,7 +389,6 @@ pub fn error_to_sqlstate(err: &crate::Error) -> (&'static str, &'static str, Str
         | crate::Error::SessionIdleTimeout
         | crate::Error::SessionKilledByAdmin
         | crate::Error::SessionUserDropped
-        | crate::Error::OidcProviderTenantUnbound
         | crate::Error::OidcProviderTenantUnavailable { .. }
         | crate::Error::ExternalRoleUndefined { .. }
         | crate::Error::OidcNoDefaultDatabase { .. }

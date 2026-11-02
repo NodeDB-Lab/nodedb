@@ -55,7 +55,7 @@ pub(crate) async fn apply_orchestrated_write(
     let deadline = crate::control::server::shared::session::StatementDeadline::of_statement(state)
         .tokio_instant();
     match propose_replicated_entry(state, proposer, entry, deadline).await {
-        Ok((payload, write_versions)) => {
+        Ok(payload) => {
             let response = Response {
                 request_id,
                 status: Status::Ok,
@@ -66,7 +66,8 @@ pub(crate) async fn apply_orchestrated_write(
                 watermark_lsn: crate::types::Lsn::ZERO,
                 error_code: None,
                 stage_vote: None,
-                read_versions: write_versions,
+                // A write scans no vShard a read-set entry names.
+                read_vshards: crate::types::ReadShards::new(),
                 write_set: Vec::new(),
             };
             Ok(response)
@@ -87,7 +88,7 @@ fn data_plane_verdict(request_id: RequestId, code: ErrorCode) -> Response {
         watermark_lsn: crate::types::Lsn::ZERO,
         error_code: Some(Box::new(code)),
         stage_vote: None,
-        read_versions: crate::types::ReadVersions::new(),
+        read_vshards: crate::types::ReadShards::new(),
         write_set: Vec::new(),
     }
 }

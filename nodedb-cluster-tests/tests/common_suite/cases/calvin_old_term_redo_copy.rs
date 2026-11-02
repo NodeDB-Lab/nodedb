@@ -67,7 +67,7 @@ impl Counters {
             commits: counters.commits_flushed.load(Ordering::Relaxed),
             restages: counters.stage_restages.load(Ordering::Relaxed),
             skipped_copies: counters.redo_copies_skipped.load(Ordering::Relaxed),
-            installs: counters.write_versions_recorded.load(Ordering::Relaxed),
+            installs: counters.redo_installs.load(Ordering::Relaxed),
         }
     }
 }
@@ -175,15 +175,36 @@ async fn an_old_term_redo_copy_committed_by_the_new_leader_installs_once() {
                 &format!("raft::hold_commit::group{group}"),
                 FailAction::WaitForFile(commit_release.clone()),
             );
+            let proposals = || {
+                fx.cluster.nodes[old]
+                    .shared
+                    .calvin
+                    .counters
+                    .redo_proposals
+                    .load(Ordering::Relaxed)
+            };
+            let proposals_before = proposals();
             std::fs::write(&propose_release, b"release").expect("release the held redo");
             let new_leader = group_members(&fx.cluster.nodes[0], group)
                 .into_iter()
                 .find(|member| *member != old_leader)
                 .expect("the entries group has a replica besides its leader");
             let new = index_of(&fx.cluster, new_leader);
-            let mut redo_index = 0;
+            // The released redo enters the log on the scheduler's next stall
+            // tick. Other entries of the group can land first, so only the
+            // proposal count tells the redo is in the old leader's log.
             wait_for(
-                "the old leader appends the redo, and the new leader holds it, uncommitted",
+                "the old leader appends the redo",
+                STEP_DEADLINE,
+                STEP_POLL,
+                || proposals() > proposals_before,
+            )
+            .await;
+            let redo_index = group_status(&fx.cluster.nodes[old], group)
+                .expect("the old leader hosts the entries group")
+                .last_log_index;
+            wait_for(
+                "the new leader holds the redo, uncommitted",
                 STEP_DEADLINE,
                 STEP_POLL,
                 || {
@@ -193,10 +214,7 @@ async fn an_old_term_redo_copy_committed_by_the_new_leader_installs_once() {
                     ) else {
                         return false;
                     };
-                    redo_index = old_status.last_log_index;
-                    old_status.last_log_index > held_status.last_log_index
-                        && old_status.commit_index < old_status.last_log_index
-                        && new_status.last_log_index >= old_status.last_log_index
+                    old_status.commit_index < redo_index && new_status.last_log_index >= redo_index
                 },
             )
             .await;

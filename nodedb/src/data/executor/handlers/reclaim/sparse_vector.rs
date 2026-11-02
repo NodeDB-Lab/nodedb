@@ -160,7 +160,8 @@ mod tests {
         }
         let manifest =
             crate::data::executor::sparse_vector_checkpoint::test_manifest_bytes(generation);
-        std::fs::write(ckpt_dir.join("MANIFEST"), manifest).expect("manifest");
+        nodedb_wal::segment::write_checkpoint_framed(&ckpt_dir, "MANIFEST", &manifest)
+            .expect("manifest");
     }
 
     /// Reclaim must reach files under EVERY core's live generation — the dropped

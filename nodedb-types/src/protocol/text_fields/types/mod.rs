@@ -6,9 +6,7 @@
 //!
 //! TextFields is encoded as a MsgPack **map** whose keys are `u16` numeric
 //! field IDs starting at 1. Fields whose value is `None` are **omitted**
-//! entirely (compact encoding). The decoder ignores unknown keys, so new
-//! fields can be added to newer servers without breaking older clients
-//! (forward compatibility).
+//! entirely (compact encoding). The decoder refuses a key no field owns.
 //!
 //! # Field ID table
 //!

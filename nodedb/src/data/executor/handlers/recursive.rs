@@ -11,6 +11,9 @@ use crate::bridge::envelope::{ErrorCode, Response};
 use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
+use nodedb_types::SystemTimeScope;
+
+use super::scoped_rows::ScopedRowsRead;
 
 use super::recursive_iterate::{RecursionError, RecursionSpec, RecursiveRow, iterate};
 
@@ -24,6 +27,9 @@ pub(in crate::data::executor) struct RecursiveScanParams<'a> {
     pub max_iterations: usize,
     pub distinct: bool,
     pub limit: usize,
+    /// The scope `collection` is read at. `Current` and `TxnSnapshot` merge
+    /// the reading transaction's staged writes.
+    pub system_time: &'a SystemTimeScope,
 }
 
 impl CoreLoop {
@@ -50,6 +56,7 @@ impl CoreLoop {
             max_iterations,
             distinct,
             limit,
+            system_time,
         } = params;
         // Scan-quiesce gate.
         let _scan_guard = match self.acquire_scan_guard(task, tid, collection) {
@@ -105,12 +112,15 @@ impl CoreLoop {
         );
 
         // Scan all documents once (used for both base and recursive steps),
-        // each at its current version.
-        let all_docs = match self.current_rows(
-            task.request.database_id.as_u64(),
-            tid,
-            collection,
-            scan_limit,
+        // each at the version the scope selects.
+        let all_docs = match self.scoped_collection_rows(
+            task,
+            ScopedRowsRead {
+                tid,
+                collection,
+                system_time,
+                limit: scan_limit,
+            },
         ) {
             Ok(d) => d,
             Err(e) => {

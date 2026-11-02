@@ -41,5 +41,5 @@ pub use ports::{DEFAULT_SYNC_PORT, PortsConfig};
 pub use retention::RetentionSettings;
 pub use scheduler::{CronTimezone, SchedulerConfig};
 pub use section::ServerSection;
-pub use snapshot_storage::{QuarantineStorageSettings, SnapshotStorageSettings};
+pub use snapshot_storage::SnapshotStorageSettings;
 pub use tls::{BackupEncryptionSettings, EncryptionSettings, TlsSettings};

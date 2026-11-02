@@ -54,6 +54,7 @@ fn kv_scan(collection: &str, count: usize) -> PhysicalPlan {
         match_pattern: None,
         sort_keys: Vec::new(),
         surrogate_ceiling: None,
+        system_time: nodedb_types::SystemTimeScope::Current,
     })
 }
 

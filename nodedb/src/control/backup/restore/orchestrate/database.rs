@@ -43,6 +43,9 @@ pub async fn reissue_into_database(
             source,
             dest,
             restore_id: 0,
+            // MOVE TENANT drains the source before it re-issues: no write
+            // follows it into the target.
+            restore_cut: i64::MAX,
         },
         snap,
         &mut stats,
@@ -64,10 +67,12 @@ pub(super) async fn reissue_database(
     let columnar_snapshots = std::mem::take(&mut snap.columnar_engines);
     let timeseries_memtables = std::mem::take(&mut snap.timeseries);
     let flushed_ts_segments = std::mem::take(&mut snap.flushed_ts_segments);
+    let ts_series_catalogs = std::mem::take(&mut snap.ts_series_catalogs);
     let crdt_state = std::mem::take(&mut snap.crdt_state);
     let kv_tables = std::mem::take(&mut snap.kv_tables);
     let vector_snapshots = std::mem::take(&mut snap.vectors);
     let vector_multi_documents = std::mem::take(&mut snap.vector_multi_documents);
+    let vector_history = std::mem::take(&mut snap.vector_versions);
     // Vector-index config re-issues as `VectorOp::SetParams` before the first
     // vector `Insert`: the Data Plane creates a (collection, field) HNSW index
     // on its first `Insert`, from whatever params it holds by then.
@@ -88,7 +93,6 @@ pub(super) async fn reissue_database(
         .unwrap_or(0)
         .max(super::super::redo_reissue::max_row_surrogate(
             tenant_id,
-            &snap.documents,
             &snap.documents_versioned,
         )?);
     super::super::surrogate_floor::raise_surrogate_floor(state, tenant_id, highest).await?;
@@ -100,7 +104,6 @@ pub(super) async fn reissue_database(
         state,
         tenant_id,
         target,
-        std::mem::take(&mut snap.documents),
         std::mem::take(&mut snap.documents_versioned),
         &surrogate_binds,
     )?;
@@ -137,19 +140,29 @@ pub(super) async fn reissue_database(
     stats.edges_reissued += redo.edges;
     stats.redo_records += redo.records;
 
-    // Plain-columnar rows: each collection's live rows replay as one durable
-    // `ColumnarOp::Insert`. Collections with zero live rows are skipped.
-    stats.columnar_engines +=
-        reissue::reissue_columnar_snapshots(state, tenant_id, target, columnar_snapshots).await?;
-
-    // Timeseries rows: each collection's memtable rows plus every flushed
-    // partition's rows replay as one durable `TimeseriesOp::Ingest`.
-    stats.timeseries_reissued += reissue::reissue_timeseries_snapshots(
+    // Plain-columnar keys, each with every version at its backed-up
+    // interval, as Calvin transactions.
+    stats.columnar_engines += super::super::redo_reissue::reissue_columnar_keys(
         state,
         tenant_id,
         target,
-        timeseries_memtables,
-        flushed_ts_segments,
+        columnar_snapshots,
+        &surrogate_binds,
+    )
+    .await?;
+
+    // Timeseries: each collection's series catalog, its ended partitions,
+    // then its current rows (the memtable and every partition no TRUNCATE
+    // ended), as Calvin transactions.
+    stats.timeseries_reissued += super::super::redo_reissue::reissue_timeseries_rows(
+        state,
+        tenant_id,
+        target,
+        super::super::redo_reissue::BackedUpTimeseries {
+            memtables: timeseries_memtables,
+            flushed: flushed_ts_segments,
+            catalogs: ts_series_catalogs,
+        },
     )
     .await?;
 
@@ -159,9 +172,10 @@ pub(super) async fn reissue_database(
     stats.crdt_reissued +=
         super::super::crdt_reissue::reissue_crdt_snapshots(state, target, crdt_state).await?;
 
-    // KV rows, one `KvOp::Put` per live row.
+    // KV keys, each with every version at its backed-up ordinal, as Calvin
+    // transactions.
     stats.kv_reissued +=
-        super::super::kv_reissue::reissue_kv_tables(state, tenant_id, target, kv_tables).await?;
+        super::super::redo_reissue::reissue_kv_tables(state, tenant_id, target, kv_tables).await?;
 
     // Vector-index configuration, as `VectorOp::SetParams`. MUST run before
     // the vector-insert re-issue below — see the `vector_params_snapshots`
@@ -175,14 +189,17 @@ pub(super) async fn reissue_database(
     )
     .await?;
 
-    // Vector rows: one `VectorOp::Insert` per single-vector row, and one
-    // delete-then-insert per multi-vector document.
-    stats.vectors_reissued += reissue::reissue_vector_snapshots(
+    // Vector rows, each with every node at its backed-up span, as Calvin
+    // transactions. A multi-vector document's nodes travel together.
+    stats.vectors_reissued += super::super::redo_reissue::reissue_vector_rows(
         state,
         tenant_id,
         target,
-        vector_snapshots,
-        vector_multi_documents,
+        super::super::redo_reissue::BackedUpVectors {
+            vectors: vector_snapshots,
+            history: vector_history,
+            multi_documents: vector_multi_documents,
+        },
         &surrogate_binds,
     )
     .await?;
@@ -190,7 +207,7 @@ pub(super) async fn reissue_database(
     // Array cell versions, in system-time order per array and vShard. Each
     // array's catalog row was restored before any database re-issues.
     stats.array_cells_reissued +=
-        super::super::array_reissue::reissue_array_cells(state, tenant_id, target, array_cells)
+        super::super::redo_reissue::reissue_array_cells(state, tenant_id, target, array_cells)
             .await?;
 
     Ok(())

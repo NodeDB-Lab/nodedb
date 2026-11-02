@@ -2,9 +2,10 @@
 
 //! Temporal `AS OF` extractors for the clone CoW read-path.
 
-/// Extract the `system_as_of_ms` value from a physical plan, if present.
-/// Derives the clone predation query LSN for `FOR SYSTEM_TIME AS OF <ms>`.
-pub(super) fn extract_system_as_of_ms(
+/// The system-time ordinal a plan's point-in-time cut reads at, if present.
+/// Derives the clone predation query LSN for `FOR SYSTEM_TIME AS OF <ms>`
+/// and for a statement's pinned cut.
+pub(super) fn extract_system_as_of_ordinal(
     plan: Option<&nodedb_physical::physical_plan::PhysicalPlan>,
 ) -> Option<i64> {
     use nodedb_physical::physical_plan::{PhysicalPlan, QueryOp};
@@ -15,13 +16,15 @@ pub(super) fn extract_system_as_of_ms(
         PhysicalPlan::Columnar(op) => extract_columnar_as_of(op),
         PhysicalPlan::Timeseries(op) => extract_timeseries_as_of(op),
         // Structural wrappers: qualifier sits on the child, not the wrapper.
-        PhysicalPlan::Query(QueryOp::Exchange(op)) => extract_system_as_of_ms(Some(&*op.child)),
+        PhysicalPlan::Query(QueryOp::Exchange(op)) => {
+            extract_system_as_of_ordinal(Some(&*op.child))
+        }
         PhysicalPlan::Query(QueryOp::PostProcess { input, .. }) => {
-            extract_system_as_of_ms(Some(&**input))
+            extract_system_as_of_ordinal(Some(&**input))
         }
         PhysicalPlan::Query(QueryOp::SetOp { inputs, .. }) => inputs
             .iter()
-            .find_map(|input| extract_system_as_of_ms(Some(input))),
+            .find_map(|input| extract_system_as_of_ordinal(Some(input))),
         // Index-only/overlay engines carry no qualifier; compose with a data-bearing collection.
         PhysicalPlan::Vector(_)
         | PhysicalPlan::Graph(_)
@@ -40,7 +43,7 @@ pub(super) fn extract_system_as_of_ms(
 fn extract_doc_as_of(op: &nodedb_physical::physical_plan::DocumentOp) -> Option<i64> {
     use nodedb_physical::physical_plan::DocumentOp;
     match op {
-        DocumentOp::Scan { system_time, .. } => system_time.as_of_ms(),
+        DocumentOp::Scan { system_time, .. } => system_time.as_of_ordinal(),
         _ => None,
     }
 }
@@ -48,7 +51,7 @@ fn extract_doc_as_of(op: &nodedb_physical::physical_plan::DocumentOp) -> Option<
 fn extract_columnar_as_of(op: &nodedb_physical::physical_plan::ColumnarOp) -> Option<i64> {
     use nodedb_physical::physical_plan::ColumnarOp;
     match op {
-        ColumnarOp::Scan { system_time, .. } => system_time.as_of_ms(),
+        ColumnarOp::Scan { system_time, .. } => system_time.as_of_ordinal(),
         _ => None,
     }
 }
@@ -56,7 +59,7 @@ fn extract_columnar_as_of(op: &nodedb_physical::physical_plan::ColumnarOp) -> Op
 fn extract_timeseries_as_of(op: &nodedb_physical::physical_plan::TimeseriesOp) -> Option<i64> {
     use nodedb_physical::physical_plan::TimeseriesOp;
     match op {
-        TimeseriesOp::Scan { system_time, .. } => system_time.as_of_ms(),
+        TimeseriesOp::Scan { system_time, .. } => system_time.as_of_ordinal(),
         _ => None,
     }
 }

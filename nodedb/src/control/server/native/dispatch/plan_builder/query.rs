@@ -25,5 +25,6 @@ pub(crate) async fn build_recursive_scan(
         max_iterations: 100,
         distinct: true,
         limit,
+        system_time: nodedb_types::SystemTimeScope::Current,
     }))
 }

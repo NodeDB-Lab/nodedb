@@ -98,7 +98,7 @@ pub(super) async fn dispatch_local(
     {
         let entry = entry.with_user_roles(user_roles.to_vec());
         let proposer = shared.async_raft_proposer()?;
-        let (payload, write_versions) = crate::control::wal_replication::propose_replicated_entry(
+        let payload = crate::control::wal_replication::propose_replicated_entry(
             shared,
             proposer,
             entry,
@@ -108,10 +108,10 @@ pub(super) async fn dispatch_local(
         .await?;
         return Ok(DispatchOutcome {
             payloads: vec![payload],
-            // A write carries no read watermark (Lsn::ZERO). Its write
-            // versions travel in `read_versions`.
+            // A write carries no read watermark (Lsn::ZERO) and scans no
+            // vShard a read-set entry names.
             shard_watermarks: vec![(vshard_id, Lsn::ZERO)],
-            read_versions: write_versions,
+            read_vshards: crate::types::ReadShards::new(),
             not_found: false,
         });
     }
@@ -135,7 +135,7 @@ pub(super) async fn dispatch_local(
     Ok(DispatchOutcome {
         payloads: vec![resp.payload.to_vec()],
         shard_watermarks: vec![(vshard_id, resp.watermark_lsn)],
-        read_versions: resp.read_versions.clone(),
+        read_vshards: resp.read_vshards.clone(),
         not_found: crate::control::local_dispatch::is_not_found(&resp),
     })
 }

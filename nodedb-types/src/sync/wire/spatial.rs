@@ -42,14 +42,11 @@ pub struct SpatialInsertMsg {
     pub geometry_bytes: Vec<u8>,
     /// Monotonic batch ID (Lite-assigned, per-operation). Used for ACK correlation.
     pub batch_id: u64,
-    /// Stable identity of the originating producer. 0 for legacy clients.
-    #[serde(default)]
+    /// Stable identity of the originating producer.
     pub producer_id: u64,
     /// Monotonic epoch counter incremented on every producer restart.
-    #[serde(default)]
     pub epoch: u64,
     /// Per-stream monotonic sequence number within the epoch.
-    #[serde(default)]
     pub seq: u64,
 }
 
@@ -97,14 +94,11 @@ pub struct SpatialDeleteMsg {
     pub doc_id: String,
     /// Monotonic batch ID for ACK correlation.
     pub batch_id: u64,
-    /// Stable identity of the originating producer. 0 for legacy clients.
-    #[serde(default)]
+    /// Stable identity of the originating producer.
     pub producer_id: u64,
     /// Monotonic epoch counter incremented on every producer restart.
-    #[serde(default)]
     pub epoch: u64,
     /// Per-stream monotonic sequence number within the epoch.
-    #[serde(default)]
     pub seq: u64,
 }
 

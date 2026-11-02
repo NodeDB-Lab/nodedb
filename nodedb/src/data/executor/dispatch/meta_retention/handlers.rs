@@ -31,6 +31,10 @@ impl CoreLoop {
         task: &ExecutionTask,
         op: &MetaOp,
     ) -> Response {
+        // An audit purge stays at or below the cleanup horizon: no open
+        // snapshot and no commit any replica still applies reads below it.
+        let safe_ms = self.maintenance.version_purge.cap_cutoff_ms(i64::MAX);
+        let cap = |cutoff_ms: &i64| (*cutoff_ms).min(safe_ms);
         match op {
             MetaOp::TemporalPurgeEdgeStore {
                 tenant_id,
@@ -40,7 +44,7 @@ impl CoreLoop {
                 task,
                 *tenant_id,
                 collection.as_str(),
-                *cutoff_system_ms,
+                cap(cutoff_system_ms),
             ),
             MetaOp::TemporalPurgeDocumentStrict {
                 tenant_id,
@@ -50,7 +54,7 @@ impl CoreLoop {
                 task,
                 *tenant_id,
                 collection.as_str(),
-                *cutoff_system_ms,
+                cap(cutoff_system_ms),
             ),
             MetaOp::TemporalPurgeColumnar {
                 tenant_id,
@@ -61,7 +65,7 @@ impl CoreLoop {
                 task,
                 *tenant_id,
                 collection.as_str(),
-                *cutoff_system_ms,
+                cap(cutoff_system_ms),
                 aggregates,
             ),
             MetaOp::TemporalPurgeCrdt {
@@ -72,13 +76,13 @@ impl CoreLoop {
                 task,
                 *tenant_id,
                 collection.as_str(),
-                *cutoff_system_ms,
+                cap(cutoff_system_ms),
             ),
             MetaOp::TemporalPurgeArray {
                 tenant_id,
                 array_id,
                 cutoff_system_ms,
-            } => self.meta_temporal_purge_array(task, *tenant_id, array_id, *cutoff_system_ms),
+            } => self.meta_temporal_purge_array(task, *tenant_id, array_id, cap(cutoff_system_ms)),
             other => self.response_error(
                 task,
                 ErrorCode::Internal {
@@ -94,7 +98,13 @@ impl CoreLoop {
         task: &ExecutionTask,
     ) -> Response {
         let now_ms = now_ms();
-        let removed = self.continuous_agg_mgr.apply_retention(now_ms);
+        // A snapshot read below this ordinal finds the removed buckets gone
+        // and refuses rather than answer without them.
+        let ordinal = self.ts_batch_ordinal(
+            crate::data::executor::handlers::timeseries::TimeseriesApplyMode::Immediate,
+            now_ms,
+        );
+        let removed = self.continuous_agg_mgr.apply_retention(now_ms, ordinal);
         tracing::debug!(removed, "continuous aggregate retention applied");
         self.response_ok(task)
     }
@@ -115,52 +125,6 @@ impl CoreLoop {
             .cloned()
             .unwrap_or_default();
         match response_codec::encode_serde(&wm) {
-            Ok(payload) => self.response_with_payload(task, payload),
-            Err(e) => self.response_error(task, ErrorCode::from(e)),
-        }
-    }
-
-    /// `MetaOp::QueryLastValues`.
-    pub(in crate::data::executor::dispatch) fn meta_query_last_values(
-        &self,
-        task: &ExecutionTask,
-        collection: &str,
-    ) -> Response {
-        let lvc_key = (
-            task.request.database_id,
-            task.request.tenant_id,
-            collection.to_string(),
-        );
-        let entries: Vec<(u64, i64, f64)> =
-            if let Some(lvc) = self.ts_last_value_caches.get(&lvc_key) {
-                lvc.all().map(|(id, e)| (id, e.ts, e.value)).collect()
-            } else {
-                Vec::new()
-            };
-        match response_codec::encode(&entries) {
-            Ok(payload) => self.response_with_payload(task, payload),
-            Err(e) => self.response_error(task, ErrorCode::from(e)),
-        }
-    }
-
-    /// `MetaOp::QueryLastValue`.
-    pub(in crate::data::executor::dispatch) fn meta_query_last_value(
-        &self,
-        task: &ExecutionTask,
-        collection: &str,
-        series_id: u64,
-    ) -> Response {
-        let lvc_key = (
-            task.request.database_id,
-            task.request.tenant_id,
-            collection.to_string(),
-        );
-        let entry: Option<(i64, f64)> = self
-            .ts_last_value_caches
-            .get(&lvc_key)
-            .and_then(|lvc| lvc.get(series_id))
-            .map(|e| (e.ts, e.value));
-        match response_codec::encode(&entry) {
             Ok(payload) => self.response_with_payload(task, payload),
             Err(e) => self.response_error(task, ErrorCode::from(e)),
         }
@@ -230,6 +194,19 @@ impl CoreLoop {
                         cutoff_ms = cutoff_system_ms,
                         "document_strict: temporal purge complete"
                     );
+                    // The purged versions leave the tenant's history charge.
+                    if let Err(e) = self.recharge_document_history(
+                        task.request.database_id,
+                        crate::types::TenantId::new(tenant_id),
+                    ) {
+                        crate::diag::history_charge_stale(&e, "audit purge");
+                        tracing::warn!(
+                            tenant = tenant_id,
+                            collection,
+                            error = %e,
+                            "document history recharge after purge failed; the prior charge stays"
+                        );
+                    }
                 }
                 let mut payload = Vec::with_capacity(16);
                 payload.extend_from_slice(&(docs as u64).to_le_bytes());
@@ -276,9 +253,11 @@ impl CoreLoop {
         self.response_with_payload(task, payload)
     }
 
-    /// `MetaOp::TemporalPurgeArray`: drop superseded tile-versions older than
-    /// `cutoff_system_ms` from the array engine. The latest version of each
-    /// tile is always preserved so bitemporal AS-OF reads remain coherent.
+    /// `MetaOp::TemporalPurgeArray`: purge the array's history below the
+    /// last system-time ordinal of `cutoff_system_ms`
+    /// (`ArrayEngine::purge_array_versions_below`). The version each cell
+    /// shows at the cutoff stays, so every `AS OF` read at or after the
+    /// cutoff answers as before.
     ///
     /// Returns an 8-byte little-endian u64 count of tile-versions dropped.
     pub(in crate::data::executor::dispatch) fn meta_temporal_purge_array(
@@ -298,11 +277,11 @@ impl CoreLoop {
         if let Err(resp) = self.open_array_if_cataloged(task, &id) {
             return resp;
         }
-        match self.array_engine.temporal_purge(
+        match self.array_engine.purge_array_versions_below(
             tenant,
             task.request.database_id,
             array_id,
-            cutoff_system_ms,
+            nodedb_types::ms_to_ordinal_upper(cutoff_system_ms),
         ) {
             Ok(count) => {
                 if count > 0 {
@@ -326,14 +305,14 @@ impl CoreLoop {
 
     /// `MetaOp::TemporalPurgeColumnar`: bitemporal audit purge for columnar
     /// collections, covering both the timeseries profile (partition-level)
-    /// and the plain profile (row-level via segment delete bitmaps).
+    /// and the plain profile (row-level via row-version stamps).
     ///
     /// Dispatch rule: a collection present in `ts_registries` is a
     /// timeseries-profile collection and goes through the shared
     /// [`CoreLoop::meta_enforce_timeseries_retention`] path, which already
     /// consults `max_system_ts` for bitemporal. A collection present in
     /// `columnar_engines` is a plain-profile collection and runs the
-    /// segment-scanning row-version purge below.
+    /// row-version purge below, which reads stamps, never a segment.
     ///
     /// `aggregates` lists the continuous aggregates the catalog roots at
     /// `collection`. The timeseries path removes nothing while one of them
@@ -358,24 +337,20 @@ impl CoreLoop {
                 .meta_enforce_timeseries_retention(task, collection, max_age_ms, aggregates);
         }
 
-        // Plain columnar profile: row-level purge via delete bitmaps.
-        match self.plain_columnar_purge(task.request.database_id, tid, collection, cutoff_system_ms)
-        {
-            Ok(n) => {
-                if n > 0 {
-                    tracing::info!(
-                        tenant = tenant_id,
-                        collection,
-                        purged = n,
-                        cutoff_ms = cutoff_system_ms,
-                        "columnar (plain): temporal purge complete"
-                    );
-                }
-                let payload = (n as u64).to_le_bytes().to_vec();
-                self.response_with_payload(task, payload)
-            }
-            Err(e) => self.response_error(task, ErrorCode::from(e)),
+        // Plain columnar profile: row-version purge at the cutoff's ordinal.
+        let n =
+            self.plain_columnar_purge(task.request.database_id, tid, collection, cutoff_system_ms);
+        if n > 0 {
+            tracing::info!(
+                tenant = tenant_id,
+                collection,
+                purged = n,
+                cutoff_ms = cutoff_system_ms,
+                "columnar (plain): temporal purge complete"
+            );
         }
+        let payload = (n as u64).to_le_bytes().to_vec();
+        self.response_with_payload(task, payload)
     }
 }
 

@@ -194,10 +194,10 @@ impl CoreLoop {
                 // staging overlay onto the base result before any budget /
                 // sort / projection / limit stage, so staged inserts count
                 // against the budget and flow through sort+limit unchanged.
-                // Only current-version reads merge staged writes — temporal
-                // (`AS OF` / all-versions) reads never see the overlay, whose
-                // staged bodies are current-version only.
-                if mode.is_current()
+                // A current read and a transaction snapshot read merge staged
+                // writes. A historical (`AS OF` / all-versions) read never
+                // sees them.
+                if mode.merges_txn_overlay()
                     && let Some(txn_id) = task.request.txn_id
                 {
                     let coll_key = (
@@ -246,8 +246,19 @@ impl CoreLoop {
                         ) {
                             return self.response_error(task, e);
                         }
-                    } else {
+                    } else if mode.is_current() {
                         self.merge_overlay_into_scan(txn_id, &coll_key, &mut filtered, &matches);
+                    } else {
+                        // A snapshot fetch normalizes its bodies to MessagePack
+                        // and reports no schema, so the staged bodies merge in
+                        // the same shape.
+                        self.merge_overlay_into_snapshot_scan(
+                            txn_id,
+                            &coll_key,
+                            strict_schema.as_ref(),
+                            &mut filtered,
+                            &matches,
+                        );
                     }
                     if let Err(e) = held.finish::<_, ErrorCode>(()) {
                         return self.response_error(task, e);

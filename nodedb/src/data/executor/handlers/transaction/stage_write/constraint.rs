@@ -54,7 +54,6 @@ impl CoreLoop {
         &self,
         ctx: &StageCtx<'_>,
         storage_key: &StorageKey,
-        bitemporal: bool,
         overlay: OverlayPk,
     ) -> crate::Result<bool> {
         match overlay {
@@ -66,23 +65,13 @@ impl CoreLoop {
                 // will perform) and DROP it without committing — no durable
                 // write happens here.
                 let txn = self.sparse.begin_write()?;
-                let exists = if bitemporal {
-                    self.sparse.versioned_exists_current_in_txn(
-                        &txn,
-                        ctx.database_id,
-                        ctx.tid,
-                        ctx.collection,
-                        storage_key,
-                    )?
-                } else {
-                    self.sparse.exists_in_txn(
-                        &txn,
-                        ctx.database_id,
-                        ctx.tid,
-                        ctx.collection,
-                        storage_key,
-                    )?
-                };
+                let exists = self.sparse.exists_in_txn(
+                    &txn,
+                    ctx.database_id,
+                    ctx.tid,
+                    ctx.collection,
+                    storage_key,
+                )?;
                 drop(txn);
                 Ok(exists)
             }
@@ -182,7 +171,6 @@ impl CoreLoop {
                 tid: statement.tid,
                 collection: statement.coll_key.2.as_str(),
                 paths: &config.index_paths,
-                bitemporal: config.bitemporal,
                 base_visible: overlay
                     .is_none_or(|overlay| overlay.base_visible(statement.coll_key)),
                 crs: &self.crs_context(),

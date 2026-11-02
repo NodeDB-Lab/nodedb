@@ -149,6 +149,7 @@ fn bulk_update_plan(predicted: Option<Vec<u32>>) -> PhysicalPlan {
         rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         resolved_sum_targets: Vec::new(),
         declared_primary_key: None,
+        system_time: nodedb_types::SystemTimeScope::Current,
     })
 }
 
@@ -167,6 +168,7 @@ fn bulk_delete_plan(predicted: Option<Vec<u32>>) -> PhysicalPlan {
         rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         resolved_sum_targets: Vec::new(),
         declared_primary_key: None,
+        system_time: nodedb_types::SystemTimeScope::Current,
     })
 }
 
@@ -189,6 +191,7 @@ fn bulk_delete_plan_with_edges(
         rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
         resolved_sum_targets: Vec::new(),
         declared_primary_key: None,
+        system_time: nodedb_types::SystemTimeScope::Current,
     })
 }
 

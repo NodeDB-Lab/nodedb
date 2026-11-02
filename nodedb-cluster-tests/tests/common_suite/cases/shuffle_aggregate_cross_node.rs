@@ -115,6 +115,7 @@ fn producer_plan(rows: &[&Row]) -> Vec<u8> {
         limit: None,
         offset: 0,
         distinct: false,
+        system_time: nodedb_types::SystemTimeScope::Current,
     });
     let plan = PhysicalPlan::Query(QueryOp::PartialAggregateState {
         collection: QualifiedCollection::new(nodedb_types::id::DatabaseId::DEFAULT, ""),
@@ -122,6 +123,7 @@ fn producer_plan(rows: &[&Row]) -> Vec<u8> {
         group_by: vec![GroupKeySpec::column("k")],
         aggregates: agg_specs(),
         filters: Vec::new(),
+        system_time: nodedb_types::SystemTimeScope::Current,
     });
     plan_wire::encode(&plan).expect("encode producer plan")
 }

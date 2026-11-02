@@ -25,7 +25,7 @@ pub(super) async fn resolve_update_period_values(
     updates: &[(String, UpdateValue)],
     def: &PeriodLockDef,
 ) -> crate::Result<Vec<ResolvedSumTarget>> {
-    let read = recon_point_row(
+    let row = recon_point_row(
         scope.state,
         scope.tenant_id,
         scope.database_id,
@@ -35,7 +35,7 @@ pub(super) async fn resolve_update_period_values(
         surrogate,
     )
     .await?;
-    let Some(old_row) = read.rows else {
+    let Some(old_row) = row else {
         return Ok(Vec::new());
     };
     let new_row = crate::query::apply_update_assignments(

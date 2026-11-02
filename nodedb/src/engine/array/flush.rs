@@ -141,7 +141,7 @@ pub(super) fn build_segment_from_memtable<'a>(
             continue;
         }
         let tile = buf.materialise(schema)?;
-        writer.append_sparse(*tile_id, &tile)?;
+        writer.append_sparse(*tile_id, buf.placement(), &tile)?;
         min_tile = Some(min_tile.map_or(*tile_id, |m| m.min(*tile_id)));
         max_tile = Some(max_tile.map_or(*tile_id, |m| m.max(*tile_id)));
         tile_count += 1;

@@ -3,7 +3,7 @@
 //! Live sparse-index maintenance for `PointUpdate`.
 //!
 //! `execute_point_update` rewrites a document's stored body directly (via
-//! `sparse.put` / `bitemporal_update_reindex`) and reconciles the secondary
+//! `update_reindex`) and reconciles the secondary
 //! btree, FTS, graph, and dense-vector overlays — but not the sparse inverted
 //! index. An UPDATE that changes (or clears) a `SparseVector` field must
 //! therefore re-index the row here, or sparse search keeps returning the stale
@@ -38,15 +38,19 @@ pub(in crate::data::executor) struct UpdateSparseReindex<'a> {
     /// the caller via `collection_has_sparse`. `false` short-circuits this call
     /// to a no-op so a non-sparse UPDATE is byte-identical to today.
     pub has_sparse: bool,
+    /// The system-time ordinal of the row version the update wrote. The
+    /// row's prior sparse versions end there and its new ones start there.
+    pub sys_from: i64,
 }
 
 impl CoreLoop {
     /// Re-index a just-updated document's sparse vectors into their inverted
     /// indexes.
     ///
-    /// No-op when the collection declares no sparse fields. Otherwise drops the
-    /// row's prior sparse entries (so a cleared field stops matching) and
-    /// upserts the new literal under the same row key.
+    /// No-op when the collection declares no sparse fields. Otherwise ends the
+    /// row's prior sparse versions at `sys_from` (so a cleared field stops
+    /// matching a current read) and inserts the new literal there under the
+    /// same row key. A read at an earlier cut still scores the old literal.
     ///
     /// Fails rather than returning early when the new body will not decode: the
     /// prior entries have already been dropped by then, so returning would leave
@@ -61,7 +65,7 @@ impl CoreLoop {
             return Ok(());
         }
 
-        // Drop the row's old sparse entries before re-inserting: an UPDATE that
+        // End the row's old sparse versions before re-inserting: an UPDATE that
         // clears the `SparseVector` field must not leave the stale literal
         // searchable, and the re-insert below only re-adds fields present in
         // the new body.
@@ -72,6 +76,7 @@ impl CoreLoop {
             p.tid,
             p.collection,
             p.storage_key,
+            p.sys_from,
             &mut Vec::new(),
         );
 
@@ -105,11 +110,14 @@ impl CoreLoop {
         // The row this re-indexes is already committed, so the undo entries
         // go unused.
         self.apply_point_put_sparse_indexes(
-            p.database_id,
-            p.tid,
-            p.collection,
-            p.storage_key,
-            mp,
+            super::apply_put::SparseIndexPut {
+                database_id: p.database_id,
+                tid: p.tid,
+                collection: p.collection,
+                storage_key: p.storage_key,
+                value: mp,
+                sys_from: p.sys_from,
+            },
             &mut Vec::new(),
         );
         Ok(())

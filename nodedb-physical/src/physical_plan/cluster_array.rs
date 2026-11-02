@@ -2,16 +2,14 @@
 
 //! Control-Plane cluster array operations.
 //!
-//! These variants are emitted by the SQL converter when cluster mode is
-//! active and an array operation spans multiple vShards. They are handled
-//! exclusively by the Control-Plane dispatch loop (pgwire routing handler)
-//! which calls the `ArrayCoordinator` before anything touches the SPSC
-//! bridge. They are **never sent to the Data Plane**.
-//!
-//! The converter emits local `ArrayOp` variants in single-node mode and
-//! `ClusterArrayOp` variants in cluster mode. Downstream code that sees
-//! a `PhysicalPlan::ClusterArray(_)` knows it must call the coordinator,
-//! not the SPSC bridge.
+//! Origin's SQL converter emits these variants for every array DML,
+//! query, and maintenance statement: an array spans the vShards its tiles
+//! route to, a one-node server included. They are handled exclusively by
+//! the Control-Plane dispatch loop (pgwire routing handler), which calls the
+//! `ArrayCoordinator` before anything touches the SPSC bridge. They are
+//! **never sent to the Data Plane**. Downstream code that sees a
+//! `PhysicalPlan::ClusterArray(_)` knows it must call the coordinator, not
+//! the SPSC bridge.
 
 use nodedb_array::types::ArrayId;
 use nodedb_types::SystemTimeScope;

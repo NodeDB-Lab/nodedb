@@ -28,20 +28,14 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             | DocumentOp::ApplyBalanceDelta { .. },
         ) => true,
 
-        // Encoded only when there's no predicted surrogate/edge set to verify against;
-        // when either is `Some`, it routes via Calvin and classifies as a read.
-        PhysicalPlan::Document(DocumentOp::BulkDelete {
-            ollp_predicted_surrogates: None,
-            ollp_predicted_edges: None,
-            ..
-        }) => true,
-        PhysicalPlan::Document(DocumentOp::BulkDelete { .. }) => false,
-        PhysicalPlan::Document(DocumentOp::BulkUpdate {
-            ollp_predicted_surrogates: None,
-            ollp_predicted_edges: None,
-            ..
-        }) => true,
-        PhysicalPlan::Document(DocumentOp::BulkUpdate { .. }) => false,
+        // A predicate write stages with its prediction in a transaction
+        // (`predicted_stage`), which re-reads its rows and replaces any
+        // predicted surrogate or edge set the plan carries. A form that
+        // carries one applies at once outside a transaction, through Calvin,
+        // and never applies at the statement inside one.
+        PhysicalPlan::Document(DocumentOp::BulkDelete { .. } | DocumentOp::BulkUpdate { .. }) => {
+            true
+        }
 
         // ---- Document: reads / DDL, not encoded ----
         PhysicalPlan::Document(
@@ -349,6 +343,8 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             | MetaOp::CreateTenantSnapshot { .. }
             | MetaOp::RestoreTenantSnapshot { .. }
             | MetaOp::PurgeDepartedVShards { .. }
+            | MetaOp::PurgeVersionsBelow { .. }
+            | MetaOp::KvDueExpiries { .. }
             | MetaOp::PurgeTenant { .. }
             | MetaOp::UnregisterCollection { .. }
             | MetaOp::UnregisterMaterializedView { .. }
@@ -380,8 +376,7 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             | MetaOp::CalvinResolve { .. }
             | MetaOp::ResolveTxn { .. }
             | MetaOp::ApplyTransactionRedo { .. }
-            | MetaOp::RestoreRedo(_)
-            | MetaOp::HomeVersions { .. },
+            | MetaOp::RestoreRedo(_),
         ) => false,
 
         // ---- Array reads / DDL / Flush: `to_replicated_entry` returns `None` — matches oracle.
@@ -466,6 +461,7 @@ mod tests {
             key: Vec::new(),
             rls_filters: Vec::new(),
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         })
     }
 
@@ -725,6 +721,7 @@ mod tests {
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 resolved_sum_targets: Vec::new(),
                 declared_primary_key: None,
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Document(DocumentOp::BulkDelete {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -736,66 +733,7 @@ mod tests {
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 resolved_sum_targets: Vec::new(),
                 declared_primary_key: None,
-            }),
-            // BulkUpdate / BulkDelete: OLLP surrogate set present — the
-            // Calvin-routed, not-buffered case.
-            PhysicalPlan::Document(DocumentOp::BulkUpdate {
-                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
-                filters: Vec::new(),
-                updates: Vec::new(),
-                returning: None,
-                ollp_predicted_surrogates: Some(vec![1, 2]),
-                ollp_predicted_edges: None,
-                rls_filters: Vec::new(),
-                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
-                resolved_sum_targets: Vec::new(),
-                declared_primary_key: None,
-            }),
-            PhysicalPlan::Document(DocumentOp::BulkDelete {
-                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
-                filters: Vec::new(),
-                returning: None,
-                ollp_predicted_surrogates: Some(vec![1, 2]),
-                ollp_predicted_edges: None,
-                rls_filters: Vec::new(),
-                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
-                resolved_sum_targets: Vec::new(),
-                declared_primary_key: None,
-            }),
-            // BulkUpdate / BulkDelete: OLLP edge set present, surrogates None —
-            // the other half of the `Some` guard.
-            PhysicalPlan::Document(DocumentOp::BulkUpdate {
-                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
-                filters: Vec::new(),
-                updates: Vec::new(),
-                returning: None,
-                ollp_predicted_surrogates: None,
-                ollp_predicted_edges: Some(vec![OllpPredictedEdge {
-                    surrogate: 1,
-                    from: "a".into(),
-                    to: "b".into(),
-                    label: None,
-                }]),
-                rls_filters: Vec::new(),
-                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
-                resolved_sum_targets: Vec::new(),
-                declared_primary_key: None,
-            }),
-            PhysicalPlan::Document(DocumentOp::BulkDelete {
-                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
-                filters: Vec::new(),
-                returning: None,
-                ollp_predicted_surrogates: None,
-                ollp_predicted_edges: Some(vec![OllpPredictedEdge {
-                    surrogate: 1,
-                    from: "a".into(),
-                    to: "b".into(),
-                    label: None,
-                }]),
-                rls_filters: Vec::new(),
-                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
-                resolved_sum_targets: Vec::new(),
-                declared_primary_key: None,
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Document(DocumentOp::MaterializeScan {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -803,6 +741,7 @@ mod tests {
                 count: 0,
                 system_time: SystemTimeScope::Current,
                 raw_bodies: false,
+                only_row: None,
             }),
             PhysicalPlan::Document(DocumentOp::ApplyBalanceDelta {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -831,6 +770,81 @@ mod tests {
         }
     }
 
+    /// A predicate write that carries a predicted surrogate or edge set
+    /// buffers in a transaction like one that carries none: it never applies
+    /// at the statement, where it would survive ROLLBACK.
+    #[test]
+    fn predicted_bulk_writes_buffer_in_a_transaction() {
+        let plans = vec![
+            PhysicalPlan::Document(DocumentOp::BulkUpdate {
+                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+                filters: Vec::new(),
+                updates: Vec::new(),
+                returning: None,
+                ollp_predicted_surrogates: Some(vec![1, 2]),
+                ollp_predicted_edges: None,
+                rls_filters: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+                resolved_sum_targets: Vec::new(),
+                declared_primary_key: None,
+                system_time: nodedb_types::SystemTimeScope::Current,
+            }),
+            PhysicalPlan::Document(DocumentOp::BulkDelete {
+                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+                filters: Vec::new(),
+                returning: None,
+                ollp_predicted_surrogates: Some(vec![1, 2]),
+                ollp_predicted_edges: None,
+                rls_filters: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+                resolved_sum_targets: Vec::new(),
+                declared_primary_key: None,
+                system_time: nodedb_types::SystemTimeScope::Current,
+            }),
+            PhysicalPlan::Document(DocumentOp::BulkUpdate {
+                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+                filters: Vec::new(),
+                updates: Vec::new(),
+                returning: None,
+                ollp_predicted_surrogates: None,
+                ollp_predicted_edges: Some(vec![OllpPredictedEdge {
+                    surrogate: 1,
+                    from: "a".into(),
+                    to: "b".into(),
+                    label: None,
+                }]),
+                rls_filters: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+                resolved_sum_targets: Vec::new(),
+                declared_primary_key: None,
+                system_time: nodedb_types::SystemTimeScope::Current,
+            }),
+            PhysicalPlan::Document(DocumentOp::BulkDelete {
+                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+                filters: Vec::new(),
+                returning: None,
+                ollp_predicted_surrogates: None,
+                ollp_predicted_edges: Some(vec![OllpPredictedEdge {
+                    surrogate: 1,
+                    from: "a".into(),
+                    to: "b".into(),
+                    label: None,
+                }]),
+                rls_filters: Vec::new(),
+                rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+                resolved_sum_targets: Vec::new(),
+                declared_primary_key: None,
+                system_time: nodedb_types::SystemTimeScope::Current,
+            }),
+        ];
+        for p in &plans {
+            assert!(
+                plan_requires_txn_buffering(p),
+                "expected {p:?} to require txn buffering"
+            );
+        }
+    }
+
     #[test]
     fn vector_variants_match_oracle() {
         let plans = vec![
@@ -847,6 +861,7 @@ mod tests {
                 ann_options: VectorAnnOptions::default(),
                 skip_payload_fetch: false,
                 payload_filters: Vec::new(),
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Vector(VectorOp::Insert {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -870,6 +885,7 @@ mod tests {
                 ef_search: 0,
                 filter_bitmap: None,
                 rls_filters: Vec::new(),
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Vector(VectorOp::Delete {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -900,6 +916,7 @@ mod tests {
                 query_entries: Vec::new(),
                 top_k: 0,
                 filters: Vec::new(),
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Vector(VectorOp::MultiVectorScoreSearch {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -908,6 +925,7 @@ mod tests {
                 top_k: 0,
                 ef_search: 0,
                 mode: String::new(),
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             // Encoder covers these six, so predicate and encoder agree — oracle-matching set.
             PhysicalPlan::Vector(VectorOp::DeleteBySurrogate {
@@ -1295,6 +1313,7 @@ mod tests {
                 key: Vec::new(),
                 rls_filters: Vec::new(),
                 surrogate_ceiling: None,
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Kv(KvOp::Put {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -1350,6 +1369,7 @@ mod tests {
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 returning: None,
                 rls_filters: Vec::new(),
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Kv(KvOp::PredicateDelete {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -1357,6 +1377,7 @@ mod tests {
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 returning: None,
                 rls_filters: Vec::new(),
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Kv(KvOp::Scan {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -1368,6 +1389,7 @@ mod tests {
                 match_pattern: None,
                 sort_keys: Vec::new(),
                 surrogate_ceiling: None,
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Kv(KvOp::Expire {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -1388,6 +1410,7 @@ mod tests {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 keys: Vec::new(),
                 rls_filters: Vec::new(),
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Kv(KvOp::BatchPut {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -1403,6 +1426,7 @@ mod tests {
                 key: Vec::new(),
                 fields: Vec::new(),
                 rls_filters: Vec::new(),
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Kv(KvOp::FieldSet {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -1482,27 +1506,34 @@ mod tests {
             PhysicalPlan::Kv(KvOp::SortedIndexRank {
                 index_name: "i".into(),
                 primary_key: Vec::new(),
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Kv(KvOp::SortedIndexTopK {
                 index_name: "i".into(),
                 k: 0,
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Kv(KvOp::SortedIndexRange {
                 index_name: "i".into(),
                 score_min: None,
                 score_max: None,
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Kv(KvOp::SortedIndexCount {
                 index_name: "i".into(),
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Kv(KvOp::SortedIndexScore {
                 index_name: "i".into(),
                 primary_key: Vec::new(),
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Kv(KvOp::MaterializeScan {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 cursor: Vec::new(),
                 count: 0,
+                system_time: nodedb_types::SystemTimeScope::Current,
+                only_key: None,
             }),
         ];
         for p in &plans {
@@ -1536,6 +1567,7 @@ mod tests {
                 provenance: None,
                 wal_lsn: None,
                 system_from: None,
+                restored_versions: Vec::new(),
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 returning: None,
                 rls_filters: Vec::new(),
@@ -1546,12 +1578,14 @@ mod tests {
                 updates: Vec::new(),
                 system_from: None,
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Columnar(ColumnarOp::Delete {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 filters: Vec::new(),
                 system_from: None,
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Columnar(ColumnarOp::ResolvedUpdate {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -1625,6 +1659,7 @@ mod tests {
                 projection: Vec::new(),
                 rls_filters: Vec::new(),
                 prefilter: None,
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
         ];
         for p in &plans {
@@ -1646,6 +1681,7 @@ mod tests {
                 filters: Vec::new(),
                 rls_filters: Vec::new(),
                 scores: Vec::new(),
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Text(TextOp::BM25ScoreScan {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -1653,6 +1689,7 @@ mod tests {
                 rls_filters: Vec::new(),
                 scores: Vec::new(),
                 bound: None,
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Text(TextOp::PhraseSearch {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -1663,6 +1700,7 @@ mod tests {
                 filters: Vec::new(),
                 rls_filters: Vec::new(),
                 scores: Vec::new(),
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Text(TextOp::HybridSearch {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -1679,6 +1717,7 @@ mod tests {
                 filter_bitmap: None,
                 rls_filters: Vec::new(),
                 score_alias: None,
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Text(TextOp::FtsIndexDoc {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -1709,6 +1748,7 @@ mod tests {
                 filter_bitmap: None,
                 rls_filters: Vec::new(),
                 score_alias: None,
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Text(TextOp::SetTextConfig {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -1740,6 +1780,7 @@ mod tests {
                 limit: None,
                 offset: 0,
                 distinct: false,
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Query(QueryOp::Aggregate {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -1747,6 +1788,7 @@ mod tests {
                 group_by: Vec::new(),
                 aggregates: Vec::new(),
                 filters: Vec::new(),
+                system_time: nodedb_types::SystemTimeScope::Current,
                 having: Vec::new(),
                 limit: 0,
                 sub_group_by: Vec::new(),
@@ -1760,6 +1802,7 @@ mod tests {
                 group_by: Vec::new(),
                 aggregates: Vec::new(),
                 filters: Vec::new(),
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Query(QueryOp::PartialAggregateState {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -1767,6 +1810,7 @@ mod tests {
                 group_by: Vec::new(),
                 aggregates: Vec::new(),
                 filters: Vec::new(),
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Query(QueryOp::HashJoin {
                 left_collection: QualifiedCollection::new(DatabaseId::DEFAULT, "l"),
@@ -1816,6 +1860,7 @@ mod tests {
                 right_rls_filters: Vec::new(),
                 left_input: None,
                 right_input: None,
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Query(QueryOp::SortMergeJoin {
                 left_collection: QualifiedCollection::new(DatabaseId::DEFAULT, "l"),
@@ -1828,12 +1873,14 @@ mod tests {
                 right_rls_filters: Vec::new(),
                 left_input: None,
                 right_input: None,
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Query(QueryOp::FacetCounts {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 filters: Vec::new(),
                 fields: Vec::new(),
                 limit_per_facet: 0,
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Query(QueryOp::RecursiveScan {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -1843,6 +1890,7 @@ mod tests {
                 max_iterations: 0,
                 distinct: false,
                 limit: 0,
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Query(QueryOp::RecursiveValue {
                 cte_name: "cte".into(),
@@ -1864,6 +1912,7 @@ mod tests {
                 lateral_alias: "l".into(),
                 projection: Vec::new(),
                 left_join: false,
+                inner_system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Query(QueryOp::LateralLoop {
                 outer_plan: Box::new(trivial_read_plan()),
@@ -1875,6 +1924,7 @@ mod tests {
                 projection: Vec::new(),
                 left_join: false,
                 outer_row_cap: 0,
+                inner_system_time: nodedb_types::SystemTimeScope::Current,
             }),
         ];
         for p in &plans {
@@ -1939,7 +1989,6 @@ mod tests {
                 replace_mode: false,
                 collections_to_clear: Vec::new(),
                 group_vshards: Vec::new(),
-                version_floor: Vec::new(),
             }),
             PhysicalPlan::Meta(MetaOp::PurgeTenant { tenant_id: 1 }),
             PhysicalPlan::Meta(MetaOp::UnregisterCollection {
@@ -2002,10 +2051,12 @@ mod tests {
             }),
             PhysicalPlan::Meta(MetaOp::QueryLastValues {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Meta(MetaOp::QueryLastValue {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 series_id: 0,
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Meta(MetaOp::CalvinExecuteStatic {
                 epoch: 0,
@@ -2017,10 +2068,10 @@ mod tests {
                     engine: EngineTag::Kv,
                     collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c").to_string(),
                     key: ReadKeyIdent::Predicate,
-                    read_version: nodedb_types::WriteVersion::ZERO,
                     home_vshard: None,
                 }],
                 body_plans: Vec::new(),
+                snapshot_ordinal: None,
             }),
             PhysicalPlan::Meta(MetaOp::CalvinExecutePassive {
                 epoch: 0,
@@ -2040,6 +2091,8 @@ mod tests {
                 plans: Vec::new(),
                 injected_reads: BTreeMap::new(),
                 epoch_system_ms: 0,
+                versioned_reads: Vec::new(),
+                snapshot_ordinal: None,
             }),
             PhysicalPlan::Meta(MetaOp::RebuildIndex {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -2239,6 +2292,7 @@ mod tests {
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 resolved_sum_targets: Vec::new(),
                 declared_primary_key: None,
+                target_system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Document(DocumentOp::UpdateFromJoin {
                 target_collection: QualifiedCollection::new(DatabaseId::DEFAULT, "t"),
@@ -2256,6 +2310,7 @@ mod tests {
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 resolved_sum_targets: Vec::new(),
                 declared_primary_key: None,
+                target_system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Crdt(CrdtOp::RestoreToVersion {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),

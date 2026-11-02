@@ -190,6 +190,30 @@ impl ArrayStore {
             &params,
         )
     }
+
+    /// The stamp of the newest version `coord` holds: a live cell, a
+    /// tombstone or an erasure, across the memtable and every segment.
+    /// `None` when the coordinate holds no version, or lies outside the
+    /// domain.
+    pub fn newest_cell_stamp(
+        &self,
+        coord: &[CoordValue],
+    ) -> nodedb_array::ArrayResult<Option<i64>> {
+        let hilbert_prefix = match nodedb_array::tile::tile_id_for_cell(&self.schema, coord, 0) {
+            Ok(tile) => tile.hilbert_prefix,
+            Err(nodedb_array::ArrayError::CoordOutOfDomain { .. }) => return Ok(None),
+            Err(e) => {
+                return Err(nodedb_array::ArrayError::SegmentCorruption {
+                    detail: format!("newest_cell_stamp: tile id: {e}"),
+                });
+            }
+        };
+        Ok(self
+            .cell_versions_for_coord(hilbert_prefix, coord, i64::MAX)?
+            .iter()
+            .map(|(tile_id, _)| tile_id.system_from_ms)
+            .max())
+    }
 }
 
 #[cfg(test)]
@@ -336,6 +360,7 @@ mod tests {
         // Tombstone at a later system time hides it.
         e.delete_cells(
             &aid(),
+            0,
             vec![ArrayDeleteCell {
                 coord: coord(1, 1),
                 system_from_ms: 10,
@@ -354,6 +379,7 @@ mod tests {
         // Re-put at a later system time restores it.
         e.put_cells(
             &aid(),
+            0,
             vec![crate::engine::array::wal::ArrayPutCell {
                 coord: coord(1, 1),
                 attrs: vec![nodedb_array::types::cell_value::value::CellValue::Int64(8)],
@@ -405,6 +431,7 @@ mod tests {
 
         e.delete_cells(
             &aid(),
+            0,
             vec![ArrayDeleteCell {
                 coord: vec![CoordValue::Int64(1), CoordValue::Int64(1)],
                 system_from_ms: 10,
@@ -424,6 +451,45 @@ mod tests {
             "the tombstone hides the cell: {} tiles",
             tiles.len()
         );
+    }
+
+    /// The newest stamp of a coordinate counts a tombstone, reads the
+    /// memtable and the segments, and ignores every other coordinate.
+    #[test]
+    fn newest_cell_stamp_counts_tombstones_across_sources() {
+        use crate::engine::array::engine::{ArrayEngine, ArrayEngineConfig};
+        use crate::engine::array::test_support::{aid, put_one, schema as engine_schema};
+        use crate::engine::array::wal::ArrayDeleteCell;
+
+        let dir = TempDir::new().unwrap();
+        let mut e = ArrayEngine::new(ArrayEngineConfig::new(dir.path().to_path_buf())).unwrap();
+        e.open_array(aid(), engine_schema(), 0xC0DE).unwrap();
+        let coord = |x: i64, y: i64| vec![CoordValue::Int64(x), CoordValue::Int64(y)];
+        let newest = |e: &ArrayEngine, x: i64, y: i64| {
+            e.store(&aid())
+                .unwrap()
+                .newest_cell_stamp(&coord(x, y))
+                .unwrap()
+        };
+
+        assert_eq!(newest(&e, 1, 1), None);
+        put_one(&mut e, 1, 1, 7, 1);
+        assert_eq!(newest(&e, 1, 1), Some(0));
+        e.flush(&aid(), crate::types::replay_stamp::ReplayStamp::through(2))
+            .unwrap();
+        e.delete_cells(
+            &aid(),
+            0,
+            vec![ArrayDeleteCell {
+                coord: coord(1, 1),
+                system_from_ms: 10,
+                erasure: false,
+            }],
+            3,
+        )
+        .unwrap();
+        assert_eq!(newest(&e, 1, 1), Some(10));
+        assert_eq!(newest(&e, 1, 2), None, "another coordinate holds nothing");
     }
 
     #[test]

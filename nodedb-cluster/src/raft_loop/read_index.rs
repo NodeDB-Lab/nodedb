@@ -37,7 +37,18 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
     /// no leader is known or the asked node no longer leads, and with
     /// [`ClusterError::ReadIndexTimeout`] when no quorum answered within
     /// `timeout`.
-    pub async fn read_index_via_leader(&self, group_id: u64, timeout: Duration) -> Result<u64> {
+    ///
+    /// `cut` is a read cut the asked leader closes before it takes the
+    /// index (see [`PlanExecutor::close_read_cut`]). On the leader itself the
+    /// caller closes the cut before the call, so the index is taken here
+    /// with no close. Either leader raises the group's ordinal floor to the
+    /// cut on a quorum before it answers (see `super::ordinal_floor`).
+    pub async fn read_index_via_leader(
+        &self,
+        group_id: u64,
+        timeout: Duration,
+        cut: Option<i64>,
+    ) -> Result<u64> {
         let leader = {
             let mr = self.multi_raft.lock().unwrap_or_else(|p| p.into_inner());
             if mr.is_group_leader(group_id) {
@@ -51,7 +62,7 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
             }
         };
         let leader_id = match leader {
-            None => return confirm_read_index(&self.multi_raft, group_id, timeout).await,
+            None => return self.confirm_cut_read_index(group_id, cut, timeout).await,
             Some(id) if id == 0 || id == self.node_id => {
                 return Err(ClusterError::ReadIndexNotLeader { group_id });
             }
@@ -61,6 +72,7 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
         let request = RaftRpc::ReadIndexRequest(ReadIndexRequest {
             group_id,
             timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+            cut,
         });
         match self.transport.send_rpc(leader_id, request).await? {
             RaftRpc::ReadIndexResponse(ReadIndexResponse { outcome }) => match outcome {
@@ -87,7 +99,21 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
     /// lead.
     pub(super) async fn handle_read_index_rpc(&self, req: ReadIndexRequest) -> Result<RaftRpc> {
         let timeout = Duration::from_millis(req.timeout_ms).min(MAX_REMOTE_TIMEOUT);
-        let outcome = match confirm_read_index(&self.multi_raft, req.group_id, timeout).await {
+        // The cut closes before the index is taken: every write reserved at
+        // or below it applied here, so it committed at or below the index.
+        if let Some(cut) = req.cut
+            && let Err(unclosed) = self.plan_executor.close_read_cut(cut, timeout).await
+        {
+            return Ok(RaftRpc::ReadIndexResponse(ReadIndexResponse {
+                outcome: ReadIndexOutcome::Timeout {
+                    waited_ms: unclosed.waited_ms,
+                },
+            }));
+        }
+        let outcome = match self
+            .confirm_cut_read_index(req.group_id, req.cut, timeout)
+            .await
+        {
             Ok(read_index) => {
                 // The term this node leads at. A node that stepped down since
                 // the quorum confirmed it reports term 0: it names no term.
@@ -149,9 +175,27 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
         }
     }
 
+    /// A read index of `group_id` confirmed on this leader. With a `cut`,
+    /// the group's ordinal floor first rises to it on a quorum of voters, so
+    /// no later leader of the group stamps a write at or below the cut. The
+    /// caller closed the cut on this node already.
+    async fn confirm_cut_read_index(
+        &self,
+        group_id: u64,
+        cut: Option<i64>,
+        timeout: Duration,
+    ) -> Result<u64> {
+        let started = std::time::Instant::now();
+        if let Some(cut) = cut {
+            self.spread_ordinal_floor(group_id, cut, timeout).await?;
+        }
+        let remaining = timeout.saturating_sub(started.elapsed());
+        confirm_read_index(&self.multi_raft, group_id, remaining).await
+    }
+
     /// Register `node_id`'s listen address with the transport, from the local
     /// topology.
-    fn register_peer_addr(&self, node_id: u64) -> Result<()> {
+    pub(super) fn register_peer_addr(&self, node_id: u64) -> Result<()> {
         let topo = self.topology.read().unwrap_or_else(|p| p.into_inner());
         let node = topo
             .get_node(node_id)

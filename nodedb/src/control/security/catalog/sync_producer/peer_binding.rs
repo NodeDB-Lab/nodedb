@@ -82,7 +82,7 @@ impl PeerBindingKey {
 
 /// The producer that owns one Loro peer id.
 #[derive(zerompk::ToMessagePack, zerompk::FromMessagePack, Debug, Clone, Copy, PartialEq, Eq)]
-#[msgpack(map, allow_unknown_fields)]
+#[msgpack(map)]
 pub struct StoredPeerBinding {
     /// Durable producer id of the Lite client that first used this peer id.
     pub producer_id: u64,

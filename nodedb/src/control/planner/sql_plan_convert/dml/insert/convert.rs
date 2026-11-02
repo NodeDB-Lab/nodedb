@@ -229,6 +229,7 @@ pub(in super::super::super) fn convert_insert(
                 provenance: None,
                 wal_lsn: None,
                 system_from: None,
+                restored_versions: Vec::new(),
                 rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
                 // Both slots are filled by later passes over the built plan —
                 // `inject_returning_spec` from the statement's RETURNING list,
@@ -286,10 +287,8 @@ mod tests {
             retention_registry: None,
             array_catalog: None,
             credentials: Some(Arc::new(store)),
-            wal: None,
             surrogate_assigner:
                 crate::control::planner::sql_plan_convert::test_support::test_assigner(),
-            cluster_enabled: false,
             bitemporal_retention_registry: None,
             max_vector_dim: 0,
             force_shuffle_join: false,
@@ -299,6 +298,7 @@ mod tests {
             broadcast_threshold_bytes: 8 * 1024 * 1024,
             shuffle_agg_threshold: 10_000,
             prefetched: Default::default(),
+            reads_txn_snapshot: false,
             database_id: crate::types::DatabaseId::DEFAULT,
             tenant_id: crate::types::TenantId::new(0),
         };

@@ -31,6 +31,7 @@ pub mod predicate;
 pub mod reader;
 #[cfg(test)]
 mod test_support;
+pub mod versions;
 pub mod wal_record;
 pub mod writer;
 
@@ -46,17 +47,19 @@ pub use format::{
     BLOCK_SIZE, BlockLayout, BlockStats, BloomFilter, ColumnMeta, MAGIC, SegmentFooter,
     SegmentHeader, VERSION_MAJOR, VERSION_MINOR,
 };
-pub use materialize_rows::materialize_segment_live_rows;
+pub use materialize_rows::{SegmentRow, materialize_segment_rows};
 pub use memtable::{ColumnarMemtable, IngestValue, MemtableRowIter};
 pub use mutation::{
-    BatchConflict, BatchRow, ColumnDataSnapshot, ColumnarEngineSnapshot, MutationEngine,
-    TruncatedRows,
+    BatchConflict, BatchRow, ColumnDataSnapshot, ColumnarEngineSnapshot, InstallRow,
+    MutationEngine, StoredVersion, TruncatedRows,
 };
 pub use pk_index::PkIndex;
 pub use predicate::{
     BLOOM_BITS_DEFAULT, BLOOM_BYTES, BLOOM_K_DEFAULT, PredicateOp, PredicateValue, ScanPredicate,
     bloom_insert, bloom_may_contain, build_bloom, build_bloom_with_params,
 };
+pub use reader::BlockSelection;
 pub use reader::OwnedSegmentReader;
 pub use reader::SegmentReader;
+pub use versions::{SegmentVersions, VersionChains, VersionCut, version_visible};
 pub use writer::SegmentWriter;

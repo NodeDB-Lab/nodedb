@@ -3,7 +3,7 @@
 //! Lossless backup/restore of the columnar `MutationEngine`.
 //!
 //! `export_snapshot` captures the full in-memory state (memtable columns,
-//! PK index, delete bitmaps, counters, schema) plus caller-supplied flushed-
+//! PK index, delete bitmaps, version stamps and chains, counters, schema) plus caller-supplied flushed-
 //! segment blobs into a single `ColumnarEngineSnapshot` that can be round-
 //! tripped through MessagePack and passed to `from_snapshot` to reconstruct
 //! an identical engine.
@@ -21,7 +21,8 @@ use zerompk::{FromMessagePack, ToMessagePack};
 use crate::delete_bitmap::DeleteBitmap;
 use crate::error::ColumnarError;
 use crate::memtable::ColumnData;
-use crate::pk_index::PkIndex;
+use crate::pk_index::{PkIndex, RowLocation};
+use crate::versions::{SegmentVersions, SegmentVersionsSnapshot, VersionChains};
 
 use super::engine::MutationEngine;
 
@@ -101,11 +102,8 @@ pub enum ColumnDataSnapshot {
 
 /// Complete serialisable snapshot of one `MutationEngine` instance.
 ///
-/// Map-encoded (`#[msgpack(map)]`) so new fields can be added with
-/// `#[msgpack(default)]` / `#[serde(default)]` and older snapshots
-/// decode without a migration — new optional fields should carry
-/// `#[msgpack(default)]` and `#[serde(default)]` and their type must
-/// implement `Default`.
+/// Map-encoded (`#[msgpack(map)]`). The version stamps and chains are
+/// required: a snapshot without them does not decode.
 #[derive(Debug, Clone, Serialize, Deserialize, ToMessagePack, FromMessagePack)]
 #[msgpack(map)]
 pub struct ColumnarEngineSnapshot {
@@ -122,8 +120,6 @@ pub struct ColumnarEngineSnapshot {
     /// Serialised closed-key index bytes (via `PkIndex::to_bytes()`): each
     /// key a bitemporal close unbound, to its tombstone row. Empty when no
     /// key was ever closed.
-    #[msgpack(default)]
-    #[serde(default)]
     pub closed_index_bytes: Vec<u8>,
     /// Serialised delete bitmaps for FLUSHED segments only.
     ///
@@ -138,9 +134,7 @@ pub struct ColumnarEngineSnapshot {
     pub flushed_segments: Vec<Vec<u8>>,
     /// Per-row cross-engine surrogates for each flushed segment, parallel to
     /// `flushed_segments` (outer index == segment index, segment_id == index+1;
-    /// inner Vec is per-row). Empty when decoded from a pre-surrogate snapshot.
-    #[msgpack(default)]
-    #[serde(default)]
+    /// inner Vec is per-row). Its length equals `flushed_segments.len()`.
     pub flushed_surrogates: FlushedSurrogateTable,
     /// Next segment ID to be assigned on flush.
     pub next_segment_id: u64,
@@ -148,6 +142,12 @@ pub struct ColumnarEngineSnapshot {
     pub memtable_segment_id: u64,
     /// Row counter within the current memtable (resets on flush).
     pub memtable_row_counter: u32,
+    /// Version stamps of every segment, the memtable's virtual segment
+    /// included, ascending by segment id.
+    pub versions: Vec<SegmentVersionsSnapshot>,
+    /// Per-key chains of ended versions as `(pk bytes, locations oldest
+    /// first)`, ascending by key.
+    pub chains: Vec<(Vec<u8>, Vec<RowLocation>)>,
 }
 
 // ── Export ────────────────────────────────────────────────────────────────────
@@ -161,8 +161,8 @@ impl MutationEngine {
     ///
     /// `flushed_surrogates` carries the per-row cross-engine surrogates for
     /// each flushed segment, parallel to `flushed_segments` (outer index ==
-    /// segment index). Pass `&[]` when no surrogate sidecar is available; the
-    /// restored rows then read as `None`-surrogate.
+    /// segment index). Both slices are empty for a collection that never
+    /// flushed.
     pub fn export_snapshot(
         &self,
         flushed_segments: &[Vec<u8>],
@@ -198,6 +198,13 @@ impl MutationEngine {
             }
         }
 
+        let mut versions: Vec<SegmentVersionsSnapshot> = self
+            .versions
+            .iter()
+            .map(|(&seg_id, stamps)| stamps.to_snapshot(seg_id))
+            .collect();
+        versions.sort_unstable_by_key(|v| v.segment_id);
+
         Ok(ColumnarEngineSnapshot {
             collection: self.collection.clone(),
             schema: self.schema.clone(),
@@ -212,6 +219,8 @@ impl MutationEngine {
             next_segment_id: self.next_segment_id,
             memtable_segment_id: self.memtable_segment_id,
             memtable_row_counter: self.memtable_row_counter,
+            versions,
+            chains: self.chains.to_entries(),
         })
     }
 
@@ -221,13 +230,14 @@ impl MutationEngine {
     /// caller is responsible for writing the blobs back to the appropriate
     /// on-disk locations and for re-attaching the surrogate sidecar. The
     /// surrogate Vec is parallel to the blob Vec (outer index == segment
-    /// index); it is empty when decoded from a pre-surrogate snapshot, in
-    /// which case the caller treats every flushed row as `None`-surrogate.
+    /// index).
     ///
     /// # Errors
     ///
     /// Returns `ColumnarError::SchemaMismatch` if the number of memtable
     /// columns in the snapshot does not match the schema column count.
+    /// Returns `ColumnarError::Corruption` if the surrogate table length
+    /// differs from the flushed segment count.
     /// Returns `ColumnarError::Serialization` if the PK index or any delete
     /// bitmap bytes are corrupt.
     /// Returns `ColumnarError::Corruption` if a column snapshot variant does
@@ -240,6 +250,18 @@ impl MutationEngine {
             return Err(ColumnarError::SchemaMismatch {
                 expected: col_count,
                 got: snap.memtable_columns.len(),
+            });
+        }
+        if snap.flushed_surrogates.len() != snap.flushed_segments.len() {
+            return Err(ColumnarError::Corruption {
+                segment_id: None,
+                reason: format!(
+                    "snapshot of '{}' carries {} surrogate tables for {} flushed segments",
+                    snap.collection,
+                    snap.flushed_surrogates.len(),
+                    snap.flushed_segments.len()
+                ),
+                offset: None,
             });
         }
 
@@ -300,6 +322,12 @@ impl MutationEngine {
             memtable_segment_id: snap.memtable_segment_id,
             memtable_row_counter: snap.memtable_row_counter,
             memtable_surrogates: snap.memtable_surrogates,
+            versions: snap
+                .versions
+                .into_iter()
+                .map(|v| (v.segment_id, SegmentVersions::from_snapshot(v)))
+                .collect(),
+            chains: VersionChains::from_entries(snap.chains),
         };
 
         Ok((engine, snap.flushed_segments, snap.flushed_surrogates))
@@ -482,7 +510,10 @@ mod tests {
     fn insert_row(engine: &mut MutationEngine, id: i64, name: &str, score: Option<f64>) {
         let score_val = score.map(Value::Float).unwrap_or(Value::Null);
         engine
-            .insert(&[Value::Integer(id), Value::String(name.into()), score_val])
+            .insert(
+                &[Value::Integer(id), Value::String(name.into()), score_val],
+                id * 10,
+            )
             .expect("insert");
     }
 
@@ -538,11 +569,8 @@ mod tests {
         insert_row(&mut engine, 10, "Xena", Some(1.0));
         insert_row(&mut engine, 20, "Yara", Some(2.0));
 
-        // Delete row 20 by re-inserting with the same PK (upsert tombstone).
-        // Actually mark it deleted directly via the memtable delete bitmap.
-        engine
-            .delete_bitmap_mut(engine.memtable_segment_id)
-            .mark_deleted(1); // row index 1 == id=20
+        // End row 1 (id=20) at ordinal 300.
+        engine.delete(&Value::Integer(20), 300).expect("delete");
 
         let snap = engine.export_snapshot(&[], &[]).expect("export");
 
@@ -567,6 +595,27 @@ mod tests {
                 .delete_bitmap(restored.memtable_segment_id())
                 .is_some_and(|bm| bm.is_deleted(1))
         );
+
+        // The history round-trips: a read before the delete sees id=20.
+        let at = |cut| -> Vec<i64> {
+            restored
+                .scan_memtable_versions(cut)
+                .map(|r| match r.expect("read").2[0] {
+                    Value::Integer(id) => id,
+                    _ => -1,
+                })
+                .collect()
+        };
+        assert_eq!(at(crate::versions::VersionCut::At(250)), vec![10, 20]);
+        assert_eq!(at(crate::versions::VersionCut::At(300)), vec![10]);
+        assert_eq!(at(crate::versions::VersionCut::At(150)), vec![10]);
+        assert_eq!(
+            restored
+                .version_chains()
+                .get(&crate::pk_index::encode_pk(&Value::Integer(20)))
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -578,7 +627,7 @@ mod tests {
         let fake_blob: Vec<u8> = vec![0x4E, 0x44, 0x42, 0x53, 0x01, 0x02, 0x03]; // "NDBS" + junk
 
         let snap = engine
-            .export_snapshot(std::slice::from_ref(&fake_blob), &[])
+            .export_snapshot(std::slice::from_ref(&fake_blob), &[vec![None]])
             .expect("export");
         assert_eq!(snap.flushed_segments.len(), 1);
 
@@ -686,34 +735,44 @@ mod tests {
     }
 
     #[test]
-    fn missing_flushed_surrogates_decode_empty() {
-        // Backward-compat: a snapshot encoded WITHOUT the `flushed_surrogates`
-        // field (e.g. a pre-surrogate snapshot) must decode into an empty
-        // surrogate sidecar via `#[msgpack(default)]` / `#[serde(default)]`,
-        // even when it carries non-empty flushed segments.
+    fn missing_flushed_surrogates_is_refused() {
+        // Encode a snapshot, then drop the `flushed_surrogates` key from the
+        // map. The field is required, so the decode fails.
         let schema = simple_schema();
-        let engine = MutationEngine::new("compat_test".to_string(), schema);
+        let engine = MutationEngine::new("strict_test".to_string(), schema);
+        let snap = engine.export_snapshot(&[], &[]).expect("export");
+        let bytes = zerompk::to_msgpack_vec(&snap).expect("serialize");
 
+        let value: zerompk::Value<'_> = zerompk::from_msgpack(&bytes).expect("decode as value");
+        let zerompk::Value::Map(entries) = value else {
+            panic!("snapshot must encode as a map");
+        };
+        let before = entries.len();
+        let entries: Vec<_> = entries
+            .into_iter()
+            .filter(|(k, _)| {
+                !matches!(k, zerompk::Value::String(name) if &**name == "flushed_surrogates")
+            })
+            .collect();
+        assert_eq!(entries.len(), before - 1, "the field must be present");
+        let stripped = zerompk::to_msgpack_vec(&zerompk::Value::Map(entries)).expect("re-encode");
+
+        assert!(zerompk::from_msgpack::<ColumnarEngineSnapshot>(&stripped).is_err());
+    }
+
+    #[test]
+    fn surrogate_table_length_mismatch_is_refused() {
+        let schema = simple_schema();
+        let engine = MutationEngine::new("mismatch_test".to_string(), schema);
         let blob: Vec<u8> = vec![0x4E, 0x44, 0x42, 0x53, 0x01];
-
-        // Export WITH a segment but WITHOUT any surrogate sidecar, then clear
-        // the surrogate field to mimic an old-shape encoding that lacks it.
-        let mut snap = engine
+        let snap = engine
             .export_snapshot(std::slice::from_ref(&blob), &[])
             .expect("export");
-        snap.flushed_surrogates.clear();
 
-        let bytes = zerompk::to_msgpack_vec(&snap).expect("serialize");
-        let snap2: ColumnarEngineSnapshot = zerompk::from_msgpack(&bytes).expect("deserialize");
-
-        // Field defaults to empty; segments still present (no equal-length req).
-        assert!(snap2.flushed_surrogates.is_empty());
-        assert_eq!(snap2.flushed_segments.len(), 1);
-
-        let (_, flushed, flushed_surrogates) =
-            MutationEngine::from_snapshot(snap2).expect("from_snapshot");
-        assert_eq!(flushed.len(), 1);
-        assert!(flushed_surrogates.is_empty());
+        assert!(matches!(
+            MutationEngine::from_snapshot(snap),
+            Err(ColumnarError::Corruption { .. })
+        ));
     }
 
     /// A memtable JSON cell restored with bytes that are not MessagePack is
@@ -729,7 +788,7 @@ mod tests {
         };
         let mut engine = MutationEngine::new("json_col".to_string(), schema);
         engine
-            .insert(&[Value::Integer(1), Value::Integer(5)])
+            .insert(&[Value::Integer(1), Value::Integer(5)], 1)
             .expect("insert");
         let mut snap = engine.export_snapshot(&[], &[]).expect("export");
         let Some(ColumnDataSnapshot::Json { data, offsets, .. }) = snap.memtable_columns.get_mut(1)

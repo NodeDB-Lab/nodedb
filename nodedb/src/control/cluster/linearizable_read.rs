@@ -234,10 +234,6 @@ mod tests {
         fn leader_lease_term(&self, _group_id: u64) -> Option<u64> {
             None
         }
-
-        fn lease_read_index(&self, _group_id: u64) -> Option<u64> {
-            None
-        }
     }
 
     /// A lagging apply delays the read: the wait follows the statement

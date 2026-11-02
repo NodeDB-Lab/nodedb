@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! The stage vote judges the slice's read-set against the local write
-//! versions: a current read commits, a stale one aborts and drops.
+//! The stage vote judges the slice's read-set against the stored
+//! versions and its snapshot: a current read commits, a stale one aborts and
+//! drops.
 
 use nodedb::bridge::envelope::{StageVote, Status};
 use nodedb::types::*;
@@ -43,7 +44,6 @@ fn drop_discards_invalid_staged_calvin_write() {
         engine: EngineTag::Kv,
         collection: "dropcoll".to_string(),
         key: ReadKeyIdent::Predicate,
-        read_version: local_version(50),
         home_vshard: None,
     };
 
@@ -51,11 +51,12 @@ fn drop_discards_invalid_staged_calvin_write() {
         &mut core,
         &mut tx,
         &mut rx,
-        stage_static(
+        stage_static_at(
             7,
             0,
             vec![kv_put("targetcoll", b"tk", b"tv")],
             vec![stale_read],
+            BEFORE_SEED,
         ),
         read_vshard,
         None,
@@ -146,7 +147,6 @@ fn point_read_at_write_version_commits_and_the_install_applies() {
         engine: EngineTag::Kv,
         collection: "pointcoll".to_string(),
         key: ReadKeyIdent::Point(KeyRepr::KvKey(Box::from(b"pk".as_slice()))),
-        read_version: local_version(10),
         home_vshard: None,
     };
 
@@ -154,11 +154,12 @@ fn point_read_at_write_version_commits_and_the_install_applies() {
         &mut core,
         &mut tx,
         &mut rx,
-        stage_static(
+        stage_static_at(
             8,
             0,
             vec![kv_put("committarget", b"ck", b"cv")],
             vec![current_read],
+            AFTER_SEED,
         ),
         point_vshard,
         None,
@@ -236,7 +237,6 @@ fn stale_point_read_of_kv_key_aborts_stage_and_drop_discards() {
         engine: EngineTag::Kv,
         collection: "stalecoll".to_string(),
         key: ReadKeyIdent::Point(KeyRepr::KvKey(Box::from(b"pk".as_slice()))),
-        read_version: local_version(5),
         home_vshard: None,
     };
 
@@ -244,11 +244,12 @@ fn stale_point_read_of_kv_key_aborts_stage_and_drop_discards() {
         &mut core,
         &mut tx,
         &mut rx,
-        stage_static(
+        stage_static_at(
             9,
             0,
             vec![kv_put("aborttarget", b"ak", b"av")],
             vec![stale_read],
+            BEFORE_SEED,
         ),
         stale_vshard,
         None,

@@ -35,6 +35,7 @@ pub(in crate::control::server::resp) async fn handle_mget(
         collection: QualifiedCollection::new(DatabaseId::DEFAULT, &session.collection),
         keys: cmd.args.clone(),
         rls_filters: Vec::new(),
+        system_time: nodedb_types::SystemTimeScope::Current,
     });
 
     match dispatch_kv(state, session, plan).await {

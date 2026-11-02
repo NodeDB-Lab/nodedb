@@ -309,7 +309,13 @@ mod tests {
         seed(&mut core, row);
         let db = DatabaseId::DEFAULT.as_u64();
         core.sparse
-            .delete(db, TID, COLLECTION, &StorageKey::for_surrogate(row))
+            .delete(
+                db,
+                TID,
+                COLLECTION,
+                &StorageKey::for_surrogate(row),
+                core.bitemporal_ordinal(),
+            )
             .expect("durable sidecar delete");
         assert!(has_node(&core, row) && !has_sidecar(&core, row));
 

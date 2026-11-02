@@ -10,7 +10,6 @@ use crate::control::server::shared::session::SessionId;
 
 use super::super::types::sqlstate_error;
 use super::core::NodeDbPgHandler;
-use crate::control::server::shared::txn_control::{IsolationLevel, unsupported_isolation_message};
 
 /// Outcome of classifying a `SET TRANSACTION` / `SET SESSION CHARACTERISTICS` command.
 enum TransactionCmd {
@@ -18,9 +17,10 @@ enum TransactionCmd {
     SetReadOnly,
     /// `READ WRITE` — store access mode, return SET.
     SetReadWrite,
-    /// `ISOLATION LEVEL READ COMMITTED` — silent accept (Snapshot Isolation is strictly stronger).
+    /// `ISOLATION LEVEL SERIALIZABLE | REPEATABLE READ | READ COMMITTED | READ UNCOMMITTED`.
+    /// Accepted, and the transaction runs serializable.
     AcceptIsolation,
-    /// Any unsupported isolation level or unknown option — reject with SQLSTATE 0A000.
+    /// An unknown isolation level or option — reject with SQLSTATE 0A000.
     RejectIsolation(String),
 }
 
@@ -32,29 +32,21 @@ fn classify_transaction_cmd(upper: &str, sql: &str) -> TransactionCmd {
     // like "SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED" does not accidentally
     // match the READ-only access-mode branch.
     if upper.contains("ISOLATION LEVEL") {
-        // READ COMMITTED: silent accept.
-        if upper.contains("READ COMMITTED") {
+        let named = [
+            "SERIALIZABLE",
+            "REPEATABLE READ",
+            "READ COMMITTED",
+            "READ UNCOMMITTED",
+        ]
+        .iter()
+        .any(|level| upper.contains(level));
+        if named {
             return TransactionCmd::AcceptIsolation;
         }
-
-        let level = if upper.contains("SERIALIZABLE") {
-            Some(IsolationLevel::Serializable)
-        } else if upper.contains("REPEATABLE READ") {
-            Some(IsolationLevel::RepeatableRead)
-        } else if upper.contains("READ UNCOMMITTED") {
-            Some(IsolationLevel::ReadUncommitted)
-        } else {
-            None
-        };
-
-        let message = match level {
-            Some(level) => unsupported_isolation_message("SET TRANSACTION", level),
-            None => format!(
-                "unsupported SET TRANSACTION option: {}",
-                sql.split_whitespace().skip(2).collect::<Vec<_>>().join(" ")
-            ),
-        };
-        return TransactionCmd::RejectIsolation(message);
+        return TransactionCmd::RejectIsolation(format!(
+            "unsupported SET TRANSACTION option: {}",
+            sql.split_whitespace().skip(2).collect::<Vec<_>>().join(" ")
+        ));
     }
 
     // Access-mode branch.
@@ -303,46 +295,34 @@ mod tests {
     }
 
     #[test]
-    fn set_transaction_read_committed() {
-        assert!(matches!(
-            run("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"),
-            TransactionCmd::AcceptIsolation
-        ));
-    }
-
-    #[test]
-    fn set_transaction_serializable() {
-        let msg = rejection_code(run("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"))
-            .expect("expected rejection");
-        assert!(
-            msg.contains("SERIALIZABLE"),
-            "message should name the level: {msg}"
-        );
-        assert!(
-            msg.contains("Snapshot Isolation"),
-            "message should mention Snapshot Isolation: {msg}"
-        );
-    }
-
-    #[test]
-    fn set_transaction_repeatable_read() {
-        let msg = rejection_code(run("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
-            .expect("expected rejection");
-        assert!(msg.contains("REPEATABLE READ"), "{msg}");
-    }
-
-    #[test]
-    fn set_transaction_read_uncommitted() {
-        let msg = rejection_code(run("SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED"))
-            .expect("expected rejection");
-        assert!(msg.contains("READ UNCOMMITTED"), "{msg}");
+    fn set_transaction_accepts_every_isolation_level() {
+        for level in [
+            "SERIALIZABLE",
+            "REPEATABLE READ",
+            "READ COMMITTED",
+            "READ UNCOMMITTED",
+        ] {
+            assert!(
+                matches!(
+                    run(&format!("SET TRANSACTION ISOLATION LEVEL {level}")),
+                    TransactionCmd::AcceptIsolation
+                ),
+                "{level}"
+            );
+        }
     }
 
     #[test]
     fn set_session_characteristics_serializable() {
         let sql = "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE";
-        let msg = rejection_code(run(sql)).expect("expected rejection");
-        assert!(msg.contains("SERIALIZABLE"), "{msg}");
+        assert!(matches!(run(sql), TransactionCmd::AcceptIsolation));
+    }
+
+    #[test]
+    fn set_transaction_unknown_isolation_level_is_rejected() {
+        let msg = rejection_code(run("SET TRANSACTION ISOLATION LEVEL SNAPSHOT"))
+            .expect("expected rejection");
+        assert!(msg.contains("unsupported"), "{msg}");
     }
 
     #[test]

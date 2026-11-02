@@ -9,9 +9,8 @@
 //!
 //! This is the same durable-counter idiom the tenant-id allocator uses; see
 //! [`super::tenant_id_hwm`]. Assignment takes the max of this counter and the
-//! OIDs present in `_system.custom_types`, so a catalog whose types predate the
-//! counter — or one restored from a backup — self-heals on the next assignment
-//! instead of colliding with a stored type.
+//! OIDs present in `_system.custom_types`, so a catalog restored from a backup
+//! self-heals on the next assignment instead of colliding with a stored type.
 //!
 //! [`SystemCatalog::put_custom_type_assigning_oid`] is the sole authority on
 //! which OID a type carries. It ignores the OID on the record handed to it and

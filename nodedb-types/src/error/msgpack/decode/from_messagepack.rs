@@ -6,9 +6,9 @@
 use zerompk::{FromMessagePack, Read};
 
 use super::readers::{
-    read_collection_deactivated, read_header, read_segment_corrupted_tolerant, read_string_vec,
-    read_sync_delta_rejected, read_u8_field, read1_str, read2_str, read2_str_tolerant, read2_u32,
-    read2_u64, read3_str_tolerant, skip_fields,
+    read_collection_deactivated, read_header, read_no_fields, read_segment_corrupted,
+    read_string_vec, read_sync_delta_rejected, read_u8_field, read1_str, read2_str, read2_u32,
+    read2_u64, read3_str,
 };
 use crate::error::details::ErrorDetails;
 use crate::error::msgpack::constants::*;
@@ -32,7 +32,7 @@ impl<'a> FromMessagePack<'a> for ErrorDetails {
                 })
             }
             TAG_DEADLINE_EXCEEDED => {
-                skip_fields(reader, field_count)?;
+                read_no_fields(field_count)?;
                 Ok(ErrorDetails::DeadlineExceeded)
             }
             TAG_PREVALIDATION_REJECTED => {
@@ -52,8 +52,7 @@ impl<'a> FromMessagePack<'a> for ErrorDetails {
                 Ok(ErrorDetails::PeriodLocked { collection })
             }
             TAG_PERIOD_LOCK_MISCONFIGURED => {
-                let (collection, ref_table, status_column) =
-                    read3_str_tolerant(reader, field_count)?;
+                let (collection, ref_table, status_column) = read3_str(reader, field_count)?;
                 Ok(ErrorDetails::PeriodLockMisconfigured {
                     collection,
                     ref_table,
@@ -133,11 +132,11 @@ impl<'a> FromMessagePack<'a> for ErrorDetails {
                 })
             }
             TAG_PLAN_ERROR => {
-                let (phase, detail) = read2_str_tolerant(reader, field_count)?;
+                let (phase, detail) = read2_str(reader, field_count)?;
                 Ok(ErrorDetails::PlanError { phase, detail })
             }
             TAG_SQL_NOT_ENABLED => {
-                skip_fields(reader, field_count)?;
+                read_no_fields(field_count)?;
                 Ok(ErrorDetails::SqlNotEnabled)
             }
             TAG_UNDEFINED_FUNCTION => {
@@ -153,7 +152,7 @@ impl<'a> FromMessagePack<'a> for ErrorDetails {
                 Ok(ErrorDetails::AmbiguousColumn { column })
             }
             TAG_DIVISION_BY_ZERO => {
-                skip_fields(reader, field_count)?;
+                read_no_fields(field_count)?;
                 Ok(ErrorDetails::DivisionByZero)
             }
             TAG_DATA_EXCEPTION => {
@@ -173,15 +172,15 @@ impl<'a> FromMessagePack<'a> for ErrorDetails {
                 Ok(ErrorDetails::AuthorizationDenied { resource })
             }
             TAG_AUTH_EXPIRED => {
-                skip_fields(reader, field_count)?;
+                read_no_fields(field_count)?;
                 Ok(ErrorDetails::AuthExpired)
             }
             TAG_AUTHENTICATION_FAILED => {
-                skip_fields(reader, field_count)?;
+                read_no_fields(field_count)?;
                 Ok(ErrorDetails::AuthenticationFailed)
             }
             TAG_SYNC_CONNECTION_FAILED => {
-                skip_fields(reader, field_count)?;
+                read_no_fields(field_count)?;
                 Ok(ErrorDetails::SyncConnectionFailed)
             }
             TAG_SYNC_DELTA_REJECTED => {
@@ -193,7 +192,7 @@ impl<'a> FromMessagePack<'a> for ErrorDetails {
                 Ok(ErrorDetails::ShapeSubscriptionFailed { shape_id })
             }
             TAG_STORAGE => {
-                let (component, op, detail) = read3_str_tolerant(reader, field_count)?;
+                let (component, op, detail) = read3_str(reader, field_count)?;
                 Ok(ErrorDetails::Storage {
                     component,
                     op,
@@ -201,8 +200,7 @@ impl<'a> FromMessagePack<'a> for ErrorDetails {
                 })
             }
             TAG_SEGMENT_CORRUPTED => {
-                let (segment_id, corruption, detail) =
-                    read_segment_corrupted_tolerant(reader, field_count)?;
+                let (segment_id, corruption, detail) = read_segment_corrupted(reader, field_count)?;
                 Ok(ErrorDetails::SegmentCorrupted {
                     segment_id,
                     corruption,
@@ -210,7 +208,7 @@ impl<'a> FromMessagePack<'a> for ErrorDetails {
                 })
             }
             TAG_COLD_STORAGE => {
-                let (backend, op, detail) = read3_str_tolerant(reader, field_count)?;
+                let (backend, op, detail) = read3_str(reader, field_count)?;
                 Ok(ErrorDetails::ColdStorage {
                     backend,
                     op,
@@ -218,7 +216,7 @@ impl<'a> FromMessagePack<'a> for ErrorDetails {
                 })
             }
             TAG_WAL => {
-                let (stage, detail) = read2_str_tolerant(reader, field_count)?;
+                let (stage, detail) = read2_str(reader, field_count)?;
                 Ok(ErrorDetails::Wal { stage, detail })
             }
             TAG_SERIALIZATION => {
@@ -226,19 +224,19 @@ impl<'a> FromMessagePack<'a> for ErrorDetails {
                 Ok(ErrorDetails::Serialization { format })
             }
             TAG_CODEC => {
-                let (codec, op, detail) = read3_str_tolerant(reader, field_count)?;
+                let (codec, op, detail) = read3_str(reader, field_count)?;
                 Ok(ErrorDetails::Codec { codec, op, detail })
             }
             TAG_CONFIG => {
-                skip_fields(reader, field_count)?;
+                read_no_fields(field_count)?;
                 Ok(ErrorDetails::Config)
             }
             TAG_BAD_REQUEST => {
-                skip_fields(reader, field_count)?;
+                read_no_fields(field_count)?;
                 Ok(ErrorDetails::BadRequest)
             }
             TAG_NO_LEADER => {
-                skip_fields(reader, field_count)?;
+                read_no_fields(field_count)?;
                 Ok(ErrorDetails::NoLeader)
             }
             TAG_NOT_LEADER => {
@@ -246,15 +244,15 @@ impl<'a> FromMessagePack<'a> for ErrorDetails {
                 Ok(ErrorDetails::NotLeader { leader_addr })
             }
             TAG_MIGRATION_IN_PROGRESS => {
-                skip_fields(reader, field_count)?;
+                read_no_fields(field_count)?;
                 Ok(ErrorDetails::MigrationInProgress)
             }
             TAG_NODE_UNREACHABLE => {
-                skip_fields(reader, field_count)?;
+                read_no_fields(field_count)?;
                 Ok(ErrorDetails::NodeUnreachable)
             }
             TAG_CLUSTER => {
-                skip_fields(reader, field_count)?;
+                read_no_fields(field_count)?;
                 Ok(ErrorDetails::Cluster)
             }
             TAG_MEMORY_EXHAUSTED => {
@@ -262,7 +260,7 @@ impl<'a> FromMessagePack<'a> for ErrorDetails {
                 Ok(ErrorDetails::MemoryExhausted { engine })
             }
             TAG_ENCRYPTION => {
-                let (cipher, detail) = read2_str_tolerant(reader, field_count)?;
+                let (cipher, detail) = read2_str(reader, field_count)?;
                 Ok(ErrorDetails::Encryption { cipher, detail })
             }
             TAG_ARRAY => {
@@ -270,27 +268,19 @@ impl<'a> FromMessagePack<'a> for ErrorDetails {
                 Ok(ErrorDetails::Array { array })
             }
             TAG_BRIDGE => {
-                let (plane, op, detail) = read3_str_tolerant(reader, field_count)?;
+                let (plane, op, detail) = read3_str(reader, field_count)?;
                 Ok(ErrorDetails::Bridge { plane, op, detail })
             }
             TAG_DISPATCH => {
-                let (stage, detail) = read2_str_tolerant(reader, field_count)?;
+                let (stage, detail) = read2_str(reader, field_count)?;
                 Ok(ErrorDetails::Dispatch { stage, detail })
             }
             TAG_HANDSHAKE_FAILED => {
                 let server_code = read_u8_field(reader, field_count)?;
                 Ok(ErrorDetails::HandshakeFailed { server_code })
             }
-            TAG_UNSUPPORTED_OPCODE => {
-                // Legacy tag — no matching variant. Treat as Internal.
-                skip_fields(reader, field_count)?;
-                Ok(ErrorDetails::Internal {
-                    component: "opcode".into(),
-                    detail: "unsupported opcode".into(),
-                })
-            }
             TAG_INTERNAL => {
-                let (component, detail) = read2_str_tolerant(reader, field_count)?;
+                let (component, detail) = read2_str(reader, field_count)?;
                 Ok(ErrorDetails::Internal { component, detail })
             }
             TAG_TENANT_VECTOR_DIM_EXCEEDED => {
@@ -310,7 +300,7 @@ impl<'a> FromMessagePack<'a> for ErrorDetails {
                 Ok(ErrorDetails::QuotaExceeded { scope })
             }
             TAG_SERVER_OVERLOAD => {
-                skip_fields(reader, field_count)?;
+                read_no_fields(field_count)?;
                 Ok(ErrorDetails::ServerOverload)
             }
             TAG_CLONE_DEPTH_EXCEEDED => {
@@ -331,7 +321,7 @@ impl<'a> FromMessagePack<'a> for ErrorDetails {
                 Ok(ErrorDetails::BackupTenantMismatch { expected, actual })
             }
             TAG_BACKUP_KEY_MISMATCH => {
-                skip_fields(reader, field_count)?;
+                read_no_fields(field_count)?;
                 Ok(ErrorDetails::BackupKeyMismatch)
             }
             TAG_CLONE_PREDATES_QUERY_TIME => {
@@ -342,7 +332,7 @@ impl<'a> FromMessagePack<'a> for ErrorDetails {
                 })
             }
             TAG_CLONE_WRITE_REQUIRES_MATERIALIZE => {
-                let (collection, engine, database) = read3_str_tolerant(reader, field_count)?;
+                let (collection, engine, database) = read3_str(reader, field_count)?;
                 Ok(ErrorDetails::CloneWriteRequiresMaterialize {
                     collection,
                     engine,
@@ -350,23 +340,23 @@ impl<'a> FromMessagePack<'a> for ErrorDetails {
                 })
             }
             TAG_MOVE_TENANT_DRAIN_TIMEOUT => {
-                let (tenant, source_db) = read2_str_tolerant(reader, field_count)?;
+                let (tenant, source_db) = read2_str(reader, field_count)?;
                 Ok(ErrorDetails::MoveTenantDrainTimeout { tenant, source_db })
             }
             TAG_MOVE_TENANT_PREFLIGHT_FAILED => {
-                let (tenant, detail) = read2_str_tolerant(reader, field_count)?;
+                let (tenant, detail) = read2_str(reader, field_count)?;
                 Ok(ErrorDetails::MoveTenantPreflightFailed { tenant, detail })
             }
             TAG_MOVE_TENANT_SNAPSHOT_FAILED => {
-                let (tenant, detail) = read2_str_tolerant(reader, field_count)?;
+                let (tenant, detail) = read2_str(reader, field_count)?;
                 Ok(ErrorDetails::MoveTenantSnapshotFailed { tenant, detail })
             }
             TAG_MOVE_TENANT_CUTOVER_FAILED => {
-                let (tenant, detail) = read2_str_tolerant(reader, field_count)?;
+                let (tenant, detail) = read2_str(reader, field_count)?;
                 Ok(ErrorDetails::MoveTenantCutoverFailed { tenant, detail })
             }
             TAG_MOVE_TENANT_ALREADY_AT_TARGET => {
-                let (tenant, target_db) = read2_str_tolerant(reader, field_count)?;
+                let (tenant, target_db) = read2_str(reader, field_count)?;
                 Ok(ErrorDetails::MoveTenantAlreadyAtTarget { tenant, target_db })
             }
             TAG_MIRROR_READ_ONLY => {
@@ -374,7 +364,7 @@ impl<'a> FromMessagePack<'a> for ErrorDetails {
                 Ok(ErrorDetails::MirrorReadOnly { database })
             }
             TAG_STALE_READ_NOT_LEADER => {
-                let (database, source_cluster) = read2_str_tolerant(reader, field_count)?;
+                let (database, source_cluster) = read2_str(reader, field_count)?;
                 Ok(ErrorDetails::StaleReadNotLeader {
                     database,
                     source_cluster,
@@ -405,16 +395,12 @@ impl<'a> FromMessagePack<'a> for ErrorDetails {
                 Ok(ErrorDetails::DependentObjectsExist { object })
             }
             TAG_CANNOT_DROP_DEFAULT_DATABASE => {
-                skip_fields(reader, field_count)?;
+                read_no_fields(field_count)?;
                 Ok(ErrorDetails::CannotDropDefaultDatabase)
             }
-            _unknown => {
-                skip_fields(reader, field_count)?;
-                Ok(ErrorDetails::Internal {
-                    component: "unspecified".into(),
-                    detail: "unspecified".into(),
-                })
-            }
+            unknown => Err(zerompk::Error::UnknownKey(format!(
+                "error details tag {unknown}"
+            ))),
         }
     }
 }
@@ -602,135 +588,99 @@ mod tests {
         assert_eq!(roundtrip(&v), v);
     }
 
-    fn decode_zero_fields(tag: u16) -> ErrorDetails {
+    /// Decode `[tag, {}]`: a variant payload with no fields.
+    fn decode_zero_fields(tag: u16) -> zerompk::Result<ErrorDetails> {
         // Manual MessagePack: [fixarray(2), uint16(tag), fixmap(0)]
         let buf = [0x92, 0xcd, (tag >> 8) as u8, (tag & 0xff) as u8, 0x80];
-        zerompk::from_msgpack(&buf).expect("decode")
+        zerompk::from_msgpack(&buf)
     }
 
+    /// A field-bearing variant written without its fields is refused, never
+    /// filled with placeholder values.
     #[test]
-    fn storage_compat_zero_fields() {
-        let v = decode_zero_fields(TAG_STORAGE);
+    fn a_variant_missing_its_fields_is_refused() {
+        for tag in [
+            TAG_STORAGE,
+            TAG_SEGMENT_CORRUPTED,
+            TAG_COLD_STORAGE,
+            TAG_WAL,
+            TAG_CODEC,
+            TAG_ENCRYPTION,
+            TAG_PLAN_ERROR,
+            TAG_BRIDGE,
+            TAG_DISPATCH,
+            TAG_INTERNAL,
+            TAG_TENANT_VECTOR_DIM_EXCEEDED,
+            TAG_BACKUP_TENANT_MISMATCH,
+        ] {
+            assert!(
+                matches!(
+                    decode_zero_fields(tag),
+                    Err(zerompk::Error::MapLengthMismatch { actual: 0, .. })
+                ),
+                "tag {tag} decoded with no fields"
+            );
+        }
+    }
+
+    /// A unit variant still decodes from its empty payload.
+    #[test]
+    fn a_unit_variant_decodes_from_no_fields() {
         assert_eq!(
-            v,
-            ErrorDetails::Storage {
-                component: "unspecified".into(),
-                op: "unspecified".into(),
-                detail: "unspecified".into(),
-            }
+            decode_zero_fields(TAG_DEADLINE_EXCEEDED).expect("unit variant"),
+            ErrorDetails::DeadlineExceeded
         );
     }
 
+    /// A payload carrying a field the encoder never writes is refused.
     #[test]
-    fn segment_corrupted_compat_zero_fields() {
-        let v = decode_zero_fields(TAG_SEGMENT_CORRUPTED);
-        assert_eq!(
-            v,
-            ErrorDetails::SegmentCorrupted {
-                segment_id: 0,
-                corruption: "unspecified".into(),
-                detail: "unspecified".into(),
-            }
-        );
+    fn an_extra_field_is_refused() {
+        // [fixarray(2), uint16(TAG_INTERNAL), fixmap(3), 1:"a", 2:"b", 3:"c"]
+        let buf = [
+            0x92,
+            0xcd,
+            (TAG_INTERNAL >> 8) as u8,
+            (TAG_INTERNAL & 0xff) as u8,
+            0x83,
+            0x01,
+            0xa1,
+            b'a',
+            0x02,
+            0xa1,
+            b'b',
+            0x03,
+            0xa1,
+            b'c',
+        ];
+        assert!(matches!(
+            zerompk::from_msgpack::<ErrorDetails>(&buf),
+            Err(zerompk::Error::MapLengthMismatch {
+                expected: 2,
+                actual: 3
+            })
+        ));
     }
 
+    /// A tag no variant owns is refused, never decoded as `Internal`.
     #[test]
-    fn cold_storage_compat_zero_fields() {
-        let v = decode_zero_fields(TAG_COLD_STORAGE);
-        assert_eq!(
-            v,
-            ErrorDetails::ColdStorage {
-                backend: "unspecified".into(),
-                op: "unspecified".into(),
-                detail: "unspecified".into(),
-            }
-        );
+    fn an_unknown_tag_is_refused() {
+        assert!(matches!(
+            decode_zero_fields(48),
+            Err(zerompk::Error::UnknownKey(_))
+        ));
+        assert!(matches!(
+            decode_zero_fields(u16::MAX),
+            Err(zerompk::Error::UnknownKey(_))
+        ));
     }
 
+    /// `CloneDependency` round-trips through its one array field.
     #[test]
-    fn wal_compat_zero_fields() {
-        let v = decode_zero_fields(TAG_WAL);
-        assert_eq!(
-            v,
-            ErrorDetails::Wal {
-                stage: "unspecified".into(),
-                detail: "unspecified".into(),
-            }
-        );
-    }
-
-    #[test]
-    fn codec_compat_zero_fields() {
-        let v = decode_zero_fields(TAG_CODEC);
-        assert_eq!(
-            v,
-            ErrorDetails::Codec {
-                codec: "unspecified".into(),
-                op: "unspecified".into(),
-                detail: "unspecified".into(),
-            }
-        );
-    }
-
-    #[test]
-    fn encryption_compat_zero_fields() {
-        let v = decode_zero_fields(TAG_ENCRYPTION);
-        assert_eq!(
-            v,
-            ErrorDetails::Encryption {
-                cipher: "unspecified".into(),
-                detail: "unspecified".into(),
-            }
-        );
-    }
-
-    #[test]
-    fn plan_error_compat_zero_fields() {
-        let v = decode_zero_fields(TAG_PLAN_ERROR);
-        assert_eq!(
-            v,
-            ErrorDetails::PlanError {
-                phase: "unspecified".into(),
-                detail: "unspecified".into(),
-            }
-        );
-    }
-
-    #[test]
-    fn bridge_compat_zero_fields() {
-        let v = decode_zero_fields(TAG_BRIDGE);
-        assert_eq!(
-            v,
-            ErrorDetails::Bridge {
-                plane: "unspecified".into(),
-                op: "unspecified".into(),
-                detail: "unspecified".into(),
-            }
-        );
-    }
-
-    #[test]
-    fn dispatch_compat_zero_fields() {
-        let v = decode_zero_fields(TAG_DISPATCH);
-        assert_eq!(
-            v,
-            ErrorDetails::Dispatch {
-                stage: "unspecified".into(),
-                detail: "unspecified".into(),
-            }
-        );
-    }
-
-    #[test]
-    fn internal_compat_zero_fields() {
-        let v = decode_zero_fields(TAG_INTERNAL);
-        assert_eq!(
-            v,
-            ErrorDetails::Internal {
-                component: "unspecified".into(),
-                detail: "unspecified".into(),
-            }
-        );
+    fn clone_dependency_roundtrip() {
+        let v = ErrorDetails::CloneDependency {
+            dependents: vec!["child_a".into(), "child_b".into()],
+        };
+        assert_eq!(roundtrip(&v), v);
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //! Live HNSW maintenance for `PointUpdate`.
 //!
 //! `execute_point_update` rewrites a document's stored body directly (via
-//! `sparse.put` / `bitemporal_update_reindex`) and reconciles the secondary
+//! `update_reindex`) and reconciles the secondary
 //! btree, FTS, and graph overlays — but not the secondary VECTOR index. An
 //! UPDATE that changes an embedding field must therefore re-index the row's
 //! vectors here, or KNN search keeps returning the stale pre-update embedding
@@ -44,6 +44,8 @@ pub(in crate::data::executor) struct UpdateVectorReindex<'a> {
     /// schemaless half scans `vector_params` unindexed. `false` short-circuits
     /// this call to a no-op.
     pub has_vectors: bool,
+    /// The system-time ordinal of the row version the update wrote.
+    pub sys_from: i64,
 }
 
 impl CoreLoop {
@@ -64,11 +66,9 @@ impl CoreLoop {
             return Ok(());
         }
 
-        // Remove the surrogate's old vector nodes (and their reverse-map
-        // entries) before re-inserting: `insert_with_surrogate` appends a new
-        // node rather than replacing, so skipping this would leave the stale
-        // embedding searchable alongside the new one.
-        self.remove_document_vector_indexes(p.database_id, p.tid, p.collection, p.storage_key);
+        // The put-time indexing below ends each vector field the new body
+        // replaces or drops at the version's `sys_from`, so a read at an
+        // earlier cut keeps the old embedding.
 
         // Re-extract vectors from the new body via the exact put-time path.
         // Vector extraction reads MessagePack; strict bodies are stored as
@@ -111,6 +111,9 @@ impl CoreLoop {
                 storage_key: p.storage_key,
                 value: mp,
                 wal_lsn: 0,
+                sys_from: p.sys_from,
+                // An update rewrites a stored row.
+                replaces_row: true,
             },
             &mut Vec::new(),
         )?;

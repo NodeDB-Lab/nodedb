@@ -23,7 +23,7 @@ use crate::control::state::SharedState;
 use nodedb_physical::physical_task::PhysicalTask;
 
 use super::dispatch::{DispatchAugmentedParams, dispatch_augmented, empty_response};
-use super::temporal::extract_system_as_of_ms;
+use super::temporal::extract_system_as_of_ordinal;
 
 /// Outcome of read-path clone interception.
 pub(in crate::control::server) enum CloneReadOutcome {
@@ -59,9 +59,9 @@ pub(in crate::control::server) async fn maybe_intercept_clone_read(
         roles,
         emitter,
     } = params;
-    // The resolver maps the `AS OF` time to an LSN only for a live clone.
+    // The resolver maps the `AS OF` cut to an LSN only for a live clone.
     let resolve_params = CloneReadParams {
-        as_of_ms: extract_system_as_of_ms(Some(&task.plan)),
+        as_of_ordinal: extract_system_as_of_ordinal(Some(&task.plan)),
     };
 
     let Some(outcome) = resolve_read(state, task.clone(), tenant_id, &resolve_params).await? else {

@@ -454,7 +454,14 @@ mod tests {
             .expect("encode seed tuple");
         let target_key = nodedb_types::StorageKey::for_surrogate(TARGET_SURROGATE);
         core.sparse
-            .put(DB, TID, TARGET, &target_key, &tuple)
+            .put(
+                DB,
+                TID,
+                TARGET,
+                &target_key,
+                &tuple,
+                core.bitemporal_ordinal(),
+            )
             .expect("seed target row");
 
         insert_source_row(
@@ -509,7 +516,14 @@ mod tests {
         let body = doc_format::encode_to_msgpack(&seed);
         let target_key = nodedb_types::StorageKey::for_surrogate(TARGET_SURROGATE);
         core.sparse
-            .put(DB, TID, TARGET, &target_key, &body)
+            .put(
+                DB,
+                TID,
+                TARGET,
+                &target_key,
+                &body,
+                core.bitemporal_ordinal(),
+            )
             .expect("seed target row");
 
         insert_source_row(
@@ -548,6 +562,7 @@ mod tests {
                 TARGET,
                 &target_key,
                 &doc_format::encode_to_msgpack(&seed),
+                core.bitemporal_ordinal(),
             )
             .expect("seed target row");
 
@@ -682,6 +697,7 @@ mod tests {
                 REMOTE_TARGET,
                 &target_key,
                 &doc_format::encode_to_msgpack(&seed),
+                core.bitemporal_ordinal(),
             )
             .expect("seed target row");
 
@@ -811,6 +827,7 @@ mod tests {
                 collection,
                 &nodedb_types::StorageKey::for_surrogate(surrogate),
                 &doc_format::encode_to_msgpack(&row),
+                core.bitemporal_ordinal(),
             )
             .expect("seed target row");
     }
@@ -824,6 +841,7 @@ mod tests {
                 SOURCE,
                 &nodedb_types::StorageKey::for_surrogate(surrogate),
                 &doc_format::encode_to_msgpack(&row),
+                core.bitemporal_ordinal(),
             )
             .expect("seed source row");
     }
@@ -984,6 +1002,7 @@ mod tests {
                 SOURCE,
                 &nodedb_types::StorageKey::for_surrogate(Surrogate(1)),
                 &doc_format::encode_to_msgpack(&entry),
+                core.bitemporal_ordinal(),
             )
             .expect("seed written row");
 
@@ -1011,6 +1030,7 @@ mod tests {
                 rls_write_check: &nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 resolved_sum_targets: &resolved,
                 declared_primary_key: None,
+                target_cut: None,
             },
         );
 

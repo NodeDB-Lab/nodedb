@@ -33,9 +33,29 @@ pub(in crate::data::executor) struct ApplyScope {
     /// version key, and every document version of the transaction stamps
     /// the edges' ordinal.
     pub(in crate::data::executor) calvin_txn_ordinal: Option<i64>,
-    /// The system-time ordinal the leader of a replicated data-group entry
-    /// assigned, set for the length of the entry's apply. Every replica
-    /// applies the entry with the same value, so every replica stamps the
-    /// same version keys.
+    /// The system-time ordinal the applied write's WAL records carry, set
+    /// for the length of the apply or the replay of a record: the one the
+    /// leader of a replicated data-group entry assigned, or the one the local
+    /// append reserved. Every replica, and every replay of the records,
+    /// applies the write with the same value, so all of them stamp the same
+    /// version keys.
     pub(in crate::data::executor) replicated_ordinal: Option<i64>,
+}
+
+impl super::CoreLoop {
+    /// Scope the replay of `record` to the system ordinal it carries
+    /// (`RecordHeader::system_ordinal`), the one its live apply stamped.
+    /// Returns the ordinal the scope held, which the caller restores once
+    /// the record applied. A record that carries none leaves the scope as
+    /// it is: a committed-redo install keeps the ordinal of its entry.
+    pub(in crate::data::executor) fn enter_record_ordinal(
+        &mut self,
+        record: &nodedb_wal::WalRecord,
+    ) -> Option<i64> {
+        let outer = self.apply_scope.replicated_ordinal;
+        if let Some(ordinal) = record.system_ordinal() {
+            self.apply_scope.replicated_ordinal = Some(ordinal);
+        }
+        outer
+    }
 }

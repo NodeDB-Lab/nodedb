@@ -200,6 +200,7 @@ mod tests {
             max_iterations: 10,
             distinct: false,
             limit: 0,
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         assert!(inject(&mut plan, &store).is_ok());
         match &plan {
@@ -231,6 +232,7 @@ mod tests {
             filters: Vec::new(),
             fields: vec!["colour".into()],
             limit_per_facet: 0,
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         assert!(inject(&mut plan, &store).is_ok());
         match &plan {

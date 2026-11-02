@@ -5,23 +5,22 @@
 //!
 //! Each test writes a valid segment using the real segment writer, corrupts one
 //! byte to flip the footer CRC, then drives the quarantine wrapper through two
-//! open attempts — verifying the first returns a plain engine error (first
-//! strike) and the second returns `SegmentQuarantined` (second strike).
+//! open attempts. The first returns a plain engine error (first strike). The
+//! second returns `SegmentQuarantined` (second strike).
 //!
-//! The final test verifies the HTTP endpoint's JSON response shape by
-//! populating a registry with three entries and exercising the same
-//! serialisation path used by the `/v1/cluster/debug/quarantined-segments`
-//! handler.
+//! The final test checks the HTTP endpoint's JSON response shape. It fills a
+//! registry with three entries and runs the same serialisation path as the
+//! `/v1/cluster/debug/quarantined-segments` handler.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use nodedb::storage::quarantine::{
-    QuarantineEngine, QuarantineRegistry, SegmentKey,
+    CollectionScope, QuarantineRegistry, SegmentKey,
     engines::{
-        ColumnarOrQuarantine, FtsOrQuarantine, RaftOrQuarantine,
-        decode_snapshot_chunk_with_quarantine, open_fts_segment_with_quarantine,
-        open_segment_with_quarantine,
+        ColumnarOrQuarantine, FtsOrQuarantine, FtsSegmentRef, RaftOrQuarantine,
+        decode_snapshot_chunk_with_quarantine, open_segment_with_quarantine,
+        validate_fts_segment_bytes,
     },
 };
 use nodedb_columnar::{ColumnarMemtable, SegmentWriter, writer::PROFILE_PLAIN};
@@ -87,16 +86,17 @@ fn corrupt_last_byte(mut bytes: Vec<u8>) -> Vec<u8> {
 fn columnar_real_segment_corrupt_crc_quarantines_on_second_strike() {
     let reg = Arc::new(QuarantineRegistry::new());
     let corrupt = corrupt_last_byte(write_columnar_segment());
+    let scope = CollectionScope::new(1, 7, "coll");
 
     // First open: CRC-class error → first strike → ColumnarError returned.
-    let r1 = open_segment_with_quarantine(&reg, &corrupt, "coll", "seg-col-1");
+    let r1 = open_segment_with_quarantine(&reg, &corrupt, &scope, 1);
     assert!(
         matches!(r1, Err(ColumnarOrQuarantine::Columnar(_))),
         "first strike must return a ColumnarError"
     );
 
     // Second open: second strike → SegmentQuarantined.
-    let r2 = open_segment_with_quarantine(&reg, &corrupt, "coll", "seg-col-1");
+    let r2 = open_segment_with_quarantine(&reg, &corrupt, &scope, 1);
     assert!(
         matches!(r2, Err(ColumnarOrQuarantine::Quarantined(_))),
         "second strike must return SegmentQuarantined"
@@ -104,9 +104,13 @@ fn columnar_real_segment_corrupt_crc_quarantines_on_second_strike() {
 
     let snap = reg.quarantined_snapshot();
     assert_eq!(snap.len(), 1, "exactly one segment must be quarantined");
-    assert_eq!(snap[0].engine, "columnar");
-    assert_eq!(snap[0].collection, "coll");
-    assert_eq!(snap[0].segment_id, "seg-col-1");
+    assert_eq!(
+        snap[0].key,
+        SegmentKey::Columnar {
+            scope: scope.clone(),
+            segment_id: 1,
+        }
+    );
     assert_eq!(snap[0].strikes, 2);
 }
 
@@ -115,14 +119,58 @@ fn columnar_good_segment_readable_after_quarantine_of_different_segment() {
     let reg = Arc::new(QuarantineRegistry::new());
     let good = write_columnar_segment();
     let corrupt = corrupt_last_byte(write_columnar_segment());
+    let scope = CollectionScope::new(1, 7, "coll");
 
     // Quarantine the corrupt segment.
-    open_segment_with_quarantine(&reg, &corrupt, "coll", "seg-corrupt").ok();
-    open_segment_with_quarantine(&reg, &corrupt, "coll", "seg-corrupt").ok();
+    open_segment_with_quarantine(&reg, &corrupt, &scope, 1).ok();
+    open_segment_with_quarantine(&reg, &corrupt, &scope, 1).ok();
 
     // The good segment must still open successfully.
-    let result = open_segment_with_quarantine(&reg, &good, "coll", "seg-good");
+    let result = open_segment_with_quarantine(&reg, &good, &scope, 2);
     assert!(result.is_ok(), "good segment must remain readable");
+}
+
+/// Two tenants each own a collection named `orders` with flushed segment 1.
+/// Tenant A's corrupt segment 1 is quarantined. Tenant B's segment 1 is a
+/// different segment and must keep its own record.
+#[test]
+fn columnar_same_collection_and_segment_in_two_tenants_are_separate_records() {
+    let reg = Arc::new(QuarantineRegistry::new());
+    let corrupt = corrupt_last_byte(write_columnar_segment());
+    let good = write_columnar_segment();
+    let tenant_a = CollectionScope::new(1, 10, "orders");
+    let tenant_b = CollectionScope::new(1, 11, "orders");
+
+    open_segment_with_quarantine(&reg, &corrupt, &tenant_a, 1).ok();
+    let quarantined = open_segment_with_quarantine(&reg, &corrupt, &tenant_a, 1);
+    assert!(matches!(
+        quarantined,
+        Err(ColumnarOrQuarantine::Quarantined(_))
+    ));
+
+    // Tenant B's healthy segment 1 opens.
+    assert!(open_segment_with_quarantine(&reg, &good, &tenant_b, 1).is_ok());
+
+    // A corrupt read of tenant B's segment 1 is B's first strike, not A's
+    // quarantine.
+    let first_b = open_segment_with_quarantine(&reg, &corrupt, &tenant_b, 1);
+    assert!(
+        matches!(first_b, Err(ColumnarOrQuarantine::Columnar(_))),
+        "tenant B's first failure must be its own first strike, got: {:?}",
+        first_b.as_ref().err()
+    );
+
+    let snap = reg.quarantined_snapshot();
+    assert_eq!(snap.len(), 1, "only tenant A's segment is quarantined");
+    assert_eq!(snap[0].key.scope(), Some(&tenant_a));
+
+    // A different database with the same tenant id, collection, and segment
+    // id is also a separate record.
+    let other_db = CollectionScope::new(2, 10, "orders");
+    assert!(!reg.is_quarantined(&SegmentKey::Columnar {
+        scope: other_db,
+        segment_id: 1,
+    }));
 }
 
 // ── FTS corruption ────────────────────────────────────────────────────────────
@@ -131,16 +179,22 @@ fn columnar_good_segment_readable_after_quarantine_of_different_segment() {
 fn fts_real_segment_corrupt_crc_quarantines_on_second_strike() {
     let reg = Arc::new(QuarantineRegistry::new());
     let corrupt = corrupt_last_byte(write_fts_segment());
+    let scope = CollectionScope::new(1, 7, "ftscoll");
+    let segment = FtsSegmentRef {
+        scope: &scope,
+        field: Some("body"),
+        segment_id: "seg-fts-1",
+    };
 
     // First open: CRC-class error → first strike → SegmentError returned.
-    let r1 = open_fts_segment_with_quarantine(&reg, corrupt.clone(), "ftscoll", "seg-fts-1");
+    let r1 = validate_fts_segment_bytes(&reg, corrupt.clone(), &segment);
     assert!(
         matches!(r1, Err(FtsOrQuarantine::Segment(_))),
         "first strike must return SegmentError, got: {r1:?}"
     );
 
     // Second open: second strike → SegmentQuarantined.
-    let r2 = open_fts_segment_with_quarantine(&reg, corrupt, "ftscoll", "seg-fts-1");
+    let r2 = validate_fts_segment_bytes(&reg, corrupt, &segment);
     assert!(
         matches!(r2, Err(FtsOrQuarantine::Quarantined(_))),
         "second strike must return SegmentQuarantined, got: {r2:?}"
@@ -148,9 +202,14 @@ fn fts_real_segment_corrupt_crc_quarantines_on_second_strike() {
 
     let snap = reg.quarantined_snapshot();
     assert_eq!(snap.len(), 1, "exactly one segment must be quarantined");
-    assert_eq!(snap[0].engine, "fts");
-    assert_eq!(snap[0].collection, "ftscoll");
-    assert_eq!(snap[0].segment_id, "seg-fts-1");
+    assert_eq!(
+        snap[0].key,
+        SegmentKey::Fts {
+            scope: scope.clone(),
+            field: Some("body".to_string()),
+            segment_id: "seg-fts-1".to_string(),
+        }
+    );
     assert_eq!(snap[0].strikes, 2);
 }
 
@@ -165,14 +224,14 @@ fn raft_snapshot_corrupt_crc_quarantines_on_second_strike() {
     corrupt[8] ^= 0xFF;
 
     // First decode: CRC mismatch → first strike → SnapshotFramingError returned.
-    let r1 = decode_snapshot_chunk_with_quarantine(&reg, &corrupt, "group=1:index=99");
+    let r1 = decode_snapshot_chunk_with_quarantine(&reg, &corrupt, 1, 99);
     assert!(
         matches!(r1, Err(RaftOrQuarantine::Framing(_))),
         "first strike must return a SnapshotFramingError, got: {r1:?}"
     );
 
     // Second decode: second strike → SegmentQuarantined.
-    let r2 = decode_snapshot_chunk_with_quarantine(&reg, &corrupt, "group=1:index=99");
+    let r2 = decode_snapshot_chunk_with_quarantine(&reg, &corrupt, 1, 99);
     assert!(
         matches!(r2, Err(RaftOrQuarantine::Quarantined(_))),
         "second strike must return SegmentQuarantined, got: {r2:?}"
@@ -180,9 +239,14 @@ fn raft_snapshot_corrupt_crc_quarantines_on_second_strike() {
 
     let snap = reg.quarantined_snapshot();
     assert_eq!(snap.len(), 1, "exactly one snapshot must be quarantined");
-    assert_eq!(snap[0].engine, "raft");
-    assert_eq!(snap[0].collection, "_raft_snapshot");
-    assert_eq!(snap[0].segment_id, "group=1:index=99");
+    assert_eq!(
+        snap[0].key,
+        SegmentKey::Raft {
+            group_id: 1,
+            last_included_index: 99,
+        }
+    );
+    assert_eq!(snap[0].key.segment_label(), "group=1:index=99");
     assert_eq!(snap[0].strikes, 2);
 }
 
@@ -191,13 +255,16 @@ fn raft_snapshot_corrupt_crc_quarantines_on_second_strike() {
 /// Mirror of the private response shape used by the
 /// `/v1/cluster/debug/quarantined-segments` handler.
 ///
-/// Matches the field names and structure of `QuarantinedSegmentsResponse` in
-/// `routes/cluster_debug/quarantined_segments.rs` so the test verifies the
-/// serialised JSON shape end-to-end without requiring a live HTTP server.
+/// Matches the field names of `QuarantinedSegmentsResponse` in
+/// `routes/cluster_debug/quarantined_segments.rs`. The test checks the
+/// serialised JSON shape without a live HTTP server.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct QuarantinedSegmentEntry {
     engine: String,
-    collection: String,
+    database_id: Option<u64>,
+    tenant_id: Option<u64>,
+    collection: Option<String>,
+    field: Option<String>,
     segment_id: String,
     quarantined_at_unix_ms: u64,
     last_error_summary: String,
@@ -209,27 +276,32 @@ struct QuarantinedSegmentsResponse {
     segments: Vec<QuarantinedSegmentEntry>,
 }
 
-/// Serialise a quarantine registry snapshot using the same `sonic_rs` path as
-/// `ok_json` in `cluster_debug/guard.rs`, then parse and verify all three
-/// engine entries are present with the expected shape.
+/// Serialise a quarantine registry snapshot with the same `sonic_rs` path as
+/// `ok_json` in `cluster_debug/guard.rs`. Parse it back and check that all
+/// three engine entries are present with the expected shape.
 #[tokio::test]
 async fn http_endpoint_response_lists_all_three_quarantined_engines() {
     let reg = QuarantineRegistry::new();
 
     // Seed one quarantined entry per engine by driving two strikes each.
-    for (engine, collection, segment_id) in [
-        (QuarantineEngine::Columnar, "coll-a", "seg-a"),
-        (QuarantineEngine::Fts, "coll-b", "seg-b"),
-        (QuarantineEngine::Raft, "_raft_snapshot", "group=2:index=1"),
+    for k in [
+        SegmentKey::Columnar {
+            scope: CollectionScope::new(1, 3, "coll-a"),
+            segment_id: 4,
+        },
+        SegmentKey::Fts {
+            scope: CollectionScope::new(1, 3, "coll-b"),
+            field: None,
+            segment_id: "seg-b".to_string(),
+        },
+        SegmentKey::Raft {
+            group_id: 2,
+            last_included_index: 1,
+        },
     ] {
-        let k = SegmentKey {
-            engine,
-            collection: collection.to_string(),
-            segment_id: segment_id.to_string(),
-        };
-        reg.record_failure(k.clone(), "crc", None)
+        reg.record_failure(k.clone(), "crc")
             .expect("first strike must be Ok");
-        reg.record_failure(k, "crc", None)
+        reg.record_failure(k, "crc")
             .expect_err("second strike must be Err");
     }
 
@@ -240,30 +312,28 @@ async fn http_endpoint_response_lists_all_three_quarantined_engines() {
     );
 
     // Replicate the handler's response-building logic (sans auth gate).
-    let snapshot = reg.quarantined_snapshot();
-    let mut entries: Vec<QuarantinedSegmentEntry> = snapshot
+    let mut entries: Vec<QuarantinedSegmentEntry> = reg
+        .quarantined_snapshot()
         .into_iter()
-        .map(|s| QuarantinedSegmentEntry {
-            engine: s.engine,
-            collection: s.collection,
-            segment_id: s.segment_id,
-            quarantined_at_unix_ms: s.quarantined_at_unix_ms,
-            last_error_summary: s.last_error_summary,
-            strikes: s.strikes,
+        .map(|s| {
+            let scope = s.key.scope();
+            QuarantinedSegmentEntry {
+                engine: s.key.engine().as_str().to_string(),
+                database_id: scope.map(|sc| sc.database_id),
+                tenant_id: scope.map(|sc| sc.tenant_id),
+                collection: scope.map(|sc| sc.collection.clone()),
+                field: s.key.field().map(str::to_string),
+                segment_id: s.key.segment_label(),
+                quarantined_at_unix_ms: s.quarantined_at_unix_ms,
+                last_error_summary: s.last_error_summary,
+                strikes: s.strikes,
+            }
         })
         .collect();
-    // Same sort order as the handler: engine → collection → segment_id.
-    entries.sort_by(|a, b| {
-        a.engine
-            .cmp(&b.engine)
-            .then_with(|| a.collection.cmp(&b.collection))
-            .then_with(|| a.segment_id.cmp(&b.segment_id))
-    });
+    entries.sort_by(|a, b| a.engine.cmp(&b.engine));
 
     let response_body = sonic_rs::to_string(&QuarantinedSegmentsResponse { segments: entries })
         .expect("serialization must succeed");
-
-    // Deserialise and assert structural correctness.
     let parsed: QuarantinedSegmentsResponse =
         sonic_rs::from_str(&response_body).expect("response body must be valid JSON");
 
@@ -272,8 +342,6 @@ async fn http_endpoint_response_lists_all_three_quarantined_engines() {
         3,
         "response must contain exactly three quarantined segments"
     );
-
-    // After sorting, order is: columnar, fts, raft.
     let engines: Vec<&str> = parsed.segments.iter().map(|e| e.engine.as_str()).collect();
     assert_eq!(
         engines,
@@ -293,28 +361,20 @@ async fn http_endpoint_response_lists_all_three_quarantined_engines() {
         );
     }
 
-    // Spot-check individual field values.
-    let col = parsed
-        .segments
-        .iter()
-        .find(|e| e.engine == "columnar")
-        .expect("columnar entry");
-    assert_eq!(col.collection, "coll-a");
-    assert_eq!(col.segment_id, "seg-a");
+    let col = &parsed.segments[0];
+    assert_eq!(col.database_id, Some(1));
+    assert_eq!(col.tenant_id, Some(3));
+    assert_eq!(col.collection.as_deref(), Some("coll-a"));
+    assert_eq!(col.field, None);
+    assert_eq!(col.segment_id, "4");
 
-    let fts = parsed
-        .segments
-        .iter()
-        .find(|e| e.engine == "fts")
-        .expect("fts entry");
-    assert_eq!(fts.collection, "coll-b");
+    let fts = &parsed.segments[1];
+    assert_eq!(fts.collection.as_deref(), Some("coll-b"));
     assert_eq!(fts.segment_id, "seg-b");
 
-    let raft = parsed
-        .segments
-        .iter()
-        .find(|e| e.engine == "raft")
-        .expect("raft entry");
-    assert_eq!(raft.collection, "_raft_snapshot");
+    let raft = &parsed.segments[2];
+    assert_eq!(raft.database_id, None);
+    assert_eq!(raft.tenant_id, None);
+    assert_eq!(raft.collection, None);
     assert_eq!(raft.segment_id, "group=2:index=1");
 }

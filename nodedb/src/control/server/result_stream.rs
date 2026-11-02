@@ -24,16 +24,15 @@ use crate::types::Lsn;
 ///
 /// `payload` is a standalone msgpack array (the exact bytes produced by a single
 /// Data-Plane scan chunk); `watermark_lsn` is that frame's read watermark and
-/// `read_versions` its read versions.
+/// `read_vshards` the vShards it read.
 pub struct RowBatch {
     /// Standalone msgpack array of row elements for this frame.
     pub payload: Vec<u8>,
     /// Watermark LSN reported by the Data Plane for this frame.
     pub watermark_lsn: Lsn,
-    /// The read versions this frame observed, one per vShard: the comparand
-    /// for cross-shard OCC read validation, distinct from the core-global
-    /// `watermark_lsn`.
-    pub read_versions: crate::types::ReadVersions,
+    /// The vShards this frame read. The transaction read-set homes an entry
+    /// on each. Distinct from the core-global `watermark_lsn`.
+    pub read_vshards: crate::types::ReadShards,
 }
 
 /// A pinned, boxed stream of [`RowBatch`]es, fallible per item.
@@ -103,7 +102,7 @@ pub(crate) fn stream_response_channel(
             yield RowBatch {
                 payload: resp.payload.to_vec(),
                 watermark_lsn: resp.watermark_lsn,
-                read_versions: resp.read_versions.clone(),
+                read_vshards: resp.read_vshards,
             };
             if is_terminal {
                 return;
@@ -157,7 +156,7 @@ mod tests {
             watermark_lsn: Lsn::ZERO,
             error_code: None,
             stage_vote: None,
-            read_versions: crate::types::ReadVersions::new(),
+            read_vshards: crate::types::ReadShards::new(),
             write_set: Vec::new(),
         }
     }
@@ -172,7 +171,7 @@ mod tests {
             watermark_lsn: Lsn::ZERO,
             error_code: None,
             stage_vote: None,
-            read_versions: crate::types::ReadVersions::new(),
+            read_vshards: crate::types::ReadShards::new(),
             write_set: Vec::new(),
         }
     }
@@ -187,7 +186,7 @@ mod tests {
             watermark_lsn: Lsn::ZERO,
             error_code: None,
             stage_vote: None,
-            read_versions: crate::types::ReadVersions::new(),
+            read_vshards: crate::types::ReadShards::new(),
             write_set: Vec::new(),
         }
     }
@@ -202,7 +201,7 @@ mod tests {
             watermark_lsn: Lsn::ZERO,
             error_code: Some(Box::new(code)),
             stage_vote: None,
-            read_versions: crate::types::ReadVersions::new(),
+            read_vshards: crate::types::ReadShards::new(),
             write_set: Vec::new(),
         }
     }

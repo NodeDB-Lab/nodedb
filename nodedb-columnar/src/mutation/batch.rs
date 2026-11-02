@@ -16,6 +16,8 @@ use super::engine::{MutationEngine, MutationResult};
 pub struct BatchRow<'a> {
     pub values: &'a [Value],
     pub surrogate: Option<Surrogate>,
+    /// The system-time ordinal the row's write takes.
+    pub stamp: i64,
 }
 
 /// What a batch insert does with a row whose primary key is already bound.
@@ -30,8 +32,8 @@ pub enum BatchConflict {
 /// The PK binding a batch found before it first wrote that PK.
 struct PriorBinding {
     location: Option<RowLocation>,
-    /// Whether the batch tombstoned `location`.
-    tombstoned: bool,
+    /// Whether the batch ended `location`.
+    ended: bool,
 }
 
 impl MutationEngine {
@@ -40,7 +42,7 @@ impl MutationEngine {
     /// Each row follows the single-row rules for `conflict`. When a row
     /// fails, the rows this call already wrote are undone: the memtable is
     /// cut back, their PK bindings are restored, the rows they replaced are
-    /// live again, and the error is returned.
+    /// open again, and the error is returned.
     ///
     /// Returns one `MutationResult` per row, in order. A skipped row has an
     /// empty `wal_records`.
@@ -78,11 +80,8 @@ impl MutationEngine {
                 wal_records: Vec::new(),
             });
         }
-        let replaced = if self.schema.is_bitemporal() {
-            None
-        } else {
-            prior
-        };
+        let sys_from = self.version_stamp(row.values, row.stamp, &[pk_bytes.as_slice()]);
+        let replaced = prior.map(|loc| (pk_bytes.clone(), loc));
 
         let mut wal_records = Vec::with_capacity(2);
         let key = pk_bytes.clone();
@@ -91,11 +90,12 @@ impl MutationEngine {
             pk_bytes,
             row.surrogate,
             replaced.as_slice(),
+            sys_from,
             &mut wal_records,
         )?;
         priors.entry(key).or_insert(PriorBinding {
             location: prior,
-            tombstoned: replaced.is_some(),
+            ended: prior.is_some(),
         });
         Ok(MutationResult { wal_records })
     }
@@ -105,10 +105,8 @@ impl MutationEngine {
         for (pk_bytes, prior) in priors {
             match prior.location {
                 Some(location) => {
-                    if prior.tombstoned
-                        && let Some(bm) = self.delete_bitmaps.get_mut(&location.segment_id)
-                    {
-                        bm.unmark_deleted(location.row_index);
+                    if prior.ended {
+                        self.reopen_row(&pk_bytes, location);
                     }
                     self.pk_index.upsert(pk_bytes, location);
                 }
@@ -145,6 +143,7 @@ mod tests {
             .map(|values| BatchRow {
                 values,
                 surrogate: None,
+                stamp: 50,
             })
             .collect()
     }
@@ -152,7 +151,7 @@ mod tests {
     #[test]
     fn failed_batch_applies_nothing() {
         let mut engine = MutationEngine::new("t".into(), schema());
-        engine.insert(&row(1, "a")).expect("insert");
+        engine.insert(&row(1, "a"), 10).expect("insert");
 
         let rows = vec![
             row(1, "a2"),
@@ -178,10 +177,12 @@ mod tests {
             .get(&encode_pk(&Value::Integer(1)))
             .copied();
         assert_eq!(loc.map(|l| l.row_index), Some(0));
+        assert!(engine.version_chains().is_empty(), "the undo reopens row 1");
+        assert_eq!(engine.segment_versions(0).map(|v| v.len()), Some(1));
 
         // An index cut by the undo starts live when a new row lands on it.
-        engine.insert(&row(4, "d")).expect("insert after undo");
-        engine.insert(&row(5, "e")).expect("insert after undo");
+        engine.insert(&row(4, "d"), 60).expect("insert after undo");
+        engine.insert(&row(5, "e"), 60).expect("insert after undo");
         let live: Vec<Vec<Value>> = engine
             .scan_memtable_rows()
             .collect::<Result<_, _>>()
@@ -192,7 +193,7 @@ mod tests {
     #[test]
     fn batch_upserts_and_skips_like_single_rows() {
         let mut engine = MutationEngine::new("t".into(), schema());
-        engine.insert(&row(1, "a")).expect("insert");
+        engine.insert(&row(1, "a"), 10).expect("insert");
 
         let rows = vec![row(1, "a2"), row(2, "b")];
         let results = engine

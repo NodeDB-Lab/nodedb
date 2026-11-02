@@ -16,7 +16,7 @@ use crate::bridge::envelope::{PhysicalPlan, Priority, Request, Response};
 use crate::control::arrow_convert;
 use crate::control::gateway::core::QueryContext;
 use crate::control::server::exchange::core_outcome::{
-    classify_core_response, reported_versions, require_every_core,
+    classify_core_response, reported_vshards, require_every_core,
 };
 use crate::control::server::exchange::read_scope::ReadScope;
 use crate::control::server::result_stream::ResultStream;
@@ -123,7 +123,7 @@ pub(crate) fn eager_dispatch_to_all_cores_until(
             wal_lsn: None,
             resolved_now_ms: None,
             commit_hlc: None,
-            entry_version: None,
+            system_ordinal: None,
             admission: crate::bridge::envelope::Admission::Exempt(
                 crate::bridge::envelope::ExemptReason::Read,
             ),
@@ -192,9 +192,8 @@ pub(crate) async fn gather_all_cores(
         });
 
     let results: Vec<(usize, crate::Result<Response>)> = join_all(response_futures).await;
-    // The read versions of every core, one per vShard: a vShard lives on ONE
-    // core, so only that core reports it.
-    let read_versions = reported_versions(results.iter().map(|(_, result)| result));
+    // The vShards every core read.
+    let read_vshards = reported_vshards(results.iter().map(|(_, result)| result));
     let answered = require_every_core(results.into_iter().map(|(core_id, result)| {
         classify_core_response(result).map(|resp| resp.map(|resp| (core_id, resp)))
     }))?;
@@ -222,7 +221,7 @@ pub(crate) async fn gather_all_cores(
     Ok(GatherOutcome {
         payloads,
         watermark_lsn: max_lsn,
-        read_versions,
+        read_vshards,
         shard_watermarks,
     })
 }
@@ -343,7 +342,7 @@ pub(crate) async fn gather_all_vshards(
     // The gateway already fails with a typed `crate::Error` — a shard's
     // `Error::DataPlane` code included. Re-wrapping it in `Dispatch` will
     // rewrite every such verdict as SQLSTATE XX000, so it passes through.
-    let (payloads, shard_watermarks, read_versions) =
+    let (payloads, shard_watermarks, read_vshards) =
         Box::pin(gateway.execute_internal_outcome(&ctx, plan))
             .await?
             .into_parts();
@@ -360,7 +359,7 @@ pub(crate) async fn gather_all_vshards(
     Ok(GatherOutcome {
         payloads: payloads.into_iter().filter(|p| !p.is_empty()).collect(),
         watermark_lsn,
-        read_versions,
+        read_vshards,
         shard_watermarks,
     })
 }

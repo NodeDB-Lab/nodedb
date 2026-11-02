@@ -2,9 +2,12 @@
 
 //! Tile identifier — `(hilbert_prefix, system_from_ms)`.
 //!
-//! The Hilbert prefix locates the tile in ND space; the system-time
-//! suffix carries the bitemporal system-time version. Until bitemporal
-//! tiles land, callers pass `system_from_ms = 0`.
+//! The Hilbert prefix locates the tile in ND space. The suffix is the tile
+//! version's system-time stamp. The writer picks its unit and every reader
+//! compares in that unit: Origin stamps the system-time ordinal of the apply
+//! (nanosecond precision, shared with every other engine), Lite stamps its
+//! clock's milliseconds. A Ceiling read at cut `S` sees the newest version
+//! with a stamp at or below `S`.
 
 use serde::{Deserialize, Serialize};
 

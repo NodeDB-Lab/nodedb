@@ -15,11 +15,11 @@ pub struct ExecutionTask {
     pub state: TaskState,
 
     /// WAL LSN the Control Plane allocated for this write at wal-dispatch time,
-    /// carried alongside the request so the apply chokepoint can record the
-    /// per-key / per-collection write version (see
+    /// carried alongside the request so the apply chokepoint can note the
+    /// write as applied (see
     /// [`CoreLoop::note_write`](crate::data::executor::core_loop::CoreLoop)).
-    /// `None` for reads, control ops, and writes whose LSN is not (yet) threaded
-    /// — the version index is skipped rather than advanced with a wrong value.
+    /// `None` for reads, control ops, and writes whose LSN is not threaded:
+    /// the note is skipped rather than taken at a wrong LSN.
     /// Copied from [`Request::wal_lsn`](crate::bridge::envelope::Request) in
     /// [`ExecutionTask::new`] — the request envelope is the cross-plane channel
     /// that carries the allocated LSN from Control Plane to this core.
@@ -57,9 +57,8 @@ impl ExecutionTask {
     pub fn new(request: Request) -> Self {
         // The request envelope is the only Control->Data channel: copy the
         // allocated write LSN and resolved TTL instant off it so the apply
-        // chokepoints on this core can record the per-key / per-collection
-        // write version and install the same expiry instant the WAL record
-        // carries.
+        // chokepoints on this core can note the write and install the same
+        // expiry instant the WAL record carries.
         let wal_lsn = request.wal_lsn;
         let resolved_now_ms = request.resolved_now_ms;
         Self {
@@ -140,7 +139,7 @@ mod tests {
             wal_lsn,
             resolved_now_ms: None,
             commit_hlc: None,
-            entry_version: None,
+            system_ordinal: None,
             admission: crate::bridge::envelope::Admission::Exempt(
                 crate::bridge::envelope::ExemptReason::Read,
             ),
@@ -151,7 +150,7 @@ mod tests {
     fn new_copies_request_wal_lsn_onto_task() {
         // The request envelope is the only Control->Data channel for the
         // allocated write LSN: `ExecutionTask::new` must copy it so the apply
-        // chokepoints can record the committed write version.
+        // chokepoints can note the committed write.
         let lsn = Lsn::new(4242);
         let task = ExecutionTask::new(request_with_wal_lsn(Some(lsn)));
         assert_eq!(task.wal_lsn(), Some(lsn));

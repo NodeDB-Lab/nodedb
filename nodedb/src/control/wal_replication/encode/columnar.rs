@@ -19,6 +19,7 @@ pub(super) struct ColumnarIngestFields<'a> {
     pub on_conflict_updates: &'a [(String, UpdateValue)],
     pub surrogates: &'a [Surrogate],
     pub schema_bytes: &'a [u8],
+    pub restored_versions: &'a [nodedb_types::columnar::RestoredVersion],
     pub provenance: Option<Vec<u8>>,
     pub returning: Option<Vec<u8>>,
     pub rls_filters: &'a [u8],
@@ -34,6 +35,7 @@ pub(super) fn columnar_ingest(fields: ColumnarIngestFields<'_>) -> ReplicatedWri
         format: fields.format.to_owned(),
         intent: fields.intent,
         on_conflict_updates: fields.on_conflict_updates.to_vec(),
+        restored_versions: fields.restored_versions.to_vec(),
         returning: fields.returning,
         rls_filters: fields.rls_filters.to_vec(),
     }

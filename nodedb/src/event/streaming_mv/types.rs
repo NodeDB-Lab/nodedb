@@ -3,14 +3,10 @@
 //! Streaming materialized view type definitions.
 
 /// Persistent definition of a streaming materialized view.
-///
-/// This is map-encoded so newly added scope fields do not invalidate persisted
-/// definitions. Legacy positional definitions are decoded in the catalog layer.
 #[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
-#[msgpack(map, allow_unknown_fields)]
+#[msgpack(map)]
 pub struct StreamingMvDef {
     /// Database that owns this MV.
-    #[msgpack(default)]
     pub database_id: crate::types::DatabaseId,
     /// Tenant that owns this MV.
     pub tenant_id: u64,

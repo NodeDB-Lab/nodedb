@@ -3,43 +3,11 @@
 //! Streaming MV metadata operations for the system catalog.
 
 use redb::{ReadableDatabase, ReadableTable};
-use std::collections::HashMap;
 
 use crate::event::streaming_mv::StreamingMvDef;
-use crate::event::streaming_mv::types::AggDef;
 use crate::types::DatabaseId;
 
 use super::types::{STREAMING_MVS, SystemCatalog, catalog_err};
-
-/// Positional format written before streaming MVs became database-scoped.
-#[derive(zerompk::FromMessagePack)]
-struct LegacyStreamingMvDef {
-    tenant_id: u64,
-    name: String,
-    source_stream: String,
-    group_by_columns: Vec<String>,
-    aggregates: Vec<AggDef>,
-    filter_expr: Option<String>,
-    owner: String,
-    created_at: u64,
-}
-
-impl From<LegacyStreamingMvDef> for StreamingMvDef {
-    fn from(legacy: LegacyStreamingMvDef) -> Self {
-        Self {
-            // Legacy definitions predate database selection and belong to default.
-            database_id: DatabaseId::DEFAULT,
-            tenant_id: legacy.tenant_id,
-            name: legacy.name,
-            source_stream: legacy.source_stream,
-            group_by_columns: legacy.group_by_columns,
-            aggregates: legacy.aggregates,
-            filter_expr: legacy.filter_expr,
-            owner: legacy.owner,
-            created_at: legacy.created_at,
-        }
-    }
-}
 
 impl SystemCatalog {
     pub fn put_streaming_mv(&self, def: &StreamingMvDef) -> crate::Result<()> {
@@ -109,24 +77,20 @@ impl SystemCatalog {
         let table = read_txn
             .open_table(STREAMING_MVS)
             .map_err(|e| catalog_err("open streaming_mvs", e))?;
-        let mut mvs = HashMap::new();
+        let mut mvs = Vec::new();
         let range = table
             .range(..)
             .map_err(|e| catalog_err("range streaming_mvs", e))?;
         for entry in range {
             let (_, value) = entry.map_err(|e| catalog_err("read streaming_mv", e))?;
-            let def = zerompk::from_msgpack::<StreamingMvDef>(value.value()).or_else(|_| {
-                zerompk::from_msgpack::<LegacyStreamingMvDef>(value.value()).map(Into::into)
-            });
-            if let Ok(def) = def {
-                let identity = (def.database_id, def.tenant_id, def.name.clone());
-                mvs.insert(identity, def);
-            }
+            let def = zerompk::from_msgpack::<StreamingMvDef>(value.value())
+                .map_err(|e| catalog_err("deser streaming_mv", e))?;
+            mvs.push(def);
         }
-        Ok(mvs.into_values().collect())
+        Ok(mvs)
     }
 }
 
 fn mv_key(database_id: DatabaseId, tenant_id: u64, name: &str) -> String {
-    format!("v2:{}:{tenant_id}:{name}", database_id.as_u64())
+    format!("{}:{tenant_id}:{name}", database_id.as_u64())
 }

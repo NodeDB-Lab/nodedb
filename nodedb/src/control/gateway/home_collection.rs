@@ -68,6 +68,7 @@ mod tests {
             key: b"k".to_vec(),
             rls_filters: Vec::new(),
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         assert_eq!(home_collection(&get).as_deref(), Some("sessions"));
     }

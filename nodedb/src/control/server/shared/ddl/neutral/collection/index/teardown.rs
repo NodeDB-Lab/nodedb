@@ -252,6 +252,7 @@ pub(crate) async fn dispatch(
                 wal_lsn: None,
                 resolved_now_ms: None,
                 minted,
+                system_ordinal: None,
             },
         )
         .await

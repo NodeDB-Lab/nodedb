@@ -166,6 +166,8 @@ pub struct VectorSearchVisitArgs<'a> {
     pub payload_filters: &'a [SqlPayloadAtom],
     /// Primary keys the search ranks among. `None`: every row.
     pub pk_prefilter: Option<&'a [SqlValue]>,
+    /// The system time the search reads at.
+    pub temporal: &'a TemporalScope,
 }
 
 /// Parameters for [`super::trait_def::PlanVisitor::text_search`].
@@ -176,6 +178,8 @@ pub struct TextSearchVisitArgs<'a> {
     pub filters: &'a [Filter],
     /// Score columns the SELECT list or ORDER BY reads.
     pub scores: &'a [TextScoreColumn],
+    /// The system time the search reads at.
+    pub temporal: &'a TemporalScope,
 }
 
 /// Parameters for [`super::trait_def::PlanVisitor::hybrid_search`].
@@ -194,6 +198,8 @@ pub struct HybridSearchVisitArgs<'a> {
     pub mode: nodedb_types::text_search::QueryMode,
     pub fuzzy: bool,
     pub score_alias: Option<&'a str>,
+    /// The system time the search reads at.
+    pub temporal: &'a TemporalScope,
 }
 
 /// Parameters for [`super::trait_def::PlanVisitor::hybrid_search_triple`].
@@ -215,6 +221,8 @@ pub struct HybridSearchTripleVisitArgs<'a> {
     pub fuzzy: bool,
     pub rrf_k: (f64, f64, f64),
     pub score_alias: Option<&'a str>,
+    /// The system time the search reads at.
+    pub temporal: &'a TemporalScope,
 }
 
 /// Parameters for [`super::trait_def::PlanVisitor::spatial_scan`].
@@ -227,6 +235,8 @@ pub struct SpatialScanVisitArgs<'a> {
     pub attribute_filters: &'a [Filter],
     pub limit: usize,
     pub projection: &'a [Projection],
+    /// The system time the scan reads at.
+    pub temporal: &'a TemporalScope,
 }
 
 /// Parameters for [`super::trait_def::PlanVisitor::recursive_scan`].

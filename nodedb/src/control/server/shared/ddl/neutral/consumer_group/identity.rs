@@ -5,8 +5,6 @@
 use crate::control::state::SharedState;
 use crate::types::DatabaseId;
 
-use super::super::super::result::DdlError;
-
 /// Resolve a stream name to its durable consumer-group identity.
 ///
 /// A name identifies a topic only when a topic definition exists for its bare
@@ -32,46 +30,4 @@ pub fn canonical_stream_name(
     } else {
         stream_name.to_string()
     }
-}
-
-/// Migrate one legacy bare-topic group and its offsets once a topic definition
-/// has established its canonical identity. Returns whether a migration ran.
-///
-/// The catalog re-key is replicated; the offsets move first, in their separate
-/// database, so a failure there leaves the legacy identity whole.
-pub async fn migrate_legacy_topic_group(
-    state: &SharedState,
-    database_id: DatabaseId,
-    tenant_id: u64,
-    canonical_stream: &str,
-    group: &str,
-) -> Result<bool, DdlError> {
-    let Some(legacy_stream) = canonical_stream.strip_prefix("topic:") else {
-        return Ok(false);
-    };
-    if state
-        .group_registry
-        .get(database_id, tenant_id, canonical_stream, group)
-        .is_some()
-    {
-        return Ok(false);
-    }
-    let Some(def) = state
-        .group_registry
-        .get(database_id, tenant_id, legacy_stream, group)
-    else {
-        return Ok(false);
-    };
-    state
-        .offset_store
-        .migrate_group_stream(
-            database_id,
-            tenant_id,
-            legacy_stream,
-            canonical_stream,
-            group,
-        )
-        .map_err(|error| DdlError::from_error_in_context("consumer-group migration", &error))?;
-    super::replicate::propose_migrate(state, &def, legacy_stream).await?;
-    Ok(true)
 }

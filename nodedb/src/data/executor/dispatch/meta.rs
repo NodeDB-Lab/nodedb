@@ -6,12 +6,13 @@ use crate::bridge::envelope::{ErrorCode, Response};
 use nodedb_physical::physical_plan::MetaOp;
 
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::handlers::control::calvin::CalvinExecCtx;
+use crate::data::executor::handlers::control::calvin::{CalvinExecCtx, CalvinSnapshot};
 use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
 
 impl CoreLoop {
-    pub(super) fn dispatch_meta(
+    /// Run `op`. [`Self::dispatch_meta`] wraps it.
+    pub(super) fn dispatch_meta_op(
         &mut self,
         task: &ExecutionTask,
         tid: u64,
@@ -105,29 +106,28 @@ impl CoreLoop {
                 replace_mode,
                 collections_to_clear,
                 group_vshards,
-                version_floor,
-            } => {
-                let response = self.execute_restore_tenant_snapshot(
-                    task,
-                    *tenant_id,
-                    snapshot,
-                    *replace_mode,
-                    collections_to_clear,
-                    group_vshards,
-                );
-                // The installed rows carry no versions: each vShard holds
-                // every write through the snapshot's cut.
-                if response.status == crate::bridge::envelope::Status::Ok {
-                    self.install_version_floor(version_floor);
-                }
-                response
-            }
+            } => self.execute_restore_tenant_snapshot(
+                task,
+                *tenant_id,
+                snapshot,
+                *replace_mode,
+                collections_to_clear,
+                group_vshards,
+            ),
 
             MetaOp::PurgeDepartedVShards {
                 departed,
                 resident,
                 collections,
             } => self.execute_purge_departed_vshards(task, departed, resident, collections),
+
+            MetaOp::PurgeVersionsBelow {
+                horizon,
+                batch_units,
+                retained,
+            } => self.meta_purge_versions_below(task, *horizon, *batch_units, retained),
+
+            MetaOp::KvDueExpiries { limit } => self.execute_kv_due_expiries(task, *limit),
 
             MetaOp::ConvertCollection {
                 collection,
@@ -170,8 +170,6 @@ impl CoreLoop {
                 self.execute_verify_hash_chain(task, collection.as_str())
             }
 
-            MetaOp::HomeVersions { probes } => self.execute_home_versions(task, probes),
-
             // Retention / purge / continuous-agg / last-value bodies live in
             // `dispatch/meta_retention/`; the arms below are one-line delegations
             // so the Meta match stays exhaustive.
@@ -189,13 +187,15 @@ impl CoreLoop {
             MetaOp::QueryAggregateWatermark { aggregate_name } => {
                 self.meta_query_aggregate_watermark(task, aggregate_name)
             }
-            MetaOp::QueryLastValues { collection } => {
-                self.meta_query_last_values(task, collection.as_str())
-            }
+            MetaOp::QueryLastValues {
+                collection,
+                system_time,
+            } => self.meta_query_last_values(task, collection.as_str(), *system_time),
             MetaOp::QueryLastValue {
                 collection,
                 series_id,
-            } => self.meta_query_last_value(task, collection.as_str(), *series_id),
+                system_time,
+            } => self.meta_query_last_value(task, collection.as_str(), *series_id, *system_time),
 
             // ALTER ARRAY is a replicated catalog entry; the Control Plane never
             // sends it to a core.
@@ -220,6 +220,7 @@ impl CoreLoop {
                 epoch_system_ms,
                 versioned_reads,
                 body_plans,
+                snapshot_ordinal,
             } => self.execute_calvin_execute_static(
                 task,
                 CalvinExecCtx {
@@ -229,7 +230,10 @@ impl CoreLoop {
                 },
                 tenant_id,
                 plans,
-                versioned_reads,
+                CalvinSnapshot {
+                    reads: versioned_reads,
+                    ordinal: *snapshot_ordinal,
+                },
                 body_plans,
             ),
 
@@ -253,6 +257,8 @@ impl CoreLoop {
                 plans,
                 injected_reads,
                 epoch_system_ms,
+                versioned_reads,
+                snapshot_ordinal,
             } => self.execute_calvin_execute_active(
                 task,
                 CalvinExecCtx {
@@ -263,6 +269,10 @@ impl CoreLoop {
                 tenant_id,
                 plans,
                 injected_reads,
+                CalvinSnapshot {
+                    reads: versioned_reads,
+                    ordinal: *snapshot_ordinal,
+                },
             ),
 
             // Both forms start the same rebuilds here. A plain REINDEX is
@@ -316,6 +326,8 @@ impl CoreLoop {
                 sum_targets,
                 origin,
                 calvin,
+                reads,
+                snapshot_ordinal,
             } => {
                 let committed =
                     crate::data::executor::handlers::transaction::redo_apply::CommittedRedo {
@@ -323,11 +335,22 @@ impl CoreLoop {
                         collections,
                         sum_targets,
                     };
-                match calvin {
-                    Some(install) => {
+                match (calvin, snapshot_ordinal) {
+                    // A Calvin slice's stage vote validated its snapshot.
+                    (Some(install), _) => {
                         self.install_calvin_redo(task, tid, committed, *origin, install)
                     }
-                    None => self.install_redo(task, tid, committed, *origin),
+                    (None, Some(ordinal)) => self.install_snapshot_redo(
+                        task,
+                        tid,
+                        committed,
+                        *origin,
+                        crate::data::executor::handlers::transaction::redo_apply::RedoSnapshot {
+                            reads,
+                            ordinal: *ordinal,
+                        },
+                    ),
+                    (None, None) => self.install_redo(task, tid, committed, *origin),
                 }
             }
 
@@ -452,7 +475,7 @@ mod txn_created_columnar_engine_tests {
             wal_lsn: None,
             resolved_now_ms: None,
             commit_hlc: None,
-            entry_version: None,
+            system_ordinal: None,
             admission: crate::bridge::envelope::Admission::Exempt(
                 crate::bridge::envelope::ExemptReason::Read,
             ),
@@ -572,7 +595,7 @@ mod txn_created_columnar_engine_tests {
         core.columnar_engines
             .get_mut(&key)
             .expect("engine present")
-            .insert(&[Value::Integer(1), Value::Float(1.0)])
+            .insert(&[Value::Integer(1), Value::Float(1.0)], 1)
             .expect("apply committed row to memtable");
         assert!(
             !core.columnar_engines[&key].memtable().is_empty(),
@@ -609,7 +632,7 @@ mod txn_created_columnar_engine_tests {
         core.columnar_engines
             .get_mut(&key)
             .expect("engine present")
-            .insert(&[Value::Integer(1), Value::Float(1.0)])
+            .insert(&[Value::Integer(1), Value::Float(1.0)], 1)
             .expect("apply committed row");
         let resp = core.dispatch_meta(&task, TID, &MetaOp::DropTxnOverlay { txn_id });
         assert_eq!(resp.status, Status::Ok);

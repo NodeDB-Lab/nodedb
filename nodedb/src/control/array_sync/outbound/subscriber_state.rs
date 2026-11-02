@@ -24,10 +24,6 @@ use std::sync::{Arc, RwLock};
 
 use nodedb_array::sync::hlc::Hlc;
 use nodedb_types::{DatabaseId, sync::shape::ArrayCoordRange};
-
-fn default_database_id() -> DatabaseId {
-    DatabaseId::DEFAULT
-}
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
@@ -40,13 +36,9 @@ use tracing::{debug, warn};
 pub struct ArraySubscriberState {
     /// The sync session this subscriber belongs to.
     pub session_id: String,
-    /// Database namespace of the subscribed array. A missing value decodes as
-    /// DEFAULT.
-    #[serde(default = "default_database_id")]
+    /// Database namespace of the subscribed array.
     pub database_id: DatabaseId,
-    /// Authenticated tenant namespace of the subscribed array. A missing value
-    /// decodes as tenant 0.
-    #[serde(default)]
+    /// Authenticated tenant namespace of the subscribed array.
     pub tenant_id: u64,
     /// The array being subscribed.
     pub array_name: String,

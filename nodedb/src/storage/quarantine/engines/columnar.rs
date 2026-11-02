@@ -12,42 +12,34 @@ use std::sync::Arc;
 use nodedb_columnar::ColumnarError;
 
 use crate::storage::quarantine::error::QuarantineError;
-use crate::storage::quarantine::registry::{QuarantineEngine, QuarantineRegistry, SegmentKey};
+use crate::storage::quarantine::key::{CollectionScope, SegmentKey};
+use crate::storage::quarantine::registry::QuarantineRegistry;
 
-/// Attempt to open a columnar segment, routing CRC-class errors through the
-/// quarantine registry.
+/// Attempt to open flushed segment `segment_id` of `scope`, routing
+/// CRC-class errors through the quarantine registry.
 ///
-/// Returns `Ok(reader)` on success, `Err(QuarantineError::SegmentQuarantined)`
-/// on the second consecutive failure, or `Err` wrapping a `ColumnarError` for
-/// non-CRC failures that should be surfaced normally.
+/// Returns `Ok(reader)` on success, `Err(Quarantined)` on the second
+/// consecutive CRC failure, and `Err(Columnar)` for every other failure.
 pub fn open_segment_with_quarantine<'a>(
     registry: &Arc<QuarantineRegistry>,
     seg_bytes: &'a [u8],
-    collection: &str,
-    segment_id: &str,
+    scope: &CollectionScope,
+    segment_id: u64,
 ) -> Result<nodedb_columnar::reader::SegmentReader<'a>, ColumnarOrQuarantine> {
+    let key = || SegmentKey::Columnar {
+        scope: scope.clone(),
+        segment_id,
+    };
     match nodedb_columnar::SegmentReader::open(seg_bytes) {
         Ok(reader) => {
-            let key = SegmentKey {
-                engine: QuarantineEngine::Columnar,
-                collection: collection.to_string(),
-                segment_id: segment_id.to_string(),
-            };
-            registry.record_success(&key);
+            registry.record_success(&key());
             Ok(reader)
         }
         Err(e) if is_crc_class(&e) => {
-            let key = SegmentKey {
-                engine: QuarantineEngine::Columnar,
-                collection: collection.to_string(),
-                segment_id: segment_id.to_string(),
-            };
-            // record_failure returns Ok(()) for the first strike (caller should retry),
-            // Err(SegmentQuarantined) for the second.
+            // The first strike returns `Ok(())` and the caller surfaces `e`.
             registry
-                .record_failure(key, &e.to_string(), None)
+                .record_failure(key(), &e.to_string())
                 .map_err(ColumnarOrQuarantine::Quarantined)?;
-            // First strike: propagate the original error so the caller can retry.
             Err(ColumnarOrQuarantine::Columnar(e))
         }
         Err(e) => Err(ColumnarOrQuarantine::Columnar(e)),
@@ -83,12 +75,13 @@ mod tests {
     #[test]
     fn empty_bytes_triggers_quarantine_path() {
         let reg = Arc::new(QuarantineRegistry::new());
+        let scope = CollectionScope::new(1, 1, "coll");
         // Empty bytes → TruncatedSegment (a CRC-class error). First call
         // returns a ColumnarError (first strike); second returns Quarantined.
-        let r1 = open_segment_with_quarantine(&reg, &[], "coll", "seg1");
+        let r1 = open_segment_with_quarantine(&reg, &[], &scope, 1);
         assert!(matches!(r1, Err(ColumnarOrQuarantine::Columnar(_))));
 
-        let r2 = open_segment_with_quarantine(&reg, &[], "coll", "seg1");
+        let r2 = open_segment_with_quarantine(&reg, &[], &scope, 1);
         assert!(matches!(r2, Err(ColumnarOrQuarantine::Quarantined(_))));
     }
 }

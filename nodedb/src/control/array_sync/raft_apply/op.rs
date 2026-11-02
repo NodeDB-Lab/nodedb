@@ -6,9 +6,7 @@ use std::sync::Arc;
 
 use tracing::warn;
 
-use super::common::{
-    AppliedPosition, ArrayWriteSubmit, ensure_array_open, submit_array_write, vshard_for_array_op,
-};
+use super::common::{AppliedPosition, ArrayWriteSubmit, ensure_array_open, submit_array_write};
 use crate::control::array_sync::{ArrayOpTarget, OriginApplyEngine};
 use crate::control::distributed_applier::{AppliedWrite, ProposeTracker};
 use crate::control::state::SharedState;
@@ -35,6 +33,7 @@ pub(crate) async fn apply_array_op(
         tenant_id,
         database_id,
         array,
+        vshard,
     } = target;
     let commit_hlc = pos.carried_commit_hlc();
     let AppliedPosition {
@@ -103,13 +102,13 @@ pub(crate) async fn apply_array_op(
             group_id,
             log_index,
             applied_key,
-            Ok(AppliedWrite::unversioned(Vec::new())),
+            Ok(AppliedWrite::new(Vec::new())),
         );
         return true;
     }
 
-    // Compute vshard for dispatch.
-    let vshard = vshard_for_array_op(state, tenant_id, database_id, &op);
+    // The cell applies on the vShard its entry carries, the tile route the
+    // proposer computed, so every replica places it alike.
 
     // Build Data Plane plan.
     use nodedb_array::sync::op::ArrayOpKind;
@@ -248,6 +247,7 @@ pub(crate) async fn apply_array_op(
             resolved_now_ms: None,
             apply_key: applied_key,
             commit_hlc,
+            system_ordinal: pos.system_ordinal,
             op_label: "array op",
             group_id,
             log_index,

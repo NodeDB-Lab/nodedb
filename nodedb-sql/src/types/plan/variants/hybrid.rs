@@ -4,6 +4,7 @@
 
 use nodedb_types::text_search::QueryMode;
 
+use crate::temporal::TemporalScope;
 use crate::types::filter::Filter;
 use crate::types::query::Projection;
 
@@ -34,6 +35,8 @@ pub struct HybridSearchPlan {
     pub score_alias: Option<String>,
     /// Resolved SELECT target list, for output-schema derivation.
     pub projection: Vec<Projection>,
+    /// `AS OF SYSTEM TIME` of the search: the system time it reads at.
+    pub temporal: TemporalScope,
 }
 
 /// Payload of [`SqlPlan::HybridSearchTriple`](crate::types::SqlPlan::HybridSearchTriple).
@@ -68,4 +71,6 @@ pub struct HybridSearchTriplePlan {
     pub score_alias: Option<String>,
     /// Resolved SELECT target list, for output-schema derivation.
     pub projection: Vec<Projection>,
+    /// `AS OF SYSTEM TIME` of the search: the system time it reads at.
+    pub temporal: TemporalScope,
 }

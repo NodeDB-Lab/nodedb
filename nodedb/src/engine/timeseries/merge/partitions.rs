@@ -87,7 +87,7 @@ pub fn merge_sources(sources: Vec<MergeSource>) -> crate::Result<MergeOutcome> {
         .columns
         .iter()
         .enumerate()
-        .filter(|(_, (_, ty))| *ty == ColumnType::Symbol)
+        .filter(|(_, (_, ty))| ty.is_dictionary())
         .map(|(i, _)| (i, SymbolDictionary::new()))
         .collect();
 
@@ -123,7 +123,7 @@ pub fn merge_sources(sources: Vec<MergeSource>) -> crate::Result<MergeOutcome> {
                     data.len()
                 )));
             }
-            if *ty == ColumnType::Symbol {
+            if ty.is_dictionary() {
                 let dict = symbol_dicts.get_mut(&j).ok_or_else(|| {
                     corrupt(format!("symbol column '{name}' has no merged dictionary"))
                 })?;
@@ -213,7 +213,7 @@ fn empty_column(ty: ColumnType) -> ColumnData {
         ColumnType::Timestamp(_) => ColumnData::Timestamp(Vec::new()),
         ColumnType::Float64 => ColumnData::Float64(Vec::new()),
         ColumnType::Int64 => ColumnData::Int64(Vec::new()),
-        ColumnType::Symbol => ColumnData::Symbol(Vec::new()),
+        ColumnType::Symbol | ColumnType::Text => ColumnData::Symbol(Vec::new()),
     }
 }
 
@@ -343,6 +343,7 @@ mod tests {
             last_flushed_wal_lsn: lsn,
             column_stats: HashMap::new(),
             max_system_ts: 0,
+            ended_at: None,
         }
     }
 

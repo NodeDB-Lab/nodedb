@@ -187,13 +187,13 @@ impl Gateway {
     }
 
     /// Execute a pre-planned `PhysicalPlan`, returning the raw payloads, the
-    /// per-shard read watermarks, the read versions observed across every
-    /// dispatched route, and a single route's `NotFound` verdict.
+    /// per-shard read watermarks, the vShards every dispatched route read,
+    /// and a single route's `NotFound` verdict.
     ///
     /// Each `(vshard, watermark_lsn)` entry is one participating shard's WAL
     /// position (local SPSC response watermark or the remote's
-    /// `ExecuteResponse.watermark_lsn`). The read versions are data-group log
-    /// positions, so the transaction read-set validates them on any replica.
+    /// `ExecuteResponse.watermark_lsn`). The transaction read-set homes an
+    /// entry on each read vShard.
     pub async fn execute_outcome(
         &self,
         ctx: &QueryContext,
@@ -272,8 +272,8 @@ impl Gateway {
         let max_total_bytes = shared.tuning.network.max_query_result_bytes as usize;
         let mut all_payloads: Vec<Vec<u8>> = Vec::new();
         let mut all_shard_watermarks: Vec<(VShardId, Lsn)> = Vec::new();
-        // The read versions every route observed, one per vShard.
-        let mut read_versions = crate::types::ReadVersions::new();
+        // The vShards every route read.
+        let mut read_vshards = crate::types::ReadShards::new();
         let mut accumulated_bytes: usize = 0;
 
         for route in routes {
@@ -337,7 +337,7 @@ impl Gateway {
             // read produces one read-set entry per shard.
             all_shard_watermarks.extend(outcome.shard_watermarks);
             not_found = single_route && outcome.not_found;
-            read_versions.merge(&outcome.read_versions);
+            read_vshards.merge(&outcome.read_vshards);
 
             for p in outcome.payloads {
                 accumulated_bytes = accumulated_bytes.saturating_add(p.len());
@@ -364,7 +364,7 @@ impl Gateway {
         Ok(GatewayOutcome {
             payloads,
             shard_watermarks: all_shard_watermarks,
-            read_versions,
+            read_vshards,
             not_found,
         })
     }
@@ -444,6 +444,7 @@ mod tests {
             key: b"k".to_vec(),
             rls_filters: vec![],
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         })
     }
 

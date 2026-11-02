@@ -136,7 +136,7 @@ impl CoreLoop {
             TenantId::new(tid),
             collection,
             Some(
-                crate::data::executor::core_loop::write_index::KeyRepr::Edge {
+                crate::data::executor::core_loop::write_note::KeyRepr::Edge {
                     src: Box::from(src_id),
                     label: Box::from(label),
                     dst: Box::from(dst_id),
@@ -216,7 +216,7 @@ pub(super) mod test_support {
             wal_lsn: Some(Lsn::new(lsn)),
             resolved_now_ms: None,
             commit_hlc: None,
-            entry_version: None,
+            system_ordinal: None,
             admission: Admission::Exempt(ExemptReason::Read),
         })
     }

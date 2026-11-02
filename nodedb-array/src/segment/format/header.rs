@@ -21,7 +21,7 @@ use crate::error::{ArrayError, ArrayResult};
 /// `b"NDAS\0\0\0\1"` — NodeDB Array Segment, version slot in last byte.
 pub const HEADER_MAGIC: [u8; 8] = *b"NDAS\0\0\0\x01";
 
-/// On-disk format version. Bump on layout-incompatible changes.
+/// On-disk format version. A segment of any other version is refused.
 pub const FORMAT_VERSION: u16 = 1;
 
 pub const HEADER_SIZE: usize = 24;
@@ -135,7 +135,7 @@ mod tests {
     }
 
     #[test]
-    fn header_rejects_v2_segment() {
+    fn header_rejects_a_segment_of_another_version() {
         let mut buf = Vec::new();
         buf.extend_from_slice(&HEADER_MAGIC);
         buf.extend_from_slice(&2u16.to_le_bytes());

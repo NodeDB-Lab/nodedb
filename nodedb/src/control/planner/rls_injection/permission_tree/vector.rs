@@ -142,6 +142,7 @@ mod tests {
             ann_options: Default::default(),
             skip_payload_fetch: false,
             payload_filters: Vec::new(),
+            system_time: nodedb_types::SystemTimeScope::Current,
         })
     }
 
@@ -194,6 +195,7 @@ mod tests {
             query_entries: vec![(1, 1.0)],
             top_k: 5,
             filters: Vec::new(),
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         assert!(apply(&mut plan, &cache).is_ok());
         match &plan {

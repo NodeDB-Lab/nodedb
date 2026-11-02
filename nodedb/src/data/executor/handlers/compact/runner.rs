@@ -79,14 +79,11 @@ impl CoreLoop {
             };
 
             // A trained IVF-PQ index holds its own tombstones beside the
-            // sealed segments', and `compact` removes both.
+            // sealed segments', and `compact` removes both. An ended node a
+            // retained cut still reads is a tombstone `compact` keeps, so
+            // only the removable ones count.
             let ivf = collection.ivf_index();
-            let total_tombstones: usize = collection
-                .sealed_segments()
-                .iter()
-                .map(|seg| seg.index.tombstone_count())
-                .sum::<usize>()
-                + ivf.map_or(0, |ivf| ivf.tombstone_count());
+            let removable = collection.removable_tombstone_count();
             let total_nodes: usize = collection
                 .sealed_segments()
                 .iter()
@@ -94,21 +91,38 @@ impl CoreLoop {
                 .sum::<usize>()
                 + ivf.map_or(0, |ivf| ivf.len());
 
-            if total_tombstones == 0 {
+            if removable == 0 {
                 continue;
             }
 
             let ratio = if total_nodes > 0 {
-                total_tombstones as f64 / total_nodes as f64
+                removable as f64 / total_nodes as f64
             } else {
                 0.0
             };
 
-            if !force && ratio < self.maintenance.compaction_tombstone_threshold {
+            // A history purge that freed nodes makes the collection due
+            // whatever its ratio: the purged versions release their memory
+            // at this pass.
+            let purged = self
+                .maintenance
+                .version_purge
+                .vector_compaction_due
+                .remove(&key);
+            if !force && !purged && ratio < self.maintenance.compaction_tombstone_threshold {
                 continue;
             }
+            let Some(collection) = self.vector_collections.get_mut(&key) else {
+                continue;
+            };
 
             let removed = collection.compact();
+            // The removed nodes leave the index's standing charge.
+            self.recharge_index(
+                &crate::data::executor::core_loop::index_charge::IndexChargeKey::Vector(
+                    key.clone(),
+                ),
+            );
             if removed > 0 {
                 info!(
                     core = self.core_id,
@@ -157,6 +171,13 @@ impl CoreLoop {
         stats.fts_compacted = fts_outcome.merged;
         stats.fts_deferred = fts_outcome.deferred;
         stats.fts_enumeration_failed = fts_outcome.enumeration_failed;
+
+        // A dropped index owes no compaction.
+        let vectors = &self.vector_collections;
+        self.maintenance
+            .version_purge
+            .vector_compaction_due
+            .retain(|key| vectors.contains_key(key));
 
         if stats.vectors_compacted > 0
             || stats.segments_merged > 0

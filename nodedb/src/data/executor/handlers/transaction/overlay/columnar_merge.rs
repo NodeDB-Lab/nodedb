@@ -11,8 +11,8 @@
 //! separate document id, so [`super::super::stage_write::stage_columnar`]
 //! stages puts keyed by surrogate with `StorageKey::for_surrogate` used only
 //! for the overlay's doc-id side-map. A base row with no recorded surrogate
-//! (legacy segments predating the surrogate sidecar) cannot be resolved
-//! against the overlay and is left untouched.
+//! (an insert that carried none) cannot be resolved against the overlay and
+//! is left untouched.
 //!
 //! Columnar has no delete/rollback/aggregate hazard for this merge (unlike
 //! Timeseries, which is out of scope for this unit): a staged put/tombstone

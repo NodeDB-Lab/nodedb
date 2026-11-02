@@ -33,26 +33,20 @@ pub struct CollectionDescriptor {
     /// Storage engine + engine-specific configuration.
     pub collection_type: CollectionType,
     /// Whether the collection tracks system-time + valid-time versions.
-    #[msgpack(default)]
     pub bitemporal: bool,
     /// Whether this collection uses CRDT (Loro) storage for offline-first sync.
-    #[msgpack(default)]
     pub crdt: bool,
     /// Lightweight field type hints, e.g. `[("email", "string")]`.
-    #[msgpack(default)]
     pub fields: Vec<(String, String)>,
     /// Which engine serves as the primary access path for this collection.
     pub primary: PrimaryEngine,
     /// Vector-primary configuration, present when `primary == PrimaryEngine::Vector`.
-    #[msgpack(default)]
     pub vector_primary: Option<VectorPrimaryConfig>,
     /// How rows are distributed across vShards.
     pub partition_strategy: PartitionStrategy,
     /// Explicitly declared primary key field, if any.
-    #[msgpack(default)]
     pub declared_primary_key: Option<String>,
     /// Monotonic version of this descriptor, bumped on schema-affecting change.
-    #[msgpack(default)]
     pub descriptor_version: u64,
 }
 

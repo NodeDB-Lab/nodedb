@@ -2,6 +2,7 @@
 
 mod core;
 mod doc_lengths;
+pub(crate) mod history_rows;
 mod meta;
 pub(crate) mod posting_rows;
 mod postings;

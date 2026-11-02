@@ -104,6 +104,20 @@ impl PlanExecutor for LocalPlanExecutor {
         });
         outcome
     }
+
+    async fn close_read_cut(
+        &self,
+        ordinal: i64,
+        timeout: std::time::Duration,
+    ) -> Result<(), nodedb_cluster::ReadCutUnclosed> {
+        let started = std::time::Instant::now();
+        let deadline = crate::control::server::shared::session::StatementDeadline::after(timeout);
+        crate::control::read_cut::close::close_local_cut(&self.state, ordinal, deadline)
+            .await
+            .map_err(|_| nodedb_cluster::ReadCutUnclosed {
+                waited_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            })
+    }
 }
 
 impl LocalPlanExecutor {
@@ -258,10 +272,8 @@ impl LocalPlanExecutor {
                     {
                         // Replicated writes carry no read watermark → 0: it floors a
                         // session's later reads, and this RPC seam has no session.
-                        // The write's versions go back to the coordinator.
-                        Ok((payload, write_versions)) => {
-                            ExecuteResponse::ok(vec![payload], 0, write_versions.to_wire())
-                        }
+                        // A write reads no vShard.
+                        Ok(payload) => ExecuteResponse::ok(vec![payload], 0, Vec::new()),
                         // A replicated write's apply verdict is a Data-Plane
                         // verdict: carry its code, never flatten to internal.
                         Err(e) => ExecuteResponse::err(execution_error_to_typed(e)),
@@ -288,8 +300,18 @@ impl LocalPlanExecutor {
         }
         // A historical read runs only once this node installed every
         // version at or below its cut.
+        let cut_groups = match crate::control::read_cut::cut_read_groups(
+            &self.state,
+            database_id,
+            &plan,
+            req.vshard_id.map(|vshard| vshard.as_u32()),
+        ) {
+            Ok(groups) => groups,
+            Err(error) => return ExecuteResponse::err(execution_error_to_typed(error)),
+        };
         if let Err(error) =
-            crate::control::read_cut::await_read_cut(&self.state, &plan, hop_deadline).await
+            crate::control::read_cut::await_read_cut(&self.state, &plan, &cut_groups, hop_deadline)
+                .await
         {
             return ExecuteResponse::err(execution_error_to_typed(error));
         }
@@ -309,20 +331,20 @@ impl LocalPlanExecutor {
         )
         .await
         {
-            // A read that found no row keeps its verdict and the versions it
-            // observed, so the coordinator answers and validates it as a
-            // local miss.
-            Ok(Ok(result)) if result.not_found => ExecuteResponse::refused_with_versions(
+            // A read that found no row keeps its verdict and the vShards it
+            // read, so the coordinator answers and validates it as a local
+            // miss.
+            Ok(Ok(result)) if result.not_found => ExecuteResponse::refused_with_vshards(
                 TypedClusterError::DataPlane {
                     code: crate::bridge::envelope::ErrorCode::NotFound.into(),
                 },
                 result.watermark_lsn.as_u64(),
-                result.read_versions.to_wire(),
+                result.read_vshards.to_wire(),
             ),
             Ok(Ok(result)) => ExecuteResponse::ok(
                 vec![result.payload],
                 result.watermark_lsn.as_u64(),
-                result.read_versions.to_wire(),
+                result.read_vshards.to_wire(),
             ),
             Ok(Err(e)) => ExecuteResponse::err(execution_error_to_typed(e)),
             Err(_) => ExecuteResponse::err(TypedClusterError::DeadlineExceeded {
@@ -403,7 +425,7 @@ impl LocalPlanExecutor {
                             .send_chunk(
                                 b.payload,
                                 b.watermark_lsn.as_u64(),
-                                b.read_versions.to_wire(),
+                                b.read_vshards.to_wire(),
                             )
                             .await
                         {

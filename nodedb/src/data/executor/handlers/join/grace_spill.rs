@@ -40,12 +40,11 @@
 //! `(String::new(), value)` therefore loses nothing and avoids framing the id
 //! through every spill file.
 //!
-//! ## Platform fallback
+//! ## Spill backend
 //!
-//! Spilling requires io_uring ([`SpillPartitionWriter::create`] returns `None`
-//! off-Linux or when uring is unavailable). When `create` returns `None` the
-//! partition simply stays in memory: correctness is preserved, only the
-//! memory bound is lost. This is a platform capability gap, not an error.
+//! [`SpillPartitionWriter`] writes through io_uring when a ring opens, else
+//! through a buffered file. A partition past its budget always spills, so
+//! the join keeps its memory bound on every platform and under ring limits.
 
 use std::path::PathBuf;
 
@@ -300,18 +299,10 @@ impl PartitionedSpiller {
         let mut next_repartition_id: u64 = 0;
 
         while let Some(item) = queue.pop() {
-            // Whether this source CAN be re-partitioned at all. Only a SPILLED
-            // build side is a re-partition candidate: a spilled file proves a
-            // `SpillPartitionWriter` was creatable (io_uring available), so the
-            // sub-partition writers can be created too, and the spilled rows can
-            // be streamed back frame-by-frame rather than held whole.
-            //
-            // An IN-MEMORY source is NEVER re-partitioned: it is already resident,
-            // so re-partitioning it to disk and back gains nothing; and on a no-
-            // io_uring platform (where nothing ever spills) it CANNOT be — that is
-            // the documented platform memory-bound gap, not an error. In-memory
-            // top-level partitions are also ≤budget by construction on the spill
-            // path (they spill the instant they cross it).
+            // Only a SPILLED build side is a re-partition candidate: its rows
+            // stream back frame by frame rather than held whole. An IN-MEMORY
+            // source is at or below its budget by construction, since a
+            // partition spills the instant it crosses it.
             let is_spilled = matches!(item.build, PartitionSource::Spilled(_));
             let build_size = item.build.size_bytes()?;
 
@@ -383,9 +374,7 @@ impl PartitionedSpiller {
             // Enqueue SUB_P new items at depth+1. `repartition_side` always
             // returns exactly SUB_P sub-partition sources each, positionally
             // aligned by sub-partition index, so the zip pairs build/probe sub-
-            // partitions that share a seed bucket. Each source is Spilled on the
-            // normal path or InMemory when io_uring was unavailable at this level
-            // (graceful fallback — see `repartition_side`).
+            // partitions that share a seed bucket. Each source is Spilled.
             for (bp, pp) in build_subs.into_iter().zip(probe_subs) {
                 queue.push(WorkItem {
                     build: bp,
@@ -459,23 +448,15 @@ fn push_row(
         return Ok(());
     }
 
-    // Over budget — try to start spilling this partition.
+    // Over budget: spill this partition. Drain everything buffered into the
+    // writer, then free the RAM.
     let path = spill_dir.join(format!("p{p}.{side_tag}.spill"));
-    match SpillPartitionWriter::create(&path) {
-        Some(mut w) => {
-            // Drain everything currently buffered into the writer, then free RAM.
-            for (_, row) in side.buffers[p].drain(..) {
-                w.append_row(&row)?;
-            }
-            side.bytes[p] = 0;
-            side.spillers[p] = Some(w);
-        }
-        None => {
-            // io_uring unavailable (e.g. non-Linux): keep the partition in
-            // memory. Correctness holds; only the memory bound is lost. This is
-            // a platform capability gap, not an error — fall through silently.
-        }
+    let mut w = SpillPartitionWriter::create(&path)?;
+    for (_, row) in side.buffers[p].drain(..) {
+        w.append_row(&row)?;
     }
+    side.bytes[p] = 0;
+    side.spillers[p] = Some(w);
     Ok(())
 }
 
@@ -615,7 +596,8 @@ mod tests {
         spiller.finish_and_probe()
     }
 
-    // Round-trip + spill exercises io_uring → gate on Linux, mirroring spill.rs.
+    // Round-trip and spill tests, run on Linux where the io_uring backend
+    // is the one under test.
     #[cfg(target_os = "linux")]
     mod io_tests {
         use super::super::super::grace_partitioner::grace_join_in_memory;

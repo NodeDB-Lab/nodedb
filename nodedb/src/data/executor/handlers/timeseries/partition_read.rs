@@ -15,7 +15,7 @@ use std::path::Path;
 use nodedb_types::timeseries::SymbolDictionary;
 use nodedb_wal::crypto::WalEncryptionKey;
 
-use crate::engine::timeseries::columnar_memtable::{ColumnData, ColumnType, ColumnarSchema};
+use crate::engine::timeseries::columnar_memtable::{ColumnData, ColumnarSchema};
 use crate::engine::timeseries::columnar_segment::{ColumnarSegmentReader, SegmentError};
 
 /// Every column of one on-disk timeseries partition, read whole.
@@ -92,7 +92,7 @@ pub(in crate::data::executor) fn read_ts_partition(
         .map_err(|e| report("column", e))?;
     let mut sym_dicts = HashMap::new();
     for (i, (name, ty)) in schema.columns.iter().enumerate() {
-        if *ty != ColumnType::Symbol || !part_dir.join(format!("{name}.sym")).exists() {
+        if !ty.is_dictionary() || !part_dir.join(format!("{name}.sym")).exists() {
             continue;
         }
         let dict = ColumnarSegmentReader::read_symbol_dict(part_dir, name, kek)

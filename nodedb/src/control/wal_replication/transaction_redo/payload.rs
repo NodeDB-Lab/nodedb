@@ -7,6 +7,8 @@ use nodedb_physical::physical_plan::{
     CalvinInstall, MetaOp, PhysicalPlan, RedoOrigin, RedoSumTargets,
 };
 
+use nodedb_types::calvin::VersionedReadEntry;
+
 use crate::control::state::SharedState;
 use crate::control::surrogate::{CarriedIdentity, collect_plan_identities};
 use crate::control::wal_replication::types::CalvinRedoMeta;
@@ -15,6 +17,7 @@ use crate::types::{DatabaseId, TenantId};
 use crate::wal::RedoRecord;
 
 use super::sum_targets::redo_sum_targets;
+use crate::control::planner::calvin::incarnation_names::{NamedIncarnation, incarnation_names};
 use nodedb_physical::physical_plan::written_collections;
 
 /// Everything a replica needs to apply one committed transaction's redo.
@@ -24,6 +27,11 @@ pub struct TransactionRedoPayload {
     pub redo: RedoRecord,
     /// Every collection the transaction wrote.
     pub collections: Vec<String>,
+    /// Every user collection and array the transaction wrote, each with its
+    /// kind. The redo entry names each one for its incarnation stamp, so an
+    /// array never takes a same-name collection's identity. Empty on a
+    /// payload decoded from an entry: the entry carries its stamps.
+    pub incarnation_names: Vec<NamedIncarnation>,
     /// Materialized-sum resolution the document writes fold into, keyed by
     /// source collection.
     pub sum_targets: Vec<RedoSumTargets>,
@@ -36,6 +44,12 @@ pub struct TransactionRedoPayload {
     /// Set when the redo is a committed Calvin slice. The record's
     /// `calvin_stamp` names its `(epoch, position)`.
     pub calvin: Option<CalvinRedoMeta>,
+    /// The transaction's read set. Every replica validates the entries homed
+    /// on the record's vShard against `snapshot_ordinal` before it installs.
+    pub reads: Vec<VersionedReadEntry>,
+    /// The snapshot every read observed. `None` validates nothing: an
+    /// autocommit record, or a Calvin slice its stage vote validated.
+    pub snapshot_ordinal: Option<i64>,
 }
 
 /// What a committed Calvin slice's redo carries beside its record, derived
@@ -43,6 +57,7 @@ pub struct TransactionRedoPayload {
 #[derive(Debug, Clone)]
 pub struct CalvinSlice {
     pub collections: Vec<String>,
+    pub incarnation_names: Vec<NamedIncarnation>,
     pub sum_targets: Vec<RedoSumTargets>,
     pub identities: Vec<CarriedIdentity>,
     pub event_source: EventSource,
@@ -64,6 +79,9 @@ impl TransactionRedoPayload {
         Ok(Self {
             redo,
             collections: written_collections(plans),
+            incarnation_names: incarnation_names(plans, |plan| {
+                written_collections(std::slice::from_ref(plan))
+            }),
             sum_targets: redo_sum_targets(plans),
             identities: collect_plan_identities(
                 &state.surrogate_assigner,
@@ -74,7 +92,17 @@ impl TransactionRedoPayload {
             event_source,
             origin: RedoOrigin::Commit,
             calvin: None,
+            reads: Vec::new(),
+            snapshot_ordinal: None,
         })
+    }
+
+    /// The payload with the transaction's read set and the snapshot its
+    /// reads observed, which every replica's apply validates.
+    pub fn with_snapshot(mut self, reads: Vec<VersionedReadEntry>, snapshot_ordinal: i64) -> Self {
+        self.reads = reads;
+        self.snapshot_ordinal = Some(snapshot_ordinal);
+        self
     }
 
     /// The payload of a committed Calvin slice whose resolved redo is `redo`,
@@ -83,6 +111,7 @@ impl TransactionRedoPayload {
     pub fn from_calvin(redo: RedoRecord, slice: CalvinSlice) -> Self {
         let CalvinSlice {
             collections,
+            incarnation_names,
             sum_targets,
             identities,
             event_source,
@@ -92,11 +121,14 @@ impl TransactionRedoPayload {
         Self {
             redo,
             collections,
+            incarnation_names,
             sum_targets,
             identities,
             event_source,
             origin,
             calvin: Some(meta),
+            reads: Vec::new(),
+            snapshot_ordinal: None,
         }
     }
 
@@ -108,6 +140,8 @@ impl TransactionRedoPayload {
             sum_targets: self.sum_targets.clone(),
             origin: self.origin,
             calvin: self.calvin_install()?,
+            reads: self.reads.clone(),
+            snapshot_ordinal: self.snapshot_ordinal,
         }))
     }
 
@@ -159,11 +193,14 @@ mod tests {
                 user_roles: Vec::new(),
             },
             collections: vec!["orders".into()],
+            incarnation_names: Vec::new(),
             sum_targets: Vec::new(),
             identities: Vec::new(),
             event_source: EventSource::User,
             origin: RedoOrigin::Commit,
             calvin,
+            reads: Vec::new(),
+            snapshot_ordinal: None,
         }
     }
 
@@ -214,5 +251,27 @@ mod tests {
     fn a_calvin_meta_without_a_stamp_is_refused() {
         let unstamped = payload(None, Some(meta()));
         assert!(install_of(&unstamped).is_err());
+    }
+
+    #[test]
+    fn a_snapshot_payload_hands_its_reads_to_the_apply() {
+        let read = VersionedReadEntry {
+            engine: nodedb_types::calvin::EngineTag::Document,
+            collection: "orders".into(),
+            key: nodedb_types::calvin::ReadKeyIdent::Predicate,
+            home_vshard: None,
+        };
+        let plain = payload(None, None).with_snapshot(vec![read.clone()], 77);
+        match plain.apply_plan().expect("plan") {
+            PhysicalPlan::Meta(MetaOp::ApplyTransactionRedo {
+                reads,
+                snapshot_ordinal,
+                ..
+            }) => {
+                assert_eq!(reads, vec![read]);
+                assert_eq!(snapshot_ordinal, Some(77));
+            }
+            other => panic!("apply plan must be ApplyTransactionRedo, got {other:?}"),
+        }
     }
 }

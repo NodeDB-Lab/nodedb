@@ -2,7 +2,7 @@
 
 //! [`OriginOpLog`] — redb-backed op-log for array CRDT sync on Origin.
 //!
-//! Entries live in `array_op_log_v2`, keyed by
+//! Entries live in `array_op_log`, keyed by
 //! `[db: u64 BE][tenant: u64 BE][name_len: u16 BE][name][hlc: 18]`.
 
 use std::collections::BTreeMap;
@@ -20,7 +20,7 @@ use tracing::warn;
 use crate::types::DatabaseId;
 
 /// Key: `[db: u64 BE][tenant: u64 BE][name_len: u16 BE][name][hlc: 18]`.
-const ARRAY_OP_LOG_V2: TableDefinition<&[u8], &[u8]> = TableDefinition::new("array_op_log_v2");
+const ARRAY_OP_LOG: TableDefinition<&[u8], &[u8]> = TableDefinition::new("array_op_log");
 
 fn v2_prefix(database_id: DatabaseId, tenant_id: u64, array: &str) -> Option<Vec<u8>> {
     let name = array.as_bytes();
@@ -104,7 +104,7 @@ impl OriginOpLog {
             engine: "array_sync".into(),
             detail: format!("begin_write init: {e}"),
         })?;
-        txn.open_table(ARRAY_OP_LOG_V2)
+        txn.open_table(ARRAY_OP_LOG)
             .map_err(|e| crate::Error::Storage {
                 engine: "array_sync".into(),
                 detail: format!("open V2 op-log table init: {e}"),
@@ -139,7 +139,7 @@ impl OriginOpLog {
             .map_err(|e| invalid(format!("op_log append begin_write: {e}")))?;
         {
             let mut table = txn
-                .open_table(ARRAY_OP_LOG_V2)
+                .open_table(ARRAY_OP_LOG)
                 .map_err(|e| invalid(format!("op_log append open table: {e}")))?;
             if table
                 .get(key.as_slice())
@@ -167,7 +167,7 @@ impl OriginOpLog {
             .begin_read()
             .map_err(|e| invalid(format!("scan_from begin_read: {e}")))?;
         let table = txn
-            .open_table(ARRAY_OP_LOG_V2)
+            .open_table(ARRAY_OP_LOG)
             .map_err(|e| invalid(format!("scan_from open table: {e}")))?;
         let mut results = BTreeMap::new();
         for entry in table
@@ -204,7 +204,7 @@ impl OriginOpLog {
             .begin_read()
             .map_err(|e| invalid(format!("scan_range begin_read: {e}")))?;
         let table = txn
-            .open_table(ARRAY_OP_LOG_V2)
+            .open_table(ARRAY_OP_LOG)
             .map_err(|e| invalid(format!("scan_range open table: {e}")))?;
         let mut results = BTreeMap::new();
         for entry in table
@@ -258,7 +258,7 @@ impl OriginOpLog {
         let mut dropped = 0;
         {
             let mut table = txn
-                .open_table(ARRAY_OP_LOG_V2)
+                .open_table(ARRAY_OP_LOG)
                 .map_err(|e| invalid(format!("drop_below open table: {e}")))?;
             let keys: Vec<Vec<u8>> = table
                 .iter()

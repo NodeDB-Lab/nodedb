@@ -1,17 +1,15 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! redb-backed B-Tree storage for the sparse engine's non-versioned tables.
+//! The sparse engine handle, its current-state document API, and its
+//! non-document tables.
 
 pub mod chain_head;
 pub mod crdt_dead_letter;
 pub mod document;
 pub mod engine;
-pub mod keys;
 pub mod tables;
 pub mod write_set_capture;
 
 pub use engine::SparseEngine;
-pub(crate) use keys::coll_prefix;
-pub(in crate::engine::sparse) use keys::{tenant_prefix, with_tenant_key4};
-pub(crate) use tables::{DOCUMENTS, KeyedTable, invalid_storage_key_err};
-pub(in crate::engine::sparse) use tables::{INDEXES, redb_err};
+pub(in crate::engine::sparse) use tables::redb_err;
+pub(crate) use tables::{KeyedTable, invalid_storage_key_err};

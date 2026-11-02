@@ -47,10 +47,8 @@ impl CoreLoop {
     /// Scan every row of `collection` on this core for an aggregate, under
     /// the scan byte budget.
     ///
-    /// A bitemporal collection keeps every write on the versioned table, so
-    /// its current-state rows come from the versioned scan. Every other
-    /// collection reads through [`CoreLoop::scan_collection`]. Both return
-    /// the same `(doc_id, msgpack)` shape.
+    /// Reads through [`CoreLoop::scan_collection`]: the current version of
+    /// every row, as `(doc_id, msgpack)`.
     pub(in crate::data::executor) fn scan_for_aggregate(
         &mut self,
         task: &ExecutionTask,
@@ -65,11 +63,7 @@ impl CoreLoop {
         // alone, and a collection past it fails loudly, never as a prefix.
         let budget = self.query_tuning.max_scan_result_bytes;
         let scan_limit = super::super::scan_budget::fetch_limit_for(usize::MAX, 0, budget);
-        let scanned = if self.is_bitemporal(did, tid, collection) {
-            self.scan_collection_versioned_current(did, tid, collection, scan_limit)
-        } else {
-            self.scan_collection(did, tid, collection, scan_limit)
-        };
+        let scanned = self.scan_collection(did, tid, collection, scan_limit);
         let docs = scanned.map_err(|e| Box::new(self.response_error(task, ErrorCode::from(e))))?;
         if super::super::scan_budget::scan_bytes_exceeded(&docs, budget) {
             return Err(Box::new(

@@ -428,8 +428,16 @@ pub(crate) async fn build_match(
         format: "msgpack".into(),
         detail: format!("match query serialization: {e}"),
     })?;
-    let scope =
-        crate::control::server::graph_dispatch::graph_read_scope(ctx.state, &temporal).await?;
+    let scope = crate::control::server::graph_dispatch::graph_read_scope(
+        ctx.state,
+        &temporal,
+        crate::control::server::graph_dispatch::GraphHistory {
+            database_id: ctx.database_id(),
+            tenant_id: ctx.tenant_id(),
+            collection: None,
+        },
+    )
+    .await?;
 
     Ok(PhysicalPlan::Graph(GraphOp::Match {
         query,

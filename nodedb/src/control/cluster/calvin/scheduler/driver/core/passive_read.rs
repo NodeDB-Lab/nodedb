@@ -345,7 +345,7 @@ mod tests {
                 })
             }),
             stage_vote: (status == Status::Ok).then_some(StageVote::Commit),
-            read_versions: crate::types::ReadVersions::new(),
+            read_vshards: crate::types::ReadShards::new(),
             write_set: Vec::new(),
         }
     }

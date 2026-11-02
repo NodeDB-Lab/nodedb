@@ -365,15 +365,23 @@ impl TestClusterNode {
         // test that sets `NODEDB_CONSTRAINT_RECONCILE_INTERVAL_MS` to suppress
         // the loop is honoured here exactly as it is in production. Parsing it
         // a second way here is what would let the two drift apart.
-        let mut reconcile_config = nodedb::ServerConfig::default();
-        nodedb::config::server::apply_env_overrides(&mut reconcile_config)
+        let mut loop_config = nodedb::ServerConfig::default();
+        nodedb::config::server::apply_env_overrides(&mut loop_config)
             .map_err(|e| format!("environment override rejected: {e}"))?;
         nodedb::bootstrap::constraint_reconcile::spawn_constraint_reconcile(
             Arc::clone(&shared),
-            reconcile_config
+            loop_config
                 .tuning
                 .maintenance
                 .constraint_reconcile_interval_ms,
+        );
+
+        // The KV TTL reaper, which `spawn_background_loops` also starts. A
+        // key's TTL ends only through the reap its group's leader proposes,
+        // so a cluster without it never expires a key.
+        nodedb::bootstrap::background_loops::kv_expiry::spawn_kv_expiry_reaper(
+            &shared,
+            &loop_config,
         );
 
         // Spawn the descriptor lease renewal loop on the cluster shutdown

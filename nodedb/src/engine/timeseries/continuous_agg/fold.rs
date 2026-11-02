@@ -415,7 +415,7 @@ mod tests {
         let mut mgr = loaded_manager(vec![minute, exact_def("v_1h", "v_1m", "1h")]);
         let rows = exact_rows();
         mgr.on_flush(0, 1, "metrics", "p1", &int_drain(&rows[..3]), T0);
-        mgr.apply_retention(T0 + 3_600_000 + 700_000);
+        mgr.apply_retention(T0 + 3_600_000 + 700_000, 1);
         mgr.on_flush(0, 1, "metrics", "p2", &int_drain(&rows[3..]), T0);
         assert_eq!(materialized(&mgr, "v_1h"), ad_hoc(&rows, 3_600_000));
     }

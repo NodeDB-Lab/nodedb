@@ -200,11 +200,6 @@ impl CoreLoop {
         // `wal_append_document_op` mints no pre-dispatch record for
         // `BatchInsert`, so these entries are the rows' only WAL record.
         let mut write_set: Vec<WriteSetEntry> = Vec::with_capacity(documents.len());
-        // Per-row secondary-index tuples (added ∪ removed ∪ bitemporal),
-        // parallel to `applied`. Recorded into the per-index write-value
-        // substrate only after `txn.commit()` succeeds below — a row that
-        // never commits touched no durable index state.
-        let mut row_index_tuples: Vec<Vec<(String, String)>> = Vec::with_capacity(documents.len());
         // The exact bytes each row landed as, parallel to `documents`, kept only
         // when a `RETURNING` projection will read them.
         let mut stored_bodies: Vec<Vec<u8>> = Vec::new();
@@ -305,14 +300,8 @@ impl CoreLoop {
                 surrogate.as_u32(),
                 row_identity.clone(),
                 value.clone(),
-                outcome.bitemporal_sys_from,
+                outcome.version_sys_from,
             ));
-            if task.wal_lsn().is_some() {
-                let mut tuples = outcome.secondary_index_added;
-                tuples.extend(outcome.secondary_index_removed);
-                tuples.extend(outcome.bitemporal_index_tuples);
-                row_index_tuples.push(tuples);
-            }
             applied.push((i, row_identity, key));
         }
 
@@ -386,21 +375,6 @@ impl CoreLoop {
         // collection.
         for (_, _, key) in &applied {
             self.note_surrogate_write(task, tid, collection, key.surrogate().as_u32());
-        }
-
-        // Record each committed row's touched secondary-index values into the
-        // per-index write-value substrate. This runs only after the batch has
-        // durably committed.
-        if let Some(stamp) = self.task_write_stamp(task) {
-            for tuples in &row_index_tuples {
-                self.note_index_write_values(
-                    task.request.database_id,
-                    crate::types::TenantId::new(tid),
-                    collection,
-                    tuples,
-                    stamp,
-                );
-            }
         }
 
         self.checkpoint_coordinator
@@ -534,7 +508,7 @@ mod tests {
             wal_lsn: None,
             resolved_now_ms: None,
             commit_hlc: None,
-            entry_version: None,
+            system_ordinal: None,
             admission: crate::bridge::envelope::Admission::Admitted,
         })
     }
@@ -903,6 +877,7 @@ mod tests {
                 SUM_TARGET,
                 &nodedb_types::StorageKey::for_surrogate(SUM_T1),
                 &doc_format::encode_to_msgpack(&seed),
+                core.bitemporal_ordinal(),
             )
             .expect("seed target row");
         core

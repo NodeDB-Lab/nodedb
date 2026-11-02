@@ -23,6 +23,11 @@ pub enum ColumnNaming {
     /// The rows are a join aggregate's output rows, keyed by bare column
     /// name. Every reference drops its relation qualifier.
     OutputRow,
+    /// The rows are a join write's merged rows (`UPDATE ... FROM`, MERGE).
+    /// The write target is the scope's first relation, and its fields are
+    /// keyed by bare column name. Every other relation's fields are keyed
+    /// `ref_name.column`.
+    JoinWriteRow,
 }
 
 /// Where an unqualified column reference resolves.
@@ -48,7 +53,13 @@ impl TableScope {
             (ColumnNaming::JoinRow, BareColumn::Relation(table)) => {
                 table.row_qualifier().map(str::to_owned)
             }
-            (ColumnNaming::JoinRow, BareColumn::Output | BareColumn::Outer)
+            (ColumnNaming::JoinWriteRow, BareColumn::Relation(table)) => {
+                self.join_write_qualifier(table)
+            }
+            (
+                ColumnNaming::JoinRow | ColumnNaming::JoinWriteRow,
+                BareColumn::Output | BareColumn::Outer,
+            )
             | (ColumnNaming::AsWritten | ColumnNaming::OutputRow, _) => None,
         })
     }
@@ -62,9 +73,22 @@ impl TableScope {
     pub fn qualified_column_qualifier(&self, table_ref: &str) -> Option<String> {
         match (self.column_naming(), self.table_by_ref(table_ref)) {
             (ColumnNaming::JoinRow, Some(table)) => table.row_qualifier().map(str::to_owned),
+            (ColumnNaming::JoinWriteRow, Some(table)) => self.join_write_qualifier(table),
             (ColumnNaming::OutputRow, Some(_)) => None,
             (ColumnNaming::AsWritten, _)
-            | (ColumnNaming::JoinRow | ColumnNaming::OutputRow, None) => Some(table_ref.to_owned()),
+            | (
+                ColumnNaming::JoinRow | ColumnNaming::OutputRow | ColumnNaming::JoinWriteRow,
+                None,
+            ) => Some(table_ref.to_owned()),
         }
+    }
+
+    /// The qualifier a join write's merged row keys `table`'s fields by:
+    /// none for the write target, the reference name for any other relation.
+    fn join_write_qualifier(&self, table: &ResolvedTable) -> Option<String> {
+        let is_target = self
+            .first_relation()
+            .is_some_and(|target| target.ref_name() == table.ref_name());
+        (!is_target).then(|| table.ref_name().to_owned())
     }
 }

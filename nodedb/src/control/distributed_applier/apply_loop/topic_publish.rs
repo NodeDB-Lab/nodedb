@@ -84,7 +84,7 @@ async fn apply_topic_publish(
             ReplicatedPublishOutcome::AlreadyApplied => 0,
         };
         zerompk::to_msgpack_vec(&sequence)
-            .map(AppliedWrite::unversioned)
+            .map(AppliedWrite::new)
             .map_err(|error| crate::Error::Serialization {
                 format: "msgpack".into(),
                 detail: format!("topic publish result: {error}"),

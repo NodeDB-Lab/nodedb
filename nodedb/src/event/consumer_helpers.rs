@@ -60,8 +60,9 @@ pub fn maybe_flush_watermark(
     lsn: Lsn,
     dirty: &mut bool,
     last_flush: &mut tokio::time::Instant,
+    interval: std::time::Duration,
 ) {
-    if *dirty && last_flush.elapsed() >= WATERMARK_FLUSH_INTERVAL {
+    if *dirty && last_flush.elapsed() >= interval {
         flush_watermark(shared, store, core_id, lsn);
         *dirty = false;
         *last_flush = tokio::time::Instant::now();

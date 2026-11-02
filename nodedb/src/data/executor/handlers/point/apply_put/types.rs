@@ -76,23 +76,14 @@ pub(in crate::data::executor) struct PointPutOutcome {
     /// caller's submitted body, so it reports the row that landed rather than
     /// the row that was asked for.
     pub stored_value: Vec<u8>,
-    /// System-time key the bitemporal version row (and its versioned index
-    /// entries) were appended at. `Some(t)` on the bitemporal branch, `None`
-    /// on the plain overwrite branch.
-    pub bitemporal_sys_from: Option<i64>,
-    /// `(field, value)` pairs whose versioned index entries this op wrote at
-    /// `bitemporal_sys_from`. Empty when not bitemporal / none written.
-    pub bitemporal_index_tuples: Vec<(String, String)>,
-    /// `(field, value)` pairs this op INSERTED into the plain (non-bitemporal)
-    /// secondary index. Empty on the bitemporal path (which uses
-    /// `bitemporal_index_tuples`). A transactional caller pushes the reverse
-    /// (remove) on rollback. Autocommit callers ignore it.
-    pub secondary_index_added: Vec<(String, String)>,
-    /// `(field, value)` pairs this op REMOVED from the plain (non-bitemporal)
-    /// secondary index because an UPDATE changed the field value. Empty on the
-    /// bitemporal path. A transactional caller re-inserts these on rollback.
-    /// Autocommit callers ignore it.
-    pub secondary_index_removed: Vec<(String, String)>,
+    /// System-time ordinal the row version (and its index entries) were
+    /// appended at.
+    pub version_sys_from: i64,
+    /// `(field, value)` pairs whose index entries this op wrote at
+    /// `version_sys_from`: a live entry for every value the row gained, a
+    /// tombstone for every value it dropped. A transactional caller removes
+    /// them on rollback. Autocommit callers ignore it.
+    pub index_tuples: Vec<(String, String)>,
     /// Undo entries for every in-memory mutation this put made, in the order
     /// it made them: R-tree and `spatial_doc_map` entries, vector nodes and
     /// indexes, and sparse-vector postings. A dropped redb transaction does not reverse
@@ -106,6 +97,11 @@ pub(in crate::data::executor) struct PointPutOutcome {
     /// the exact `ColumnStats` that existed before, `None` removes a key the op
     /// created. Autocommit callers ignore it.
     pub stats_prior: Vec<crate::engine::sparse::stats::StatsPreImage>,
+    /// `Some` when the put installed a version below the row's newest
+    /// version: the index entries it wrote at its successor's ordinal. Such
+    /// a put ran no current-state side effect.
+    pub history:
+        Option<crate::data::executor::handlers::point::history_install::SuccessorIndexWrites>,
 }
 
 /// Map an enforcement check's `ErrorCode` onto the crate's typed `Error`.
@@ -194,6 +190,7 @@ pub(in crate::data::executor) fn map_enforcement_error(e: ErrorCode) -> crate::E
         | ErrorCode::ExpiredBeforeExecution
         | ErrorCode::BadRequest { .. }
         | ErrorCode::TransactionRollback { .. }
+        | ErrorCode::SerializationConflict { .. }
         | ErrorCode::ActiveSqlTransaction { .. }
         | ErrorCode::DependentObjectsExist { .. }
         | ErrorCode::NodeLabelLimit { .. }

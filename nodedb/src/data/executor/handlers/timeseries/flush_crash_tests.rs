@@ -95,6 +95,7 @@ fn declare_hourly(core: &mut CoreLoop) {
         time_key: "timestamp".into(),
         columns: Vec::new(),
         partition_interval: "1h".into(),
+        last_value_cache: false,
     }));
     core.doc_configs.insert(key(), config);
 }

@@ -35,7 +35,7 @@ pub enum Resolved {
     /// EVERY participating collection's vshard is validated at commit rather than
     /// only the plan's collapsed left collection. Empty when there is no
     /// in-transaction base-collection capture (autocommit reads, and shuffle
-    /// AGGREGATE which carries its single read version on the response scalar).
+    /// AGGREGATE which carries its read vShards on the response).
     Gathered(Response, Vec<(VShardId, Lsn)>, Vec<DistributedReadCapture>),
     /// The plan (possibly mutated by catalog materialization or Broadcast
     /// embedding) is self-contained and is dispatched normally.

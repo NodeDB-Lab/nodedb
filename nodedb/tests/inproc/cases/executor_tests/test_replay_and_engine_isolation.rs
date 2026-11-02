@@ -231,6 +231,7 @@ fn mixed_engine_isolation_no_cross_eviction() {
             skip_payload_fetch: false,
             payload_filters: Vec::new(),
             metric: DistanceMetric::L2,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
     assert_eq!(

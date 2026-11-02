@@ -78,12 +78,10 @@ pub struct ShuffleFanoutSink {
     keys: Vec<String>,
     /// `part -> PartState`, one entry per part in `0..num_parts`.
     parts: HashMap<u32, PartState>,
-    /// The read versions observed across every scanned frame fed to this sink,
-    /// one per vShard. A producer scans exactly one collection, so the fold
-    /// holds that collection's observed versions: the comparand the
-    /// coordinator uses for cross-shard OCC read validation of an
-    /// in-transaction distributed aggregate.
-    read_versions: crate::types::ReadVersions,
+    /// The vShards every scanned frame fed to this sink read. The
+    /// coordinator homes an in-transaction distributed aggregate's read-set
+    /// entries on them.
+    read_vshards: crate::types::ReadShards,
 }
 
 /// Parameters for [`ShuffleFanoutSink::new`].
@@ -147,16 +145,16 @@ impl ShuffleFanoutSink {
             producer_count,
             keys,
             parts,
-            read_versions: crate::types::ReadVersions::new(),
+            read_vshards: crate::types::ReadShards::new(),
         }
     }
 
-    /// The read versions observed across every scanned frame fed to this
-    /// sink (empty if no frame carried one). The producer hook reads them
-    /// after the streaming scan completes and reports them on the
-    /// `ShuffleProduceResponse` so the coordinator can validate the read.
-    pub fn observed_read_versions(&self) -> &crate::types::ReadVersions {
-        &self.read_versions
+    /// The vShards every scanned frame fed to this sink read (empty if no
+    /// frame carried one). The producer hook reads them after the streaming
+    /// scan completes and reports them on the `ShuffleProduceResponse` so the
+    /// coordinator can validate the read.
+    pub fn observed_read_vshards(&self) -> &crate::types::ReadShards {
+        &self.read_vshards
     }
 
     /// The `ShufflePushRequest` opener for `part` (shared shape for remote +
@@ -411,17 +409,17 @@ impl nodedb_cluster::ChunkSink for &mut ShuffleFanoutSink {
         &mut self,
         payload: Vec<u8>,
         _watermark_lsn: u64,
-        read_versions: Vec<nodedb_types::ShardVersion>,
+        read_vshards: Vec<u32>,
     ) -> nodedb_cluster::Result<()> {
         // The streaming executor calls this per scan batch. Fold this frame's
-        // read versions so the producer can report what it observed for
-        // cross-shard OCC validation (NOT the core-global watermark). Then
+        // read vShards so the producer can report them (NOT the core-global
+        // watermark). Then
         // hash-partition the batch and buffer/flush per part. A
         // routing/flush failure is surfaced as a cluster error so the streaming
         // executor terminates the scan; the producer hook then `finish`es the
         // fan-out with the error so consumers fail fast (never a silent drop).
-        self.read_versions
-            .merge(&crate::types::ReadVersions::from_wire(&read_versions));
+        self.read_vshards
+            .merge(&crate::types::ReadShards::from_wire(&read_vshards));
         self.route_chunk(payload)
             .await
             .map_err(|e| nodedb_cluster::ClusterError::Storage {

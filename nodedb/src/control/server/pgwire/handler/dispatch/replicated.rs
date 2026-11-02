@@ -28,9 +28,7 @@ impl NodeDbPgHandler {
         let ReplicatedWrite { entry, proposer } = args;
         let request_id = self.next_request_id();
 
-        // `write_versions` are the versions the write stamped. The session
-        // floors its later reads of the written vShards at them.
-        let (payload, write_versions) = crate::control::wal_replication::propose_replicated_entry(
+        let payload = crate::control::wal_replication::propose_replicated_entry(
             &self.state,
             proposer,
             entry,
@@ -49,7 +47,8 @@ impl NodeDbPgHandler {
             watermark_lsn: crate::types::Lsn::ZERO,
             error_code: None,
             stage_vote: None,
-            read_versions: write_versions,
+            // A write scans no vShard a read-set entry names.
+            read_vshards: crate::types::ReadShards::new(),
             write_set: Vec::new(),
         };
 

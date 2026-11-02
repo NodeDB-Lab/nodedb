@@ -21,6 +21,10 @@
 //! - [`membership_sync`]: set a group's voters and learners from routing
 //!   after a snapshot install.
 //! - [`read_index`]: leadership confirmation for linearizable reads.
+//! - [`ordinal_floor`]: each group's system-time floor, read and raised by
+//!   the floor exchange.
+//! - [`sequencer_cut_floor`]: the cut floors of the markers this node
+//!   appends to its sequencer log, which every epoch it mints stays above.
 
 pub mod conf_change;
 pub mod conf_change_gate;
@@ -28,13 +32,16 @@ pub mod core;
 pub mod membership;
 pub mod membership_sync;
 pub mod mount;
+pub mod ordinal_floor;
 pub mod peer_contact;
 pub mod proposals;
 pub mod read_index;
 pub mod rpc_dispatch;
+pub mod sequencer_cut_floor;
 pub mod status;
 
 pub use core::{MultiRaft, MultiRaftReady, SnapshotRequirement};
 pub use mount::{GroupMountSpec, OpenedGroup};
+pub use ordinal_floor::{FloorAnswer, FloorRound};
 pub use peer_contact::PeerAckSample;
 pub use status::{GroupMembership, GroupStatus};

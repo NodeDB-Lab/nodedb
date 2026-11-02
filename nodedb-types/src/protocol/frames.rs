@@ -77,7 +77,6 @@ pub struct NativeResponse {
     /// `MERGE`, `TRUNCATE`, ...). `None` when the statement produced no DML
     /// outcome.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[msgpack(default)]
     pub command: Option<String>,
     /// WAL LSN watermark at time of computation.
     pub watermark_lsn: u64,
@@ -88,20 +87,14 @@ pub struct NativeResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth: Option<AuthResponse>,
     /// Advisory warnings (e.g. password expiry grace period, must_change_password).
-    /// Empty in the common case; `#[serde(default)]` and `#[msgpack(default)]`
-    /// keep this additive and backward-compatible with older clients.
+    /// Empty in the common case.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[msgpack(default)]
     pub warnings: Vec<String>,
 }
 
 /// Error details in a response.
 ///
-/// Encoded as a MessagePack map rather than an array so that fields can be
-/// added without invalidating the frames older peers already understand —
-/// the same reason [`NativeResponse`] is a map. An array representation has
-/// no field names, so a decoder cannot tell a missing optional field from a
-/// truncated frame and every addition is a breaking change.
+/// Encoded as a MessagePack map, like [`NativeResponse`].
 #[derive(
     Debug, Clone, Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack,
 )]
@@ -118,23 +111,18 @@ pub struct ErrorPayload {
     /// idempotency key both render as `23505`, and everything unclassified
     /// renders as `XX000` — so it cannot carry the classification a client
     /// needs to reconstruct a typed error. This field is the authoritative
-    /// one for that. `0` means the sending server predates this field, and a
-    /// client must fall back to a generic error rather than guess.
-    /// `#[serde(default)]` + `#[msgpack(default)]` keep it additive and
-    /// backward-compatible with peers that never send it.
+    /// one for that. `0` means the server classified no code, and a client
+    /// must fall back to a generic error rather than guess.
     #[serde(default, skip_serializing_if = "is_zero")]
-    #[msgpack(default)]
     pub ndb_code: u16,
     /// The structured details the server held: the collection, gate, or
     /// document the error names. `None` when the server had none to send.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[msgpack(default)]
     pub details: Option<crate::error::ErrorDetails>,
     /// The typed error that caused this one, when the server held one: the
     /// Data-Plane refusal behind a phase failure, say. `None` when there is
     /// no cause to report.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[msgpack(default)]
     pub cause: Option<super::error_cause::ErrorCausePayload>,
 }
 
@@ -390,23 +378,15 @@ mod tests {
     }
 
     #[test]
-    fn error_payload_without_numeric_code_still_decodes() {
-        // Hand-rolled 2-key map: exactly what a peer built before the numeric
-        // code was added sends. It must decode with `ndb_code == 0` rather
-        // than fail, which is what makes the field additive.
-        let mut legacy = vec![0x82u8];
+    fn error_payload_without_numeric_code_is_refused() {
+        // Hand-rolled 2-key map that lacks `ndb_code`, `details` and `cause`.
+        let mut partial = vec![0x82u8];
         for (key, value) in [("code", "42P01"), ("message", "boom")] {
-            legacy.push(0xA0 | key.len() as u8);
-            legacy.extend_from_slice(key.as_bytes());
-            legacy.push(0xA0 | value.len() as u8);
-            legacy.extend_from_slice(value.as_bytes());
+            partial.push(0xA0 | key.len() as u8);
+            partial.extend_from_slice(key.as_bytes());
+            partial.push(0xA0 | value.len() as u8);
+            partial.extend_from_slice(value.as_bytes());
         }
-        let decoded: ErrorPayload = zerompk::from_msgpack(&legacy).expect("legacy frame decodes");
-        assert_eq!(decoded.code, "42P01");
-        assert_eq!(decoded.message, "boom");
-        assert_eq!(
-            decoded.ndb_code, 0,
-            "an absent numeric code must read as the 'not carried' sentinel"
-        );
+        assert!(zerompk::from_msgpack::<ErrorPayload>(&partial).is_err());
     }
 }

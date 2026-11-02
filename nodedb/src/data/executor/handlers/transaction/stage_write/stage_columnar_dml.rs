@@ -3,12 +3,14 @@
 //! Statement-time staging for columnar predicate DML —
 //! `ColumnarOp::Delete` (`DELETE ... WHERE <predicate>`) and
 //! `ColumnarOp::Update` (`UPDATE ... SET col = ... WHERE <predicate>`) —
-//! issued inside a `BEGIN..COMMIT` block.
+//! issued inside a `BEGIN..COMMIT` block. The predicate matches the rows the
+//! block's snapshot sees (the plan's `system_time`), with the block's staged
+//! writes folded in.
 //!
 //! Mirrors the Document predicate-DML staging (`stage_bulk_delete` /
 //! `stage_bulk_update`) onto the columnar overlay: the predicate is evaluated
-//! at statement time against the CURRENT in-transaction view (committed
-//! memtable rows folded with this transaction's own already-staged overlay
+//! at statement time against the in-transaction view (the committed rows at
+//! the match's cut folded with this transaction's own already-staged overlay
 //! via [`CoreLoop::merge_overlay_into_columnar_scan`]), so a same-transaction
 //! scan observes the delete/update (read-your-own-writes) and the statement
 //! reports its real affected-row count immediately.
@@ -39,10 +41,10 @@
 //! transaction's redo record (`resolve::columnar_image`). The first statement
 //! that stages a base row records that row's primary key
 //! (`stage_columnar_base_key`), so the redo names the base row a key-changing
-//! UPDATE or a DELETE removes. The staged set is resolved from the current
-//! rows, flushed and in the memtable (plus overlay), the scope the
-//! autocommit handlers (`execute_columnar_delete` / `execute_columnar_update`)
-//! match against.
+//! UPDATE or a DELETE removes. The staged set is resolved from the rows at
+//! the match's cut, flushed and in the memtable (plus overlay). At `Current`
+//! that is the set the autocommit handlers (`execute_columnar_delete` /
+//! `execute_columnar_update`) match against.
 
 use crate::data::executor::core_loop::bitemporal_time::raised_above;
 use crate::data::executor::handlers::columnar_write::system_stamp::stored_stamp;
@@ -55,6 +57,7 @@ use crate::bridge::envelope::{ErrorCode, Response};
 use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::columnar_assignments::ColumnarAssignments;
+use crate::data::executor::handlers::columnar_read::block_predicates::block_predicates;
 use crate::data::executor::handlers::columnar_read::convert::row_to_value;
 use crate::data::executor::handlers::columnar_read::filter::row_matches_filters;
 use crate::data::executor::handlers::columnar_resolve::CurrentColumnarRow;
@@ -92,6 +95,9 @@ pub(in crate::data::executor) struct StageColumnarDeleteParams<'a> {
     /// Compiled row-level-security WRITE predicate carried by the plan,
     /// decided against the pre-image of every row this would remove.
     pub rls_write_check: &'a nodedb_types::RlsWriteCheck,
+    /// The cut BASE is matched at: `None` for the current rows, `Some` for
+    /// the block's snapshot ordinal.
+    pub system_as_of: Option<i64>,
 }
 
 /// Routing identity + payload for one staged columnar predicate `UPDATE`.
@@ -107,6 +113,8 @@ pub(in crate::data::executor) struct StageColumnarUpdateParams<'a> {
     /// Compiled row-level-security WRITE predicate carried by the plan,
     /// decided against each row's post-image once the assignments are applied.
     pub rls_write_check: &'a nodedb_types::RlsWriteCheck,
+    /// See `StageColumnarDeleteParams::system_as_of`.
+    pub system_as_of: Option<i64>,
 }
 
 impl CoreLoop {
@@ -125,6 +133,7 @@ impl CoreLoop {
             collection,
             filter_bytes,
             rls_write_check,
+            system_as_of,
         } = params;
 
         let coll_key = (
@@ -138,11 +147,17 @@ impl CoreLoop {
             Err(resp) => return resp,
         };
 
-        let affected_rows =
-            match self.columnar_txn_matching_rows(task, tid, txn_id, collection, filter_bytes) {
-                Ok(rows) => rows,
-                Err(resp) => return resp,
-            };
+        let affected_rows = match self.columnar_txn_matching_rows(
+            task,
+            tid,
+            txn_id,
+            collection,
+            filter_bytes,
+            system_as_of,
+        ) {
+            Ok(rows) => rows,
+            Err(resp) => return resp,
+        };
 
         // The image a delete is governed by is the row it removes. Decided for
         // the whole matching set before the first tombstone, so a refusal
@@ -193,6 +208,7 @@ impl CoreLoop {
             filter_bytes,
             updates,
             rls_write_check,
+            system_as_of,
         } = params;
 
         let coll_key = (
@@ -209,11 +225,17 @@ impl CoreLoop {
             Err(resp) => return resp,
         };
 
-        let affected_rows =
-            match self.columnar_txn_matching_rows(task, tid, txn_id, collection, filter_bytes) {
-                Ok(rows) => rows,
-                Err(resp) => return resp,
-            };
+        let affected_rows = match self.columnar_txn_matching_rows(
+            task,
+            tid,
+            txn_id,
+            collection,
+            filter_bytes,
+            system_as_of,
+        ) {
+            Ok(rows) => rows,
+            Err(resp) => return resp,
+        };
 
         // Resolve every post-image and let the policy decide all of them before
         // the first staged put: the post-image is what the policy governs, and
@@ -312,6 +334,7 @@ impl CoreLoop {
         txn_id: TxnId,
         collection: &str,
         filter_bytes: &[u8],
+        system_as_of: Option<i64>,
     ) -> Result<Vec<(u32, Vec<Value>)>, Response> {
         let schema = self.columnar_engine_schema(task, tid, collection)?;
 
@@ -337,15 +360,21 @@ impl CoreLoop {
             collection.to_string(),
         );
 
-        // BASE: current rows, flushed and in the memtable, matching the
+        // BASE: the rows visible at `system_as_of` (the block's snapshot, or
+        // the current rows), flushed and in the memtable, matching the
         // predicate, carried as the shared `ColumnarMatchedRow` tuple the
         // overlay merge consumes. A missing engine visits no row, so the only
         // affected rows are overlay-only staged inserts, which the merge
         // appends below.
         let mut matched: Vec<ColumnarMatchedRow> = Vec::new();
         let crs = self.crs_context();
-        let base =
-            self.for_each_current_columnar_row(&coll_key, "columnar_txn_dml_resolve", |row| {
+        let predicates = block_predicates(&schema, &filter_predicates, &[]);
+        let base = self.for_each_columnar_row_at(
+            &coll_key,
+            system_as_of,
+            &predicates,
+            "columnar_txn_dml_resolve",
+            |row| {
                 let CurrentColumnarRow { surrogate, values } = row;
                 if !filter_predicates.is_empty()
                     && !row_matches_filters(&values, &schema, &filter_predicates, &crs)?
@@ -355,7 +384,8 @@ impl CoreLoop {
                 let obj = row_to_value(&values, &schema);
                 matched.push((surrogate, values, obj));
                 Ok(())
-            });
+            },
+        );
         if let Err(e) = base {
             return Err(self.response_error(task, e));
         }

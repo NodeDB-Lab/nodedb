@@ -33,7 +33,7 @@ use futures::future::join_all;
 
 use crate::bridge::envelope::{Payload, PhysicalPlan, Response};
 use crate::control::server::exchange::core_outcome::{
-    classify_core_response, reported_versions, require_every_core,
+    classify_core_response, reported_vshards, require_every_core,
 };
 use crate::control::server::exchange::gather::eager_dispatch_to_all_cores;
 use crate::control::server::payload_merge::{encode_msgpack_array, extract_msgpack_elements};
@@ -77,8 +77,8 @@ pub struct MatchBroadcastOutcome {
     pub partial: bool,
     /// The highest watermark any core served the MATCH at.
     pub watermark_lsn: crate::types::Lsn,
-    /// The versions every core reported, one per vShard it holds.
-    pub read_versions: crate::types::ReadVersions,
+    /// The vShards every core read: each core's hosted vShards.
+    pub read_vshards: crate::types::ReadShards,
 }
 
 /// Locate a top-level map value by key in a msgpack map payload.
@@ -110,20 +110,16 @@ pub(crate) struct DecodedMatchEnvelope {
     pub(crate) row_elements: Vec<Vec<u8>>,
     /// Cross-shard frontier entries decoded from the `frontier` map value.
     pub(crate) frontier: Vec<UnresolvedExpansion>,
-    /// Variable-length truncation resume cursors decoded from the optional
-    /// `resume` map value. Empty when the key is absent (backward-compat with
-    /// pre-resume 2-key envelopes from older peers).
+    /// Variable-length truncation resume cursors decoded from the `resume`
+    /// map value.
     pub(crate) resume: Vec<VarLenResume>,
 }
 
 /// Decode one core's `{rows, frontier, resume}` envelope.
 ///
-/// The `resume` key is OPTIONAL on decode: an older-version peer (or the
-/// historic 2-key envelope) that omits it decodes to an empty cursor vec, so a
-/// mixed-version cluster never breaks. `rows` and `frontier` remain mandatory.
-///
-/// Malformed bytes (not a map, missing mandatory keys, undecodable frontier or
-/// resume) surface as a typed [`crate::Error`] rather than a panic.
+/// All three keys are mandatory. Malformed bytes (not a map, missing keys,
+/// undecodable frontier or resume) surface as a typed [`crate::Error`]
+/// rather than a panic.
 fn decode_match_envelope(payload: &[u8]) -> crate::Result<DecodedMatchEnvelope> {
     let rows_bytes =
         map_value_raw(payload, MATCH_ENVELOPE_ROWS_KEY).ok_or_else(|| crate::Error::Codec {
@@ -139,16 +135,14 @@ fn decode_match_envelope(payload: &[u8]) -> crate::Result<DecodedMatchEnvelope> 
         zerompk::from_msgpack(frontier_bytes).map_err(|e| crate::Error::Codec {
             detail: format!("match envelope: invalid frontier: {e}"),
         })?;
-    // Backward-compat: a missing `resume` key (older peer / pre-resume 2-key
-    // envelope) decodes to an empty cursor vec, never an error.
-    let resume: Vec<VarLenResume> = match map_value_raw(payload, MATCH_ENVELOPE_RESUME_KEY) {
-        Some(resume_bytes) => {
-            zerompk::from_msgpack(resume_bytes).map_err(|e| crate::Error::Codec {
-                detail: format!("match envelope: invalid resume: {e}"),
-            })?
-        }
-        None => Vec::new(),
-    };
+    let resume_bytes =
+        map_value_raw(payload, MATCH_ENVELOPE_RESUME_KEY).ok_or_else(|| crate::Error::Codec {
+            detail: "match envelope: missing or malformed 'resume' field".into(),
+        })?;
+    let resume: Vec<VarLenResume> =
+        zerompk::from_msgpack(resume_bytes).map_err(|e| crate::Error::Codec {
+            detail: format!("match envelope: invalid resume: {e}"),
+        })?;
     Ok(DecodedMatchEnvelope {
         row_elements,
         frontier,
@@ -165,8 +159,7 @@ pub struct UnwrappedMatchEnvelope {
     pub(crate) rows_payload: Payload,
     /// Cross-shard frontier entries decoded from the envelope.
     pub(crate) frontier: Vec<UnresolvedExpansion>,
-    /// Variable-length truncation resume cursors. Empty when nothing truncated
-    /// or when the envelope is from a pre-resume peer (backward-compat).
+    /// Variable-length truncation resume cursors. Empty when nothing truncated.
     pub(crate) resume: Vec<VarLenResume>,
 }
 
@@ -233,6 +226,7 @@ pub async fn broadcast_match_to_all_cores(
     crate::control::read_cut::await_read_cut(
         state,
         &plan,
+        &crate::control::read_cut::cut_read_groups(state, database_id, &plan, None)?,
         crate::control::server::shared::session::StatementDeadline::of_statement(state),
     )
     .await?;
@@ -279,7 +273,7 @@ pub async fn broadcast_match_to_all_cores(
         });
 
     let results: Vec<crate::Result<Response>> = join_all(response_futures).await;
-    let read_versions = reported_versions(&results);
+    let read_vshards = reported_vshards(&results);
     // `NotFound` is an empty CSR slice on that core. Any other core error fails
     // the MATCH: rows from the surviving cores are not the full answer.
     let answered = require_every_core(results.into_iter().map(classify_core_response))?;
@@ -317,7 +311,7 @@ pub async fn broadcast_match_to_all_cores(
         resume,
         partial,
         watermark_lsn,
-        read_versions,
+        read_vshards,
     })
 }
 
@@ -442,26 +436,20 @@ mod tests {
         assert_eq!(decoded_raw.resume[0].source_row, cursor.source_row);
     }
 
-    /// Backward-compat: an OLD-style 2-key `{rows, frontier}` envelope (no
-    /// `resume` key) still decodes cleanly, with the resume cursors defaulting
-    /// to empty — a mixed-version cluster never breaks.
+    /// A 2-key `{rows, frontier}` envelope with no `resume` key is a typed error.
     #[test]
-    fn legacy_two_key_envelope_decodes_resume_as_empty() {
+    fn envelope_without_resume_is_typed_error() {
         let rows_array =
             crate::engine::graph::pattern::executor::rows_to_msgpack(&[row(&[("a", "x")])])
                 .unwrap();
         let frontier_bytes = zerompk::to_msgpack_vec(&Vec::<UnresolvedExpansion>::new()).unwrap();
 
-        // Hand-roll the legacy 2-key map exactly as the pre-resume encoder did.
         let mut buf = Vec::new();
         write_map_header(&mut buf, 2);
         write_kv_raw(&mut buf, MATCH_ENVELOPE_ROWS_KEY, &rows_array);
         write_kv_raw(&mut buf, MATCH_ENVELOPE_FRONTIER_KEY, &frontier_bytes);
 
-        let decoded = decode_match_envelope(&buf).unwrap();
-        assert_eq!(decoded.row_elements.len(), 1);
-        assert!(decoded.frontier.is_empty());
-        assert!(decoded.resume.is_empty());
+        assert!(decode_match_envelope(&buf).is_err());
     }
 
     /// Malformed bytes (not a map) surface a typed error, never a panic.

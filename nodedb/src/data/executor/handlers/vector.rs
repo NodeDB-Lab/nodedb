@@ -222,18 +222,20 @@ impl CoreLoop {
         // once the whole record landed, so a rollback finds its inserts in
         // the growing segment.
         let defer_seal = self.recording_redo_undo();
+        // The node's system time: the node it replaces ends there, so a read
+        // at an earlier cut still finds the replaced vector.
+        let ordinal = self.bitemporal_ordinal();
         match self.get_or_create_vector_index(database_id, tid, collection, dim, field_name) {
             Ok(collection_ref) => {
-                if let Err(e) = collection_ref.insert_with_surrogate(vector.to_vec(), surrogate) {
+                if let Err(e) = collection_ref.insert_at(vector.to_vec(), surrogate, ordinal) {
                     return self.response_error(task, crate::Error::from(e));
                 }
                 if !defer_seal {
                     self.settle_vector_collection(&index_key);
                 }
                 self.checkpoint_coordinator.mark_dirty("vector", 1);
-                // Record this write's version so cross-shard OCC read-set
-                // validation (predicate reads always record the collection
-                // floor) sees this insert.
+                // Record this write, so the newest-ordinal cache commit
+                // validation reads holds this insert.
                 self.note_surrogate_write(task, tid, collection, surrogate.as_u32());
                 self.response_ok(task)
             }
@@ -381,8 +383,6 @@ impl CoreLoop {
 mod tests {
     use super::*;
     use crate::bridge::envelope::{PhysicalPlan, Priority, Request};
-    use crate::data::executor::core_loop::write_index::WriteKey;
-    use crate::data::executor::core_loop::write_index::tests::local;
     use crate::types::{Lsn, RequestId, TraceId, VShardId};
     use nodedb_bridge::buffer::RingBuffer;
     use nodedb_physical::physical_plan::VectorOp;
@@ -440,6 +440,7 @@ mod tests {
                 ann_options: Default::default(),
                 skip_payload_fetch: false,
                 payload_filters: Vec::new(),
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             deadline: Instant::now() + Duration::from_secs(5),
             priority: Priority::Normal,
@@ -454,7 +455,7 @@ mod tests {
             wal_lsn: Some(Lsn::new(lsn)),
             resolved_now_ms: None,
             commit_hlc: None,
-            entry_version: None,
+            system_ordinal: None,
             admission: crate::bridge::envelope::Admission::Exempt(
                 crate::bridge::envelope::ExemptReason::Read,
             ),
@@ -462,7 +463,7 @@ mod tests {
     }
 
     #[test]
-    fn vector_insert_populates_write_version_index_surrogate_and_floor() {
+    fn vector_insert_notes_its_write() {
         let mut h = make_core();
         let task = make_task_with_lsn(11);
         let surrogate = Surrogate::new(42);
@@ -479,32 +480,10 @@ mod tests {
         });
         assert_eq!(response.status, crate::bridge::envelope::Status::Ok);
 
-        let key = WriteKey {
-            vshard: VShardId::new(0),
-            db: DatabaseId::DEFAULT,
-            tenant: TenantId::new(1),
-            collection: Box::from("docs"),
-            key: crate::data::executor::core_loop::write_index::KeyRepr::Surrogate(
-                surrogate.as_u32(),
-            ),
-        };
         assert_eq!(
-            h.core.write_index.key_version(&key),
-            Some(local(11)),
-            "vector insert must populate the per-key (surrogate) write-version index"
-        );
-
-        let coll_key = crate::data::executor::core_loop::write_index::CollKey {
-            vshard: VShardId::new(0),
-            db: DatabaseId::DEFAULT,
-            tenant: TenantId::new(1),
-            collection: Box::from("docs"),
-        };
-        assert_eq!(
-            h.core.write_index.collection_version(&coll_key),
-            Some(local(11)),
-            "vector insert must advance the collection write version \
-             (predicate reads validate against the floor)"
+            h.core.watermark,
+            Lsn::new(11),
+            "vector insert must note its write"
         );
     }
 

@@ -67,6 +67,17 @@ impl From<crate::engine::kv::UnboundKvWrite> for Error {
     }
 }
 
+/// A KV restore whose ended versions overlap the versions the key holds. The
+/// restore is refused as a whole, and nothing of it is written.
+impl From<crate::engine::kv::KvHistoryOverlap> for Error {
+    fn from(e: crate::engine::kv::KvHistoryOverlap) -> Self {
+        Error::RejectedPrevalidation {
+            constraint: "kv_history_overlap".into(),
+            reason: e.to_string(),
+        }
+    }
+}
+
 /// A qualified collection name that does not carry its database's qualifier
 /// reached a placement or surrogate path. Every qualified name is built by
 /// `QualifiedCollection::new`, so this is an internal invariant break.

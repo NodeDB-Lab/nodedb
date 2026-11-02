@@ -52,7 +52,7 @@ use crate::bridge::envelope::PhysicalPlan;
 use crate::control::cluster::snapshot_install::{
     CoreMap, CoreShares, SettleStep, SnapshotInstallError, append_install_barrier,
     append_install_marker, clear_targets_per_core, group_collections, install_on_every_core,
-    split_by_core, version_floor,
+    split_by_core,
 };
 use crate::control::state::SharedState;
 use crate::types::{SurrogateBindEntry, TenantDataSnapshot, TenantId, VShardId};
@@ -189,7 +189,6 @@ impl DataPlaneSnapshotApplier {
         // vShards. A store with none of them stays as it is.
         let mut vshards: Vec<u32> = group_vshards.iter().copied().collect();
         vshards.sort_unstable();
-        let version_floor = version_floor(&self.shared, group_id, &vshards, cut_index);
 
         let plans = per_core
             .into_iter()
@@ -208,7 +207,6 @@ impl DataPlaneSnapshotApplier {
                     replace_mode: true,
                     collections_to_clear,
                     group_vshards: vshards.clone(),
-                    version_floor: version_floor.clone(),
                 }))
             })
             .collect::<Result<Vec<_>, SnapshotInstallError>>()?;
@@ -510,7 +508,10 @@ mod tests {
         let watcher = shared.applied_index_watcher(METADATA_GROUP_ID);
         let floor = watcher.current() + 3;
         let snapshot = TenantDataSnapshot {
-            documents: vec![("1:1:recreated:doc1".to_string(), b"new".to_vec())],
+            documents_versioned: vec![(
+                "1:1:recreated:doc1\x0000000000000000000001".to_string(),
+                b"new".to_vec(),
+            )],
             metadata_floor: floor,
             group_calvin: Some(crate::types::GroupCalvinCut::default()),
             ..Default::default()

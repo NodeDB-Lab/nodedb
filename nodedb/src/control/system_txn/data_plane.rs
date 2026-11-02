@@ -53,6 +53,7 @@ impl TxnDataPlane for SystemTxnDataPlane<'_> {
                     wal_lsn: None,
                     resolved_now_ms: None,
                     minted: None,
+                    system_ordinal: None,
                 },
             )
             .await

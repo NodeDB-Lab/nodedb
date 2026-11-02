@@ -82,7 +82,7 @@ async fn handle_slice(
         rows_msgpack: exec.rows,
         truncated,
         truncated_before_horizon: exec.truncated_before_horizon,
-        read_versions: exec.read_versions,
+        read_vshards: exec.read_vshards,
     };
     serialise(resp)
 }
@@ -103,7 +103,7 @@ async fn handle_agg(
         shard_id: local_vshard_id,
         partials: exec.partials,
         truncated_before_horizon: exec.truncated_before_horizon,
-        read_versions: exec.read_versions,
+        read_vshards: exec.read_vshards,
     };
     serialise(resp)
 }
@@ -124,7 +124,7 @@ async fn handle_elementwise(
         shard_id: local_vshard_id,
         rows_msgpack: exec.rows,
         truncated_before_horizon: exec.truncated_before_horizon,
-        read_versions: exec.read_versions,
+        read_vshards: exec.read_vshards,
     };
     serialise(resp)
 }
@@ -305,12 +305,9 @@ mod tests {
     };
     use super::handle_array_shard_rpc;
 
-    /// The version a stub shard read reports for its vShard.
-    fn stub_versions(vshard: u32) -> Vec<nodedb_types::ShardVersion> {
-        vec![nodedb_types::ShardVersion {
-            vshard,
-            version: nodedb_types::WriteVersion::logged(1, 7),
-        }]
+    /// The vShards a stub shard read reports: its own.
+    fn stub_vshards(vshard: u32) -> Vec<u32> {
+        vec![vshard]
     }
 
     /// Mock executor that returns a fixed set of row bytes for slice,
@@ -334,7 +331,7 @@ mod tests {
             Ok(ArraySliceExec {
                 rows: self.rows.clone(),
                 truncated_before_horizon: self.truncated_before_horizon,
-                read_versions: stub_versions(local_vshard_id),
+                read_vshards: stub_vshards(local_vshard_id),
             })
         }
 
@@ -355,7 +352,7 @@ mod tests {
             Ok(ArrayAggExec {
                 partials: self.partials.clone(),
                 truncated_before_horizon: self.truncated_before_horizon,
-                read_versions: stub_versions(local_vshard_id),
+                read_vshards: stub_vshards(local_vshard_id),
             })
         }
 
@@ -367,7 +364,7 @@ mod tests {
             Ok(super::super::local_executor::ArrayElementwiseExec {
                 rows: self.rows.clone(),
                 truncated_before_horizon: self.truncated_before_horizon,
-                read_versions: stub_versions(local_vshard_id),
+                read_vshards: stub_vshards(local_vshard_id),
             })
         }
 
@@ -485,7 +482,7 @@ mod tests {
         assert_eq!(resp.shard_id, 3);
         assert_eq!(resp.rows_msgpack, vec![row]);
         assert!(resp.truncated_before_horizon);
-        assert_eq!(resp.read_versions, stub_versions(3));
+        assert_eq!(resp.read_vshards, stub_vshards(3));
     }
 
     #[tokio::test]
@@ -581,14 +578,14 @@ mod tests {
         let slice: ArrayShardSliceResp =
             zerompk::from_msgpack(&slice).expect("response should deserialise");
         assert!(slice.rows_msgpack.is_empty());
-        assert_eq!(slice.read_versions, stub_versions(5));
+        assert_eq!(slice.read_vshards, stub_vshards(5));
 
         let agg = handle_array_shard_rpc(ARRAY_SHARD_AGG_REQ, 5, &make_agg_req_bytes(), &executor)
             .await
             .expect("agg handler should succeed");
         let agg: ArrayShardAggResp =
             zerompk::from_msgpack(&agg).expect("response should deserialise");
-        assert_eq!(agg.read_versions, stub_versions(5));
+        assert_eq!(agg.read_vshards, stub_vshards(5));
     }
 
     #[tokio::test]

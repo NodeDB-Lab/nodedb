@@ -104,3 +104,78 @@ async fn a_rolled_back_clone_write_leaves_nothing() {
         vec![row("p1", "10"), row("p2", "20")]
     );
 }
+
+const PASSWORD: &str = "clone-copyup-snapshot-3";
+
+/// The first column of every row `sql` returns.
+async fn column(client: &tokio_postgres::Client, sql: &str) -> Vec<String> {
+    client
+        .simple_query(sql)
+        .await
+        .unwrap_or_else(|e| panic!("{sql}: {e}"))
+        .iter()
+        .filter_map(|message| match message {
+            tokio_postgres::SimpleQueryMessage::Row(row) => row.get(0).map(str::to_string),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A concurrent copy-up installs the source row's own version in the clone.
+/// A block that read the row through the source before the copy-up keeps
+/// reading the same row from its snapshot, and commits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_concurrent_copy_up_keeps_a_block_snapshot_stable() {
+    let server = TestServer::start().await;
+    clone_with_two_rows(&server, "cws_src", "cws_clone").await;
+    server
+        .exec(&format!("CREATE USER cws_writer PASSWORD '{PASSWORD}'"))
+        .await
+        .expect("CREATE USER");
+    // The copy-up reads the source, so the writer needs both databases.
+    for database in ["cws_clone", "cws_src"] {
+        server
+            .exec(&format!("GRANT ALL ON DATABASE {database} TO cws_writer"))
+            .await
+            .unwrap_or_else(|e| panic!("GRANT ON {database}: {e}"));
+    }
+    let (writer, _connection) = server
+        .connect_as("cws_writer", PASSWORD)
+        .await
+        .expect("second connection");
+    writer
+        .simple_query("USE DATABASE cws_clone")
+        .await
+        .expect("USE the clone");
+
+    let price = "SELECT price FROM products WHERE key = 'p1'";
+    server.exec("BEGIN").await.unwrap();
+    assert_eq!(
+        column(&server.client, price).await,
+        ["10"],
+        "the block reads the source row through the clone"
+    );
+
+    // The autocommit UPDATE copies `p1` up into the clone, then writes it.
+    writer
+        .simple_query("UPDATE products SET price = '99' WHERE key = 'p1'")
+        .await
+        .expect("autocommit update of a source-only row");
+
+    assert_eq!(
+        column(&server.client, price).await,
+        ["10"],
+        "the copy-up keeps the row at its snapshot: same value, same version"
+    );
+    server.exec("COMMIT").await.unwrap();
+
+    assert_eq!(
+        prices(&server, "cws_clone").await,
+        vec![row("p1", "99"), row("p2", "20")]
+    );
+    assert_eq!(
+        prices(&server, "cws_src").await,
+        vec![row("p1", "10"), row("p2", "20")],
+        "the source never changes"
+    );
+}

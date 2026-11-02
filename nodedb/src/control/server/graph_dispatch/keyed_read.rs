@@ -79,6 +79,7 @@ pub async fn read_on_vshard(
             crate::control::read_cut::await_read_cut(
                 state,
                 &plan,
+                &crate::control::read_cut::cut_read_groups(state, database_id, &plan, None)?,
                 crate::control::server::shared::session::StatementDeadline::of_statement(state),
             )
             .await?;
@@ -91,7 +92,7 @@ pub async fn read_on_vshard(
                 txn_id,
             )
             .await?;
-            reads.note([vshard_id], &response.read_versions);
+            reads.note([vshard_id]);
             response.payload
         }
         RouteDecision::Remote {
@@ -122,7 +123,7 @@ pub async fn read_on_vshard(
                 user_roles: &[],
             })
             .await?;
-            reads.note([vshard_id], &outcome.read_versions);
+            reads.note([vshard_id]);
             let payloads = outcome.payloads;
             Payload::from_vec(match payloads.len() {
                 1 => payloads.into_iter().next().unwrap_or_default(),

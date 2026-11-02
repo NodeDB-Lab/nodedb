@@ -31,6 +31,20 @@ impl InvertedIndex {
         collection: &str,
         surrogate: Surrogate,
     ) -> crate::Result<()> {
+        self.remove_document_at(database_id, tid, collection, surrogate, super::UNVERSIONED)
+    }
+
+    /// [`Self::remove_document`] at system-time ordinal `ordinal`: the
+    /// document's indexed version ends there, so a read at an earlier cut
+    /// still matches it.
+    pub fn remove_document_at(
+        &self,
+        database_id: u64,
+        tid: TenantId,
+        collection: &str,
+        surrogate: Surrogate,
+        ordinal: i64,
+    ) -> crate::Result<()> {
         let db = self.inner.backend().db();
         let write_txn = db.begin_write().map_err(|e| inverted_err("write txn", e))?;
         self.remove_document_in_txn(
@@ -40,6 +54,7 @@ impl InvertedIndex {
                 tid,
                 collection,
                 surrogate,
+                ordinal,
             },
         )?;
         write_txn
@@ -82,6 +97,8 @@ impl InvertedIndex {
         let Some(old_len) = prior_doc_length(txn, doc, index)? else {
             return Ok(());
         };
+        // The version's tokens leave for the history before its postings go.
+        self.end_text_version_in_txn(txn, doc, index, old_len)?;
 
         // The stored term set names exactly the lists this document occupies;
         // the fallback scan covers a document whose term set row is missing.

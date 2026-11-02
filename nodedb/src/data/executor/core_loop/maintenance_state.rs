@@ -50,6 +50,10 @@ pub(in crate::data::executor) struct MaintenanceState {
     /// tick answers each one once the fold pass caught up, or at its
     /// deadline.
     pub(in crate::data::executor) cagg_read_waiters: Vec<CaggReadWaiter>,
+
+    /// The history purge below the cleanup horizon, and the commit snapshot
+    /// window every replica checks.
+    pub(in crate::data::executor) version_purge: super::version_purge::VersionPurgeState,
 }
 
 impl MaintenanceState {
@@ -64,6 +68,7 @@ impl MaintenanceState {
             reindex_waiters: Vec::new(),
             cagg_refresh_waiters: Vec::new(),
             cagg_read_waiters: Vec::new(),
+            version_purge: super::version_purge::VersionPurgeState::new(),
         }
     }
 }

@@ -107,6 +107,9 @@ impl CoreLoop {
         // point too, so a restart seeds the memtable with every column a
         // committed partition's records added.
         write_ts_schema(&segment_dir, mt.schema())?;
+        // The catalog lands before the commit point too, so it names the
+        // series of every row a committed partition stores.
+        self.persist_ts_series_catalog(&key)?;
         let ts_kek = self.segment_keks.ts_segment_kek.as_ref();
 
         // One partition per interval the rows fall in. Several commit together

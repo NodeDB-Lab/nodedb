@@ -282,6 +282,7 @@ async fn search_probe(node: &TestClusterNode, query: Vec<f32>) -> Result<Vec<u32
         ann_options: nodedb_types::VectorAnnOptions::default(),
         skip_payload_fetch: true,
         payload_filters: Vec::new(),
+        system_time: nodedb_types::SystemTimeScope::Current,
     });
     let resp = execute_on_node(node, plan).await;
     if !resp.success {

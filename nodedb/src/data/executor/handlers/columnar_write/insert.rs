@@ -30,6 +30,10 @@ pub(in crate::data::executor) struct ColumnarInsertParams<'a> {
     /// System-time ordinal of the first row of a bitemporal insert, from the
     /// plan or the WAL record (`ColumnarOp::Insert::system_from`).
     pub system_from: Option<i64>,
+    /// The stamps of each row of a RESTORE re-issue, from the plan or the
+    /// WAL record (`ColumnarOp::Insert::restored_versions`). Empty for every
+    /// other insert.
+    pub restored_versions: &'a [nodedb_types::columnar::RestoredVersion],
     /// Compiled row-level-security WRITE predicate carried by the plan.
     pub rls_write_check: &'a nodedb_types::RlsWriteCheck,
     /// Projection for a `RETURNING` clause, when the statement carried one.
@@ -73,6 +77,7 @@ impl CoreLoop {
             schema_bytes,
             provenance,
             system_from,
+            restored_versions,
             rls_write_check,
             returning,
             rls_filters,
@@ -168,6 +173,7 @@ impl CoreLoop {
                 on_conflict_updates,
                 surrogates,
                 ndb_rows: &ndb_rows,
+                restored_versions,
                 rls_write_check,
                 collect_stored_rows: returning.is_some(),
             },
@@ -184,9 +190,22 @@ impl CoreLoop {
 
         // Populate R-tree for geometry columns so spatial predicates work.
         // The SRID check above ran on the same rows, so this changes the
-        // index or fails before touching it.
+        // index or fails before touching it. A restore indexes only the open
+        // versions: the R-tree holds each key's current geometry.
+        let open_rows: Vec<nodedb_types::Value>;
+        let indexed_rows: &[nodedb_types::Value] = if restored_versions.is_empty() {
+            &ndb_rows
+        } else {
+            open_rows = ndb_rows
+                .iter()
+                .zip(restored_versions)
+                .filter(|(_, version)| version.sys_to.is_none())
+                .map(|(row, _)| row.clone())
+                .collect();
+            &open_rows
+        };
         let geometry_delta =
-            match self.index_columnar_geometry_columns(task, &schema, collection, &ndb_rows) {
+            match self.index_columnar_geometry_columns(task, &schema, collection, indexed_rows) {
                 Ok(delta) => delta,
                 Err(e) => return self.response_error(task, ErrorCode::from(e)),
             };
@@ -215,7 +234,7 @@ impl CoreLoop {
         self.checkpoint_coordinator
             .mark_dirty("columnar", accepted as usize);
 
-        // Advance the collection floor for this committed columnar write.
+        // Note this committed columnar write.
         if accepted > 0 {
             self.note_collection_write(task, collection);
         }
@@ -260,7 +279,7 @@ impl CoreLoop {
             watermark_lsn: self.watermark,
             error_code: None,
             stage_vote: None,
-            read_versions: crate::types::ReadVersions::new(),
+            read_vshards: crate::types::ReadShards::new(),
             write_set: Vec::new(),
         }
     }

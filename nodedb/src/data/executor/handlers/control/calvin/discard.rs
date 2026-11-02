@@ -60,7 +60,14 @@ mod tests {
             position: 0,
             epoch_system_ms: 0,
         };
-        let resp = core.execute_calvin_execute_static(&task, ctx, &tenant_id, &plans, &[], &[]);
+        let resp = core.execute_calvin_execute_static(
+            &task,
+            ctx,
+            &tenant_id,
+            &plans,
+            crate::data::executor::handlers::control::calvin::CalvinSnapshot::NONE,
+            &[],
+        );
         assert_eq!(resp.status, Status::Ok);
 
         let vshard_id = task.request.vshard_id.as_u32();

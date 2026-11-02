@@ -16,22 +16,61 @@ use crate::bridge::envelope::{ErrorCode, Response};
 use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
+use nodedb_types::SystemTimeScope;
+
+/// Borrowed inputs for [`CoreLoop::execute_facet_counts`].
+pub(in crate::data::executor) struct FacetCountsParams<'a> {
+    pub tid: u64,
+    pub collection: &'a str,
+    /// Serialized `Vec<ScanFilter>` predicates (MessagePack).
+    pub filter_bytes: &'a [u8],
+    pub fields: &'a [String],
+    /// Values per facet field, `0` for every value.
+    pub limit_per_facet: usize,
+    /// The scope the matched rows are read at. `TxnSnapshot` and `Current`
+    /// merge the reading transaction's staged writes.
+    pub system_time: &'a SystemTimeScope,
+}
 
 impl CoreLoop {
     /// Execute a multi-facet count query.
     ///
     /// Returns a JSON object: `{ field: [{value, count}, ...], ... }` where
     /// each field has its facet values sorted by count descending.
+    ///
+    /// A current read outside a transaction counts from the secondary index
+    /// when one covers the field, and caches its answer. A read at another
+    /// scope, or one that merges staged writes, counts the matched bodies
+    /// and caches nothing: the index and the cache hold the current state.
     pub(in crate::data::executor) fn execute_facet_counts(
         &mut self,
         task: &ExecutionTask,
-        tid: u64,
-        collection: &str,
-        filter_bytes: &[u8],
-        fields: &[String],
-        limit_per_facet: usize,
+        params: FacetCountsParams<'_>,
     ) -> Response {
+        let FacetCountsParams {
+            tid,
+            collection,
+            filter_bytes,
+            fields,
+            limit_per_facet,
+            system_time,
+        } = params;
         debug!(core = self.core_id, %collection, facet_fields = fields.len(), "facet counts");
+        let Some(system_as_of) = point_cut_of(system_time) else {
+            return self.response_error(
+                task,
+                ErrorCode::Unsupported {
+                    detail: "AS OF SYSTEM TIME NULL (all-versions) is not supported on facet \
+                             counts"
+                        .into(),
+                },
+            );
+        };
+        let overlay_txn = task
+            .request
+            .txn_id
+            .filter(|_| system_time.merges_txn_overlay());
+        let reads_current_state = system_as_of.is_none() && overlay_txn.is_none();
 
         // Step 1: Evaluate filter predicate once → set of matching document IDs.
         let filters: Vec<ScanFilter> = if filter_bytes.is_empty() {
@@ -50,14 +89,23 @@ impl CoreLoop {
             }
         };
 
-        // Each matching row at its current version: the newest version on a
-        // bitemporal collection, the plain table on any other.
-        let matching_rows = match self.current_matching_rows(
-            task.request.database_id.as_u64(),
-            tid,
-            collection,
-            &filters,
-        ) {
+        // Each matching row at the read's cut, with the reading
+        // transaction's staged writes on top when the scope merges them.
+        let database_id = task.request.database_id.as_u64();
+        let matched = match overlay_txn {
+            Some(txn_id) => self.txn_matching_rows(
+                txn_id,
+                &(
+                    task.request.database_id,
+                    crate::types::TenantId::new(tid),
+                    collection.to_string(),
+                ),
+                &filters,
+                system_as_of,
+            ),
+            None => self.matching_rows_at(database_id, tid, collection, &filters, system_as_of),
+        };
+        let matching_rows = match matched {
             Ok(rows) => rows,
             Err(e) => return self.response_error(task, e),
         };
@@ -75,12 +123,15 @@ impl CoreLoop {
 
         for field in fields {
             let counts = match self.count_facet_field(
-                task.request.database_id.as_u64(),
-                tid,
-                collection,
+                FacetFieldSource {
+                    database_id,
+                    tid,
+                    collection,
+                    matching_set: &matching_set,
+                    matching_rows: &matching_rows,
+                    index_reads_state: reads_current_state,
+                },
                 field,
-                &matching_set,
-                &matching_rows,
             ) {
                 Ok(counts) => counts,
                 Err(e) => return self.response_error(task, e),
@@ -101,7 +152,8 @@ impl CoreLoop {
             fields,
             filter_bytes,
         );
-        if self.aggregate_cache.len() < 256
+        if reads_current_state
+            && self.aggregate_cache.len() < 256
             && let Ok(bytes) =
                 nodedb_types::json_to_msgpack(&serde_json::Value::Object(facet_result.clone()))
         {
@@ -127,28 +179,36 @@ impl CoreLoop {
 
     /// Count distinct values for a single facet field, filtered to matching documents.
     ///
-    /// Tries index-backed counting first (O(index_entries)), falls back to
-    /// document-scan counting (O(matching_docs)). A storage read or value
-    /// transcoding error fails the count: a partial count is a wrong count.
+    /// Tries index-backed counting first (O(index_entries)) when the index
+    /// holds the read's state, falls back to document-scan counting
+    /// (O(matching_docs)). A storage read or value transcoding error fails
+    /// the count: a partial count is a wrong count.
     fn count_facet_field(
         &self,
-        database_id: u64,
-        tid: u64,
-        collection: &str,
+        source: FacetFieldSource<'_>,
         field: &str,
-        matching_set: &HashSet<nodedb_types::StorageKey>,
-        matching_rows: &[(nodedb_types::StorageKey, Vec<u8>)],
     ) -> crate::Result<Vec<(String, usize)>> {
-        // Fast path: index-backed counting with filtered doc set.
-        let groups = self.sparse.scan_index_groups_filtered(
+        let FacetFieldSource {
             database_id,
             tid,
             collection,
-            field,
             matching_set,
-        )?;
-        if !groups.is_empty() {
-            return Ok(groups);
+            matching_rows,
+            index_reads_state,
+        } = source;
+        // Fast path: index-backed counting with filtered doc set. The index
+        // holds each row's current value, so only a current read uses it.
+        if index_reads_state {
+            let groups = self.sparse.scan_index_groups_filtered(
+                database_id,
+                tid,
+                collection,
+                field,
+                matching_set,
+            )?;
+            if !groups.is_empty() {
+                return Ok(groups);
+            }
         }
 
         // Fallback: scan matching documents, extract field from msgpack, count.
@@ -197,6 +257,31 @@ impl CoreLoop {
         let mut result: Vec<(String, usize)> = counts.into_iter().collect();
         result.sort_by_key(|r| std::cmp::Reverse(r.1)); // Count descending.
         Ok(result)
+    }
+}
+
+/// The matched rows one facet field is counted over.
+struct FacetFieldSource<'a> {
+    database_id: u64,
+    tid: u64,
+    collection: &'a str,
+    matching_set: &'a HashSet<nodedb_types::StorageKey>,
+    matching_rows: &'a [(nodedb_types::StorageKey, Vec<u8>)],
+    /// True when the secondary index holds the read's state: a current read
+    /// with no staged writes merged.
+    index_reads_state: bool,
+}
+
+/// The ordinal a facet read reads at: `Some(None)` for the current state,
+/// `Some(Some(ordinal))` for a point-in-time scope, `None` for
+/// `AllVersions`.
+fn point_cut_of(system_time: &SystemTimeScope) -> Option<Option<i64>> {
+    match system_time {
+        SystemTimeScope::Current => Some(None),
+        SystemTimeScope::AsOf(_)
+        | SystemTimeScope::Pinned { .. }
+        | SystemTimeScope::TxnSnapshot { .. } => Some(system_time.as_of_ordinal()),
+        SystemTimeScope::AllVersions => None,
     }
 }
 

@@ -47,6 +47,7 @@ impl InvertedIndex {
             tid,
             collection,
             surrogate,
+            ordinal: super::UNVERSIONED,
         };
         let db = self.inner.backend().db();
         let txn = db.begin_write().map_err(|e| inverted_err("write txn", e))?;
@@ -74,6 +75,7 @@ impl InvertedIndex {
             tid,
             collection,
             surrogate,
+            ordinal: super::UNVERSIONED,
         };
         let db = self.inner.backend().db();
         let txn = db.begin_write().map_err(|e| inverted_err("write txn", e))?;

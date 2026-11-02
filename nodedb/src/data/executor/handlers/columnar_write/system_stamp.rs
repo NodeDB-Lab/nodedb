@@ -11,17 +11,14 @@
 //! key-changing update, the new key. A `_ts_system` the client sends or the
 //! SET list assigns never decides the stamp.
 //!
-//! A RESTORE re-issue (`ColumnarInsertIntent::Restore`) installs the stamp
-//! each row carries, the stamp its original write took.
+//! A RESTORE re-issue (`ColumnarInsertIntent::Restore`) stamps no row here:
+//! it installs each row at the stamps its `restored_versions` entry carries
+//! (`restore_ingest.rs`).
 //!
 //! A key's newest stored version is its bound row or, for a key a delete
 //! closed, the tombstone, whichever is newer.
 
-use std::collections::HashMap;
-
-use nodedb_physical::physical_plan::ColumnarInsertIntent;
 use nodedb_types::columnar::ColumnarSchema;
-use nodedb_types::columnar::schema::TS_SYSTEM;
 use nodedb_types::value::Value;
 
 use crate::data::executor::core_loop::CoreLoop;
@@ -31,12 +28,9 @@ use crate::data::executor::core_loop::bitemporal_time::KeyStamps;
 pub(super) struct RowStampInput<'a> {
     pub engine_key: &'a (nodedb_types::DatabaseId, crate::types::TenantId, String),
     pub schema: &'a ColumnarSchema,
-    pub intent: ColumnarInsertIntent,
     /// The first ordinal of the insert's carried run.
     pub system_from: Option<i64>,
     pub row_idx: usize,
-    /// The row as the client or the restore sent it.
-    pub incoming: &'a HashMap<String, Value>,
     /// The row in schema order, its `_ts_system` cell not yet final.
     pub values: &'a [Value],
 }
@@ -45,8 +39,8 @@ impl CoreLoop {
     /// The `_ts_system` ordinal row `input.row_idx` of a bitemporal columnar
     /// insert stamps. The stamp folds into the shared clock.
     ///
-    /// `Err` when a restored row carries no integer `_ts_system`, the
-    /// collection has no engine, or the key's stored rows do not read.
+    /// `Err` when the collection has no engine, or when the key's stored
+    /// rows do not read.
     pub(super) fn columnar_row_stamp(
         &self,
         input: RowStampInput<'_>,
@@ -55,44 +49,21 @@ impl CoreLoop {
         let RowStampInput {
             engine_key,
             schema,
-            intent,
             system_from,
             row_idx,
-            incoming,
             values,
         } = input;
-        match intent {
-            ColumnarInsertIntent::Restore => {
-                let Some(Value::Integer(stamp)) = incoming.get(TS_SYSTEM) else {
-                    return Err(crate::Error::BadRequest {
-                        detail: format!(
-                            "restore into bitemporal columnar '{}': row {row_idx} carries no \
-                             integer {TS_SYSTEM}; a restored version keeps the system time its \
-                             write stamped",
-                            engine_key.2
-                        ),
-                    });
-                };
-                self.observe_bitemporal_ordinal(*stamp);
-                Ok(*stamp)
-            }
-            ColumnarInsertIntent::Insert
-            | ColumnarInsertIntent::InsertIfAbsent
-            | ColumnarInsertIntent::Put
-            | ColumnarInsertIntent::InsertUnique => {
-                let engine = self
-                    .columnar_engines
-                    .get(engine_key)
-                    .ok_or_else(|| missing_engine(engine_key))?;
-                let pk_bytes = engine.encode_pk_from_row(values)?;
-                let base = self.columnar_system_ordinal(system_from, row_idx);
-                let stamp = batch.stamp_row(base, vec![pk_bytes], |pk| {
-                    self.newest_stored_stamp(engine_key, schema, pk)
-                })?;
-                self.observe_bitemporal_ordinal(stamp);
-                Ok(stamp)
-            }
-        }
+        let engine = self
+            .columnar_engines
+            .get(engine_key)
+            .ok_or_else(|| missing_engine(engine_key))?;
+        let pk_bytes = engine.encode_pk_from_row(values)?;
+        let base = self.columnar_system_ordinal(system_from, row_idx);
+        let stamp = batch.stamp_row(base, vec![pk_bytes], |pk| {
+            self.newest_stored_stamp(engine_key, schema, pk)
+        })?;
+        self.observe_bitemporal_ordinal(stamp);
+        Ok(stamp)
     }
 }
 
@@ -190,6 +161,7 @@ mod tests {
     use std::collections::HashMap;
 
     use nodedb_physical::physical_plan::{ColumnarInsertIntent, ColumnarOp};
+    use nodedb_types::columnar::RestoredVersion;
     use nodedb_types::{RlsWriteCheck, Value};
 
     use crate::bridge::envelope::Status;
@@ -268,6 +240,7 @@ mod tests {
                 schema_bytes: &[],
                 provenance: None,
                 system_from,
+                restored_versions: &[],
                 rls_write_check: &RlsWriteCheck::already_decided_elsewhere(),
                 returning: None,
                 rls_filters: &[],
@@ -277,53 +250,14 @@ mod tests {
         assert_eq!(response.status, Status::Ok, "{:?}", response.error_code);
     }
 
-    /// `(v, _ts_system)` of every stored row, in append order.
-    fn stamps(core: &CoreLoop) -> Vec<(i64, i64)> {
-        let engine = core.columnar_engines.get(&key()).expect("engine");
-        let schema = engine.schema();
-        let ts_idx = schema.ts_system_idx().expect("bitemporal schema");
-        let v_idx = schema
-            .columns
-            .iter()
-            .position(|c| c.name == "v")
-            .expect("v column");
-        engine
-            .scan_memtable_rows()
-            .map(|row| {
-                let row = row.expect("read");
-                match (row.get(v_idx), row.get(ts_idx)) {
-                    (Some(Value::Integer(v)), Some(Value::Integer(ts))) => (*v, *ts),
-                    other => panic!("unexpected row cells: {other:?}"),
-                }
-            })
-            .collect()
-    }
-
-    /// A restore installs the stamp each row carries and folds it into the
-    /// clock.
-    #[test]
-    fn a_restore_keeps_each_rows_system_time() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let (mut core, _tx, _rx) = bitemporal_core(dir.path());
-        let first = core.hlc.peek().saturating_add(5_000_000_000_000);
-        insert(
-            &mut core,
-            ColumnarInsertIntent::Restore,
-            Some(1),
-            vec![row(1, 10, Some(first)), row(1, 20, Some(first + 7))],
-        );
-        assert_eq!(stamps(&core), vec![(10, first), (20, first + 7)]);
-        assert!(core.hlc.peek() >= first + 7, "the restored stamps fold");
-    }
-
-    /// A restored bitemporal row with no stamp refuses the restore.
-    #[test]
-    fn a_restored_row_without_a_stamp_is_refused() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let (mut core, _tx, _rx) = bitemporal_core(dir.path());
-        let payload =
-            nodedb_types::value_to_msgpack(&Value::Array(vec![row(1, 10, None)])).expect("rows");
-        let response = core.execute_columnar_insert(
+    /// Re-issue `rows` as a RESTORE carrying `versions`.
+    fn restore(
+        core: &mut CoreLoop,
+        rows: Vec<Value>,
+        versions: &[RestoredVersion],
+    ) -> crate::bridge::envelope::Response {
+        let payload = nodedb_types::value_to_msgpack(&Value::Array(rows)).expect("encode rows");
+        core.execute_columnar_insert(
             &task(),
             ColumnarInsertParams {
                 collection: COLLECTION,
@@ -335,12 +269,98 @@ mod tests {
                 schema_bytes: &[],
                 provenance: None,
                 system_from: None,
+                restored_versions: versions,
                 rls_write_check: &RlsWriteCheck::already_decided_elsewhere(),
                 returning: None,
                 rls_filters: &[],
                 spatial_undo: None,
             },
+        )
+    }
+
+    /// `(v, _ts_system)` of every stored version, in append order.
+    fn stamps(core: &CoreLoop) -> Vec<(i64, i64)> {
+        let engine = core.columnar_engines.get(&key()).expect("engine");
+        let schema = engine.schema();
+        let ts_idx = schema.ts_system_idx().expect("bitemporal schema");
+        let v_idx = schema
+            .columns
+            .iter()
+            .position(|c| c.name == "v")
+            .expect("v column");
+        engine
+            .scan_memtable_versions(nodedb_columnar::VersionCut::All)
+            .map(|row| {
+                let (_, _, row) = row.expect("read");
+                match (row.get(v_idx), row.get(ts_idx)) {
+                    (Some(Value::Integer(v)), Some(Value::Integer(ts))) => (*v, *ts),
+                    other => panic!("unexpected row cells: {other:?}"),
+                }
+            })
+            .collect()
+    }
+
+    /// A restore installs each row at the stamps it carries: the superseded
+    /// version ends where its successor starts, a read at a cut between them
+    /// sees the old version, and the stamps fold into the clock. A
+    /// `_ts_system` the row sends never decides the stamp.
+    #[test]
+    fn a_restore_keeps_each_rows_system_time() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _tx, _rx) = bitemporal_core(dir.path());
+        let first = core.hlc.peek().saturating_add(5_000_000_000_000);
+        let response = restore(
+            &mut core,
+            vec![row(1, 10, Some(1)), row(1, 20, None)],
+            &[
+                RestoredVersion {
+                    sys_from: first,
+                    sys_to: Some(first + 7),
+                    clone_copy: false,
+                },
+                RestoredVersion {
+                    sys_from: first + 7,
+                    sys_to: None,
+                    clone_copy: false,
+                },
+            ],
         );
+        assert_eq!(response.status, Status::Ok, "{:?}", response.error_code);
+        assert_eq!(stamps(&core), vec![(10, first), (20, first + 7)]);
+        assert!(core.hlc.peek() >= first + 7, "the restored stamps fold");
+
+        let engine = core.columnar_engines.get(&key()).expect("engine");
+        let at = |cut| -> Vec<Value> {
+            engine
+                .scan_memtable_versions(cut)
+                .map(|row| {
+                    let (_, _, row) = row.expect("read");
+                    row[engine
+                        .schema()
+                        .columns
+                        .iter()
+                        .position(|c| c.name == "v")
+                        .expect("v")]
+                    .clone()
+                })
+                .collect()
+        };
+        assert_eq!(
+            at(nodedb_columnar::VersionCut::At(first + 3)),
+            vec![Value::Integer(10)]
+        );
+        assert_eq!(
+            at(nodedb_columnar::VersionCut::Current),
+            vec![Value::Integer(20)]
+        );
+    }
+
+    /// A restore whose stamps do not align with its rows is refused.
+    #[test]
+    fn a_restore_without_a_stamp_per_row_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _tx, _rx) = bitemporal_core(dir.path());
+        let response = restore(&mut core, vec![row(1, 10, None)], &[]);
         assert_eq!(response.status, Status::Error);
     }
 
@@ -495,23 +515,14 @@ mod tests {
             !engine.pk_index().contains(&pk),
             "the closed key is unbound"
         );
-        let stored: Vec<Vec<Value>> = engine
-            .scan_memtable_rows()
-            .map(|row| row.expect("read"))
-            .collect();
-        let gate = |cut: Option<i64>| {
-            core.columnar_version_gate(&key(), cut, false)
-                .expect("gate")
-                .expect("bitemporal")
-        };
-        let current = gate(None);
-        assert!(
-            stored.iter().all(|row| !current.admits(row)),
+        let visible = |cut: nodedb_columnar::VersionCut| engine.scan_memtable_versions(cut).count();
+        assert_eq!(
+            visible(nodedb_columnar::VersionCut::Current),
+            0,
             "no current row"
         );
-        let before_close = gate(Some(first));
         assert_eq!(
-            stored.iter().filter(|row| before_close.admits(row)).count(),
+            visible(nodedb_columnar::VersionCut::At(first)),
             1,
             "the closed version answers a read before the close"
         );

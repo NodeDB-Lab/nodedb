@@ -32,11 +32,11 @@
 //!   purges it owes.
 //! - `l2_cleanup_queue`, `pending_reclaim`, `pending_history_compaction`:
 //!   work this node still owes its own storage.
-//! - `surrogate_pk_v3`, `surrogate_pk_rev_v3`: PK bindings of stored rows,
+//! - `surrogate_pk`, `surrogate_pk_rev`: PK bindings of stored rows,
 //!   carried by data-group snapshots. A purge apply deletes a collection's
 //!   bindings; the install's reclaim of that collection does the same here.
-//! - `crdt_signing_keys`, `crdt_signing_root_metadata`: key material derived
-//!   from this node's WAL.
+//! - `crdt_signing_root_metadata`: the fingerprint of the signing root
+//!   derived from this node's WAL.
 //! - `topic_messages`: this node's published-message buffer.
 //! - `topic_publish_marks`: the committed-message marks of this node's
 //!   topic log, moved with each append.

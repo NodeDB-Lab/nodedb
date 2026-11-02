@@ -79,6 +79,13 @@ pub struct ContinuousAggregateManager {
     /// Boot registered every aggregate the catalog holds. An image entry of
     /// an aggregate not registered from then on belongs to a dropped one.
     pub(super) boot_registered: bool,
+    /// The newest time-key value of a partition retention removed, per
+    /// root. See [`super::image::CaggImage::raw_dropped_through`].
+    pub(super) raw_dropped_through: HashMap<AggKey, i64>,
+    /// Per root, the newest system-time ordinal at which each aggregate's
+    /// buckets changed other than by folding rows: a refresh cut or a
+    /// bucket retention pass. Keyed by aggregate name.
+    pub(super) rewritten_at: HashMap<AggKey, HashMap<String, i64>>,
 }
 
 impl ContinuousAggregateManager {
@@ -99,7 +106,30 @@ impl ContinuousAggregateManager {
             quarantined: HashSet::new(),
             images_read: HashSet::new(),
             boot_registered: false,
+            raw_dropped_through: HashMap::new(),
+            rewritten_at: HashMap::new(),
         }
+    }
+
+    /// Record that retention removed root partitions whose rows reach the
+    /// time-key value `max_ts`. The tiers then hold the only copy of those
+    /// rows, so a raw read of their range is incomplete.
+    pub fn note_raw_dropped(&mut self, database_id: u64, tenant_id: u64, root: &str, max_ts: i64) {
+        let key = (database_id, tenant_id, root.to_string());
+        let through = self
+            .raw_dropped_through
+            .entry(key.clone())
+            .or_insert(max_ts);
+        *through = (*through).max(max_ts);
+        self.dirty_images.insert(key);
+    }
+
+    /// The newest time-key value of a partition of `root` retention
+    /// removed, `None` when it removed none.
+    pub fn raw_dropped_through(&self, database_id: u64, tenant_id: u64, root: &str) -> Option<i64> {
+        self.raw_dropped_through
+            .get(&(database_id, tenant_id, root.to_string()))
+            .copied()
     }
 
     // -- Registration --
@@ -272,8 +302,9 @@ impl ContinuousAggregateManager {
 
     /// Apply retention across every registered aggregate on this core:
     /// remove materialized buckets older than each aggregate's retention
-    /// period.
-    pub fn apply_retention(&mut self, now_ms: i64) -> usize {
+    /// period. An aggregate that loses a bucket records `ordinal`, the
+    /// system time of the pass, as its rewrite.
+    pub fn apply_retention(&mut self, now_ms: i64, ordinal: i64) -> usize {
         let mut total_removed = 0;
         let defs: Vec<(AggKey, u64)> = self
             .definitions
@@ -295,6 +326,9 @@ impl ContinuousAggregateManager {
                 None => 0,
             };
             if removed > 0 {
+                if let Some(root) = self.root_of(key.0, key.1, &key.2) {
+                    self.note_rewritten(key.0, key.1, &root, &key.2, ordinal);
+                }
                 self.mark_root_dirty(&key);
             }
             total_removed += removed;
@@ -527,7 +561,7 @@ mod tests {
             .get_materialized(0, 1, "v_1m")
             .expect("registered")
             .len();
-        let removed = mgr.apply_retention(T0 + 15 * 60_000);
+        let removed = mgr.apply_retention(T0 + 15 * 60_000, 1);
         assert!(removed > 0);
         assert!(
             mgr.get_materialized(0, 1, "v_1m")

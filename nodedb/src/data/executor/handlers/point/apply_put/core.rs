@@ -43,7 +43,6 @@ impl CoreLoop {
         txn: &WriteTransaction,
         params: PointPutParams<'_>,
     ) -> crate::Result<PointPutOutcome> {
-        let crs = self.crs_context();
         let PointPutParams {
             database_id,
             tid,
@@ -65,35 +64,41 @@ impl CoreLoop {
             collection.to_string(),
         );
 
-        // A stamp in `apply_scope.bitemporal_stamps` (WAL redo replay) forces the
-        // versioned branch at the EXACT redo stamp, independent of
-        // `doc_configs` (empty during replay); absent an override, derive
-        // bitemporality from config and stamp the write's system-time
-        // ordinal, raised above the row's newest version when the write
-        // applies a replicated entry.
-        let (bitemporal, sys_from, valid_from_ms, valid_until_ms) =
-            match self.apply_scope.bitemporal_stamps.get(&surrogate.as_u32()) {
-                Some(stamp) => (
-                    true,
-                    stamp.sys_from,
-                    stamp.valid_from_ms,
-                    stamp.valid_until_ms,
-                ),
-                None if self.is_bitemporal(database_id, tid, collection) => (
-                    true,
-                    self.row_version_ordinal(database_id, tid, collection, &storage_key)?,
-                    i64::MIN,
-                    i64::MAX,
-                ),
-                None => (false, self.bitemporal_ordinal(), i64::MIN, i64::MAX),
-            };
+        // Every write appends a version of the row. A stamp in
+        // `apply_scope.bitemporal_stamps` (WAL redo replay, a committed
+        // redo install) fixes the version at the EXACT stamp the live write
+        // used, independent of `doc_configs` (empty during replay). Absent a
+        // stamp the write takes its system-time ordinal, raised above the
+        // row's newest version. A `bitemporal=true` collection carries the
+        // stamp into its strict tuple's temporal columns. Any other
+        // collection's body carries no temporal column.
+        let bitemporal = self.is_bitemporal(database_id, tid, collection);
+        let carried = self
+            .apply_scope
+            .bitemporal_stamps
+            .get(&surrogate.as_u32())
+            .copied();
+        let (stamped, sys_from, valid_from_ms, valid_until_ms) = match carried {
+            Some(stamp) => (
+                true,
+                stamp.sys_from,
+                stamp.valid_from_ms,
+                stamp.valid_until_ms,
+            ),
+            None => (
+                bitemporal,
+                self.row_version_ordinal(database_id, tid, collection, &storage_key)?,
+                i64::MIN,
+                i64::MAX,
+            ),
+        };
 
         // Shared with the governed-write RESOLVE pass.
         let body = self.build_stored_body(super::stored_body::StoredBodyInput {
             config_key: &config_key,
             surrogate,
             value,
-            bitemporal,
+            bitemporal: stamped,
             sys_from,
             valid_from_ms,
             valid_until_ms,
@@ -102,42 +107,61 @@ impl CoreLoop {
         let stored = body.stored;
         let value: &[u8] = &body.value;
 
-        // Read the prior value only when needed: bitemporal (always), an
-        // enforcement-configured collection (stateless PUT checks), or a
-        // collection with index paths (drop the stale entry on UPDATE).
-        let need_old = bitemporal
-            || (enforce
-                && self
-                    .doc_configs
-                    .get(&config_key)
-                    .is_some_and(|config| config.enforcement.has_put_checks()))
-            || self
-                .doc_configs
-                .get(&config_key)
-                .is_some_and(|config| !config.index_paths.is_empty());
-        let old_value = if bitemporal {
-            self.sparse
-                .versioned_get_current(database_id, tid, collection, &storage_key)?
-        } else if need_old {
-            self.sparse
-                .get(database_id, tid, collection, &storage_key)?
-        } else {
-            None
-        };
-        // Pre-write doc for the non-bitemporal secondary-index SET diff;
-        // bitemporal reverses via versioned index tuples instead. Routed
+        // A carried stamp below the row's newest version installs history
+        // only. A fresh ordinal is raised above the newest version, so only
+        // a carried one can land below it.
+        if carried.is_some()
+            && let Some(slot) =
+                self.history_slot_in_txn(txn, database_id, tid, collection, &storage_key, sys_from)?
+        {
+            self.check_stateless_put_enforcement(
+                enforce,
+                PutEnforcement {
+                    config_key: &config_key,
+                    database_id,
+                    tid,
+                    collection,
+                    value,
+                    old_value: &slot.predecessor,
+                    user_roles,
+                    resolved_targets,
+                },
+            )?;
+            return self.apply_history_put(
+                txn,
+                super::history::HistoryPut {
+                    database_id,
+                    tid,
+                    collection,
+                    storage_key: &storage_key,
+                    value,
+                    stored,
+                    sys_from,
+                    valid_from_ms,
+                    valid_until_ms,
+                    slot,
+                },
+            );
+        }
+
+        // The row's current body: the prior value the event reports, the
+        // enforcement pre-image, and the old index values the write moves
+        // off.
+        let old_value = self
+            .sparse
+            .get_in_txn(txn, database_id, tid, collection, &storage_key)?;
+        // Pre-write document for the secondary-index SET diff, routed
         // through the storage-mode-aware helper so a strict row's Binary
-        // Tuple decodes too. `None` means "no prior row" (INSERT, bitemporal,
-        // or no index paths) — a prior row that exists but fails to decode
-        // fails the write instead, or its old index entries leak forever.
-        let old_doc_for_index: Option<serde_json::Value> = if bitemporal {
-            None
-        } else {
+        // Tuple decodes too. `None` means "no prior row" or "no index
+        // paths". A prior row that exists but fails to decode fails the
+        // write instead, or its old index entries stay live forever.
+        let old_doc_for_index: Option<serde_json::Value> =
             match (old_value.as_ref(), self.doc_configs.get(&config_key)) {
-                (Some(b), Some(config)) => Some(self.decode_stored_document(config, b)?),
+                (Some(b), Some(config)) if !config.index_paths.is_empty() => {
+                    Some(self.decode_stored_document(config, b)?)
+                }
                 _ => None,
-            }
-        };
+            };
 
         // Runs before any store or index is touched, so a refusal leaves
         // nothing behind.
@@ -155,26 +179,20 @@ impl CoreLoop {
             },
         )?;
 
-        // Bitemporal appends a new version; non-bitemporal overwrites in place.
-        let prior = if bitemporal {
-            self.sparse.versioned_put_in_txn(
-                txn,
-                crate::engine::sparse::btree_versioned::VersionedPut {
-                    database_id,
-                    tenant: tid,
-                    coll: collection,
-                    doc_id: &storage_key,
-                    sys_from,
-                    valid_from_ms,
-                    valid_until_ms,
-                    body: &stored,
-                },
-            )?;
-            old_value
-        } else {
-            self.sparse
-                .put_in_txn(txn, database_id, tid, collection, &storage_key, &stored)?
-        };
+        self.sparse.versioned_put_in_txn(
+            txn,
+            crate::engine::sparse::btree_versioned::VersionedPut {
+                database_id,
+                tenant: tid,
+                coll: collection,
+                doc_id: &storage_key,
+                sys_from,
+                valid_from_ms,
+                valid_until_ms,
+                body: &stored,
+            },
+        )?;
+        let prior = old_value;
 
         // Pre-image capture for the column-stats read-modify-write, so a
         // transactional caller can restore the exact prior stats on rollback.
@@ -201,6 +219,7 @@ impl CoreLoop {
                         tid: crate::types::TenantId::new(tid),
                         collection,
                         surrogate,
+                        ordinal: sys_from,
                     },
                     &text_content,
                 ) {
@@ -225,16 +244,20 @@ impl CoreLoop {
             self.invalidate_aggregate_cache_for_collection(database_id, tid, collection);
         }
 
-        self.doc_cache
-            .put(database_id, tid, collection, &storage_key, &stored);
+        self.doc_cache.put(
+            database_id,
+            tid,
+            collection,
+            &storage_key,
+            sys_from,
+            &stored,
+        );
 
         // Secondary index extraction into the caller's write txn — the
         // non-_in_txn variant would deadlock since `execute_point_put`
         // already owns the only writer. A `Row` UNIQUE probe runs first,
         // through a separate MVCC read txn that sees the committed index only.
-        let mut bitemporal_index_tuples: Vec<(String, String)> = Vec::new();
-        let mut secondary_index_added: Vec<(String, String)> = Vec::new();
-        let mut secondary_index_removed: Vec<(String, String)> = Vec::new();
+        let mut index_tuples: Vec<(String, String)> = Vec::new();
         let config_key = (
             crate::types::DatabaseId::new(database_id),
             crate::types::TenantId::new(tid),
@@ -260,7 +283,6 @@ impl CoreLoop {
                         tid,
                         collection,
                         paths: &paths,
-                        bitemporal,
                         base_visible: true,
                         crs: &self.crs_context(),
                     },
@@ -271,59 +293,22 @@ impl CoreLoop {
                     }],
                 )?;
             }
-            if bitemporal {
-                // Keyed at the same `sys_from` as the primary version row,
-                // so one `bitemporal_sys_from` in the undo entry reverses both.
-                for path in &paths {
-                    if let Some(ref pred) = path.predicate
-                        && !pred.evaluate_json(&doc, &crs)
-                    {
-                        continue;
-                    }
-                    for v in crate::engine::document::store::extract_index_values(
-                        &doc,
-                        &path.path,
-                        path.is_array,
-                    ) {
-                        let value = if path.case_insensitive {
-                            v.to_lowercase()
-                        } else {
-                            v
-                        };
-                        self.sparse.versioned_index_put_in_txn(
-                            txn,
-                            crate::engine::sparse::btree_versioned::VersionedIndexEntry {
-                                database_id,
-                                tenant: tid,
-                                coll: collection,
-                                field: &path.path,
-                                value: &value,
-                                doc_id: &storage_key,
-                                sys_from,
-                            },
-                        )?;
-                        bitemporal_index_tuples.push((path.path.clone(), value));
-                    }
-                }
-            } else {
-                // SET diff against `old_doc_for_index` inserts new values and
-                // removes stale ones; (added, removed) let a transactional
-                // caller reverse them on rollback.
-                let (added, removed) = self.apply_secondary_indexes_in_txn(
-                    txn,
-                    crate::data::executor::core_loop::maintenance::SecondaryIndexInputs {
-                        database_id,
-                        tid,
-                        collection,
-                        old_doc: old_doc_for_index.as_ref(),
-                        new_doc: &doc,
-                        doc_id: &storage_key,
-                        index_paths: &paths,
-                    },
-                )?;
-                secondary_index_added = added;
-                secondary_index_removed = removed;
-            }
+            // Keyed at the same `sys_from` as the row version, so one
+            // `version_sys_from` in the undo entry reverses both. Values the
+            // write drops are tombstoned, values it gains are added.
+            index_tuples = self.apply_secondary_indexes_in_txn(
+                txn,
+                crate::data::executor::core_loop::maintenance::SecondaryIndexInputs {
+                    database_id,
+                    tid,
+                    collection,
+                    old_doc: old_doc_for_index.as_ref(),
+                    new_doc: &doc,
+                    doc_id: &storage_key,
+                    index_paths: &paths,
+                    sys_from,
+                },
+            )?;
         }
 
         // Every write below is in memory, where the caller's transaction
@@ -338,6 +323,8 @@ impl CoreLoop {
                 storage_key,
                 value,
                 wal_lsn: wal_lsn.map(|l| l.as_u64()).unwrap_or(0),
+                sys_from,
+                replaces_row: prior.is_some(),
             },
             &mut memory_undo,
         ) {
@@ -348,12 +335,11 @@ impl CoreLoop {
         Ok(PointPutOutcome {
             prior_value: prior,
             stored_value: stored,
-            bitemporal_sys_from: if bitemporal { Some(sys_from) } else { None },
-            bitemporal_index_tuples,
-            secondary_index_added,
-            secondary_index_removed,
+            version_sys_from: sys_from,
+            index_tuples,
             memory_undo,
             stats_prior,
+            history: None,
         })
     }
 
@@ -372,8 +358,20 @@ impl CoreLoop {
             storage_key,
             value,
             wal_lsn,
+            sys_from,
+            replaces_row,
         } = put;
-        self.apply_point_put_spatial(database_id, tid, collection, storage_key, value, undo)?;
+        self.apply_point_put_spatial(
+            super::index::SpatialIndexPut {
+                database_id,
+                tid,
+                collection,
+                storage_key,
+                value,
+                sys_from,
+            },
+            undo,
+        )?;
         self.apply_point_put_vector_indexes(
             crate::data::executor::handlers::point::apply_put::VectorIndexPutParams {
                 database_id,
@@ -382,11 +380,38 @@ impl CoreLoop {
                 storage_key,
                 value,
                 wal_lsn,
+                sys_from,
+                replaces_row,
             },
             undo,
         )?;
+        // A body carries no multi-vector document, so a write that replaces
+        // the row ends the row's documents, as a delete does.
+        if replaces_row {
+            undo.extend(
+                self.end_document_multi_vectors(
+                    database_id,
+                    tid,
+                    collection,
+                    storage_key,
+                    sys_from,
+                )
+                .into_iter()
+                .map(super::VectorIndexDelta::into_delete_undo),
+            );
+        }
         // No-op unless the strict schema declares a `SparseVector` column.
-        self.apply_point_put_sparse_indexes(database_id, tid, collection, storage_key, value, undo);
+        self.apply_point_put_sparse_indexes(
+            super::SparseIndexPut {
+                database_id,
+                tid,
+                collection,
+                storage_key,
+                value,
+                sys_from,
+            },
+            undo,
+        );
         Ok(())
     }
 }
@@ -400,6 +425,12 @@ struct MemoryIndexPut<'a> {
     storage_key: crate::engine::document::store::StorageKey,
     value: &'a [u8],
     wal_lsn: u64,
+    /// The row version's system-time ordinal: the index entries the write
+    /// replaces end there, the ones it adds start there.
+    sys_from: i64,
+    /// Whether the write replaces a stored row: the row's multi-vector
+    /// documents end at `sys_from`, as an update ends them.
+    replaces_row: bool,
 }
 
 #[cfg(test)]
@@ -476,7 +507,7 @@ mod tests {
             wal_lsn: None,
             resolved_now_ms: None,
             commit_hlc: None,
-            entry_version: None,
+            system_ordinal: None,
             admission: crate::bridge::envelope::Admission::Admitted,
         })
     }
@@ -644,5 +675,78 @@ mod tests {
         );
         txn.commit().unwrap();
         assert!(stored_row(&core, &row_key).is_some());
+    }
+
+    /// Apply one put of `body` to row `SURROGATE` and commit it. Returns the
+    /// version's system-time ordinal.
+    fn put_committed(core: &mut CoreLoop, body: &[u8]) -> i64 {
+        let txn = core.sparse.begin_write().unwrap();
+        let outcome = core
+            .apply_point_put(
+                &txn,
+                PointPutParams {
+                    database_id: DatabaseId::DEFAULT.as_u64(),
+                    tid: TID,
+                    collection: COLL,
+                    storage_key: StorageKey::for_surrogate(SURROGATE),
+                    surrogate: SURROGATE,
+                    value: body,
+                    index_text: false,
+                    user_roles: &[],
+                    enforce: true,
+                    unique: UniqueJudge::Row,
+                    wal_lsn: None,
+                    resolved_targets: &[],
+                    guards: crate::data::executor::enforcement::typeguard::GuardScope::Document,
+                },
+            )
+            .unwrap();
+        txn.commit().unwrap();
+        outcome.version_sys_from
+    }
+
+    /// A collection that is not bitemporal keeps every version: a read at
+    /// the first version's ordinal sees the first body and the first index
+    /// value, and the current read sees the overwrite.
+    #[test]
+    fn an_overwrite_keeps_the_prior_version_and_its_index_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        core.doc_configs.insert(
+            (DatabaseId::DEFAULT, TenantId::new(TID), COLL.to_string()),
+            crate::engine::document::store::CollectionConfig::new(COLL).with_index("city"),
+        );
+        let first = put_committed(&mut core, br#"{"city":"oslo"}"#);
+        let second = put_committed(&mut core, br#"{"city":"rome"}"#);
+        assert!(second > first, "each write stamps a later version");
+
+        let db = DatabaseId::DEFAULT.as_u64();
+        let key = StorageKey::for_surrogate(SURROGATE);
+        let city = |cut: Option<i64>| -> String {
+            let body = core
+                .sparse
+                .versioned_get_as_of(db, TID, COLL, &key, cut, None)
+                .unwrap()
+                .expect("a visible version");
+            crate::data::executor::doc_format::decode_document(&body).unwrap()["city"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(city(Some(first)), "oslo");
+        assert_eq!(city(None), "rome");
+
+        let owners = |value: &str, cut: Option<i64>| {
+            core.sparse
+                .versioned_index_lookup_as_of(db, TID, COLL, "city", value, cut)
+                .unwrap()
+        };
+        assert_eq!(owners("oslo", Some(first)), vec![key]);
+        assert!(owners("rome", Some(first)).is_empty());
+        assert!(
+            owners("oslo", None).is_empty(),
+            "the overwrite tombstones the old index value"
+        );
+        assert_eq!(owners("rome", None), vec![key]);
     }
 }

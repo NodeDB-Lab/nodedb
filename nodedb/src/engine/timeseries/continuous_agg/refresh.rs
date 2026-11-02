@@ -56,6 +56,19 @@ impl<'a> RefreshSource<'a> {
         }
     }
 
+    /// The `_ts_system` ordinal of each row, bounded by `row_count`. Empty
+    /// when the schema has no such column.
+    fn ordinals(&self) -> &'a [i64] {
+        match self
+            .schema
+            .ts_system_idx()
+            .and_then(|idx| self.columns.get(idx))
+        {
+            Some(ColumnData::Int64(v)) => &v[..v.len().min(self.row_count)],
+            _ => &[],
+        }
+    }
+
     /// The designated time column's cells, bounded by `row_count`.
     fn timestamps(&self) -> &'a [i64] {
         match self.columns.get(self.schema.timestamp_idx) {
@@ -78,6 +91,36 @@ pub struct RefreshResult {
 
 /// Compute the partial state of `src`'s rows for `def`.
 pub fn refresh_rows(def: &ContinuousAggregateDef, src: &RefreshSource<'_>) -> RefreshResult {
+    refresh_rows_where(def, src, &|_, _| true)
+}
+
+/// Which rows of a batch a read at system-time ordinal `at` folds: those
+/// written at or below `at` whose time-key value `keep_ts` accepts.
+pub struct RowCut<'a> {
+    pub at: i64,
+    pub keep_ts: &'a dyn Fn(i64) -> bool,
+}
+
+/// Compute the partial state of the rows of `src` that `cut` selects. A row
+/// with no `_ts_system` cell counts as written at ordinal `0`.
+pub fn refresh_rows_at(
+    def: &ContinuousAggregateDef,
+    src: &RefreshSource<'_>,
+    cut: &RowCut<'_>,
+) -> RefreshResult {
+    let ordinals = src.ordinals();
+    refresh_rows_where(def, src, &|row, ts| {
+        ordinals.get(row).copied().unwrap_or(0) <= cut.at && (cut.keep_ts)(ts)
+    })
+}
+
+/// Compute the partial state of the rows of `src` that `keep(row, ts)`
+/// accepts.
+fn refresh_rows_where(
+    def: &ContinuousAggregateDef,
+    src: &RefreshSource<'_>,
+    keep: &dyn Fn(usize, i64) -> bool,
+) -> RefreshResult {
     let timestamps = src.timestamps();
     let bucket_ms = def.bucket_interval_ms;
     if bucket_ms <= 0 || timestamps.is_empty() {
@@ -113,10 +156,19 @@ pub fn refresh_rows(def: &ContinuousAggregateDef, src: &RefreshSource<'_>) -> Re
         })
         .collect();
 
+    // The `_ts_system` ordinal of each row, which every timeseries row
+    // carries. A bucket records the newest it holds.
+    let ordinals = src.ordinals();
+
     let mut max_ts = i64::MIN;
     let mut delta = Buckets::new();
+    let mut rows_processed = 0u64;
 
     for (row, &ts) in timestamps.iter().enumerate() {
+        if !keep(row, ts) {
+            continue;
+        }
+        rows_processed += 1;
         let bucket = time_bucket::time_bucket(bucket_ms, ts);
         max_ts = max_ts.max(ts);
 
@@ -131,6 +183,9 @@ pub fn refresh_rows(def: &ContinuousAggregateDef, src: &RefreshSource<'_>) -> Re
                 PartialAggregate::new(*bucket, key.clone(), &layout)
             });
         partial.count += 1;
+        if let Some(&ordinal) = ordinals.get(row) {
+            partial.max_ordinal = partial.max_ordinal.max(ordinal);
+        }
         for (slot, column) in slot_columns.iter().enumerate() {
             let Some(state) = partial.columns.get_mut(slot) else {
                 continue;
@@ -152,7 +207,7 @@ pub fn refresh_rows(def: &ContinuousAggregateDef, src: &RefreshSource<'_>) -> Re
     }
 
     RefreshResult {
-        rows_processed: timestamps.len() as u64,
+        rows_processed,
         max_ts,
         delta,
     }
@@ -166,5 +221,60 @@ pub fn merge_delta(materialized: &mut Buckets, delta: &Buckets, layout: &ColumnL
             .entry((*bucket, key.clone()))
             .or_insert_with(|| PartialAggregate::new(*bucket, key.clone(), layout))
             .merge(partial);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nodedb_types::columnar::schema::TS_SYSTEM;
+
+    use super::*;
+    use crate::engine::timeseries::continuous_agg::test_support::{T0, exact_def};
+
+    /// Each bucket records the newest `_ts_system` ordinal of the rows it
+    /// folds, and a merge keeps the newer of two.
+    #[test]
+    fn a_bucket_records_its_newest_row_ordinal() {
+        let schema = ColumnarSchema {
+            columns: vec![
+                ("timestamp".into(), ColumnType::Timestamp(TimeKind::Millis)),
+                ("v".into(), ColumnType::Int64),
+                (TS_SYSTEM.into(), ColumnType::Int64),
+            ],
+            timestamp_idx: 0,
+            codecs: vec![nodedb_codec::ColumnCodec::Auto; 3],
+        };
+        let columns = vec![
+            ColumnData::Timestamp(vec![T0, T0 + 1_000, T0 + 3_600_000]),
+            ColumnData::Int64(vec![1, 2, 3]),
+            ColumnData::Int64(vec![10, 30, 20]),
+        ];
+        let dicts = HashMap::new();
+        let src = RefreshSource {
+            schema: &schema,
+            columns: &columns,
+            symbol_dicts: &dicts,
+            row_count: 3,
+        };
+        let result = refresh_rows(&exact_def("t", "s", "1m"), &src);
+        let mut ordinals: Vec<(i64, i64)> = result
+            .delta
+            .values()
+            .map(|bucket| (bucket.bucket_ts, bucket.max_ordinal))
+            .collect();
+        ordinals.sort_unstable();
+        assert_eq!(
+            ordinals.iter().map(|(_, o)| *o).collect::<Vec<_>>(),
+            vec![30, 20]
+        );
+
+        let mut first =
+            PartialAggregate::new(0, Vec::new(), &ColumnLayout::of(&exact_def("t", "s", "1m")));
+        let mut second =
+            PartialAggregate::new(0, Vec::new(), &ColumnLayout::of(&exact_def("t", "s", "1m")));
+        first.max_ordinal = 5;
+        second.max_ordinal = 9;
+        first.merge(&second);
+        assert_eq!(first.max_ordinal, 9);
     }
 }

@@ -40,6 +40,9 @@ pub struct ArrayCellVersion {
     pub payload: Option<CellPayload>,
     /// A GDPR erasure. Meaningful only when `payload` is `None`.
     pub erased: bool,
+    /// The vShard whose write stored the version. A snapshot install keeps
+    /// it. A backup restore writes under the vShard it restores into.
+    pub placement: u32,
 }
 
 impl ArrayEngine {
@@ -71,6 +74,7 @@ pub(super) fn export_store(store: &ArrayStore) -> ArrayEngineResult<Vec<ArrayCel
                 out.push(version(
                     Memtable::decode_coord_key(coord_key)?,
                     tile_id.system_from_ms,
+                    buffer.placement(),
                     bytes,
                 )?);
             }
@@ -82,7 +86,12 @@ pub(super) fn export_store(store: &ArrayStore) -> ArrayEngineResult<Vec<ArrayCel
             match reader.read_tile(idx)? {
                 TilePayload::Sparse(tile) => {
                     let mut rows = Vec::new();
-                    sparse_versions(&tile, entry.tile_id.system_from_ms, &mut rows)?;
+                    sparse_versions(
+                        &tile,
+                        entry.tile_id.system_from_ms,
+                        entry.placement,
+                        &mut rows,
+                    )?;
                     for row in rows {
                         let key = zerompk::to_msgpack_vec(&row.coord).map_err(|e| {
                             ArrayEngineError::Io {
@@ -111,6 +120,7 @@ pub(super) fn export_store(store: &ArrayStore) -> ArrayEngineResult<Vec<ArrayCel
 fn version(
     coord: Vec<CoordValue>,
     system_from_ms: i64,
+    placement: u32,
     bytes: &[u8],
 ) -> ArrayEngineResult<ArrayCellVersion> {
     let (payload, erased) = if is_cell_tombstone(bytes) {
@@ -125,6 +135,7 @@ fn version(
         system_from_ms,
         payload,
         erased,
+        placement,
     })
 }
 
@@ -133,6 +144,7 @@ fn version(
 fn sparse_versions(
     tile: &SparseTile,
     system_from_ms: i64,
+    placement: u32,
     out: &mut Vec<ArrayCellVersion>,
 ) -> ArrayEngineResult<()> {
     let mut live_row = 0usize;
@@ -171,6 +183,7 @@ fn sparse_versions(
             system_from_ms,
             payload,
             erased: kind == RowKind::GdprErased,
+            placement,
         });
     }
     Ok(())
@@ -233,10 +246,11 @@ mod tests {
             .expect("push");
         }
         let mut out = Vec::new();
-        sparse_versions(&b.build(), 70, &mut out).expect("export");
+        sparse_versions(&b.build(), 70, 3, &mut out).expect("export");
 
         assert_eq!(out.len(), 4);
         assert!(out.iter().all(|v| v.system_from_ms == 70));
+        assert!(out.iter().all(|v| v.placement == 3));
         assert_eq!((out[0].payload.is_none(), out[0].erased), (true, false));
         assert_eq!((out[2].payload.is_none(), out[2].erased), (true, true));
         let live = |i: usize| out[i].payload.as_ref().expect("live").attrs.clone();
@@ -250,9 +264,9 @@ mod tests {
 
     #[test]
     fn a_memtable_sentinel_exports_its_kind() {
-        let tomb = version(vec![CoordValue::Int64(1)], 5, &[0xFF]).expect("tombstone");
+        let tomb = version(vec![CoordValue::Int64(1)], 5, 0, &[0xFF]).expect("tombstone");
         assert_eq!((tomb.payload.is_none(), tomb.erased), (true, false));
-        let erased = version(vec![CoordValue::Int64(1)], 5, &[0xFE]).expect("erasure");
+        let erased = version(vec![CoordValue::Int64(1)], 5, 0, &[0xFE]).expect("erasure");
         assert_eq!((erased.payload.is_none(), erased.erased), (true, true));
     }
 }

@@ -26,16 +26,11 @@ impl ParamDirection {
 
 /// A stored procedure parameter.
 #[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
-#[msgpack(map, allow_unknown_fields)]
+#[msgpack(map)]
 pub struct ProcedureParam {
     pub name: String,
     pub data_type: String,
-    #[msgpack(default = "default_direction")]
     pub direction: ParamDirection,
-}
-
-fn default_direction() -> ParamDirection {
-    ParamDirection::In
 }
 
 /// Routability classification for procedure DML targets.
@@ -58,45 +53,27 @@ pub enum ProcedureRoutability {
 
 /// Serializable stored procedure definition for redb storage.
 #[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
-#[msgpack(map, allow_unknown_fields)]
+#[msgpack(map)]
 pub struct StoredProcedure {
     pub tenant_id: u64,
-    /// Database namespace. Missing in legacy records means `default`.
-    #[msgpack(default)]
+    /// Database namespace.
     pub database_id: DatabaseId,
     pub name: String,
     pub parameters: Vec<ProcedureParam>,
     /// Procedural SQL body (BEGIN ... END).
     pub body_sql: String,
-    /// Maximum loop iterations (default 1_000_000).
-    #[msgpack(default = "default_max_iterations")]
+    /// Maximum loop iterations.
     pub max_iterations: u64,
-    /// Execution timeout in seconds (default 60).
-    #[msgpack(default = "default_timeout_secs")]
+    /// Execution timeout in seconds.
     pub timeout_secs: u64,
     /// Routability classification: which collections the procedure targets.
     /// Used by cron scheduler for affinity routing.
-    #[msgpack(default)]
     pub routability: ProcedureRoutability,
     pub owner: String,
     pub created_at: u64,
     /// Monotonic descriptor version, stamped by the metadata applier.
     /// See `StoredCollection::descriptor_version`.
-    #[msgpack(default)]
     pub descriptor_version: u64,
     /// HLC stamped by the metadata applier at commit time.
-    #[msgpack(default)]
     pub modification_hlc: nodedb_types::Hlc,
-}
-
-/// Default max loop iterations — allows moderate data processing (1M rows).
-/// Override per-procedure via `WITH (MAX_ITERATIONS = N)`.
-fn default_max_iterations() -> u64 {
-    1_000_000
-}
-
-/// Default execution timeout — prevents long-running procedures from
-/// blocking the Tokio Control Plane. Override via `WITH (TIMEOUT = N)`.
-fn default_timeout_secs() -> u64 {
-    60
 }

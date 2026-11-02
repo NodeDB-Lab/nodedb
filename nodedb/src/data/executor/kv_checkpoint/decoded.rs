@@ -10,13 +10,15 @@
 
 use std::collections::HashMap;
 
-use super::format::KvCheckpointEntry;
+use super::format::{KvCheckpointEntry, KvCheckpointKeyHistory};
 use super::index_decode::DecodedKvIndexes;
 
 /// One collection's decoded state.
 pub(super) struct DecodedKvCollection {
     /// Every live row at flush time.
     pub entries: Vec<KvCheckpointEntry>,
+    /// Every ended version of every key.
+    pub history: Vec<KvCheckpointKeyHistory>,
     /// Every index registration, with its content.
     pub indexes: DecodedKvIndexes,
 }

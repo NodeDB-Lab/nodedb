@@ -312,7 +312,7 @@ mod tests {
             wal_lsn: None,
             resolved_now_ms: None,
             commit_hlc: None,
-            entry_version: None,
+            system_ordinal: None,
             admission: crate::bridge::envelope::Admission::Exempt(
                 crate::bridge::envelope::ExemptReason::Read,
             ),
@@ -335,7 +335,11 @@ mod tests {
 
         for (id, name, surr) in flushed {
             engine
-                .insert_with_surrogate(&[Value::Integer(*id), Value::String((*name).into())], *surr)
+                .insert_with_surrogate(
+                    &[Value::Integer(*id), Value::String((*name).into())],
+                    *surr,
+                    *id,
+                )
                 .expect("insert_with_surrogate");
         }
 
@@ -370,7 +374,11 @@ mod tests {
 
         for (id, name, surr) in resident {
             engine
-                .insert_with_surrogate(&[Value::Integer(*id), Value::String((*name).into())], *surr)
+                .insert_with_surrogate(
+                    &[Value::Integer(*id), Value::String((*name).into())],
+                    *surr,
+                    *id,
+                )
                 .expect("insert_with_surrogate");
         }
 
@@ -384,6 +392,21 @@ mod tests {
         collection: &str,
         prefilter: Option<&SurrogateBitmap>,
     ) -> Vec<serde_json::Value> {
+        scan_at(
+            core,
+            collection,
+            prefilter,
+            nodedb_types::SystemTimeScope::Current,
+        )
+    }
+
+    /// [`scan`] at a system-time scope.
+    fn scan_at(
+        core: &mut CoreLoop,
+        collection: &str,
+        prefilter: Option<&SurrogateBitmap>,
+        system_time: nodedb_types::SystemTimeScope,
+    ) -> Vec<serde_json::Value> {
         let task = make_task();
         let params = ColumnarScanParams {
             collection,
@@ -393,7 +416,7 @@ mod tests {
             filters: &[],
             rls_filters: &[],
             sort_keys: &[],
-            system_time: nodedb_types::SystemTimeScope::Current,
+            system_time,
             valid_at_ms: None,
             prefilter,
             computed_columns: &[],
@@ -543,6 +566,7 @@ mod tests {
                 .insert_with_surrogate(
                     &[Value::Integer(2), Value::String("b".into())],
                     Surrogate(302),
+                    2,
                 )
                 .expect("insert_with_surrogate");
             let new_segment_id = engine.next_segment_id();
@@ -828,7 +852,7 @@ mod tests {
         core.columnar_engines
             .get_mut(&key)
             .expect("engine")
-            .delete(&Value::Integer(1))
+            .delete(&Value::Integer(1), 100)
             .expect("delete");
         core.watermark = Lsn::new(200);
         core.floors
@@ -849,6 +873,80 @@ mod tests {
             "the live generation is the SECOND one; the deleted row must not return"
         );
         assert_eq!(restored.floors.columnar_durable_lsn, Lsn::new(200));
+    }
+
+    /// Row history survives a checkpoint and a restart: a read at an
+    /// ordinal before an overwrite or a delete sees the rows it saw before,
+    /// flushed and resident alike, and a current read sees the newest.
+    #[test]
+    fn row_history_survives_a_checkpoint_round_trip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let coll = "ck_history";
+
+        let mut core = open_core(dir.path());
+        let key = seed_collection(
+            &mut core,
+            coll,
+            &[(1, "a", Surrogate(1001)), (2, "b", Surrogate(1002))],
+            &[(3, "c", Surrogate(1003))],
+        );
+        {
+            let engine = core.columnar_engines.get_mut(&key).expect("engine");
+            engine
+                .insert_with_surrogate(
+                    &[Value::Integer(1), Value::String("a2".into())],
+                    Surrogate(1001),
+                    50,
+                )
+                .expect("overwrite");
+            engine.delete(&Value::Integer(2), 60).expect("delete");
+        }
+        core.watermark = Lsn::new(100);
+        core.floors
+            .applied_prefix
+            .observe_outcome_floor(Lsn::new(100));
+        core.checkpoint_columnar_engines()
+            .expect("checkpoint must publish");
+        drop(core);
+
+        let mut restored = open_core(dir.path());
+        restored
+            .load_columnar_checkpoints()
+            .expect("checkpoint load must succeed");
+
+        let pinned = |ordinal| nodedb_types::SystemTimeScope::Pinned {
+            ordinal,
+            cut_marker: 0,
+        };
+        let names = |rows: Vec<serde_json::Value>| -> Vec<String> {
+            let mut v: Vec<String> = rows
+                .iter()
+                .filter_map(|r| r.get("name").and_then(|x| x.as_str()).map(str::to_string))
+                .collect();
+            v.sort_unstable();
+            v
+        };
+        assert_eq!(
+            names(scan_at(&mut restored, coll, None, pinned(10))),
+            vec!["a", "b", "c"],
+            "before the overwrite and the delete"
+        );
+        assert_eq!(
+            names(scan_at(&mut restored, coll, None, pinned(55))),
+            vec!["a2", "b", "c"],
+            "after the overwrite, before the delete"
+        );
+        assert_eq!(names(scan(&mut restored, coll, None)), vec!["a2", "c"]);
+        assert_eq!(
+            names(scan_at(
+                &mut restored,
+                coll,
+                None,
+                nodedb_types::SystemTimeScope::AllVersions
+            )),
+            vec!["a", "a2", "b", "c"],
+            "every version"
+        );
     }
 
     /// A restore must not be undone by the schema seed that runs after it.

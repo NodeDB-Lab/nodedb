@@ -73,6 +73,7 @@ pub(crate) async fn build_insert(
         provenance: None,
         wal_lsn: None,
         system_from: None,
+        restored_versions: Vec::new(),
         rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
         // The native insert API takes rows, not a projection; a caller wanting
         // rows back issues SQL, where `inject_returning_spec` fills this slot.

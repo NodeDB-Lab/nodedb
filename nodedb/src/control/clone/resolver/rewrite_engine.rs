@@ -136,6 +136,7 @@ pub(super) fn rewrite_kv(
             // (clones-of-clones still funnel through here per-level);
             // the resolver overrides it for source delegation below.
             surrogate_ceiling: _,
+            system_time,
         } if ctx.is_target(collection) => Ok(SourceRewrite::task(PhysicalPlan::Kv(KvOp::Scan {
             collection: ctx.source_qualified.clone(),
             cursor: cursor.clone(),
@@ -146,6 +147,7 @@ pub(super) fn rewrite_kv(
             match_pattern: match_pattern.clone(),
             sort_keys: sort_keys.clone(),
             surrogate_ceiling: ctx.kv_surrogate_ceiling,
+            system_time: *system_time,
         }))),
 
         KvOp::Get {
@@ -153,11 +155,13 @@ pub(super) fn rewrite_kv(
             key,
             rls_filters,
             surrogate_ceiling: _,
+            system_time,
         } if ctx.is_target(collection) => Ok(SourceRewrite::task(PhysicalPlan::Kv(KvOp::Get {
             collection: ctx.source_qualified.clone(),
             key: key.clone(),
             rls_filters: rls_filters.clone(),
             surrogate_ceiling: ctx.kv_surrogate_ceiling,
+            system_time: *system_time,
         }))),
 
         _ => refuse_or_skip(plan, ctx),

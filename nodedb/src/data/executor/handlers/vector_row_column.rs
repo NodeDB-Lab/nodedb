@@ -84,14 +84,47 @@ impl CoreLoop {
             })
     }
 
-    /// The vector `surrogate` reads with in a transaction: the staged one
-    /// when the transaction staged a put of the row, else the committed one.
+    /// The vector of `surrogate`'s row version visible at system-time
+    /// ordinal `at` in the vector-primary index of `collection`.`field`.
+    /// `None` reads the committed current vector. A row version visible at
+    /// the cut has its node visible there too, so a row without one is an
+    /// error.
+    pub(in crate::data::executor) fn primary_vector_at(
+        &self,
+        database_id: u64,
+        tid: u64,
+        collection: &str,
+        field: &str,
+        surrogate: Surrogate,
+        at: Option<i64>,
+    ) -> crate::Result<Vec<f32>> {
+        let Some(at) = at else {
+            return self.committed_primary_vector(database_id, tid, collection, field, surrogate);
+        };
+        let index_key = CoreLoop::vector_index_key(database_id, tid, collection, field);
+        self.vector_collections
+            .get(&index_key)
+            .and_then(|coll| coll.vector_for_surrogate_at(surrogate, at))
+            .ok_or_else(|| crate::Error::Internal {
+                detail: format!(
+                    "vector-primary row {} of '{collection}' has no vector visible at \
+                     system-time ordinal {at}",
+                    StorageKey::for_surrogate(surrogate)
+                ),
+            })
+    }
+
+    /// The vector `surrogate` reads with: the staged one when `txn_id`
+    /// staged a put of the row, else the vector of the version visible at
+    /// `at` (the committed current one when `at` is `None`). A historical
+    /// read passes no `txn_id`.
     pub(in crate::data::executor) fn current_primary_vector(
         &self,
         txn_id: Option<TxnId>,
         coll_key: &(DatabaseId, TenantId, String),
         field: &str,
         surrogate: Surrogate,
+        at: Option<i64>,
     ) -> crate::Result<Vec<f32>> {
         if let Some(Staged::Put(body)) = txn_id
             .and_then(|txn| self.txn_overlays.get(&txn))
@@ -99,16 +132,40 @@ impl CoreLoop {
         {
             return Ok(StagedVectorRow::from_bytes(body)?.vector);
         }
-        self.committed_primary_vector(
+        self.primary_vector_at(
             coll_key.0.as_u64(),
             coll_key.1.as_u64(),
             &coll_key.2,
             field,
             surrogate,
+            at,
         )
     }
 
-    /// Add each normalized sidecar row's committed vector under `field`.
+    /// The vector field and the vector a vector-primary row version held:
+    /// the node visible at the version's `system_from`, or, for a delete
+    /// version, the node of the version it closes. `None` when the index
+    /// keeps no such node: a purge dropped it.
+    pub(in crate::data::executor) fn version_primary_vector(
+        &self,
+        database_id: u64,
+        tid: u64,
+        collection: &str,
+        surrogate: Surrogate,
+        system_from: i64,
+    ) -> Option<(String, Vec<f32>)> {
+        let field = self.vector_primary_field(database_id, tid, collection)?;
+        let index_key = CoreLoop::vector_index_key(database_id, tid, collection, &field);
+        let coll = self.vector_collections.get(&index_key)?;
+        let vector = coll
+            .vector_for_surrogate_at(surrogate, system_from)
+            .or_else(|| coll.vector_for_surrogate_at(surrogate, system_from.saturating_sub(1)))?;
+        Some((field, vector))
+    }
+
+    /// Add each normalized sidecar row's vector under `field`: the vector of
+    /// the row version visible at system-time ordinal `at`, the committed
+    /// current one when `at` is `None`.
     pub(in crate::data::executor) fn attach_primary_vectors(
         &self,
         database_id: u64,
@@ -116,15 +173,11 @@ impl CoreLoop {
         collection: &str,
         field: &str,
         rows: &mut [(StorageKey, Vec<u8>)],
+        at: Option<i64>,
     ) -> crate::Result<()> {
         for (key, row) in rows.iter_mut() {
-            let vector = self.committed_primary_vector(
-                database_id,
-                tid,
-                collection,
-                field,
-                key.surrogate(),
-            )?;
+            let vector =
+                self.primary_vector_at(database_id, tid, collection, field, key.surrogate(), at)?;
             *row = with_vector_column(row, field, &vector)?;
         }
         Ok(())

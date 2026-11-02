@@ -25,6 +25,7 @@ impl ArrayStore {
             self.schema_hash,
             self.kek.as_ref(),
         )?;
+        self.note_version_stamps(super::versions::segment_newest_stamps(&h));
         self.segments.insert(seg.id.clone(), h);
         self.manifest.append(seg);
         Ok(())
@@ -53,6 +54,7 @@ impl ArrayStore {
             self.segments.remove(id);
         }
         for h in new_handles {
+            self.note_version_stamps(super::versions::segment_newest_stamps(&h));
             self.segments.insert(h.id().to_string(), h);
         }
         Ok(())

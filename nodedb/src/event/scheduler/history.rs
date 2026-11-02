@@ -9,45 +9,13 @@ use redb::{Database, ReadableTable, TableDefinition};
 use tracing::debug;
 
 use super::types::JobRun;
-use crate::types::DatabaseId;
 
-/// Exact pre-database positional history layout.
-///
-/// This is intentionally private: new writes always use `JobRun`'s map
-/// encoding, while only the history loader recognizes persisted legacy rows.
-#[derive(zerompk::ToMessagePack, zerompk::FromMessagePack)]
-struct LegacyJobRun {
-    schedule_name: String,
-    tenant_id: u64,
-    started_at: u64,
-    duration_ms: u64,
-    success: bool,
-    error: Option<String>,
-}
-
-impl From<LegacyJobRun> for JobRun {
-    fn from(legacy: LegacyJobRun) -> Self {
-        Self {
-            database_id: DatabaseId::DEFAULT.as_u64(),
-            schedule_name: legacy.schedule_name,
-            tenant_id: legacy.tenant_id,
-            started_at: legacy.started_at,
-            duration_ms: legacy.duration_ms,
-            success: legacy.success,
-            error: legacy.error,
-        }
-    }
-}
-
-/// Decode the current map encoding, falling back only to the exact legacy
-/// positional layout.
-fn decode_job_run(bytes: &[u8]) -> Option<JobRun> {
-    match zerompk::from_msgpack(bytes) {
-        Ok(run) => Some(run),
-        Err(_) => zerompk::from_msgpack::<LegacyJobRun>(bytes)
-            .ok()
-            .map(JobRun::from),
-    }
+/// Decode one persisted `JobRun`. Any other shape fails.
+fn decode_job_run(bytes: &[u8]) -> crate::Result<JobRun> {
+    zerompk::from_msgpack(bytes).map_err(|e| crate::Error::Serialization {
+        format: "msgpack".into(),
+        detail: format!("decode job run: {e}"),
+    })
 }
 
 /// redb table: monotonic run_id → MessagePack-serialized JobRun.
@@ -112,9 +80,7 @@ impl JobHistoryStore {
                     if id > max_id {
                         max_id = id;
                     }
-                    if let Some(run) = decode_job_run(value_guard.value()) {
-                        runs.push_back(run);
-                    }
+                    runs.push_back(decode_job_run(value_guard.value())?);
                 }
             }
             txn.commit().map_err(|e| crate::Error::Storage {
@@ -247,9 +213,20 @@ mod tests {
         assert_eq!(decoded.error.as_deref(), Some("timeout"));
     }
 
+    /// A positional run without `database_id` fails to decode.
+    #[derive(zerompk::ToMessagePack)]
+    struct PositionalJobRun {
+        schedule_name: String,
+        tenant_id: u64,
+        started_at: u64,
+        duration_ms: u64,
+        success: bool,
+        error: Option<String>,
+    }
+
     #[test]
-    fn legacy_job_run_roundtrip_defaults_database() {
-        let legacy = LegacyJobRun {
+    fn positional_job_run_is_refused() {
+        let positional = PositionalJobRun {
             schedule_name: "cleanup".into(),
             tenant_id: 7,
             started_at: 1_700_000_000_000,
@@ -257,16 +234,8 @@ mod tests {
             success: false,
             error: Some("timeout".into()),
         };
-        let bytes = zerompk::to_msgpack_vec(&legacy).unwrap();
-        let decoded = decode_job_run(&bytes).unwrap();
-
-        assert_eq!(decoded.database_id, DatabaseId::DEFAULT.as_u64());
-        assert_eq!(decoded.schedule_name, "cleanup");
-        assert_eq!(decoded.tenant_id, 7);
-        assert_eq!(decoded.started_at, 1_700_000_000_000);
-        assert_eq!(decoded.duration_ms, 150);
-        assert!(!decoded.success);
-        assert_eq!(decoded.error.as_deref(), Some("timeout"));
+        let bytes = zerompk::to_msgpack_vec(&positional).unwrap();
+        assert!(decode_job_run(&bytes).is_err());
     }
 
     #[test]

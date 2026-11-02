@@ -27,6 +27,7 @@ impl CoreLoop {
                 filters,
                 rls_filters,
                 scores,
+                system_time,
             } => self.execute_text_search(
                 task,
                 TextSearchParams {
@@ -41,6 +42,7 @@ impl CoreLoop {
                     filters,
                     rls_filters,
                     scores,
+                    system_time: *system_time,
                 },
             ),
 
@@ -50,6 +52,7 @@ impl CoreLoop {
                 rls_filters,
                 scores,
                 bound,
+                system_time,
             } => self.execute_bm25_score_scan(
                 task,
                 ScoreScanParams {
@@ -59,6 +62,7 @@ impl CoreLoop {
                     rls_filters,
                     scores,
                     bound: bound.as_ref(),
+                    system_time: *system_time,
                 },
             ),
 
@@ -71,6 +75,7 @@ impl CoreLoop {
                 filters,
                 rls_filters,
                 scores,
+                system_time,
             } => self.execute_phrase_search(
                 task,
                 PhraseSearchParams {
@@ -83,6 +88,7 @@ impl CoreLoop {
                     filters,
                     rls_filters,
                     scores,
+                    system_time: *system_time,
                 },
             ),
 
@@ -101,6 +107,7 @@ impl CoreLoop {
                 filter_bitmap,
                 rls_filters,
                 score_alias,
+                system_time,
             } => self.execute_hybrid_search(
                 task,
                 HybridSearchParams {
@@ -119,6 +126,7 @@ impl CoreLoop {
                     filter_bitmap: filter_bitmap.as_ref(),
                     rls_filters,
                     score_alias: score_alias.as_deref(),
+                    system_time: *system_time,
                 },
             ),
 
@@ -166,29 +174,47 @@ impl CoreLoop {
                 filter_bitmap,
                 rls_filters,
                 score_alias,
-            } => self.execute_hybrid_search_triple(
-                task,
-                HybridSearchTripleParams {
+                system_time,
+            } => {
+                // The graph leg walks the collection's graph at the cut. A
+                // read handler cannot build a CSR, so it is built here.
+                let graph_scope =
+                    crate::data::executor::handlers::text_search_triple::graph_leg_scope(
+                        *system_time,
+                    );
+                if let Err(e) = self.prepare_csr_view(
+                    task.request.database_id.as_u64(),
                     tid,
-                    collection: collection.as_str(),
-                    vector_field,
-                    query_vector,
-                    text_field: text_field.as_deref(),
-                    query_text,
-                    filters,
-                    graph_seed_id,
-                    graph_depth: *graph_depth,
-                    graph_edge_label: graph_edge_label.as_deref(),
-                    top_k: *top_k,
-                    ef_search: *ef_search,
-                    mode: *mode,
-                    fuzzy: *fuzzy,
-                    rrf_k: *rrf_k,
-                    filter_bitmap: filter_bitmap.as_ref(),
-                    rls_filters,
-                    score_alias: score_alias.as_deref(),
-                },
-            ),
+                    Some(collection.as_str()),
+                    &graph_scope,
+                ) {
+                    return self.response_error(task, e);
+                }
+                self.execute_hybrid_search_triple(
+                    task,
+                    HybridSearchTripleParams {
+                        tid,
+                        collection: collection.as_str(),
+                        vector_field,
+                        query_vector,
+                        text_field: text_field.as_deref(),
+                        query_text,
+                        filters,
+                        graph_seed_id,
+                        graph_depth: *graph_depth,
+                        graph_edge_label: graph_edge_label.as_deref(),
+                        top_k: *top_k,
+                        ef_search: *ef_search,
+                        mode: *mode,
+                        fuzzy: *fuzzy,
+                        rrf_k: *rrf_k,
+                        filter_bitmap: filter_bitmap.as_ref(),
+                        rls_filters,
+                        score_alias: score_alias.as_deref(),
+                        system_time: *system_time,
+                    },
+                )
+            }
 
             TextOp::SetTextConfig {
                 collection,

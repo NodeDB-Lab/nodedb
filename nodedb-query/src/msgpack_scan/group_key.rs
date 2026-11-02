@@ -16,8 +16,8 @@ use crate::msgpack_scan::reader::{read_f64, read_integer, read_null, read_str};
 /// Build a GROUP BY key string from raw msgpack bytes.
 ///
 /// Format: `[val1,val2,...]` where values are formatted as JSON literals.
-/// This is compatible with the legacy `sonic_rs::to_string(&key_parts)` format,
-/// so the result-construction code can parse it back with `sonic_rs::from_str`.
+/// The text matches `sonic_rs::to_string(&key_parts)`, so the
+/// result-construction code can parse it back with `sonic_rs::from_str`.
 ///
 /// Each key contributes one positional slot: a bare-column key (`field: Some`)
 /// contributes the value extracted from that document field; a computed key

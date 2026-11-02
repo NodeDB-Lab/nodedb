@@ -22,7 +22,7 @@
 //!   its rows from the plan node as they are.
 
 use nodedb_types::RowIdentity;
-use nodedb_types::timeseries::{SeriesCatalog, SeriesKey};
+use nodedb_types::timeseries::SeriesCatalog;
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
@@ -422,7 +422,8 @@ fn resolved_row_images(batch: &ResolvedTsBatch) -> Result<Vec<rmpv::Value>, Erro
     let mut scratch = ColumnarMemtable::new(schema, config);
     let mut catalog = SeriesCatalog::default();
     for row in &batch.rows {
-        let series_key = SeriesKey::new(batch.measurement.as_str(), row.tags.clone());
+        let series_key =
+            ilp_ingest::row_series_key(batch.measurement.as_str(), scratch.schema(), &row.values);
         let series_id = ilp_ingest::resolve_series(&mut catalog, &series_key);
         scratch
             .ingest_row(series_id, &row.values)

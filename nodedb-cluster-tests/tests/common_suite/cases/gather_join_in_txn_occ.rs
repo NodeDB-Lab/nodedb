@@ -10,33 +10,30 @@
 //! routes the whole `HashJoin` to the LEFT (probe) collection's owning vShard,
 //! where the left side is scanned locally, and GATHERS the RIGHT (build)
 //! collection across all vShards (`gather_join_build_side`) to inline it as a
-//! `ProviderScan`. Each of those two gathers observes its own collection's
-//! write version at read time.
+//! `ProviderScan`. Each of those two gathers reports the vShards it read.
 //!
-//! The GATHER path must not have a serializability HOLE where only the plan's
+//! The GATHER path must not leave a serializability HOLE where only the plan's
 //! collapsed left collection reaches the read-set (`extract_collection` of an
-//! `Exchange{Gather{HashJoin}}` returns the left collection), while the build
-//! side's gathered read-version is DISCARDED — that would leave its vShard
-//! never validated at commit. A concurrent write to the build collection
-//! between the in-txn read and COMMIT must be detected, not silently commit
-//! a stale join.
-//! The fix threads a per-collection capture accumulator through the Gather
-//! resolution so BOTH sides are recorded, mirroring the shuffle path.
+//! `Exchange{Gather{HashJoin}}` returns the left collection) while the build
+//! side's vShard is never validated at commit. A concurrent write to the build
+//! collection between the in-txn read and COMMIT must be detected, not
+//! silently commit a stale join. A per-collection capture accumulator threads
+//! through the Gather resolution so BOTH sides are recorded, mirroring the
+//! shuffle path.
 //!
-//! Three cases bound the fixed behavior:
+//! Three cases bound the behavior:
 //!
 //!  * `commits_when_neither_side_concurrently_written` — neither join side is
-//!    written during the txn, so both recorded real versions still validate and
-//!    COMMIT must SUCCEED (proves the captures carry the sound per-collection
-//!    write version, not an inflated global watermark that would over-abort).
+//!    written during the txn, so no version sits above the snapshot and COMMIT
+//!    must SUCCEED.
 //!  * `occ_aborts_on_stale_probe_read` — a confirmed-visible concurrent write to
-//!    the LEFT/probe collection advances it past the captured probe version, so
-//!    COMMIT must abort with 40001.
+//!    the LEFT/probe collection lands a version above the snapshot, so COMMIT
+//!    must abort with 40001.
 //!  * `occ_aborts_on_stale_build_read` — THE LOAD-BEARING CASE: a
 //!    confirmed-visible concurrent write to the RIGHT/build collection ONLY must
-//!    STILL abort with 40001. Pre-fix, no read-set entry existed for the build
-//!    collection, so this would have SILENTLY committed. This case proves the
-//!    hole is closed on the NATURAL Gather path (no forced shuffle).
+//!    STILL abort with 40001. Without a read-set entry for the build collection
+//!    it would commit silently. This case proves the build side is recorded on
+//!    the NATURAL Gather path (no forced shuffle).
 //!
 //! ## Why a single node reproduces it
 //!
@@ -183,9 +180,7 @@ async fn spawn_node_with_collections() -> (
     .await;
 
     // Seed left and right with three matching join keys so the join returns real
-    // rows AND each side's committed write version is non-zero (gives the
-    // stale-read cases a real baseline version to advance past, and the
-    // commits-clean case a non-zero version that must still validate).
+    // rows AND each side holds committed versions below the snapshot.
     node.client
         .simple_query(&format!(
             "INSERT INTO {left} (id, jk, val) VALUES \
@@ -243,8 +238,7 @@ async fn spawn_node_with_collections() -> (
 /// `left`/`right` + two buffered writes on distinct vShards, leaving the
 /// transaction OPEN. The two INSERTs buffer on the coordinator, so at COMMIT the
 /// write set spans two vShards → the Calvin barrier; the join SELECT registers
-/// BOTH join sides' vShards as read-only participants with captured real read
-/// versions.
+/// BOTH join sides' vShards as read-only participants.
 async fn begin_join_read_and_buffer_writes(
     node: &TestClusterNode,
     left: &str,
@@ -265,10 +259,8 @@ async fn begin_join_read_and_buffer_writes(
         .expect("open cross-shard txn: distributed gather join read + buffer writes");
 }
 
-/// Neither join side is concurrently written, so both recorded real read versions
-/// still validate at the barrier and COMMIT must SUCCEED. Proves the captured
-/// read-versions are the sound per-collection write versions — an inflated
-/// global watermark would over-abort this clean commit.
+/// Neither join side is concurrently written, so no version of either sits above
+/// the snapshot. Both reads validate at the barrier and COMMIT must SUCCEED.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn gather_join_commits_when_neither_side_concurrently_written() {
     let (node, _data_dir, left, right, w1, w2) = spawn_node_with_collections().await;
@@ -325,8 +317,8 @@ async fn gather_join_commits_when_neither_side_concurrently_written() {
     node.shutdown().await;
 }
 
-/// A confirmed-visible concurrent write to the LEFT/probe collection advances it
-/// past the captured probe read version. COMMIT must abort with SQLSTATE 40001 —
+/// A confirmed-visible concurrent write to the LEFT/probe collection lands a
+/// version above the snapshot. COMMIT must abort with SQLSTATE 40001 —
 /// the barrier revalidates the probe side's read-only slice and finds it stale.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn gather_join_occ_aborts_on_stale_probe_read() {
@@ -336,8 +328,8 @@ async fn gather_join_occ_aborts_on_stale_probe_read() {
 
     begin_join_read_and_buffer_writes(&node, &left, &right, &w1, &w2).await;
 
-    // Concurrent writer on a SEPARATE connection advances the LEFT (probe)
-    // collection past the captured probe read version by inserting a new row.
+    // Concurrent writer on a SEPARATE connection lands a version of the LEFT
+    // (probe) collection above the snapshot by inserting a new row.
     let (writer, writer_conn) = open_client(&node).await;
     writer
         .simple_query(&format!(
@@ -389,13 +381,12 @@ async fn gather_join_occ_aborts_on_stale_probe_read() {
 }
 
 /// THE LOAD-BEARING CASE. A confirmed-visible concurrent write to the RIGHT/build
-/// collection ONLY must STILL abort the COMMIT with SQLSTATE 40001. Pre-fix, the
-/// Gather resolver DISCARDED the build side's gathered read-version and
-/// `extract_collection(Exchange{Gather{HashJoin}})` returned only the left
-/// collection, so NO read-set entry existed for the build collection — its vShard
-/// was never validated at the barrier and this transaction would have SILENTLY
-/// committed a stale join result. The abort here proves the build side is now
-/// recorded on the NATURAL gather path and the serializability hole is closed.
+/// collection ONLY must STILL abort the COMMIT with SQLSTATE 40001.
+/// `extract_collection(Exchange{Gather{HashJoin}})` returns only the left
+/// collection, so the build side's capture is its only read-set entry: without
+/// it the build vShard is never validated at the barrier and a stale join
+/// commits silently. The abort proves the build side is recorded on the
+/// NATURAL gather path.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn gather_join_occ_aborts_on_stale_build_read() {
     let (node, _data_dir, left, right, w1, w2) = spawn_node_with_collections().await;
@@ -404,8 +395,8 @@ async fn gather_join_occ_aborts_on_stale_build_read() {
 
     begin_join_read_and_buffer_writes(&node, &left, &right, &w1, &w2).await;
 
-    // Concurrent writer advances the RIGHT (build) collection ONLY — the LEFT
-    // side stays current. Pre-fix this write went undetected at commit.
+    // Concurrent writer lands a version of the RIGHT (build) collection ONLY —
+    // the LEFT side stays current.
     let (writer, writer_conn) = open_client(&node).await;
     writer
         .simple_query(&format!(
@@ -431,10 +422,11 @@ async fn gather_join_occ_aborts_on_stale_build_read() {
     )
     .await;
 
-    let err = node.client.simple_query("COMMIT").await.expect_err(
-        "COMMIT of a stale in-txn distributed gather join (BUILD side) must abort — the hole \
-             this closes; pre-fix it silently committed",
-    );
+    let err = node
+        .client
+        .simple_query("COMMIT")
+        .await
+        .expect_err("COMMIT of a stale in-txn distributed gather join (BUILD side) must abort");
     assert_eq!(
         pg_sqlstate(&err).as_deref(),
         Some("40001"),

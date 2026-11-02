@@ -158,6 +158,7 @@ pub trait PlanVisitor {
         query_vector: &[f32],
         top_k: usize,
         ef_search: usize,
+        temporal: &TemporalScope,
     ) -> Result<Self::Output, Self::Error>;
 
     /// Handle [`SqlPlan::SparseSearch`]. `filters` is the statement's
@@ -169,6 +170,7 @@ pub trait PlanVisitor {
         query_entries: &[(u32, f32)],
         top_k: usize,
         filters: &[Filter],
+        temporal: &TemporalScope,
     ) -> Result<Self::Output, Self::Error>;
 
     /// Handle [`SqlPlan::TextSearch`].

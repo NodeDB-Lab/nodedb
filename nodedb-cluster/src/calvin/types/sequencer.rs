@@ -47,10 +47,7 @@ pub struct SequencedTxn {
     /// paths. Engine handlers that need a "current time" (bitemporal sys_from,
     /// KV TTL expire_at, timeseries system_ms) MUST use this value instead of
     /// reading the wall clock independently, ensuring byte-identical state
-    /// across all replicas. Wire-additive: zerompk returns default (0) when
-    /// decoding older entries that lack this field.
-    #[serde(default)]
-    #[msgpack(default)]
+    /// across all replicas.
     pub epoch_system_ms: i64,
     /// Number of positions in this epoch that target the vShard this copy is
     /// delivered to.
@@ -62,19 +59,14 @@ pub struct SequencedTxn {
     /// priori knowledge, how many positions of an epoch it must apply before
     /// that epoch is fully applied on its vShard — the input to the scheduler's
     /// exactly-once per-`(epoch, position)` applied gate and fully-applied
-    /// watermark. Wire-additive: zerompk returns default (0) when decoding
-    /// entries that predate this field.
-    #[serde(default)]
-    #[msgpack(default)]
+    /// watermark.
     pub epoch_vshard_txn_count: u32,
     /// Optional lock-table identity distinct from this txn's `(epoch, position)`
     /// apply-slot. `None` (the default) means the lock owner is the apply slot —
     /// the established behavior. `Some(id)` lets a different identity (e.g. a
     /// read-reservation id from a separate position band) own the exclusive lock
     /// while this txn keeps its own fresh apply-slot for the watermark and
-    /// completion path. Wire-additive: decodes to `None` on older log entries.
-    #[serde(default)]
-    #[msgpack(default)]
+    /// completion path.
     pub lock_owner: Option<TxnIdWire>,
     /// The plans this vShard runs, once a multi-part txn's parts assembled.
     ///
@@ -133,7 +125,9 @@ pub struct EpochBatch {
     pub epoch: u64,
     /// Ordered transactions in this epoch. Position is the index in this vec.
     pub txns: Vec<SequencedTxn>,
-    /// Wall-clock ms read ONCE on the sequencer leader at epoch creation.
+    /// Wall-clock ms read ONCE on the sequencer leader at epoch creation,
+    /// raised above every instant minted or applied before it and above the
+    /// floor of every cut marker the log holds before it.
     ///
     /// This single timestamp is the deterministic time anchor for every
     /// transaction in this epoch. When the state machine fans `SequencedTxn`s

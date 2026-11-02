@@ -232,7 +232,7 @@ async fn rejects_corrupted_trailer() {
 async fn rejects_unsupported_version() {
     let server = TestServer::start().await;
     let mut bytes = drain_backup(&server, TENANT).await.expect("BACKUP");
-    bytes[4] = 99; // version byte in header
+    bytes[4] = nodedb_types::backup_envelope::VERSION + 1; // version byte in header
     let err = push_restore(&server, TENANT, bytes, false)
         .await
         .unwrap_err();

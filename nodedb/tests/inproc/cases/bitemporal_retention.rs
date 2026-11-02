@@ -37,6 +37,7 @@ fn sealed_partition_meta(min_ts: i64, max_ts: i64, max_system_ts: i64) -> Partit
         last_flushed_wal_lsn: 0,
         column_stats: Default::default(),
         max_system_ts,
+        ended_at: None,
     }
 }
 
@@ -47,22 +48,24 @@ fn sealed_partition_meta(min_ts: i64, max_ts: i64, max_system_ts: i64) -> Partit
 fn bitemporal_retention_preserves_backfill() {
     let now_ms = 40 * 86_400_000i64;
     let backfill_event_ts = 5 * 86_400_000i64; // 35 days old (event time)
-    let backfill_system_ts = now_ms - 60_000; // 1 minute ago (system time)
+    // Written 1 minute ago: `max_system_ts` holds the write's ordinal.
+    let backfill_system_ts = nodedb_types::ms_to_ordinal_upper(now_ms - 60_000);
     let retention_ms: i64 = 30 * 86_400_000; // 30-day retention window
 
     let mut reg = PartitionRegistry::new(test_config(retention_ms as u64));
 
     // Seed a partition directly — simulates a flushed backfill batch.
     let start = backfill_event_ts;
-    reg.get_or_create_partition(start);
+    let dir = reg.get_or_create_partition(start).0.dir_name.clone();
+    let key = reg.key_of_dir(&dir).expect("registered");
     let meta = sealed_partition_meta(backfill_event_ts, backfill_event_ts, backfill_system_ts);
-    reg.update_meta(start, meta);
+    reg.update_meta(&key, meta);
 
     // Non-bitemporal axis: partition is older than retention → expired.
     let expired_event = reg.find_expired(now_ms, false);
     assert_eq!(
         expired_event,
-        vec![start],
+        vec![key],
         "event-time retention should drop the backdated partition"
     );
 
@@ -84,21 +87,23 @@ fn bitemporal_fallback_when_system_ts_zero() {
 
     let mut reg = PartitionRegistry::new(test_config(retention_ms as u64));
     let start = 5 * 86_400_000i64;
-    reg.get_or_create_partition(start);
+    let dir = reg.get_or_create_partition(start).0.dir_name.clone();
+    let key = reg.key_of_dir(&dir).expect("registered");
     let meta = sealed_partition_meta(start, start, 0); // max_system_ts = 0
-    reg.update_meta(start, meta);
+    reg.update_meta(&key, meta);
 
     // Both axes should agree because max_system_ts = 0 triggers fallback.
-    assert_eq!(reg.find_expired(now_ms, false), vec![start]);
-    assert_eq!(reg.find_expired(now_ms, true), vec![start]);
+    assert_eq!(reg.find_expired(now_ms, false), vec![key.clone()]);
+    assert_eq!(reg.find_expired(now_ms, true), vec![key]);
 }
 
 /// Plain columnar bitemporal: two inserts with the same user PK but
-/// different `_ts_system` stamps produce two memtable rows with no
-/// delete bitmap entry — compaction sees both versions.
+/// different `_ts_system` stamps keep both versions. The first ends at the
+/// second's stamp: a current read sees v2, a read before v2 sees v1, and
+/// both stay until a purge.
 #[test]
 fn bitemporal_columnar_insert_preserves_versions() {
-    use nodedb_columnar::MutationEngine;
+    use nodedb_columnar::{MutationEngine, VersionCut};
     use nodedb_types::columnar::{ColumnDef, ColumnType, ColumnarSchema};
     use nodedb_types::value::Value;
 
@@ -118,49 +123,44 @@ fn bitemporal_columnar_insert_preserves_versions() {
     );
 
     let mut engine = MutationEngine::new("bi_collection".into(), schema);
+    let version = |ts: i64, v: f64| {
+        vec![
+            Value::Integer(ts),
+            Value::Integer(i64::MIN),
+            Value::Integer(i64::MAX),
+            Value::Integer(42),
+            Value::Float(v),
+        ]
+    };
 
     // First version of user pk=42.
-    engine
-        .insert(&[
-            Value::Integer(1_000),
-            Value::Integer(i64::MIN),
-            Value::Integer(i64::MAX),
-            Value::Integer(42),
-            Value::Float(1.0),
-        ])
-        .expect("insert v1");
+    engine.insert(&version(1_000, 1.0), 0).expect("insert v1");
 
     // Second version of the same pk — later system time, different value.
-    let r2 = engine
-        .insert(&[
-            Value::Integer(2_000),
-            Value::Integer(i64::MIN),
-            Value::Integer(i64::MAX),
-            Value::Integer(42),
-            Value::Float(2.0),
-        ])
-        .expect("insert v2");
+    let r2 = engine.insert(&version(2_000, 2.0), 0).expect("insert v2");
 
-    // Non-bitemporal would emit a DeleteRows record for the prior version;
-    // bitemporal should emit ONLY the InsertRow.
+    // The prior version ends at v2's stamp, then v2 lands.
     assert_eq!(
         r2.wal_records.len(),
-        1,
-        "bitemporal insert must not tombstone prior version"
+        2,
+        "an end record and an insert record"
     );
     assert!(matches!(
         &r2.wal_records[0],
-        nodedb_columnar::wal_record::ColumnarWalRecord::InsertRow { .. }
+        nodedb_columnar::wal_record::ColumnarWalRecord::DeleteRows { sys_to: 2_000, .. }
     ));
 
-    // Both rows are live in the memtable — no delete bitmap entries.
+    // Both versions stay in the memtable.
     assert_eq!(engine.memtable().row_count(), 2);
-    assert!(
+    let seen = |cut| -> Vec<Vec<Value>> {
         engine
-            .delete_bitmap(0)
-            .is_none_or(|bm| bm.deleted_count() == 0),
-        "bitemporal insert must not create tombstones"
-    );
+            .scan_memtable_versions(cut)
+            .map(|r| r.expect("read").2)
+            .collect()
+    };
+    assert_eq!(seen(VersionCut::Current), vec![version(2_000, 2.0)]);
+    assert_eq!(seen(VersionCut::At(1_500)), vec![version(1_000, 1.0)]);
+    assert_eq!(seen(VersionCut::All).len(), 2);
 
     // PK index rebinds to latest version so current-state reads find v2.
     let pk = nodedb_columnar::pk_index::encode_pk(&Value::Integer(42));

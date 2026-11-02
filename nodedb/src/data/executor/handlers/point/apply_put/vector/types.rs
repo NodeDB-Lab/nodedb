@@ -14,24 +14,43 @@ pub(in crate::data::executor) struct VectorIndexPutParams<'a> {
     pub storage_key: crate::engine::document::store::StorageKey,
     pub value: &'a [u8],
     pub wal_lsn: u64,
+    /// The system-time ordinal of the row version this write stores. The
+    /// row's prior vector nodes end there and its new ones start there.
+    pub sys_from: i64,
+    /// Whether the write replaces a stored row. Only then does a vector field
+    /// the body lacks end.
+    pub replaces_row: bool,
 }
 
-/// Capture of a single HNSW vector index mutation (insert or soft-delete),
-/// carrying everything needed to both key the `VectorCollection` (`index_key`,
-/// `vector_id`) AND reverse the paired `vector_doc_map` entry on rollback
-/// (`collection`, `field`, `doc_id`). Replaces a raw `(index_key, vector_id)`
-/// tuple so undo can restore/remove the reverse-lookup map symmetrically with
-/// the R-tree's `SpatialInsert`/`SpatialDelete` undo pattern.
+/// How a removal found the node, or nodes, it ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::data::executor) enum VectorRemoval {
+    /// The `vector_doc_map` entry of the document's field named the node.
+    /// `node_deleted` is `false` when the node was dead already and only the
+    /// map entry went.
+    Recorded { node_deleted: bool },
+    /// The node bound to the row's surrogate, with no `vector_doc_map` entry:
+    /// a node a direct vector write bound, or a document node whose map entry
+    /// a restart or a snapshot install did not carry.
+    Bound,
+    /// The multi-vector document of the row's surrogate: its `members`, and
+    /// the ids among them the removal ended.
+    MultiVector { members: Vec<u32>, ended: Vec<u32> },
+}
+
+/// Capture of one vector index removal, carrying everything needed to key
+/// the `VectorCollection` (`index_key`, `vector_id`) AND reverse the paired
+/// `vector_doc_map` entry or multi-vector membership on rollback
+/// (`collection`, `field`, `doc_id`, `removal`).
 #[derive(Clone)]
 pub(in crate::data::executor) struct VectorIndexDelta {
     pub index_key: (nodedb_types::DatabaseId, crate::types::TenantId, String),
+    /// The ended node. The first ended member for a multi-vector document.
     pub vector_id: u32,
     pub collection: String,
     pub field: String,
     pub doc_id: crate::engine::document::store::StorageKey,
-    /// Whether the removal tombstoned `vector_id`. `false` when the node was
-    /// dead already and only the `vector_doc_map` entry went.
-    pub node_deleted: bool,
+    pub removal: VectorRemoval,
 }
 
 impl VectorIndexDelta {
@@ -39,13 +58,27 @@ impl VectorIndexDelta {
     pub(in crate::data::executor) fn into_delete_undo(
         self,
     ) -> crate::data::executor::handlers::transaction::undo::UndoEntry {
-        crate::data::executor::handlers::transaction::undo::UndoEntry::DeleteVector {
-            index_key: self.index_key,
-            vector_id: self.vector_id,
-            collection: self.collection,
-            field: self.field,
-            doc_id: Some(self.doc_id),
-            node_deleted: self.node_deleted,
+        use crate::data::executor::handlers::transaction::undo::UndoEntry;
+        match self.removal {
+            VectorRemoval::Recorded { node_deleted } => UndoEntry::DeleteVector {
+                index_key: self.index_key,
+                vector_id: self.vector_id,
+                collection: self.collection,
+                field: self.field,
+                doc_id: Some(self.doc_id),
+                node_deleted,
+            },
+            VectorRemoval::Bound => UndoEntry::DisplacedVector {
+                index_key: self.index_key,
+                vector_id: self.vector_id,
+                surrogate: self.doc_id.surrogate(),
+            },
+            VectorRemoval::MultiVector { members, ended } => UndoEntry::EndedMultiVector {
+                index_key: self.index_key,
+                document: self.doc_id.surrogate(),
+                members,
+                ended,
+            },
         }
     }
 }
@@ -63,4 +96,6 @@ pub(super) struct VectorFieldInsert<'a> {
     pub(super) field_name: &'a str,
     pub(super) storage_key: crate::engine::document::store::StorageKey,
     pub(super) floats: Vec<f32>,
+    /// The row version's system-time ordinal (see `VectorIndexPutParams`).
+    pub(super) sys_from: i64,
 }

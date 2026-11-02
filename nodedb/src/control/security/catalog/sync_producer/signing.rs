@@ -7,15 +7,9 @@
 //! or missing root fails closed on restart instead of silently deriving
 //! different keys.
 
-use redb::ReadableDatabase;
 use sha2::{Digest as _, Sha256};
 
 use crate::control::security::catalog::types::{SystemCatalog, catalog_err};
-
-/// Legacy table for raw per-user signing keys. Retained so secure startup can
-/// find and delete any rows a pre-derivation build left behind.
-pub const CRDT_SIGNING_KEYS: redb::TableDefinition<(u64, u64), &[u8]> =
-    redb::TableDefinition::new("_system.crdt_signing_keys");
 
 /// Non-secret fingerprint that binds the catalog to its WAL-wrapped signing
 /// root and makes a missing/incorrect root fail closed on restart.
@@ -24,8 +18,7 @@ pub const CRDT_SIGNING_ROOT_METADATA: redb::TableDefinition<&str, &[u8]> =
 
 impl SystemCatalog {
     /// Install the at-rest-protected root used to derive per-user signing
-    /// keys. Legacy raw key rows are deleted immediately so catalog bytes can
-    /// never retain a plaintext signing secret after secure startup.
+    /// keys.
     pub fn configure_crdt_signing_root(&self, root: Option<[u8; 32]>) -> crate::Result<()> {
         use redb::ReadableTable as _;
 
@@ -54,42 +47,6 @@ impl SystemCatalog {
             }
             txn.commit()
                 .map_err(|e| catalog_err("crdt signing-root metadata commit", e))?;
-        }
-        let legacy_keys = {
-            let txn = self
-                .db
-                .begin_read()
-                .map_err(|e| catalog_err("crdt_signing_keys migration read txn", e))?;
-            let table = txn
-                .open_table(CRDT_SIGNING_KEYS)
-                .map_err(|e| catalog_err("open crdt_signing_keys", e))?;
-            let mut keys = Vec::new();
-            for row in table
-                .iter()
-                .map_err(|e| catalog_err("iterate crdt_signing_keys", e))?
-            {
-                let (key, _) = row.map_err(|e| catalog_err("read crdt_signing_keys", e))?;
-                keys.push(key.value());
-            }
-            keys
-        };
-        if !legacy_keys.is_empty() {
-            let txn = self
-                .db
-                .begin_write()
-                .map_err(|e| catalog_err("crdt_signing_keys migration write txn", e))?;
-            {
-                let mut table = txn
-                    .open_table(CRDT_SIGNING_KEYS)
-                    .map_err(|e| catalog_err("open crdt_signing_keys", e))?;
-                for key in legacy_keys {
-                    table
-                        .remove(key)
-                        .map_err(|e| catalog_err("remove legacy crdt_signing_key", e))?;
-                }
-            }
-            txn.commit()
-                .map_err(|e| catalog_err("crdt_signing_keys migration commit", e))?;
         }
         *self
             .crdt_signing_root
@@ -140,7 +97,6 @@ impl SystemCatalog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use redb::ReadableTableMetadata as _;
 
     #[test]
     fn crdt_signing_key_is_stable_and_tenant_user_scoped() {
@@ -158,9 +114,6 @@ mod tests {
         let cat = SystemCatalog::open(&path).unwrap();
         cat.configure_crdt_signing_root(Some(root)).unwrap();
         assert_eq!(cat.get_crdt_signing_key(5, 9).unwrap(), Some(first));
-        let txn = cat.db.begin_read().unwrap();
-        let table = txn.open_table(CRDT_SIGNING_KEYS).unwrap();
-        assert_eq!(table.len().unwrap(), 0, "raw signing keys must not persist");
     }
 
     #[test]

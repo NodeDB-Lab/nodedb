@@ -15,22 +15,6 @@ use crate::rpc_codec::JoinNodeInfo;
 /// consumer.
 pub use nodedb_types::wire_version::WIRE_FORMAT_VERSION as CLUSTER_WIRE_FORMAT_VERSION;
 
-fn default_spiffe_id() -> Option<String> {
-    None
-}
-
-fn default_spki_pin() -> Option<[u8; 32]> {
-    None
-}
-
-fn default_wire_version() -> u16 {
-    // Records persisted by an older build that did not carry a
-    // `wire_version` field default to `1` — the minimum supported
-    // wire version — so rolling-upgrade feature gates treat them
-    // as N-1 until the node re-registers with its real version.
-    1
-}
-
 /// Node lifecycle states.
 #[derive(
     Debug,
@@ -116,23 +100,18 @@ pub struct NodeInfo {
     /// `control::rolling_upgrade::view::compute` to derive the
     /// cluster-wide min/max/mixed view on demand from the live
     /// topology.
-    #[serde(default = "default_wire_version")]
     pub wire_version: u16,
     /// SPIFFE URI SAN (e.g. `spiffe://cluster.local/node/1`) extracted from
-    /// the node's mTLS leaf certificate at join time.  `None` for nodes that
-    /// joined before SPIFFE identity was introduced or that are running in
-    /// insecure transport mode.
-    #[serde(default = "default_spiffe_id")]
+    /// the node's mTLS leaf certificate at join time.  `None` for a node
+    /// running in insecure transport mode.
     pub spiffe_id: Option<String>,
     /// SHA-256 digest of the node's SubjectPublicKeyInfo DER blob, pinned at
     /// join time.  Stable across cert renewals that reuse the same key-pair;
     /// changes on key rotation.  `None` until the node has joined and
     /// transmitted its identity fields.
-    #[serde(default = "default_spki_pin")]
     pub spki_pin: Option<[u8; 32]>,
     /// Bound UDP address of this node's SWIM failure detector. Peers seed
     /// SWIM from it. `None` for a node that runs no SWIM detector.
-    #[serde(default)]
     pub swim_addr: Option<String>,
 }
 

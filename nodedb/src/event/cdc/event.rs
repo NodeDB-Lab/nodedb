@@ -32,14 +32,10 @@ pub struct CdcEvent {
     pub lsn: u64,
     /// Position index of the write: the data-group Raft log index in a
     /// cluster, equal on every replica. See [`super::offset`].
-    #[serde(default)]
     pub index: u64,
     /// Position epoch of the partition. See [`super::offset`].
-    #[serde(default)]
     pub epoch: u64,
-    /// Database that owns the collection. Missing legacy payloads decode to
-    /// the built-in default database.
-    #[serde(default)]
+    /// Database that owns the collection.
     pub database_id: DatabaseId,
     /// Tenant ID.
     pub tenant_id: u64,
@@ -55,7 +51,6 @@ pub struct CdcEvent {
     /// Schema version of the collection at the time of the event.
     /// Incremented on ALTER TABLE / schema changes. Consumers can detect
     /// schema changes by watching this field.
-    #[serde(default)]
     pub schema_version: u64,
     /// Per-field diffs for UPDATE operations.
     /// Present when both `old_value` and `new_value` are available and differ.
@@ -206,22 +201,27 @@ impl zerompk::ToMessagePack for CdcEvent {
     }
 }
 
+/// Take a required map field, or fail naming the missing key.
+fn required<T>(value: Option<T>, key: &str) -> zerompk::Result<T> {
+    value.ok_or_else(|| zerompk::Error::KeyNotFound(key.into()))
+}
+
 impl<'a> zerompk::FromMessagePack<'a> for CdcEvent {
     fn read<R: zerompk::Read<'a>>(reader: &mut R) -> zerompk::Result<Self> {
         let len = reader.read_map_len()?;
-        let mut sequence: u64 = 0;
-        let mut partition: u32 = 0;
-        let mut collection = String::new();
-        let mut op = String::new();
-        let mut row_id = String::new();
-        let mut event_time: u64 = 0;
-        let mut lsn: u64 = 0;
-        let mut index: u64 = 0;
-        let mut epoch: u64 = 0;
-        let mut tenant_id: u64 = 0;
-        let mut database_id = DatabaseId::DEFAULT;
+        let mut sequence: Option<u64> = None;
+        let mut partition: Option<u32> = None;
+        let mut collection: Option<String> = None;
+        let mut op: Option<String> = None;
+        let mut row_id: Option<String> = None;
+        let mut event_time: Option<u64> = None;
+        let mut lsn: Option<u64> = None;
+        let mut index: Option<u64> = None;
+        let mut epoch: Option<u64> = None;
+        let mut tenant_id: Option<u64> = None;
+        let mut database_id: Option<DatabaseId> = None;
         let mut source: Option<crate::event::EventSource> = None;
-        let mut schema_version: u64 = 0;
+        let mut schema_version: Option<u64> = None;
         let mut new_value: Option<serde_json::Value> = None;
         let mut old_value: Option<serde_json::Value> = None;
         let mut field_diffs: Option<Vec<super::super::field_diff::FieldDiff>> = None;
@@ -230,17 +230,17 @@ impl<'a> zerompk::FromMessagePack<'a> for CdcEvent {
         for _ in 0..len {
             let key = reader.read_string()?.into_owned();
             match key.as_str() {
-                "sequence" => sequence = reader.read_u64()?,
-                "partition" => partition = reader.read_u32()?,
-                "collection" => collection = reader.read_string()?.into_owned(),
-                "op" => op = reader.read_string()?.into_owned(),
-                "row_id" => row_id = reader.read_string()?.into_owned(),
-                "event_time" => event_time = reader.read_u64()?,
-                "lsn" => lsn = reader.read_u64()?,
-                "index" => index = reader.read_u64()?,
-                "epoch" => epoch = reader.read_u64()?,
-                "tenant_id" => tenant_id = reader.read_u64()?,
-                "database_id" => database_id = DatabaseId::new(reader.read_u64()?),
+                "sequence" => sequence = Some(reader.read_u64()?),
+                "partition" => partition = Some(reader.read_u32()?),
+                "collection" => collection = Some(reader.read_string()?.into_owned()),
+                "op" => op = Some(reader.read_string()?.into_owned()),
+                "row_id" => row_id = Some(reader.read_string()?.into_owned()),
+                "event_time" => event_time = Some(reader.read_u64()?),
+                "lsn" => lsn = Some(reader.read_u64()?),
+                "index" => index = Some(reader.read_u64()?),
+                "epoch" => epoch = Some(reader.read_u64()?),
+                "tenant_id" => tenant_id = Some(reader.read_u64()?),
+                "database_id" => database_id = Some(DatabaseId::new(reader.read_u64()?)),
                 "source" => {
                     let name = reader.read_string()?;
                     source = Some(
@@ -248,7 +248,7 @@ impl<'a> zerompk::FromMessagePack<'a> for CdcEvent {
                             .ok_or(zerompk::Error::InvalidMarker(0))?,
                     );
                 }
-                "schema_version" => schema_version = reader.read_u64()?,
+                "schema_version" => schema_version = Some(reader.read_u64()?),
                 "new_value" => new_value = Some(JsonValue::read(reader)?.0),
                 "old_value" => old_value = Some(JsonValue::read(reader)?.0),
                 "field_diffs" => {
@@ -256,28 +256,25 @@ impl<'a> zerompk::FromMessagePack<'a> for CdcEvent {
                 }
                 "system_time_ms" => system_time_ms = Some(reader.read_i64()?),
                 "valid_time_ms" => valid_time_ms = Some(reader.read_i64()?),
-                _ => {
-                    JsonValue::read(reader)?;
-                }
+                _ => return Err(zerompk::Error::KeyNotFound(key)),
             }
         }
-        // Every encoder writes the source, so an event without one is not
-        // a CDC event.
-        let source = source.ok_or(zerompk::Error::InvalidMarker(0))?;
+        // The encoder writes every non-optional field, so an event missing
+        // one is refused.
         Ok(CdcEvent {
-            sequence,
-            partition,
-            collection,
-            op,
-            row_id,
-            event_time,
-            lsn,
-            index,
-            epoch,
-            tenant_id,
-            source,
-            database_id,
-            schema_version,
+            sequence: required(sequence, "sequence")?,
+            partition: required(partition, "partition")?,
+            collection: required(collection, "collection")?,
+            op: required(op, "op")?,
+            row_id: required(row_id, "row_id")?,
+            event_time: required(event_time, "event_time")?,
+            lsn: required(lsn, "lsn")?,
+            index: required(index, "index")?,
+            epoch: required(epoch, "epoch")?,
+            tenant_id: required(tenant_id, "tenant_id")?,
+            source: required(source, "source")?,
+            database_id: required(database_id, "database_id")?,
+            schema_version: required(schema_version, "schema_version")?,
             new_value,
             old_value,
             field_diffs,
@@ -421,5 +418,49 @@ mod tests {
 
         let parsed_mp: CdcEvent = zerompk::from_msgpack(&event.to_msgpack_bytes()).unwrap();
         assert_eq!(parsed_mp.source, crate::event::EventSource::Restore);
+    }
+
+    /// An event without `database_id` fails to decode in MessagePack and JSON.
+    #[test]
+    fn an_event_missing_database_id_is_refused() {
+        let event = CdcEvent {
+            sequence: 5,
+            partition: 0,
+            collection: "users".into(),
+            op: "INSERT".into(),
+            row_id: "u-3".into(),
+            event_time: 1700000004000,
+            lsn: 500,
+            index: 500,
+            epoch: 0,
+            tenant_id: 1,
+            source: crate::event::EventSource::User,
+            database_id: DatabaseId::DEFAULT,
+            new_value: None,
+            old_value: None,
+            schema_version: 0,
+            field_diffs: None,
+            system_time_ms: None,
+            valid_time_ms: None,
+        };
+
+        let mp = event.to_msgpack_bytes();
+        let value: zerompk::Value<'_> = zerompk::from_msgpack(&mp).unwrap();
+        let zerompk::Value::Map(entries) = value else {
+            panic!("event must encode as a map");
+        };
+        let entries: Vec<_> = entries
+            .into_iter()
+            .filter(|(k, _)| !matches!(k, zerompk::Value::String(name) if &**name == "database_id"))
+            .collect();
+        let stripped = zerompk::to_msgpack_vec(&zerompk::Value::Map(entries)).unwrap();
+        assert!(zerompk::from_msgpack::<CdcEvent>(&stripped).is_err());
+
+        let mut json: serde_json::Value = sonic_rs::from_slice(&event.to_json_bytes()).unwrap();
+        if let Some(object) = json.as_object_mut() {
+            object.remove("database_id");
+        }
+        let stripped_json = sonic_rs::to_vec(&json).unwrap();
+        assert!(serde_json::from_slice::<CdcEvent>(&stripped_json).is_err());
     }
 }

@@ -4,15 +4,15 @@
 
 use nodedb_types::timeseries::{PartitionState, TieredPartitionConfig};
 
-use super::entry::PartitionEntry;
+use super::entry::{PartitionEntry, PartitionKey};
 use super::registry::PartitionRegistry;
 
 impl PartitionRegistry {
     /// Export registry state for persistence.
-    pub fn export(&self) -> Vec<(i64, PartitionEntry)> {
+    pub fn export(&self) -> Vec<(PartitionKey, PartitionEntry)> {
         self.partitions
             .iter()
-            .map(|(&k, v)| (k, v.clone()))
+            .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
     }
 
@@ -22,33 +22,28 @@ impl PartitionRegistry {
     /// export) use this. Anything registering a NEWLY written partition must go
     /// through [`PartitionRegistry::insert_partition`], which cannot displace a
     /// partition that happens to share a start timestamp.
-    pub fn import(&mut self, entries: Vec<(i64, PartitionEntry)>) {
-        for (start, entry) in entries {
-            self.partitions.insert(start, entry);
+    pub fn import(&mut self, entries: Vec<(PartitionKey, PartitionEntry)>) {
+        for (key, entry) in entries {
+            self.partitions.insert(key, entry);
         }
     }
 
     /// Register a newly written partition, returning the key it was filed under.
     ///
-    /// The map key is a handle ordered by start timestamp; nothing resolves a
-    /// partition by computing a boundary from it — every consumer either
-    /// iterates the map or reuses a key the map handed back. Two partitions can
-    /// legitimately share a `min_ts` (late or duplicate-timestamp ingest), so
-    /// filing strictly under `min_ts` would silently drop one of them while its
-    /// rows sit on disk and a checkpoint has already reported them durable. A
-    /// colliding partition takes the next free slot instead.
+    /// The key is the partition's `min_ts` and directory name
+    /// ([`PartitionKey`]). Two partitions can legitimately share a `min_ts`
+    /// (late or duplicate-timestamp ingest), and their directory names differ,
+    /// so neither ever displaces the other.
     ///
     /// Re-registering the SAME directory is idempotent — that is a restore or a
     /// boot rescan seeing a partition it already knows, not a second partition.
-    pub fn insert_partition(&mut self, entry: PartitionEntry) -> i64 {
-        let mut key = entry.meta.min_ts;
-        while let Some(existing) = self.partitions.get(&key) {
-            if existing.dir_name == entry.dir_name || key == i64::MAX {
-                break;
-            }
-            key += 1;
-        }
-        self.partitions.insert(key, entry);
+    /// It replaces the entry under the key the directory is already filed
+    /// under.
+    pub fn insert_partition(&mut self, entry: PartitionEntry) -> PartitionKey {
+        let key = self
+            .key_of_dir(&entry.dir_name)
+            .unwrap_or_else(|| PartitionKey::of(&entry));
+        self.partitions.insert(key.clone(), entry);
         key
     }
 
@@ -86,7 +81,7 @@ impl PartitionRegistry {
             engine: "timeseries".to_string(),
             detail: format!("read {}: {e}", path.display()),
         })?;
-        let entries: Vec<(i64, PartitionEntry)> =
+        let entries: Vec<(PartitionKey, PartitionEntry)> =
             sonic_rs::from_slice(&data).map_err(|e| crate::Error::Serialization {
                 format: "json".to_string(),
                 detail: format!("parse {}: {e}", path.display()),
@@ -94,7 +89,7 @@ impl PartitionRegistry {
 
         let mut registry = Self::new(config);
 
-        for (start, mut entry) in entries {
+        for (key, mut entry) in entries {
             match entry.meta.state {
                 PartitionState::Merging => {
                     // Incomplete merge — roll back to Sealed.
@@ -106,7 +101,7 @@ impl PartitionRegistry {
                 }
                 _ => {}
             }
-            registry.partitions.insert(start, entry);
+            registry.partitions.insert(key, entry);
         }
 
         Ok(registry)
@@ -176,6 +171,7 @@ mod tests {
                     last_flushed_wal_lsn: 0,
                     column_stats: std::collections::HashMap::new(),
                     max_system_ts: 0,
+                    ended_at: None,
                 },
                 dir_name: dir.to_string(),
             }
@@ -188,7 +184,10 @@ mod tests {
         assert_ne!(first, second);
         assert_eq!(reg.partition_count(), 2);
 
-        let found = reg.query_partitions(&TimeRange::new(0, 1000));
+        let found = reg.query_partitions(
+            &TimeRange::new(0, 1000),
+            nodedb_columnar::VersionCut::Current,
+        );
         let mut dirs: Vec<&str> = found.iter().map(|e| e.dir_name.as_str()).collect();
         dirs.sort_unstable();
         assert_eq!(dirs, vec!["ts-a", "ts-b"]);

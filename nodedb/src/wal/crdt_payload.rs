@@ -1,17 +1,23 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Versioned, self-describing WAL payloads for CRDT delta records.
+//! Self-describing WAL payloads for CRDT delta records.
 //!
-//! Writers encode V4 for a signed sync delta and V3 otherwise. Decode accepts
-//! those two shapes only. A document delta always carries its row's bound
-//! surrogate, and a snapshot import carries no row identity. Any other shape
-//! is refused with a typed [`CrdtDeltaWalError`].
+//! Every payload starts with the format version byte, then a shape tag.
+//! Writers encode the signed shape for a signed sync delta and the unsigned
+//! shape otherwise. Decode accepts those two shapes at
+//! `CRDT_DELTA_WAL_FORMAT_VERSION` only. A document delta always carries its
+//! row's bound surrogate, and a snapshot import carries no row identity. Any
+//! other version or shape is refused with a typed [`CrdtDeltaWalError`].
 
 use nodedb_types::Surrogate;
 use nodedb_types::sync::wire::SyncProvenance;
 
-const CRDT_DELTA_WAL_FORMAT_V3: u8 = 3;
-const CRDT_DELTA_WAL_FORMAT_V4: u8 = 4;
+/// Format version of every CRDT delta WAL payload.
+const CRDT_DELTA_WAL_FORMAT_VERSION: u8 = 1;
+/// Shape tag of a payload with no signing admission.
+const CRDT_DELTA_SHAPE_UNSIGNED: u8 = 1;
+/// Shape tag of a payload that carries signing admission metadata.
+const CRDT_DELTA_SHAPE_SIGNED: u8 = 2;
 
 /// Admission metadata of a signed sync delta.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,8 +103,12 @@ pub(crate) enum CrdtDeltaWalError {
         has_surrogate: bool,
     },
 
-    /// The payload matches neither current format.
-    #[error("CRDT delta payload matches neither the V3 nor the V4 shape")]
+    /// The payload is not the unsigned or the signed shape at the current
+    /// format version.
+    #[error(
+        "CRDT delta payload is neither the unsigned nor the signed shape at format version {}",
+        CRDT_DELTA_WAL_FORMAT_VERSION
+    )]
     UnknownShape,
 
     /// The payload did not encode.
@@ -124,8 +134,9 @@ pub(crate) struct CrdtDeltaWalPayload {
 }
 
 #[derive(zerompk::ToMessagePack, zerompk::FromMessagePack)]
-struct CrdtDeltaWalPayloadV4 {
-    format: u8,
+struct CrdtDeltaWalPayloadSigned {
+    version: u8,
+    shape: u8,
     bytes: Vec<u8>,
     collection: String,
     provenance: Option<SyncProvenance>,
@@ -141,8 +152,9 @@ struct CrdtDeltaWalPayloadV4 {
 }
 
 #[derive(zerompk::ToMessagePack, zerompk::FromMessagePack)]
-struct CrdtDeltaWalPayloadV3 {
-    format: u8,
+struct CrdtDeltaWalPayloadUnsigned {
+    version: u8,
+    shape: u8,
     bytes: Vec<u8>,
     collection: String,
     provenance: Option<SyncProvenance>,
@@ -181,12 +193,13 @@ impl CrdtDeltaWalPayload {
         self
     }
 
-    /// Encode the current explicit wire format.
+    /// Encode the signed shape when signing is set, else the unsigned shape.
     pub(crate) fn encode(&self) -> Result<Vec<u8>, CrdtDeltaWalError> {
         let (document_id, surrogate) = self.target.to_wire();
         let encoded = match self.signing {
-            Some(signing) => zerompk::to_msgpack_vec(&CrdtDeltaWalPayloadV4 {
-                format: CRDT_DELTA_WAL_FORMAT_V4,
+            Some(signing) => zerompk::to_msgpack_vec(&CrdtDeltaWalPayloadSigned {
+                version: CRDT_DELTA_WAL_FORMAT_VERSION,
+                shape: CRDT_DELTA_SHAPE_SIGNED,
                 bytes: self.bytes.clone(),
                 collection: self.collection.clone(),
                 provenance: self.provenance.clone(),
@@ -200,8 +213,9 @@ impl CrdtDeltaWalPayload {
                 delta_signature: signing.delta_signature,
                 signing_required: signing.required,
             }),
-            None => zerompk::to_msgpack_vec(&CrdtDeltaWalPayloadV3 {
-                format: CRDT_DELTA_WAL_FORMAT_V3,
+            None => zerompk::to_msgpack_vec(&CrdtDeltaWalPayloadUnsigned {
+                version: CRDT_DELTA_WAL_FORMAT_VERSION,
+                shape: CRDT_DELTA_SHAPE_UNSIGNED,
                 bytes: self.bytes.clone(),
                 collection: self.collection.clone(),
                 provenance: self.provenance.clone(),
@@ -214,39 +228,42 @@ impl CrdtDeltaWalPayload {
         encoded.map_err(|source| CrdtDeltaWalError::Encode { source })
     }
 
-    /// Decode V4 or V3. No missing-field defaults or arity widening are used,
-    /// and a document delta without its surrogate is refused.
+    /// Decode the signed or the unsigned shape at the current format version.
+    /// No missing-field defaults or arity widening are used, and a document
+    /// delta without its surrogate is refused.
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, CrdtDeltaWalError> {
-        if let Ok(v4) = zerompk::from_msgpack::<CrdtDeltaWalPayloadV4>(bytes)
-            && v4.format == CRDT_DELTA_WAL_FORMAT_V4
+        if let Ok(signed) = zerompk::from_msgpack::<CrdtDeltaWalPayloadSigned>(bytes)
+            && signed.version == CRDT_DELTA_WAL_FORMAT_VERSION
+            && signed.shape == CRDT_DELTA_SHAPE_SIGNED
         {
             return Ok(Self::new(
-                v4.bytes,
-                v4.collection,
-                v4.provenance,
-                v4.expected_frontier_digest,
-                CrdtDeltaTarget::from_wire(v4.document_id, v4.surrogate)?,
+                signed.bytes,
+                signed.collection,
+                signed.provenance,
+                signed.expected_frontier_digest,
+                CrdtDeltaTarget::from_wire(signed.document_id, signed.surrogate)?,
             )
             .with_signing(CrdtDeltaSigning {
-                auth_user_id: v4.auth_user_id,
-                auth_device_id: v4.auth_device_id,
-                auth_seq_no: v4.auth_seq_no,
-                delta_signature: v4.delta_signature,
-                required: v4.signing_required,
+                auth_user_id: signed.auth_user_id,
+                auth_device_id: signed.auth_device_id,
+                auth_seq_no: signed.auth_seq_no,
+                delta_signature: signed.delta_signature,
+                required: signed.signing_required,
             })
-            .with_peer_id(v4.peer_id));
+            .with_peer_id(signed.peer_id));
         }
-        if let Ok(v3) = zerompk::from_msgpack::<CrdtDeltaWalPayloadV3>(bytes)
-            && v3.format == CRDT_DELTA_WAL_FORMAT_V3
+        if let Ok(unsigned) = zerompk::from_msgpack::<CrdtDeltaWalPayloadUnsigned>(bytes)
+            && unsigned.version == CRDT_DELTA_WAL_FORMAT_VERSION
+            && unsigned.shape == CRDT_DELTA_SHAPE_UNSIGNED
         {
             return Ok(Self::new(
-                v3.bytes,
-                v3.collection,
-                v3.provenance,
-                v3.expected_frontier_digest,
-                CrdtDeltaTarget::from_wire(v3.document_id, v3.surrogate)?,
+                unsigned.bytes,
+                unsigned.collection,
+                unsigned.provenance,
+                unsigned.expected_frontier_digest,
+                CrdtDeltaTarget::from_wire(unsigned.document_id, unsigned.surrogate)?,
             )
-            .with_peer_id(v3.peer_id));
+            .with_peer_id(unsigned.peer_id));
         }
         Err(CrdtDeltaWalError::UnknownShape)
     }
@@ -262,7 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn v4_round_trips_authenticated_signing_admission() {
+    fn signed_shape_round_trips_authenticated_signing_admission() {
         let payload = CrdtDeltaWalPayload::new(
             vec![8, 9],
             "docs".into(),
@@ -278,12 +295,12 @@ mod tests {
             required: true,
         });
         let decoded =
-            CrdtDeltaWalPayload::decode(&payload.encode().expect("encode")).expect("decode v4");
+            CrdtDeltaWalPayload::decode(&payload.encode().expect("encode")).expect("decode signed");
         assert_eq!(decoded, payload);
     }
 
     #[test]
-    fn v3_round_trips_fenced_projection_identity() {
+    fn unsigned_shape_round_trips_fenced_projection_identity() {
         let payload = CrdtDeltaWalPayload::new(
             vec![3, 4],
             "docs".into(),
@@ -291,8 +308,8 @@ mod tests {
             Some([0xa5; 32]),
             document("doc-1", 42),
         );
-        let decoded =
-            CrdtDeltaWalPayload::decode(&payload.encode().expect("encode")).expect("decode v3");
+        let decoded = CrdtDeltaWalPayload::decode(&payload.encode().expect("encode"))
+            .expect("decode unsigned");
         assert_eq!(decoded, payload);
     }
 
@@ -305,18 +322,18 @@ mod tests {
             None,
             CrdtDeltaTarget::Collection,
         );
-        let decoded =
-            CrdtDeltaWalPayload::decode(&payload.encode().expect("encode")).expect("decode v3");
+        let decoded = CrdtDeltaWalPayload::decode(&payload.encode().expect("encode"))
+            .expect("decode unsigned");
         assert_eq!(decoded.target, CrdtDeltaTarget::Collection);
     }
 
     #[test]
-    fn the_producing_peer_round_trips_in_both_current_formats() {
+    fn the_producing_peer_round_trips_in_both_shapes() {
         let unsigned =
             CrdtDeltaWalPayload::new(vec![1], "docs".into(), None, None, document("d", 1))
                 .with_peer_id(0xFEED);
-        let decoded =
-            CrdtDeltaWalPayload::decode(&unsigned.encode().expect("encode")).expect("decode v3");
+        let decoded = CrdtDeltaWalPayload::decode(&unsigned.encode().expect("encode"))
+            .expect("decode unsigned");
         assert_eq!(decoded.peer_id, 0xFEED);
 
         let signed = unsigned.clone().with_signing(CrdtDeltaSigning {
@@ -327,7 +344,7 @@ mod tests {
             required: true,
         });
         let decoded =
-            CrdtDeltaWalPayload::decode(&signed.encode().expect("encode")).expect("decode v4");
+            CrdtDeltaWalPayload::decode(&signed.encode().expect("encode")).expect("decode signed");
         assert_eq!(decoded.peer_id, 0xFEED);
     }
 
@@ -339,13 +356,14 @@ mod tests {
         ));
     }
 
-    /// A V3 record carrying a zero surrogate, or only half of a document
+    /// An unsigned record carrying a zero surrogate, or only half of a document
     /// target, is refused on decode instead of replaying without identity.
     #[test]
     fn identity_less_document_records_are_refused_on_decode() {
         let wire = |document_id: Option<&str>, surrogate: Option<u32>| {
-            zerompk::to_msgpack_vec(&CrdtDeltaWalPayloadV3 {
-                format: CRDT_DELTA_WAL_FORMAT_V3,
+            zerompk::to_msgpack_vec(&CrdtDeltaWalPayloadUnsigned {
+                version: CRDT_DELTA_WAL_FORMAT_VERSION,
+                shape: CRDT_DELTA_SHAPE_UNSIGNED,
                 bytes: vec![1],
                 collection: "docs".into(),
                 provenance: None,
@@ -370,9 +388,51 @@ mod tests {
         ));
     }
 
-    /// The pre-surrogate three-field shape decodes to no current format.
+    /// A payload at another format version is refused.
     #[test]
-    fn retired_shapes_are_refused() {
+    fn another_format_version_is_refused() {
+        let wire = zerompk::to_msgpack_vec(&CrdtDeltaWalPayloadUnsigned {
+            version: CRDT_DELTA_WAL_FORMAT_VERSION + 1,
+            shape: CRDT_DELTA_SHAPE_UNSIGNED,
+            bytes: vec![1],
+            collection: "docs".into(),
+            provenance: None,
+            expected_frontier_digest: None,
+            document_id: Some("doc".into()),
+            surrogate: Some(7),
+            peer_id: 0,
+        })
+        .expect("encode");
+        assert!(matches!(
+            CrdtDeltaWalPayload::decode(&wire),
+            Err(CrdtDeltaWalError::UnknownShape)
+        ));
+    }
+
+    /// An unsigned payload stamped with the signed shape tag is refused.
+    #[test]
+    fn a_mismatched_shape_tag_is_refused() {
+        let wire = zerompk::to_msgpack_vec(&CrdtDeltaWalPayloadUnsigned {
+            version: CRDT_DELTA_WAL_FORMAT_VERSION,
+            shape: CRDT_DELTA_SHAPE_SIGNED,
+            bytes: vec![1],
+            collection: "docs".into(),
+            provenance: None,
+            expected_frontier_digest: None,
+            document_id: Some("doc".into()),
+            surrogate: Some(7),
+            peer_id: 0,
+        })
+        .expect("encode");
+        assert!(matches!(
+            CrdtDeltaWalPayload::decode(&wire),
+            Err(CrdtDeltaWalError::UnknownShape)
+        ));
+    }
+
+    /// A three-field shape with no surrogate decodes to no current shape.
+    #[test]
+    fn foreign_shapes_are_refused() {
         #[derive(zerompk::ToMessagePack)]
         struct RetiredPayload {
             bytes: Vec<u8>,

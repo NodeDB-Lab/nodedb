@@ -115,7 +115,7 @@ async fn enqueue_generic_entry<'a>(
                 group_id,
                 entry.index,
                 applied_key,
-                Ok(AppliedWrite::unversioned(Vec::new())),
+                Ok(AppliedWrite::new(Vec::new())),
             );
             // Prefix-neutral. This is a pure shape check over
             // `entry.data`, so a re-delivery on the next boot decodes to
@@ -319,9 +319,8 @@ fn conclude_generic_entry(
     // failure, not as an empty success.
     let result = match submitted {
         // The response carries the versions the write stamped: the
-        // entry's log position on the written vShard. The proposer needs
-        // them as its read-your-writes floor, and the propose waiter is
-        // where they are handed back.
+        // entry's log position on the written vShard. The propose waiter
+        // hands them back to the proposer.
         Ok(resp) if resp.status == Status::Ok => Ok(AppliedWrite::from_response(&resp)),
         Ok(resp) => committed_response_result(&resp),
         Err(e) => {

@@ -123,10 +123,8 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_join(
         tenant_id,
         ctx,
     } = p;
-    let mut left_collection =
-        super::super::aggregate::join_side_collection(left, p.ctx.database_id);
-    let mut right_collection =
-        super::super::aggregate::join_side_collection(right, p.ctx.database_id);
+    let mut left_collection = super::super::aggregate::join_side_collection(left, p.ctx);
+    let mut right_collection = super::super::aggregate::join_side_collection(right, p.ctx);
     // RAW (non-db-qualified) names for the cost-model stats lookup: `ANALYZE`
     // keys its persisted column stats by the bare collection name, so the
     // shuffle cost model must look them up by the same raw name (not the
@@ -210,9 +208,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_join(
     // non-empty). Anything else (nested joins, catalog sides, cross/keyless
     // joins) keeps the default broadcast/local plan unchanged.
     //
-    // Shuffle is honored only in cluster mode: single-node has no peers to
-    // repartition across, so the local broadcast plan is both correct and
-    // cheaper. The two inputs are left as BARE name scans (`left_input` /
+    // The two inputs are left as BARE name scans (`left_input` /
     // `right_input` stay `None`); the coordinator resolver builds the per-side
     // scan fragments from the collection names and drives the producers.
     //
@@ -222,8 +218,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_join(
     //   2. the ANALYZE-driven cost model picks it (both sides large enough that
     //      neither is cheap to broadcast). Un-analyzed collections fall back to
     //      broadcast — see `join_cost::cost_model_picks_shuffle`.
-    let structurally_shufflable = p.ctx.cluster_enabled
-        && !on_keys.is_empty()
+    let structurally_shufflable = !on_keys.is_empty()
         && left_input.is_none()
         && right_input.is_none()
         // Shuffle consumers currently execute only the bare equi-join. Keep

@@ -23,6 +23,11 @@ pub struct CoreCompactionConfig {
     /// sourced from the same `[checkpoint].interval_secs` as the Control
     /// Plane's coordinated `checkpoint_manager` cycle).
     pub checkpoint_interval: std::time::Duration,
+    /// The longest a committing transaction's snapshot can trail its commit
+    /// ordinal (`NetworkTuning::snapshot_max_hold`). A commit past it is
+    /// refused on every replica, so a replica's purge below the cleanup
+    /// horizon never changes a commit verdict.
+    pub commit_snapshot_window: std::time::Duration,
 }
 
 impl Default for CoreCompactionConfig {
@@ -35,6 +40,8 @@ impl Default for CoreCompactionConfig {
             timeseries: nodedb_types::config::tuning::TimeseriesToning::default(),
             vector: nodedb_types::config::tuning::VectorTuning::default(),
             checkpoint_interval: std::time::Duration::from_secs(300),
+            commit_snapshot_window: nodedb_types::config::tuning::NetworkTuning::default()
+                .snapshot_max_hold(),
         }
     }
 }

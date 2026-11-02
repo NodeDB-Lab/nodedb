@@ -15,9 +15,9 @@ pub struct DocumentEngine<'a> {
     pub(super) database_id: u64,
     pub(super) tenant_id: u64,
     pub(super) configs: HashMap<String, CollectionConfig>,
-    /// System-time ordinals for this struct API's bitemporal writes. The
-    /// `CoreLoop` write paths stamp from the core's shared clock instead,
-    /// so this clock never reaches a Calvin or replicated write.
+    /// System-time ordinals for this struct API's writes. The `CoreLoop`
+    /// write paths stamp from the core's shared clock instead, so this clock
+    /// never reaches a Calvin or replicated write.
     pub(super) clock: OrdinalClock,
 }
 
@@ -37,79 +37,42 @@ impl<'a> DocumentEngine<'a> {
         self.configs.insert(config.name.clone(), config);
     }
 
-    pub(super) fn is_bitemporal(&self, collection: &str) -> bool {
-        self.configs.get(collection).is_some_and(|c| c.bitemporal)
-    }
-
-    /// Drop all secondary index entries for a field across the entire collection.
+    /// Drop all secondary index entries for a field across the entire
+    /// collection: every value, every row, every version.
     pub fn drop_field_index(&self, collection: &str, field: &str) -> crate::Result<usize> {
-        self.sparse.delete_index_entries_for_field(
+        let txn = self.sparse.begin_write()?;
+        let removed = self.sparse.versioned_index_drop_field_in_txn(
+            &txn,
             self.database_id,
             self.tenant_id,
             collection,
             field,
-        )
+        )?;
+        txn.commit().map_err(|e| crate::Error::Storage {
+            engine: "sparse".into(),
+            detail: format!("commit index drop: {e}"),
+        })?;
+        Ok(removed)
     }
 
-    /// Lookup documents by a secondary index value.
-    ///
-    /// When `bitemporal` is true the collection never populates the plain
-    /// `INDEXES` table — every secondary-index write lands in the versioned
-    /// index. Resolve current-version doc IDs through
-    /// `versioned_index_lookup_as_of(.., None)`, which groups by doc_id, keeps
-    /// the newest entry, and filters tombstoned entries (so deleted or
-    /// superseded values are hidden). Non-bitemporal collections keep the exact
-    /// plain `range_scan` path below.
+    /// The documents whose version visible at `sys_cutoff` (`None` =
+    /// current) holds exactly `value` under the index `path`, in doc-id
+    /// order. Every match is returned.
     pub fn index_lookup(
         &self,
         collection: &str,
         path: &str,
         value: &str,
-        bitemporal: bool,
+        sys_cutoff: Option<i64>,
     ) -> crate::Result<Vec<StorageKey>> {
-        if bitemporal {
-            return self.sparse.versioned_index_lookup_as_of(
-                self.database_id,
-                self.tenant_id,
-                collection,
-                path,
-                value,
-                None,
-            );
-        }
-        let prefix_with_value = format!("{value}:");
-        let results =
-            self.sparse
-                .range_scan(crate::engine::sparse::btree_index::RangeScanParams {
-                    database_id: self.database_id,
-                    tenant_id: self.tenant_id,
-                    collection,
-                    field: path,
-                    lower: Some(prefix_with_value.as_bytes()),
-                    upper: None,
-                    limit: 1000,
-                })?;
-
-        let mut doc_ids = Vec::new();
-        for (key, _) in results {
-            if let Some(doc_id) = key.rsplit(':').next() {
-                let expected_prefix = format!(
-                    "{}:{}:{collection}:{path}:{value}:",
-                    self.database_id, self.tenant_id
-                );
-                if key.starts_with(&expected_prefix) {
-                    let doc_id = StorageKey::parse(doc_id).ok_or_else(|| {
-                        crate::engine::sparse::btree::invalid_storage_key_err(
-                            crate::engine::sparse::btree::KeyedTable::Indexes,
-                            collection,
-                            doc_id,
-                        )
-                    })?;
-                    doc_ids.push(doc_id);
-                }
-            }
-        }
-        Ok(doc_ids)
+        self.sparse.versioned_index_lookup_as_of(
+            self.database_id,
+            self.tenant_id,
+            collection,
+            path,
+            value,
+            sys_cutoff,
+        )
     }
 }
 
@@ -154,7 +117,7 @@ mod tests {
             .unwrap();
 
         let results = doc_engine
-            .index_lookup("users", "$.email", "alice@example.com", false)
+            .index_lookup("users", "$.email", "alice@example.com", None)
             .unwrap();
         assert_eq!(results, vec![key(1)]);
     }
@@ -175,12 +138,12 @@ mod tests {
             .unwrap();
 
         let results = doc_engine
-            .index_lookup("users", "$.tags", "admin", false)
+            .index_lookup("users", "$.tags", "admin", None)
             .unwrap();
         assert_eq!(results, vec![key(1)]);
 
         let results = doc_engine
-            .index_lookup("users", "$.tags", "editor", false)
+            .index_lookup("users", "$.tags", "editor", None)
             .unwrap();
         assert_eq!(results, vec![key(1)]);
     }
@@ -201,7 +164,7 @@ mod tests {
             .unwrap();
 
         let results = doc_engine
-            .index_lookup("docs", "$.metadata.lang", "en", false)
+            .index_lookup("docs", "$.metadata.lang", "en", None)
             .unwrap();
         assert_eq!(results, vec![key(1)]);
     }
@@ -221,7 +184,7 @@ mod tests {
         doc_engine.put_raw("items", &key(1), &buf).unwrap();
 
         let results = doc_engine
-            .index_lookup("items", "$.category", "tools", false)
+            .index_lookup("items", "$.category", "tools", None)
             .unwrap();
         assert_eq!(results, vec![key(1)]);
     }

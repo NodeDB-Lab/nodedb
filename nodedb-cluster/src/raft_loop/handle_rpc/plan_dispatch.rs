@@ -67,9 +67,9 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
                     }
                 }
             },
-            ProposeTarget::Sequencer => {
+            ProposeTarget::Sequencer { cut_floor } => {
                 let mut mr = self.multi_raft.lock().unwrap_or_else(|p| p.into_inner());
-                propose_to_sequencer(&mut mr, req.bytes)
+                propose_to_sequencer(&mut mr, req.bytes, cut_floor)
             }
         };
         Ok(RaftRpc::DataProposeResponse(resp))
@@ -114,8 +114,8 @@ fn vshard_answer(result: Result<Vec<u8>>) -> RaftRpc {
 ///
 /// Answers `not leader` with the known leader as a hint when this node does
 /// not lead the sequencer group.
-fn propose_to_sequencer(mr: &mut MultiRaft, bytes: Vec<u8>) -> DataProposeResponse {
-    match mr.propose_to_group(SEQUENCER_GROUP_ID, bytes) {
+fn propose_to_sequencer(mr: &mut MultiRaft, bytes: Vec<u8>, cut_floor: i64) -> DataProposeResponse {
+    match mr.propose_to_sequencer(bytes, cut_floor) {
         Ok(log_index) => DataProposeResponse::ok(SEQUENCER_GROUP_ID, log_index),
         Err(error) => DataProposeResponse::refused(&error),
     }
@@ -150,7 +150,7 @@ mod tests {
 
     fn sequencer_request() -> DataProposeRequest {
         DataProposeRequest {
-            target: ProposeTarget::Sequencer,
+            target: ProposeTarget::Sequencer { cut_floor: 0 },
             bytes: vec![7, 7, 7],
         }
     }
@@ -190,7 +190,7 @@ mod tests {
         elect_sequencer_leader(&mut mr);
         let before = mr.last_log_index(SEQUENCER_GROUP_ID).unwrap_or(0);
 
-        let resp = propose_to_sequencer(&mut mr, sequencer_request().bytes);
+        let resp = propose_to_sequencer(&mut mr, sequencer_request().bytes, 0);
 
         assert!(resp.success, "{}", resp.error_message);
         assert_eq!(resp.group_id, SEQUENCER_GROUP_ID);
@@ -203,7 +203,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut mr = multi_raft_with_sequencer(dir.path());
 
-        let resp = propose_to_sequencer(&mut mr, sequencer_request().bytes);
+        let resp = propose_to_sequencer(&mut mr, sequencer_request().bytes, 0);
 
         assert!(!resp.success);
         assert_eq!(

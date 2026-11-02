@@ -119,6 +119,9 @@ impl CoreLoop {
                     stamp.clone(),
                 )
                 .map_err(|e| install_error(format!("array '{}': {e}", entry.name)))?;
+            // The installed versions keep their ordinals. A write after the
+            // install stamps above them.
+            self.fold_array_versions(&entry.array_id);
         }
         Ok(installed)
     }

@@ -225,7 +225,7 @@ impl KvEngine {
         } = step;
         require_bound(ctx.collection, ctx.surrogate)?;
         let tkey = table_key(ctx.database_id, ctx.tenant_id, ctx.collection);
-        let table = self.ensure_table(tkey, ctx.tenant_id, ctx.collection);
+        let table = self.ensure_table(tkey, &ctx);
 
         let current = table.get(ctx.key, ctx.now_ms).map(|v| v.to_vec());
         let (value, computed) = compute::incr(current.as_deref(), delta, shape)?;
@@ -270,7 +270,7 @@ impl KvEngine {
     ) -> Result<Incremented<f64>, AtomicError> {
         require_bound(ctx.collection, ctx.surrogate)?;
         let tkey = table_key(ctx.database_id, ctx.tenant_id, ctx.collection);
-        let table = self.ensure_table(tkey, ctx.tenant_id, ctx.collection);
+        let table = self.ensure_table(tkey, &ctx);
 
         let current = table.get(ctx.key, ctx.now_ms).map(|v| v.to_vec());
         let (value, computed) = compute::incr_float(current.as_deref(), delta, shape)?;
@@ -301,7 +301,7 @@ impl KvEngine {
     ) -> Result<CasResult, AtomicError> {
         require_bound(ctx.collection, ctx.surrogate)?;
         let tkey = table_key(ctx.database_id, ctx.tenant_id, ctx.collection);
-        let table = self.ensure_table(tkey, ctx.tenant_id, ctx.collection);
+        let table = self.ensure_table(tkey, &ctx);
 
         let current = table.get(ctx.key, ctx.now_ms).map(|v| v.to_vec());
 
@@ -335,7 +335,7 @@ impl KvEngine {
     ) -> Result<GetSetResult, AtomicError> {
         require_bound(ctx.collection, ctx.surrogate)?;
         let tkey = table_key(ctx.database_id, ctx.tenant_id, ctx.collection);
-        let table = self.ensure_table(tkey, ctx.tenant_id, ctx.collection);
+        let table = self.ensure_table(tkey, &ctx);
         let old = table.get(ctx.key, ctx.now_ms).map(|v| v.to_vec());
         let write_bytes = compute::getset(old.as_deref(), new_value)?;
         // Decided before the value is installed — see `incr_resolved`.
@@ -349,13 +349,10 @@ impl KvEngine {
         })
     }
 
-    /// Ensure a hash table exists for (tenant, collection), creating if needed.
-    /// Returns a mutable reference to the table.
-    fn ensure_table(&mut self, tkey: u64, tenant_id: u64, collection: &str) -> &mut KvHashTable {
-        self.hash_to_tenant.entry(tkey).or_insert(tenant_id);
-        self.hash_to_collection
-            .entry(tkey)
-            .or_insert_with(|| collection.to_string());
+    /// Ensure a hash table exists for (database, tenant, collection),
+    /// creating if needed. Returns a mutable reference to the table.
+    fn ensure_table(&mut self, tkey: u64, ctx: &AtomicKeyCtx<'_>) -> &mut KvHashTable {
+        self.register_table_identity(tkey, ctx.database_id, ctx.tenant_id, ctx.collection);
         let default_capacity = self.default_capacity;
         let load_factor_threshold = self.load_factor_threshold;
         let rehash_batch_size = self.rehash_batch_size;
@@ -450,8 +447,10 @@ impl KvEngine {
 
         // Write the value, bumping this table's write epoch — the single
         // chokepoint the aggregate result cache reads to detect this write.
-        let table = self.table_for_write_or_create(tkey, tenant_id, collection);
-        table.put(key, value, expire_at, surrogate);
+        let ordinal = self.write_ordinal();
+        let table = self.table_for_write_or_create(tkey, database_id, tenant_id, collection);
+        table.put(key, value, expire_at, surrogate, ordinal);
+        self.recharge_table(tkey);
 
         // Schedule new expiry if needed.
         if expire_at != NO_EXPIRY {

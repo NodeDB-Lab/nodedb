@@ -30,6 +30,9 @@ impl CoreLoop {
     /// classic collection's are ordinary document bodies; the two are
     /// indistinguishable byte-wise, and both the RLS filter evaluator and the
     /// Control-Plane flatten read the attached body as one shape.
+    ///
+    /// `at` is the system-time ordinal a search at a cut reads: the body is
+    /// the row's version visible there. `None` attaches the current version.
     #[inline]
     pub(in crate::data::executor) fn attach_body(
         &self,
@@ -37,6 +40,7 @@ impl CoreLoop {
         tid: u64,
         collection: &str,
         attach: bool,
+        at: Option<i64>,
         mut hit: super::super::response_codec::VectorSearchHit,
     ) -> crate::Result<super::super::response_codec::VectorSearchHit> {
         if !attach {
@@ -45,8 +49,20 @@ impl CoreLoop {
         let Some(key) = hit.id.storage_key() else {
             return Ok(hit);
         };
-        // The row at its current version, so a bitemporal collection attaches.
-        if let Some(bytes) = self.current_row_body(database_id, tid, collection, &key)? {
+        let body = match at {
+            // The row at its current version, so a bitemporal collection
+            // attaches.
+            None => self.current_row_body(database_id, tid, collection, &key)?,
+            Some(ordinal) => self.sparse.versioned_get_as_of(
+                database_id,
+                tid,
+                collection,
+                &key,
+                Some(ordinal),
+                None,
+            )?,
+        };
+        if let Some(bytes) = body {
             let format = self.sparse_body_format(
                 crate::types::DatabaseId::new(database_id),
                 crate::types::TenantId::new(tid),
@@ -84,7 +100,12 @@ impl CoreLoop {
             ann_options,
             skip_payload_fetch,
             payload_filters,
+            system_time,
         } = params;
+        let cut = match super::search_cut::SearchCut::of(system_time) {
+            Ok(cut) => cut,
+            Err(e) => return self.response_error(task, e),
+        };
         // RLS requires body fetch regardless of projection. If RLS filters are
         // active, ignore the skip flag and record why at debug level.
         let skip_payload_fetch = if skip_payload_fetch && !rls_filters.is_empty() {
@@ -167,8 +188,10 @@ impl CoreLoop {
                 },
             )
         };
+        // A historical read sees committed rows only, never staged ones.
+        let overlay_txn = task.request.txn_id.filter(|_| cut.merge_overlay);
         let Some(collection_ref) = self.vector_collections.get(&effective_key) else {
-            if let Some(txn_id) = task.request.txn_id {
+            if let Some(txn_id) = overlay_txn {
                 return staged_only(self, txn_id);
             }
             return self.response_error(task, ErrorCode::NotFound);
@@ -181,8 +204,9 @@ impl CoreLoop {
                 super::vector::dimension_mismatch(collection_ref.dim(), query_vector.len()),
             );
         }
-        if collection_ref.is_empty() {
-            if let Some(txn_id) = task.request.txn_id {
+        // An index with no live node can still hold nodes a cut reads.
+        if collection_ref.is_empty() && cut.at.is_none() {
+            if let Some(txn_id) = overlay_txn {
                 return staged_only(self, txn_id);
             }
             return super::vector_search::empty_hits_response(self, task);
@@ -235,7 +259,16 @@ impl CoreLoop {
         // equalities by intersecting per-field equality bitmaps. Returns
         // `None` when no payload filters were requested or any filter
         // references a field with no registered payload index.
-        let payload_bm: Option<RoaringBitmap> = if payload_filters.is_empty() {
+        // The payload bitmap indexes describe live nodes only. A search at a
+        // cut evaluates the payload predicates against the bodies at the cut.
+        let cut_payload: Vec<nodedb_query::scan_filter::ScanFilter> = match cut.at {
+            Some(_) => match super::search_cut::payload_atoms_as_filters(payload_filters) {
+                Ok(filters) => filters,
+                Err(e) => return self.response_error(task, e),
+            },
+            None => Vec::new(),
+        };
+        let payload_bm: Option<RoaringBitmap> = if payload_filters.is_empty() || cut.at.is_some() {
             None
         } else {
             let preds: Vec<nodedb_vector::collection::FilterPredicate> = payload_filters
@@ -273,7 +306,17 @@ impl CoreLoop {
             collection_ref.payload.pre_filter(&conj)
         };
 
+        // A search at a cut admits each prefiltered row's node visible there.
+        let cut_allow: Option<RoaringBitmap> = match (cut.at, filter_bitmap) {
+            (Some(at), Some(surrogate_bm)) => {
+                Some(collection_ref.nodes_at(surrogate_bm.iter(), at))
+            }
+            (Some(_), None) | (None, _) => None,
+        };
+        // A current search's candidate bitmap. A search at a cut reads
+        // `cut_allow` instead.
         let combined_bm: Option<RoaringBitmap> = match (filter_bitmap, payload_bm) {
+            _ if cut.at.is_some() => None,
             (Some(surrogate_bm), Some(pbm)) => {
                 let mut bm = surrogate_bitmap_to_global_ids(collection_ref, surrogate_bm);
                 bm &= pbm;
@@ -312,6 +355,12 @@ impl CoreLoop {
         // flattens their fields into the hit for column projection. The
         // pure-vector fast path fetches no body.
         let attach = !skip_payload_fetch || !rls_filters.is_empty();
+        let window_residual: std::borrow::Cow<'_, [nodedb_query::scan_filter::ScanFilter]> =
+            if cut_payload.is_empty() {
+                std::borrow::Cow::Borrowed(&residual)
+            } else {
+                std::borrow::Cow::Owned(residual.iter().chain(&cut_payload).cloned().collect())
+            };
         let window = self.rank_window(
             &SearchWindow {
                 collection: collection_ref,
@@ -319,14 +368,16 @@ impl CoreLoop {
                 ef_search,
                 metric,
                 bitmap: bitmap_bytes.as_deref(),
+                cut: cut.at.map(|at| (at, cut_allow.as_ref())),
             },
             &BodySource {
                 database_id: task.request.database_id.as_u64(),
                 tid,
                 collection,
-                attach,
+                attach: attach || !cut_payload.is_empty(),
+                at: cut.at,
             },
-            &residual,
+            &window_residual,
             top_k,
             fetch_k,
         );
@@ -336,6 +387,27 @@ impl CoreLoop {
             Ok(window) => window,
             Err(e) => return self.response_error(task, e),
         };
+        // The payload predicates of a search at a cut drop the hits whose
+        // body at the cut fails them. A pure-vector projection then returns
+        // no body.
+        if !cut_payload.is_empty() {
+            let crs = self.crs_context();
+            hits.retain(|hit| {
+                hit.body.as_deref().is_some_and(|body| {
+                    nodedb_query::scan_filter::ScanFilter::all_match_binary(
+                        &cut_payload,
+                        body,
+                        &crs,
+                    )
+                    .unwrap_or(false)
+                })
+            });
+            if !attach {
+                for hit in &mut hits {
+                    hit.body = None;
+                }
+            }
+        }
         // With a residual filter the Control Plane makes the top-k cut, so
         // the whole window travels.
         let truncate_to = if residual.is_empty() { top_k } else { fetch_k };
@@ -343,7 +415,7 @@ impl CoreLoop {
         // staged vector inserts into the base HNSW/IVF result before
         // truncation, so a vector inserted earlier in the same transaction
         // is ranked in by true distance before COMMIT.
-        if let Some(txn_id) = task.request.txn_id {
+        if let Some(txn_id) = overlay_txn {
             if let Err(e) = self.merge_vector_overlay_into_search(
                 super::transaction::overlay::VectorMergeParams {
                     txn_id,

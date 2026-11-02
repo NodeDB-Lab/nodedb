@@ -8,6 +8,7 @@
 //!
 //! Internal document representation: `nodedb_types::Value` (no JSON intermediary).
 
+mod cut_rows;
 mod full_scan;
 mod prefilter;
 mod rtree_scan;

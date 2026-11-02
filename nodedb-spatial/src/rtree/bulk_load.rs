@@ -37,6 +37,7 @@ impl RTree {
             srid: srid.srid,
             space,
             memory,
+            history: super::history::SpatialHistory::default(),
         };
         tree.root = str_pack(&mut tree.nodes, entries, space);
         tree

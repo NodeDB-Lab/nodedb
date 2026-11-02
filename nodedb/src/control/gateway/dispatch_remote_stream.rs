@@ -92,7 +92,7 @@ pub(super) async fn dispatch_remote_stream(
             let batch = RowBatch {
                 payload: resp.payload.to_vec(),
                 watermark_lsn: resp.watermark_lsn,
-                read_versions: resp.read_versions,
+                read_vshards: resp.read_vshards,
             };
             return Ok(Box::pin(futures::stream::once(async move { Ok(batch) })));
         }
@@ -170,8 +170,8 @@ pub(super) async fn dispatch_remote_stream(
             payload,
             watermark_lsn: Lsn::new(lsn),
             // The `ExecuteStream` wire chunk carries only the watermark; no
-            // read version is threaded on this remote path.
-            read_versions: crate::types::ReadVersions::new(),
+            // read vShard is threaded on this remote path.
+            read_vshards: crate::types::ReadShards::new(),
         },
         Some(Err(e)) => {
             return Err(map_stream_cluster_error(e, &send));
@@ -187,7 +187,7 @@ pub(super) async fn dispatch_remote_stream(
         Ok((payload, lsn)) => Ok(RowBatch {
             payload,
             watermark_lsn: Lsn::new(lsn),
-            read_versions: crate::types::ReadVersions::new(),
+            read_vshards: crate::types::ReadShards::new(),
         }),
         Err(e) => Err(Error::Dispatch {
             detail: format!("remote stream terminal error: {e}"),

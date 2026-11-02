@@ -1,36 +1,41 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Audit-retention purge: drop *superseded* edge versions older than the
-//! system-time cutoff.
+//! History purge of the edge store below a system-time horizon.
 //!
-//! Live (latest-per-base) versions and any version newer than the cutoff are
-//! preserved. The last surviving version of a base is never deleted, even if
-//! it is older than the cutoff — "audit retain" reclaims only history, not
-//! the current state.
+//! A read at or above horizon `H` resolves each edge to its newest version
+//! at or below the read's system time that no TRUNCATE cut hides. The purge
+//! removes every version no such read reaches:
+//!
+//! - a version at or below `H` that a cut hides at `H`: a later cut hides
+//!   it too;
+//! - a version older than the version visible at `H`, applied no later
+//!   than it: a cut that hides the visible version hides it too;
+//! - the version visible at `H` when it is a tombstone and no version
+//!   follows it: the edge then reads as absent at every such cut.
+//!
+//! Versions above `H` stay. A TRUNCATE cut at or below `H` that a newer cut
+//! at or below `H` shadows goes as well.
 
-use super::keys::{parse_versioned_edge_key, versioned_edge_key};
-use super::visibility::{EDGE_APPLIED, read_visibility};
+use super::keys::{is_tombstone, parse_versioned_edge_key, versioned_edge_key};
+use super::visibility::{EDGE_APPLIED, EDGE_CUTS, ReadVisibility, cut_key, read_visibility};
 use crate::engine::graph::edge_store::store::{EDGES, EdgeStore, REVERSE_EDGES, redb_err};
 use nodedb_types::TenantId;
 use nodedb_types::temporal::ms_to_ordinal_upper;
 use redb::{ReadableDatabase, ReadableTable};
 
+/// What one purge of a collection removed.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct EdgePurgeCount {
+    /// Edge versions removed, each with its reverse entry.
+    pub versions: usize,
+    /// Shadowed TRUNCATE cuts removed.
+    pub cuts: usize,
+}
+
 impl EdgeStore {
-    /// Purge superseded versions for `(tid, collection)` whose
-    /// `system_from` ordinal is strictly less than
-    /// `ms_to_ordinal_upper(cutoff_system_ms)`.
-    ///
-    /// Preserves:
-    /// - Every version whose `system_from >= cutoff_ordinal`.
-    /// - The current version of each base: its newest version no TRUNCATE
-    ///   hides (tombstones / GDPR markers included), even if it is older
-    ///   than the cutoff — otherwise the base is silently resurrected
-    ///   on a subsequent scan.
-    ///
-    /// Deletes from both `EDGES` and `REVERSE_EDGES` inside a single
-    /// write transaction so the two indexes never diverge mid-purge.
-    /// Returns the number of `EDGES` rows removed (reverse-index
-    /// removals are paired 1:1).
+    /// The `audit_retention` purge of `(tid, collection)`: the purge at the
+    /// last ordinal of millisecond `cutoff_system_ms`
+    /// ([`Self::purge_edge_versions_below`]). Returns the versions removed.
     pub fn purge_superseded_versions(
         &self,
         db: u64,
@@ -38,16 +43,29 @@ impl EdgeStore {
         collection: &str,
         cutoff_system_ms: i64,
     ) -> crate::Result<usize> {
-        let cutoff_ordinal = ms_to_ordinal_upper(cutoff_system_ms);
+        let horizon = ms_to_ordinal_upper(cutoff_system_ms);
+        Ok(self
+            .purge_edge_versions_below(db, tid, collection, horizon)?
+            .versions)
+    }
+
+    /// Remove every edge version and TRUNCATE cut of `(tid, collection)`
+    /// that no read at or above `horizon` reaches.
+    ///
+    /// Deletes from `EDGES`, `REVERSE_EDGES` and `EDGE_APPLIED` inside one
+    /// write transaction, so the indexes never diverge mid-purge.
+    pub fn purge_edge_versions_below(
+        &self,
+        db: u64,
+        tid: TenantId,
+        collection: &str,
+        horizon: i64,
+    ) -> crate::Result<EdgePurgeCount> {
         let t = tid.as_u64();
-
-        // Pass 1: scan read-only, group by base, collect delete candidates.
-        let victims = self.collect_purge_victims(db, t, collection, cutoff_ordinal)?;
-        if victims.is_empty() {
-            return Ok(0);
+        let (victims, cuts) = self.collect_purge_victims(db, t, collection, horizon)?;
+        if victims.is_empty() && cuts.is_empty() {
+            return Ok(EdgePurgeCount::default());
         }
-
-        // Pass 2: delete forward + reverse inside one write txn.
         let write_txn = self
             .db
             .begin_write()
@@ -62,7 +80,6 @@ impl EdgeStore {
             let mut applied = write_txn
                 .open_table(EDGE_APPLIED)
                 .map_err(|e| redb_err("open edge_applied purge", e))?;
-
             for v in &victims {
                 edges
                     .remove((db, t, v.fwd_key.as_str()))
@@ -73,21 +90,33 @@ impl EdgeStore {
                     .remove((db, t, v.fwd_key.as_str()))
                     .map_err(|e| redb_err("remove edge applied ordinal", e))?;
             }
+            let mut cut_rows = write_txn
+                .open_table(EDGE_CUTS)
+                .map_err(|e| redb_err("open edge_cuts purge", e))?;
+            for cut in &cuts {
+                let key = cut_key(collection, *cut)?;
+                cut_rows
+                    .remove((db, t, key.as_str()))
+                    .map_err(|e| redb_err("remove edge cut", e))?;
+            }
         }
         write_txn
             .commit()
             .map_err(|e| redb_err("commit purge", e))?;
-
-        Ok(victims.len())
+        Ok(EdgePurgeCount {
+            versions: victims.len(),
+            cuts: cuts.len(),
+        })
     }
 
+    /// The versions and the cuts the purge at `horizon` removes.
     fn collect_purge_victims(
         &self,
         db: u64,
         t: u64,
         collection: &str,
-        cutoff_ordinal: i64,
-    ) -> crate::Result<Vec<Victim>> {
+        horizon: i64,
+    ) -> crate::Result<(Vec<Victim>, Vec<i64>)> {
         let read_txn = self
             .db
             .begin_read()
@@ -97,12 +126,7 @@ impl EdgeStore {
             .map_err(|e| redb_err("open edges read purge", e))?;
         let mut visibility = read_visibility(&read_txn)?;
 
-        // Versioned keys sort by base, then by system time ascending. Each
-        // base keeps its current version: the newest one no TRUNCATE hides.
-        // Removing it changes what the edge resolves to. Every other
-        // version below the cutoff is a victim. A version a TRUNCATE hides
-        // can go even when it is the newest: no read at the current system
-        // time reaches it.
+        // Versioned keys sort by base, then by system time ascending.
         let prefix = format!("{collection}\x00");
         let range = edges
             .range((db, t, prefix.as_str())..)
@@ -111,7 +135,7 @@ impl EdgeStore {
         let mut victims: Vec<Victim> = Vec::new();
         let mut group: Option<BaseVersions> = None;
         for entry in range {
-            let (k, _v) = entry.map_err(|e| redb_err("entry purge", e))?;
+            let (k, v) = entry.map_err(|e| redb_err("entry purge", e))?;
             let (kd, kt, key_str) = k.value();
             if kd != db || kt != t || !key_str.starts_with(&prefix) {
                 break;
@@ -119,31 +143,39 @@ impl EdgeStore {
             let Some((_, src, label, dst, system_from)) = parse_versioned_edge_key(key_str) else {
                 continue;
             };
-            let hidden = visibility.hidden(db, t, collection, key_str, system_from, i64::MAX)?;
+            let version = StoredVersion {
+                system_from,
+                tombstone: is_tombstone(v.value()),
+                fwd_key: key_str.to_string(),
+            };
             let base = Base {
                 src: src.to_string(),
                 label: label.to_string(),
                 dst: dst.to_string(),
             };
             match group.as_mut() {
-                Some(current) if current.base == base => {
-                    current.versions.push((system_from, hidden));
-                }
+                Some(current) if current.base == base => current.versions.push(version),
                 _ => {
                     if let Some(done) = group.take() {
-                        done.push_victims(collection, cutoff_ordinal, &mut victims)?;
+                        done.push_victims(
+                            &mut visibility,
+                            (db, t, collection),
+                            horizon,
+                            &mut victims,
+                        )?;
                     }
                     group = Some(BaseVersions {
                         base,
-                        versions: vec![(system_from, hidden)],
+                        versions: vec![version],
                     });
                 }
             }
         }
         if let Some(done) = group {
-            done.push_victims(collection, cutoff_ordinal, &mut victims)?;
+            done.push_victims(&mut visibility, (db, t, collection), horizon, &mut victims)?;
         }
-        Ok(victims)
+        let cuts = visibility.cuts_shadowed_at(db, t, collection, horizon)?;
+        Ok((victims, cuts))
     }
 }
 
@@ -154,25 +186,62 @@ struct Base {
     dst: String,
 }
 
-/// Every version of one base, ascending, each with whether a TRUNCATE hides
-/// it from a current read.
+/// One stored version of a base.
+struct StoredVersion {
+    system_from: i64,
+    tombstone: bool,
+    fwd_key: String,
+}
+
+/// Every version of one base, ascending by `system_from`.
 struct BaseVersions {
     base: Base,
-    versions: Vec<(i64, bool)>,
+    versions: Vec<StoredVersion>,
 }
 
 impl BaseVersions {
-    /// Push the versions below `cutoff_ordinal` other than the current one.
+    /// Push the versions no read at or above `horizon` reaches.
     fn push_victims(
         self,
-        collection: &str,
-        cutoff_ordinal: i64,
+        visibility: &mut ReadVisibility,
+        (db, t, collection): (u64, u64, &str),
+        horizon: i64,
         victims: &mut Vec<Victim>,
     ) -> crate::Result<()> {
-        let current = self.versions.iter().rposition(|(_, hidden)| !hidden);
-        for (index, (system_from, _)) in self.versions.iter().enumerate() {
-            if Some(index) != current && *system_from < cutoff_ordinal {
-                victims.push(Victim::new(collection, &self.base, *system_from)?);
+        let at_or_below = self
+            .versions
+            .partition_point(|version| version.system_from <= horizon);
+        let mut hidden = Vec::with_capacity(at_or_below);
+        for version in &self.versions[..at_or_below] {
+            hidden.push(visibility.hidden(
+                db,
+                t,
+                collection,
+                &version.fwd_key,
+                version.system_from,
+                horizon,
+            )?);
+        }
+        let visible = hidden.iter().rposition(|is_hidden| !is_hidden);
+        let visible_applied = match visible {
+            Some(index) => {
+                let version = &self.versions[index];
+                Some(visibility.applied_at(db, t, &version.fwd_key, version.system_from)?)
+            }
+            None => None,
+        };
+        let nothing_after = at_or_below == self.versions.len();
+        for (index, version) in self.versions[..at_or_below].iter().enumerate() {
+            let goes = match (visible, visible_applied) {
+                _ if hidden[index] => true,
+                (Some(visible), Some(applied)) if index < visible => {
+                    visibility.applied_at(db, t, &version.fwd_key, version.system_from)? <= applied
+                }
+                (Some(visible), _) if index == visible => version.tombstone && nothing_after,
+                _ => false,
+            };
+            if goes {
+                victims.push(Victim::new(collection, &self.base, version.system_from)?);
             }
         }
         Ok(())
@@ -233,40 +302,66 @@ mod tests {
             .count()
     }
 
+    fn delete(store: &EdgeStore, edge: EdgeRef<'_>, system_from: i64) {
+        store.soft_delete_edge(edge, system_from).unwrap();
+    }
+
+    /// The version visible at the horizon stays; the one it superseded goes.
     #[test]
-    fn purge_drops_superseded_versions_below_cutoff() {
+    fn purge_keeps_the_version_visible_at_the_horizon() {
         let (_dir, store) = fresh_store();
         let tid = TenantId::new(1);
         let edge = EdgeRef::new(DB, tid, "c", "a", "L", "b");
-
-        // Three versions at ms = 100, 200, 300. Cutoff at 250 should drop
-        // version 100 (< cutoff AND not latest). Version 200 is < cutoff
-        // but WOULD be latest if 300 didn't exist — it's superseded by 300,
-        // so it's eligible too. Version 300 is latest: kept.
         for ms in [100i64, 200, 300] {
-            let ord = ms_to_ordinal_upper(ms);
-            put(&store, edge, ord);
+            put(&store, edge, ms_to_ordinal_upper(ms));
         }
         assert_eq!(count_edges(&store, tid, "c"), 3);
 
-        let purged = store.purge_superseded_versions(D, tid, "c", 150).unwrap();
-        assert_eq!(purged, 1, "only v@100 is below cutoff AND superseded");
+        let at_150 = store.purge_superseded_versions(D, tid, "c", 150).unwrap();
+        assert_eq!(at_150, 0, "v@100 is the version a read at 150 sees");
+
+        let at_250 = store.purge_superseded_versions(D, tid, "c", 250).unwrap();
+        assert_eq!(at_250, 1, "v@100 is superseded by v@200 below the horizon");
         assert_eq!(count_edges(&store, tid, "c"), 2);
     }
 
     #[test]
-    fn purge_never_deletes_latest_version() {
+    fn purge_never_deletes_the_latest_live_version() {
         let (_dir, store) = fresh_store();
         let tid = TenantId::new(1);
         let edge = EdgeRef::new(DB, tid, "c", "a", "L", "b");
         put(&store, edge, ms_to_ordinal_upper(100));
 
-        // Cutoff way in the future. Only one version: keep it.
         let purged = store
             .purge_superseded_versions(D, tid, "c", 10_000)
             .unwrap();
         assert_eq!(purged, 0);
         assert_eq!(count_edges(&store, tid, "c"), 1);
+    }
+
+    /// A tombstone at or below the horizon with nothing after it removes the
+    /// edge entirely. One followed by a later version stays.
+    #[test]
+    fn purge_removes_an_edge_deleted_below_the_horizon() {
+        let (_dir, store) = fresh_store();
+        let tid = TenantId::new(1);
+        let gone = EdgeRef::new(DB, tid, "c", "a", "L", "b");
+        put(&store, gone, ms_to_ordinal_upper(100));
+        delete(&store, gone, ms_to_ordinal_upper(200));
+        let back = EdgeRef::new(DB, tid, "c", "x", "L", "y");
+        put(&store, back, ms_to_ordinal_upper(100));
+        delete(&store, back, ms_to_ordinal_upper(200));
+        put(&store, back, ms_to_ordinal_upper(400));
+
+        let purged = store
+            .purge_edge_versions_below(D, tid, "c", ms_to_ordinal_upper(300))
+            .unwrap();
+        assert_eq!(purged.versions, 3, "a->b whole, x->y's first version");
+        assert_eq!(
+            count_edges(&store, tid, "c"),
+            2,
+            "x->y keeps its tombstone and head"
+        );
     }
 
     #[test]
@@ -284,8 +379,7 @@ mod tests {
             put(&store, e_other_coll, ms_to_ordinal_upper(ms));
         }
 
-        // Purge only (tid=1, "c") below 250.
-        let purged = store.purge_superseded_versions(D, tid, "c", 150).unwrap();
+        let purged = store.purge_superseded_versions(D, tid, "c", 250).unwrap();
         assert_eq!(purged, 1);
         assert_eq!(count_edges(&store, tid, "c"), 2);
         assert_eq!(count_edges(&store, tid, "d"), 3);
@@ -300,9 +394,23 @@ mod tests {
         for ms in [100i64, 200, 300] {
             put(&store, edge, ms_to_ordinal_upper(ms));
         }
-        let first = store.purge_superseded_versions(D, tid, "c", 150).unwrap();
-        let second = store.purge_superseded_versions(D, tid, "c", 150).unwrap();
+        let first = store.purge_superseded_versions(D, tid, "c", 250).unwrap();
+        let second = store.purge_superseded_versions(D, tid, "c", 250).unwrap();
         assert_eq!(first, 1);
         assert_eq!(second, 0);
+    }
+
+    /// A TRUNCATE cut shadowed by a newer cut at or below the horizon goes.
+    #[test]
+    fn purge_removes_shadowed_cuts() {
+        let (_dir, store) = fresh_store();
+        let tid = TenantId::new(1);
+        store.install_edge_cut(DB, tid, "c", 1_000).unwrap();
+        store.install_edge_cut(DB, tid, "c", 2_000).unwrap();
+        store.install_edge_cut(DB, tid, "c", 9_000).unwrap();
+        let purged = store.purge_edge_versions_below(D, tid, "c", 5_000).unwrap();
+        assert_eq!(purged.cuts, 1, "only the cut at 1000 is shadowed at 5000");
+        let again = store.purge_edge_versions_below(D, tid, "c", 5_000).unwrap();
+        assert_eq!(again.cuts, 0);
     }
 }

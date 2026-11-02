@@ -120,6 +120,7 @@ impl Scheduler {
             redo,
             CalvinSlice {
                 collections: scope.collections.clone(),
+                incarnation_names: scope.incarnation_names.clone(),
                 sum_targets: scope.sum_targets.clone(),
                 identities: scope.identities.clone(),
                 event_source: super::request::slice_event_source(tx_class, scope),
@@ -134,15 +135,16 @@ impl Scheduler {
             },
         );
         let incarnations = scope
-            .collections
+            .incarnation_names
             .iter()
-            .map(|collection| CollectionIncarnation {
+            .map(|(collection, kind)| CollectionIncarnation {
                 collection: collection.clone(),
                 incarnation: tx_class
                     .incarnations
                     .iter()
-                    .find(|named| named.collection == *collection)
+                    .find(|named| named.collection == *collection && named.kind == *kind)
                     .map_or(nodedb_types::Hlc::ZERO, |named| named.incarnation),
+                kind: *kind,
             })
             .collect();
         Ok(OwedRedo {

@@ -59,11 +59,9 @@ pub struct GroupState {
     pub max: Option<Value>,
     /// Whether this bucket is finalized (all partitions have advanced past it).
     /// Once finalized, no more events will arrive for this group key.
-    #[msgpack(default)]
     pub finalized: bool,
     /// Latest event_time (wall-clock ms) seen for this group key.
     /// Used to map LSN watermarks to wall-clock time for time-bucket finalization.
-    #[msgpack(default)]
     pub latest_event_time: u64,
 }
 

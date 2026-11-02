@@ -113,10 +113,6 @@ pub fn compute_from_topology(topology: &ClusterTopology) -> ClusterVersionView {
 }
 
 fn node_wire_version(node: &NodeInfo) -> u16 {
-    // `NodeInfo` always carries a `wire_version` on new builds;
-    // serde deserialization of older persisted records returns
-    // the minimum supported (`1`) via the `serde(default)` hook
-    // in `nodedb-cluster`.
     node.wire_version
 }
 

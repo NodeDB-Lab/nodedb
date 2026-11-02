@@ -5,8 +5,16 @@
 //! A batch stages nothing. Its resolve appends the rows' sub-records and
 //! change events as the backup holds them, and one sub-record per edge
 //! version. Each edge version keeps its historical `system_from` and is
-//! applied at the transaction's ordinal: a TRUNCATE sequenced before the
-//! RESTORE leaves it visible, and one sequenced after it hides it.
+//! applied at the RESTORE's cut (`RestoreScope::edge_apply`): a TRUNCATE
+//! before the cut leaves it visible, and one after it hides it. A row, KV
+//! key or edge the destination holds past its newest backed-up version, at
+//! or below the cut, gets that version once more above the destination's
+//! (`restore_reassert`).
+//!
+//! Each restored array's cells resolve to one sub-record that carries every
+//! version at its backed-up system time, and the versions that set each
+//! coordinate's backed-up state again above the destination's newer ones
+//! (`restore_array`).
 //!
 //! Each restored node's label versions resolve to exact label sets, each at
 //! its historical `system_from`. A node whose newest version is not its
@@ -19,9 +27,13 @@ use nodedb_physical::physical_plan::{
 use nodedb_wal::record::RecordType;
 
 use crate::data::executor::core_loop::CoreLoop;
+use crate::types::DatabaseId;
 use crate::wal::{
     EdgeDeleteRedo, EdgePutRedo, NodeLabelRedo, RedoRecord, RedoRowChange, RedoSubRecord,
 };
+
+use super::restore_changes::RestoreChanges;
+use super::restore_reassert::RestoreScope;
 
 impl CoreLoop {
     /// Append the rows, edge versions and node labels of every RESTORE batch
@@ -29,6 +41,8 @@ impl CoreLoop {
     /// `row_changes`.
     pub(super) fn serialize_restored_batches(
         &self,
+        database_id: DatabaseId,
+        tid: u64,
         plans: &[PhysicalPlan],
         ops: &mut Vec<RedoSubRecord>,
         row_changes: &mut Vec<RedoRowChange>,
@@ -43,28 +57,44 @@ impl CoreLoop {
                     .ok_or_else(|| crate::Error::Internal {
                         detail: "a RESTORE batch resolved outside a Calvin transaction".into(),
                     })?;
+            let scope = RestoreScope {
+                database_id,
+                tid,
+                applied,
+                cut: batch.restore_cut,
+            };
             if !batch.rows_redo.is_empty() {
                 let rows = RedoRecord::from_bytes(&batch.rows_redo)?;
-                ops.extend(rows.ops);
+                let mut changes = RestoreChanges::default();
+                ops.extend(self.reassert_restored_rows(scope, rows.ops, &mut changes)?);
                 row_changes.extend(rows.row_changes);
+                row_changes.extend(changes.into_changes());
             }
             for edge in &batch.edges {
-                ops.push(restored_edge(edge, applied)?);
+                ops.push(restored_edge(edge, scope.edge_apply())?);
             }
+            self.reassert_restored_edges(scope, &batch.edges, ops)?;
             for node in &batch.node_labels {
                 restored_labels(node, applied, ops)?;
+            }
+            for cells in &batch.arrays {
+                ops.push(self.resolve_restored_array(scope, cells)?);
             }
         }
         Ok(())
     }
 }
 
-/// The sub-record of one restored edge version, applied at `applied`, the
-/// transaction's ordinal. A backup taken on a cluster whose clock ran ahead
-/// of this sequence holds versions above that ordinal: each keeps its
+/// The sub-record of one restored edge version, applied at `applied`: the
+/// RESTORE's cut, or the transaction's ordinal for a re-issue with none. A
+/// backup taken on a cluster whose clock ran ahead of this sequence holds
+/// versions above that ordinal: each keeps its
 /// system time and is applied at the ordinal all the same, so a TRUNCATE
 /// compares it by its place in the sequence.
-fn restored_edge(edge: &RestoredEdgeVersion, applied: i64) -> crate::Result<RedoSubRecord> {
+pub(super) fn restored_edge(
+    edge: &RestoredEdgeVersion,
+    applied: i64,
+) -> crate::Result<RedoSubRecord> {
     let applied = (applied != edge.system_from).then_some(applied);
     let encoded = match &edge.properties {
         Some(properties) => zerompk::to_msgpack_vec(&EdgePutRedo {

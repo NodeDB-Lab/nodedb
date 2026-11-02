@@ -17,11 +17,6 @@
 //!   surrogates, and the version's ordinal.
 //! * DELETE — [`crate::wal::EdgeDeleteRedo`]: the edge, both endpoint
 //!   surrogates, and the tombstone's ordinal.
-//! * `GraphNodeCascade` — [`crate::wal::NodeCascadeRedo`]: every edge one
-//!   document delete's node cascade tombstoned, each at its own ordinal, in
-//!   a WAL an older build wrote. Replay writes exactly those tombstones,
-//!   skips a key that already holds one, and drops the node's identity
-//!   binding. No live write produces this record.
 //! * `GraphEdgeCut` — [`crate::wal::EdgeCutRedo`]: one TRUNCATE share's cut
 //!   of an edge collection, installed by `wal_replay_redo_graph_cut`.
 //!
@@ -77,9 +72,8 @@ impl CoreLoop {
             let record_type = RecordType::from_raw(record.logical_record_type());
             let is_put = record_type == Some(RecordType::Put);
             let is_delete = record_type == Some(RecordType::Delete);
-            let is_cascade = record_type == Some(RecordType::GraphNodeCascade);
             let is_cut = record_type == Some(RecordType::GraphEdgeCut);
-            if !is_put && !is_delete && !is_cascade && !is_cut {
+            if !is_put && !is_delete && !is_cut {
                 continue;
             }
 
@@ -97,12 +91,6 @@ impl CoreLoop {
             let database_id = DatabaseId::new(record.header.database_id);
             let record_lsn = record.header.lsn;
 
-            if is_cascade {
-                if self.replay_node_cascade(record) {
-                    deletes += 1;
-                }
-                continue;
-            }
             if is_cut {
                 if self.replay_edge_cut(record, tombstones) {
                     cuts += 1;
@@ -320,56 +308,10 @@ impl CoreLoop {
         }
     }
 
-    /// Write one journalled node cascade: each tombstone at its ordinal, the
-    /// node's identity binding dropped, and the node's edges gone from the
-    /// CSR. Returns whether it applied. A cascade that does not decode is a
-    /// committed effect replay cannot apply, and halts replay.
-    fn replay_node_cascade(&mut self, record: &WalRecord) -> bool {
-        let record_lsn = record.header.lsn;
-        let cascade = match zerompk::from_msgpack::<crate::wal::NodeCascadeRedo>(&record.payload) {
-            Ok(cascade) => cascade,
-            Err(e) => {
-                self.replay_record_unapplied(
-                    "graph",
-                    "node_cascade_decode",
-                    record_lsn,
-                    &format!("node cascade does not decode: {e}"),
-                );
-                return false;
-            }
-        };
-        if self.claim_for_validation() {
-            return false;
-        }
-        let database_id = record.header.database_id;
-        let tenant_id = record.header.tenant_id;
-        self.historical_csr.invalidate_tenant(
-            nodedb_types::DatabaseId::new(database_id),
-            crate::types::TenantId::new(tenant_id),
-        );
-        if let Err(e) = self.edge_store.apply_node_cascade(
-            database_id,
-            crate::types::TenantId::new(tenant_id),
-            &cascade.node,
-            &cascade.edges,
-        ) {
-            self.replay_record_unapplied(
-                "graph",
-                "node_cascade_apply",
-                record_lsn,
-                &format!("node cascade of '{}' failed: {e}", cascade.node),
-            );
-            return false;
-        }
-        self.csr_partition_mut(database_id, tenant_id)
-            .remove_node_edges(&cascade.node);
-        true
-    }
-
     /// Build a synthetic `ExecutionTask` for graph edge redo replay. Carries the
     /// enclosing record's `database_id` (which the edge handlers read for
-    /// keying) and its LSN as `wal_lsn` so the committed-edge write-version index
-    /// is repopulated exactly as on the live path.
+    /// keying) and its LSN as `wal_lsn` so the write note and the
+    /// newest-ordinal cache take the edge exactly as on the live path.
     fn replay_graph_task(
         tenant_id: u64,
         database_id: DatabaseId,
@@ -399,7 +341,7 @@ impl CoreLoop {
                 wal_lsn,
                 resolved_now_ms: None,
                 commit_hlc: None,
-                entry_version: None,
+                system_ordinal: None,
                 admission: crate::bridge::envelope::Admission::Exempt(
                     crate::bridge::envelope::ExemptReason::AlreadyOrdered,
                 ),
@@ -543,9 +485,7 @@ mod tests {
     }
 
     #[test]
-    fn redo_graph_edge_put_records_its_write_version() {
-        use crate::data::executor::core_loop::write_index::{KeyRepr, WriteKey};
-
+    fn redo_graph_edge_put_notes_its_record_as_applied() {
         let mut h = make_core();
         let record = redo_record(7, vec![edge_put_sub("knows", "a", "KNOWS", "b")]);
 
@@ -557,25 +497,10 @@ mod tests {
             )
             .expect("redo replay must succeed");
 
-        // The edge applies on the vShard its record names, at the record's
-        // LSN: no registered stamp names an entry for it.
-        let write_key = WriteKey {
-            vshard: crate::types::VShardId::new(record.header.vshard_id),
-            db: DatabaseId::new(0),
-            tenant: crate::types::TenantId::new(7),
-            collection: Box::from("knows"),
-            key: KeyRepr::Edge {
-                src: Box::from("a"),
-                label: Box::from("KNOWS"),
-                dst: Box::from("b"),
-            },
-        };
         assert_eq!(
-            h.core.write_index.key_version(&write_key),
-            Some(crate::data::executor::core_loop::write_index::tests::local(
-                1
-            )),
-            "graph edge redo replay must record the write version at the record's LSN"
+            h.core.watermark,
+            crate::types::Lsn::new(record.header.lsn),
+            "graph edge redo replay must note its record as applied"
         );
     }
 

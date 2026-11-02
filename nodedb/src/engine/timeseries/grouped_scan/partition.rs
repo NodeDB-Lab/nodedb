@@ -10,7 +10,7 @@ use std::path::Path;
 
 use nodedb_query::simd_filter;
 
-use super::super::columnar_memtable::{ColumnData, ColumnType, ColumnarMemtable};
+use super::super::columnar_memtable::{ColumnData, ColumnarMemtable};
 use super::super::columnar_segment::ColumnarSegmentReader;
 use super::super::grouped_filter::{self, UnsupportedPredicate};
 use super::strategies::dispatch_grouping;
@@ -158,25 +158,16 @@ pub fn aggregate_partition(p: PartitionAggParams<'_>) -> crate::Result<Option<Gr
         return Ok(None);
     };
 
-    // Load sparse index for block-level skip. A partition written without
-    // one has no index file.
+    // Load sparse index for block-level skip. Every partition carries one.
     let sparse_idx = ColumnarSegmentReader::read_sparse_index(dir, kek)
         .map_err(|e| partition_corrupt(dir, "sparse_index", SITE, e))?;
 
-    // Determine surviving blocks (if sparse index available).
-    let surviving_blocks: Option<Vec<usize>> = sparse_idx
-        .as_ref()
-        .map(|idx| idx.filter_blocks(p.time_range.0, p.time_range.1, &[]));
+    let surviving_blocks = sparse_idx.filter_blocks(p.time_range.0, p.time_range.1, &[]);
 
     // If sparse index skips blocks and we have surviving blocks, use
     // block-level read. Otherwise read full columns.
-    let total_blocks = sparse_idx
-        .as_ref()
-        .map(|idx| idx.block_count())
-        .unwrap_or(0);
-    let use_block_read = surviving_blocks
-        .as_ref()
-        .is_some_and(|sb| !sb.is_empty() && sb.len() < total_blocks);
+    let use_block_read =
+        !surviving_blocks.is_empty() && surviving_blocks.len() < sparse_idx.block_count();
 
     let has_time_range = p.time_range.0 > 0 || p.time_range.1 < i64::MAX;
     // The time column is read whenever a time range or a bucket needs it,
@@ -190,7 +181,7 @@ pub fn aggregate_partition(p: PartitionAggParams<'_>) -> crate::Result<Option<Gr
         time_column,
         meta: &meta,
         use_block_read,
-        surviving_blocks: surviving_blocks.as_deref(),
+        surviving_blocks: &surviving_blocks,
         uring_reader: p.uring_reader,
         io_priority: p.io_priority,
         io_metrics: p.io_metrics,
@@ -216,13 +207,13 @@ pub fn aggregate_partition(p: PartitionAggParams<'_>) -> crate::Result<Option<Gr
         row_count
     };
 
-    // A `.sym` file is written only for a symbol column that has a
+    // A `.sym` file is written only for a symbol or text column that has a
     // dictionary, so an absent one is no dictionary. A present one that does
     // not read is corruption.
     let mut sym_dicts: HashMap<usize, nodedb_types::timeseries::SymbolDictionary> = HashMap::new();
     for (i, (name, ty)) in schema.columns.iter().enumerate() {
         let needed = p.needed_columns.is_empty() || p.needed_columns.iter().any(|n| n == name);
-        if *ty != ColumnType::Symbol || !needed || !dir.join(format!("{name}.sym")).exists() {
+        if !ty.is_dictionary() || !needed || !dir.join(format!("{name}.sym")).exists() {
             continue;
         }
         let dict = ColumnarSegmentReader::read_symbol_dict(dir, name, kek)
@@ -247,7 +238,7 @@ pub fn aggregate_partition(p: PartitionAggParams<'_>) -> crate::Result<Option<Gr
     } else {
         let partition_fully_in_range =
             !has_time_range || (meta.min_ts >= p.time_range.0 && meta.max_ts <= p.time_range.1);
-        let m = if partition_fully_in_range {
+        let mut m = if partition_fully_in_range {
             simd_filter::bitmask_all(effective_row_count)
         } else {
             let timestamps = time_cells(dir, &col_data, resolved.ts_idx)?;
@@ -255,13 +246,8 @@ pub fn aggregate_partition(p: PartitionAggParams<'_>) -> crate::Result<Option<Gr
             (rt.range_i64)(timestamps, p.time_range.0, p.time_range.1)
         };
         // Apply sparse index block-level skip on full data.
-        if let Some(ref idx) = sparse_idx {
-            let mut m = m;
-            grouped_filter::apply_sparse_skip(&mut m, idx, p.time_range, effective_row_count);
-            m
-        } else {
-            m
-        }
+        grouped_filter::apply_sparse_skip(&mut m, &sparse_idx, p.time_range, effective_row_count);
+        m
     };
 
     // Apply predicate filters. A predicate the bitmask evaluator cannot
@@ -352,7 +338,7 @@ struct ReadPartitionColumnsParams<'a> {
     time_column: Option<usize>,
     meta: &'a nodedb_types::timeseries::PartitionMeta,
     use_block_read: bool,
-    surviving_blocks: Option<&'a [usize]>,
+    surviving_blocks: &'a [usize],
     uring_reader: Option<&'a mut crate::data::io::uring_reader::UringReader>,
     io_priority: Option<Priority>,
     io_metrics: Option<&'a IoMetrics>,
@@ -404,7 +390,7 @@ fn read_partition_columns(
                 name,
                 *ty,
                 codec,
-                surviving_blocks.unwrap_or(&[]),
+                surviving_blocks,
                 kek,
             )
             .map(|(data, _)| data)

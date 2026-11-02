@@ -10,7 +10,7 @@ use nodedb_types::timeseries::{
 };
 
 use super::boundary::interval_bounds;
-use super::entry::{PartitionEntry, format_partition_dir};
+use super::entry::{PartitionEntry, PartitionKey, format_partition_dir};
 use super::rate::RateEstimator;
 
 /// One day, in milliseconds: the interval `Auto` starts at.
@@ -18,8 +18,8 @@ const DAY_MS: u64 = 86_400_000;
 
 /// Registry of all partitions for one timeseries collection.
 pub struct PartitionRegistry {
-    /// Partitions keyed by start timestamp.
-    pub(super) partitions: BTreeMap<i64, PartitionEntry>,
+    /// Partitions keyed by `min_ts` and directory name.
+    pub(super) partitions: BTreeMap<PartitionKey, PartitionEntry>,
     /// Current effective interval (may differ from config if AUTO + adapted).
     pub(super) current_interval: PartitionInterval,
     /// Rate estimator for AUTO mode.
@@ -47,12 +47,16 @@ impl PartitionRegistry {
     /// Returns the partition directory name and whether it's new.
     pub fn get_or_create_partition(&mut self, timestamp_ms: i64) -> (&PartitionEntry, bool) {
         let (start, end) = self.partition_boundaries(timestamp_ms);
+        let dir_name = format_partition_dir(start, end);
+        let key = self.key_of_dir(&dir_name).unwrap_or_else(|| PartitionKey {
+            min_ts: timestamp_ms,
+            dir_name: dir_name.clone(),
+        });
 
         use std::collections::btree_map::Entry;
-        match self.partitions.entry(start) {
+        match self.partitions.entry(key) {
             Entry::Occupied(e) => (e.into_mut(), false),
             Entry::Vacant(e) => {
-                let dir_name = format_partition_dir(start, end);
                 let entry = PartitionEntry {
                     meta: PartitionMeta {
                         min_ts: timestamp_ms,
@@ -65,6 +69,7 @@ impl PartitionRegistry {
                         last_flushed_wal_lsn: 0,
                         column_stats: std::collections::HashMap::new(),
                         max_system_ts: 0,
+                        ended_at: None,
                     },
                     dir_name,
                 };
@@ -94,8 +99,8 @@ impl PartitionRegistry {
     }
 
     /// Seal a partition (mark immutable).
-    pub fn seal_partition(&mut self, start_ts: i64) -> bool {
-        if let Some(entry) = self.partitions.get_mut(&start_ts)
+    pub fn seal_partition(&mut self, key: &PartitionKey) -> bool {
+        if let Some(entry) = self.partitions.get_mut(key)
             && entry.meta.state == PartitionState::Active
         {
             entry.meta.state = PartitionState::Sealed;
@@ -143,8 +148,8 @@ impl PartitionRegistry {
     }
 
     /// Update a partition's metadata (e.g., after flush updates row_count).
-    pub fn update_meta(&mut self, start_ts: i64, meta: PartitionMeta) {
-        if let Some(entry) = self.partitions.get_mut(&start_ts) {
+    pub fn update_meta(&mut self, key: &PartitionKey, meta: PartitionMeta) {
+        if let Some(entry) = self.partitions.get_mut(key) {
             entry.meta = meta;
         }
     }
@@ -189,16 +194,24 @@ impl PartitionRegistry {
         self.rate_estimator.rate()
     }
 
-    pub fn get(&self, start_ts: i64) -> Option<&PartitionEntry> {
-        self.partitions.get(&start_ts)
+    pub fn get(&self, key: &PartitionKey) -> Option<&PartitionEntry> {
+        self.partitions.get(key)
     }
 
     /// Mutable access to a partition entry (for merge/compaction state updates).
-    pub fn get_mut(&mut self, start_ts: i64) -> Option<&mut PartitionEntry> {
-        self.partitions.get_mut(&start_ts)
+    pub fn get_mut(&mut self, key: &PartitionKey) -> Option<&mut PartitionEntry> {
+        self.partitions.get_mut(key)
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&i64, &PartitionEntry)> {
+    /// The key of the partition in directory `dir_name`, if registered.
+    pub fn key_of_dir(&self, dir_name: &str) -> Option<PartitionKey> {
+        self.partitions
+            .keys()
+            .find(|key| key.dir_name == dir_name)
+            .cloned()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&PartitionKey, &PartitionEntry)> {
         self.partitions.iter()
     }
 }
@@ -243,10 +256,11 @@ mod tests {
     fn seal_partition() {
         let mut reg = PartitionRegistry::new(test_config());
         let day1_start = 86_400_000i64;
-        reg.get_or_create_partition(day1_start);
+        let dir = reg.get_or_create_partition(day1_start).0.dir_name.clone();
+        let key = reg.key_of_dir(&dir).expect("registered");
         assert_eq!(reg.active_count(), 1);
 
-        assert!(reg.seal_partition(day1_start));
+        assert!(reg.seal_partition(&key));
         assert_eq!(reg.active_count(), 0);
         assert_eq!(reg.sealed_count(), 1);
     }
@@ -262,11 +276,12 @@ mod tests {
 
         // Create and seal a partition with < 1000 rows.
         let start = 86_400_000i64;
-        reg.get_or_create_partition(start);
-        if let Some(entry) = reg.partitions.get_mut(&start) {
+        let dir = reg.get_or_create_partition(start).0.dir_name.clone();
+        let key = reg.key_of_dir(&dir).expect("registered");
+        if let Some(entry) = reg.partitions.get_mut(&key) {
             entry.meta.row_count = 50;
         }
-        reg.seal_partition(start);
+        reg.seal_partition(&key);
 
         // Interval should have doubled to 2d.
         assert_eq!(reg.current_interval().as_millis(), Some(2 * 86_400_000));

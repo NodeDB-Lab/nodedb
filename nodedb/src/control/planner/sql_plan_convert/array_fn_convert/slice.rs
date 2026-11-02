@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! ARRAY_SLICE → PhysicalPlan::Array(ArrayOp::Slice) or ClusterArray(Slice).
+//! ARRAY_SLICE → `PhysicalPlan::ClusterArray(ClusterArrayOp::Slice)`.
 
 use nodedb_array::types::ArrayId;
 use nodedb_sql::ArraySliceVisitArgs;
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::types::TenantId;
-use nodedb_physical::physical_plan::{ArrayOp, ClusterArrayOp};
+use nodedb_physical::physical_plan::ClusterArrayOp;
 
 use super::super::convert::ConvertContext;
 use super::helpers::{decode_schema, load_entry, resolve_attr_indices, resolve_slice};
@@ -63,41 +63,23 @@ pub(crate) fn convert_slice(
     let aid = ArrayId::in_database(tenant_id, ctx.database_id, name);
     let vshard = ctx.collection_key(name).vshard();
 
-    let plan = if ctx.cluster_enabled {
-        // In cluster mode emit a ClusterArray variant. The routing loop
-        // intercepts it and calls ArrayCoordinator::coord_slice instead
-        // of sending to the local SPSC bridge.
-        //
-        // The coordinator fans out only to the shards that own a tile the
-        // slice covers. An empty list fans out to every shard.
-        let slice_tile_keys =
-            compute_slice_tile_keys(&schema, &slice.dim_ranges, entry.prefix_bits);
-        PhysicalPlan::ClusterArray(ClusterArrayOp::Slice {
-            array_id: aid,
-            slice_msgpack,
-            attr_projection: attr_indices,
-            limit,
-            slice_tile_keys,
-            prefix_bits: entry.prefix_bits,
-            system_time,
-            valid_at_ms,
-            zone_msgpack,
-            physical,
-        })
-    } else {
-        PhysicalPlan::Array(ArrayOp::Slice {
-            array_id: aid,
-            slice_msgpack,
-            attr_projection: attr_indices,
-            limit,
-            cell_filter: None,
-            shard_bucket: None,
-            system_time,
-            valid_at_ms,
-            zone_msgpack,
-            physical,
-        })
-    };
+    // The routing loop intercepts the ClusterArray variant and calls
+    // ArrayCoordinator::coord_slice instead of sending to the local SPSC
+    // bridge. The coordinator fans out only to the shards that own a tile
+    // the slice covers. An empty list fans out to every shard.
+    let slice_tile_keys = compute_slice_tile_keys(&schema, &slice.dim_ranges, entry.prefix_bits);
+    let plan = PhysicalPlan::ClusterArray(ClusterArrayOp::Slice {
+        array_id: aid,
+        slice_msgpack,
+        attr_projection: attr_indices,
+        limit,
+        slice_tile_keys,
+        prefix_bits: entry.prefix_bits,
+        system_time,
+        valid_at_ms,
+        zone_msgpack,
+        physical,
+    });
 
     Ok(vec![PhysicalTask {
         tenant_id,
@@ -135,9 +117,7 @@ mod tests {
         (bytes, schema)
     }
 
-    fn make_ctx(
-        cluster_enabled: bool,
-    ) -> (
+    fn make_ctx() -> (
         ConvertContext,
         crate::control::array_catalog::ArrayCatalogHandle,
     ) {
@@ -165,10 +145,8 @@ mod tests {
             retention_registry: None,
             array_catalog: Some(handle.clone()),
             credentials: None,
-            wal: None,
             surrogate_assigner:
                 crate::control::planner::sql_plan_convert::test_support::test_assigner(),
-            cluster_enabled,
             bitemporal_retention_registry: None,
             max_vector_dim: 0,
             force_shuffle_join: false,
@@ -178,6 +156,7 @@ mod tests {
             broadcast_threshold_bytes: 8 * 1024 * 1024,
             shuffle_agg_threshold: 10_000,
             prefetched: Default::default(),
+            reads_txn_snapshot: false,
             database_id: crate::types::DatabaseId::DEFAULT,
             tenant_id: crate::types::TenantId::new(0),
         };
@@ -203,20 +182,8 @@ mod tests {
     }
 
     #[test]
-    fn single_node_emits_local_array() {
-        let (ctx, _handle) = make_ctx(false);
-        let tasks = whole_slice(&ctx);
-        assert_eq!(tasks.len(), 1);
-        assert!(
-            matches!(&tasks[0].plan, PhysicalPlan::Array(ArrayOp::Slice { .. })),
-            "expected local Array variant, got: {:?}",
-            tasks[0].plan
-        );
-    }
-
-    #[test]
-    fn cluster_mode_emits_cluster_array() {
-        let (ctx, _handle) = make_ctx(true);
+    fn a_slice_emits_cluster_array() {
+        let (ctx, _handle) = make_ctx();
         let tasks = whole_slice(&ctx);
         assert_eq!(tasks.len(), 1);
         assert!(

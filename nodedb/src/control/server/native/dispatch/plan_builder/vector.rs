@@ -67,6 +67,7 @@ pub(crate) async fn build_search(
         ann_options: Default::default(),
         skip_payload_fetch: false,
         payload_filters: Vec::new(),
+        system_time: nodedb_types::SystemTimeScope::Current,
     }))
 }
 
@@ -174,6 +175,7 @@ pub(crate) async fn build_multi_search(
         ef_search,
         filter_bitmap: None,
         rls_filters: Vec::new(),
+        system_time: nodedb_types::SystemTimeScope::Current,
     }))
 }
 

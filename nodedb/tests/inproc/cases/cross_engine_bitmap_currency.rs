@@ -76,7 +76,7 @@ fn make_req(plan: PhysicalPlan) -> Request {
         wal_lsn: None,
         resolved_now_ms: None,
         commit_hlc: None,
-        entry_version: None,
+        system_ordinal: None,
         admission: nodedb::bridge::envelope::Admission::Admitted,
     }
 }
@@ -236,6 +236,7 @@ fn fts_derived_bitmap_filters_vector_search() {
             skip_payload_fetch: false,
             payload_filters: Vec::new(),
             metric: DistanceMetric::L2,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
     let all_ids = extract_vector_surrogates(&all_payload);
@@ -274,6 +275,7 @@ fn fts_derived_bitmap_filters_vector_search() {
             skip_payload_fetch: false,
             payload_filters: Vec::new(),
             metric: DistanceMetric::L2,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
     let filtered_ids = extract_vector_surrogates(&filtered_payload);
@@ -385,6 +387,7 @@ fn document_scan_bitmap_filters_columnar_aggregate() {
             provenance: None,
             wal_lsn: None,
             system_from: None,
+            restored_versions: Vec::new(),
             // No RLS policy on this test's collection.
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             returning: None,

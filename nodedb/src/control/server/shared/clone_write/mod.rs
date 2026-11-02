@@ -11,6 +11,7 @@
 //! unprotected — merging an un-suppressed source row into a target read is
 //! only sound where copy-up/tombstone maintains that invariant.
 
+mod copy_source;
 mod document;
 mod entry;
 mod gate;

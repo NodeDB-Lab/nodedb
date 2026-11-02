@@ -62,7 +62,7 @@ pub fn make_request(plan: PhysicalPlan) -> Request {
         wal_lsn: None,
         resolved_now_ms: None,
         commit_hlc: None,
-        entry_version: None,
+        system_ordinal: None,
         admission: nodedb::bridge::envelope::Admission::Admitted,
     }
 }
@@ -194,6 +194,7 @@ pub fn kv_get(key: &[u8]) -> PhysicalPlan {
         key: key.to_vec(),
         rls_filters: Vec::new(),
         surrogate_ceiling: None,
+        system_time: nodedb_types::SystemTimeScope::Current,
     })
 }
 
@@ -213,6 +214,7 @@ pub fn columnar_insert(collection: &str, id: &str, val: i64) -> PhysicalPlan {
         provenance: None,
         wal_lsn: None,
         system_from: None,
+        restored_versions: Vec::new(),
         // These helpers build plans for transaction-batch tests on
         // collections that carry no RLS policy.
         rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
@@ -244,6 +246,7 @@ pub fn columnar_count(collection: &str) -> PhysicalPlan {
             param: None,
         }],
         filters: Vec::new(),
+        system_time: nodedb_types::SystemTimeScope::Current,
         having: Vec::new(),
         limit: 10,
         sub_group_by: Vec::new(),

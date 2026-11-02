@@ -24,8 +24,7 @@ pub struct DeltaPushMsg {
     /// Per-mutation unique ID for dedup.
     pub mutation_id: u64,
     /// CRC32C checksum of `delta` bytes for integrity verification.
-    /// Computed by sender, validated by receiver. 0 for legacy clients.
-    #[serde(default)]
+    /// Computed by sender, validated by receiver.
     pub checksum: u32,
     /// Device-assigned valid-time for the mutation (ms since Unix epoch).
     ///
@@ -37,24 +36,16 @@ pub struct DeltaPushMsg {
     #[serde(default)]
     pub device_valid_time_ms: Option<i64>,
     /// Stable identity of the originating producer (Lite peer ID or Origin node ID).
-    /// 0 for legacy / pre-idempotency clients.
-    #[serde(default)]
     pub producer_id: u64,
     /// Monotonic epoch counter incremented on every producer restart.
-    /// 0 for legacy / pre-idempotency clients.
-    #[serde(default)]
     pub epoch: u64,
     /// Per-stream monotonic sequence number within the epoch.
-    /// 0 for legacy / pre-idempotency clients.
-    #[serde(default)]
     pub seq: u64,
     /// Authenticated device identifier used in delta-key derivation.
-    #[serde(default)]
     pub device_id: u64,
     /// HMAC-SHA256 over the session epoch, collection, document id, exact
     /// delta bytes, and authenticated user/device/sequence tuple.
-    /// All zeros denotes an unsigned legacy delta.
-    #[serde(default)]
+    /// All zeros denotes an unsigned delta.
     pub delta_signature: [u8; 32],
     /// The incarnation of the collection the client built this delta
     /// against: the `creation_hlc` Origin announced with the collection's

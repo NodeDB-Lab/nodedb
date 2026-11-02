@@ -87,7 +87,7 @@ async fn register_array_catalog_entry(
 /// The catalog row a schema snapshot defines. The snapshot decodes on its
 /// own, so a node that does not replicate the array's data group builds the
 /// same row.
-fn catalog_entry_of(
+pub(crate) fn catalog_entry_of(
     tenant_id: TenantId,
     database_id: DatabaseId,
     array: &str,

@@ -8,7 +8,23 @@ use std::collections::HashMap;
 
 use nodedb_types::timeseries::{SeriesId, SymbolDictionary};
 
-use super::super::types::{ColumnData, ColumnType, ColumnarMemtableConfig, ColumnarSchema};
+use super::super::types::{ColumnData, ColumnarMemtableConfig, ColumnarSchema};
+
+/// The bytes the strings of `dicts` hold, as ingest counts each new entry.
+///
+/// A recount of the memtable's footprint adds it to the column capacities:
+/// a text field can hold a distinct string per row.
+pub(super) fn dictionary_string_bytes(dicts: &HashMap<usize, SymbolDictionary>) -> usize {
+    dicts
+        .values()
+        .map(|dict| {
+            (0..dict.len())
+                .filter_map(|id| u32::try_from(id).ok().and_then(|id| dict.get(id)))
+                .map(str::len)
+                .sum::<usize>()
+        })
+        .sum()
+}
 
 /// Columnar memtable: per-column vectors instead of per-series hash maps.
 ///
@@ -39,10 +55,10 @@ impl ColumnarMemtable {
             .map(|(_, ty)| ColumnData::new(*ty))
             .collect();
 
-        // Initialize symbol dicts for tag columns.
+        // Initialize a dictionary for every symbol and text column.
         let mut symbol_dicts = HashMap::new();
         for (i, (_, ty)) in schema.columns.iter().enumerate() {
-            if *ty == ColumnType::Symbol {
+            if ty.is_dictionary() {
                 symbol_dicts.insert(i, SymbolDictionary::new());
             }
         }

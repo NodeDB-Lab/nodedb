@@ -12,11 +12,6 @@
 //! `Table '…' does not exist`. The `bootstrap_creates_every_registered_table`
 //! unit test re-opens every entry read-only against a freshly-bootstrapped
 //! catalog to keep the registry and the init path in lockstep.
-//!
-//! Migration-only tables (`_system.collections`, a superseded key layout) are
-//! intentionally absent: they are read only by the idempotent migration path,
-//! which already tolerates their absence, and materialising empty copies on
-//! every fresh server misrepresents the catalog state.
 
 use redb::{ReadTransaction, TableError, WriteTransaction};
 
@@ -101,15 +96,14 @@ pub(super) const BOOTSTRAP_TABLES: &[BootstrapTable] = bootstrap_tables![
     // ── Surrogate identity map ──
     "surrogate_scopes" => SURROGATE_SCOPES,
     "surrogate_scope_seq" => SURROGATE_SCOPE_SEQ,
-    "surrogate_pk_v4" => SURROGATE_PK,
-    "surrogate_pk_rev_v4" => SURROGATE_PK_REV,
+    "surrogate_pk" => SURROGATE_PK,
+    "surrogate_pk_rev" => SURROGATE_PK_REV,
     "surrogate_hwm" => super::surrogate_hwm::SURROGATE_HWM,
     "surrogate_reserve_index" => super::surrogate_hwm::SURROGATE_RESERVE_INDEX,
     // ── Sync producer registry ──
     "sync_producer_hwm" => super::sync_producer::SYNC_PRODUCER_HWM,
     "sync_producers" => super::sync_producer::SYNC_PRODUCERS,
     "sync_peer_bindings" => super::sync_producer::SYNC_PEER_BINDINGS,
-    "crdt_signing_keys" => super::sync_producer::CRDT_SIGNING_KEYS,
     "crdt_signing_root_metadata" => super::sync_producer::CRDT_SIGNING_ROOT_METADATA,
     "join_token_states" => super::sync_producer::JOIN_TOKEN_STATES,
     "enrollment_preauthorizations" => super::sync_producer::ENROLLMENT_PREAUTHORIZATIONS,

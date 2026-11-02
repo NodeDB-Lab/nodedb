@@ -67,8 +67,8 @@ pub(super) async fn admit_peer_identity(
         peer_id,
         producer_id,
     } = request;
-    // `producer_id == 0` is the unfenced/legacy session sentinel and `peer_id
-    // == 0` is the unset-peer sentinel; neither names an identity to bind.
+    // `producer_id == 0` marks an unfenced session. `peer_id == 0` marks an
+    // unset peer. Neither names an identity to bind.
     if producer_id == 0 || peer_id == 0 {
         return Ok(PeerIdentity::Unbound);
     }

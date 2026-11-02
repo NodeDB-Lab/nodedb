@@ -10,9 +10,10 @@
 
 mod expr_lower;
 mod serialize;
+mod system_time;
 
 pub(super) use expr_lower::{expr_filter, expr_filter_qualified};
-pub(crate) use serialize::serialize_filters;
 pub(super) use serialize::{
     encode_scan_filters, filter_to_scan_filters, serialize_join_post_filters,
 };
+pub(crate) use serialize::{serialize_filters, serialize_timeseries_filters};

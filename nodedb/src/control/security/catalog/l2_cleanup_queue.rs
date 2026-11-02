@@ -21,7 +21,7 @@ use super::types::{L2_CLEANUP_QUEUE, SystemCatalog, catalog_err};
 
 /// One queue entry: "L2 delete for this collection is still owed".
 #[derive(zerompk::ToMessagePack, zerompk::FromMessagePack, Debug, Clone)]
-#[msgpack(map, allow_unknown_fields)]
+#[msgpack(map)]
 pub struct StoredL2CleanupEntry {
     pub database_id: u64,
     pub tenant_id: u64,
@@ -32,13 +32,10 @@ pub struct StoredL2CleanupEntry {
     /// Unix-epoch nanoseconds when this entry was created.
     pub enqueued_at_ns: u64,
     /// Best-effort estimate of L2 bytes still to delete. 0 if unknown.
-    #[msgpack(default)]
     pub bytes_pending: u64,
     /// Last error the worker observed, if any. Empty = healthy.
-    #[msgpack(default)]
     pub last_error: String,
     /// Number of delete attempts this entry has survived.
-    #[msgpack(default)]
     pub attempts: u32,
 }
 

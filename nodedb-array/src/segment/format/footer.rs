@@ -109,6 +109,7 @@ mod tests {
             0xABCDEF,
             vec![TileEntry::new(
                 TileId::snapshot(7),
+                3,
                 TileKind::Sparse,
                 32,
                 64,

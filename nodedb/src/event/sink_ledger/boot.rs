@@ -29,7 +29,12 @@ pub fn load_sink_state(
         .persist_floors(&shared.cdc_router.availability().all())?;
     // A WAL catch-up can rebuild events of records applied before the
     // restart. Their replicated positions come back from the WAL markers.
-    shared.cdc_router.positions().recover(&wal.replay()?);
+    // A refused forward record keeps its position: the events rebuilt from
+    // its write's group parts name its LSN.
+    shared
+        .cdc_router
+        .positions()
+        .recover(&wal.replay_with_refused()?);
     // The Control-Plane change feeds come back from their journal, so a
     // cursor inside retention resumes after the restart.
     let journal = crate::control::change_stream::ChangeJournal::open(

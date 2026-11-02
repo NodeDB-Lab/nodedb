@@ -42,7 +42,7 @@ pub enum DatabaseStatus {
     serde::Serialize,
     serde::Deserialize,
 )]
-#[msgpack(map, allow_unknown_fields)]
+#[msgpack(map)]
 pub struct DatabaseDescriptor {
     pub id: DatabaseId,
     /// Human-readable name. Mutable via `ALTER DATABASE RENAME`.
@@ -54,34 +54,27 @@ pub struct DatabaseDescriptor {
     pub created_at_lsn: u64,
     /// Quota reference id — links to the quota hierarchy.
     /// `0` means "no explicit quota; inherits global default".
-    #[msgpack(default)]
     pub quota_ref: u64,
     /// For cloned databases: the source `DatabaseId` this was
     /// forked from, and the LSN / system-time boundary.
     /// `None` for non-clones.
-    #[msgpack(default)]
     pub parent_clone: Option<ParentCloneRef>,
     /// For mirror databases: the source cluster/database and replication state.
     /// `None` for non-mirrors and post-promotion mirrors where the lineage
     /// record was cleared. Post-promotion databases retain this field as a
     /// historical record of their origin; `status` will be `Promoted`.
-    #[msgpack(default)]
     pub mirror_origin: Option<MirrorOrigin>,
     /// DML audit level for this database.
     /// Set via `ALTER DATABASE <name> SET AUDIT_DML = <mode>`.
-    #[msgpack(default)]
-    #[serde(default)]
     pub audit_dml: AuditDmlMode,
     /// Idle session timeout in seconds for sessions in this database.
     /// `0` means no per-database timeout (falls back to global `idle_timeout_secs`).
     /// Set via `ALTER DATABASE <name> SET IDLE_TIMEOUT = <secs>`.
-    #[msgpack(default)]
-    #[serde(default)]
     pub idle_session_timeout_secs: u64,
 }
 
-/// Reference to a clone's origin. Populated by the clone subsystem; stored
-/// on the descriptor from day one so the schema stays forward-compatible.
+/// Reference to a clone's origin. Populated by the clone subsystem and
+/// stored on the descriptor.
 #[derive(
     Debug,
     Clone,
@@ -90,7 +83,7 @@ pub struct DatabaseDescriptor {
     serde::Serialize,
     serde::Deserialize,
 )]
-#[msgpack(map, allow_unknown_fields)]
+#[msgpack(map)]
 pub struct ParentCloneRef {
     pub source_db_id: DatabaseId,
     /// WAL LSN at which the clone was taken (the `AS OF` point).
@@ -101,11 +94,7 @@ pub struct ParentCloneRef {
     /// at clone-create time.  Used by the lazy KV read path to filter out
     /// source rows whose binding was allocated AFTER the clone — those
     /// rows belong strictly to post-clone writes and must not leak through
-    /// source delegation.  `None` on legacy clones created before this
-    /// field existed (treated as "no ceiling" — i.e. no isolation enforced
-    /// for those clones, matching the prior behaviour).
-    #[serde(default)]
-    #[msgpack(default)]
+    /// source delegation. `None` means no ceiling.
     pub kv_surrogate_ceiling: Option<u32>,
 }
 

@@ -35,7 +35,7 @@
 use std::borrow::Cow;
 
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::core_loop::write_index::KeyRepr;
+use crate::data::executor::core_loop::write_note::KeyRepr;
 use crate::data::executor::handlers::kv::declared_body::coerce_kv_body;
 use crate::data::executor::handlers::transaction::undo::UndoEntry;
 use nodedb_types::Surrogate;
@@ -90,9 +90,9 @@ impl CoreLoop {
         };
         let value = coerced.unwrap_or(value);
         if self.recording_redo_undo() {
-            let prior =
-                self.kv_engine
-                    .entry_image(database_id, tenant_id, &collection, &key, now_ms);
+            let prior = self
+                .kv_engine
+                .stored_image(database_id, tenant_id, &collection, &key);
             self.record_redo_undo([UndoEntry::KvPut {
                 collection: collection.clone(),
                 key: key.clone(),
@@ -155,9 +155,9 @@ impl CoreLoop {
             return Some(0);
         }
         if self.recording_redo_undo() {
-            let prior =
-                self.kv_engine
-                    .entry_image(database_id, tenant_id, &collection, &key, now_ms);
+            let prior = self
+                .kv_engine
+                .stored_image(database_id, tenant_id, &collection, &key);
             self.record_redo_undo([UndoEntry::KvPut {
                 collection: collection.clone(),
                 key: key.clone(),

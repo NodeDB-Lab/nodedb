@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! WAL record header: fixed 63-byte prefix + constants.
+//! WAL record header: fixed 71-byte prefix + constants.
 
 use crate::error::{Result, WalError};
 
@@ -21,15 +21,20 @@ pub const MAX_WAL_PAYLOAD_SIZE: usize = 64 * 1024 * 1024;
 /// Layout (all little-endian):
 ///   magic(4) | format_version(2) | record_type(4) | lsn(8) | tenant_id(8)
 ///   | vshard_id(4) | payload_len(4) | database_id(8) | apply_key(8)
-///   | event_source(1) | commit_hlc(8) | crc32c(4)
+///   | event_source(1) | commit_hlc(8) | system_ordinal(8) | crc32c(4)
 ///
 /// `database_id` occupies bytes 34–41. `apply_key` occupies bytes 42–49.
-pub const HEADER_SIZE: usize = 63;
+/// `system_ordinal` occupies bytes 59–66.
+pub const HEADER_SIZE: usize = 71;
 
 /// The event source of a record that carries no row write. Replay rebuilds
 /// no write event from it. A write record carries the code of the source its
 /// write ran with; the WAL stores the code and does not interpret it.
 pub const NO_EVENT_SOURCE: u8 = 0;
+
+/// The system ordinal of a record whose write carries none: replay stamps
+/// such a record as its engine decides.
+pub const NO_SYSTEM_ORDINAL: i64 = 0;
 
 /// Bit 14 in `record_type` signals the payload is AES-256-GCM encrypted.
 /// Separate from bit 15 (required flag).
@@ -39,7 +44,7 @@ pub const ENCRYPTED_FLAG: u32 = 0x0000_4000;
 /// must not be silently skipped.
 pub const REQUIRED_FLAG: u32 = 0x0000_8000;
 
-/// WAL record header (fixed 63 bytes).
+/// WAL record header (fixed 71 bytes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecordHeader {
     pub magic: u32,
@@ -69,6 +74,12 @@ pub struct RecordHeader {
     /// restore keeps a record with a nonzero value only when it is below the
     /// restore point's watermark. Covered by CRC32C. Occupies bytes 51–58.
     pub commit_hlc: u64,
+    /// The system-time ordinal every version the record's write lands
+    /// stamps, fixed before the record is appended. The live apply and every
+    /// replay of the record stamp it, so they write the same version keys.
+    /// [`NO_SYSTEM_ORDINAL`] for a record whose write carries none. Covered
+    /// by CRC32C. Occupies bytes 59–66.
+    pub system_ordinal: i64,
     pub crc32c: u32,
 }
 
@@ -86,7 +97,8 @@ impl RecordHeader {
         buf[42..50].copy_from_slice(&self.apply_key.to_le_bytes());
         buf[50] = self.event_source;
         buf[51..59].copy_from_slice(&self.commit_hlc.to_le_bytes());
-        buf[59..63].copy_from_slice(&self.crc32c.to_le_bytes());
+        buf[59..67].copy_from_slice(&self.system_ordinal.to_le_bytes());
+        buf[67..71].copy_from_slice(&self.crc32c.to_le_bytes());
         buf
     }
 
@@ -113,7 +125,10 @@ impl RecordHeader {
             commit_hlc: u64::from_le_bytes([
                 buf[51], buf[52], buf[53], buf[54], buf[55], buf[56], buf[57], buf[58],
             ]),
-            crc32c: u32::from_le_bytes([buf[59], buf[60], buf[61], buf[62]]),
+            system_ordinal: i64::from_le_bytes([
+                buf[59], buf[60], buf[61], buf[62], buf[63], buf[64], buf[65], buf[66],
+            ]),
+            crc32c: u32::from_le_bytes([buf[67], buf[68], buf[69], buf[70]]),
         }
     }
 
@@ -179,6 +194,7 @@ mod tests {
             apply_key: 0,
             event_source: NO_EVENT_SOURCE,
             commit_hlc: 0,
+            system_ordinal: NO_SYSTEM_ORDINAL,
             crc32c: 0xDEAD_BEEF,
         }
     }
@@ -191,11 +207,12 @@ mod tests {
     }
 
     #[test]
-    fn header_golden_63_bytes_exact_offsets() {
+    fn header_golden_71_bytes_exact_offsets() {
         // magic at 0..4, format_version at 4..6, record_type at 6..10,
         // lsn at 10..18, tenant_id at 18..26, vshard_id at 26..30,
         // payload_len at 30..34, database_id at 34..42, apply_key at 42..50,
-        // event_source at 50, commit_hlc at 51..59, crc32c at 59..63.
+        // event_source at 50, commit_hlc at 51..59, system_ordinal at
+        // 59..67, crc32c at 67..71.
         let header = RecordHeader {
             magic: WAL_MAGIC,
             format_version: WAL_FORMAT_VERSION,
@@ -208,10 +225,11 @@ mod tests {
             apply_key: 0,
             event_source: NO_EVENT_SOURCE,
             commit_hlc: 0,
+            system_ordinal: NO_SYSTEM_ORDINAL,
             crc32c: 0x1234_5678,
         };
         let b = header.to_bytes();
-        assert_eq!(b.len(), 63);
+        assert_eq!(b.len(), 71);
         // magic
         assert_eq!(&b[0..4], &WAL_MAGIC.to_le_bytes());
         // format_version
@@ -234,8 +252,10 @@ mod tests {
         assert_eq!(b[50], NO_EVENT_SOURCE);
         // commit_hlc — zero
         assert_eq!(&b[51..59], &[0u8; 8]);
+        // system_ordinal — none
+        assert_eq!(&b[59..67], &NO_SYSTEM_ORDINAL.to_le_bytes());
         // crc32c
-        assert_eq!(&b[59..63], &0x1234_5678u32.to_le_bytes());
+        assert_eq!(&b[67..71], &0x1234_5678u32.to_le_bytes());
     }
 
     #[test]
@@ -253,6 +273,7 @@ mod tests {
             apply_key: 0,
             event_source: NO_EVENT_SOURCE,
             commit_hlc: 0,
+            system_ordinal: NO_SYSTEM_ORDINAL,
             crc32c: 0,
         };
         let bytes = header.to_bytes();
@@ -268,6 +289,19 @@ mod tests {
         };
         let decoded = RecordHeader::from_bytes(&header.to_bytes());
         assert_eq!(decoded.commit_hlc, 1_700_000_000_123_456_789);
+        assert_eq!(decoded, header);
+    }
+
+    #[test]
+    fn system_ordinal_roundtrip() {
+        let header = RecordHeader {
+            system_ordinal: 1_800_000_000_123_456_789,
+            ..make_header(1, 0)
+        };
+        let bytes = header.to_bytes();
+        assert_eq!(&bytes[59..67], &1_800_000_000_123_456_789i64.to_le_bytes());
+        let decoded = RecordHeader::from_bytes(&bytes);
+        assert_eq!(decoded.system_ordinal, 1_800_000_000_123_456_789);
         assert_eq!(decoded, header);
     }
 
@@ -300,6 +334,7 @@ mod tests {
             apply_key: 0,
             event_source: NO_EVENT_SOURCE,
             commit_hlc: 0,
+            system_ordinal: NO_SYSTEM_ORDINAL,
             crc32c: 0,
         };
         let bytes = header.to_bytes();

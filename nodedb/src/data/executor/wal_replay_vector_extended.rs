@@ -42,10 +42,13 @@ impl CoreLoop {
         let mut applied = 0usize;
         let mut skipped = 0usize;
 
+        // Each record applies at the system ordinal its live apply stamped.
+        let outer_ordinal = self.apply_scope.replicated_ordinal;
         for record in records {
             if self.replay_halted() {
                 break;
             }
+            self.apply_scope.replicated_ordinal = record.system_ordinal().or(outer_ordinal);
             let record_type = RecordType::from_raw(record.logical_record_type());
             let is_target = matches!(
                 record_type,
@@ -152,6 +155,7 @@ impl CoreLoop {
                 skipped += 1;
             }
         }
+        self.apply_scope.replicated_ordinal = outer_ordinal;
 
         if applied > 0 {
             tracing::info!(

@@ -12,6 +12,7 @@ pub mod apply_put;
 pub mod delete;
 pub mod delete_version;
 pub mod get;
+pub mod history_install;
 pub mod insert;
 pub mod overlay_lookup;
 pub mod put;

@@ -6,13 +6,14 @@
 //! Every query handler (aggregate, join, sort, filter, subquery) should
 //! use `scan_collection` instead of calling engine-specific scan methods.
 //! This gives a single place to handle format differences:
-//! - Schemaless document → msgpack (already standard or legacy JSON)
+//! - Schemaless document → msgpack (already standard, or JSON transcoded)
 //! - Strict document → Binary Tuple → decode → msgpack
 //! - Key-Value → zerompk Value → transcode → msgpack
 //! - Columnar → segment and memtable rows → msgpack
 //! - Timeseries → memtable and partition rows → msgpack
 
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::handlers::columnar_read::flushed_segment::SegmentBlocks;
 use crate::engine::kv::KvScanParams;
 
 impl CoreLoop {
@@ -119,7 +120,13 @@ impl CoreLoop {
         }
 
         // 3. Columnar engine
-        let col_docs = self.scan_columnar(did, tid, collection, limit)?;
+        let col_docs = self.scan_columnar(
+            did,
+            tid,
+            collection,
+            limit,
+            nodedb_columnar::VersionCut::Current,
+        )?;
         if !col_docs.is_empty() {
             return Ok(col_docs);
         }
@@ -193,7 +200,13 @@ impl CoreLoop {
         // 2. Columnar — materializes internally; iterate the batch per-row.
         // columnar stays materialized — per-row segment streaming is a separate
         // follow-up (flushed-segment decode).
-        let col_docs = self.scan_columnar(did, tid, collection, usize::MAX)?;
+        let col_docs = self.scan_columnar(
+            did,
+            tid,
+            collection,
+            usize::MAX,
+            nodedb_columnar::VersionCut::Current,
+        )?;
         if !col_docs.is_empty() {
             for (id, bytes) in &col_docs {
                 f(id, bytes)?;
@@ -202,9 +215,9 @@ impl CoreLoop {
         }
 
         // 3. Sparse/document engine (schemaless + strict + vector-primary
-        //    sidecar) — streams via `for_each_current_row`: row-at-a-time on
-        //    the plain table, a page at a time on a bitemporal collection's
-        //    current versions. The body encoding is resolved once up
+        //    sidecar) — streams each row's current version via
+        //    `for_each_current_row`, one row at a time. The body encoding is
+        //    resolved once up
         //    front through the same helper `scan_sparse` uses, so the streaming
         //    and materializing scans cannot disagree about a row's shape.
         let database_id = crate::types::DatabaseId::new(did);
@@ -248,14 +261,16 @@ impl CoreLoop {
     }
 
     /// Scan plain/spatial columnar rows → standard msgpack: flushed
-    /// segments, then the live memtable. A bitemporal collection scans each
-    /// key's current version only.
-    fn scan_columnar(
+    /// segments, then the live memtable. The scan reads the row versions
+    /// visible at `cut`. At `Current` the delete bitmap marks every ended
+    /// version.
+    pub(in crate::data::executor) fn scan_columnar(
         &self,
         database_id: u64,
         tid: u64,
         collection: &str,
         limit: usize,
+        cut: nodedb_columnar::VersionCut,
     ) -> crate::Result<Vec<(String, Vec<u8>)>> {
         let columnar_key = (
             nodedb_types::DatabaseId::new(database_id),
@@ -267,10 +282,6 @@ impl CoreLoop {
         };
 
         let schema = engine.schema();
-        let version_gate = self.columnar_version_gate(&columnar_key, None, false)?;
-        let current = |row: &[nodedb_types::value::Value]| {
-            version_gate.as_ref().is_none_or(|gate| gate.admits(row))
-        };
         let mut results = Vec::new();
 
         // 1. Read from flushed segments (older rows drained from prior memtable flushes).
@@ -280,42 +291,50 @@ impl CoreLoop {
                     break;
                 }
                 let seg_id = seg_idx as u64 + 1;
+                if engine.segment_skippable(seg_id, cut) {
+                    continue;
+                }
                 // A segment that does not read refuses the scan. Skipping it
                 // would answer without the segment's rows.
                 let segment = self.decode_flushed_segment(
-                    collection,
+                    &columnar_key,
                     seg_id,
                     seg_bytes,
                     schema.columns.len(),
+                    SegmentBlocks::Visible {
+                        engine,
+                        cut,
+                        predicates: &[],
+                    },
                     "columnar_normalized_scan",
                 )?;
-                let delete_bm = engine.delete_bitmap(seg_id);
                 for row_idx in 0..segment.row_count() {
                     if results.len() >= limit {
                         break;
                     }
-                    // A tombstoned row is not a row any more.
-                    if delete_bm.is_some_and(|bm| bm.is_deleted(row_idx as u32)) {
+                    if !segment.holds_row(row_idx) {
+                        continue;
+                    }
+                    // A row the cut does not see is skipped.
+                    let visible = u32::try_from(row_idx)
+                        .is_ok_and(|row| engine.row_visible(seg_id, row, cut));
+                    if !visible {
                         continue;
                     }
                     let row = segment.row(schema, row_idx)?;
-                    if current(&row) {
-                        results.push(columnar_row_to_doc(schema, row)?);
-                    }
+                    results.push(columnar_row_to_doc(schema, row)?);
                 }
             }
         }
 
         // 2. Read from the live memtable (most-recent rows not yet flushed).
         if results.len() < limit {
-            for row in engine.scan_memtable_rows() {
+            for row in engine.scan_memtable_versions(cut) {
                 if results.len() >= limit {
                     break;
                 }
-                let row = row?;
-                if current(&row) {
-                    results.push(columnar_row_to_doc(schema, row)?);
-                }
+                let (_, _, row) = row?;
+                results.push(columnar_row_to_doc(schema, row)?);
             }
         }
 
@@ -415,9 +434,15 @@ mod tests {
         let raw_a = b"{\"x\":1}";
         let raw_b = b"{\"x\":2}";
         let raw_c = b"{\"x\":3}";
-        core.sparse.put(0, tid, coll, &key(1), raw_a).unwrap();
-        core.sparse.put(0, tid, coll, &key(2), raw_b).unwrap();
-        core.sparse.put(0, tid, coll, &key(3), raw_c).unwrap();
+        core.sparse
+            .put(0, tid, coll, &key(1), raw_a, core.bitemporal_ordinal())
+            .unwrap();
+        core.sparse
+            .put(0, tid, coll, &key(2), raw_b, core.bitemporal_ordinal())
+            .unwrap();
+        core.sparse
+            .put(0, tid, coll, &key(3), raw_c, core.bitemporal_ordinal())
+            .unwrap();
 
         // Collect via `scan_collection` (the reference output).
         let mut expected = core.scan_collection(0, tid, coll, usize::MAX).unwrap();
@@ -544,16 +569,44 @@ mod tests {
         // Insert in non-alphabetical order so insertion order != sorted order.
         // If either scan path sorts internally the assertion will catch the divergence.
         core.sparse
-            .put(0, tid, coll, &key(4), b"{\"v\":4}")
+            .put(
+                0,
+                tid,
+                coll,
+                &key(4),
+                b"{\"v\":4}",
+                core.bitemporal_ordinal(),
+            )
             .unwrap();
         core.sparse
-            .put(0, tid, coll, &key(1), b"{\"v\":1}")
+            .put(
+                0,
+                tid,
+                coll,
+                &key(1),
+                b"{\"v\":1}",
+                core.bitemporal_ordinal(),
+            )
             .unwrap();
         core.sparse
-            .put(0, tid, coll, &key(3), b"{\"v\":3}")
+            .put(
+                0,
+                tid,
+                coll,
+                &key(3),
+                b"{\"v\":3}",
+                core.bitemporal_ordinal(),
+            )
             .unwrap();
         core.sparse
-            .put(0, tid, coll, &key(2), b"{\"v\":2}")
+            .put(
+                0,
+                tid,
+                coll,
+                &key(2),
+                b"{\"v\":2}",
+                core.bitemporal_ordinal(),
+            )
             .unwrap();
 
         // Reference output — NOT sorted.
@@ -711,10 +764,24 @@ mod tests {
         let tid: u64 = 1;
         let coll = "err_test";
         core.sparse
-            .put(0, tid, coll, &key(1), b"{\"v\":1}")
+            .put(
+                0,
+                tid,
+                coll,
+                &key(1),
+                b"{\"v\":1}",
+                core.bitemporal_ordinal(),
+            )
             .unwrap();
         core.sparse
-            .put(0, tid, coll, &key(2), b"{\"v\":2}")
+            .put(
+                0,
+                tid,
+                coll,
+                &key(2),
+                b"{\"v\":2}",
+                core.bitemporal_ordinal(),
+            )
             .unwrap();
 
         let mut calls = 0usize;

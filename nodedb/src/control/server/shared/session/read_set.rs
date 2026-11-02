@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Protocol-neutral, versioned transaction read-set capture.
+//! Protocol-neutral transaction read-set capture.
 //!
 //! Every read a transaction performs is recorded here as one or more
 //! [`ReadSetEntry`]s, keyed by the same `(database_id, tenant_id, collection,
@@ -19,13 +19,14 @@
 //! Absent-key / empty-result reads are recorded too: a "not found" is a
 //! validatable phantom observation, not a no-op.
 //!
-//! Each entry carries the write version its read observed on its validation
-//! vShard. A version is the data-group log position of the write that set it,
-//! so every replica of the vShard reports the same version for the same state.
-//! A read served by a follower validates against the leader's versions.
+//! An entry carries no version. A read inside a transaction block reads at
+//! the block's snapshot ordinal, and COMMIT validates every entry at that
+//! ordinal: the transaction commits only when no committed version of what it
+//! read has an ordinal above it. A plan-derivation read that pins its own cut
+//! records that cut's ordinal on the entry ([`ReadSetEntry::observed_at`]).
 //!
-//! No validation happens here — the entries are captured for the commit-time
-//! optimistic-concurrency check to consume.
+//! No validation happens here. The apply of the transaction's writes
+//! validates the entries on every replica.
 
 use std::sync::Arc;
 
@@ -36,8 +37,7 @@ use crate::control::cluster::calvin::scheduler::lock::LockKey;
 use crate::control::planner::calvin::reservation::submit_reserve_read;
 use crate::control::server::shared::plan_util::{extract_collection, plan_engine, read_key_of};
 use crate::control::state::SharedState;
-use crate::types::{DatabaseId, KeyRepr, ReadVersions, TenantId, VShardId};
-use nodedb_types::WriteVersion;
+use crate::types::{DatabaseId, KeyRepr, ReadShards, TenantId, VShardId};
 
 use super::connection::SessionId;
 use super::store::SessionStore;
@@ -100,52 +100,8 @@ impl ReadPoint {
     }
 }
 
-/// Why a read is on the transaction's read-set — and therefore whether the
-/// read-your-own-write exclusion is allowed to drop it.
-///
-/// The exclusion (in the Calvin `TxClass` builders) removes reads whose
-/// collection the transaction also WRITES, because validating such a read
-/// against the transaction's own staged write will abort the transaction on
-/// itself. That reasoning holds only for reads the SESSION issued inside the
-/// transaction. It does NOT hold for a read the Control Plane performed at plan
-/// time to DERIVE a value the transaction now ships, so the two kinds are
-/// distinguished here rather than guessed at the filter site.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReadOrigin {
-    /// A read this transaction itself issued, through any transport, after it
-    /// began. Its observation can legitimately be superseded by the
-    /// transaction's own writes, so the own-write exclusion applies.
-    Session,
-    /// A read the Control Plane performed at plan time, whose observed value a
-    /// value this transaction writes was computed from — a materialized-sum
-    /// settlement's pre-image is the case that exists today.
-    ///
-    /// This is NOT a read-your-own-write. Its version is the COMMITTED base
-    /// state at a point in time, and the derived value the transaction ships is
-    /// only correct if that observation still holds at apply time. Inside a
-    /// transaction the read also folds the transaction's staging overlay, but
-    /// a staged write moves no committed version, so the check still compares
-    /// committed base only. Dropping it because the transaction happens to
-    /// write the same collection will discard the one check that catches a
-    /// concurrent writer moving the base row out from under the derivation, so
-    /// it survives the exclusion.
-    PlanDerivation,
-}
-
-impl ReadOrigin {
-    /// Whether an entry of this origin must stay in the OCC read-set even when
-    /// the transaction also writes the entry's collection.
-    pub fn survives_own_write_exclusion(self) -> bool {
-        match self {
-            ReadOrigin::Session => false,
-            ReadOrigin::PlanDerivation => true,
-        }
-    }
-}
-
-/// One versioned, predicate-aware read-set entry. Scoped by
-/// `(database_id, tenant_id)` exactly like the write path so two tenants (or
-/// databases) never alias.
+/// One predicate-aware read-set entry. Scoped by `(database_id, tenant_id)`
+/// exactly like the write path so two tenants (or databases) never alias.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadSetEntry {
     pub engine: EngineTag,
@@ -153,17 +109,11 @@ pub struct ReadSetEntry {
     pub tenant_id: TenantId,
     pub collection: String,
     pub key: ReadKey,
-    /// The version the read observed on its validation vShard. Commit
-    /// validation compares it with that vShard's current version of the
-    /// collection. Every replica numbers versions alike, so the read can have
-    /// been served by any replica.
-    pub read_version: WriteVersion,
-    /// Whether this observation is the transaction's own session read or a
-    /// plan-time derivation read. Required at construction — the own-write
-    /// exclusion in the `TxClass` builders reads it, and an entry that guessed
-    /// will be silently dropped from validation.
-    pub origin: ReadOrigin,
-    /// The vShard whose write versions validate this entry, or `None` for the
+    /// The ordinal of the cut a read pinned for itself: a plan-derivation
+    /// read takes a cut before it reads. `None` for a read at the
+    /// transaction block's snapshot.
+    pub observed_at: Option<i64>,
+    /// The vShard whose apply validates this entry, or `None` for the
     /// collection's own vShard. A cross-shard graph or array read records one
     /// entry per vShard it read, each homed there. A homed entry with an empty
     /// `collection` observed every collection on its vShard.
@@ -171,7 +121,7 @@ pub struct ReadSetEntry {
 }
 
 impl ReadSetEntry {
-    /// The vShard whose versions validate this entry: its home, else its
+    /// The vShard whose apply validates this entry: its home, else its
     /// collection's vShard. `None` for an unhomed entry whose collection
     /// names no vShard.
     pub fn validation_vshard(&self) -> Option<VShardId> {
@@ -186,25 +136,53 @@ impl ReadSetEntry {
     }
 }
 
+/// The snapshot ordinal a commit validates `reads` at: the lowest of the
+/// block's snapshot and every cut a read pinned for itself. A lower ordinal
+/// only widens what counts as a change, so no change a read could miss
+/// passes.
+///
+/// `block_snapshot` is `None` outside a transaction block, and for a block
+/// that took no snapshot. A read with no cut of its own then has no ordinal
+/// to validate at, so the commit is refused.
+pub fn read_snapshot_ordinal(
+    block_snapshot: Option<i64>,
+    reads: &[ReadSetEntry],
+) -> crate::Result<Option<i64>> {
+    let mut snapshot = block_snapshot;
+    for read in reads {
+        let observed = match read.observed_at.or(block_snapshot) {
+            Some(observed) => observed,
+            None => {
+                return Err(crate::Error::Internal {
+                    detail: format!(
+                        "a read of '{}' joined a transaction that holds no snapshot, so the \
+                         commit cannot validate it; retry the transaction",
+                        read.collection
+                    ),
+                });
+            }
+        };
+        snapshot = Some(snapshot.map_or(observed, |held| held.min(observed)));
+    }
+    Ok(snapshot)
+}
+
 /// The observed read passed to [`record_read_set`]: the executed plan, the
-/// versions its responding cores reported, and whether a point read hit.
+/// vShards its responding cores reported, and whether a point read hit.
 pub struct ReadCapture<'a> {
     pub plan: &'a PhysicalPlan,
-    pub read_versions: &'a ReadVersions,
+    pub read_vshards: &'a ReadShards,
     pub found: bool,
 }
 
 /// Record a completed read into the session's transaction read-set.
 ///
 /// Transport-agnostic: every read post-dispatch seam calls this with the plan
-/// that ran and the versions it observed.
+/// that ran and the vShards its cores reported.
 ///
-/// A read of one collection records one entry that validates on the
-/// collection's vShard at the version the read observed there. A vShard the
-/// read reported no version of had no write the serving core knew of, so the
-/// read observed it at `WriteVersion::ZERO`. A read that reported other
-/// vShards too records one more entry per other reported vShard, homed
-/// there.
+/// A read of one collection records one entry on the collection's vShard. A
+/// read that reported other vShards too records one more entry per other
+/// reported vShard, homed there.
 ///
 /// A read that names no collection observed every collection on each vShard
 /// it reported. It records one entry per reported vShard, homed there.
@@ -226,7 +204,7 @@ pub async fn record_read_set(
 ) {
     let ReadCapture {
         plan,
-        read_versions,
+        read_vshards,
         found,
     } = capture;
 
@@ -242,55 +220,32 @@ pub async fn record_read_set(
         .get_current_database(session_id)
         .unwrap_or(DatabaseId::DEFAULT);
 
-    let entry = |home: Option<VShardId>, observed: WriteVersion, validation: VShardId| {
-        // Read-your-writes floor: raise the observed version to the
-        // session's own highest committed write of this collection on the
-        // validation vShard. A read that ran before the serving replica
-        // applied the session's own prior write will otherwise abort on that
-        // write. Only this session's own writes raise the floor, so a
-        // concurrent write by another session still exceeds it and aborts.
-        let own = if collection.is_empty() {
-            WriteVersion::ZERO
-        } else {
-            sessions.own_write_version(session_id, database_id, tenant_id, &collection, validation)
-        };
-        ReadSetEntry {
-            engine,
-            database_id,
-            tenant_id,
-            collection: collection.clone(),
-            key: key.clone(),
-            read_version: observed.max(own),
-            // Every entry captured here is a read the session issued inside its
-            // own transaction, so the own-write exclusion applies to it.
-            origin: ReadOrigin::Session,
-            home,
-        }
+    let entry = |home: Option<VShardId>| ReadSetEntry {
+        engine,
+        database_id,
+        tenant_id,
+        collection: collection.clone(),
+        key: key.clone(),
+        // The read ran at the block's snapshot.
+        observed_at: None,
+        home,
     };
     let entries: Vec<ReadSetEntry> =
         match nodedb_types::CollectionKey::from_qualified_str(database_id, &collection) {
             Ok(collection_key) if !collection.is_empty() => {
                 let validation = collection_key.vshard();
-                let observed = read_versions.of(validation).unwrap_or_default();
-                let mut entries = vec![entry(None, observed, validation)];
+                let mut entries = vec![entry(None)];
                 entries.extend(
-                    read_versions
+                    read_vshards
                         .iter()
-                        .map(|shard| VShardId::new(shard.vshard))
                         .filter(|vshard| *vshard != validation)
-                        .map(|vshard| {
-                            let observed = read_versions.of(vshard).unwrap_or_default();
-                            entry(Some(vshard), observed, vshard)
-                        }),
+                        .map(|vshard| entry(Some(vshard))),
                 );
                 entries
             }
-            _ => read_versions
+            _ => read_vshards
                 .iter()
-                .map(|shard| {
-                    let vshard = VShardId::new(shard.vshard);
-                    entry(Some(vshard), shard.version, vshard)
-                })
+                .map(|vshard| entry(Some(vshard)))
                 .collect(),
         };
     if entries.is_empty() {
@@ -440,6 +395,7 @@ mod tests {
             key: key.to_vec(),
             rls_filters: Vec::new(),
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         })
     }
 
@@ -448,6 +404,7 @@ mod tests {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, collection),
             keys: vec![b"a".to_vec(), b"b".to_vec()],
             rls_filters: Vec::new(),
+            system_time: nodedb_types::SystemTimeScope::Current,
         })
     }
 
@@ -458,7 +415,7 @@ mod tests {
             SessionId::LegacySocket(addr) => addr,
             SessionId::Connection(_) => unreachable!("legacy test identity"),
         });
-        sessions.begin(session_id, 0).expect("begin");
+        sessions.begin(session_id).expect("begin");
         (sessions, session_id)
     }
 
@@ -487,9 +444,9 @@ mod tests {
             .vshard()
     }
 
-    /// `collection`'s vShard observed at log index `index`.
-    fn observed(collection: &str, index: u64) -> ReadVersions {
-        ReadVersions::single(home_of(collection), WriteVersion::logged(1, index))
+    /// `collection`'s home vShard, as a read of it reports it.
+    fn observed(collection: &str) -> ReadShards {
+        ReadShards::single(home_of(collection))
     }
 
     #[tokio::test]
@@ -503,7 +460,7 @@ mod tests {
             TenantId::new(1),
             ReadCapture {
                 plan: &kv_get("c", b"k1"),
-                read_versions: &observed("c", 7),
+                read_vshards: &observed("c"),
                 found: true,
             },
         )
@@ -512,7 +469,7 @@ mod tests {
         assert_eq!(rs.len(), 1);
         assert_eq!(rs[0].engine, EngineTag::Kv);
         assert_eq!(rs[0].collection, "c");
-        assert_eq!(rs[0].read_version, WriteVersion::logged(1, 7));
+        assert_eq!(rs[0].observed_at, None);
         assert_eq!(rs[0].home, None);
         assert_eq!(rs[0].validation_vshard(), Some(home_of("c")));
         assert_eq!(
@@ -536,7 +493,7 @@ mod tests {
             TenantId::new(1),
             ReadCapture {
                 plan: &kv_batch_get("c"),
-                read_versions: &observed("c", 9),
+                read_vshards: &observed("c"),
                 found: true,
             },
         )
@@ -552,9 +509,9 @@ mod tests {
         let (sessions, a) = begun_session();
         // The collection's own vShard validates the unhomed entry. Another
         // reported vShard validates an entry homed there.
-        let other = VShardId::new(home_of("c").as_u32() + 1);
-        let mut versions = observed("c", 11);
-        versions.note(other, WriteVersion::logged(1, 90));
+        let other = VShardId::new((home_of("c").as_u32() + 1) % VShardId::COUNT);
+        let mut versions = observed("c");
+        versions.note(other);
         record_read_set(
             &state,
             &sessions,
@@ -562,7 +519,7 @@ mod tests {
             TenantId::new(1),
             ReadCapture {
                 plan: &kv_batch_get("c"),
-                read_versions: &versions,
+                read_vshards: &versions,
                 found: true,
             },
         )
@@ -570,18 +527,14 @@ mod tests {
         let rs = sessions.take_read_set(a);
         assert_eq!(rs.len(), 2);
         assert_eq!(rs[0].home, None);
-        assert_eq!(rs[0].read_version, WriteVersion::logged(1, 11));
         assert_eq!(rs[1].home, Some(other));
-        assert_eq!(rs[1].read_version, WriteVersion::logged(1, 90));
         assert_eq!(rs[1].collection, "c");
     }
 
     #[tokio::test]
-    async fn a_read_with_no_reported_version_observed_zero() {
+    async fn a_read_with_no_reported_vshard_records_its_collection() {
         let (state, _dir) = test_state();
         let (sessions, a) = begun_session();
-        // The serving core knew no write of the vShard, so any write since
-        // the read moves it above the recorded version.
         record_read_set(
             &state,
             &sessions,
@@ -589,41 +542,61 @@ mod tests {
             TenantId::new(1),
             ReadCapture {
                 plan: &kv_get("c", b"k1"),
-                read_versions: &ReadVersions::new(),
+                read_vshards: &ReadShards::new(),
                 found: false,
             },
         )
         .await;
         let rs = sessions.take_read_set(a);
         assert_eq!(rs.len(), 1);
-        assert_eq!(rs[0].read_version, WriteVersion::ZERO);
+        assert_eq!(rs[0].home, None);
+        assert_eq!(rs[0].validation_vshard(), Some(home_of("c")));
     }
 
-    #[tokio::test]
-    async fn the_sessions_own_write_floors_the_read_version() {
-        let (state, _dir) = test_state();
-        let (sessions, a) = begun_session();
-        sessions.note_own_write(
-            a,
-            DatabaseId::DEFAULT,
-            TenantId::new(1),
-            "c",
-            &observed("c", 20),
+    fn snapshot_read(observed_at: Option<i64>) -> ReadSetEntry {
+        ReadSetEntry {
+            engine: EngineTag::Document,
+            database_id: DatabaseId::DEFAULT,
+            tenant_id: TenantId::new(1),
+            collection: "c".to_owned(),
+            key: ReadKey::Predicate,
+            observed_at,
+            home: None,
+        }
+    }
+
+    #[test]
+    fn a_block_validates_at_its_snapshot() {
+        assert_eq!(
+            read_snapshot_ordinal(Some(40), &[snapshot_read(None)]).expect("snapshot"),
+            Some(40)
         );
-        record_read_set(
-            &state,
-            &sessions,
-            a,
-            TenantId::new(1),
-            ReadCapture {
-                plan: &kv_get("c", b"k1"),
-                read_versions: &observed("c", 12),
-                found: true,
-            },
-        )
-        .await;
-        let rs = sessions.take_read_set(a);
-        assert_eq!(rs[0].read_version, WriteVersion::logged(1, 20));
+        // A write-only block still validates its write keys at its snapshot.
+        assert_eq!(
+            read_snapshot_ordinal(Some(40), &[]).expect("snapshot"),
+            Some(40)
+        );
+        assert_eq!(read_snapshot_ordinal(None, &[]).expect("snapshot"), None);
+    }
+
+    #[test]
+    fn a_pinned_read_lowers_the_snapshot_to_its_cut() {
+        let reads = [snapshot_read(None), snapshot_read(Some(25))];
+        assert_eq!(
+            read_snapshot_ordinal(Some(40), &reads).expect("snapshot"),
+            Some(25)
+        );
+        // Outside a block only pinned reads carry an ordinal.
+        assert_eq!(
+            read_snapshot_ordinal(None, &[snapshot_read(Some(25)), snapshot_read(Some(31))])
+                .expect("snapshot"),
+            Some(25)
+        );
+    }
+
+    #[test]
+    fn a_read_with_no_ordinal_outside_a_snapshot_is_refused() {
+        assert!(read_snapshot_ordinal(None, &[snapshot_read(None)]).is_err());
     }
 
     #[tokio::test]
@@ -631,7 +604,7 @@ mod tests {
         let (state, _dir) = test_state();
         let (sessions, a) = begun_session();
         // A "not found" is a validatable phantom observation: the KV point entry
-        // is recorded (as `found = false`) at the observed version. KV keeps the
+        // is recorded (as `found = false`). KV keeps the
         // precise byte key — the identity any future insert of that key reuses.
         record_read_set(
             &state,
@@ -640,7 +613,7 @@ mod tests {
             TenantId::new(1),
             ReadCapture {
                 plan: &kv_get("c", b"missing"),
-                read_versions: &observed("c", 5),
+                read_vshards: &observed("c"),
                 found: false,
             },
         )
@@ -680,7 +653,7 @@ mod tests {
             TenantId::new(1),
             ReadCapture {
                 plan: &doc_point_get("docs", 42),
-                read_versions: &observed("docs", 7),
+                read_vshards: &observed("docs"),
                 found: true,
             },
         )
@@ -709,7 +682,7 @@ mod tests {
             TenantId::new(1),
             ReadCapture {
                 plan: &doc_point_get("docs", 999),
-                read_versions: &observed("docs", 5),
+                read_vshards: &observed("docs"),
                 found: false,
             },
         )
@@ -733,7 +706,7 @@ mod tests {
             TenantId::new(1),
             ReadCapture {
                 plan: &kv_get("c", b"k1"),
-                read_versions: &observed("c", 7),
+                read_vshards: &observed("c"),
                 found: true,
             },
         )
@@ -747,11 +720,9 @@ mod tests {
         let (sessions, a) = begun_session();
         // A read that names no collection observed every collection on each
         // vShard it reported.
-        let plan = PhysicalPlan::Meta(nodedb_physical::physical_plan::MetaOp::HomeVersions {
-            probes: Vec::new(),
-        });
-        let mut versions = ReadVersions::single(VShardId::new(3), WriteVersion::logged(1, 4));
-        versions.note(VShardId::new(8), WriteVersion::logged(2, 6));
+        let plan = PhysicalPlan::Meta(nodedb_physical::physical_plan::MetaOp::CreateSnapshot);
+        let mut versions = ReadShards::single(VShardId::new(3));
+        versions.note(VShardId::new(8));
         record_read_set(
             &state,
             &sessions,
@@ -759,7 +730,7 @@ mod tests {
             TenantId::new(1),
             ReadCapture {
                 plan: &plan,
-                read_versions: &versions,
+                read_vshards: &versions,
                 found: true,
             },
         )
@@ -767,9 +738,7 @@ mod tests {
         let rs = sessions.take_read_set(a);
         assert_eq!(rs.len(), 2);
         assert_eq!(rs[0].home, Some(VShardId::new(3)));
-        assert_eq!(rs[0].read_version, WriteVersion::logged(1, 4));
         assert_eq!(rs[1].home, Some(VShardId::new(8)));
-        assert_eq!(rs[1].read_version, WriteVersion::logged(2, 6));
         assert!(rs.iter().all(|entry| entry.collection.is_empty()));
     }
 

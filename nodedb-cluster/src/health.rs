@@ -19,6 +19,7 @@ use crate::catalog::ClusterCatalog;
 use crate::error::ClusterError;
 use crate::loop_metrics::LoopMetrics;
 use crate::rpc_codec::{PingRequest, PongResponse, RaftRpc, TopologyAck, TopologyUpdate};
+use crate::snapshot_board::SnapshotBoard;
 use crate::topology::{ClusterTopology, NodeInfo, NodeState};
 use crate::transport::NexarTransport;
 
@@ -61,6 +62,8 @@ pub struct HealthMonitor {
     /// Per-peer consecutive ping failure count.
     ping_failures: Mutex<HashMap<u64, u32>>,
     loop_metrics: Arc<LoopMetrics>,
+    /// The oldest-snapshot reports every ping and pong carries.
+    snapshot_board: Arc<SnapshotBoard>,
 }
 
 impl HealthMonitor {
@@ -79,7 +82,15 @@ impl HealthMonitor {
             config,
             ping_failures: Mutex::new(HashMap::new()),
             loop_metrics: LoopMetrics::new("health_loop"),
+            snapshot_board: Arc::new(SnapshotBoard::new()),
         }
+    }
+
+    /// Exchange oldest-snapshot reports through `board`, the one the host
+    /// publishes its open snapshots to (builder chain).
+    pub fn with_snapshot_board(mut self, board: Arc<SnapshotBoard>) -> Self {
+        self.snapshot_board = board;
+        self
     }
 
     /// Shared handle to this loop's standardized metrics.
@@ -141,6 +152,7 @@ impl HealthMonitor {
             let ping = RaftRpc::Ping(PingRequest {
                 sender_id: self.node_id,
                 topology_version: topo_version,
+                oldest_snapshot: self.snapshot_board.local_report(),
             });
             // The ping is the peer's recovery probe. An open circuit still
             // lets it through, and its answer closes the circuit.
@@ -176,6 +188,8 @@ impl HealthMonitor {
     /// Handle a successful pong — reset failure count, mark node Active
     /// if needed, and push topology if the peer is behind.
     fn handle_pong(&self, peer_id: u64, pong: &PongResponse) -> bool {
+        self.snapshot_board
+            .record_peer(peer_id, pong.oldest_snapshot);
         // Reset failure count.
         {
             let mut failures = self.ping_failures.lock().unwrap_or_else(|p| p.into_inner());
@@ -341,11 +355,19 @@ async fn broadcast_topology_to_peer(
     }
 }
 
-/// Handle an incoming Ping RPC — return a Pong with our topology version.
-pub fn handle_ping(node_id: u64, topology_version: u64, _req: &PingRequest) -> RaftRpc {
+/// Handle an incoming Ping RPC: record the sender's oldest-snapshot report
+/// on `board`, and return a Pong with our topology version and our report.
+pub fn handle_ping(
+    node_id: u64,
+    topology_version: u64,
+    board: &SnapshotBoard,
+    req: &PingRequest,
+) -> RaftRpc {
+    board.record_peer(req.sender_id, req.oldest_snapshot);
     RaftRpc::Pong(PongResponse {
         responder_id: node_id,
         topology_version,
+        oldest_snapshot: board.local_report(),
     })
 }
 
@@ -401,8 +423,10 @@ mod tests {
         let req = PingRequest {
             sender_id: 2,
             topology_version: 5,
+            oldest_snapshot: crate::snapshot_board::NO_SNAPSHOT_REPORT,
         };
-        let resp = handle_ping(1, 7, &req);
+        let board = SnapshotBoard::new();
+        let resp = handle_ping(1, 7, &board, &req);
         match resp {
             RaftRpc::Pong(pong) => {
                 assert_eq!(pong.responder_id, 1);
@@ -410,6 +434,30 @@ mod tests {
             }
             other => panic!("expected Pong, got {other:?}"),
         }
+    }
+
+    /// A ping records the sender's snapshot report, and the pong carries
+    /// this node's.
+    #[test]
+    fn a_ping_exchanges_snapshot_reports() {
+        let board = SnapshotBoard::new();
+        board.set_local_oldest(Some(11));
+        let now = nodedb_types::wall_now_ns_i64();
+        let req = PingRequest {
+            sender_id: 2,
+            topology_version: 0,
+            oldest_snapshot: now - 40,
+        };
+        match handle_ping(1, 0, &board, &req) {
+            RaftRpc::Pong(pong) => assert_eq!(pong.oldest_snapshot, 11),
+            other => panic!("expected Pong, got {other:?}"),
+        }
+        assert_eq!(board.horizon(1, [2], now, Duration::from_secs(60)), 11);
+        board.set_local_oldest(None);
+        assert_eq!(
+            board.horizon(1, [2], now, Duration::from_secs(60)),
+            now - 40
+        );
     }
 
     #[test]
@@ -567,6 +615,7 @@ mod tests {
         let pong = PongResponse {
             responder_id: 2,
             topology_version: 1,
+            oldest_snapshot: crate::snapshot_board::NO_SNAPSHOT_REPORT,
         };
         let changed = monitor.handle_pong(2, &pong);
         assert!(changed); // Should have transitioned to Active.
@@ -598,6 +647,7 @@ mod tests {
         let pong = Ok(RaftRpc::Pong(PongResponse {
             responder_id: 2,
             topology_version: 1,
+            oldest_snapshot: crate::snapshot_board::NO_SNAPSHOT_REPORT,
         }));
         assert!(matches!(classify_ping(pong), PingOutcome::Pong(_)));
     }

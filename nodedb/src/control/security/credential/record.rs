@@ -67,8 +67,8 @@ pub struct UserRecord {
     /// The database ID this user connects to by default. `0` means server default.
     pub default_database_id: u64,
     /// Database IDs this account may access. Ignored for regular users (they use
-    /// `_system.database_grants`). For service accounts: authoritative; empty = legacy =
-    /// treat as `[DatabaseId::DEFAULT]` at auth time.
+    /// `_system.database_grants`). For service accounts: authoritative. Empty
+    /// reads as `[DatabaseId::DEFAULT]` at auth time.
     pub accessible_databases: Vec<DatabaseId>,
 }
 
@@ -105,13 +105,6 @@ impl UserRecord {
             .iter()
             .map(|r| r.parse().unwrap_or(Role::ReadOnly))
             .collect();
-        // password_changed_at defaults to created_at for pre-existing records
-        // (where the field was absent and zerompk returns 0).
-        let password_changed_at = if s.password_changed_at > 0 {
-            s.password_changed_at
-        } else {
-            s.created_at
-        };
         let accessible_databases = s
             .accessible_databases
             .iter()
@@ -131,7 +124,7 @@ impl UserRecord {
             updated_at: s.updated_at,
             password_expires_at: s.password_expires_at,
             must_change_password: s.must_change_password,
-            password_changed_at,
+            password_changed_at: s.password_changed_at,
             default_database_id: s.default_database_id,
             accessible_databases,
             roles,
@@ -143,8 +136,9 @@ impl UserRecord {
 mod tests {
     use super::*;
 
+    /// A `StoredUser` map without the trailing fields fails to decode.
     #[test]
-    fn backward_compat_stored_user_defaults() {
+    fn stored_user_missing_fields_is_refused() {
         let created_at_epoch: u64 = 1_700_000_000;
         let mut buf = Vec::new();
         rmpv::encode::write_value(
@@ -156,7 +150,7 @@ mod tests {
                 ),
                 (
                     rmpv::Value::String("username".into()),
-                    rmpv::Value::String("legacy_user".into()),
+                    rmpv::Value::String("partial_user".into()),
                 ),
                 (
                     rmpv::Value::String("tenant_id".into()),
@@ -192,14 +186,8 @@ mod tests {
                 ),
             ]),
         )
-        .expect("encode legacy StoredUser");
+        .expect("encode partial StoredUser");
 
-        let stored: StoredUser = zerompk::from_msgpack(&buf).expect("decode legacy StoredUser");
-        assert!(!stored.must_change_password);
-        assert_eq!(stored.password_changed_at, 0);
-
-        let record = UserRecord::from_stored(stored);
-        assert!(!record.must_change_password);
-        assert_eq!(record.password_changed_at, created_at_epoch);
+        assert!(zerompk::from_msgpack::<StoredUser>(&buf).is_err());
     }
 }

@@ -8,11 +8,9 @@ use super::core::TenantCrdtEngine;
 ///
 /// Format: `{"v": <LORO_VV_FORMAT_VERSION>, "vv": {"<peer_hex>": <counter>, …}}`
 ///
-/// Increment this constant (and add a migration path) when the serialization
-/// format for version vectors changes in a backward-incompatible way. Every
-/// call site that produces or consumes a version-vector string goes through
-/// [`version_vector_json`] / [`json_to_vv`], so the version check is
-/// centralised here.
+/// A string of any other version is refused. Every call site that produces or
+/// consumes a version-vector string goes through [`version_vector_json`] /
+/// [`json_to_vv`], so the version check is centralised here.
 const LORO_VV_FORMAT_VERSION: u8 = 1;
 
 impl TenantCrdtEngine {

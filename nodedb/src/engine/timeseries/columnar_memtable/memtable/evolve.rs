@@ -22,14 +22,16 @@ impl ColumnarMemtable {
         let col = match col_type {
             ColumnType::Float64 => ColumnData::Float64(vec![f64::NAN; existing_rows]),
             ColumnType::Int64 => ColumnData::Int64(vec![0; existing_rows]),
-            ColumnType::Symbol => ColumnData::Symbol(vec![NULL_SYMBOL_ID; existing_rows]),
+            ColumnType::Symbol | ColumnType::Text => {
+                ColumnData::Symbol(vec![NULL_SYMBOL_ID; existing_rows])
+            }
             ColumnType::Timestamp(_) => return, // never add a second timestamp
         };
         let idx = self.columns.len();
         self.columns.push(col);
         self.schema.columns.push((name, col_type));
         self.schema.codecs.push(nodedb_codec::ColumnCodec::Auto);
-        if col_type == ColumnType::Symbol {
+        if col_type.is_dictionary() {
             self.symbol_dicts.insert(idx, SymbolDictionary::new());
         }
     }

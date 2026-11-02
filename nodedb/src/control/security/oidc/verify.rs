@@ -103,7 +103,7 @@ async fn verify_catalog_token(
         select_catalog_provider(providers, &claims.iss, &claims.aud).map_err(token_refusal)?;
     attempt.set_provider(
         &provider.provider_name,
-        provider.tenant_id.map(TenantId::new),
+        Some(TenantId::new(provider.tenant_id)),
     );
 
     // 3. Verify signature via JwksRegistry using the catalog-provided JWKS URI.
@@ -122,11 +122,7 @@ async fn verify_catalog_token(
     // 4. Re-check the verified claims against the provider selected above.
     validate_selected_provider_claims(&provider, verified_claims).map_err(token_refusal)?;
 
-    // Legacy records without a tenant binding must not reveal catalog metadata
-    // until the token has passed signature, time, issuer, and audience checks.
-    let tenant_id = provider
-        .tenant_id
-        .ok_or_else(|| BearerRefusal::from_error(crate::Error::OidcProviderTenantUnbound))?;
+    let tenant_id = provider.tenant_id;
 
     // A provider can outlive its tenant after a tenant drop. Confirm the bound
     // tenant still exists before issuing an identity from an authenticated token.

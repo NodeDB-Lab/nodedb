@@ -268,7 +268,7 @@ impl CoreLoop {
             crate::types::DatabaseId::new(did),
             crate::types::TenantId::new(tid),
             collection,
-            Some(crate::data::executor::core_loop::write_index::KeyRepr::KvKey(Box::from(key))),
+            Some(crate::data::executor::core_loop::write_note::KeyRepr::KvKey(Box::from(key))),
             stamp,
         );
     }

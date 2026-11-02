@@ -258,7 +258,7 @@ impl From<nodedb_cluster::rpc_codec::TypedClusterError> for Error {
                 crate::control::planner::calvin::calvin_abort_error(reason.into())
             }
             TypedClusterError::Internal { code, message } => {
-                // Legacy or unknown codes retain their message without panicking.
+                // An unclassified failure (code 0) keeps its message as `Internal`.
                 match u16::try_from(code) {
                     Ok(code_u16) if code_u16 != 0 => Error::RemoteTyped {
                         code: nodedb_types::error::ErrorCode(code_u16),
@@ -456,10 +456,10 @@ impl From<Error> for nodedb_cluster::rpc_codec::TypedClusterError {
             | Error::SequencerUnavailable
             | Error::SessionCapExceeded { .. }
             | Error::SessionIdleTimeout
+            | Error::TxnSnapshotTooOld { .. }
             | Error::SessionTokenExpired
             | Error::SessionKilledByAdmin
             | Error::SessionUserDropped
-            | Error::OidcProviderTenantUnbound
             | Error::OidcProviderTenantUnavailable { .. }
             | Error::ExternalRoleUndefined { .. }
             | Error::OidcNoDefaultDatabase { .. }
@@ -484,9 +484,9 @@ mod tests {
     use super::Error;
     use crate::types::TenantId;
 
-    /// A legacy peer (or one that never classified the failure) sends `code ==
-    /// 0`. Decoding must degrade to the pre-existing generic `Error::Internal`
-    /// rather than fabricating a bogus `ErrorCode(0)` classification.
+    /// A peer that never classified the failure sends `code == 0`. Decoding
+    /// yields the generic `Error::Internal` rather than fabricating a bogus
+    /// `ErrorCode(0)` classification.
     #[test]
     fn decode_zero_code_degrades_to_internal() {
         let wire = TypedClusterError::Internal {

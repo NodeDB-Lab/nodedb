@@ -85,7 +85,12 @@ impl ContinuousAggregateManager {
             .orphan_cuts
             .get(&root_key)
             .map_or(&[][..], Vec::as_slice);
-        CaggImageView { entries, orphans }
+        CaggImageView {
+            entries,
+            orphans,
+            raw_dropped_through: self.raw_dropped_through.get(&root_key).copied(),
+            rewritten: self.rewritten_view(&root_key),
+        }
     }
 
     /// Install `image` into every unloaded aggregate rooted at `root`, and
@@ -133,6 +138,14 @@ impl ContinuousAggregateManager {
             }
         }
         let root_key = (database_id, tenant_id, root.to_string());
+        if let Some(through) = image.raw_dropped_through {
+            let held = self
+                .raw_dropped_through
+                .entry(root_key.clone())
+                .or_insert(through);
+            *held = (*held).max(through);
+        }
+        self.merge_rewritten(&root_key, image.rewritten);
         self.images_read.insert(root_key.clone());
         if leftover.is_empty() {
             self.unclaimed.remove(&root_key);
@@ -203,6 +216,24 @@ impl ContinuousAggregateManager {
             .into_iter()
             .collect();
         let mut merged = Vec::new();
+        // The snapshot's root lost raw rows to retention the local root may
+        // not have: a raw read of their range is incomplete here too.
+        if let Some(through) = image.raw_dropped_through {
+            let root_key = (database_id, tenant_id, root.to_string());
+            let held = self
+                .raw_dropped_through
+                .entry(root_key.clone())
+                .or_insert(through);
+            *held = (*held).max(through);
+            self.dirty_images.insert(root_key);
+        }
+        // The snapshot's aggregates were rewritten at its ordinals: a read
+        // below them here finds the same buckets gone.
+        if !image.rewritten.is_empty() {
+            let root_key = (database_id, tenant_id, root.to_string());
+            self.merge_rewritten(&root_key, image.rewritten);
+            self.dirty_images.insert(root_key);
+        }
         for entry in image.entries {
             if !chain.contains(&entry.def.name) || entry.def.incarnation == Hlc::ZERO {
                 continue;

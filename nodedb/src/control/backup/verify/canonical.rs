@@ -23,11 +23,19 @@ pub(crate) struct Row {
     /// Bare catalog name of the collection.
     pub collection: String,
     pub part: VerifiedPart,
-    /// `None` for a part whose rows have no key: timeseries and columnar.
+    /// `None` for a part whose rows have no key: timeseries.
     pub key: Option<KeyHash>,
     pub hash: [u8; 32],
     /// The row's TTL deadline in Unix milliseconds, `0` for none.
     pub expire_at_ms: u64,
+    /// The system time the version starts at, on a part that keeps versions
+    /// of one key: documents, edges, KV, array cells, columnar rows and
+    /// key-bound vectors. The destination counts a version only at a
+    /// `(key, stamp)` the backup holds. `None` on every other part.
+    pub stamp: Option<i64>,
+    /// The key's current state, without system times. Set on the key's
+    /// newest version only, `None` on every other row.
+    pub state: Option<[u8; 32]>,
 }
 
 /// The hash of `key`, the canonical key parts of a row of `part`.
@@ -49,6 +57,17 @@ impl RowHasher {
     /// A row of `part` keyed by `key`.
     pub fn new(part: VerifiedPart, key: &[&[u8]]) -> Self {
         let mut hasher = Self::start(b"nodedb-verify-row", part);
+        hasher.count(b'K', key.len());
+        for item in key {
+            hasher.bytes(b'k', item);
+        }
+        hasher
+    }
+
+    /// The current state of a key of `part`. It hashes apart from every
+    /// row: no state hash equals a row hash.
+    pub fn state(part: VerifiedPart, key: &[&[u8]]) -> Self {
+        let mut hasher = Self::start(b"nodedb-verify-state", part);
         hasher.count(b'K', key.len());
         for item in key {
             hasher.bytes(b'k', item);

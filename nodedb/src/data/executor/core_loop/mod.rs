@@ -5,6 +5,7 @@ pub(in crate::data::executor) mod apply_scope;
 pub(in crate::data::executor) mod bitemporal_time;
 pub(in crate::data::executor) mod calvin_state;
 pub(in crate::data::executor) mod checkpoint_floors;
+pub(in crate::data::executor) mod columnar_history_charge;
 mod columnar_schema_seed;
 pub(in crate::data::executor) mod commit_pending;
 mod crdt_dead_letters;
@@ -24,12 +25,14 @@ mod graph_partition;
 mod graph_view;
 pub(in crate::data::executor) mod hash_chain_state;
 pub(in crate::data::executor) mod idempotency;
-pub(in crate::data::executor) mod index_value_versions;
+pub(in crate::data::executor) mod index_charge;
 pub(in crate::data::executor) mod maintenance;
 pub(in crate::data::executor) mod maintenance_state;
+pub(in crate::data::executor) mod newest_ordinals;
 mod open;
 pub mod pressure;
 pub(in crate::data::executor) mod priority_queues;
+mod read_vshards;
 pub(in crate::data::executor) mod redo_image;
 mod response;
 mod segment_keks;
@@ -38,10 +41,12 @@ mod test_governor;
 mod tick;
 mod ts_declared_schema;
 pub(in crate::data::executor) mod ts_replay_state;
+pub(in crate::data::executor) mod txn_validate;
 pub(in crate::data::executor) mod vector_build_queue;
 mod vector_index_rebuild;
 mod vector_index_seed;
-pub(in crate::data::executor) mod write_index;
+pub(in crate::data::executor) mod version_purge;
+pub(in crate::data::executor) mod write_note;
 pub(in crate::data::executor) mod write_set_journal;
 
 pub(in crate::data::executor) use crdt_dead_letters::crdt_rejection;
@@ -51,8 +56,7 @@ pub use state::CoreLoop;
 pub use test_governor::test_governor;
 pub(in crate::data::executor) use ts_declared_schema::TsGroupKeyKind;
 /// Shared test fixtures (`make_core_with_dir`, `make_default_task`), kept
-/// alongside the write-version-index tests that exercise the same `CoreLoop`
-/// apply chokepoints. Re-exported here so external test modules keep using
-/// the pre-existing `core_loop::tests::` path.
+/// alongside the write-note tests that exercise the same `CoreLoop` apply
+/// chokepoints. External test modules reach them as `core_loop::tests::`.
 #[cfg(test)]
-pub(crate) use write_index::tests;
+pub(crate) use write_note::tests;

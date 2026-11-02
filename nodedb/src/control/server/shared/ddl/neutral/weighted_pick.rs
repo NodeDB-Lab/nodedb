@@ -281,6 +281,7 @@ async fn scan_all_entries(
         match_pattern: None,
         sort_keys: Vec::new(),
         surrogate_ceiling: None,
+        system_time: nodedb_types::SystemTimeScope::Current,
     });
     gate.inject_rls(&mut plan)?;
 

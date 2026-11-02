@@ -20,10 +20,10 @@
 //! # Conflict handling (read-aware)
 //!
 //! The scheduler locks a txn's write keys exclusive and its read keys shared,
-//! so a reader and a writer of conflicting keys serialize by `position`. Per-key last-write-LSN
-//! validation means a reader `R` of key `K` aborts at commit only if a
-//! *lower-position* writer `W` of `K` committed first (its write LSN exceeds
-//! `R`'s read version). Giving `R` a lower position than `W` converts that
+//! so a reader and a writer of conflicting keys serialize by `position`.
+//! Snapshot validation aborts a reader `R` of key `K` at commit only if a
+//! *lower-position* writer `W` of `K` committed first (its version ordinal
+//! exceeds `R`'s snapshot). Giving `R` a lower position than `W` converts that
 //! read-after-write abort into a write-after-read that commits.
 //!
 //! So the validator:

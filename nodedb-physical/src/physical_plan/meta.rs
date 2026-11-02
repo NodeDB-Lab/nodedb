@@ -36,11 +36,9 @@ pub enum MetaOp {
     ///
     /// `txn_id` identifies the committing session transaction whose staging
     /// overlay holds the resolve-time bitemporal stamps an install must reuse.
-    /// `None` for callers with no session overlay to consult. Wire-additive:
-    /// defaults to `None` on decode of older entries.
+    /// `None` for callers with no session overlay to consult.
     TransactionBatch {
         plans: Vec<super::PhysicalPlan>,
-        #[serde(default)]
         txn_id: Option<nodedb_types::id::TxnId>,
     },
 
@@ -149,12 +147,6 @@ pub enum MetaOp {
         /// their edges too.
         #[serde(default)]
         group_vshards: Vec<u32>,
-        /// The version each of the group's vShards holds once the install
-        /// lands: the log position of the snapshot's cut. The installed rows
-        /// carry no per-row versions, so a read older than the cut no longer
-        /// validates on this node. Empty = no group install.
-        #[serde(default)]
-        version_floor: Vec<nodedb_types::ShardVersion>,
     },
 
     /// Remove this core's data of vShards this node no longer hosts, once
@@ -360,14 +352,23 @@ pub enum MetaOp {
     QueryAggregateWatermark { aggregate_name: String },
 
     /// Query all entries from a collection's last-value cache.
-    /// Returns JSON-serialized `Vec<(u64, i64, f64)>` — (series_id, ts, value).
-    QueryLastValues { collection: QualifiedCollection },
+    /// Returns MessagePack `Vec<(u64, i64, f64)>` — (series_id, ts, value).
+    /// A read at a system-time cut (`TxnSnapshot`, `Pinned`, `AsOf`) returns
+    /// each series' last value as of the cut.
+    QueryLastValues {
+        collection: QualifiedCollection,
+        #[serde(default)]
+        system_time: nodedb_types::SystemTimeScope,
+    },
 
     /// Query a single series from a collection's last-value cache.
-    /// Returns JSON-serialized `Option<(i64, f64)>` — (ts, value).
+    /// Returns MessagePack `Option<(i64, f64)>` — (ts, value). A read at a
+    /// system-time cut returns the series' last value as of the cut.
     QueryLastValue {
         collection: QualifiedCollection,
         series_id: u64,
+        #[serde(default)]
+        system_time: nodedb_types::SystemTimeScope,
     },
 
     /// Calvin deterministic executor: static-set multi-shard transaction.
@@ -399,10 +400,10 @@ pub enum MetaOp {
         /// the wall clock independently. Wire-additive: defaults to 0 on decode
         /// of older entries.
         epoch_system_ms: i64,
-        /// The transaction's LSN-versioned read-set from the replicated `TxClass`.
-        /// Each participant checks its own vShard's reads at apply and records
-        /// whether they were still current, without gating apply. Wire-additive:
-        /// defaults to empty on decode of older entries.
+        /// The transaction's read-set from the replicated `TxClass`. Each
+        /// participant checks its own vShard's reads at stage and votes
+        /// `SerializationConflict` when one holds a committed version above
+        /// `snapshot_ordinal`.
         #[serde(default)]
         versioned_reads: Vec<VersionedReadEntry>,
         /// Indexes into `plans` of the plans a trigger body buffered. Their
@@ -410,6 +411,11 @@ pub enum MetaOp {
         /// transaction no body joined.
         #[serde(default)]
         body_plans: Vec<u32>,
+        /// The ordinal every read of the transaction observed. `None` for a
+        /// transaction with no snapshot (autocommit): its stage validates
+        /// nothing.
+        #[serde(default)]
+        snapshot_ordinal: Option<i64>,
     },
 
     /// Calvin dependent-read executor: a passive participant reads its keys
@@ -461,6 +467,13 @@ pub enum MetaOp {
         /// Wall-clock ms read once on the sequencer leader at epoch creation.
         /// Same semantics as `CalvinExecuteStatic::epoch_system_ms`.
         epoch_system_ms: i64,
+        /// The transaction's read-set, validated against `snapshot_ordinal`
+        /// exactly like `CalvinExecuteStatic::versioned_reads`.
+        #[serde(default)]
+        versioned_reads: Vec<VersionedReadEntry>,
+        /// See `CalvinExecuteStatic::snapshot_ordinal`.
+        #[serde(default)]
+        snapshot_ordinal: Option<i64>,
     },
 
     /// Rebuild a collection's indexes (HNSW, full-text, graph CSR) on
@@ -628,12 +641,23 @@ pub enum MetaOp {
     /// install then stamps the slice's ordinal on the core clock, consumes
     /// the slice's staged state when this core staged it, and answers the
     /// reply `calvin.reply` describes.
+    ///
+    /// `reads` is the transaction's read set and `snapshot_ordinal` the one
+    /// ordinal every read of it observed. When `snapshot_ordinal` is set, the
+    /// apply refuses the record with `SerializationConflict` on every
+    /// replica when a read entry homed on this vShard, or a row the record
+    /// replaces or deletes, holds a committed version above the snapshot.
+    /// A Calvin slice carries neither: its stage vote validated it.
     ApplyTransactionRedo {
         redo: Vec<u8>,
         collections: Vec<String>,
         sum_targets: Vec<super::RedoSumTargets>,
         origin: super::RedoOrigin,
         calvin: Option<super::CalvinInstall>,
+        #[serde(default)]
+        reads: Vec<VersionedReadEntry>,
+        #[serde(default)]
+        snapshot_ordinal: Option<i64>,
     },
 
     /// Install one batch of a RESTORE as part of a Calvin transaction, on
@@ -645,16 +669,28 @@ pub enum MetaOp {
     /// RESTORE. Its write keys are the rows and edges the batch writes.
     RestoreRedo(Box<super::RestoredRedo>),
 
-    /// Report the current version of each home in `probes`.
+    /// Purge every engine's history on this core below the cleanup horizon.
     ///
-    /// A read-only transaction's commit sends this to the leader of the
-    /// vShards its cross-shard graph reads observed, one request per leader.
-    /// The leader hands each core the probes whose vShard that core owns. The
-    /// core answers each probe with the collection's write floor on the core,
-    /// or with the core watermark for a probe with no collection. The payload
-    /// is a msgpack array of `HomeVersion`. It reads nothing else and writes
-    /// nothing.
-    HomeVersions {
-        probes: Vec<super::HomeVersionProbe>,
+    /// A version goes once a newer version at or below `horizon` replaced it.
+    /// The version each row shows at `horizon` stays, so every read at or
+    /// above the horizon answers as before. A row deleted at or below the
+    /// horizon leaves with its history. A collection in `retained` purges at
+    /// its own horizon, or not at all. Arrays keep their audit window and are
+    /// not purged here.
+    ///
+    /// The core purges at most `batch_units` stores (one engine of one
+    /// collection each) per request and answers `{"remaining": n}`, the
+    /// stores still due. The sender repeats the request until every core
+    /// answers `0`. A request at another horizon starts another pass.
+    PurgeVersionsBelow {
+        horizon: i64,
+        batch_units: u32,
+        retained: Vec<super::RetainedHistory>,
     },
+
+    /// Read at most `limit` KV keys whose TTL passed on this core. The core
+    /// first hands its expiry wheel's passed entries to its due set. It
+    /// answers one msgpack array of `DueExpiry` and reaps nothing: the data
+    /// group's leader proposes each reap through write admission.
+    KvDueExpiries { limit: u32 },
 }

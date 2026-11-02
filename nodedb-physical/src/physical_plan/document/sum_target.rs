@@ -68,15 +68,8 @@ impl SumTargetKey {
     zerompk::FromMessagePack,
 )]
 pub struct ResolvedSumTarget {
-    /// TARGET collection of the binding this entry was resolved for, or `None`
-    /// for an entry lifted out of a replicated record written before the target
-    /// collection travelled on the wire.
-    ///
-    /// `None` matches ANY binding of the source by join value alone — exactly
-    /// what such a record meant when it was written, and the only reading of it
-    /// that keeps a node able to replay its own committed log across the
-    /// upgrade. Nothing produces `None` at plan time.
-    pub target_collection: Option<String>,
+    /// TARGET collection of the binding this entry was resolved for.
+    pub target_collection: String,
     /// Join-key value that names the target row.
     pub join_value: String,
     /// The target row's stable cross-engine identity.
@@ -91,18 +84,7 @@ impl ResolvedSumTarget {
         surrogate: Surrogate,
     ) -> Self {
         Self {
-            target_collection: Some(target_collection.into()),
-            join_value: join_value.into(),
-            surrogate,
-        }
-    }
-
-    /// An entry that names no target collection — see
-    /// [`ResolvedSumTarget::target_collection`]. Only the replicated-record
-    /// decoder builds these.
-    pub fn untargeted(join_value: impl Into<String>, surrogate: Surrogate) -> Self {
-        Self {
-            target_collection: None,
+            target_collection: target_collection.into(),
             join_value: join_value.into(),
             surrogate,
         }
@@ -110,11 +92,7 @@ impl ResolvedSumTarget {
 
     /// Whether this entry answers for `target_collection`'s `join_value`.
     pub fn addresses(&self, target_collection: &str, join_value: &str) -> bool {
-        self.join_value == join_value
-            && self
-                .target_collection
-                .as_deref()
-                .is_none_or(|declared| declared == target_collection)
+        self.join_value == join_value && self.target_collection == target_collection
     }
 
     /// Whether this entry answers for `key`.
@@ -201,21 +179,6 @@ mod tests {
         assert_eq!(
             resolved_sum_surrogate(&resolved, "audit_totals", "acc-1"),
             None
-        );
-    }
-
-    /// An entry decoded from a pre-widening replicated record answers for every
-    /// binding, which is what that record meant when it was written.
-    #[test]
-    fn an_untargeted_entry_answers_any_target() {
-        let resolved = vec![ResolvedSumTarget::untargeted("acc-1", Surrogate::new(500))];
-        assert_eq!(
-            resolved_sum_surrogate(&resolved, "accounts", "acc-1"),
-            Some(Surrogate::new(500))
-        );
-        assert_eq!(
-            resolved_sum_surrogate(&resolved, "audit_totals", "acc-1"),
-            Some(Surrogate::new(500))
         );
     }
 }

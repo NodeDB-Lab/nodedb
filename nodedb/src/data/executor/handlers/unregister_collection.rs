@@ -205,22 +205,11 @@ impl CoreLoop {
 
         // ── Persistent engines (redb-backed, collection-scoped range drop) ──
 
-        // Sparse engine: current documents + secondary indexes.
-        let (mut docs_removed, mut idxs_removed) = retry_reclaim(
-            "sparse.delete_all_for_collection",
-            tid_raw,
-            collection,
-            || {
-                self.sparse
-                    .delete_all_for_collection(db_raw, tid_raw, collection)
-            },
-        )?;
-
-        // Sparse engine: bitemporal versioned document + index history. Cleared
-        // unconditionally — a `bitemporal=true` collection reuses the same key
-        // prefix on re-CREATE, so surviving versioned rows would resurrect the
-        // dropped collection's history (and yield a corrupt current row).
-        let (v_docs, v_idxs) = retry_reclaim(
+        // Sparse engine: every document version and index entry version. A
+        // re-CREATE reuses the same key prefix, so surviving versions would
+        // resurrect the dropped collection's history (and yield a corrupt
+        // current row).
+        let (docs_removed, idxs_removed) = retry_reclaim(
             "sparse.delete_all_versioned_for_collection",
             tid_raw,
             collection,
@@ -229,8 +218,6 @@ impl CoreLoop {
                     .delete_all_versioned_for_collection(db_raw, tid_raw, collection)
             },
         )?;
-        docs_removed += v_docs;
-        idxs_removed += v_idxs;
 
         // Inverted index: postings + doc_lengths + stats + segments.
         let inv_removed = retry_reclaim("inverted.purge_collection", tid_raw, collection, || {
@@ -284,6 +271,10 @@ impl CoreLoop {
         self.continuous_agg_mgr
             .reset_for_source(db_raw, tid_raw, collection);
 
+        // The dropped collection's document versions left the store: the
+        // tenant's history charge follows the store's counter.
+        self.recharge_document_history(db, tid)?;
+
         // Timeseries engine.
         let ts_removed = {
             let key = (db, tid, coll.clone());
@@ -317,6 +308,8 @@ impl CoreLoop {
         // Lockstep: drop the surrogate sidecar for the same keys.
         self.columnar_flushed_surrogates
             .retain(|(d, t, c), _| !(*d == db && *t == tid && c == &coll));
+        // The dropped collection's row-version history releases its charge.
+        self.recharge_columnar_history(&(db, tid, coll.clone()));
 
         // Sparse vector indexes (tuple key: database, tenant, collection, field).
         self.sparse_vector_indexes

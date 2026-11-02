@@ -18,7 +18,6 @@ use crate::control::surrogate::SurrogateAssigner;
 use crate::engine::bitemporal::BitemporalRetentionRegistry;
 use crate::engine::timeseries::retention_policy::RetentionPolicyRegistry;
 use crate::types::TenantId;
-use crate::wal::WalManager;
 
 use nodedb_physical::physical_task::PhysicalTask;
 
@@ -60,17 +59,11 @@ pub struct ConvertContext {
     /// Used by `SqlPlan::CreateArray` / `DropArray` to persist or
     /// remove `_system.arrays` rows.
     pub credentials: Option<Arc<CredentialStore>>,
-    /// LSN allocator for array Put/Delete dispatches.
-    pub wal: Option<Arc<WalManager>>,
     /// CP-side surrogate assigner — bound to the same `Arc` held on
     /// `SharedState`. Threaded into INSERT/UPSERT/KV-INSERT converters
     /// to bind `(collection, pk_bytes)` → `Surrogate` before the op
     /// crosses the SPSC bridge.
     pub surrogate_assigner: Arc<SurrogateAssigner>,
-    /// `true` when the node is running in cluster mode with a live
-    /// topology. Array DML/query converters emit `ClusterArray` variants
-    /// when this flag is set; single-node mode emits local `Array` variants.
-    pub cluster_enabled: bool,
     /// Bitemporal retention registry — required by `ALTER ARRAY` to
     /// update the purge-scheduler's view of the array's retention policy.
     /// `None` for sub-planners that don't own array DDL.
@@ -87,24 +80,21 @@ pub struct ConvertContext {
     /// same-named collection resolve to distinct surrogates.
     pub tenant_id: crate::types::TenantId,
     /// Permanent operator override (session var `nodedb.force_shuffle_join`):
-    /// when `true` AND the node is in cluster mode, an equi hash join over two
-    /// sharded sources is emitted as a whole-join `Exchange{Shuffle}` (both
-    /// inputs left as bare scans) instead of the default broadcast-build-side
-    /// plan. This is the manual hint layer; the automatic cost-model default is
-    /// a separate follow-up. Ignored in single-node mode (no peers to shuffle
-    /// across — the broadcast/local path is correct and cheaper).
+    /// when `true`, an equi hash join over two sharded sources is emitted as a
+    /// whole-join `Exchange{Shuffle}` (both inputs left as bare scans) instead
+    /// of the default broadcast-build-side plan. This is the manual hint layer.
+    /// The ANALYZE-driven cost model picks a shuffle on its own.
     pub force_shuffle_join: bool,
     /// Target partition count for a forced shuffle join. Clamped to `>= 1` at
     /// emit time. Sourced from session var `nodedb.shuffle_num_parts`; defaults
     /// to the cluster's data-node count when unset.
     pub shuffle_num_parts: usize,
     /// Permanent operator override (session var `nodedb.force_shuffle_agg`):
-    /// when `true` AND the node is in cluster mode, a GROUP BY aggregate over a
-    /// sharded source is emitted as a whole-aggregate `Exchange{ShuffleAggregate}`
-    /// (the input left as a bare per-shard scan) instead of the default
-    /// Gather-merge plan. This is the manual hint layer; the automatic
-    /// cost-model default is a separate follow-up. Ignored in single-node mode
-    /// (no peers to shuffle across — the Gather path is correct and cheaper).
+    /// when `true`, a GROUP BY aggregate over a sharded source is emitted as a
+    /// whole-aggregate `Exchange{ShuffleAggregate}` (the input left as a bare
+    /// per-shard scan) instead of the default Gather-merge plan. This is the
+    /// manual hint layer. The ANALYZE-driven cost model picks a shuffle on its
+    /// own.
     pub force_shuffle_agg: bool,
     /// Target partition count for a forced shuffle aggregate. Sourced from
     /// session var `nodedb.shuffle_agg_num_parts`; `0` defaults to the cluster's
@@ -132,6 +122,11 @@ pub struct ConvertContext {
     /// surrogate or asks a key's home. A key with no answer is recorded here
     /// as a miss for the bind step to resolve.
     pub prefetched: super::surrogate_prefetch::PrefetchedSurrogates,
+    /// True when the statement runs inside a transaction block and reads the
+    /// block's snapshot. A join then embeds each user-collection side as its
+    /// own engine scan, which reads at the snapshot with the block's staged
+    /// writes, instead of scanning the side by name at the current state.
+    pub reads_txn_snapshot: bool,
 }
 
 impl ConvertContext {
@@ -318,6 +313,7 @@ pub(super) fn convert_plan(
                 limit: None,
                 offset: 0,
                 distinct: false,
+                system_time: nodedb_types::SystemTimeScope::Current,
             });
             let inner = std::mem::replace(&mut task.plan, sentinel);
             task.plan = PhysicalPlan::Query(QueryOp::Exchange(ExchangeOp {
@@ -355,9 +351,7 @@ mod tests {
             retention_registry: None,
             array_catalog: None,
             credentials: None,
-            wal: None,
             surrogate_assigner: assigner,
-            cluster_enabled: false,
             bitemporal_retention_registry: None,
             max_vector_dim: 0,
             database_id: DatabaseId::DEFAULT,
@@ -369,6 +363,7 @@ mod tests {
             broadcast_threshold_bytes: 0,
             shuffle_agg_threshold: 0,
             prefetched: Default::default(),
+            reads_txn_snapshot: false,
         }
     }
 

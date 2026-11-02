@@ -34,16 +34,11 @@ use nodedb_types::Surrogate;
 use nodedb_types::sync::wire::SyncProvenance;
 use serde::{Deserialize, Serialize};
 
-/// Current on-disk format version for array WAL payloads.
+/// On-disk format version for array WAL payloads.
 ///
-/// Increment this when the shape of [`ArrayPutPayload`] or
-/// [`ArrayDeletePayload`] changes in a backward-incompatible way.
 /// Readers that encounter any other version return
 /// [`ArrayError::UnsupportedFormat`] fail-CLOSED.
-///
-/// Version 3: added `erasure: bool` field to [`ArrayDeleteCell`] to support
-/// GDPR erasure as distinct from soft-delete tombstones.
-pub const ARRAY_WAL_FORMAT_VERSION: u8 = 3;
+pub const ARRAY_WAL_FORMAT_VERSION: u8 = 1;
 
 #[derive(
     Debug,
@@ -61,8 +56,12 @@ pub struct ArrayPutCell {
     /// carried into the memtable and segment. Never `Surrogate::ZERO`: a put
     /// with an unbound cell is refused before any cell is written.
     pub surrogate: Surrogate,
-    /// System-time timestamp (HLC ms) when the write was accepted by the
-    /// Control Plane. Monotonically increasing within a given array.
+    /// The tile-version stamp the engine writes the cell at. A Data Plane
+    /// apply (`handle_array_put`, WAL replay) overwrites it with the
+    /// system-time ordinal of the apply. A restored cell
+    /// (`crate::wal::ArrayRestoreRedo`) keeps it: the value is the
+    /// backed-up version's stamp, or the stamp the restore set the version
+    /// again at. A direct engine call writes it as given.
     pub system_from_ms: i64,
     /// Valid-time lower bound (ms). Supplied by the caller; defaults to
     /// the system timestamp for non-bitemporal inserts.
@@ -83,6 +82,10 @@ pub struct ArrayPutCell {
 )]
 pub struct ArrayPutPayload {
     pub array_id: ArrayId,
+    /// The vShard whose write stores the cells: the `vshard_id` of the
+    /// `ArrayOp::Put`. Every tile version the record writes carries it, on
+    /// every replica and every replay.
+    pub vshard_id: u32,
     pub cells: Vec<ArrayPutCell>,
     /// Sync provenance for idempotency — `None` for locally-originated writes.
     /// Carried here so the WAL record is self-contained for deduplication
@@ -102,8 +105,9 @@ pub struct ArrayPutPayload {
 )]
 pub struct ArrayDeleteCell {
     pub coord: Vec<CoordValue>,
-    /// System-time timestamp (HLC ms) when the delete was accepted by the
-    /// Control Plane. Used as the tombstone/erasure version key in the memtable.
+    /// The tombstone or erasure version stamp. A Data Plane apply overwrites
+    /// it with the system-time ordinal of the apply, or keeps a restored
+    /// stamp, as for [`ArrayPutCell::system_from_ms`].
     pub system_from_ms: i64,
     /// When `true`, writes the GDPR erasure sentinel (`0xFE`) instead of the
     /// soft-delete tombstone sentinel (`0xFF`). Default is `false` (tombstone).
@@ -124,6 +128,9 @@ pub struct ArrayDeleteCell {
 )]
 pub struct ArrayDeletePayload {
     pub array_id: ArrayId,
+    /// The vShard whose write stores the tombstones, as
+    /// [`ArrayPutPayload::vshard_id`].
+    pub vshard_id: u32,
     pub cells: Vec<ArrayDeleteCell>,
     /// Sync provenance for idempotency — `None` for locally-originated writes.
     #[serde(default)]
@@ -162,8 +169,9 @@ pub enum ArrayWalError {
 
 /// The msgpack fixarray header of [`ArrayPutPayload`] and
 /// [`ArrayDeletePayload`]. zerompk encodes a struct as an array of its
-/// fields, and both payloads have three: `array_id`, `cells`, `provenance`.
-const PAYLOAD_ARRAY_HEADER: u8 = 0x93;
+/// fields, and both payloads have four: `array_id`, `vshard_id`, `cells`,
+/// `provenance`.
+const PAYLOAD_ARRAY_HEADER: u8 = 0x94;
 
 /// Encode an [`ArrayPutPayload`] with a leading version byte.
 ///
@@ -172,8 +180,9 @@ pub fn encode_put_with_version(payload: &ArrayPutPayload) -> Result<Vec<u8>, Arr
     encode_versioned(payload, "ArrayPutPayload")
 }
 
-/// Encode the versioned `ArrayPut` record of `array_id` around
-/// `cells_msgpack`, an already-encoded `Vec<ArrayPutCell>`.
+/// Encode the versioned `ArrayPut` record of `array_id`, placed on
+/// `vshard_id`, around `cells_msgpack`, an already-encoded
+/// `Vec<ArrayPutCell>`.
 ///
 /// The cell bytes are copied in as they are, never decoded. The result is
 /// byte-identical to [`encode_put_with_version`] over the decoded payload,
@@ -181,10 +190,17 @@ pub fn encode_put_with_version(payload: &ArrayPutPayload) -> Result<Vec<u8>, Arr
 /// `Vec<ArrayPutCell>` encoder produced.
 pub fn encode_put_spliced(
     array_id: &ArrayId,
+    vshard_id: u32,
     cells_msgpack: &[u8],
     provenance: &Option<SyncProvenance>,
 ) -> Result<Vec<u8>, ArrayError> {
-    splice_versioned(array_id, cells_msgpack, provenance, "ArrayPutPayload")
+    splice_versioned(
+        array_id,
+        vshard_id,
+        cells_msgpack,
+        provenance,
+        "ArrayPutPayload",
+    )
 }
 
 /// [`encode_put_spliced`] for an `ArrayDelete` record around an
@@ -192,10 +208,17 @@ pub fn encode_put_spliced(
 /// [`encode_delete_with_version`] over the decoded payload.
 pub fn encode_delete_spliced(
     array_id: &ArrayId,
+    vshard_id: u32,
     cells_msgpack: &[u8],
     provenance: &Option<SyncProvenance>,
 ) -> Result<Vec<u8>, ArrayError> {
-    splice_versioned(array_id, cells_msgpack, provenance, "ArrayDeletePayload")
+    splice_versioned(
+        array_id,
+        vshard_id,
+        cells_msgpack,
+        provenance,
+        "ArrayDeletePayload",
+    )
 }
 
 /// Write the version byte, then `value`, into one buffer.
@@ -210,6 +233,7 @@ fn encode_versioned<T: zerompk::ToMessagePack>(
 
 fn splice_versioned(
     array_id: &ArrayId,
+    vshard_id: u32,
     cells_msgpack: &[u8],
     provenance: &Option<SyncProvenance>,
     what: &str,
@@ -219,6 +243,7 @@ fn splice_versioned(
     buf.push(ARRAY_WAL_FORMAT_VERSION);
     buf.push(PAYLOAD_ARRAY_HEADER);
     write_into(&mut buf, array_id, what)?;
+    write_into(&mut buf, &vshard_id, what)?;
     buf.extend_from_slice(cells_msgpack);
     write_into(&mut buf, provenance, what)?;
     Ok(buf)
@@ -278,6 +303,7 @@ mod tests {
     fn sample_put_payload() -> ArrayPutPayload {
         ArrayPutPayload {
             array_id: ArrayId::new(nodedb_types::TenantId::new(1), "g"),
+            vshard_id: 517,
             cells: vec![ArrayPutCell {
                 coord: vec![CoordValue::Int64(1), CoordValue::Int64(2)],
                 attrs: vec![CellValue::Int64(99)],
@@ -312,23 +338,20 @@ mod tests {
     }
 
     #[test]
-    fn wal_record_rejects_old_versions() {
+    fn wal_record_rejects_another_version() {
         let p = sample_put_payload();
-        let raw = zerompk::to_msgpack_vec(&p).unwrap();
-
-        for bad_version in [0x01u8, 0x02u8] {
-            let mut bad = raw.clone();
-            bad.insert(0, bad_version);
-            let err = decode_put_with_version(&bad).unwrap_err();
-            assert!(
-                matches!(err, ArrayError::UnsupportedFormat { .. }),
-                "version {bad_version}: expected UnsupportedFormat, got {err:?}"
-            );
-        }
+        let mut bad = zerompk::to_msgpack_vec(&p).unwrap();
+        let bad_version = ARRAY_WAL_FORMAT_VERSION + 1;
+        bad.insert(0, bad_version);
+        let err = decode_put_with_version(&bad).unwrap_err();
+        assert!(
+            matches!(err, ArrayError::UnsupportedFormat { version } if version == bad_version),
+            "version {bad_version}: expected UnsupportedFormat, got {err:?}"
+        );
     }
 
     #[test]
-    fn wal_record_v3_roundtrip() {
+    fn wal_record_roundtrip() {
         let p = sample_put_payload();
         let encoded = encode_put_with_version(&p).unwrap();
         assert_eq!(encoded[0], ARRAY_WAL_FORMAT_VERSION);
@@ -351,7 +374,8 @@ mod tests {
             let mut p = sample_put_payload();
             p.provenance = provenance;
             let cells = zerompk::to_msgpack_vec(&p.cells).unwrap();
-            let spliced = encode_put_spliced(&p.array_id, &cells, &p.provenance).unwrap();
+            let spliced =
+                encode_put_spliced(&p.array_id, p.vshard_id, &cells, &p.provenance).unwrap();
             assert_eq!(spliced, encode_put_with_version(&p).unwrap());
             assert_eq!(decode_put_with_version(&spliced).unwrap(), p);
         }
@@ -361,6 +385,7 @@ mod tests {
     fn spliced_delete_matches_the_encoded_payload() {
         let payload = ArrayDeletePayload {
             array_id: ArrayId::new(nodedb_types::TenantId::new(1), "g"),
+            vshard_id: 33,
             cells: vec![ArrayDeleteCell {
                 coord: vec![CoordValue::Int64(5), CoordValue::Int64(7)],
                 system_from_ms: 9_000,
@@ -369,8 +394,13 @@ mod tests {
             provenance: None,
         };
         let cells = zerompk::to_msgpack_vec(&payload.cells).unwrap();
-        let spliced =
-            encode_delete_spliced(&payload.array_id, &cells, &payload.provenance).unwrap();
+        let spliced = encode_delete_spliced(
+            &payload.array_id,
+            payload.vshard_id,
+            &cells,
+            &payload.provenance,
+        )
+        .unwrap();
         assert_eq!(spliced, encode_delete_with_version(&payload).unwrap());
         assert_eq!(decode_delete_with_version(&spliced).unwrap(), payload);
     }
@@ -379,6 +409,7 @@ mod tests {
     fn delete_cell_erasure_flag_roundtrip() {
         let payload = ArrayDeletePayload {
             array_id: ArrayId::new(nodedb_types::TenantId::new(1), "g"),
+            vshard_id: 33,
             cells: vec![ArrayDeleteCell {
                 coord: vec![CoordValue::Int64(5), CoordValue::Int64(7)],
                 system_from_ms: 9_000,

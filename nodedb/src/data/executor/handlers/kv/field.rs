@@ -22,6 +22,8 @@ pub(in crate::data::executor) struct KvFieldGetArgs<'a> {
     pub key: &'a [u8],
     pub fields: &'a [String],
     pub rls_filters: &'a [u8],
+    /// The system-time cut the base read answers at.
+    pub system_time: nodedb_types::SystemTimeScope,
 }
 
 /// Arguments for [`CoreLoop::execute_kv_field_set`] beyond the shared
@@ -51,15 +53,23 @@ impl CoreLoop {
             key,
             fields,
             rls_filters,
+            system_time,
         } = args;
         debug!(core = self.core_id, %collection, field_count = fields.len(), "kv field get");
         let now_ms = current_ms();
 
         // Read-your-own-writes: consult this transaction's staging overlay
         // before falling back to base storage (see `execute_kv_batch_get`).
-        let value = match self.kv_overlay_body(task, tid, collection, key) {
+        let value = match system_time
+            .merges_txn_overlay()
+            .then(|| self.kv_overlay_body(task, tid, collection, key))
+            .flatten()
+        {
             Some(overlay_result) => overlay_result,
-            None => self.kv_engine.get(did, tid, collection, key, now_ms),
+            None => self
+                .kv_engine
+                .get_at(did, tid, collection, key, system_time, now_ms)
+                .map(|(value, _)| value),
         };
         let Some(value) = value else {
             return self.response_error(task, ErrorCode::NotFound);

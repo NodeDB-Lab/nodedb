@@ -9,16 +9,14 @@ use redb::{ReadableDatabase, ReadableTable};
 
 /// Serializable organization record for redb storage.
 #[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
-#[msgpack(map, allow_unknown_fields)]
+#[msgpack(map)]
 pub struct StoredOrg {
     pub org_id: String,
     pub name: String,
     pub tenant_id: u64,
     /// Organization status: active, suspended, banned.
-    #[msgpack(default = "default_active")]
     pub status: String,
     pub created_at: u64,
-    #[msgpack(default)]
     pub metadata: std::collections::HashMap<String, String>,
 }
 
@@ -30,10 +28,6 @@ pub struct StoredOrgMember {
     /// Role within the org (e.g., "owner", "admin", "member").
     pub role: String,
     pub joined_at: u64,
-}
-
-fn default_active() -> String {
-    "active".into()
 }
 
 impl SystemCatalog {

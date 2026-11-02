@@ -3,9 +3,8 @@
 // Structural sparse-tile decoder — symmetric to tile_encode.
 //
 // Validates the version byte, dispatches on CodecTag, and reconstructs
-// a SparseTile from the structural payload. Legacy (v3) msgpack tiles are
-// NOT handled here; the segment reader peeks the tag and dispatches to
-// zerompk for those.
+// a SparseTile from the structural payload. A payload whose first byte is
+// no CodecTag is corruption.
 
 use crate::codec::attr_col::decode_attr_col;
 use crate::codec::column_codec::{decode_row_kinds, decode_surrogates, decode_timestamps_col};
@@ -73,15 +72,11 @@ fn decode_sparse_tile_inner(
         });
     }
 
-    let tag_result = peek_tag(payload).ok_or_else(|| {
-        // peek_tag returns None for both legacy msgpack and unknown bytes.
-        // The reader should never call us with a legacy payload.
-        ArrayError::SegmentCorruption {
-            detail: format!(
-                "decode_sparse_tile called with legacy or unknown tag byte: {:#04x}",
-                payload[0]
-            ),
-        }
+    let tag_result = peek_tag(payload).ok_or_else(|| ArrayError::SegmentCorruption {
+        detail: format!(
+            "sparse tile payload has unknown tag byte: {:#04x}",
+            payload[0]
+        ),
     })?;
 
     let version = payload[1];

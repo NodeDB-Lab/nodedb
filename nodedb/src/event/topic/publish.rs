@@ -100,7 +100,7 @@ async fn publish_replicated(
     entry: ReplicatedEntry,
     topic_name: &str,
 ) -> Result<u64, PublishError> {
-    let (payload, _) = crate::control::wal_replication::propose_replicated_entry(
+    let payload = crate::control::wal_replication::propose_replicated_entry(
         state,
         proposer,
         entry,

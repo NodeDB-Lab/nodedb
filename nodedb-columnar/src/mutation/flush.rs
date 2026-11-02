@@ -11,10 +11,11 @@ use super::engine::{MutationEngine, MutationResult};
 impl MutationEngine {
     /// Notify the engine that the memtable was flushed to a new segment.
     ///
-    /// Remaps the PK index and closed-key entries of the memtable's virtual
-    /// segment to `new_segment_id` and moves the memtable's delete bitmap with them, so
-    /// a row tombstoned while in the memtable stays tombstoned in the
-    /// segment. The virtual segment id itself never changes: it names the
+    /// Remaps the PK index, closed-key, and version-chain entries of the
+    /// memtable's virtual segment to `new_segment_id` and moves the
+    /// memtable's delete bitmap and version stamps with them, so a row ended
+    /// while in the memtable stays ended, with its `sys_from` and `sys_to`,
+    /// in the segment. The virtual segment id itself never changes: it names the
     /// memtable, not a flushed segment, so no flushed segment can ever share
     /// it and a later remap can never sweep flushed rows along.
     ///
@@ -41,8 +42,18 @@ impl MutationEngine {
                     row_index: old_row,
                 })
             });
+        self.chains
+            .remap_segment(self.memtable_segment_id, |old_row| {
+                Some(RowLocation {
+                    segment_id: new_segment_id,
+                    row_index: old_row,
+                })
+            });
         if let Some(bitmap) = self.delete_bitmaps.remove(&self.memtable_segment_id) {
             self.delete_bitmaps.insert(new_segment_id, bitmap);
+        }
+        if let Some(stamps) = self.versions.remove(&self.memtable_segment_id) {
+            self.versions.insert(new_segment_id, stamps);
         }
 
         // Advance the segment ID counter with overflow protection.
@@ -90,10 +101,10 @@ mod tests {
     #[test]
     fn second_flush_leaves_first_segment_rows_in_place() {
         let mut e = engine();
-        e.insert(&[Value::Integer(1)]).expect("insert");
+        e.insert(&[Value::Integer(1)], 1).expect("insert");
         let first = e.next_segment_id();
         e.on_memtable_flushed(first).expect("flush 1");
-        e.insert(&[Value::Integer(2)]).expect("insert");
+        e.insert(&[Value::Integer(2)], 2).expect("insert");
         let second = e.next_segment_id();
         e.on_memtable_flushed(second).expect("flush 2");
 
@@ -117,9 +128,9 @@ mod tests {
     #[test]
     fn memtable_tombstones_follow_the_flushed_segment() {
         let mut e = engine();
-        e.insert(&[Value::Integer(1)]).expect("insert");
-        e.insert(&[Value::Integer(2)]).expect("insert");
-        e.delete(&Value::Integer(1)).expect("delete");
+        e.insert(&[Value::Integer(1)], 1).expect("insert");
+        e.insert(&[Value::Integer(2)], 2).expect("insert");
+        e.delete(&Value::Integer(1), 3).expect("delete");
         let seg = e.next_segment_id();
         e.on_memtable_flushed(seg).expect("flush");
 
@@ -129,5 +140,16 @@ mod tests {
             "row 0 of the flushed segment is the tombstoned row"
         );
         assert!(!e.delete_bitmap(seg).is_some_and(|bm| bm.is_deleted(1)));
+        let ended = RowLocation {
+            segment_id: seg,
+            row_index: 0,
+        };
+        assert_eq!(e.sys_from_at(ended), Some(1), "the stamps follow the rows");
+        assert_eq!(e.sys_to_at(ended), Some(3));
+        assert_eq!(
+            e.version_chains().get(&encode_pk(&Value::Integer(1))),
+            &[ended],
+            "the chain names the segment row"
+        );
     }
 }

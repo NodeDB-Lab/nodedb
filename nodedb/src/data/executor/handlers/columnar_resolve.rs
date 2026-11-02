@@ -15,8 +15,9 @@
 //! staging path (`stage_columnar_dml.rs`) reads the same current rows. One
 //! selection decides what a predicate DML writes and what it reports.
 
-use nodedb_columnar::MutationEngine;
 use nodedb_columnar::pk_index::RowLocation;
+use nodedb_columnar::predicate::ScanPredicate;
+use nodedb_columnar::{MutationEngine, VersionCut};
 use nodedb_physical::physical_plan::UpdateValue;
 use nodedb_types::columnar::ColumnarSchema;
 use nodedb_types::{Surrogate, Value};
@@ -27,7 +28,9 @@ use crate::data::executor::handlers::columnar_assignments::ColumnarAssignments;
 use crate::data::executor::handlers::columnar_mutation_apply::{
     ColumnarEngineKey, flushed_row_surrogate,
 };
+use crate::data::executor::handlers::columnar_read::block_predicates::block_predicates;
 use crate::data::executor::handlers::columnar_read::filter::row_matches_filters;
+use crate::data::executor::handlers::columnar_read::flushed_segment::SegmentBlocks;
 use crate::data::executor::handlers::rls_write_gate::admit_columnar_row;
 
 /// Column index of the schema's primary-key column, or the standard
@@ -79,7 +82,9 @@ pub(in crate::data::executor) struct ResolveDeleteRowsParams<'a> {
 
 impl CoreLoop {
     /// Visit every current row of the collection at `key`: each flushed
-    /// segment in segment order, then the memtable.
+    /// segment in segment order, then the memtable. A flushed block whose
+    /// statistics rule out one of `predicates` is neither decoded nor
+    /// visited: the caller's filter rejects every row of it.
     ///
     /// A row its segment's delete bitmap marks is not visited. A live row the
     /// primary-key index does not bind is a superseded version, which only a
@@ -92,6 +97,7 @@ impl CoreLoop {
     pub(in crate::data::executor) fn for_each_current_columnar_row(
         &self,
         key: &ColumnarEngineKey,
+        predicates: &[ScanPredicate],
         site: &'static str,
         mut visit: impl FnMut(CurrentColumnarRow) -> crate::Result<()>,
     ) -> crate::Result<()> {
@@ -110,14 +116,22 @@ impl CoreLoop {
             // Segment ids are 1-based. Id 0 names the memtable.
             let segment_id = seg_idx as u64 + 1;
             let segment = self.decode_flushed_segment(
-                collection,
+                key,
                 segment_id,
                 seg_bytes,
                 schema.columns.len(),
+                SegmentBlocks::Visible {
+                    engine,
+                    cut: VersionCut::Current,
+                    predicates,
+                },
                 site,
             )?;
             let deletes = engine.delete_bitmap(segment_id);
             for row_idx in 0..segment.row_count() {
+                if !segment.holds_row(row_idx) {
+                    continue;
+                }
                 let location = RowLocation {
                     segment_id,
                     row_index: row_index_u32(collection, segment_id, row_idx)?,
@@ -182,7 +196,8 @@ impl CoreLoop {
         let assignments = ColumnarAssignments::bind(schema, updates)?;
         let crs = self.crs_context();
         let mut resolved = Vec::new();
-        self.for_each_current_columnar_row(key, "columnar_dml_resolve", |row| {
+        let predicates = block_predicates(schema, filter_predicates, &[]);
+        self.for_each_current_columnar_row(key, &predicates, "columnar_dml_resolve", |row| {
             let row = row.values;
             if !row_matches(&row, schema, filter_predicates, &crs)? {
                 return Ok(());
@@ -215,7 +230,8 @@ impl CoreLoop {
         } = params;
         let mut pks = Vec::new();
         let crs = self.crs_context();
-        self.for_each_current_columnar_row(key, "columnar_dml_resolve", |row| {
+        let predicates = block_predicates(schema, filter_predicates, &[]);
+        self.for_each_current_columnar_row(key, &predicates, "columnar_dml_resolve", |row| {
             let row = row.values;
             if !row_matches(&row, schema, filter_predicates, &crs)? {
                 return Ok(());

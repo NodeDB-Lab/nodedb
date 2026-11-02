@@ -38,9 +38,11 @@ pub(in crate::data::executor) struct TimeseriesScanParams<'a> {
     pub gap_fill: &'a str,
     /// Serialized computed columns for scalar projection expressions.
     pub computed_columns: &'a [u8],
-    /// Bitemporal system-time selection. `AsOf(ms)` hides rows whose
-    /// `_ts_system` exceeds the cutoff; `AllVersions` emits every `_ts_system`
-    /// row ordered ascending (audit log); `Current` is unconstrained.
+    /// System-time selection. `_ts_system` holds the system-time ordinal of
+    /// the batch that wrote the row. `Pinned { ordinal }` hides rows above
+    /// `ordinal`, `AsOf(ms)` hides rows above the last ordinal of `ms`,
+    /// `AllVersions` emits every row ordered ascending by system time (audit
+    /// log), and `Current` is unconstrained.
     pub system_time: nodedb_types::SystemTimeScope,
     /// Bitemporal valid-time point. `None` skips valid-time filtering.
     pub valid_at_ms: Option<i64>,
@@ -87,7 +89,11 @@ impl CoreLoop {
         } = params;
 
         let all_versions = system_time.is_all_versions();
-        let system_as_of_ms = system_time.as_of_ms();
+        let system_cutoff = system_time.as_of_ordinal();
+        // The partitions a TRUNCATE ended at or below the cut hold no row the
+        // read sees. The memtable holds only rows written after the newest
+        // TRUNCATE, which flushed every earlier row into a partition it ended.
+        let cut = nodedb_columnar::VersionCut::of_scope(system_time);
 
         // The collection's declared TIME_KEY drives partition pruning and
         // projection pushdown. Resolved once here and threaded through both
@@ -119,19 +125,12 @@ impl CoreLoop {
                 Ok(p) => p,
                 Err(e) => return self.response_error(task, e),
             };
-        // Bitemporal cutoffs: translate to column-level predicates on
+        // Temporal cutoffs: translate to column-level predicates on
         // `_ts_system` / `_ts_valid_from` / `_ts_valid_until`. The
         // segment reader's block-skip infrastructure applies these
-        // against per-block min/max automatically.
-        if let Some(cutoff) = system_as_of_ms {
-            filter_predicates.push(crate::bridge::scan_filter::ScanFilter {
-                field: TS_SYSTEM.into(),
-                op: crate::bridge::scan_filter::FilterOp::Lte,
-                value: nodedb_types::Value::Integer(cutoff),
-                clauses: Vec::new(),
-                expr: None,
-            });
-        }
+        // against per-block min/max automatically. Every timeseries row
+        // carries `_ts_system`, so the system cut applies to every
+        // collection.
         if let Some(point) = valid_at_ms {
             filter_predicates.push(crate::bridge::scan_filter::ScanFilter {
                 field: TS_VALID_FROM.into(),
@@ -144,6 +143,21 @@ impl CoreLoop {
                 field: TS_VALID_UNTIL.into(),
                 op: crate::bridge::scan_filter::FilterOp::Gt,
                 value: nodedb_types::Value::Integer(point),
+                clauses: Vec::new(),
+                expr: None,
+            });
+        }
+        // A staged row carries no `_ts_system` yet: it is newer than every
+        // committed version. A transaction snapshot read applies the system
+        // cut to stored rows only, so the staged rows keep every other
+        // predicate.
+        let staged_filter_predicates = filter_predicates.clone();
+        let staged_has_filters = !staged_filter_predicates.is_empty();
+        if let Some(cutoff) = system_cutoff {
+            filter_predicates.push(crate::bridge::scan_filter::ScanFilter {
+                field: TS_SYSTEM.into(),
+                op: crate::bridge::scan_filter::FilterOp::Lte,
+                value: nodedb_types::Value::Integer(cutoff),
                 clauses: Vec::new(),
                 expr: None,
             });
@@ -161,13 +175,13 @@ impl CoreLoop {
         let is_aggregate = !aggregates.is_empty() || bucket_interval_ms > 0;
         let has_time_range = time_range.0 > 0 || time_range.1 < i64::MAX;
 
-        // In-transaction read-your-own-writes covers current-version reads:
-        // audit-log (`all_versions`) and `AS OF SYSTEM TIME` reads are
-        // committed-only.
-        let overlay_txn = if all_versions || system_as_of_ms.is_some() {
-            None
-        } else {
+        // In-transaction read-your-own-writes covers a current read and a
+        // transaction snapshot read: audit-log (`all_versions`) and
+        // `AS OF SYSTEM TIME` reads are committed-only.
+        let overlay_txn = if system_time.merges_txn_overlay() {
             task.request.txn_id
+        } else {
+            None
         };
 
         // AUTO_TIER: the part of the range raw rows serve, and the parts
@@ -187,10 +201,29 @@ impl CoreLoop {
         {
             return self.response_error(task, e);
         }
+        // A transaction snapshot reads a tier only where the tier is exact
+        // at the snapshot. Every other span reads raw rows at the snapshot.
+        let split = match system_cutoff {
+            Some(at) if is_aggregate && !system_time.is_historical() => {
+                let root = super::tier_fold::TierRoot {
+                    database_id: task.request.database_id,
+                    tid,
+                    collection,
+                };
+                match self.exact_tier_split_at(root, split, at, now_ms) {
+                    Ok(split) => split,
+                    Err(e) => return self.response_error(task, e),
+                }
+            }
+            Some(_) | None => split,
+        };
         // A tiered aggregate reads each tier's buckets for the tier's part
         // of the range, after checking the buckets merge exactly.
         let tier_partials = if is_aggregate && !split.tiers.is_empty() {
-            let row_predicates: Vec<ScanFilter> = filter_predicates
+            // The query's own predicates, without the system cut pushed above:
+            // every span left is exact at the cut (`exact_tier_split_at`), so
+            // the cut holds for its buckets already.
+            let row_predicates: Vec<ScanFilter> = staged_filter_predicates
                 .iter()
                 .chain(&rls_predicates)
                 .cloned()
@@ -202,7 +235,9 @@ impl CoreLoop {
                     bucket_interval_ms,
                     filter_predicates: &row_predicates,
                     time_key: &time_key,
-                    temporal: all_versions || system_as_of_ms.is_some() || valid_at_ms.is_some(),
+                    // A transaction snapshot keeps only the spans exact at
+                    // the snapshot (`exact_tier_split_at`).
+                    temporal: system_time.is_historical() || valid_at_ms.is_some(),
                 };
                 if let Err(e) = super::tier_route::refuse_unmergeable(collection, span, shape) {
                     return self.response_error(task, e);
@@ -243,8 +278,8 @@ impl CoreLoop {
                         txn_id,
                         coll_key: &coll_key,
                         time_range,
-                        filter_predicates: &filter_predicates,
-                        has_filters,
+                        filter_predicates: &staged_filter_predicates,
+                        has_filters: staged_has_filters,
                         rls_predicates: &rls_predicates,
                         limit: usize::MAX,
                     },
@@ -276,7 +311,14 @@ impl CoreLoop {
             && aggregates[0].0 == "count"
             && aggregates[0].1 == "*"
         {
-            return self.execute_ts_count_star(task, tid, collection, time_range, output_columns);
+            return self.execute_ts_count_star(
+                task,
+                tid,
+                collection,
+                time_range,
+                cut,
+                output_columns,
+            );
         }
 
         // Determine needed columns (projection pushdown).
@@ -333,6 +375,7 @@ impl CoreLoop {
                 staged,
                 raw_range,
                 tier_partials,
+                cut,
                 output_columns,
             })
         } else {
@@ -343,17 +386,19 @@ impl CoreLoop {
                 time_range,
                 limit,
                 filter_predicates: &filter_predicates,
-                has_filters,
+                staged_filter_predicates: &staged_filter_predicates,
                 rls_predicates: &rls_predicates,
                 computed_columns,
                 all_versions,
                 txn_id: overlay_txn,
                 sort_keys,
+                cut,
             })
         }
     }
 
-    /// COUNT(*) metadata fast path — zero I/O.
+    /// COUNT(*) metadata fast path — zero I/O. A partition a TRUNCATE
+    /// ended at or below `cut` counts no row.
     ///
     /// The one row carries the count under each name `output_columns` gives
     /// it, as the grouped scan's rows do.
@@ -363,6 +408,7 @@ impl CoreLoop {
         tid: crate::types::TenantId,
         collection: &str,
         time_range: (i64, i64),
+        cut: nodedb_columnar::VersionCut,
         output_columns: &[(String, String)],
     ) -> Response {
         let key = (task.request.database_id, tid, collection.to_string());
@@ -372,7 +418,7 @@ impl CoreLoop {
         }
         if let Some(registry) = self.ts_registries.get(&key) {
             let query_range = nodedb_types::timeseries::TimeRange::new(time_range.0, time_range.1);
-            for entry in registry.query_partitions(&query_range) {
+            for entry in registry.query_partitions(&query_range, cut) {
                 total += entry.meta.row_count;
             }
         }
@@ -401,7 +447,7 @@ impl CoreLoop {
             watermark_lsn: self.watermark,
             error_code: None,
             stage_vote: None,
-            read_versions: crate::types::ReadVersions::new(),
+            read_vshards: crate::types::ReadShards::new(),
             write_set: Vec::new(),
         }
     }

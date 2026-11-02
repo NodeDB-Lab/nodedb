@@ -39,12 +39,12 @@ impl TestClusterNode {
             .expect("every vshard routes to a core")
     }
 
-    /// The document keys of `tenant` in the default database that core
-    /// `core_id` stores, from that core's own tenant snapshot.
+    /// The keys of the current document rows of `tenant` in the default
+    /// database that core `core_id` stores, from that core's own tenant
+    /// snapshot.
     pub async fn document_keys_on_core(&self, core_id: usize, tenant: TenantId) -> Vec<String> {
-        self.tenant_snapshot_on_core(core_id, tenant)
-            .await
-            .documents
+        let snapshot = self.tenant_snapshot_on_core(core_id, tenant).await;
+        crate::cluster_harness::snapshot_rows::current_document_rows(&snapshot)
             .into_iter()
             .map(|(k, _)| k)
             .collect()
@@ -104,7 +104,7 @@ impl TestClusterNode {
             wal_lsn: None,
             resolved_now_ms: None,
             commit_hlc: None,
-            entry_version: None,
+            system_ordinal: None,
             admission: nodedb::bridge::envelope::Admission::Exempt(
                 nodedb::bridge::envelope::ExemptReason::Read,
             ),

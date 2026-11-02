@@ -124,9 +124,7 @@ pub(crate) async fn propose_sync_write(
 
     for (attempt, backoff_ms) in BACKOFF_MS.iter().enumerate() {
         match proposer(vshard_id, idempotency_key, data.clone(), deadline).await {
-            // The write's versions ride alongside the payload. The sync-ack
-            // path needs only the payload bytes.
-            Ok((p, _write_versions)) => {
+            Ok(p) => {
                 payload = Some(p);
                 break;
             }

@@ -292,6 +292,17 @@ impl KvIndexSet {
         }
     }
 
+    /// Remove every entry of every index and keep each registration. A
+    /// TRUNCATE empties the indexes with the rows it removes.
+    pub fn clear_entries(&mut self) {
+        for idx in &mut self.indexes {
+            idx.clear();
+        }
+        for ci in &mut self.composite_indexes {
+            ci.clear();
+        }
+    }
+
     /// Write amplification ratio: total_index_writes / total_puts.
     ///
     /// Returns 0.0 if no PUTs have been performed.

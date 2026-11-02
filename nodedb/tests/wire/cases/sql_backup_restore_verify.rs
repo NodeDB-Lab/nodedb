@@ -123,9 +123,13 @@ fn drop_one_document(envelope: &[u8], collections: &[&str]) -> Vec<u8> {
                 zerompk::from_msgpack(&data.snapshot).expect("decode a tenant snapshot");
             pending.retain(|collection| {
                 let needle = format!(":{collection}:");
-                match snap.documents.iter().position(|(k, _)| k.contains(&needle)) {
+                match snap
+                    .documents_versioned
+                    .iter()
+                    .position(|(k, _)| k.contains(&needle))
+                {
                     Some(at) => {
-                        snap.documents.remove(at);
+                        snap.documents_versioned.remove(at);
                         false
                     }
                     None => true,

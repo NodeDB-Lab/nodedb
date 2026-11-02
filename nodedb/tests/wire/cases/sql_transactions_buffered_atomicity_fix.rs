@@ -21,11 +21,9 @@
 //! Document cases below, which exercise the identical `exec_tx_passthrough`
 //! COMMIT-replay path.
 //!
-//! `INSERT INTO ARRAY` / `DELETE FROM ARRAY` do not plan as `ArrayOp` on the
-//! default `TestServer::start()`. Every server runs a cluster topology, so
-//! `plan_sql()` emits the Control-Plane routing wrapper
-//! `ClusterArrayOp::{Put, Delete}` instead (`array_convert/dml.rs`, gated on
-//! `ctx.cluster_enabled`). The wrapper has no Data-Plane handler, so the
+//! `INSERT INTO ARRAY` / `DELETE FROM ARRAY` do not plan as `ArrayOp`.
+//! `plan_sql()` always emits the Control-Plane routing wrapper
+//! `ClusterArrayOp::{Put, Delete}` (`array_convert/dml.rs`). The wrapper has no Data-Plane handler, so the
 //! staging gate reshapes it into one `ArrayOp::{Put, Delete}` per owning
 //! vShard (`session::txn_expand`), buffers every per-shard task, and stages
 //! each into its shard's overlay (`session::array_fanout_stage`); COMMIT

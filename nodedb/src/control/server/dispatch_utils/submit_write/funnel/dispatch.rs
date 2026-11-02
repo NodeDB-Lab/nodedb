@@ -49,10 +49,9 @@ pub(super) struct DispatchTarget {
     pub resolved_now_ms: Option<u64>,
     /// The write's commit HLC, which dates every event it emits.
     pub commit_hlc: u64,
-    /// The data-group entry the write applies: its version and the
-    /// system-time ordinal its leader assigned, alike on every replica.
-    /// `None` for a write that applies no entry.
-    pub entry_version: Option<crate::bridge::envelope::AppliedEntry>,
+    /// The system-time ordinal the write stamps, alike on every replica.
+    /// `None` for a write that stamps from the local clock.
+    pub system_ordinal: Option<i64>,
     pub admission: Admission,
     /// The record group the write journals its write set into.
     pub journal: Option<JournalGroup>,
@@ -109,7 +108,7 @@ pub(super) async fn dispatch_to_data_plane(
         wal_lsn: target.wal_lsn,
         resolved_now_ms: target.resolved_now_ms,
         commit_hlc: Some(target.commit_hlc),
-        entry_version: target.entry_version,
+        system_ordinal: target.system_ordinal,
         admission: target.admission,
     };
 

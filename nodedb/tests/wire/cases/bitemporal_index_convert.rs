@@ -8,8 +8,9 @@
 //!   index at its cutoff, so it returns the rows as they stood then. That
 //!   holds for an index created after the rows changed, too.
 //! - `CONVERT` rewrites every version, so the current read and the history
-//!   read return the same rows after it. A target that holds no row versions
-//!   is refused with nothing moved.
+//!   read return the same rows after it. A key-value target keeps no valid
+//!   time and purges its versions at the cleanup horizon, so it is refused
+//!   with nothing moved.
 
 use crate::harness::TestServer;
 
@@ -300,7 +301,8 @@ async fn convert_to_kv_is_refused_with_nothing_moved() {
 
     srv.expect_error(
         "CONVERT COLLECTION bt_conv_kv TO kv (id TEXT PRIMARY KEY, kind TEXT)",
-        "holds no row versions",
+        "a key-value collection keeps no valid time and purges its row versions at the \
+         cleanup horizon",
     )
     .await;
     assert_eq!(reads(&srv, "bt_conv_kv", before).await, expected);

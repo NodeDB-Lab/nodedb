@@ -492,6 +492,7 @@ mod tests {
                 filters: Vec::new(),
                 system_from: None,
                 rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Vector(VectorOp::SparseDelete {
                 collection: qualified("vec"),

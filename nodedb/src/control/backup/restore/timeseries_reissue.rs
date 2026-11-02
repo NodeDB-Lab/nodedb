@@ -1,37 +1,41 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Durable re-issue of restored timeseries rows.
+//! Decode of restored timeseries rows.
 //!
-//! Snapshot-install writes memtable + partition state directly, with no WAL
-//! record or Raft entry — on a multi-replica cluster only the restore-target
-//! node gets the data. RESTORE re-issues each collection's rows as a durable
-//! `TimeseriesOp::Ingest` (Raft on cluster, WAL + dispatch on single-node).
-//! Surrogates are empty: timeseries has no surrogate sidecar, only series
-//! identity re-derived from tag columns.
+//! RESTORE re-issues each collection's current rows as Calvin transactions
+//! (`redo_reissue::timeseries`). A row of a partition a TRUNCATE ended is no
+//! current row, and never decodes here. Timeseries has no surrogate sidecar:
+//! series identity re-derives from the tag columns.
 
 use std::collections::HashMap;
 
-use nodedb_types::RlsWriteCheck;
 use nodedb_types::columnar::schema::TS_SYSTEM;
 use nodedb_types::datetime::NdbDateTimeError;
 use nodedb_types::value::Value;
 
 use crate::Error;
-use crate::bridge::envelope::PhysicalPlan;
 use crate::engine::timeseries::columnar_memtable::{
-    ColumnData, ColumnType, ColumnarMemtable, ColumnarMemtableConfig, MemtableSnapshot,
+    ColumnType, ColumnarMemtable, ColumnarMemtableConfig, MemtableSnapshot,
 };
-use crate::engine::timeseries::columnar_segment::ColumnarSegmentReader;
+use crate::engine::timeseries::row_cells::{insert_non_null, memtable_cell, partition_cell};
 use crate::types::TsFlushedCollectionBlob;
-use nodedb_physical::physical_plan::TimeseriesOp;
 
-/// Server-stamped reserved column — re-derived by the ingest path, so it must
-/// NOT be carried back into the re-issued rows (the ingest handler restamps it).
-/// `_ts_valid_from` / `_ts_valid_until` ARE client-provided and preserved.
-const TS_SYSTEM_COLUMN: &str = TS_SYSTEM;
+use super::timeseries_partition::{BackedUpPartition, read_backed_up_partition};
 
-/// Decode the memtable section plus every flushed partition of one timeseries
-/// collection into live `Value::Object` rows (keyed by column name).
+/// Whether a decode keeps each row's `_ts_system` ordinal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SystemCell {
+    /// Leave it out: the row as a client wrote it.
+    Drop,
+    /// Keep it: a RESTORE installs each row at its backed-up ordinal. A
+    /// partition with no `_ts_system` column gives each row the partition's
+    /// `max_system_ts`, and a memtable with none gives `0`.
+    Keep,
+}
+
+/// Decode the memtable section plus every flushed partition no TRUNCATE
+/// ended of one timeseries collection into live `Value::Object` rows (keyed
+/// by column name). A row of an ended partition is no current row.
 ///
 /// `memtable_bytes` is `None` when no resident memtable existed at backup
 /// time. `kek` is the segment encryption key, `None` if unconfigured.
@@ -41,23 +45,67 @@ pub fn decode_timeseries_live_rows(
     flushed: &TsFlushedCollectionBlob,
     kek: Option<&nodedb_wal::crypto::WalEncryptionKey>,
 ) -> crate::Result<Vec<Value>> {
+    decode_rows(collection, memtable_bytes, flushed, kek, SystemCell::Drop)
+}
+
+/// [`decode_timeseries_live_rows`], with each row's `_ts_system` ordinal
+/// kept: the rows a RESTORE installs at their backed-up ordinals.
+pub fn decode_timeseries_restore_rows(
+    collection: &str,
+    memtable_bytes: Option<&[u8]>,
+    flushed: &TsFlushedCollectionBlob,
+    kek: Option<&nodedb_wal::crypto::WalEncryptionKey>,
+) -> crate::Result<Vec<Value>> {
+    decode_rows(collection, memtable_bytes, flushed, kek, SystemCell::Keep)
+}
+
+fn decode_rows(
+    collection: &str,
+    memtable_bytes: Option<&[u8]>,
+    flushed: &TsFlushedCollectionBlob,
+    kek: Option<&nodedb_wal::crypto::WalEncryptionKey>,
+    system: SystemCell,
+) -> crate::Result<Vec<Value>> {
     let mut rows: Vec<Value> = Vec::new();
 
     if let Some(bytes) = memtable_bytes {
-        decode_memtable_rows(collection, bytes, &mut rows)?;
+        decode_memtable_rows(collection, bytes, system, &mut rows)?;
     }
 
     for part in &flushed.partitions {
-        decode_partition_rows(collection, part, kek, &mut rows)?;
+        let meta = partition_meta(collection, part)?;
+        if meta.ended_at.is_some() {
+            continue;
+        }
+        let fallback = (system == SystemCell::Keep).then_some(meta.max_system_ts);
+        decode_partition_rows(collection, part, kek, fallback, &mut rows)?;
     }
 
     Ok(rows)
+}
+
+/// The meta of `part`. A partition whose `ended_at` is set holds rows a
+/// TRUNCATE ended: no current rows.
+fn partition_meta(
+    collection: &str,
+    part: &crate::types::TsFlushedPartitionBlob,
+) -> crate::Result<nodedb_types::timeseries::PartitionMeta> {
+    let meta: nodedb_types::timeseries::PartitionMeta = zerompk::from_msgpack(&part.meta_bytes)
+        .map_err(|e| Error::Serialization {
+            format: "msgpack".into(),
+            detail: format!(
+                "restore reissue: decode the meta of partition '{}' of '{collection}': {e}",
+                part.dir_name
+            ),
+        })?;
+    Ok(meta)
 }
 
 /// Decode the captured memtable snapshot into row objects, appending to `rows`.
 fn decode_memtable_rows(
     collection: &str,
     bytes: &[u8],
+    system: SystemCell,
     rows: &mut Vec<Value>,
 ) -> crate::Result<()> {
     let snap: MemtableSnapshot =
@@ -78,12 +126,16 @@ fn decode_memtable_rows(
     for idx in 0..mt.row_count() as usize {
         let mut map: HashMap<String, Value> = HashMap::with_capacity(columns.len());
         for (col_idx, name, ty) in &columns {
-            if name == TS_SYSTEM_COLUMN {
+            if name == TS_SYSTEM && system == SystemCell::Drop {
                 continue;
             }
             let cell = memtable_cell(&mt, *col_idx, *ty, idx)
                 .map_err(|e| instant_cell_error(collection, name, e))?;
             insert_non_null(&mut map, name, cell);
+        }
+        if system == SystemCell::Keep {
+            map.entry(TS_SYSTEM.to_string())
+                .or_insert(Value::Integer(0));
         }
         rows.push(Value::Object(map));
     }
@@ -98,216 +150,50 @@ fn instant_cell_error(collection: &str, column: &str, e: NdbDateTimeError) -> Er
     }
 }
 
-/// Extract one cell from a memtable column as a `Value`.
-///
-/// A time column yields the value its kind denotes — a typed instant for a
-/// declared `TIMESTAMP` / `TIMESTAMPTZ` key, the integer stored for a
-/// `BIGINT` key — so the reissued row carries the cell a client INSERT
-/// would have sent.
-fn memtable_cell(
-    mt: &ColumnarMemtable,
-    col_idx: usize,
-    ty: ColumnType,
-    idx: usize,
-) -> Result<Value, NdbDateTimeError> {
-    let value = match ty {
-        ColumnType::Timestamp(kind) => {
-            return kind.cell_value(mt.column(col_idx).as_timestamps()[idx]);
-        }
-        ColumnType::Int64 => Value::Integer(mt.column(col_idx).as_i64()[idx]),
-        ColumnType::Float64 => {
-            let v = mt.column(col_idx).as_f64()[idx];
-            if v.is_nan() {
-                Value::Null
-            } else {
-                Value::Float(v)
-            }
-        }
-        ColumnType::Symbol => match mt.column(col_idx) {
-            ColumnData::Symbol(ids) => mt
-                .symbol_dict(col_idx)
-                .and_then(|dict| dict.get(ids[idx]))
-                .map(|s| Value::String(s.to_string()))
-                .unwrap_or(Value::Null),
-            ColumnData::DictEncoded {
-                ids,
-                dictionary,
-                valid,
-                ..
-            } => {
-                if valid.get(idx).copied().unwrap_or(false) {
-                    dictionary
-                        .get(ids[idx] as usize)
-                        .map(|s| Value::String(s.clone()))
-                        .unwrap_or(Value::Null)
-                } else {
-                    Value::Null
-                }
-            }
-            _ => Value::Null,
-        },
-    };
-    Ok(value)
-}
-
 /// Decode one flushed partition directory into row objects, appending to `rows`.
 ///
-/// The partition files are materialized to a temporary directory and read with
-/// the SAME `ColumnarSegmentReader` the live scan path uses, so the decode is
-/// byte-faithful to what a query against the restored segment would return.
+/// The partition reads with the same `ColumnarSegmentReader` the live scan
+/// path uses (`read_backed_up_partition`), so the decode is byte-faithful to
+/// what a query against the segment returns.
 fn decode_partition_rows(
     collection: &str,
     part: &crate::types::TsFlushedPartitionBlob,
     kek: Option<&nodedb_wal::crypto::WalEncryptionKey>,
+    system_fallback: Option<i64>,
     rows: &mut Vec<Value>,
 ) -> crate::Result<()> {
-    let tmp = tempfile::Builder::new()
-        .prefix("nodedb-ts-reissue-")
-        .tempdir()
-        .map_err(Error::Io)?;
-    let part_dir = tmp.path();
-    for (filename, data) in &part.files {
-        std::fs::write(part_dir.join(filename), data).map_err(Error::Io)?;
-    }
-
-    let schema = ColumnarSegmentReader::read_schema(part_dir, kek).map_err(|e| Error::Storage {
-        engine: "timeseries".into(),
-        detail: format!(
-            "restore reissue: read schema for partition '{}' of '{collection}': {e}",
-            part.dir_name
-        ),
-    })?;
-
-    let requested: Vec<(String, ColumnType)> = schema.columns.clone();
-    let col_data = ColumnarSegmentReader::read_columns(part_dir, &requested, kek).map_err(|e| {
-        Error::Storage {
-            engine: "timeseries".into(),
-            detail: format!(
-                "restore reissue: read columns for partition '{}' of '{collection}': {e}",
-                part.dir_name
-            ),
-        }
-    })?;
-
-    let mut sym_dicts: HashMap<usize, nodedb_types::timeseries::SymbolDictionary> = HashMap::new();
-    for (i, (name, ty)) in schema.columns.iter().enumerate() {
-        if *ty == ColumnType::Symbol
-            && let Ok(dict) = ColumnarSegmentReader::read_symbol_dict(part_dir, name, kek)
-        {
-            sym_dicts.insert(i, dict);
-        }
-    }
+    let BackedUpPartition {
+        schema,
+        columns: col_data,
+        sym_dicts,
+    } = read_backed_up_partition(collection, part, kek)?;
 
     let row_count = col_data.first().map(|c| c.len()).unwrap_or(0);
     for idx in 0..row_count {
         let mut map: HashMap<String, Value> = HashMap::with_capacity(schema.columns.len());
         for (col_i, (name, ty)) in schema.columns.iter().enumerate() {
-            if name == TS_SYSTEM_COLUMN {
+            if name == TS_SYSTEM && system_fallback.is_none() {
                 continue;
             }
             let cell = partition_cell(&col_data[col_i], *ty, col_i, &sym_dicts, idx)
                 .map_err(|e| instant_cell_error(collection, name, e))?;
             insert_non_null(&mut map, name, cell);
         }
+        if let Some(fallback) = system_fallback {
+            map.entry(TS_SYSTEM.to_string())
+                .or_insert(Value::Integer(fallback));
+        }
         rows.push(Value::Object(map));
     }
     Ok(())
 }
 
-/// Extract one cell from a flushed-segment column as a `Value`. The partition
-/// schema carries each time column's kind, so the cell is typed the same way
-/// a memtable cell is.
-fn partition_cell(
-    data: &ColumnData,
-    ty: ColumnType,
-    col_idx: usize,
-    sym_dicts: &HashMap<usize, nodedb_types::timeseries::SymbolDictionary>,
-    idx: usize,
-) -> Result<Value, NdbDateTimeError> {
-    let value = match ty {
-        ColumnType::Timestamp(kind) => {
-            return kind.cell_value(data.as_timestamps()[idx]);
-        }
-        ColumnType::Int64 => Value::Integer(data.as_i64()[idx]),
-        ColumnType::Float64 => {
-            let v = data.as_f64()[idx];
-            if v.is_nan() {
-                Value::Null
-            } else {
-                Value::Float(v)
-            }
-        }
-        ColumnType::Symbol => match data {
-            ColumnData::Symbol(ids) => sym_dicts
-                .get(&col_idx)
-                .and_then(|dict| dict.get(ids[idx]))
-                .map(|s| Value::String(s.to_string()))
-                .unwrap_or(Value::Null),
-            ColumnData::DictEncoded {
-                ids,
-                dictionary,
-                valid,
-                ..
-            } => {
-                if valid.get(idx).copied().unwrap_or(false) {
-                    dictionary
-                        .get(ids[idx] as usize)
-                        .map(|s| Value::String(s.clone()))
-                        .unwrap_or(Value::Null)
-                } else {
-                    Value::Null
-                }
-            }
-            _ => Value::Null,
-        },
-    };
-    Ok(value)
-}
-
-/// Insert a cell, skipping nulls so a re-issued row carries only present fields
-/// (mirrors the ILP / msgpack ingest contract: absent field == not written).
-fn insert_non_null(map: &mut HashMap<String, Value>, name: &str, value: Value) {
-    if !matches!(value, Value::Null) {
-        map.insert(name.to_string(), value);
-    }
-}
-
-/// Build the durable `TimeseriesOp::Ingest` plan from decoded rows.
-///
-/// The payload is the native-`Value` msgpack encoding of `Value::Array(rows)`
-/// (array of per-row field-keyed maps) — the exact shape the `"msgpack"` ingest
-/// handler decodes (`decode_msgpack_rows`). Surrogates are empty: timeseries
-/// re-derives series identity from the tag columns.
-pub fn build_timeseries_ingest_plan(
-    collection: &str,
-    rows: Vec<Value>,
-) -> crate::Result<PhysicalPlan> {
-    let payload =
-        nodedb_types::value_to_msgpack(&Value::Array(rows)).map_err(|e| Error::Serialization {
-            format: "msgpack".into(),
-            detail: format!("restore reissue: encode timeseries rows for '{collection}': {e}"),
-        })?;
-
-    Ok(PhysicalPlan::Timeseries(TimeseriesOp::Ingest {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_string()),
-        payload,
-        format: "msgpack".into(),
-        wal_lsn: None,
-        surrogates: Vec::new(),
-        provenance: None,
-        // No predicate here: a restore re-issues rows that were already
-        // admitted before the backup was taken. The identity that admitted
-        // them is not available during restore.
-        rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
-        returning: None,
-        rls_filters: Vec::new(),
-    }))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::timeseries::columnar_memtable::{ColumnValue, ColumnarSchema, TimeKind};
+    use crate::engine::timeseries::columnar_memtable::{
+        ColumnData, ColumnValue, ColumnarSchema, TimeKind,
+    };
     use nodedb_types::InstantKind;
     use nodedb_types::datetime::NdbDateTime;
     use nodedb_types::timeseries::SeriesId;

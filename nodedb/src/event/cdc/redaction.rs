@@ -29,10 +29,11 @@
 //!   (`ChangeStreamDef::subscriber_roles`), which the delivery task reads back
 //!   from the stream registry. No identity is pulled across the Data→Event bus.
 //!
-//! A captured scope that carries no roles proves nothing about the destination:
-//! the record may simply predate the field. Events of a collection some policy
-//! protects are then withheld instead of delivered in the clear, per collection,
-//! so a stream over unprotected collections still survives the upgrade.
+//! A captured scope that carries no roles proves nothing about the destination.
+//! Every policy is keyed on a role, so no policy can match it. Events of a
+//! collection some policy protects are then withheld instead of delivered in the
+//! clear. The check runs per collection, so a stream over unprotected
+//! collections keeps delivering.
 //!
 //! Rules are keyed per collection and a wildcard stream carries events from
 //! many, so the resolved inputs are rebuilt only when consecutive events cross
@@ -57,9 +58,9 @@ enum ScopeOrigin {
     /// serves unmasked, and the same one the planner's refusal pass lets
     /// through.
     LiveIdentity,
-    /// Captured onto the subscription record at `CREATE CHANGE STREAM`. No
-    /// roles then may equally mean the record predates the field, so nothing can
-    /// be concluded about what the destination is entitled to read.
+    /// Captured onto the subscription record at `CREATE CHANGE STREAM`. The
+    /// destination is not the creator. No roles then proves nothing about what
+    /// the destination is entitled to read.
     CapturedSubscription,
 }
 
@@ -176,17 +177,14 @@ impl CdcSubscriberScope {
     /// Whether this event's collection is protected but the subscriber cannot
     /// be shown to be entitled to any part of it.
     ///
-    /// A subscription written before the roles were captured decodes with an
-    /// empty list, which is indistinguishable from a creator that held none. No
+    /// A subscription whose creator held no roles captures an empty list. No
     /// policy is keyed on the empty list, so every rule on the collection would
-    /// silently fail to match and the stored columns would go out in the clear —
-    /// to a webhook endpoint or a Kafka topic that no later request can take
-    /// them back from.
+    /// fail to match. The stored columns would then go out in the clear, to a
+    /// webhook endpoint or a Kafka topic that no later request can take them
+    /// back from.
     ///
-    /// The question is asked per collection so the refusal stays where it is
-    /// needed: an unprotected collection has nothing to prove entitlement to,
-    /// and its stream keeps delivering across the upgrade that introduced the
-    /// field.
+    /// The question is asked per collection. An unprotected collection has
+    /// nothing to prove entitlement to, so its stream keeps delivering.
     fn entitlement_is_unprovable(&self, store: &RedactionStore, collection: &str) -> bool {
         self.origin == ScopeOrigin::CapturedSubscription
             && self.roles.is_empty()
@@ -252,7 +250,7 @@ fn warn_unprovable_entitlement(event: &CdcEvent) {
         "CDC events dropped: a redaction policy protects this collection but the \
          change stream captured no subscriber roles, so the destination cannot be \
          shown to be entitled to the stored values — recreate the change stream as \
-         the principal that should receive it, or backfill its subscriber roles, to \
+         a principal holding the roles the destination should receive under, to \
          resume delivery"
     );
 }
@@ -655,7 +653,7 @@ mod tests {
         assert!(Arc::ptr_eq(&original, &events[0]));
     }
 
-    fn legacy_subscription() -> CdcSubscriberScope {
+    fn roleless_subscription() -> CdcSubscriberScope {
         CdcSubscriberScope::with_origin(
             TenantId::new(1),
             Vec::new(),
@@ -663,15 +661,13 @@ mod tests {
         )
     }
 
-    /// The leak this closes: a subscription persisted before the roles were
-    /// captured decodes roleless, so every rule on the collection failed to
-    /// match and the stored columns went to the webhook or Kafka destination in
-    /// the clear. Nothing can prove that destination entitled, so the events are
-    /// withheld — for ANY role's policy, since none of them can be evaluated.
+    /// A subscription whose creator held no roles matches no rule on the
+    /// collection. Nothing can prove the webhook or Kafka destination entitled,
+    /// so the events are withheld for any role's policy.
     #[test]
     fn roleless_subscription_drops_events_of_a_protected_collection() {
         let store = masked("users", "support", "email");
-        let mut scope = legacy_subscription();
+        let mut scope = roleless_subscription();
 
         assert!(
             scope
@@ -680,13 +676,12 @@ mod tests {
         );
     }
 
-    /// …and the refusal is per collection, not blanket: a stream over a
-    /// collection no policy covers keeps delivering across the upgrade that
-    /// introduced the captured roles.
+    /// The refusal is per collection. A stream over a collection no policy
+    /// covers keeps delivering.
     #[test]
     fn roleless_subscription_still_delivers_an_unprotected_collection() {
         let store = masked("users", "support", "email");
-        let mut scope = legacy_subscription();
+        let mut scope = roleless_subscription();
         let original = event("audit", "INSERT", Some(row("d@e.f")), None);
 
         let delivered = scope
@@ -702,7 +697,7 @@ mod tests {
     #[test]
     fn roleless_wildcard_subscription_withholds_only_the_protected_collection() {
         let store = masked("users", "support", "email");
-        let mut scope = legacy_subscription();
+        let mut scope = roleless_subscription();
         let mut events = vec![
             event("users", "INSERT", Some(row("a@b.c")), None),
             event("audit", "INSERT", Some(row("d@e.f")), None),

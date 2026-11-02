@@ -29,6 +29,12 @@
 //! - A text or spatial index write locks its collection `Intent`.
 //! - A transaction batch takes the keys of every plan it carries.
 //! - Any other write locks every collection it writes `Exclusive`.
+//!
+//! Every write that takes a key also takes the vShard key `Intent`
+//! ([`vshard_key`]). A pending Calvin transaction that read the vShard whole
+//! holds that key `Shared` from its lock grant until its install. So no
+//! gated write lands between that transaction's validation and its install.
+//! Gated writes hold the key together.
 
 use std::collections::BTreeMap;
 
@@ -37,7 +43,9 @@ use nodedb_physical::physical_plan::{
     ColumnarOp, DocumentOp, KvOp, MetaOp, PhysicalPlan, TimeseriesOp, VectorOp,
 };
 
-use crate::control::cluster::calvin::scheduler::driver::helpers::expand_write_key_sets;
+use crate::control::cluster::calvin::scheduler::driver::helpers::{
+    expand_write_key_sets, vshard_key,
+};
 use crate::control::cluster::calvin::scheduler::lock_manager::{LockKey, LockMode};
 use crate::control::planner::calvin::submit::unique_claims::catalog_unique_claim_sets;
 use crate::control::planner::calvin::tx_class::write_keys::{WriteKeys, add_plan_write_keys};
@@ -76,23 +84,40 @@ pub(crate) fn plan_admission_keys(
         )?);
     }
     Ok(AdmissionKeys {
-        keys: expand_write_key_sets(&sets),
+        keys: with_vshard_intent(expand_write_key_sets(&sets)),
         sequenced,
     })
 }
 
 /// The lock request of a write that names only whole `collections`, each
-/// locked `Exclusive`. A committed session transaction's redo and a synced
-/// array op take it.
+/// locked `Exclusive`, and the vShard key `Intent`. A committed session
+/// transaction's redo and a synced array op take it.
+///
+/// A redo validates its own reads at its install. The vShard key orders it
+/// after every pending transaction that read the vShard whole, so the redo
+/// never lands between that transaction's validation and its install.
 pub(crate) fn collection_admission_keys(collections: &[String]) -> AdmissionKeys {
     let mut keys = WriteKeys::default();
     for collection in collections {
         keys.whole_collection(collection);
     }
+    let mut keys = expand_write_key_sets(&keys.into_key_sets());
+    keys.insert(vshard_key(), LockMode::Intent);
     AdmissionKeys {
-        keys: expand_write_key_sets(&keys.into_key_sets()),
+        keys,
         sequenced: false,
     }
+}
+
+/// `keys` with the vShard key `Intent` added, when the write takes any key.
+/// A write that takes no key passes the gate unlocked.
+fn with_vshard_intent(mut keys: BTreeMap<LockKey, LockMode>) -> BTreeMap<LockKey, LockMode> {
+    if !keys.is_empty() {
+        keys.entry(vshard_key())
+            .and_modify(|mode| *mode = mode.merge(LockMode::Intent))
+            .or_insert(LockMode::Intent);
+    }
+    keys
 }
 
 /// A Calvin-scheduled apply: the scheduler acquired its locks.
@@ -329,6 +354,7 @@ mod tests {
                 filters: Vec::new(),
                 system_from: None,
                 rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Timeseries(TimeseriesOp::Truncate {
                 collection: qualified("docs"),
@@ -465,6 +491,7 @@ mod tests {
             provenance: None,
             wal_lsn: None,
             system_from: None,
+            restored_versions: Vec::new(),
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
             returning: None,
             rls_filters: Vec::new(),
@@ -594,6 +621,86 @@ mod tests {
         assert!(!request.sequenced);
         assert_eq!(request.keys.get(&coll("a")), Some(&LockMode::Exclusive));
         assert_eq!(request.keys.get(&coll("b")), Some(&LockMode::Exclusive));
-        assert_eq!(request.keys.len(), 2);
+        assert_eq!(request.keys.get(&vshard_key()), Some(&LockMode::Intent));
+        assert_eq!(request.keys.len(), 3);
+    }
+
+    /// A Calvin transaction that read vShard 0 whole (one home of a
+    /// cross-shard graph read) and writes `docs` there votes at its stage
+    /// and installs later. A session commit's redo of `counter` on the same
+    /// vShard shares no collection with it. The redo waits while the
+    /// transaction holds its keys, so it never installs between the vote and
+    /// the install. Two redos of distinct collections run together: each
+    /// holds the vShard key `Intent`.
+    #[test]
+    fn a_redo_waits_for_a_pending_transaction_that_read_its_vshard_whole() {
+        use nodedb_cluster::calvin::types::{
+            EngineKeySet, ReadWriteSet, SequencedTxn, SortedVec, TxClass,
+        };
+
+        use crate::control::cluster::calvin::scheduler::driver::helpers::{
+            LockSite, expand_rw_set,
+        };
+        use crate::control::planner::calvin::tx_class::static_builder::build_single_vshard_tx_class;
+
+        let write = nodedb_physical::physical_task::PhysicalTask {
+            tenant_id: TenantId::new(1),
+            vshard_id: crate::types::VShardId::new(0),
+            database_id: DatabaseId::DEFAULT,
+            plan: doc_insert("o1", 17),
+            post_set_op: nodedb_physical::physical_task::PostSetOp::None,
+            txn_id: None,
+        };
+        let mut tx: TxClass = build_single_vshard_tx_class(&[write], TenantId::new(1), &[])
+            .expect("a valid transaction class");
+        tx.read_set = ReadWriteSet::new(vec![EngineKeySet::Edge {
+            collection: String::new(),
+            edges: SortedVec::new(Vec::new()),
+            home_vshards: SortedVec::new(vec![0]),
+        }]);
+        let calvin_keys = expand_rw_set(
+            &SequencedTxn {
+                epoch: 1,
+                position: 0,
+                tx_class: Arc::new(tx),
+                epoch_system_ms: 1_700_000_000_000,
+                epoch_vshard_txn_count: 1,
+                lock_owner: None,
+                local_plans: None,
+            },
+            LockSite::On(0),
+        );
+        assert_eq!(
+            calvin_keys.get(&vshard_key()),
+            Some(&LockMode::Shared),
+            "a read of a whole vShard holds the vShard key on its home"
+        );
+        // A redo locks each collection it writes `Exclusive`, so two redos
+        // that share a vShard key must write distinct collections.
+        let redo = |collection: &str| {
+            collection_admission_keys(&[qualified(collection).as_str().to_owned()]).keys
+        };
+
+        let mut table = LockManager::new();
+        let calvin = TxnId::new(1, 0);
+        assert!(table.try_acquire(calvin, calvin_keys.clone()));
+        assert!(
+            !table.try_acquire(TxnId::new(TxnId::AUTOCOMMIT_EPOCH, 0), redo("counter")),
+            "the redo must not install between the transaction's vote and its install"
+        );
+        let _promoted = table.release(calvin);
+        assert!(table.try_acquire(TxnId::new(TxnId::AUTOCOMMIT_EPOCH, 1), redo("counter")));
+        assert!(
+            table.try_acquire(TxnId::new(TxnId::AUTOCOMMIT_EPOCH, 2), redo("ledger")),
+            "two redos hold the vShard key together"
+        );
+        assert!(
+            !table.try_acquire(TxnId::new(TxnId::AUTOCOMMIT_EPOCH, 3), redo("counter")),
+            "two redos of one collection still exclude each other"
+        );
+        assert!(
+            !table.try_acquire(calvin, calvin_keys),
+            "a transaction that reads the vShard whole waits for the admitted redos"
+        );
     }
 }

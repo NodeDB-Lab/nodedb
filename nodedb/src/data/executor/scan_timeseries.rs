@@ -7,6 +7,9 @@
 //! partition. A flushed collection with no resident memtable still answers
 //! with all of its rows.
 
+use nodedb_types::columnar::schema::TS_SYSTEM;
+
+use crate::bridge::scan_filter::{FilterOp, ScanFilter};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::timeseries::raw_scan::TsGatherParams;
 use crate::types::{DatabaseId, TenantId};
@@ -61,16 +64,48 @@ impl CoreLoop {
         collection: &str,
         limit: usize,
     ) -> crate::Result<Vec<(String, Vec<u8>)>> {
+        self.scan_timeseries_docs_at(did, tid, collection, limit, None)
+    }
+
+    /// [`Self::scan_timeseries_docs`] read at a system-time cut. `None` reads
+    /// the current rows. `Some(ordinal)` reads the rows whose stored
+    /// `_ts_system` ordinal is at or below `ordinal`, in the partitions no
+    /// TRUNCATE ended at or below it. Those are exactly the rows visible at
+    /// the cut.
+    pub(in crate::data::executor) fn scan_timeseries_docs_at(
+        &self,
+        did: u64,
+        tid: u64,
+        collection: &str,
+        limit: usize,
+        at: Option<i64>,
+    ) -> crate::Result<Vec<(String, Vec<u8>)>> {
+        let cut_predicates: Vec<ScanFilter> = at.map(system_cut_predicate).into_iter().collect();
         let rows = self.gather_ts_rows(TsGatherParams {
             database_id: DatabaseId::new(did),
             tid: TenantId::new(tid),
             collection,
             time_range: ALL_TIME,
-            filter_predicates: &[],
+            filter_predicates: &cut_predicates,
             rls_predicates: &[],
             limit,
+            cut: at.map_or(
+                nodedb_columnar::VersionCut::Current,
+                nodedb_columnar::VersionCut::At,
+            ),
         })?;
         rows.into_iter().map(ts_row_to_doc).collect()
+    }
+}
+
+/// The predicate that admits the rows a read at `ordinal` sees.
+fn system_cut_predicate(ordinal: i64) -> ScanFilter {
+    ScanFilter {
+        field: TS_SYSTEM.into(),
+        op: FilterOp::Lte,
+        value: nodedb_types::Value::Integer(ordinal),
+        clauses: Vec::new(),
+        expr: None,
     }
 }
 
@@ -105,6 +140,14 @@ mod tests {
         let (id, mp) = ts_row_to_doc(row).expect("row encodes");
         assert_eq!(id, "r1");
         assert!(!mp.is_empty());
+    }
+
+    #[test]
+    fn a_cut_admits_rows_stamped_at_or_below_it() {
+        let predicate = system_cut_predicate(42);
+        assert_eq!(predicate.field, TS_SYSTEM);
+        assert_eq!(predicate.op, FilterOp::Lte);
+        assert_eq!(predicate.value, nodedb_types::Value::Integer(42));
     }
 
     #[test]

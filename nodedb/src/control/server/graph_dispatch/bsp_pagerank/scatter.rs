@@ -59,8 +59,6 @@ pub(super) struct ShardDispatch {
 pub(super) struct ShardResult {
     pub(super) node_id: u64,
     pub(super) result: BspSuperstepResult,
-    /// The versions the node's cores reported for the superstep.
-    pub(super) read_versions: crate::types::ReadVersions,
 }
 
 /// Parameters for [`scatter_superstep`].
@@ -140,11 +138,7 @@ pub(super) async fn scatter_superstep(
             )
             .await?;
             let result = decode_single_result_from_payload(node_id, read.payload)?;
-            Ok::<ShardResult, crate::Error>(ShardResult {
-                node_id,
-                result,
-                read_versions: read.read_versions,
-            })
+            Ok::<ShardResult, crate::Error>(ShardResult { node_id, result })
         })
     });
 

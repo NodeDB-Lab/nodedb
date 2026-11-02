@@ -27,10 +27,7 @@ use crate::data::executor::task::ExecutionTask;
 use crate::engine::graph::csr::Direction;
 use crate::types::{DatabaseId, Lsn, ReadConsistency, RequestId, TenantId, TraceId, VShardId};
 use crate::wal::manager::{NO_APPLY_KEY, WalManager};
-use crate::wal::{
-    CascadedEdge, GroupMembership, NodeCascadeRedo, RedoRecord, RedoSubRecord, WriteGroup,
-    WriteGroupRecord,
-};
+use crate::wal::{GroupMembership, RedoRecord, WriteGroup, WriteGroupRecord};
 
 const TID: u64 = 1;
 const SOCIAL: &str = "social";
@@ -133,7 +130,7 @@ fn request(plan: PhysicalPlan, wal_lsn: Option<Lsn>) -> Request {
         wal_lsn,
         resolved_now_ms: None,
         commit_hlc: None,
-        entry_version: None,
+        system_ordinal: None,
         admission: Admission::Admitted,
     }
 }
@@ -228,72 +225,6 @@ fn a_crdt_document_delete_leaves_its_nodes_edges() {
         "the edge of u1 is still live"
     );
     assert_eq!(replayed_edges(&live.records(), "u1"), live_edges);
-}
-
-/// A node cascade an older WAL journalled replays at its own ordinals, and
-/// the replayed store holds exactly those tombstones.
-#[test]
-fn a_journalled_node_cascade_replays_at_its_ordinals() {
-    let mut live = Live::open();
-    live.write(edge_put(("a", 1), ("b", 2)));
-    let (before_versions, before) = replayed_edges(&live.records(), "a");
-    assert_eq!(before, vec![("KNOWS".to_string(), "b".to_string())]);
-
-    let (t, v, d) = (TenantId::new(TID), VShardId::new(0), DatabaseId::DEFAULT);
-    let appender = live
-        .wal
-        .appender(NO_APPLY_KEY)
-        .with_event_source(crate::event::EventSource::User);
-    let origin = appender
-        .append_write_group(
-            t,
-            v,
-            d,
-            &WriteGroupRecord {
-                group: WriteGroup::OPENING,
-                ops: Vec::new(),
-                redo: None,
-            },
-        )
-        .expect("open");
-    let cascade = NodeCascadeRedo {
-        node: "a".into(),
-        edges: vec![CascadedEdge {
-            collection: QualifiedCollection::new(DatabaseId::DEFAULT, SOCIAL)
-                .as_str()
-                .to_string(),
-            src: "a".into(),
-            label: "KNOWS".into(),
-            dst: "b".into(),
-            system_from: i64::MAX / 2,
-        }],
-    };
-    appender
-        .append_write_group(
-            t,
-            v,
-            d,
-            &WriteGroupRecord {
-                group: WriteGroup::part_of(origin.as_u64(), 1, 1),
-                ops: vec![RedoSubRecord {
-                    record_type: nodedb_wal::record::RecordType::GraphNodeCascade as u32,
-                    payload: zerompk::to_msgpack_vec(&cascade).expect("encode"),
-                }],
-                redo: None,
-            },
-        )
-        .expect("part");
-
-    let (versions, neighbors) = replayed_edges(&live.records(), "a");
-    assert!(
-        neighbors.is_empty(),
-        "the journalled tombstone removes a -> b"
-    );
-    assert_eq!(
-        versions.visible.len(),
-        before_versions.visible.len() + 1,
-        "the tombstone is stored beside the version it covers"
-    );
 }
 
 /// A committed transaction record whose install never became durable keeps

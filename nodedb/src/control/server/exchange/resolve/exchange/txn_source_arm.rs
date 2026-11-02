@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Read-your-writes for per-shard reads inside a transaction.
+//! Read-your-writes and system-time scopes for per-shard reads.
 //!
 //! A per-shard aggregate and a join's by-name side read their collection by
 //! name in the Data Plane, which sees committed rows only. The engine's
-//! own full scan folds the transaction's staged writes. Inside a
-//! transaction such a read is rewritten here to run over that scan, gathered
-//! on the coordinator under the same predicates and read policy.
+//! own full scan folds the transaction's staged writes and reads at any
+//! system-time scope. Inside a transaction, or at a scope other than
+//! `Current`, such a read is rewritten here to run over that scan, gathered
+//! on the coordinator under the same predicates, read policy, and scope.
 
 use nodedb_physical::physical_plan::{PhysicalPlan, QueryOp};
 
@@ -26,28 +27,27 @@ pub(super) enum TxnRewrite {
     Unchanged(Box<PhysicalPlan>),
 }
 
-/// Rewrite an in-transaction per-shard aggregate to aggregate over the
-/// collection's full engine scan.
+/// Rewrite an in-transaction per-shard aggregate, or one at a system-time
+/// scope other than `Current`, to aggregate over the collection's full
+/// engine scan at the aggregate's scope.
 ///
 /// The aggregate's `filters` already hold the WHERE predicates and the read
 /// policy; they move onto the scan, which applies them per row before the
-/// staged rows are folded. Outside a transaction, or for any other plan, the
-/// plan comes back unchanged.
+/// staged rows are folded. A current read outside a transaction, or any
+/// other plan, comes back unchanged.
 pub(super) async fn txn_aggregate(
     state: &SharedState,
     ctx: ReadScope,
     captures: &mut Vec<DistributedReadCapture>,
     plan: PhysicalPlan,
 ) -> crate::Result<TxnRewrite> {
-    if ctx.txn_id.is_none() {
-        return Ok(TxnRewrite::Unchanged(Box::new(plan)));
-    }
     let PhysicalPlan::Query(QueryOp::Aggregate {
         collection,
         input: None,
         group_by,
         aggregates,
         filters,
+        system_time,
         having,
         limit,
         sub_group_by,
@@ -59,11 +59,30 @@ pub(super) async fn txn_aggregate(
     else {
         return Ok(TxnRewrite::Unchanged(Box::new(plan)));
     };
+    if ctx.txn_id.is_none() && system_time.is_current() {
+        return Ok(TxnRewrite::Unchanged(Box::new(PhysicalPlan::Query(
+            QueryOp::Aggregate {
+                collection,
+                input: None,
+                group_by,
+                aggregates,
+                filters,
+                system_time,
+                having,
+                limit,
+                sub_group_by,
+                sub_aggregates,
+                grouping_sets,
+                sort_keys,
+                group_key_aliases,
+            },
+        ))));
+    }
     let scan = full_scan_plan_for_collection(
         state,
         ctx.database_id,
         ctx.tenant_id,
-        ScanSide::join_side(collection.as_str(), &filters, &[]),
+        ScanSide::join_side(collection.as_str(), &filters, &[]).at(system_time),
     )?;
     let Some(scan) = scan else {
         // No catalog record on this node: the by-name aggregate stands.
@@ -74,6 +93,7 @@ pub(super) async fn txn_aggregate(
                 group_by,
                 aggregates,
                 filters,
+                system_time,
                 having,
                 limit,
                 sub_group_by,
@@ -95,6 +115,7 @@ pub(super) async fn txn_aggregate(
             aggregates,
             // The scan applies them.
             filters: Vec::new(),
+            system_time,
             having,
             limit,
             sub_group_by,
@@ -109,7 +130,8 @@ pub(super) async fn txn_aggregate(
 }
 
 /// Gather a join's by-name side through the collection's full engine scan
-/// inside a transaction, so the side's rows include the staged writes.
+/// inside a transaction, so the side's rows include the staged writes, or
+/// at a scope other than `Current`, so the side reads the scope's versions.
 /// Returns the embedded input, or `None` when the side keeps its by-name
 /// scan.
 pub(super) async fn txn_join_side(
@@ -118,7 +140,7 @@ pub(super) async fn txn_join_side(
     captures: &mut Vec<DistributedReadCapture>,
     side: ScanSide<'_>,
 ) -> crate::Result<Option<Box<PhysicalPlan>>> {
-    if ctx.txn_id.is_none() || side.collection().is_empty() {
+    if (ctx.txn_id.is_none() && side.system_time().is_current()) || side.collection().is_empty() {
         return Ok(None);
     }
     let Some(scan) = full_scan_plan_for_collection(state, ctx.database_id, ctx.tenant_id, side)?

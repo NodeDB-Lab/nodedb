@@ -2,11 +2,9 @@
 
 pub mod engines;
 pub mod error;
+pub mod key;
 pub mod registry;
-pub mod registry_store;
 
 pub use error::QuarantineError;
-pub use registry::{
-    QuarantineEngine, QuarantineRecord, QuarantineRegistry, QuarantineSnapshot, SegmentKey,
-};
-pub use registry_store::{QuarantineStorageConfig, build_quarantine_store};
+pub use key::{CollectionScope, QuarantineEngine, SegmentKey};
+pub use registry::{QuarantineCountKey, QuarantineRegistry, QuarantineSnapshot};

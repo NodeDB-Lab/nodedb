@@ -60,7 +60,7 @@ pub struct DatabaseId(u64);
 
 impl DatabaseId {
     /// The built-in `default` database. Permanently reserved; cannot be
-    /// dropped. Zero-fill backward-compatibility with pre-10 WAL records.
+    /// dropped.
     pub const DEFAULT: DatabaseId = DatabaseId(0);
 
     pub const fn new(id: u64) -> Self {

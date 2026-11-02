@@ -55,8 +55,6 @@ pub(in crate::data::executor) struct UniqueScope<'a> {
     pub tid: u64,
     pub collection: &'a str,
     pub paths: &'a [IndexPath],
-    /// Bitemporal collections keep index entries in the versioned index only.
-    pub bitemporal: bool,
     /// `false` when the unit truncated the collection: no committed row
     /// survives it.
     pub base_visible: bool,
@@ -124,8 +122,7 @@ pub(in crate::data::executor) fn check_unique_post_state(
             continue;
         }
         for (needle, owner) in judged_claims {
-            let stored =
-                doc_engine.index_lookup(scope.collection, &path.path, &needle, scope.bitemporal)?;
+            let stored = doc_engine.index_lookup(scope.collection, &path.path, &needle, None)?;
             let foreign_owner = stored.iter().any(|key| {
                 let holder = key.surrogate().as_u32();
                 holder != owner && !last_write.contains_key(&holder)
@@ -210,7 +207,6 @@ impl CoreLoop {
                 tid,
                 collection,
                 paths: &config.index_paths,
-                bitemporal: config.bitemporal,
                 base_visible: true,
                 crs: &self.crs_context(),
             },
@@ -323,15 +319,16 @@ mod tests {
         let key = StorageKey::for_surrogate(Surrogate::new(surrogate));
         let txn = core.sparse.begin_write().expect("begin");
         core.sparse
-            .index_put_in_txn(
+            .versioned_index_put_in_txn(
                 &txn,
-                crate::engine::sparse::btree_index::IndexEntryTxn {
+                crate::engine::sparse::btree_versioned::VersionedIndexEntry {
                     database_id: DB,
-                    tenant_id: TID,
-                    collection: COLL,
+                    tenant: TID,
+                    coll: COLL,
                     field: "code",
                     value: code,
-                    document_id: &key,
+                    doc_id: &key,
+                    sys_from: 1,
                 },
             )
             .expect("index put");
@@ -515,7 +512,6 @@ mod tests {
                 tid: TID,
                 collection: COLL,
                 paths: &config.index_paths,
-                bitemporal: false,
                 base_visible: false,
                 crs: &nodedb_crs::CrsContext::builtin_only(),
             },

@@ -119,8 +119,8 @@ pub struct CsrIndex {
     ///
     /// `0` (Surrogate::ZERO) is the unset sentinel — populated at `EdgePut` time
     /// from the surrogates resolved by the Control Plane. A node whose surrogate
-    /// is zero was inserted without surrogate plumbing (e.g. legacy paths or tests)
-    /// and is treated as "not in any prefilter bitmap" when a bitmap is active.
+    /// is zero was inserted without a resolved surrogate. It is treated as
+    /// "not in any prefilter bitmap" when a bitmap is active.
     pub(crate) node_surrogates: Vec<u32>,
     /// Reverse map: `Surrogate.as_u32()` → CSR-local node id. Maintained
     /// in step with `node_surrogates` by `set_node_surrogate`. Excludes the

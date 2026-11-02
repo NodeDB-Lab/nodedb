@@ -32,6 +32,47 @@ pub(crate) fn bind_in_group(
     .intersects(group_vshards)
 }
 
+/// Move the vector multi-document membership and the index history sections
+/// of `snap` whose key passes `in_group` onto `merged`. Each entry is keyed
+/// `"{db}:{tid}:{collection}[:suffix]"` like the index it describes.
+pub(crate) fn push_group_index_sections(
+    snap: &mut TenantDataSnapshot,
+    in_group: &dyn Fn(&str) -> bool,
+    merged: &mut TenantDataSnapshot,
+) {
+    fn keep<V>(
+        from: &mut Vec<(String, V)>,
+        in_group: &dyn Fn(&str) -> bool,
+        into: &mut Vec<(String, V)>,
+    ) {
+        into.extend(
+            std::mem::take(from)
+                .into_iter()
+                .filter(|(k, _)| in_group(k)),
+        );
+    }
+    keep(
+        &mut snap.vector_multi_documents,
+        in_group,
+        &mut merged.vector_multi_documents,
+    );
+    keep(
+        &mut snap.vector_versions,
+        in_group,
+        &mut merged.vector_versions,
+    );
+    keep(
+        &mut snap.sparse_vectors,
+        in_group,
+        &mut merged.sparse_vectors,
+    );
+    keep(
+        &mut snap.spatial_indexes,
+        in_group,
+        &mut merged.spatial_indexes,
+    );
+}
+
 /// Push the current labels and the label versions of every node whose
 /// labels home on a vShard of `group_vshards` onto `merged`.
 pub(crate) fn push_group_node_labels(

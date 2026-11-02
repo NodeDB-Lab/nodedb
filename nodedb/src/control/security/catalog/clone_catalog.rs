@@ -286,6 +286,25 @@ impl SystemCatalog {
             .map_err(|e| catalog_err("clone_kv_tombstones commit", e))
     }
 
+    /// Returns `true` if `kv_key` has been tombstoned in this KV clone.
+    pub fn is_kv_clone_tombstoned(
+        &self,
+        target_collection_key: &str,
+        kv_key: &str,
+    ) -> crate::Result<bool> {
+        let txn = self
+            .db
+            .begin_read()
+            .map_err(|e| catalog_err("clone_kv_tombstones begin_read", e))?;
+        let table = txn
+            .open_table(CLONE_KV_TOMBSTONES)
+            .map_err(|e| catalog_err("open clone_kv_tombstones read", e))?;
+        Ok(table
+            .get((target_collection_key, kv_key))
+            .map_err(|e| catalog_err("get clone_kv_tombstones", e))?
+            .is_some())
+    }
+
     /// All KV tombstoned keys for a clone collection, used to filter source
     /// KV scan results before merging into the target result set.
     pub fn list_kv_clone_tombstones(

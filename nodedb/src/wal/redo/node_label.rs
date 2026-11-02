@@ -30,13 +30,9 @@ pub struct NodeLabelRedo {
     pub labels: Vec<String>,
     /// The system-time ordinal of the op's label version. `None` on an
     /// autocommit record, which takes its live ordinal.
-    #[serde(default)]
-    #[msgpack(default)]
     pub system_from: Option<i64>,
     /// On a set: `labels` replaces the node's label set, and the version
     /// holds exactly `labels`. A restored label version is exact.
-    #[serde(default)]
-    #[msgpack(default)]
     pub exact: bool,
 }
 

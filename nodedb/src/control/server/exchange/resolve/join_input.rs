@@ -3,7 +3,9 @@
 //! HashJoin input-slot resolution: embed Broadcast/Gather children as inline
 //! `ProviderScan`s and gather cross-node build sides on the coordinator.
 
-use nodedb_physical::physical_plan::{ExchangeMode, ExchangeOp, PhysicalPlan, QueryOp};
+use nodedb_physical::physical_plan::{
+    ExchangeMode, ExchangeOp, GatheredSource, PhysicalPlan, QueryOp,
+};
 
 use crate::control::server::exchange::read_scope::ReadScope;
 use crate::control::state::SharedState;
@@ -25,21 +27,18 @@ use crate::control::server::shared::authorization::gathered_sources;
 /// When the slot is already a `ProviderScan{None, ..}` or `None`, it is
 /// returned unchanged.
 ///
-/// `captures` accumulates a [`DistributedReadCapture`] for an embedded
-/// `Exchange{Gather}` input's base collection (in-transaction reads only) so the
-/// materialized side is validated at commit like every other distributed read.
+/// `captures` accumulates one [`DistributedReadCapture`] per collection an
+/// embedded `Exchange{Broadcast}` or `Exchange{Gather}` input read
+/// (in-transaction reads only), so the materialized side is validated at
+/// commit like every other distributed read. Inside a transaction every scan
+/// side of a join arrives here embedded, and its join names no collection.
 pub(super) async fn resolve_join_input(
     state: &SharedState,
     scope: ReadScope,
     input: Option<Box<PhysicalPlan>>,
     captures: &mut Vec<DistributedReadCapture>,
 ) -> crate::Result<Option<Box<PhysicalPlan>>> {
-    let ReadScope {
-        database_id,
-        tenant_id,
-        txn_id,
-        ..
-    } = scope;
+    let database_id = scope.database_id;
     let Some(boxed) = input else {
         return Ok(None);
     };
@@ -63,6 +62,7 @@ pub(super) async fn resolve_join_input(
             let sources = gathered_sources(&child, database_id)?;
             let array_rows = is_cluster_array_read(&child);
             let outcome = Box::pin(gather_all_vshards(state, *child, scope)).await?;
+            capture_gathered_reads(state, scope, &sources, &outcome, captures)?;
             let rows = relational_rows(array_rows, &outcome, false)?;
             Ok(Some(Box::new(provider_scan_of_rows(rows, sources))))
         }
@@ -99,32 +99,11 @@ pub(super) async fn resolve_join_input(
             child,
             mode: ExchangeMode::Gather { as_aggregate },
         })) => {
-            // Capture this embedded gather's base collection for the transaction
-            // read-set before the child plan is consumed by the gather (a bare
-            // single-collection scan so `extract_collection` re-homes exactly
-            // this collection's vshard at commit). In-transaction reads only.
-            let child_collection: Option<String> = if txn_id.is_some() {
-                child.collection().map(str::to_owned)
-            } else {
-                None
-            };
             let sources = gathered_sources(&child, database_id)?;
             let array_rows = is_cluster_array_read(&child);
             // Read from every vShard's owner, as the Broadcast arm does.
             let outcome = Box::pin(gather_all_vshards(state, *child, scope)).await?;
-            if let Some(coll) = child_collection
-                && let Some(scan_plan) = full_scan_plan_for_collection(
-                    state,
-                    database_id,
-                    tenant_id,
-                    ScanSide::read_set_only(&coll),
-                )?
-            {
-                captures.push(DistributedReadCapture {
-                    scan_plan,
-                    read_versions: outcome.read_versions.clone(),
-                });
-            }
+            capture_gathered_reads(state, scope, &sources, &outcome, captures)?;
             let rows = relational_rows(array_rows, &outcome, as_aggregate)?;
             Ok(Some(Box::new(provider_scan_of_rows(rows, sources))))
         }
@@ -133,6 +112,40 @@ pub(super) async fn resolve_join_input(
         // pass through.
         other => Ok(Some(Box::new(other))),
     }
+}
+
+/// Capture every collection a gathered join input read, for the transaction
+/// read-set: one bare full-collection scan per collection, at the vShards the
+/// gather read. Each scan names one collection, so the record seam homes and
+/// validates each collection on its own. A source that read no collection
+/// (constant rows) has nothing to validate. Autocommit reads capture nothing.
+fn capture_gathered_reads(
+    state: &SharedState,
+    scope: ReadScope,
+    sources: &[GatheredSource],
+    outcome: &GatherOutcome,
+    captures: &mut Vec<DistributedReadCapture>,
+) -> crate::Result<()> {
+    if scope.txn_id.is_none() {
+        return Ok(());
+    }
+    for source in sources {
+        let GatheredSource::Collection(collection) = source else {
+            continue;
+        };
+        if let Some(scan_plan) = full_scan_plan_for_collection(
+            state,
+            scope.database_id,
+            scope.tenant_id,
+            ScanSide::read_set_only(collection),
+        )? {
+            captures.push(DistributedReadCapture {
+                scan_plan,
+                read_vshards: outcome.read_vshards.clone(),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Gather a HashJoin build collection across all vShards and inline it as a
@@ -188,11 +201,11 @@ pub(super) async fn gather_join_build_side(
     };
 
     // Capture the build/right collection's read for the transaction read-set:
-    // its own bare full-collection scan plan + the read-version its gather
-    // observes. Previously DISCARDED — the hole that left the build side out of
-    // the read-set entirely, so a concurrent write to it between the
-    // in-transaction read and COMMIT went undetected by the OCC validator. Clone
-    // before the scan plan is moved into the gather; in-transaction reads only.
+    // its own bare full-collection scan plan + the vShards its gather reads.
+    // Without it the build side stays out of the read-set, and a concurrent
+    // write to it between the in-transaction read and COMMIT goes undetected.
+    // Clone before the scan plan is moved into the gather; in-transaction
+    // reads only.
     let capture_plan = if txn_id.is_some() {
         Some(scan_plan.clone())
     } else {
@@ -210,7 +223,7 @@ pub(super) async fn gather_join_build_side(
     if let Some(scan_plan) = capture_plan {
         captures.push(DistributedReadCapture {
             scan_plan,
-            read_versions: outcome.read_versions.clone(),
+            read_vshards: outcome.read_vshards.clone(),
         });
     }
 

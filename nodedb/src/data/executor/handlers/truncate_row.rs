@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Removing one row of a TRUNCATE: its current version, its secondary-index
-//! entries and the materialized-sum deltas it owes, in one transaction, then
+//! Removing one row of a TRUNCATE: a tombstone for its current version and
+//! its index entries, and the materialized-sum deltas it owes, in one
+//! transaction, then
 //! its journal entry, its delete event and its in-memory cascades.
 
 use nodedb_physical::physical_plan::ResolvedSumTarget;
@@ -29,9 +30,8 @@ pub(in crate::data::executor) struct TruncateScope<'a> {
     /// `Some` for a strict collection, whose pre-images are Binary Tuples.
     pub strict_schema: Option<&'a StrictSchema>,
     pub has_vectors: bool,
-    /// The tombstones' system time on a bitemporal collection, `None` on any
-    /// other.
-    pub bitemporal_sys_from: Option<i64>,
+    /// The tombstones' system time.
+    pub sys_from: i64,
 }
 
 /// What a TRUNCATE has removed so far.
@@ -77,16 +77,13 @@ impl CoreLoop {
                     tid,
                     collection,
                     storage_key,
-                    bitemporal_sys_from: s.bitemporal_sys_from,
+                    sys_from: s.sys_from,
                 },
             )
             .map_err(|e| refuse(progress.truncated, e))?;
         let Some(deleted_bytes) = removal.prior else {
             return Ok(());
         };
-        self.sparse
-            .delete_indexes_for_document_in_txn(&row_txn, database_id, tid, collection, storage_key)
-            .map_err(|e| refuse(progress.truncated, e))?;
         // The row's BALANCED contribution was settled for the whole statement
         // before any row was removed; taking it again here counts it twice.
         let outcome = write_hook::run(
@@ -136,15 +133,46 @@ impl CoreLoop {
         progress.removed.push(surrogate);
         // The put path indexed this row's vectors under its surrogate. A
         // leaked vector keeps scoring in KNN search in the same process.
+        // A multi-vector document bound to the row ends with it either way.
         if s.has_vectors {
-            self.remove_document_vector_indexes(database_id, tid, collection, *storage_key);
+            self.remove_document_vector_indexes(
+                database_id,
+                tid,
+                collection,
+                *storage_key,
+                s.sys_from,
+            );
+        } else {
+            self.end_document_multi_vectors(database_id, tid, collection, *storage_key, s.sys_from);
         }
-        // A bitemporal tombstone carries its version key, so replay closes
-        // the same version.
+        // The row's R-tree entries end at the tombstone's ordinal: a read at
+        // an earlier cut still finds them. The row is committed by the
+        // statement, so the removed entries need no undo here.
+        self.remove_document_spatial_indexes(
+            database_id,
+            tid,
+            collection,
+            crate::data::executor::handlers::point::apply_put::SpatialEntryId::from_storage_key(
+                *storage_key,
+            ),
+            s.sys_from,
+        );
+        // The row's sparse-vector postings end at the same ordinal, so a
+        // current sparse search stops scoring the removed row.
+        self.remove_document_sparse_indexes(
+            database_id,
+            tid,
+            collection,
+            *storage_key,
+            s.sys_from,
+            &mut Vec::new(),
+        );
+        // The tombstone carries its version key, so replay closes the same
+        // version.
         progress.write_set.push(removed_row_image(
             surrogate.as_u32(),
             row_identity.clone(),
-            removal.tombstone_sys_from,
+            s.sys_from,
         ));
         // The collection's edges keep their place here: the TRUNCATE's
         // transaction cuts them with one `TruncateEdges` per vShard.

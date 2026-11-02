@@ -53,8 +53,7 @@ async fn calvin_round(conn: &mut RawPgConn, rows: &str, other: &str, round: usiz
 async fn local_row_images(node: &TestClusterNode, collection: &str) -> Vec<serde_json::Value> {
     let bytes = node.create_tenant_snapshot(TenantId::new(TENANT)).await;
     let snapshot: TenantDataSnapshot = zerompk::from_msgpack(&bytes).unwrap_or_default();
-    snapshot
-        .documents
+    nodedb_test_support::cluster_harness::snapshot_rows::current_document_rows(&snapshot)
         .into_iter()
         .filter(|(key, _)| key_collection(key) == Some(collection))
         .map(|(key, value)| {

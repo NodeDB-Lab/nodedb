@@ -32,7 +32,7 @@ impl NodeDbPgHandler {
                 &message,
             ));
         }
-        match lifecycle::run_begin(&self.sessions, session_id, &self.state) {
+        match lifecycle::run_begin(&self.sessions, session_id) {
             Ok(()) => {
                 if let Some(access) = modes.access {
                     self.sessions.set_parameter(

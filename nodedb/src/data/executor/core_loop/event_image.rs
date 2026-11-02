@@ -292,10 +292,10 @@ mod tests {
             surrogate: 7,
             identity: RowIdentity::from_user_key("r1"),
         };
-        assert!(core.stored_row_image(row(), &tuple("dave"), None).is_ok());
+        assert!(core.stored_row_image(row(), &tuple("dave"), 1).is_ok());
         assert!(!core.is_fail_stopped());
         let error = core
-            .stored_row_image(row(), CORRUPT, None)
+            .stored_row_image(row(), CORRUPT, 1)
             .expect_err("a corrupt row journals no redo body");
         assert!(
             matches!(error, crate::Error::Serialization { .. }),

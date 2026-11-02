@@ -11,7 +11,7 @@
 use nodedb_physical::physical_plan::DocumentPageSource;
 
 use crate::bridge::scan_filter::ScanFilter;
-use crate::control::maintenance::clone_materializer::scan_source_page;
+use crate::control::maintenance::clone_materializer::{SourceRow, scan_source_page};
 
 use super::context::SourceReadContext;
 use super::shape::RowShaper;
@@ -74,7 +74,7 @@ impl PageReader {
         .await?;
         let crs = crate::control::crs_context::crs_context_for(ctx.state);
         let mut rows = Vec::with_capacity(entries.len());
-        for (_doc_id, _surrogate, body) in entries {
+        for SourceRow { body, .. } in entries {
             if self.remaining == Some(0) {
                 break;
             }

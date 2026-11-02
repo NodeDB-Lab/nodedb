@@ -11,6 +11,7 @@ mod core;
 mod crdt;
 mod document;
 mod graph;
+mod redo_floor;
 mod spatial;
 mod stamp;
 mod system_stamp;
@@ -23,6 +24,7 @@ pub use core::{
     WalAppendOutcome, WalAppendRequest, wal_append, wal_append_if_write,
     wal_append_if_write_with_creds,
 };
+pub use redo_floor::floor_redo_stamps;
 pub use stamp::stamp_minted_lsn;
 pub use system_stamp::stamp_system_ordinals;
 pub use write_set_redo::{

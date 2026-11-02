@@ -25,14 +25,11 @@
 //! or WCC run reads the graph at, before `bsp` and `wcc` fan the plan.
 //! `base_snapshot` keeps every core's image apart, by core id, for a base
 //! snapshot.
-//! `home_versions` asks each core for the home versions of the vShards it
-//! owns.
 
 mod base_snapshot;
 mod bsp;
 mod dispatch;
 mod fanout;
-mod home_versions;
 pub(crate) mod read_cut;
 mod snapshot;
 mod wcc;

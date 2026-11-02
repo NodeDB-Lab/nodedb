@@ -15,12 +15,13 @@ use super::rewrite::rewrite_plan_for_source;
 
 /// Parameters for the clone read resolver.
 pub struct CloneReadParams {
-    /// The read's `AS OF SYSTEM TIME` milliseconds, `None` for a current read.
-    /// Only a read of a live clone maps it to an LSN (T_lsn), through this
-    /// node's WAL time anchors. A read of any other collection never consults
-    /// the anchors, so a historical read of versions that predate them (a
-    /// restored backup's) is answered from the versions themselves.
-    pub as_of_ms: Option<i64>,
+    /// The system-time ordinal the read's `AS OF SYSTEM TIME` cut reads at,
+    /// `None` for a current read. Only a read of a live clone maps it to an
+    /// LSN (T_lsn), through this node's WAL time anchors. A read of any other
+    /// collection never consults the anchors, so a historical read of
+    /// versions that predate them (a restored backup's) is answered from the
+    /// versions themselves.
+    pub as_of_ordinal: Option<i64>,
 }
 
 /// Outcome of attempting to resolve a clone read for one task.
@@ -80,8 +81,8 @@ pub async fn resolve_read(
 
     // T_lsn: the highest LSN committed by the `AS OF` time, and a time before
     // the oldest retained anchor is refused. Without one, the WAL frontier.
-    let query_lsn = match params.as_of_ms {
-        Some(as_of_ms) => state.ms_to_lsn(as_of_ms)?,
+    let query_lsn = match params.as_of_ordinal {
+        Some(ordinal) => state.ordinal_to_lsn(ordinal)?,
         None => state.wal.next_lsn(),
     };
 

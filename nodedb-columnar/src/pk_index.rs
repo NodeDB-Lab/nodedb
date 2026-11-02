@@ -134,6 +134,11 @@ impl PkIndex {
         Ok(())
     }
 
+    /// Keep only the entries whose location `keep` admits.
+    pub fn retain(&mut self, mut keep: impl FnMut(&RowLocation) -> bool) {
+        self.inner.retain(|_, loc| keep(loc));
+    }
+
     /// Remove all entries pointing to a given segment (used when dropping a segment).
     pub fn remove_segment(&mut self, segment_id: u64) {
         self.inner.retain(|_, loc| loc.segment_id != segment_id);

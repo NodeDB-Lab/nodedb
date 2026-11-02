@@ -96,6 +96,7 @@ async fn native_gateway_migration_single_node_select() {
         key: b"native-key".to_vec(),
         rls_filters: vec![],
         surrogate_ceiling: None,
+        system_time: nodedb_types::SystemTimeScope::Current,
     });
     let get_checked = common::authorize_gateway_plan(&node.shared, &ctx, get_plan).await;
     let payloads = gateway
@@ -171,6 +172,7 @@ async fn native_gateway_migration_cross_node_select() {
         key: b"cross-native-key".to_vec(),
         rls_filters: vec![],
         surrogate_ceiling: None,
+        system_time: nodedb_types::SystemTimeScope::Current,
     });
     let get_checked =
         common::authorize_gateway_plan(&cluster.nodes[1].shared, &ctx, get_plan).await;

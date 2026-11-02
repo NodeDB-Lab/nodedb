@@ -111,15 +111,16 @@ impl CoreLoop {
         options.max_visited.min(self.graph_tuning.max_visited)
     }
 
-    /// The transaction's staged edge writes, for a live read. A historical
-    /// read sees committed versions only. Read-your-own-writes refreshes the
-    /// overlay lease (see the overlay reaper).
+    /// The transaction's staged edge writes, for a live read and a
+    /// transaction snapshot read. A historical read sees committed versions
+    /// only. Read-your-own-writes refreshes the overlay lease (see the
+    /// overlay reaper).
     fn live_overlay(
         &self,
         task: &ExecutionTask,
         scope: &GraphReadScope,
     ) -> Option<&crate::data::executor::handlers::transaction::overlay::GraphTxnOverlay> {
-        if !scope.is_live() {
+        if !scope.merges_txn_overlay() {
             return None;
         }
         let txn_id = task.request.txn_id?;
@@ -483,7 +484,7 @@ mod tests {
             wal_lsn: Some(Lsn::new(lsn)),
             resolved_now_ms: None,
             commit_hlc: None,
-            entry_version: None,
+            system_ordinal: None,
             admission: Admission::Exempt(ExemptReason::Read),
         })
     }

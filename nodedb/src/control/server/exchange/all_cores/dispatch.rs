@@ -18,12 +18,12 @@ use super::wcc::fan_wcc_all_cores;
 pub struct NodeLevelResult {
     pub payload: Vec<u8>,
     pub watermark_lsn: Lsn,
-    /// The read versions the fanned read observed, one per vShard. Empty for
-    /// non-read results. Distinct from `watermark_lsn`: the comparand for
-    /// cross-shard OCC read validation.
-    pub read_versions: crate::types::ReadVersions,
+    /// The vShards the fanned read scanned. Empty for non-read results.
+    /// Distinct from `watermark_lsn`: the transaction read-set homes an entry
+    /// on each.
+    pub read_vshards: crate::types::ReadShards,
     /// The plan's one owning core refused it with `NotFound`: a read that
-    /// found no row. `read_versions` holds the versions it observed.
+    /// found no row. `read_vshards` holds the vShards it scanned.
     pub not_found: bool,
 }
 
@@ -82,7 +82,7 @@ pub(crate) async fn execute_plan_all_local_cores(
                 Ok(NodeLevelResult {
                     payload: envelope,
                     watermark_lsn: outcome.watermark_lsn,
-                    read_versions: outcome.read_versions,
+                    read_vshards: outcome.read_vshards,
                     not_found: false,
                 })
             }
@@ -156,19 +156,18 @@ pub(crate) async fn execute_plan_all_local_cores(
                          sends it to every core itself"
                     .into(),
             }),
+            MetaOp::PurgeVersionsBelow { .. } => Err(crate::Error::Internal {
+                detail: "PurgeVersionsBelow reached the all-core fan; the version cleanup \
+                         sends it to every core itself"
+                    .into(),
+            }),
+            MetaOp::KvDueExpiries { .. } => Err(crate::Error::Internal {
+                detail: "KvDueExpiries reached the all-core fan; the TTL reaper sends it to \
+                         every core itself"
+                    .into(),
+            }),
             // One image per core, kept apart by core id. A merged payload
             // loses which core each image belongs to.
-            // Each core answers the probes of the vShards it owns.
-            MetaOp::HomeVersions { .. } => {
-                super::home_versions::fan_home_versions(
-                    state,
-                    tenant_id,
-                    database_id,
-                    plan,
-                    trace_id,
-                )
-                .await
-            }
             MetaOp::CreateSnapshot => Err(crate::Error::Internal {
                 detail: "CreateSnapshot reached the all-core fan; it runs through \
                          capture_base_on_local_cores"
@@ -291,7 +290,7 @@ async fn generic_gather(
     Ok(NodeLevelResult {
         payload: outcome.single_core_shape()?,
         watermark_lsn: outcome.watermark_lsn,
-        read_versions: outcome.read_versions,
+        read_vshards: outcome.read_vshards,
         not_found: false,
     })
 }
@@ -336,7 +335,7 @@ async fn owning_core_result(
         not_found: crate::control::local_dispatch::is_not_found(&resp),
         payload: resp.payload.to_vec(),
         watermark_lsn: resp.watermark_lsn,
-        read_versions: resp.read_versions,
+        read_vshards: resp.read_vshards,
     })
 }
 
@@ -366,20 +365,20 @@ async fn single_blob_gather(
         gather_every_core(state, tenant_id, database_id, plan, trace_id, "single-blob").await?;
 
     let mut watermark_lsn = Lsn::ZERO;
-    let mut read_versions = crate::types::ReadVersions::new();
+    let mut read_vshards = crate::types::ReadShards::new();
     let mut payloads: Vec<Vec<u8>> = Vec::with_capacity(responses.len());
     for resp in responses {
         if resp.watermark_lsn > watermark_lsn {
             watermark_lsn = resp.watermark_lsn;
         }
-        read_versions.merge(&resp.read_versions);
+        read_vshards.merge(&resp.read_vshards);
         payloads.push(resp.payload.as_ref().to_vec());
     }
 
     Ok(NodeLevelResult {
         payload: pick_single_blob(payloads, op)?,
         watermark_lsn,
-        read_versions,
+        read_vshards,
         not_found: false,
     })
 }

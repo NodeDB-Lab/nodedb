@@ -148,7 +148,7 @@ impl EdgeStore {
         {
             if !account_stats {
                 // Suppress the lazy edge-scan rebuild on a destination-only
-                // replica: absence of a summary means "legacy stats missing",
+                // replica: absence of a summary means "stats not built yet",
                 // while an explicit zero summary means "this shard owns no
                 // logical edges for this collection". Preserve an existing
                 // nonzero summary because this core may canonically own other

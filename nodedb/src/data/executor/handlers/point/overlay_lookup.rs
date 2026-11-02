@@ -3,11 +3,11 @@
 //! Point-get overlay consultation: read-your-own-writes for in-transaction
 //! point lookups.
 //!
-//! Non-temporal point-get reads consult the issuing transaction's staging
-//! overlay before falling back to the doc cache / base storage, so a point
-//! read inside `BEGIN..COMMIT` observes writes staged earlier in the same
-//! transaction. Temporal (`AS OF`) reads never consult the overlay — staged
-//! bodies only represent the current version, not a historical one.
+//! Current and transaction-snapshot point-get reads consult the issuing
+//! transaction's staging overlay before falling back to the doc cache / base
+//! storage, so a point read inside `BEGIN..COMMIT` observes writes staged
+//! earlier in the same transaction. Historical (`AS OF`) reads never consult
+//! the overlay: staged bodies are newer than every committed version.
 
 use crate::bridge::envelope::Response;
 use crate::data::executor::core_loop::CoreLoop;

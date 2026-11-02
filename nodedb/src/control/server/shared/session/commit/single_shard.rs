@@ -7,11 +7,15 @@
 //! there and every replica, this node included, appends it to its own WAL and
 //! installs it when the entry commits. COMMIT returns only once the record is
 //! durable and installed here.
+//!
+//! The record carries the transaction's reads and snapshot ordinal. Every
+//! replica's apply validates them against its own state before it installs,
+//! so each replica reaches the same verdict at the record's log position.
 
 use nodedb_physical::physical_plan::MetaOp;
 use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 
-use crate::bridge::envelope::{PhysicalPlan, Status};
+use crate::bridge::envelope::{ErrorCode, PhysicalPlan, Status};
 use crate::control::gateway::RouteDecision;
 use crate::control::state::SharedState;
 use crate::control::wal_replication::transaction_redo::{
@@ -20,20 +24,42 @@ use crate::control::wal_replication::transaction_redo::{
 use crate::wal::RedoPublish;
 
 use super::super::outcome::{AbortReason, TxnDataPlane};
+use super::super::read_set::ReadSetEntry;
+
+/// One single-shard commit: the buffered batch, who commits it, and what its
+/// apply validates.
+pub(super) struct SingleShardCommit<'a> {
+    pub buffered: &'a [PhysicalTask],
+    pub identity: &'a crate::control::security::identity::AuthenticatedIdentity,
+    /// The vShard every write and every read of the batch is on.
+    pub vshard_id: crate::types::VShardId,
+    pub publishes: Vec<RedoPublish>,
+    pub ts_preview: &'a super::ts_rejections::RejectedByCollection,
+    /// The transaction's reads. The apply validates each one.
+    pub reads: &'a [ReadSetEntry],
+    /// The ordinal the apply validates `reads` and the written keys at.
+    /// `None` for a transaction with no snapshot and no read.
+    pub snapshot_ordinal: Option<i64>,
+}
 
 /// Single-shard commit: resolve the transaction's staged post-images into one
-/// `RedoRecord` that also carries `publishes` and the roles of `identity`,
-/// then commit it through the vShard's apply log. Returns `Some(reason)` on
-/// failure.
+/// `RedoRecord` that also carries the commit's messages and the roles of its
+/// identity, then commit it through the vShard's apply log with its reads and
+/// snapshot. Returns `Some(reason)` on failure.
 pub(super) async fn dispatch_single_shard(
     state: &SharedState,
     dp: &impl TxnDataPlane,
-    buffered: &[PhysicalTask],
-    identity: &crate::control::security::identity::AuthenticatedIdentity,
-    vshard_id: crate::types::VShardId,
-    publishes: Vec<RedoPublish>,
-    ts_preview: &super::ts_rejections::RejectedByCollection,
+    commit: SingleShardCommit<'_>,
 ) -> Option<AbortReason> {
+    let SingleShardCommit {
+        buffered,
+        identity,
+        vshard_id,
+        publishes,
+        ts_preview,
+        reads,
+        snapshot_ordinal,
+    } = commit;
     let tenant_id = identity.tenant_id;
     let plans: Vec<PhysicalPlan> = buffered.iter().map(|t| t.plan.clone()).collect();
     let database_id = buffered
@@ -84,13 +110,11 @@ pub(super) async fn dispatch_single_shard(
         }
     };
 
-    // Re-verify local vShard leadership before anything durable happens.
-    // `run_commit` resolved this vShard as `Local` and validated the read set
-    // against this node's write versions, but a leadership handoff can land
-    // during the `ResolveTxn` await above. The new leader can already have
-    // applied writes this node's validation never saw, so the commit aborts
-    // side-effect-free and retryable: the retry sees the vShard is non-local
-    // and routes through Calvin's replicated barrier.
+    // Re-verify local vShard leadership before anything durable happens. The
+    // record resolves from this node's staging overlay, and a leadership
+    // handoff can land during the `ResolveTxn` await above. The commit then
+    // aborts side-effect-free and retryable: the retry sees the vShard is
+    // non-local and routes through Calvin's replicated barrier.
     if !matches!(
         crate::control::gateway::live_leaders::resolve_live_decision(state, vshard_id.as_u32()),
         RouteDecision::Local
@@ -112,9 +136,11 @@ pub(super) async fn dispatch_single_shard(
     let ts_committed = super::ts_rejections::redo_rejected_by_collection(&redo);
 
     // 2. Commit the record through the vShard's apply log. The payload carries
-    //    the resolve-time bitemporal stamps inside the redo sub-records, so
-    //    every replica installs each row on the same version key.
-    let payload = match TransactionRedoPayload::from_commit(
+    //    the resolve-time bitemporal stamps inside the redo sub-records. The
+    //    apply's funnel raises each one below the record's ordinal to that
+    //    ordinal, alike on every replica, so every replica installs each row
+    //    on the same version key.
+    let mut payload = match TransactionRedoPayload::from_commit(
         state,
         database_id,
         tenant_id,
@@ -125,12 +151,18 @@ pub(super) async fn dispatch_single_shard(
         Ok(payload) => payload,
         Err(e) => return Some(AbortReason::Dispatch(e)),
     };
+    // Every read of a single-shard commit is homed on this vShard, so its
+    // apply validates every one.
+    payload.reads =
+        crate::control::planner::calvin::tx_class::shared::versioned_read_entries(reads);
+    payload.snapshot_ordinal = snapshot_ordinal;
     let outcome = commit_redo(
         state,
         RedoTarget {
             tenant_id,
             database_id,
             vshard_id,
+            system_ordinal: None,
         },
         &payload,
     )
@@ -143,7 +175,12 @@ pub(super) async fn dispatch_single_shard(
             super::ts_rejections::raise_commit_rejections(ts_preview, &committed);
             None
         }
-        Err(reason) => Some(reason),
+        Err(reason) => {
+            if matches!(reason, AbortReason::Serialization) {
+                super::super::hot_key::record_read_set_aborts(state, reads);
+            }
+            Some(reason)
+        }
     }
 }
 
@@ -189,6 +226,7 @@ pub(super) async fn commit_publishes(
             tenant_id,
             database_id,
             vshard_id,
+            system_ordinal: None,
         },
         &payload,
     )
@@ -217,15 +255,27 @@ async fn commit_redo(
     let deadline = crate::control::server::shared::session::StatementDeadline::of_statement(state)
         .tokio_instant();
     match propose_transaction_redo(state, target, payload, deadline).await {
-        Ok((applied, _)) => Ok(super::ts_rejections::applied_rejected_by_collection(
+        Ok(applied) => Ok(super::ts_rejections::applied_rejected_by_collection(
             &applied,
         )),
+        // A read or a written key moved past the snapshot: the apply refused
+        // the record on every replica.
+        Err(crate::Error::DataPlane(code)) if is_serialization_refusal(&code) => {
+            Err(AbortReason::Serialization)
+        }
+        Err(crate::Error::CalvinSerializationConflict) => Err(AbortReason::Serialization),
         Err(crate::Error::DataPlane(code)) => Err(AbortReason::BatchRejected { code: Some(code) }),
         Err(e) => {
             tracing::warn!(error = %e, "transaction redo commit failed");
             Err(AbortReason::Dispatch(e))
         }
     }
+}
+
+/// Whether the apply refused a redo record because a committed version of a
+/// read or a written key has an ordinal above the transaction's snapshot.
+fn is_serialization_refusal(code: &ErrorCode) -> bool {
+    matches!(code, ErrorCode::ConflictRetry)
 }
 
 /// The `commit::single_shard_redo_commit` fail point of node `node_id`.

@@ -102,7 +102,7 @@ fn validate_claim_mapping_databases(
 fn validate_claim_mapping_roles(
     state: &SharedState,
     claim_mappings: &[OidcClaimMappingClause],
-    tenant_id: Option<u64>,
+    tenant_id: u64,
 ) -> Result<(), DdlError> {
     if claim_mappings
         .iter()
@@ -114,19 +114,13 @@ fn validate_claim_mapping_roles(
             "OIDC claim mappings cannot grant the database-owned superuser role",
         ));
     }
-    if let Some(tenant_id) = tenant_id {
-        let roles: Vec<crate::control::security::identity::Role> = claim_mappings
-            .iter()
-            .flat_map(|mapping| mapping.add_roles.iter())
-            .map(String::as_str)
-            .map(crate::control::security::role_assignment::parse_role_name)
-            .collect();
-        super::role_checks::check_user_roles(
-            state,
-            &roles,
-            crate::types::TenantId::new(tenant_id),
-        )?;
-    }
+    let roles: Vec<crate::control::security::identity::Role> = claim_mappings
+        .iter()
+        .flat_map(|mapping| mapping.add_roles.iter())
+        .map(String::as_str)
+        .map(crate::control::security::role_assignment::parse_role_name)
+        .collect();
+    super::role_checks::check_user_roles(state, &roles, crate::types::TenantId::new(tenant_id))?;
     Ok(())
 }
 
@@ -183,7 +177,7 @@ pub async fn create_oidc_provider(
             format!("tenant '{tenant_id}' does not exist"),
         ));
     }
-    validate_claim_mapping_roles(state, claim_mappings, Some(tenant_id))?;
+    validate_claim_mapping_roles(state, claim_mappings, tenant_id)?;
     validate_claim_mapping_databases(state, claim_mappings)?;
 
     // Check for duplicate by provider name.
@@ -236,7 +230,7 @@ pub async fn create_oidc_provider(
         issuer: issuer.to_string(),
         jwks_uri: jwks_uri.to_string(),
         audience: audience.map(str::to_string),
-        tenant_id: Some(tenant_id),
+        tenant_id,
         claim_mapping: stored_mappings,
         created_at_lsn: 0,
     };
@@ -385,7 +379,7 @@ pub fn show_oidc_providers(
         );
         row.insert(
             "tenant_id".to_string(),
-            JsonValue::String(p.tenant_id.map(|id| id.to_string()).unwrap_or_default()),
+            JsonValue::String(p.tenant_id.to_string()),
         );
         let aud = p.audience.as_deref().unwrap_or("");
         row.insert("audience".to_string(), JsonValue::String(aud.to_string()));

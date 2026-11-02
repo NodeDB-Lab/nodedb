@@ -35,7 +35,7 @@ pub(super) fn fx_hash_key(key: &[u64]) -> u64 {
 #[inline]
 pub(super) fn key_part(ty: ColumnType, data: Option<&ColumnData>, row_idx: usize) -> u64 {
     data.map(|data| match ty {
-        ColumnType::Symbol => {
+        ColumnType::Symbol | ColumnType::Text => {
             if let ColumnData::Symbol(ids) = data {
                 ids[row_idx] as u64
             } else {

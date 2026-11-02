@@ -110,7 +110,6 @@ pub(crate) fn error_variant_index(err: &crate::Error) -> usize {
         E::SessionTokenExpired => 94,
         E::SessionKilledByAdmin => 95,
         E::SessionUserDropped => 96,
-        E::OidcProviderTenantUnbound => 97,
         E::OidcProviderTenantUnavailable { .. } => 98,
         E::ExternalRoleUndefined { .. } => 99,
         E::OidcNoDefaultDatabase { .. } => 100,
@@ -139,5 +138,6 @@ pub(crate) fn error_variant_index(err: &crate::Error) -> usize {
         E::MixedSrid { .. } => 124,
         E::UngroupedColumn { .. } => 125,
         E::UnknownSrid { .. } => 126,
+        E::TxnSnapshotTooOld { .. } => 97,
     }
 }

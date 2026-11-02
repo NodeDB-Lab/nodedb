@@ -78,7 +78,7 @@ impl CoreLoop {
                 wal_lsn: None,
                 resolved_now_ms: None,
                 commit_hlc: None,
-                entry_version: None,
+                system_ordinal: None,
                 admission: crate::bridge::envelope::Admission::Exempt(
                     crate::bridge::envelope::ExemptReason::AlreadyOrdered,
                 ),
@@ -133,9 +133,6 @@ impl CoreLoop {
             let tenant_id = record.header.tenant_id;
             let record_lsn = record.header.lsn;
             // Replayed writes land under the database recorded in the WAL header.
-            // Pre-scoping records carry `database_id == 0`, which maps to
-            // `DatabaseId::DEFAULT` — exactly where the migration placed legacy
-            // rows, so old and replayed data co-locate correctly.
             let database_id = DatabaseId::new(record.header.database_id);
 
             if is_fts_index {

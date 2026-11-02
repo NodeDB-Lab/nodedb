@@ -3,25 +3,18 @@
 //! The rows a predicate write matches, and the OLLP helpers that compare
 //! them with a carried prediction.
 //!
-//! The reads here are the one place a document read decides where a row's
-//! current version lives. A bitemporal collection holds its rows only in the
-//! versioned table, so the reads take each row's current version there. Any
-//! other collection reads the plain document table.
+//! Every document collection holds its rows in the versioned table, and the
+//! reads here take each row's current version there.
 
 use std::ops::ControlFlow;
 
 use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::filter_match::HeldEvalError;
-use crate::engine::sparse::btree_versioned::VersionedScanParams;
-use crate::engine::sparse::scan_stop::never_stop;
 use nodedb_types::StorageKey;
 
 /// One matched row: its storage key and its current stored body.
 pub(in crate::data::executor) type MatchedRow = (StorageKey, Vec<u8>);
-
-/// Rows read per page of a bitemporal collection's current versions.
-const BITEMPORAL_PAGE_ROWS: usize = 1024;
 
 impl CoreLoop {
     /// Each `(row key, current body)` in `collection` that `filters` match.
@@ -37,11 +30,25 @@ impl CoreLoop {
         collection: &str,
         filters: &[ScanFilter],
     ) -> crate::Result<Vec<MatchedRow>> {
+        self.matching_rows_at(database_id, tid, collection, filters, None)
+    }
+
+    /// [`Self::current_matching_rows`] read at `system_as_of`: `None` reads
+    /// each row's current version, `Some(ordinal)` the version visible at
+    /// `ordinal`. Folds no transaction overlay.
+    pub(in crate::data::executor) fn matching_rows_at(
+        &self,
+        database_id: u64,
+        tid: u64,
+        collection: &str,
+        filters: &[ScanFilter],
+        system_as_of: Option<i64>,
+    ) -> crate::Result<Vec<MatchedRow>> {
         let crs = self.crs_context();
         let raw_matches = self.strict_aware_matcher(database_id, tid, collection, filters, &crs);
         let held = HeldEvalError::default();
         let matches = |row_key: &StorageKey, body: &[u8]| held.check(|| raw_matches(row_key, body));
-        let rows = self.current_rows_where(database_id, tid, collection, &matches)?;
+        let rows = self.rows_where_at(database_id, tid, collection, system_as_of, &matches)?;
         held.finish(rows)
     }
 
@@ -61,10 +68,7 @@ impl CoreLoop {
     }
 
     /// Each `(row key, current body)` in `collection` that `matches` accepts.
-    ///
-    /// A bitemporal collection yields the newest system-time version of each
-    /// row from the versioned table. A row whose newest version is a
-    /// tombstone is absent. Any other collection reads the plain table.
+    /// A row whose current version is a tombstone is absent.
     pub(in crate::data::executor) fn current_rows_where(
         &self,
         database_id: u64,
@@ -72,20 +76,6 @@ impl CoreLoop {
         collection: &str,
         matches: &dyn Fn(&StorageKey, &[u8]) -> bool,
     ) -> crate::Result<Vec<MatchedRow>> {
-        if self.is_bitemporal(database_id, tid, collection) {
-            return self.sparse.versioned_scan_as_of(
-                VersionedScanParams {
-                    database_id,
-                    tenant: tid,
-                    coll: collection,
-                    sys_cutoff: None,
-                    valid_at_ms: None,
-                    limit: usize::MAX,
-                },
-                matches,
-                &never_stop,
-            );
-        }
         let mut rows = Vec::new();
         self.sparse.scan_documents_for_each(
             database_id,
@@ -102,6 +92,35 @@ impl CoreLoop {
         Ok(rows)
     }
 
+    /// Each `(row key, body)` in `collection` that `matches` accepts, read
+    /// at `system_as_of`: `None` reads each row's current version
+    /// ([`Self::current_rows_where`]), `Some(ordinal)` the version visible
+    /// at `ordinal`. A row whose visible version is a tombstone is absent.
+    pub(in crate::data::executor) fn rows_where_at(
+        &self,
+        database_id: u64,
+        tid: u64,
+        collection: &str,
+        system_as_of: Option<i64>,
+        matches: &dyn Fn(&StorageKey, &[u8]) -> bool,
+    ) -> crate::Result<Vec<MatchedRow>> {
+        let Some(ordinal) = system_as_of else {
+            return self.current_rows_where(database_id, tid, collection, matches);
+        };
+        self.sparse.versioned_scan_as_of(
+            crate::engine::sparse::btree_versioned::VersionedScanParams {
+                database_id,
+                tenant: tid,
+                coll: collection,
+                sys_cutoff: Some(ordinal),
+                valid_at_ms: None,
+                limit: usize::MAX,
+            },
+            matches,
+            &crate::engine::sparse::scan_stop::never_stop,
+        )
+    }
+
     /// The first `limit` rows of `collection` in key order, each at its
     /// current version, with no filter.
     pub(in crate::data::executor) fn current_rows(
@@ -111,68 +130,22 @@ impl CoreLoop {
         collection: &str,
         limit: usize,
     ) -> crate::Result<Vec<MatchedRow>> {
-        if self.is_bitemporal(database_id, tid, collection) {
-            return self.sparse.versioned_scan_as_of(
-                VersionedScanParams {
-                    database_id,
-                    tenant: tid,
-                    coll: collection,
-                    sys_cutoff: None,
-                    valid_at_ms: None,
-                    limit,
-                },
-                &|_: &StorageKey, _: &[u8]| true,
-                &never_stop,
-            );
-        }
         self.sparse
             .scan_documents(database_id, tid, collection, limit)
     }
 
     /// Visit each row of `collection` at its current version, in key order,
-    /// until `visit` breaks.
-    ///
-    /// A plain collection streams one row at a time. A bitemporal collection
-    /// is read a page at a time, so at most one page of rows is in memory. A
-    /// visit error ends the scan and is returned.
+    /// one row in memory at a time, until `visit` breaks. A visit error ends
+    /// the scan and is returned.
     pub(in crate::data::executor) fn for_each_current_row(
         &self,
         database_id: u64,
         tid: u64,
         collection: &str,
-        mut visit: impl FnMut(&StorageKey, &[u8]) -> crate::Result<ControlFlow<()>>,
+        visit: impl FnMut(&StorageKey, &[u8]) -> crate::Result<ControlFlow<()>>,
     ) -> crate::Result<()> {
-        if !self.is_bitemporal(database_id, tid, collection) {
-            return self
-                .sparse
-                .scan_documents_while(database_id, tid, collection, visit);
-        }
-        let mut after: Option<StorageKey> = None;
-        loop {
-            let page = self.sparse.versioned_scan_as_of_after(
-                VersionedScanParams {
-                    database_id,
-                    tenant: tid,
-                    coll: collection,
-                    sys_cutoff: None,
-                    valid_at_ms: None,
-                    limit: BITEMPORAL_PAGE_ROWS,
-                },
-                after.as_ref(),
-                &|_: &StorageKey, _: &[u8]| true,
-                &never_stop,
-            )?;
-            let full = page.len() >= BITEMPORAL_PAGE_ROWS;
-            for (key, body) in &page {
-                if visit(key, body)?.is_break() {
-                    return Ok(());
-                }
-            }
-            match page.into_iter().next_back() {
-                Some((key, _)) if full => after = Some(key),
-                _ => return Ok(()),
-            }
-        }
+        self.sparse
+            .scan_documents_while(database_id, tid, collection, visit)
     }
 
     /// The current stored body of one row, `None` when the row is absent.
@@ -186,12 +159,7 @@ impl CoreLoop {
         collection: &str,
         key: &StorageKey,
     ) -> crate::Result<Option<Vec<u8>>> {
-        if self.is_bitemporal(database_id, tid, collection) {
-            self.sparse
-                .versioned_get_current(database_id, tid, collection, key)
-        } else {
-            self.sparse.get(database_id, tid, collection, key)
-        }
+        self.sparse.get(database_id, tid, collection, key)
     }
 
     /// [`Self::current_row_body`] read inside `txn`, so it sees the writes
@@ -204,13 +172,8 @@ impl CoreLoop {
         collection: &str,
         key: &StorageKey,
     ) -> crate::Result<Option<Vec<u8>>> {
-        if self.is_bitemporal(database_id, tid, collection) {
-            self.sparse
-                .versioned_get_current_in_txn(txn, database_id, tid, collection, key)
-        } else {
-            self.sparse
-                .get_in_txn(txn, database_id, tid, collection, key)
-        }
+        self.sparse
+            .get_in_txn(txn, database_id, tid, collection, key)
     }
 }
 
@@ -473,7 +436,7 @@ mod tests {
         );
 
         // Each removal journals its tombstone at its version key.
-        let tombstones: Vec<(u32, Option<i64>)> = response
+        let tombstones: Vec<(u32, i64)> = response
             .write_set
             .iter()
             .filter_map(|entry| match entry.effect {
@@ -482,11 +445,7 @@ mod tests {
             })
             .collect();
         assert_eq!(tombstones.len(), 2);
-        assert!(
-            tombstones
-                .iter()
-                .all(|(_, sys)| sys.is_some_and(|sys| sys > SEEDED_AT))
-        );
+        assert!(tombstones.iter().all(|(_, sys)| *sys > SEEDED_AT));
     }
 
     #[test]
@@ -550,10 +509,7 @@ mod tests {
             .write_set
             .iter()
             .filter_map(|entry| match &entry.effect {
-                RowEffect::Put {
-                    version: Some(version),
-                    ..
-                } => Some(version.sys_from),
+                RowEffect::Put { version, .. } => Some(version.sys_from),
                 _ => None,
             })
             .collect();

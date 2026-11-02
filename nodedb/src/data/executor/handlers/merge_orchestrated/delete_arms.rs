@@ -160,11 +160,15 @@ impl CoreLoop {
                     }
                     // Journalled only once the arm committed: the removal
                     // and the target rows its debit rewrote.
-                    if outcome.prior_value.is_some() {
+                    // A tombstone ordinal exists exactly when a live row
+                    // was closed.
+                    if let (Some(_), Some(sys_from)) =
+                        (&outcome.prior_value, outcome.version_sys_from)
+                    {
                         write_set.push(removed_row_image(
                             surrogate.as_u32(),
                             row_identity.clone(),
-                            outcome.bitemporal_sys_from,
+                            sys_from,
                         ));
                     }
                     write_set.extend(write_hook::target_write_set(&target_writes));

@@ -44,10 +44,9 @@ pub(super) const OWNERS: TableDefinition<&str, &[u8]> = TableDefinition::new("_s
 /// Table: `(database_id: u64, "{tenant_id}:{name}")` -> MessagePack collection metadata.
 ///
 /// The compound key prepends `database_id` (as raw `u64`) so every collection
-/// is namespaced within its database. The inner key preserves the legacy
-/// `"{tenant_id}:{name}"` encoding for catalog-resolver compatibility.
+/// is namespaced within its database. The inner key is `"{tenant_id}:{name}"`.
 pub(super) const COLLECTIONS: TableDefinition<(u64, &str), &[u8]> =
-    TableDefinition::new("_system.collections_v2");
+    TableDefinition::new("_system.collections");
 
 /// Table: `(database_id, tenant_id, collection_name)` -> `purge_lsn` (u64 LE).
 ///
@@ -133,14 +132,14 @@ pub(super) const SURROGATE_SCOPE_SEQ: TableDefinition<(), u64> =
 /// so a compare is one `memcmp`, and one scope's rows are one key range.
 /// Every binding writes the forward and the reverse row in one redb txn.
 pub(super) const SURROGATE_PK: TableDefinition<&[u8], u32> =
-    TableDefinition::new("_system.surrogate_pk_v4");
+    TableDefinition::new("_system.surrogate_pk");
 
 /// Table: `(scope_id << 32) | surrogate` -> encoded pk bytes.
 ///
-/// Reverse direction of `_system.surrogate_pk_v4`. One scope's rows are one
+/// Reverse direction of `_system.surrogate_pk`. One scope's rows are one
 /// key range, in surrogate order.
 pub(super) const SURROGATE_PK_REV: TableDefinition<u128, &[u8]> =
-    TableDefinition::new("_system.surrogate_pk_rev_v4");
+    TableDefinition::new("_system.surrogate_pk_rev");
 
 // ── Event Plane ───────────────────────────────────────────────────────
 

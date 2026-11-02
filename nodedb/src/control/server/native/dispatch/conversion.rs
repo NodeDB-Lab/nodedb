@@ -65,6 +65,12 @@ pub(crate) fn native_error_fields(e: &crate::Error) -> NativeErrorFields {
             nodedb_types::error::sqlstate::SERIALIZATION_FAILURE,
             format!("{e}"),
         ),
+        // A block whose snapshot outlived the age limit retries at a fresh
+        // snapshot (40001).
+        crate::Error::TxnSnapshotTooOld { .. } => (
+            nodedb_types::error::sqlstate::SERIALIZATION_FAILURE,
+            format!("{e}"),
+        ),
         // A participant error aborted the txn before any read-set was validated:
         // retryable class 40, but never 40001.
         crate::Error::CalvinParticipantError => (

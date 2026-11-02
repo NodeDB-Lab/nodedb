@@ -69,6 +69,7 @@ fn input_of(ctx: &mut super::super::helpers::TestCtx, collection: &str) -> Box<P
         limit: None,
         offset: 0,
         distinct: false,
+        system_time: nodedb_types::SystemTimeScope::Current,
     }))
 }
 
@@ -95,6 +96,7 @@ fn join(
             right_rls_filters: Vec::new(),
             left_input,
             right_input,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
         Strategy::SortMerge => PhysicalPlan::Query(QueryOp::SortMergeJoin {
             left_collection: coll("bnj_l"),
@@ -107,6 +109,7 @@ fn join(
             right_rls_filters: Vec::new(),
             left_input,
             right_input,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     }
 }

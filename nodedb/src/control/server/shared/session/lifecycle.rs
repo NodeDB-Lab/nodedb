@@ -16,23 +16,14 @@ use super::outcome::TxnDataPlane;
 use super::overlay_drop::drop_txn_overlay;
 use super::store::SessionStore;
 
-/// Run the neutral BEGIN sequence: anchor the snapshot LSN, activate the DDL
-/// buffer, and enter the transaction block. Returns the session error (mapped
+/// Run the neutral BEGIN sequence: activate the DDL buffer and enter the
+/// transaction block. The block's snapshot is taken at its first statement
+/// (`txn_snapshot::ensure_txn_snapshot`). Returns the session error (mapped
 /// to the transport's `25P02`) if the connection cannot begin a transaction.
-pub fn run_begin(
-    sessions: &SessionStore,
-    session_id: SessionId,
-    state: &SharedState,
-) -> Result<(), crate::Error> {
-    // Last globally-applied Calvin epoch as the cross-shard snapshot anchor.
-    // 0 in single-node / no-Calvin deployments (the atomic is never advanced).
-    let snapshot_epoch = state
-        .calvin
-        .last_applied_epoch
-        .load(std::sync::atomic::Ordering::Acquire);
+pub fn run_begin(sessions: &SessionStore, session_id: SessionId) -> Result<(), crate::Error> {
     ddl_buffer::activate();
     sessions
-        .begin(session_id, snapshot_epoch)
+        .begin(session_id)
         .map_err(|msg| crate::Error::BadRequest {
             detail: msg.to_owned(),
         })
@@ -137,37 +128,20 @@ mod tests {
     use nodedb_physical::physical_plan::MetaOp;
     use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 
-    /// `run_begin` anchors the session's cross-shard snapshot to the last
-    /// globally-applied Calvin epoch from `CalvinLocalState::last_applied_epoch`.
+    /// `run_begin` enters the block and takes no snapshot: the block's first
+    /// statement takes it.
     #[tokio::test]
-    async fn run_begin_anchors_snapshot_epoch() {
-        use std::sync::atomic::Ordering;
-
-        use crate::bridge::dispatch::Dispatcher;
-        use crate::wal::WalManager;
-
-        let dir = tempfile::tempdir().unwrap();
-        let wal = std::sync::Arc::new(
-            WalManager::open_for_testing(&dir.path().join("test.wal")).unwrap(),
-        );
-        let (dispatcher, _data_sides) = Dispatcher::new(1, 64);
-        let state = SharedState::new(dispatcher, wal).unwrap();
-
+    async fn run_begin_enters_the_block_without_a_snapshot() {
         let store = SessionStore::new();
         let addr: std::net::SocketAddr = "127.0.0.1:5100".parse().unwrap();
         store.ensure_session(addr);
-
-        // Seed the applied epoch to 7 and BEGIN — the session anchors to 7.
-        state.calvin.last_applied_epoch.store(7, Ordering::Release);
-        run_begin(&store, SessionId::from(&addr), &state).unwrap();
-        assert_eq!(store.snapshot_epoch(addr), Some(7));
+        run_begin(&store, SessionId::from(&addr)).unwrap();
+        assert_eq!(
+            store.transaction_state(addr),
+            super::super::state::TransactionState::InBlock
+        );
+        assert_eq!(store.tx_snapshot(addr), None);
         store.commit(addr).unwrap();
-        assert_eq!(store.snapshot_epoch(addr), None);
-
-        // Unset (single-node / no-Calvin): BEGIN anchors to 0.
-        state.calvin.last_applied_epoch.store(0, Ordering::Release);
-        run_begin(&store, SessionId::from(&addr), &state).unwrap();
-        assert_eq!(store.snapshot_epoch(addr), Some(0));
     }
 
     /// A `TxnDataPlane` that records every dispatched overlay meta-op (per vShard)
@@ -195,7 +169,7 @@ mod tests {
                     watermark_lsn: Lsn::ZERO,
                     error_code: None,
                     stage_vote: None,
-                    read_versions: crate::types::ReadVersions::new(),
+                    read_vshards: crate::types::ReadShards::new(),
                     write_set: Vec::new(),
                 })
             })
@@ -251,7 +225,7 @@ mod tests {
         let store = SessionStore::new();
         let addr: std::net::SocketAddr = "127.0.0.1:5200".parse().unwrap();
         store.ensure_session(addr);
-        run_begin(&store, SessionId::from(&addr), &state).unwrap();
+        run_begin(&store, SessionId::from(&addr)).unwrap();
 
         // Stage to two distinct vShards/cores.
         assert!(store.buffer_write(addr, staged_task(3)));

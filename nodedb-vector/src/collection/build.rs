@@ -200,6 +200,7 @@ impl VectorCollection {
             (Self::build_sq8_for_index(&index), None)
         };
         let (tier, mmap_vectors) = self.resolve_tier_for_build(segment_id, base_id, &index, memory);
+        let resident_bytes = SealedSegment::measure(&index, sq8.as_ref());
         SealedSegment {
             index,
             base_id,
@@ -207,6 +208,7 @@ impl VectorCollection {
             pq,
             tier,
             mmap_vectors,
+            resident_bytes,
         }
     }
 

@@ -26,8 +26,14 @@ pub(super) struct WalAppendOutcome {
     pub group_origin: Option<wal_dispatch::GroupOrigin>,
     /// The replicated position whose marker precedes the write's records.
     pub change_position: Option<crate::event::cdc::position::ReplicatedPosition>,
-    /// The system-time ordinal the leader of the applied entry assigned.
+    /// The system-time ordinal the write stamps: the one the leader of the
+    /// applied entry assigned, the one the caller's records carry, or the one
+    /// the append reserved. Every record of the write carries it.
     pub system_ordinal: Option<i64>,
+    /// The write's open ordinal reservation: it stays open until the write
+    /// applied or failed, so no read cut at or above the ordinal closes
+    /// before then (`read_cut::reservations`).
+    pub reservation: Option<crate::control::read_cut::OrdinalReservation>,
 }
 
 /// Where and how [`authorize_and_append`] journals one write.
@@ -90,14 +96,16 @@ pub(super) fn authorize_and_append(
         });
     }
 
-    let (marked_position, system_ordinal) = match &durability {
+    let (marked_position, carried_ordinal) = match &durability {
         WalDurability::AppendHere {
             change_position,
             system_ordinal,
             ..
         } => (*change_position, *system_ordinal),
-        WalDurability::CallerSupplied { .. } => (None, None),
+        WalDurability::CallerSupplied { system_ordinal, .. } => (None, *system_ordinal),
     };
+    let mut system_ordinal = carried_ordinal;
+    let mut reservation = None;
     let (wal_lsn, resolved_now_ms, group_origin) = match durability {
         WalDurability::AppendHere {
             now_override,
@@ -107,14 +115,25 @@ pub(super) fn authorize_and_append(
         } => {
             // The marker precedes the redo in the WAL, so the fsync that makes
             // the redo durable makes the marker durable too.
-            // The rows' system-time ordinals are fixed here, under the guard
-            // and before the record, so the record carries them: the run the
-            // applied entry's leader assigned, else a run of this node's clock.
-            wal_dispatch::stamp_system_ordinals(
-                &mut plan,
-                &shared.wal.ordinal_clock(),
-                system_ordinal,
-            );
+            // The write's system-time ordinal is fixed here, under the guard
+            // and before the record, so every record of the write carries it:
+            // the one the applied entry's leader assigned, else one of this
+            // node's clock.
+            // The draw runs under the reservation registry's lock, so a read
+            // cut closing here either sees the reservation or stamps below
+            // the write. A carried ordinal is reserved here too: the leader's
+            // own reservation ends when the apply starts.
+            let clock = shared.wal.ordinal_clock();
+            let (drawn, reserved) = shared.read_cut.reservations.reserve_with(|| {
+                wal_dispatch::stamp_system_ordinals(&mut plan, &clock, carried_ordinal)
+            });
+            system_ordinal = drawn;
+            reservation = reserved;
+            // A session commit's versions take at least the reserved
+            // ordinal, so each sits at or above an open reservation until it
+            // installs. The record holds the raised stamps, so restart
+            // replay installs the same versions.
+            wal_dispatch::floor_redo_stamps(&mut plan, system_ordinal)?;
             if let Some(position) = change_position {
                 let marker = ChangePositionMarker {
                     apply_key,
@@ -134,7 +153,8 @@ pub(super) fn authorize_and_append(
                         None => shared.wal.appender(apply_key),
                     },
                     commit_hlc,
-                ),
+                )
+                .with_system_ordinal(system_ordinal),
                 event_source,
                 tenant_id,
                 vshard_id,
@@ -179,6 +199,7 @@ pub(super) fn authorize_and_append(
         group_origin,
         change_position: marked_position,
         system_ordinal,
+        reservation,
     })
 }
 

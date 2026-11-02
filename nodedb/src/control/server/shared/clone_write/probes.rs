@@ -4,7 +4,7 @@
 //! write-interception paths: presence probes on the target collection, and
 //! source-row/value fetches for copy-up.
 
-use nodedb_types::{DatabaseId, QualifiedCollection, Surrogate, TenantId};
+use nodedb_types::{DatabaseId, QualifiedCollection, Surrogate, SystemTimeScope, TenantId};
 
 use crate::bridge::envelope::{Priority, Request, Response, Status};
 use crate::control::security::identity::AuthenticatedIdentity;
@@ -72,25 +72,44 @@ pub(super) async fn probe_row_in_target(
     Ok(!resp.payload.is_empty() && resp.status == Status::Ok)
 }
 
-/// Fetch the raw msgpack bytes for a row from the source collection.
+/// The source collection a clone reads, and the cut it reads it at.
+#[derive(Clone, Copy)]
+pub(super) struct SourceView<'a> {
+    pub tenant_id: TenantId,
+    pub source_db_id: DatabaseId,
+    pub source_coll_qualified: &'a str,
+    /// The cut the clone reads its source at: `AsOf` the clone's source
+    /// time for a bitemporal source, `Current` otherwise.
+    pub system_time: SystemTimeScope,
+    /// The source surrogate high-water a KV clone read applies.
+    pub kv_surrogate_ceiling: Option<u32>,
+}
+
+/// Fetch the raw msgpack bytes for a row from the source collection, as the
+/// caller may see it at `view.system_time`.
 ///
 /// Returns `None` when the row is absent in source (PointGet returned empty).
 pub(super) async fn fetch_source_row(
     state: &SharedState,
     identity: &AuthenticatedIdentity,
-    tenant_id: TenantId,
-    source_db_id: DatabaseId,
-    source_coll_qualified: &str,
+    view: SourceView<'_>,
     document_id: &str,
     surrogate: Surrogate,
 ) -> crate::Result<Option<Vec<u8>>> {
+    let SourceView {
+        tenant_id,
+        source_db_id,
+        source_coll_qualified,
+        system_time,
+        kv_surrogate_ceiling: _,
+    } = view;
     let plan = PhysicalPlan::Document(DocumentOp::PointGet {
         collection: QualifiedCollection::from_stored(source_coll_qualified.to_string()),
         document_id: document_id.to_string(),
         surrogate: Some(surrogate),
         pk_bytes: document_id.as_bytes().to_vec(),
         rls_filters: Vec::new(),
-        system_time: nodedb_types::SystemTimeScope::Current,
+        system_time,
         valid_at_ms: None,
     });
     let plan = with_caller_rls(state, identity, tenant_id, source_db_id, plan)?;
@@ -137,6 +156,7 @@ pub(super) async fn probe_kv_key_in_target(
         // Internal probe of the clone's own target collection — never
         // delegated to source, so no isolation ceiling applies.
         surrogate_ceiling: None,
+        system_time: nodedb_types::SystemTimeScope::Current,
     });
     let plan = with_caller_rls(state, identity, tenant_id, db_id, plan)?;
     let vshard_id =
@@ -155,25 +175,31 @@ pub(super) async fn probe_kv_key_in_target(
     Ok(!resp.payload.is_empty() && resp.status == Status::Ok)
 }
 
-/// Fetch the raw value bytes for a KV row from the source collection.
+/// Fetch the raw value bytes for a KV row from the source collection, as the
+/// caller may see it through the clone at `view.system_time`.
 ///
 /// Returns `None` when the key is absent in source (KvOp::Get returned empty).
 pub(super) async fn fetch_kv_source_value(
     state: &SharedState,
     identity: &AuthenticatedIdentity,
-    tenant_id: TenantId,
-    source_db_id: DatabaseId,
-    source_coll_qualified: &str,
+    view: SourceView<'_>,
     kv_key: &[u8],
 ) -> crate::Result<Option<Vec<u8>>> {
+    let SourceView {
+        tenant_id,
+        source_db_id,
+        source_coll_qualified,
+        system_time,
+        kv_surrogate_ceiling,
+    } = view;
     let plan = PhysicalPlan::Kv(KvOp::Get {
         collection: QualifiedCollection::from_stored(source_coll_qualified.to_string()),
         key: kv_key.to_vec(),
         rls_filters: Vec::new(),
-        // Copy-up reads must see every binding in the source — the
-        // post-copy target write reflects the latest source state, and
-        // a missed source row will silently drop data on the clone.
-        surrogate_ceiling: None,
+        // A key bound in the source after the clone point is not part of
+        // the clone, so a copy-up or a delete count never reaches it.
+        surrogate_ceiling: kv_surrogate_ceiling,
+        system_time,
     });
     let plan = with_caller_rls(state, identity, tenant_id, source_db_id, plan)?;
     let vshard_id =
@@ -287,7 +313,7 @@ pub(super) async fn dispatch_data_plane_raw(
         wal_lsn: None,
         resolved_now_ms: None,
         commit_hlc: None,
-        entry_version: None,
+        system_ordinal: None,
         admission: crate::bridge::envelope::Admission::Exempt(
             crate::bridge::envelope::ExemptReason::Read,
         ),

@@ -43,27 +43,6 @@ pub(super) async fn propose_delete(
     propose_and_apply_async(state, &entry).await
 }
 
-/// Propose the re-key of a legacy bare-topic group onto its canonical stream.
-///
-/// The caller moves the durable offsets first: they live in a separate
-/// database this entry cannot carry.
-pub(super) async fn propose_migrate(
-    state: &SharedState,
-    def: &ConsumerGroupDef,
-    legacy_stream: &str,
-) -> Result<(), DdlError> {
-    // The entry names the canonical row, which is what its incarnation fences.
-    let canonical = ConsumerGroupDef {
-        stream_name: format!("topic:{legacy_stream}"),
-        ..def.clone()
-    };
-    let entry = CatalogEntry::MigrateConsumerGroupStream {
-        def: Box::new(canonical),
-        legacy_stream: legacy_stream.to_string(),
-    };
-    propose_and_apply_async(state, &entry).await
-}
-
 /// Propose raising the group's committed offsets. Every node raises its own
 /// offset store on apply, so a consumer resumes from this commit on any node.
 ///

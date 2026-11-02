@@ -158,7 +158,7 @@ fn is_count_star(field: &str) -> bool {
 }
 
 /// Collect every column reference in `expr`.
-pub(super) fn collect_columns<'e>(expr: &'e SqlExpr, out: &mut Vec<&'e str>) {
+pub(crate) fn collect_columns<'e>(expr: &'e SqlExpr, out: &mut Vec<&'e str>) {
     match expr {
         SqlExpr::Column(name) | SqlExpr::OldColumn(name) | SqlExpr::ExcludedColumn(name) => {
             out.push(name.as_str());

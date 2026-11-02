@@ -28,6 +28,7 @@ impl CoreLoop {
             match_pattern,
             sort_keys,
             surrogate_ceiling,
+            system_time,
         } = op
         else {
             return self.response_error(
@@ -51,6 +52,7 @@ impl CoreLoop {
                 computed_columns_bytes: computed_columns,
                 sort_keys,
                 surrogate_ceiling: *surrogate_ceiling,
+                system_time: *system_time,
             },
         )
     }

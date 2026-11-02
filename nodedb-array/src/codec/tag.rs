@@ -6,7 +6,7 @@
 // Any byte not recognized as a valid CodecTag is treated as corruption and
 // must be surfaced as a SegmentCorruption error by the caller.
 
-/// One-byte codec tag at the front of a new-format (v4+) tile payload.
+/// One-byte codec tag at the front of every tile payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum CodecTag {
@@ -33,10 +33,10 @@ impl CodecTag {
 
 /// Peek at the first byte of a tile payload and return the codec tag.
 ///
-/// Returns `Some(tag)` for a recognized new-format tag byte.
-/// Returns `None` for an empty payload or any unrecognized byte (including
-/// former msgpack map-start bytes 0x80–0x8f, 0xde, 0xdf) — callers must
-/// surface a `SegmentCorruption` error.
+/// Returns `Some(tag)` for a recognized tag byte.
+/// Returns `None` for an empty payload or any unrecognized byte, msgpack
+/// map-start bytes 0x80–0x8f, 0xde and 0xdf included. Callers must surface a
+/// `SegmentCorruption` error.
 pub fn peek_tag(payload: &[u8]) -> Option<CodecTag> {
     let first = *payload.first()?;
     CodecTag::from_byte(first)
@@ -65,9 +65,8 @@ mod tests {
     }
 
     #[test]
-    fn peek_tag_former_msgpack_bytes_return_none() {
-        // Bytes 0x80..=0x8f, 0xde, 0xdf were formerly treated as legacy msgpack
-        // map-start markers. They are now unknown tag bytes and must return None.
+    fn peek_tag_msgpack_map_bytes_return_none() {
+        // Msgpack map-start bytes 0x80..=0x8f, 0xde, 0xdf are no tag bytes.
         for b in 0x80u8..=0x8fu8 {
             let payload = [b, 0x00];
             assert_eq!(peek_tag(&payload), None, "byte {b:#04x} should be None");

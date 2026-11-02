@@ -4,7 +4,7 @@
 //!
 //! All wire types are defined in `nodedb-types::sync::wire` so that both
 //! Origin and NodeDB-Lite share identical serialization. This module
-//! re-exports them for backwards-compatible use within the Origin codebase.
+//! re-exports them for use within the Origin codebase.
 
 // ── Re-export all wire types from nodedb-types ──
 pub use nodedb_types::sync::wire::{

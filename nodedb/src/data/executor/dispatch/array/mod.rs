@@ -14,3 +14,4 @@ pub mod open;
 pub mod read;
 mod slice_row;
 pub mod surrogate_scan;
+pub mod version_stamp;

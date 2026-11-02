@@ -46,6 +46,7 @@ fn kv_get(key: &[u8]) -> PhysicalPlan {
         key: key.to_vec(),
         rls_filters: Vec::new(),
         surrogate_ceiling: None,
+        system_time: nodedb_types::SystemTimeScope::Current,
     })
 }
 
@@ -362,6 +363,7 @@ fn rollback_matrix_columnar_then_doc_fail() {
                 provenance: None,
                 wal_lsn: None,
                 system_from: None,
+                restored_versions: Vec::new(),
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 returning: None,
                 rls_filters: Vec::new(),
@@ -433,6 +435,7 @@ fn rollback_matrix_columnar_count_after_rollback() {
             provenance: None,
             wal_lsn: None,
             system_from: None,
+            restored_versions: Vec::new(),
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             returning: None,
             rls_filters: Vec::new(),
@@ -461,6 +464,7 @@ fn rollback_matrix_columnar_count_after_rollback() {
                 provenance: None,
                 wal_lsn: None,
                 system_from: None,
+                restored_versions: Vec::new(),
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 returning: None,
                 rls_filters: Vec::new(),
@@ -496,6 +500,7 @@ fn rollback_matrix_columnar_count_after_rollback() {
                 param: None,
             }],
             filters: Vec::new(),
+            system_time: nodedb_types::SystemTimeScope::Current,
             having: Vec::new(),
             limit: 10,
             sub_group_by: Vec::new(),

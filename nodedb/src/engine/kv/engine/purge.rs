@@ -4,7 +4,8 @@ use super::KvEngine;
 use crate::engine::kv::engine_helpers::expiry_prefix;
 
 impl KvEngine {
-    /// Remove the hash table and indexes for a single `(tenant_id, collection)`.
+    /// Remove the hash table, its version history, and its indexes for a
+    /// single `(tenant_id, collection)`.
     ///
     /// Returns `1` if the table existed and was removed, `0` otherwise.
     /// Idempotent — safe to re-run after partial completion.
@@ -22,8 +23,10 @@ impl KvEngine {
         if self.tables.remove(&tkey).is_some() {
             removed += 1;
         }
+        self.release_table(tkey);
         self.indexes.remove(&tkey);
         self.hash_to_tenant.remove(&tkey);
+        self.hash_to_database.remove(&tkey);
         self.hash_to_collection.remove(&tkey);
         self.sorted_indexes
             .purge_collection(database_id, tenant_id, collection);
@@ -35,6 +38,8 @@ impl KvEngine {
         // wasted work until every scheduled time has passed.
         let prefix = expiry_prefix(database_id, tenant_id, collection).into_bytes();
         let wheel_removed = self.expiry.purge_prefix(&prefix);
+        self.due
+            .retain(|(composite, _)| !composite.starts_with(&prefix));
         if wheel_removed > 0 {
             tracing::debug!(
                 tenant_id,
@@ -63,8 +68,10 @@ impl KvEngine {
         for key in &keys_to_remove {
             self.bump_write_epoch(*key);
             self.tables.remove(key);
+            self.release_table(*key);
             self.indexes.remove(key);
             self.hash_to_tenant.remove(key);
+            self.hash_to_database.remove(key);
             self.hash_to_collection.remove(key);
         }
         removed

@@ -13,6 +13,7 @@ pub mod dispatch_multi;
 pub mod edge_truncate;
 pub mod explain;
 pub mod graph_sequencing;
+pub(crate) mod incarnation_names;
 pub mod node_delete_txn;
 pub mod predicate;
 pub mod preexec;
@@ -37,7 +38,7 @@ pub use dispatch::{
     classify_dispatch, is_dependent_predicate, is_write_plan, predicate_class, read_vshards_of,
 };
 pub use dispatch_multi::dispatch_authorized_tasks_to_calvin;
-pub(crate) use dispatch_multi::{TxnProvenance, dispatch_strict_atomic_tasks_to_calvin};
+pub(crate) use dispatch_multi::{TxnProvenance, TxnReads, dispatch_strict_atomic_tasks_to_calvin};
 pub use explain::calvin_explain_preamble;
 pub use graph_sequencing::{
     GraphWrite, is_edge_write, is_label_write, is_sequenced_graph_write, sequence_graph_write,

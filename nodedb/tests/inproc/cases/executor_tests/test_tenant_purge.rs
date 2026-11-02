@@ -215,6 +215,7 @@ fn purge_removes_all_tenant_data() {
             key: b"sess_1".to_vec(),
             rls_filters: Vec::new(),
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
     let kv_empty = kv_resp.payload.is_empty()

@@ -3,15 +3,66 @@
 //! Cross-source (memtable + segment) version metadata and single-cell
 //! version lookup for [`ArrayStore`]'s bitemporal reads.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use nodedb_array::segment::{TilePayload, extract_cell_bytes};
 use nodedb_array::types::TileId;
 use nodedb_array::types::coord::value::CoordValue;
 
 use super::ArrayStore;
+use crate::engine::array::store::segment_handle::SegmentHandle;
+
+/// The newest tile-version stamp a segment holds under each placement,
+/// read from its footer.
+pub(super) fn segment_newest_stamps(handle: &SegmentHandle) -> HashMap<u32, i64> {
+    let mut newest: HashMap<u32, i64> = HashMap::new();
+    for entry in handle.reader().tiles() {
+        raise_newest_stamp(&mut newest, entry.placement, entry.tile_id.system_from_ms);
+    }
+    newest
+}
+
+/// Raise the newest stamp of `placement` in `newest` to `stamp`.
+fn raise_newest_stamp(newest: &mut HashMap<u32, i64>, placement: u32, stamp: i64) {
+    let held = newest.entry(placement).or_insert(stamp);
+    *held = (*held).max(stamp);
+}
+
+/// Raise each placement's newest stamp in `into` to its stamp in `from`.
+pub(super) fn merge_newest_stamps(into: &mut HashMap<u32, i64>, from: HashMap<u32, i64>) {
+    for (placement, stamp) in from {
+        raise_newest_stamp(into, placement, stamp);
+    }
+}
 
 impl ArrayStore {
+    /// The newest tile-version stamp the store holds under any placement,
+    /// across every segment and the memtable. `None` for an empty store.
+    pub fn newest_version_stamp(&self) -> Option<i64> {
+        self.newest_stamps.values().copied().max()
+    }
+
+    /// The newest tile-version stamp the store holds under `placement`. A
+    /// write placed there stamps above it, so it sorts after every version
+    /// of its cell. One placement's writes apply in the same order on every
+    /// replica, so every replica raises alike. `None` when the placement
+    /// holds no version. The value never falls: a rolled-back memtable tile
+    /// can leave it above the true newest, which only raises a later stamp
+    /// further.
+    pub fn newest_version_stamp_at(&self, placement: u32) -> Option<i64> {
+        self.newest_stamps.get(&placement).copied()
+    }
+
+    /// Raise [`Self::newest_version_stamp_at`] of `placement` to `stamp`.
+    pub(crate) fn note_version_stamp(&mut self, placement: u32, stamp: i64) {
+        raise_newest_stamp(&mut self.newest_stamps, placement, stamp);
+    }
+
+    /// Raise the newest stamps to every placement's newest in `stamps`.
+    pub(super) fn note_version_stamps(&mut self, stamps: HashMap<u32, i64>) {
+        merge_newest_stamps(&mut self.newest_stamps, stamps);
+    }
+
     /// Collect every distinct `hilbert_prefix` present in any tile version,
     /// across both the memtable and all open segments.
     pub(super) fn all_hilbert_prefixes(&self) -> HashSet<u64> {

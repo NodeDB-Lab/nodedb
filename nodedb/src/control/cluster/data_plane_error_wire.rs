@@ -148,6 +148,7 @@ impl From<ErrorCode> for DataPlaneErrorCode {
             ErrorCode::BadRequest { detail } => Self::BadRequest { detail },
             ErrorCode::TransactionRollback { detail } => Self::TransactionRollback { detail },
             ErrorCode::ActiveSqlTransaction { detail } => Self::ActiveSqlTransaction { detail },
+            ErrorCode::SerializationConflict { detail } => Self::SerializationConflict { detail },
             ErrorCode::DependentObjectsExist { object, detail } => {
                 Self::DependentObjectsExist { object, detail }
             }
@@ -316,6 +317,9 @@ impl From<DataPlaneErrorCode> for ErrorCode {
             DataPlaneErrorCode::BadRequest { detail } => Self::BadRequest { detail },
             DataPlaneErrorCode::TransactionRollback { detail } => {
                 Self::TransactionRollback { detail }
+            }
+            DataPlaneErrorCode::SerializationConflict { detail } => {
+                Self::SerializationConflict { detail }
             }
             DataPlaneErrorCode::ActiveSqlTransaction { detail } => {
                 Self::ActiveSqlTransaction { detail }

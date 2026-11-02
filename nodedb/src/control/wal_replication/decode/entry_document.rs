@@ -6,20 +6,11 @@
 //! these variants.
 
 use super::super::decode_sync_engines::decode_returning;
-use super::super::types::{BalanceDeltaFields, ReplicatedSumTarget, ReplicatedWrite};
+use super::super::types::{BalanceDeltaFields, ReplicatedWrite};
 use super::document;
-use super::document::{PointInsertOptions, ReturningFields, UpsertExtras, WireSumResolution};
+use super::document::{PointInsertOptions, ReturningFields, UpsertExtras};
 use super::document_join;
 use crate::bridge::envelope::PhysicalPlan;
-
-/// Pair a record's two materialized-sum resolution slots so the decoder, not
-/// each call site, decides which answers — see [`WireSumResolution`].
-fn sums<'a>(
-    bindings: &'a [ReplicatedSumTarget],
-    legacy: &'a [(String, u32)],
-) -> WireSumResolution<'a> {
-    WireSumResolution { bindings, legacy }
-}
 
 pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan> {
     match write {
@@ -29,7 +20,6 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             value,
             surrogate,
             resolved_sum_targets,
-            resolved_sum_target_bindings,
             returning,
             rls_filters,
         } => Ok(document::point_put(
@@ -37,7 +27,7 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             document_id,
             value,
             *surrogate,
-            &sums(resolved_sum_target_bindings, resolved_sum_targets),
+            resolved_sum_targets,
             ReturningFields {
                 returning: decode_returning(returning)?,
                 rls_filters,
@@ -51,7 +41,6 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             surrogate,
             resolved_sum_targets,
             deferred_sum_targets,
-            resolved_sum_target_bindings,
             returning,
             rls_filters,
         } => Ok(document::point_insert(
@@ -62,7 +51,7 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             *surrogate,
             PointInsertOptions {
                 sums: document::SumDecisions {
-                    resolved: sums(resolved_sum_target_bindings, resolved_sum_targets),
+                    resolved: resolved_sum_targets,
                     deferred: deferred_sum_targets,
                 },
                 returning: ReturningFields {
@@ -76,14 +65,13 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             document_id,
             surrogate,
             resolved_sum_targets,
-            resolved_sum_target_bindings,
             returning,
             rls_filters,
         } => Ok(document::point_delete(
             collection,
             document_id,
             *surrogate,
-            &sums(resolved_sum_target_bindings, resolved_sum_targets),
+            resolved_sum_targets,
             ReturningFields {
                 returning: decode_returning(returning)?,
                 rls_filters,
@@ -95,7 +83,6 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             updates,
             surrogate,
             resolved_sum_targets,
-            resolved_sum_target_bindings,
             returning,
             rls_filters,
             declared_primary_key,
@@ -105,7 +92,7 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             updates,
             *surrogate,
             document::PointUpdateExtras {
-                resolved_sum_targets: &sums(resolved_sum_target_bindings, resolved_sum_targets),
+                resolved_sum_targets,
                 returning: ReturningFields {
                     returning: decode_returning(returning)?,
                     rls_filters,
@@ -120,7 +107,6 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             on_conflict_updates,
             surrogate,
             resolved_sum_targets,
-            resolved_sum_target_bindings,
             returning,
             rls_filters,
         } => Ok(document::doc_upsert(
@@ -130,7 +116,7 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             on_conflict_updates,
             *surrogate,
             UpsertExtras {
-                resolved_sum_targets: &sums(resolved_sum_target_bindings, resolved_sum_targets),
+                resolved_sum_targets,
                 returning: ReturningFields {
                     returning: decode_returning(returning)?,
                     rls_filters,
@@ -143,7 +129,6 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             surrogates,
             on_conflict_updates,
             resolved_sum_targets,
-            resolved_sum_target_bindings,
             returning,
             rls_filters,
         } => document::batch_upsert(
@@ -152,7 +137,7 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             surrogates,
             on_conflict_updates,
             UpsertExtras {
-                resolved_sum_targets: &sums(resolved_sum_target_bindings, resolved_sum_targets),
+                resolved_sum_targets,
                 returning: ReturningFields {
                     returning: decode_returning(returning)?,
                     rls_filters,
@@ -166,7 +151,6 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             if_absent,
             resolved_sum_targets,
             deferred_sum_targets,
-            resolved_sum_target_bindings,
             returning,
             rls_filters,
         } => document::batch_insert(
@@ -174,7 +158,7 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             documents,
             surrogates,
             *if_absent,
-            &sums(resolved_sum_target_bindings, resolved_sum_targets),
+            resolved_sum_targets,
             deferred_sum_targets,
             ReturningFields {
                 returning: decode_returning(returning)?,
@@ -185,12 +169,11 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             collection,
             restart_identity,
             resolved_sum_targets,
-            resolved_sum_target_bindings,
             declared_primary_key,
         } => Ok(document::truncate(
             collection,
             *restart_identity,
-            &sums(resolved_sum_target_bindings, resolved_sum_targets),
+            resolved_sum_targets,
             declared_primary_key.clone(),
         )),
         ReplicatedWrite::BulkDml {
@@ -199,7 +182,6 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             is_update,
             updates,
             resolved_sum_targets,
-            resolved_sum_target_bindings,
             returning,
             rls_filters,
             declared_primary_key,
@@ -208,7 +190,7 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             filters,
             *is_update,
             updates,
-            &sums(resolved_sum_target_bindings, resolved_sum_targets),
+            resolved_sum_targets,
             ReturningFields {
                 returning: decode_returning(returning)?,
                 rls_filters,
@@ -251,7 +233,6 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             source_rows,
             rls_filters,
             resolved_sum_targets,
-            resolved_sum_target_bindings,
             declared_primary_key,
         } => Ok(document_join::merge_apply(
             document_join::JoinFields {
@@ -261,7 +242,7 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
                 target_join_col,
                 source_join_col,
                 source_rows,
-                resolved_sum_targets: &sums(resolved_sum_target_bindings, resolved_sum_targets),
+                resolved_sum_targets,
                 declared_primary_key: declared_primary_key.clone(),
             },
             document_join::MergeFields {
@@ -286,7 +267,6 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             source_rows,
             rls_filters,
             resolved_sum_targets,
-            resolved_sum_target_bindings,
             declared_primary_key,
         } => Ok(document_join::update_from_join_apply(
             document_join::JoinFields {
@@ -296,7 +276,7 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
                 target_join_col,
                 source_join_col,
                 source_rows,
-                resolved_sum_targets: &sums(resolved_sum_target_bindings, resolved_sum_targets),
+                resolved_sum_targets,
                 declared_primary_key: declared_primary_key.clone(),
             },
             updates,

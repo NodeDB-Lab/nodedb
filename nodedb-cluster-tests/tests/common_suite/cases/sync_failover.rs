@@ -27,6 +27,7 @@ use common::cluster_harness::{TestCluster, wait::wait_for};
 use std::sync::Arc;
 use std::time::Duration;
 
+use nodedb::control::security::identity::{AuthMethod, AuthenticatedIdentity};
 use nodedb::control::server::sync::columnar_handler::{
     ColumnarDispatcher, SharedStateColumnarDispatcher,
 };
@@ -169,6 +170,16 @@ async fn cluster_sync_producer_fence_survives_failover() {
 
 // ── test 2: columnar sync-write dedup survives data-group failover ───────────
 
+/// The superuser the cluster's pgwire sessions authenticate as, from
+/// `shared`'s own credential store: the identity whose DDL created the
+/// collection, in its tenant.
+fn cluster_superuser(shared: &SharedState) -> AuthenticatedIdentity {
+    shared
+        .credentials
+        .to_identity("nodedb", AuthMethod::Trust)
+        .expect("the cluster's superuser")
+}
+
 /// Constant context for a columnar sync send: which node, route, and producer.
 /// The varying `seq`/`val` are passed per call.
 struct ColumnarSendCtx<'a> {
@@ -188,7 +199,7 @@ async fn dispatch_columnar_seq(
     seq: u64,
     val: &str,
 ) -> Result<AckStatus, String> {
-    let identity = nodedb_test_support::pgwire_auth_helpers::superuser();
+    let identity = cluster_superuser(ctx.shared);
     let dispatcher =
         SharedStateColumnarDispatcher::new(ctx.shared.as_ref(), &identity, DatabaseId::DEFAULT);
     let rows = vec![vec![
@@ -228,13 +239,17 @@ async fn dispatch_with_retry(
     val: &str,
     label: &str,
 ) -> AckStatus {
+    let mut last_error = String::new();
     for _ in 0..120 {
         match dispatch_columnar_seq(ctx, seq, val).await {
             Ok(status) => return status,
-            Err(_) => tokio::time::sleep(Duration::from_millis(250)).await,
+            Err(error) => {
+                last_error = error;
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
         }
     }
-    panic!("dispatch never succeeded: {label}");
+    panic!("dispatch never succeeded: {label}; last error: {last_error}");
 }
 
 /// cluster/sync_columnar_dedup_survives_failover
@@ -246,7 +261,9 @@ async fn cluster_sync_columnar_dedup_survives_failover() {
 
     const COLL: &str = "csync_failover";
     const PRODUCER: u64 = 7777;
-    let tenant = TenantId::new(0);
+    // The sync writes as the superuser, into the tenant its DDL created the
+    // collection in.
+    let tenant = cluster_superuser(&cluster.nodes[0].shared).tenant_id;
     let vshard = nodedb_types::CollectionKey::from_bare(DatabaseId::DEFAULT, COLL).vshard();
 
     cluster

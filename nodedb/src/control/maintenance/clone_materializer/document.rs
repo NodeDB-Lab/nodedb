@@ -13,7 +13,7 @@
 
 use nodedb_types::{DatabaseId, SystemTimeScope, TenantId};
 
-use crate::types::TxnId;
+use crate::types::{DocVersionStamp, TxnId};
 
 use super::dispatch::{dispatch_local, dispatch_to_owner};
 use super::document_copy::RowCopy;
@@ -91,8 +91,19 @@ pub(super) async fn materialize_document_collection(
     Ok(())
 }
 
-/// `(doc_id_hex, source_surrogate_u32, value_bytes)` returned by one scan page.
-pub(crate) type ScanPage = (Vec<(String, u32, Vec<u8>)>, Vec<u8>);
+/// One row a source scan page returned.
+pub(crate) struct SourceRow {
+    /// The row's storage key, its surrogate in hex.
+    pub doc_id_hex: String,
+    pub source_surrogate: u32,
+    pub body: Vec<u8>,
+    /// The stamps of the source version read. `None` for a row a
+    /// transaction overlay supplied.
+    pub stamp: Option<DocVersionStamp>,
+}
+
+/// The rows of one scan page and the cursor of the next page.
+pub(crate) type ScanPage = (Vec<SourceRow>, Vec<u8>);
 
 /// Run one source-side `MaterializeScan` round-trip.
 ///
@@ -119,9 +130,35 @@ pub(crate) async fn scan_source_page(
     scan_page(state, page, txn_id).await
 }
 
+/// Read the one source row `surrogate` names, as the version a read at
+/// `system_time` sees, with its stamps. `None` when that read sees no row.
+/// The read runs on the source shard's owner.
+pub(crate) async fn read_source_row(
+    state: &SharedState,
+    tenant_id: TenantId,
+    source_db_id: DatabaseId,
+    source_qualified: &str,
+    surrogate: nodedb_types::Surrogate,
+    system_time: SystemTimeScope,
+) -> crate::Result<Option<SourceRow>> {
+    let plan = PhysicalPlan::Document(DocumentOp::MaterializeScan {
+        collection: nodedb_types::QualifiedCollection::from_stored(source_qualified.to_string()),
+        cursor: Vec::new(),
+        count: 1,
+        system_time,
+        raw_bodies: true,
+        only_row: Some(surrogate),
+    });
+    let payload = dispatch_to_owner(state, tenant_id, source_db_id, source_qualified, plan).await?;
+    let (rows, _) = parse_materialize_scan_payload(&payload)?;
+    Ok(rows
+        .into_iter()
+        .find(|row| row.source_surrogate == surrogate.as_u32()))
+}
+
 /// The scope a clone copy reads its source at: `AsOf` the clone's source
 /// time, or `Current` when the clone carries none.
-pub(super) fn clone_scope(system_as_of_ms: Option<i64>) -> SystemTimeScope {
+pub(crate) fn clone_scope(system_as_of_ms: Option<i64>) -> SystemTimeScope {
     system_as_of_ms.map_or(SystemTimeScope::Current, SystemTimeScope::AsOf)
 }
 
@@ -157,6 +194,7 @@ pub(super) async fn scan_page(
         count: SCAN_PAGE,
         system_time,
         raw_bodies,
+        only_row: None,
     });
     // A transaction's staging overlay lives on the source shard's leader, so
     // a staged read runs there (`dispatch_local` routes it). Every other read
@@ -188,7 +226,7 @@ pub(super) async fn scan_page(
 }
 
 /// Parse the msgpack payload emitted by `execute_document_materialize_scan`:
-///   `[next_cursor: bin, entries: [[doc_id: str, surrogate: u32, value_bytes: bin], ...]]`.
+///   `[next_cursor: bin, entries: [[doc_id: str, surrogate: u32, value_bytes: bin, stamp], ...]]`.
 fn parse_materialize_scan_payload(payload: &[u8]) -> crate::Result<ScanPage> {
     use nodedb_query::msgpack_scan;
 
@@ -216,20 +254,27 @@ fn parse_materialize_scan_payload(payload: &[u8]) -> crate::Result<ScanPage> {
     // each complete entry has been structurally consumed from `payload`.
     let mut entries = Vec::new();
     for _ in 0..entry_count {
-        let (triple_len, mut triple_off) =
+        let (entry_len, mut field_off) =
             msgpack_scan::array_header(payload, entry_off).ok_or_else(bad)?;
-        if triple_len != 3 {
+        if entry_len != 4 {
             return Err(bad());
         }
-        let doc_id = msgpack_scan::read_str_advance(payload, &mut triple_off)
+        let doc_id_hex = msgpack_scan::read_str_advance(payload, &mut field_off)
             .ok_or_else(bad)?
             .to_string();
-        let surrogate = msgpack_scan::read_u32_advance(payload, &mut triple_off).ok_or_else(bad)?;
-        let value = msgpack_scan::read_bin_advance(payload, &mut triple_off)
+        let source_surrogate =
+            msgpack_scan::read_u32_advance(payload, &mut field_off).ok_or_else(bad)?;
+        let body = msgpack_scan::read_bin_advance(payload, &mut field_off)
             .ok_or_else(bad)?
             .to_vec();
-        entries.push((doc_id, surrogate, value));
-        entry_off = triple_off;
+        let stamp = DocVersionStamp::read(payload, &mut field_off).ok_or_else(bad)?;
+        entries.push(SourceRow {
+            doc_id_hex,
+            source_surrogate,
+            body,
+            stamp,
+        });
+        entry_off = field_off;
     }
 
     Ok((entries, next_cursor))

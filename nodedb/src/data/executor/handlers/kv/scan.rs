@@ -25,6 +25,8 @@ pub(in crate::data::executor) struct KvScanHandlerParams<'a> {
     pub computed_columns_bytes: &'a [u8],
     pub sort_keys: &'a [nodedb_physical::physical_plan::SortKeySpec],
     pub surrogate_ceiling: Option<u32>,
+    /// The system-time cut the base rows are read at.
+    pub system_time: nodedb_types::SystemTimeScope,
 }
 
 impl CoreLoop {
@@ -46,6 +48,7 @@ impl CoreLoop {
             computed_columns_bytes,
             sort_keys,
             surrogate_ceiling,
+            system_time,
         } = params;
 
         debug!(core = self.core_id, %collection, count, "kv scan");
@@ -81,21 +84,39 @@ impl CoreLoop {
             Err(e) => return self.response_error(task, e),
         };
 
-        // Index pushdown for one equality conjunct. The post-scan filter
-        // below still checks every predicate on every row.
-        let probe = eq_index_probe(&filter_predicates);
-        let (mut entries, _next_cursor) = self.kv_engine.scan(KvScanParams {
-            database_id: did,
-            tenant_id: tid,
-            collection,
-            cursor,
-            count: fetch_count,
-            now_ms,
-            match_pattern,
-            filter_field: probe.as_ref().map(|(field, _)| *field),
-            filter_value: probe.as_ref().map(|(_, key)| key.as_slice()),
-            surrogate_ceiling,
-        });
+        // A `Current` scan reads the live rows, with index pushdown for one
+        // equality conjunct. A past cut or an all-versions scan reads the
+        // versions there (see `scan_versioned.rs`). The post-scan filter
+        // below checks every predicate on every row either way.
+        let (mut entries, row_sys_from) = if system_time.is_temporal() {
+            let rows = self.kv_versioned_scan_rows(super::scan_versioned::VersionedScanArgs {
+                did,
+                tid,
+                collection,
+                cursor,
+                count: fetch_count,
+                now_ms,
+                match_pattern,
+                surrogate_ceiling,
+                system_time,
+            });
+            (rows.entries, rows.sys_from)
+        } else {
+            let probe = eq_index_probe(&filter_predicates);
+            let (entries, _next_cursor) = self.kv_engine.scan(KvScanParams {
+                database_id: did,
+                tenant_id: tid,
+                collection,
+                cursor,
+                count: fetch_count,
+                now_ms,
+                match_pattern,
+                filter_field: probe.as_ref().map(|(field, _)| *field),
+                filter_value: probe.as_ref().map(|(_, key)| key.as_slice()),
+                surrogate_ceiling,
+            });
+            (entries, Vec::new())
+        };
 
         // Read-your-own-writes: fold this transaction's staged KV writes
         // into the base scan result before the shared filter/sort/encode
@@ -103,8 +124,12 @@ impl CoreLoop {
         // `matches` always accepts here -- the per-entry filter loop further
         // down re-applies `filter_predicates` uniformly to every row
         // (base or merged), so there is no need to duplicate that check
-        // in the merge itself.
-        if let Some(txn_id) = task.request.txn_id {
+        // in the merge itself. A current scan and a transaction snapshot
+        // scan merge staged writes. A historical or all-versions scan reads
+        // stored history only.
+        if let Some(txn_id) = task.request.txn_id
+            && system_time.merges_txn_overlay()
+        {
             let coll_key = (
                 crate::types::DatabaseId::new(did),
                 crate::types::TenantId::new(tid),
@@ -132,13 +157,22 @@ impl CoreLoop {
 
         // Build results as raw msgpack — no serde_json::Value intermediary.
         let mut result_entries: Vec<Vec<u8>> = Vec::with_capacity(entries.len());
-        for (k, v) in &entries {
+        for (row, (k, v)) in entries.iter().enumerate() {
             // The two storage shapes (msgpack map vs raw bytes) are resolved by
             // the one shared shaper, so this scan, the streaming/materializing
             // scans, and a write's `RETURNING` projection cannot disagree about
             // what a KV row looks like. A private copy of that logic in this
             // loop risks diverging from the others on the raw-bytes case.
-            let (_key_str, entry_mp) = crate::data::executor::scan_normalize::kv_row_to_doc(k, v);
+            let (_key_str, mut entry_mp) =
+                crate::data::executor::scan_normalize::kv_row_to_doc(k, v);
+            // An all-versions row carries the millisecond of the write that
+            // set it.
+            if let Some(&sys_from) = row_sys_from.get(row) {
+                entry_mp = match super::scan_versioned::with_ts_system(&entry_mp, sys_from) {
+                    Ok(stamped) => stamped,
+                    Err(e) => return self.response_error(task, e),
+                };
+            }
 
             // Apply filter predicates post-scan (already works on raw msgpack).
             if !filter_predicates.is_empty() {

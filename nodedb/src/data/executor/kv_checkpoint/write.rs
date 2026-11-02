@@ -8,6 +8,7 @@ use tracing::{info, warn};
 use super::format::{
     KV_CKPT_FORMAT_VERSION, KvCheckpointEntry, KvCheckpointFile, KvCheckpointManifest,
 };
+use super::history_codec::export_history;
 use super::index_export::export_collection_indexes;
 use super::manifest::storage_err;
 use super::paths::{KV_CKPT_MANIFEST, kv_ckpt_dir, kv_ckpt_filename, kv_ckpt_gen_dir};
@@ -125,14 +126,18 @@ impl CoreLoop {
                             value: e.value,
                             expire_at_ms: e.expire_at_ms,
                             surrogate: e.surrogate.0,
+                            sys_from: e.sys_from,
                         })
                         .collect()
                 })
                 .unwrap_or_default();
 
+            let history = coll.table.map(export_history).unwrap_or_default();
+
             let file = KvCheckpointFile {
                 format_version: KV_CKPT_FORMAT_VERSION,
                 entries,
+                history,
                 indexes: export_collection_indexes(&self.kv_engine, coll.table_key),
             };
             let bytes =

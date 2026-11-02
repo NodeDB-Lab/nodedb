@@ -143,7 +143,7 @@ pub(super) fn staged_rows_response(rows: Vec<u8>) -> crate::bridge::envelope::Re
         watermark_lsn: crate::types::Lsn::ZERO,
         error_code: None,
         stage_vote: None,
-        read_versions: crate::types::ReadVersions::new(),
+        read_vshards: crate::types::ReadShards::new(),
         write_set: Vec::new(),
     }
 }

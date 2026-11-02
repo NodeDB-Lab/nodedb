@@ -75,6 +75,7 @@ impl RetryableSchemaChange for Error {
             | Error::ConflictRetry { .. }
             | Error::CalvinSerializationConflict
             | Error::CalvinParticipantError
+            | Error::TxnSnapshotTooOld { .. }
             | Error::RejectedPrevalidation { .. }
             | Error::RetryableRefusal { .. }
             | Error::AppendOnlyViolation { .. }
@@ -182,7 +183,6 @@ impl RetryableSchemaChange for Error {
             | Error::SessionTokenExpired
             | Error::SessionKilledByAdmin
             | Error::SessionUserDropped
-            | Error::OidcProviderTenantUnbound
             | Error::OidcProviderTenantUnavailable { .. }
             | Error::ExternalRoleUndefined { .. }
             | Error::OidcNoDefaultDatabase { .. }

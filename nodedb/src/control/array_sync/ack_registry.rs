@@ -17,7 +17,7 @@ use tracing::warn;
 use crate::types::DatabaseId;
 
 /// redb table: `[db: u64 BE][tenant: u64 BE][name_len: u16 BE][name][replica: u64 BE]` → HLC.
-const ACK_TABLE_V2: TableDefinition<&[u8], &[u8]> = TableDefinition::new("array_ack_hlcs_v2");
+const ACK_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("array_ack_hlcs");
 
 type ArrayScope = (DatabaseId, u64, String);
 
@@ -103,7 +103,7 @@ impl ArrayAckRegistry {
                 engine: "array_sync".into(),
                 detail: format!("ack_registry init begin_write: {e}"),
             })?;
-            txn.open_table(ACK_TABLE_V2)
+            txn.open_table(ACK_TABLE)
                 .map_err(|e| crate::Error::Storage {
                     engine: "array_sync".into(),
                     detail: format!("ack_registry init open v2 table: {e}"),
@@ -128,7 +128,7 @@ impl ArrayAckRegistry {
             detail: format!("ack_registry load begin_read: {e}"),
         })?;
         let table = txn
-            .open_table(ACK_TABLE_V2)
+            .open_table(ACK_TABLE)
             .map_err(|e| crate::Error::Storage {
                 engine: "array_sync".into(),
                 detail: format!("ack_registry load open table: {e}"),
@@ -209,7 +209,7 @@ impl ArrayAckRegistry {
         })?;
         {
             let mut table = txn
-                .open_table(ACK_TABLE_V2)
+                .open_table(ACK_TABLE)
                 .map_err(|e| crate::Error::Storage {
                     engine: "array_sync".into(),
                     detail: format!("ack_registry persist open table: {e}"),
@@ -383,7 +383,7 @@ mod tests {
 
         assert_eq!(reg.min_ack_hlc("arr"), Some(hlc(150)));
         let txn = reg.db.begin_read().expect("read transaction");
-        let table = txn.open_table(ACK_TABLE_V2).expect("ack table");
+        let table = txn.open_table(ACK_TABLE).expect("ack table");
         let persisted = table.get(key.as_slice()).expect("get").expect("row");
         assert_eq!(
             Hlc::from_bytes(&persisted.value().try_into().expect("HLC bytes")),

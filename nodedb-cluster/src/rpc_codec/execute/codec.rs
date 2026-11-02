@@ -226,14 +226,11 @@ mod tests {
 
     #[test]
     fn roundtrip_execute_response_success() {
-        let read_versions = vec![nodedb_types::ShardVersion {
-            vshard: 513,
-            version: nodedb_types::WriteVersion::logged(2, 0xBEEF_5678),
-        }];
+        let read_vshards = vec![513];
         let resp = ExecuteResponse::ok(
             vec![b"row1".to_vec(), b"row2".to_vec()],
             0xCAFE_1234,
-            read_versions.clone(),
+            read_vshards.clone(),
         );
         let decoded = roundtrip_resp(resp);
         assert!(decoded.success);
@@ -245,30 +242,27 @@ mod tests {
             "read watermark roundtrips on the response body"
         );
         assert_eq!(
-            decoded.read_versions, read_versions,
-            "read versions roundtrip distinct from the watermark"
+            decoded.read_vshards, read_vshards,
+            "read vShards roundtrip distinct from the watermark"
         );
     }
 
     #[test]
-    fn a_refusal_roundtrips_the_versions_it_observed() {
-        let read_versions = vec![nodedb_types::ShardVersion {
-            vshard: 7,
-            version: nodedb_types::WriteVersion::logged(1, 40),
-        }];
-        let resp = ExecuteResponse::refused_with_versions(
+    fn a_refusal_roundtrips_the_vshards_it_read() {
+        let read_vshards = vec![7];
+        let resp = ExecuteResponse::refused_with_vshards(
             TypedClusterError::Internal {
                 code: 0,
                 message: "no row".into(),
             },
             12,
-            read_versions.clone(),
+            read_vshards.clone(),
         );
         let decoded = roundtrip_resp(resp);
         assert!(!decoded.success);
         assert!(decoded.error.is_some());
         assert_eq!(decoded.watermark_lsn, 12);
-        assert_eq!(decoded.read_versions, read_versions);
+        assert_eq!(decoded.read_vshards, read_vshards);
     }
 
     #[test]
@@ -286,8 +280,8 @@ mod tests {
             "error responses carry no watermark"
         );
         assert!(
-            decoded.read_versions.is_empty(),
-            "error responses carry no read versions"
+            decoded.read_vshards.is_empty(),
+            "error responses carry no read vShards"
         );
         match decoded.error {
             Some(TypedClusterError::NotLeader {

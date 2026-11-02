@@ -12,7 +12,9 @@
 //! written to the WAL and applied to engine state. After WAL durability the handler
 //! calls [`CoreLoop::sync_commit`] to advance the HWM.
 //!
-//! Callers wired in Stage 3; HWM advance via `sync_commit` post-WAL-commit.
+//! Producer `0` is the local sentinel. A SQL write carries the empty
+//! provenance, and a sync session whose handshake carried no Lite identity is
+//! unfenced. Neither takes part in producer sequencing.
 
 use nodedb_types::sync::wire::{AckStatus, SyncAckResult, SyncProvenance};
 
@@ -92,9 +94,8 @@ impl CoreLoop {
 
     /// Admit a sync frame and fence-forward a newer producer epoch.
     ///
-    /// This preserves the historical admission semantics: every non-fenced
-    /// frame from a newer epoch advances the epoch floor immediately, while
-    /// HWM advancement remains the caller's post-durability responsibility.
+    /// Every non-fenced frame from a newer epoch advances the epoch floor
+    /// immediately. HWM advancement is the caller's post-durability step.
     pub(in crate::data::executor) fn sync_admit(&mut self, prov: &SyncProvenance) -> SyncAdmit {
         let admit = self.sync_classify(prov);
         if prov.producer_id != 0

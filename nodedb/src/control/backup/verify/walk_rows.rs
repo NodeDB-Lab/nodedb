@@ -4,9 +4,11 @@
 //!
 //! A document row is keyed by the identity RESTORE binds it under: the backup's
 //! primary-key bind of its surrogate, else the identity INSERT derives from its
-//! body. A bitemporal row emits one canonical row per version.
+//! body. A row emits one canonical row per version, stamped with its system
+//! time. The newest version of a row or an edge also carries the current
+//! state.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use nodedb_types::backup_envelope::VerifiedPart;
 use nodedb_types::{RowIdentity, StorageKey, Value};
@@ -37,6 +39,7 @@ impl<'a> RowKey<'a> {
 }
 
 /// A stored body decoded to MessagePack and to a native value.
+#[derive(Clone)]
 struct Body {
     msgpack: Vec<u8>,
     value: Option<Value>,
@@ -45,23 +48,11 @@ struct Body {
 impl Walk<'_> {
     pub(super) fn documents(
         &self,
-        documents: &[(String, Vec<u8>)],
         documents_versioned: &[(String, Vec<u8>)],
         sink: &mut dyn FnMut(Row),
     ) -> Result<(), Error> {
         // A collection with no catalog row decodes as schemaless, keyed by `id`.
         let unknown = DocShape::default();
-        for (key, body) in documents {
-            let (stored, rest) = self.document_key(key)?;
-            let bare = self.bare(stored);
-            let shape = self.shapes.get(&bare).unwrap_or(&unknown);
-            let row_key = RowKey::parse(rest);
-            let body = decode_body(shape, &bare, row_key, body)?;
-            let identity = self.identity(&bare, shape, row_key, Some(body.msgpack.as_slice()));
-            let mut hasher = RowHasher::new(VerifiedPart::Documents, &[identity.as_slice()]);
-            hash_body(&mut hasher, shape, body)?;
-            sink(row(bare, &identity, hasher));
-        }
 
         // Every version of a row, in system-time order: the identity comes from
         // the first live version, as RESTORE derives it.
@@ -81,21 +72,34 @@ impl Walk<'_> {
             let bare = self.bare(stored);
             let shape = self.shapes.get(&bare).unwrap_or(&unknown);
             let mut decoded = Vec::with_capacity(versions.len());
-            for (_, raw) in versions {
+            for (sys, raw) in versions {
                 let version = decode_value(raw)?;
                 let body = if version.tag == TAG_LIVE {
                     Some(decode_body(shape, &bare, row_key, version.body)?)
                 } else {
                     None
                 };
-                decoded.push((version, body));
+                decoded.push((sys, version, body));
             }
             let first_live = decoded
                 .iter()
-                .find_map(|(_, body)| body.as_ref().map(|b| b.msgpack.as_slice()));
+                .find_map(|(_, _, body)| body.as_ref().map(|b| b.msgpack.as_slice()));
             let identity = self.identity(&bare, shape, row_key, first_live);
-            for (version, body) in decoded {
+            let newest = decoded.len().saturating_sub(1);
+            for (index, (sys, version, body)) in decoded.into_iter().enumerate() {
+                let state = if index == newest {
+                    let held = VersionState {
+                        tag: version.tag,
+                        valid_from_ms: version.valid_from_ms,
+                        valid_until_ms: version.valid_until_ms,
+                    };
+                    Some(document_state(shape, &identity, held, body.as_ref())?)
+                } else {
+                    None
+                };
                 let mut hasher = RowHasher::new(VerifiedPart::Documents, &[identity.as_slice()]);
+                // RESTORE installs each version at its own system time.
+                hasher.int(b's', sys);
                 hasher.bytes(b't', &[version.tag]);
                 hasher.int(b'f', version.valid_from_ms);
                 hasher.int(b'u', version.valid_until_ms);
@@ -103,7 +107,7 @@ impl Walk<'_> {
                     Some(body) => hash_body(&mut hasher, shape, body)?,
                     None => hasher.bytes(b'R', version.body),
                 }
-                sink(row(bare.clone(), &identity, hasher));
+                sink(row(bare.clone(), &identity, sys, hasher, state));
             }
         }
         Ok(())
@@ -114,8 +118,18 @@ impl Walk<'_> {
         edges: &[(String, Vec<u8>)],
         sink: &mut dyn FnMut(Row),
     ) -> Result<(), Error> {
+        // The newest version of each edge carries its current state.
+        let mut newest: HashMap<(&str, &str, &str, &str), i64> = HashMap::new();
+        for (key, _) in edges {
+            let (stored, src, label, dst, system_from) =
+                parse_versioned_edge_key(key).ok_or_else(|| malformed(key))?;
+            let held = newest
+                .entry((stored, src, label, dst))
+                .or_insert(system_from);
+            *held = (*held).max(system_from);
+        }
         for (key, value) in edges {
-            let (stored, src, label, dst, _system_from) =
+            let (stored, src, label, dst, system_from) =
                 parse_versioned_edge_key(key).ok_or_else(|| malformed(key))?;
             let endpoints: [&[u8]; 3] = [src.as_bytes(), label.as_bytes(), dst.as_bytes()];
             let mut hasher = RowHasher::new(VerifiedPart::Edges, &endpoints);
@@ -126,12 +140,18 @@ impl Walk<'_> {
             } else {
                 hasher.bytes(b'p', &EdgeValuePayload::decode(value)?.properties);
             }
+            // An edge hashes without its system time, so its newest
+            // version's hash is its current state.
+            let hash = hasher.finish();
+            let is_newest = newest.get(&(stored, src, label, dst)) == Some(&system_from);
             sink(Row {
                 collection: self.bare(stored),
                 part: VerifiedPart::Edges,
                 key: Some(key_hash(VerifiedPart::Edges, &endpoints)),
-                hash: hasher.finish(),
+                hash,
                 expire_at_ms: 0,
+                stamp: Some(system_from),
+                state: is_newest.then_some(hash),
             });
         }
         Ok(())
@@ -175,14 +195,49 @@ impl Walk<'_> {
     }
 }
 
-fn row(collection: String, identity: &[u8], hasher: RowHasher) -> Row {
+fn row(
+    collection: String,
+    identity: &[u8],
+    sys: i64,
+    hasher: RowHasher,
+    state: Option<[u8; 32]>,
+) -> Row {
     Row {
         collection,
         part: VerifiedPart::Documents,
         key: Some(key_hash(VerifiedPart::Documents, &[identity])),
         hash: hasher.finish(),
         expire_at_ms: 0,
+        stamp: Some(sys),
+        state,
     }
+}
+
+/// The tag and valid time of a row's newest version.
+#[derive(Clone, Copy)]
+struct VersionState {
+    tag: u8,
+    valid_from_ms: i64,
+    valid_until_ms: i64,
+}
+
+/// The current state of a document row: its newest version without its
+/// system time. A live version hashes its valid time and body. Any other
+/// version hashes its tag only, so every tombstone states the same absence.
+fn document_state(
+    shape: &DocShape,
+    identity: &[u8],
+    newest: VersionState,
+    body: Option<&Body>,
+) -> Result<[u8; 32], Error> {
+    let mut hasher = RowHasher::state(VerifiedPart::Documents, &[identity]);
+    hasher.bytes(b't', &[newest.tag]);
+    if let Some(body) = body {
+        hasher.int(b'f', newest.valid_from_ms);
+        hasher.int(b'u', newest.valid_until_ms);
+        hash_body(&mut hasher, shape, body.clone())?;
+    }
+    Ok(hasher.finish())
 }
 
 /// Decode a stored body: a strict row's Binary Tuple with the collection's

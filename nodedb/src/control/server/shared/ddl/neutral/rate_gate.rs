@@ -172,6 +172,7 @@ pub async fn rate_remaining(
         key: rate_key.as_bytes().to_vec(),
         rls_filters: Vec::new(),
         surrogate_ceiling: None,
+        system_time: nodedb_types::SystemTimeScope::Current,
     });
 
     let result = crate::control::server::dispatch_utils::dispatch_to_data_plane(
@@ -434,7 +435,7 @@ mod tests {
             watermark_lsn: Lsn::ZERO,
             error_code: code.map(Box::new),
             stage_vote: None,
-            read_versions: crate::types::ReadVersions::new(),
+            read_vshards: crate::types::ReadShards::new(),
             write_set: Vec::new(),
         }
     }

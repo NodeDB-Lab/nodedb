@@ -174,7 +174,7 @@ mod tests {
             wal_lsn: None,
             resolved_now_ms: None,
             commit_hlc: None,
-            entry_version: None,
+            system_ordinal: None,
             admission: crate::bridge::envelope::Admission::Admitted,
         }
     }
@@ -233,10 +233,22 @@ mod tests {
         }
 
         fn send_plan(&mut self, plan: PhysicalPlan) -> crate::bridge::envelope::Response {
+            self.send_request(plan, None)
+        }
+
+        /// Send `plan` as a write that stamps `system_ordinal`, or as a
+        /// local request that stamps a fresh ordinal when it is `None`.
+        fn send_request(
+            &mut self,
+            plan: PhysicalPlan,
+            system_ordinal: Option<i64>,
+        ) -> crate::bridge::envelope::Response {
             let id = self.next_id;
             self.next_id += 1;
+            let mut request = make_request(plan, id);
+            request.system_ordinal = system_ordinal;
             self.req_tx
-                .try_push(BridgeRequest::unfloored(make_request(plan, id)))
+                .try_push(BridgeRequest::unfloored(request))
                 .unwrap();
             self.core.tick();
             let resp = self.resp_rx.try_pop().unwrap();
@@ -256,15 +268,25 @@ mod tests {
             assert_eq!(r.status, Status::Ok, "open failed: {r:?}");
         }
 
+        /// The apply stamps the write's ordinal. A test cell's nonzero
+        /// `system_from_ms` names a millisecond: the put stamps that
+        /// millisecond's first ordinal, as a replicated entry's leader
+        /// assigns it, so `AS OF` reads and audit rows see that millisecond. A zero `system_from_ms` applies as a local
+        /// write that stamps a fresh ordinal.
         fn put(&mut self, aid: &ArrayId, cells: Vec<ArrayPutCell>, lsn: u64) {
+            let stamp_ms = cells.first().map_or(0, |c| c.system_from_ms);
+            let system_ordinal = (stamp_ms != 0).then(|| stamp_ms * nodedb_types::NANOS_PER_MS);
             let bytes = zerompk::to_msgpack_vec(&cells).unwrap();
-            let r = self.send(ArrayOp::Put {
-                array_id: aid.clone(),
-                cells_msgpack: bytes,
-                wal_lsn: lsn,
-                provenance: None,
-                vshard_id: 0,
-            });
+            let r = self.send_request(
+                PhysicalPlan::Array(ArrayOp::Put {
+                    array_id: aid.clone(),
+                    cells_msgpack: bytes,
+                    wal_lsn: lsn,
+                    provenance: None,
+                    vshard_id: 0,
+                }),
+                system_ordinal,
+            );
             assert_eq!(r.status, Status::Ok, "put failed: {r:?}");
         }
 
@@ -348,6 +370,7 @@ mod tests {
             skip_payload_fetch: false,
             payload_filters: Vec::new(),
             metric: DistanceMetric::L2,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }));
         assert_eq!(r.status, Status::Ok, "vector+prefilter failed: {r:?}");
 

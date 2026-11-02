@@ -83,7 +83,7 @@ impl DataPlaneArrayExecutor {
         Ok(ArraySliceExec {
             rows,
             truncated_before_horizon: slice_resp.truncated_before_horizon,
-            read_versions: resp.read_versions.to_wire(),
+            read_vshards: resp.read_vshards.to_wire(),
         })
     }
 
@@ -145,7 +145,7 @@ impl DataPlaneArrayExecutor {
             return Ok(ArrayAggExec {
                 partials: Vec::new(),
                 truncated_before_horizon: false,
-                read_versions: resp.read_versions.to_wire(),
+                read_vshards: resp.read_vshards.to_wire(),
             });
         }
 
@@ -160,7 +160,7 @@ impl DataPlaneArrayExecutor {
         Ok(ArrayAggExec {
             partials,
             truncated_before_horizon,
-            read_versions: resp.read_versions.to_wire(),
+            read_vshards: resp.read_vshards.to_wire(),
         })
     }
 

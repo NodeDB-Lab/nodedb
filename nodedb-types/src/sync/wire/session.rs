@@ -11,10 +11,7 @@ use serde::{Deserialize, Serialize};
 /// [`HandshakeAckMsg::server_wire_version`]. A server refuses a handshake
 /// whose version differs from its own: the two sides frame messages
 /// differently, and a frame of the other layout does not decode.
-///
-/// It rises whenever the layout of a sync message changes. At version 2,
-/// `DeltaPushMsg` carries `collection_incarnation`.
-pub const SYNC_WIRE_VERSION: u16 = 2;
+pub const SYNC_WIRE_VERSION: u16 = 1;
 
 /// A handshake whose sync protocol version differs from the server's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -192,9 +189,9 @@ mod tests {
         };
         assert_eq!(handshake(SYNC_WIRE_VERSION).check_wire_version(), Ok(()));
         assert_eq!(
-            handshake(1).check_wire_version(),
+            handshake(SYNC_WIRE_VERSION + 1).check_wire_version(),
             Err(SyncWireVersionMismatch {
-                client: 1,
+                client: SYNC_WIRE_VERSION + 1,
                 server: SYNC_WIRE_VERSION
             })
         );

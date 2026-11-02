@@ -57,57 +57,56 @@ pub(in crate::data::executor) type SpatialDocMapEntry = (
     String,
 );
 
-/// Complete pre-image of one timeseries `TRUNCATE` applied inside a
-/// transaction batch: the in-memory state moved out whole, and the on-disk
-/// partition directory renamed aside rather than removed, so a rollback
-/// renames it back and a commit removes it (`finalize_timeseries_truncates`).
+/// What one timeseries `TRUNCATE` applied inside a transaction batch
+/// changed, so a rollback reverses it exactly. Every row stays on disk: the
+/// truncate only ended partitions, so the rollback reopens them.
 pub(in crate::data::executor) struct TimeseriesTruncateUndo {
     pub collection_key: (nodedb_types::DatabaseId, TenantId, String),
-    /// The collection's live directory. The truncate leaves a fresh one
-    /// holding only its replay stamp; the rollback removes it.
-    pub original_dir: std::path::PathBuf,
-    /// The aside name of the directory the collection had, if it had one.
-    pub moved_dir: Option<std::path::PathBuf>,
-    pub memtable: Option<crate::engine::timeseries::columnar_memtable::ColumnarMemtable>,
-    pub memtable_mem: Option<nodedb_mem::ReservationToken>,
-    pub registry: Option<crate::engine::timeseries::partition_registry::PartitionRegistry>,
+    /// The partitions the truncate ended.
+    pub ended: Vec<crate::data::executor::handlers::timeseries::truncate_end::EndedPartition>,
+    /// The in-memory collection stamp before the truncate raised it.
+    pub replay_stamp: Option<crate::data::executor::timeseries_checkpoint::stamp::TsReplayStamp>,
+    /// The collection directory's stamp file before the truncate wrote it.
+    pub stamp_file: Option<crate::data::executor::timeseries_checkpoint::stamp::TsReplayStamp>,
+    /// The aggregate image the truncate removed.
+    pub cagg_image: Option<Vec<u8>>,
+    /// The collection's newest truncate ordinal before this one.
+    pub newest_truncate: Option<i64>,
     pub last_value_cache: Option<LastValueCache>,
     pub series_catalog: Option<nodedb_types::timeseries::SeriesCatalog>,
-    /// The collection's replay stamp before this truncate raised it.
-    pub replay_stamp: Option<crate::data::executor::timeseries_checkpoint::stamp::TsReplayStamp>,
+}
+
+/// The ended partition `install_ts_ended_partition` filed, so a rollback
+/// removes it from the registry and from disk.
+pub(in crate::data::executor) struct TimeseriesEndedInstallUndo {
+    pub collection_key: (nodedb_types::DatabaseId, TenantId, String),
+    pub partition_key: crate::engine::timeseries::partition_registry::PartitionKey,
 }
 
 /// Tracks a write operation for rollback purposes.
 pub(in crate::data::executor) enum UndoEntry {
-    /// Undo a PointPut by deleting the document (or restoring the old value).
+    /// Undo a PointPut by removing the version it appended, which makes the
+    /// row's prior version current again.
     PutDocument {
         collection: String,
         /// The redb storage key. `.surrogate()` recovers the numeric surrogate
         /// FTS index rollback needs.
         document_id: nodedb_types::StorageKey,
-        /// `None` if the document didn't exist before (inserted); `Some(bytes)`
-        /// if it was overwritten (updated).
-        old_value: Option<Vec<u8>>,
-        /// System-time key of the versioned/tombstone row this op appended on a
-        /// bitemporal collection. `None` = plain non-bitemporal op → reverse via
-        /// the non-versioned table exactly as before. `Some(t)` = physically
-        /// remove the version row at `t` (and skip the plain-table reversal).
-        bitemporal_sys_from: Option<i64>,
-        /// `(field, value)` pairs whose versioned index entries this op wrote at
-        /// `bitemporal_sys_from`. Empty = none.
-        bitemporal_index_tuples: Vec<(String, String)>,
-        /// `(field, value)` pairs this op INSERTED into the plain secondary
-        /// index. Reversed by `index_remove` on undo. Empty = none.
-        secondary_index_added: Vec<(String, String)>,
-        /// `(field, value)` pairs this op REMOVED from the plain secondary index
-        /// (stale entries on UPDATE). Restored by `index_put` on undo. Empty = none.
-        secondary_index_removed: Vec<(String, String)>,
+        /// System-time key of the version this op appended. Undo physically
+        /// removes the version at it.
+        version_sys_from: i64,
+        /// `(field, value)` pairs whose index entries (live or tombstone) this
+        /// op wrote at `version_sys_from`. Undo removes them. Empty = none.
+        index_tuples: Vec<(String, String)>,
         /// Pre-image of `chain.heads[(tenant, collection)]` before this op
         /// mutated it. Outer `None` = op didn't touch the chain (no-op on undo);
         /// `Some(None)` = no prior entry (genesis insert → remove key on undo);
         /// `Some(Some(prev))` = restore the key to `prev` on undo.
         chain_hash_prior: Option<Option<crate::types::hash_chain::ChainHead>>,
     },
+    /// Undo a put or a delete installed below the row's newest version by
+    /// removing the version and every index entry the install wrote.
+    HistoryVersion(Box<super::history_version::HistoryVersionUndo>),
     /// Put a collection's hash-chain head back to `prior`, the head before a
     /// write that linked rows without its own document undo entry. `None` =
     /// no head before (genesis).
@@ -124,18 +123,12 @@ pub(in crate::data::executor) enum UndoEntry {
         /// rolled-back delete recomputes and re-inserts them under it.
         document_id: nodedb_types::StorageKey,
         old_value: Vec<u8>,
-        /// System-time key of the versioned tombstone row this op appended on a
-        /// bitemporal collection. `None` = plain op → re-insert via the
-        /// non-versioned table as before. `Some(t)` = physically remove the
-        /// tombstone row at `t` (and skip the plain-table re-insert).
-        bitemporal_sys_from: Option<i64>,
-        /// `(field, value)` pairs whose versioned index entries this op wrote at
-        /// `bitemporal_sys_from`. Empty = none.
-        bitemporal_index_tuples: Vec<(String, String)>,
-        /// `(field, value)` pairs the plain secondary-index cascade removed for
-        /// this document. Restored by `index_put` on undo, closing the
-        /// rolled-back-DELETE secondary-index hole. Empty = none.
-        secondary_index_tuples: Vec<(String, String)>,
+        /// System-time key of the tombstone version this op appended. Undo
+        /// physically removes it.
+        version_sys_from: i64,
+        /// `(field, value)` pairs whose index tombstones this op wrote at
+        /// `version_sys_from`. Undo removes them. Empty = none.
+        index_tuples: Vec<(String, String)>,
         /// Pre-image of `chain.heads[(tenant, collection)]` before this op
         /// mutated it (see [`UndoEntry::PutDocument`] for semantics).
         chain_hash_prior: Option<Option<crate::types::hash_chain::ChainHead>>,
@@ -192,6 +185,15 @@ pub(in crate::data::executor) enum UndoEntry {
         vector_id: u32,
         surrogate: nodedb_types::Surrogate,
     },
+    /// Undo the end of a multi-vector document a row write or removal made:
+    /// revive the `ended` nodes and restore `members` as the document's
+    /// membership in the index.
+    EndedMultiVector {
+        index_key: (nodedb_types::DatabaseId, TenantId, String),
+        document: nodedb_types::Surrogate,
+        members: Vec<u32>,
+        ended: Vec<u32>,
+    },
     /// Undo a spatial R-tree insert by removing the entry from the per-field
     /// R-tree and deleting its reverse `spatial_doc_map` record.
     ///
@@ -207,12 +209,15 @@ pub(in crate::data::executor) enum UndoEntry {
     /// (the R-tree `delete` does not return it); `document_id` is the reverse
     /// map value removed by the forward cascade. `srid` is the SRID of the
     /// tree the entry left, which the re-insert binds the tree back to.
+    /// `sys_to` is the ordinal the forward removal ended the entry at: the
+    /// undo takes the ended entry out of the tree's history.
     SpatialDelete {
         key: SpatialIndexKey,
         entry_id: u64,
         bbox: nodedb_types::BoundingBox,
         document_id: String,
         srid: crate::engine::spatial::TreeSrid,
+        sys_to: i64,
     },
     /// Undo a graph edge write: remove the version it added and put the CSR
     /// back.
@@ -221,18 +226,21 @@ pub(in crate::data::executor) enum UndoEntry {
     /// the CSR back.
     EdgeCut(Box<super::edge_cut::EdgeCutUndo>),
     /// Undo a KV write (Put / Insert / InsertIfAbsent / InsertOnConflictUpdate /
-    /// FieldSet / Incr / IncrFloat / Cas / GetSet) by reinstating the key's
-    /// prior state.
+    /// FieldSet / Incr / IncrFloat / Cas / GetSet / Expire / Persist) by
+    /// reversing it exactly.
     ///
-    /// `prior == None` means the key did not exist before: undo deletes it.
-    /// `prior == Some(image)` reinstalls the value, the absolute expiry
-    /// instant and the surrogate the key held.
+    /// `prior == None` means the key stored no live version: undo removes
+    /// the version the write inserted and ends nothing. `prior == Some(image)`
+    /// removes the write's version and the ended version it appended, and
+    /// reinstalls the value, the absolute expiry instant, the surrogate and
+    /// the start ordinal the key held.
     KvPut {
         collection: String,
         key: Vec<u8>,
         prior: Option<crate::engine::kv::KvEntryImage>,
     },
-    /// Undo a KV Delete by reinstalling one key's prior state.
+    /// Undo a KV Delete by reinstalling one key's prior live version at its
+    /// own start ordinal and removing the ended version the delete appended.
     ///
     /// One entry per key that was actually deleted. If a batch delete removed
     /// N keys, N `KvDelete` entries are pushed.
@@ -241,17 +249,18 @@ pub(in crate::data::executor) enum UndoEntry {
         key: Vec<u8>,
         prior: crate::engine::kv::KvEntryImage,
     },
-    /// Undo a KV `EXPIRE` / `PERSIST` by putting back the key's prior expiry.
-    /// The value is untouched: a TTL change writes only the expiry.
-    ///
-    /// `prior_expire_at_ms` is the absolute instant the key expired at, or
-    /// [`NO_EXPIRY`](crate::engine::kv::entry::NO_EXPIRY) when it had none.
-    KvTtl {
+    /// Undo a restored KV key's history by putting back the ended versions
+    /// the key held before. Pushed before the key's `KvPut`, so a rollback
+    /// reinstates the live row first and then replaces whatever history that
+    /// reinstatement ended.
+    KvHistory {
         collection: String,
         key: Vec<u8>,
-        prior_expire_at_ms: u64,
+        prior: Vec<crate::engine::kv::history::HistoryVersion>,
     },
-    /// Undo a KV `TRUNCATE` by reinstalling every row the collection held.
+    /// Undo a KV `TRUNCATE` by reinstalling every row the collection held,
+    /// each at its own start ordinal, and removing the ended versions the
+    /// truncate appended.
     KvTruncate {
         collection: String,
         rows: Vec<crate::engine::kv::hash_table::KvExportEntry>,
@@ -395,6 +404,8 @@ pub(in crate::data::executor) enum UndoEntry {
     /// Undo a timeseries `TRUNCATE` by reinstalling its pre-image and
     /// renaming the partition directory back.
     TimeseriesTruncate(Box<TimeseriesTruncateUndo>),
+    /// Undo the install of an ended timeseries partition by removing it.
+    TimeseriesEndedInstall(TimeseriesEndedInstallUndo),
     /// Undo a column-stats observe by restoring the pre-image captured before
     /// the read-modify-write.
     ///

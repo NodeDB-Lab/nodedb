@@ -1114,7 +1114,15 @@ RELEASE SAVEPOINT sp1;       -- also: RELEASE sp1
 COMMIT;
 ```
 
-Isolation level: **Snapshot Isolation (SI)**. Reads see a consistent snapshot from `BEGIN` time. Write conflicts detected at `COMMIT` and surfaced as SQLSTATE `40001` (`could not serialize access due to concurrent update`).
+Isolation level: **serializable snapshot**. Every transaction block runs serializable, whatever level `BEGIN`, `START TRANSACTION`, `SET TRANSACTION` or `SET SESSION CHARACTERISTICS` names. `SERIALIZABLE`, `REPEATABLE READ`, `READ COMMITTED` and `READ UNCOMMITTED` are all accepted, and `SHOW transaction_isolation` reports `serializable`. `DEFERRABLE` is refused with SQLSTATE `0A000`.
+
+- **Snapshot.** A block takes one snapshot at its first statement, not at `BEGIN`. Every read in the block sees that snapshot plus the block's own writes.
+- **Validation.** `COMMIT` checks, at the moment the writes apply, that nothing the block read or overwrote changed after its snapshot. If something changed, `COMMIT` fails with SQLSTATE `40001` (`could not serialize access`). The client must retry the whole block.
+- **Read-only blocks.** A block that wrote nothing commits without validation and never fails with `40001`. A reader can page through a large result set inside one read-only block, and every page reads the same snapshot.
+- **Age limit.** A snapshot older than `[tuning.network] txn_snapshot_max_age_secs` (default `300`) fails the next statement with `40001`. Retry the block.
+- **Unbufferable writes.** A write that cannot be buffered inside a block is refused with SQLSTATE `25001`.
+- **Autocommit.** An autocommit statement reads the current state at a per-statement cut.
+- **Time travel.** `AS OF SYSTEM TIME` works on every collection.
 
 ### Cross-Shard Transactions
 

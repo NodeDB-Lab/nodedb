@@ -63,8 +63,8 @@ fn doc_version_keys(snapshots: &[TenantDataSnapshot]) -> BTreeSet<String> {
         .collect()
 }
 
-/// Every row of columnar collection `coll` the cores of `node` hold in
-/// their memtables, `_ts_system` ordinal included.
+/// Every row version of columnar collection `coll` the cores of `node`
+/// hold in their memtables, `_ts_system` ordinal included.
 fn columnar_rows(snapshots: &[TenantDataSnapshot], coll: &str) -> BTreeSet<String> {
     let suffix = format!(":{coll}");
     let mut out = BTreeSet::new();
@@ -81,8 +81,8 @@ fn columnar_rows(snapshots: &[TenantDataSnapshot], coll: &str) -> BTreeSet<Strin
             .schema()
             .ts_system_idx()
             .expect("a bitemporal schema has _ts_system");
-        for scanned in engine.scan_memtable_rows_with_surrogates() {
-            let (_, values) = scanned.unwrap_or_else(|e| panic!("{key}: row: {e}"));
+        for scanned in engine.scan_memtable_versions(nodedb_columnar::VersionCut::All) {
+            let (_, _, values) = scanned.unwrap_or_else(|e| panic!("{key}: row: {e}"));
             let ts = match values.get(ts_idx) {
                 Some(nodedb_types::Value::Integer(ts)) => *ts,
                 other => panic!("{key}: no _ts_system ordinal: {other:?}"),

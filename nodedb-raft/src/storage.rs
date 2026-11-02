@@ -199,6 +199,7 @@ mod tests {
         let hs = HardState {
             current_term: 5,
             voted_for: 2,
+            ordinal_floor: 77,
         };
         s.save_hard_state(&hs).unwrap();
         let loaded = s.load_hard_state().unwrap();

@@ -8,10 +8,10 @@
 
 use nodedb_array::sync::hlc::Hlc;
 use nodedb_array::sync::op::ArrayOp;
-use nodedb_cluster::array_routing::{array_vshard_for_name, vshard_for_array_coord};
 use nodedb_types::sync::wire::array::{ArrayRejectMsg, ArrayRejectReason};
 use tracing::{error, warn};
 
+use crate::control::array_catalog::tile_vshard::cell_tile_vshard;
 use crate::control::wal_replication::ReplicatedEntry;
 use crate::types::{TraceId, VShardId};
 
@@ -89,7 +89,7 @@ impl OriginArrayInbound {
             crate::control::server::shared::session::StatementDeadline::of_statement(self.shared())
                 .tokio_instant();
         match async_proposer(vshard_id, idempotency_key, data, deadline).await {
-            Ok((_payload, _committed_version)) => Ok(()),
+            Ok(_payload) => Ok(()),
             Err(e) => {
                 warn!(array = %array, error = %e, "array_inbound: raft propose+apply failed");
                 Err(engine_reject(array, hlc, "raft propose failed", &e))
@@ -132,42 +132,39 @@ impl OriginArrayInbound {
         Ok(Some(surrogate))
     }
 
-    /// Compute the vShard that owns this op's tile.
+    /// The vShard that owns this op's tile: the vShard a SQL put of the
+    /// same cell routes to (`cell_tile_vshard`). The entry carries it, so
+    /// every replica applies and places the cell on it.
     ///
-    /// Extracts tile extents from the schema registry and casts the op's coord
-    /// to `u64` for tile routing. Falls back to collection-level routing with
-    /// a warning when the schema is unavailable or coord cannot be cast.
-    pub(super) fn vshard_for_op(&self, op: &ArrayOp) -> VShardId {
-        use nodedb_array::types::coord::value::CoordValue;
-
-        let tile_extents = self.schemas().tile_extents_in_database(
-            self.database_id(),
-            self.tenant_id().as_u64(),
-            &op.header.array,
-        );
-
-        let Some(tile_extents) = tile_extents else {
-            warn!(
-                array = %op.header.array,
-                "array_inbound: schema unavailable; routing by name only"
-            );
-            return VShardId::new(array_vshard_for_name(&op.header.array));
+    /// A reject when the array has no catalog row on this node, or the
+    /// coordinate has no tile in the array's domain.
+    pub(super) fn vshard_for_op(&self, op: &ArrayOp) -> Result<VShardId, ArrayRejectMsg> {
+        let entry = {
+            let mirror = match self.shared().array_catalog.read() {
+                Ok(mirror) => mirror,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            mirror.lookup_by_name_in_database(
+                self.tenant_id(),
+                self.database_id(),
+                &op.header.array,
+            )
         };
-
-        let coord_u64: Vec<u64> = op
-            .coord
-            .iter()
-            .map(|c| match c {
-                CoordValue::Int64(v) | CoordValue::TimestampMs(v) => *v as u64,
-                CoordValue::Float64(v) => v.to_bits(),
-                CoordValue::String(_) => 0,
-            })
-            .collect();
-
-        VShardId::new(vshard_for_array_coord(
-            &op.header.array,
-            &coord_u64,
-            &tile_extents,
-        ))
+        let Some(entry) = entry else {
+            return Err(build_reject(
+                &op.header.array,
+                op.header.hlc,
+                ArrayRejectReason::ArrayUnknown,
+                format!("array '{}' has no catalog row on Origin", op.header.array),
+            ));
+        };
+        cell_tile_vshard(&entry, &op.coord).map_err(|e| {
+            build_reject(
+                &op.header.array,
+                op.header.hlc,
+                ArrayRejectReason::ShapeInvalid,
+                format!("array op cell has no tile route: {e}"),
+            )
+        })
     }
 }

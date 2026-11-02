@@ -38,8 +38,8 @@ use crate::control::planner::calvin::write_class::is_write_plan;
 ///
 /// `reads` is the neutral session read-set, projected onto the `TxClass`'s
 /// routing/identity `read_set` (collection-homed) so read shards are enumerated
-/// as participants, and onto `versioned_reads` (write-versioned OCC validation
-/// set) for commit-time optimistic-concurrency validation. Autocommit paths
+/// as participants, and onto `versioned_reads`, the set every participant's
+/// apply validates at the transaction's snapshot ordinal. Autocommit paths
 /// pass an empty slice.
 ///
 /// Returns `Ok(None)` when the batch turns out to write nothing at all — the
@@ -144,7 +144,7 @@ fn build_predicted_tx_class_impl(
         detail: format!("failed to encode PhysicalPlan vec for Calvin predicted TxClass: {e}"),
     })?;
 
-    // versioned_reads carries the write-versioned OCC validation set, populated
+    // versioned_reads carries the validation set, populated
     // from the same session read-set the routing `read_set` above was built
     // from.
     let versioned_reads = versioned_reads_from(reads);
@@ -210,6 +210,7 @@ mod tests {
                 rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
                 resolved_sum_targets: Vec::new(),
                 declared_primary_key: None,
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             post_set_op: nodedb_physical::physical_task::PostSetOp::None,
             txn_id: None,

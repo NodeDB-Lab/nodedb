@@ -12,7 +12,7 @@ use crate::data::executor::applied_prefix::ReplayStamp;
 /// A file stamped with any other version is refused rather than misparsed.
 /// Refusing costs a WAL replay; misparsing would install wrong rows AND a floor
 /// that suppresses the records which would have corrected them.
-pub(crate) const COLUMNAR_CKPT_FORMAT_VERSION: u16 = 3;
+pub(crate) const COLUMNAR_CKPT_FORMAT_VERSION: u16 = 1;
 
 /// Names the live generation. Writing this file is what publishes a checkpoint.
 #[derive(
@@ -60,7 +60,8 @@ pub(crate) struct ColumnarCheckpointFile {
     /// Always [`COLUMNAR_CKPT_FORMAT_VERSION`] when written; validated on load.
     pub format_version: u16,
     /// The complete `MutationEngine` state: memtable columns and their per-row
-    /// surrogates, PK index, delete bitmaps, segment-id counters, schema, and
+    /// surrogates, PK index, delete bitmaps, row-version stamps (`sys_from`,
+    /// `sys_to`) and per-key version chains, segment-id counters, schema, and
     /// the flushed segment blobs together with their per-row surrogate sidecar.
     ///
     /// One field, not two, deliberately: the segment blobs and their surrogate

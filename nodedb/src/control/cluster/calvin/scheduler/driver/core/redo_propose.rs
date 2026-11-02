@@ -25,6 +25,8 @@
 //! Every copy that commits installs at most once: the apply loop claims the
 //! position in the vShard's applied ledger.
 
+use std::sync::atomic::Ordering;
+
 use nodedb_cluster::ClusterError;
 use nodedb_raft::RaftError;
 
@@ -105,6 +107,11 @@ impl Scheduler {
             .and_then(|entries| self.propose_entries(entries));
         match proposed {
             Ok(proposed) => {
+                self.shared
+                    .calvin
+                    .counters
+                    .redo_proposals
+                    .fetch_add(1, Ordering::Relaxed);
                 if let Some(pending) = self.pending.get_mut(&txn_id) {
                     pending.commit_state = CommitState::AwaitingRedoApply {
                         proposed: Some(proposed),

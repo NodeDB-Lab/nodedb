@@ -1,103 +1,56 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! In-process quarantine registry and startup-scan rebuild.
+//! In-process quarantine registry for segments that fail CRC.
 //!
-//! # Persistent state
+//! # Lifetime
 //!
-//! Persistence uses the renamed file as the sole record:
-//! `<original_path>.quarantined.<unix_ts_ms>`. On startup, each engine's
-//! segment directory is scanned for files matching `*.quarantined.*`, and the
-//! registry is rebuilt from those filenames. No metadata schema changes are
-//! needed.
+//! Quarantine state lives for one process run. The corrupt bytes are the
+//! durable record: a restart re-reads them and quarantines the segment again
+//! after two failing reads. No file is renamed and no marker is persisted.
+//! A persisted marker would outlive the segment it names, because columnar
+//! segment ids restart at 1 after a truncate or a drop-and-recreate.
 //!
 //! # Concurrency
 //!
-//! `QuarantineRegistry` is `Send + Sync`. The hot-path read (does this segment
-//! need to be refused?) is a single `RwLock::read` + `HashMap::contains_key`.
-//! Writes happen at most twice per segment (first strike → insert; second
-//! strike → mark quarantined + rename file). After quarantine, writes stop.
+//! `QuarantineRegistry` is `Send + Sync`. The hot-path check is one
+//! `RwLock::read` plus one `HashMap` lookup. Writes happen at most twice per
+//! segment: the first strike inserts, the second strike marks it quarantined.
 //!
 //! # Strike accounting
 //!
 //! Two consecutive CRC failures quarantine a segment. A successful read resets
-//! the strike counter. "Consecutive" is defined per process lifetime: the
-//! segment counter does not persist across restarts (a restart always retries
-//! once on first open, matching the "retry once" contract).
+//! the strike counter.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::RwLock;
 
-use object_store::ObjectStore;
-
 use super::error::QuarantineError;
+use super::key::{CollectionScope, QuarantineEngine, SegmentKey};
 
-pub use super::registry_store::{QuarantineStorageConfig, build_quarantine_store};
-
-/// Identifies an engine kind, used as a label in metrics and HTTP.
-///
-/// No catch-all (`_`) — every variant is handled explicitly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum QuarantineEngine {
-    Columnar,
-    Fts,
-    Vector,
-    Raft,
-}
-
-impl QuarantineEngine {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            QuarantineEngine::Columnar => "columnar",
-            QuarantineEngine::Fts => "fts",
-            QuarantineEngine::Vector => "vector",
-            QuarantineEngine::Raft => "raft",
-        }
-    }
-}
-
-impl std::fmt::Display for QuarantineEngine {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-/// Uniquely identifies a segment across all engines and collections.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct SegmentKey {
-    pub engine: QuarantineEngine,
-    pub collection: String,
-    pub segment_id: String,
-}
-
-/// In-memory record for a segment that has been observed to fail CRC.
+/// In-memory record for a segment observed to fail CRC.
 #[derive(Debug, Clone)]
-pub struct QuarantineRecord {
-    /// Number of consecutive CRC failures observed since last success.
-    pub strikes: u32,
-    /// Unix timestamp (ms) of the first observed failure in this run.
-    pub first_seen_ms: u64,
+struct QuarantineRecord {
+    /// Consecutive CRC failures since the last successful read.
+    strikes: u32,
     /// Error message from the most recent failure.
-    pub last_error: String,
-    /// If quarantined: the renamed path, and the timestamp at quarantine.
-    pub quarantine_info: Option<QuarantineInfo>,
+    last_error: String,
+    /// Unix ms of the second strike. `None` while the segment is not quarantined.
+    quarantined_at_ms: Option<u64>,
 }
 
-/// Details recorded once a segment transitions to the quarantined state.
-#[derive(Debug, Clone)]
-pub struct QuarantineInfo {
-    /// Path to the `.quarantined.<ts>` file on disk.
-    pub quarantined_path: PathBuf,
-    /// Unix ms timestamp at which the file was renamed.
-    pub quarantined_at_ms: u64,
+/// Groups quarantined segments for the metrics gauge: one series per engine
+/// and owning collection.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct QuarantineCountKey {
+    pub engine: QuarantineEngine,
+    /// `None` for a Raft snapshot chunk.
+    pub scope: Option<CollectionScope>,
 }
 
 /// Thread-safe quarantine registry.
 ///
 /// Stored as `Arc<QuarantineRegistry>` in `SharedState` and injected into
-/// engine read wrappers. All public methods are `&self` (interior mutability
-/// through the `RwLock`).
+/// engine read wrappers. All public methods take `&self`.
 #[derive(Debug, Default)]
 pub struct QuarantineRegistry {
     entries: RwLock<HashMap<SegmentKey, QuarantineRecord>>,
@@ -105,315 +58,92 @@ pub struct QuarantineRegistry {
 
 impl QuarantineRegistry {
     pub fn new() -> Self {
-        Self {
-            entries: RwLock::new(HashMap::new()),
-        }
+        Self::default()
     }
 
-    /// Called by engine read wrappers when a CRC-class error is observed.
+    /// Records one CRC-class failure of `key`.
     ///
-    /// Behaviour:
-    /// - If the segment is already quarantined → returns `Err(SegmentQuarantined)`.
-    /// - If this is the first strike → records it and returns `Ok(())`, so the
-    ///   caller retries once.
-    /// - If this is the second strike → renames the file (if a path is provided)
-    ///   and returns `Err(SegmentQuarantined)`.
-    ///
-    /// A successful read should be reported via `record_success` to reset
-    /// the strike counter for transient failures.
+    /// - Already quarantined: returns `Err(SegmentQuarantined)`.
+    /// - First strike: returns `Ok(())`. The caller surfaces the read error.
+    /// - Second strike: marks the segment quarantined and returns
+    ///   `Err(SegmentQuarantined)`.
     pub fn record_failure(
         &self,
         key: SegmentKey,
         error_summary: &str,
-        segment_path: Option<&Path>,
     ) -> Result<(), QuarantineError> {
-        let now_ms = unix_ms_now();
-
-        // Fast path: already quarantined — no write lock needed.
         {
             let read = self.entries.read().unwrap_or_else(|p| p.into_inner());
-            if let Some(rec) = read.get(&key)
-                && let Some(ref qi) = rec.quarantine_info
-            {
+            if let Some(at) = read.get(&key).and_then(|rec| rec.quarantined_at_ms) {
                 return Err(QuarantineError::SegmentQuarantined {
-                    engine: key.engine.to_string(),
-                    collection: key.collection.clone(),
-                    segment_id: key.segment_id.clone(),
-                    quarantined_at_unix_ms: qi.quarantined_at_ms,
+                    segment: key,
+                    quarantined_at_unix_ms: at,
                 });
             }
         }
 
-        // Acquire write lock to update strike count.
         let mut write = self.entries.write().unwrap_or_else(|p| p.into_inner());
-
         let rec = write.entry(key.clone()).or_insert(QuarantineRecord {
             strikes: 0,
-            first_seen_ms: now_ms,
-            last_error: error_summary.to_string(),
-            quarantine_info: None,
+            last_error: String::new(),
+            quarantined_at_ms: None,
         });
 
-        // If it was quarantined between our fast-path check and acquiring the write
-        // lock, return immediately.
-        if let Some(ref qi) = rec.quarantine_info {
+        // Another thread can quarantine the segment between the read check
+        // and the write lock.
+        if let Some(at) = rec.quarantined_at_ms {
             return Err(QuarantineError::SegmentQuarantined {
-                engine: key.engine.to_string(),
-                collection: key.collection.clone(),
-                segment_id: key.segment_id.clone(),
-                quarantined_at_unix_ms: qi.quarantined_at_ms,
+                segment: key,
+                quarantined_at_unix_ms: at,
             });
         }
 
         rec.strikes += 1;
         rec.last_error = error_summary.to_string();
-
         if rec.strikes < 2 {
-            // First strike — caller should retry once.
             return Ok(());
         }
 
-        // Second strike — quarantine the segment.
-        let quarantined_at_ms = now_ms;
-        let quarantined_path = if let Some(path) = segment_path {
-            let new_path = path.with_extension(format!(
-                "{}.quarantined.{quarantined_at_ms}",
-                path.extension().and_then(|s| s.to_str()).unwrap_or("seg")
-            ));
-            // no-objectstore: in-place rename of a corrupted local segment file before its bytes are uploaded to the warm-tier ObjectStore archive.
-            if let Err(e) = std::fs::rename(path, &new_path) {
-                tracing::error!(
-                    engine = key.engine.as_str(),
-                    collection = %key.collection,
-                    segment_id = %key.segment_id,
-                    path = %path.display(),
-                    error = %e,
-                    "failed to rename corrupt segment file; segment will still be quarantined in memory"
-                );
-                // Even if rename fails, we still mark the segment quarantined in
-                // memory — subsequent reads return SegmentQuarantined immediately.
-                // The operator must investigate the original file manually.
-                path.to_path_buf()
-            } else {
-                tracing::error!(
-                    engine = key.engine.as_str(),
-                    collection = %key.collection,
-                    segment_id = %key.segment_id,
-                    quarantined_path = %new_path.display(),
-                    "segment quarantined after two consecutive CRC failures; \
-                     file renamed, collection degraded but other segments remain readable"
-                );
-                new_path
-            }
-        } else {
-            // No path provided (e.g. in-memory segment, Raft snapshot chunk).
-            tracing::error!(
-                engine = key.engine.as_str(),
-                collection = %key.collection,
-                segment_id = %key.segment_id,
-                "segment quarantined after two consecutive CRC failures (no file path)"
-            );
-            PathBuf::new()
-        };
-
-        rec.quarantine_info = Some(QuarantineInfo {
-            quarantined_path,
-            quarantined_at_ms,
-        });
-
+        let at = unix_ms_now();
+        rec.quarantined_at_ms = Some(at);
+        tracing::error!(
+            segment = %key,
+            "segment quarantined after two consecutive CRC failures; \
+             other segments of the collection remain readable"
+        );
         Err(QuarantineError::SegmentQuarantined {
-            engine: key.engine.to_string(),
-            collection: key.collection.clone(),
-            segment_id: key.segment_id.clone(),
-            quarantined_at_unix_ms: quarantined_at_ms,
+            segment: key,
+            quarantined_at_unix_ms: at,
         })
     }
 
-    /// Returns `true` if `key` is currently in the quarantined state.
-    ///
-    /// Callers that want to reject a segment without even attempting a read can
-    /// use this as a fast pre-check. Uses a read-lock only and is cheap to call
-    /// on every inbound RPC or segment open.
+    /// Returns `true` if `key` is quarantined. Takes a read lock only.
     pub fn is_quarantined(&self, key: &SegmentKey) -> bool {
         let read = self.entries.read().unwrap_or_else(|p| p.into_inner());
         read.get(key)
-            .map(|rec| rec.quarantine_info.is_some())
-            .unwrap_or(false)
+            .is_some_and(|rec| rec.quarantined_at_ms.is_some())
     }
 
-    /// Called when a segment read succeeds. Clears any pending strikes so
-    /// a later failure starts the two-strike count fresh.
+    /// Clears pending strikes of `key` after a successful read.
     ///
-    /// Does nothing if the segment has already been quarantined — a quarantined
-    /// segment stays quarantined until the operator removes the file and
-    /// the process restarts.
+    /// A quarantined segment stays quarantined for the rest of the process run.
     pub fn record_success(&self, key: &SegmentKey) {
         let mut write = self.entries.write().unwrap_or_else(|p| p.into_inner());
         if let Some(rec) = write.get_mut(key)
-            && rec.quarantine_info.is_none()
+            && rec.quarantined_at_ms.is_none()
         {
             rec.strikes = 0;
         }
     }
 
-    /// Rebuild the registry by scanning an object store for keys matching the
-    /// `.quarantined.<ts>` pattern.
-    ///
-    /// Called at startup. Each matching object key represents a previously
-    /// quarantined segment. The segment is immediately inserted as fully
-    /// quarantined (strikes = 2) so reads against it return
-    /// `SegmentQuarantined` without a retry.
-    ///
-    /// `engine_key_from_filename` maps a key name (the final path component)
-    /// to `(collection, segment_id)` using the engine-specific naming
-    /// convention. If the mapping returns `None` (unrecognised key), it is
-    /// skipped.
-    pub async fn rebuild_from_store(
-        &self,
-        engine: QuarantineEngine,
-        store: &Arc<dyn ObjectStore>,
-        engine_key_from_filename: &(dyn Fn(&str) -> Option<(String, String)> + Send + Sync),
-    ) {
-        use futures::TryStreamExt;
-
-        let objects: Vec<_> = match store.list(None).try_collect().await {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(error = %e, "quarantine rebuild: cannot list object store");
-                return;
-            }
-        };
-
-        for obj in objects {
-            // Use only the final component of the object path as the filename.
-            let key_str = obj.location.as_ref();
-            let fname_str = key_str.rsplit('/').next().unwrap_or(key_str);
-
-            if !fname_str.contains(".quarantined.") {
-                continue;
-            }
-
-            let (collection, segment_id) = match engine_key_from_filename(fname_str) {
-                Some(pair) => pair,
-                None => {
-                    tracing::warn!(
-                        file = fname_str,
-                        engine = engine.as_str(),
-                        "quarantine rebuild: cannot parse filename, skipping"
-                    );
-                    continue;
-                }
-            };
-
-            let quarantined_at_ms = fname_str
-                .rsplit('.')
-                .next()
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-
-            let key = SegmentKey {
-                engine,
-                collection,
-                segment_id,
-            };
-            // Record the object store key path as a local path string for
-            // compatibility with the existing `QuarantineInfo` shape. Operators
-            // can locate the file via the object store path.
-            let quarantined_path = PathBuf::from(obj.location.as_ref());
-            let mut write = self.entries.write().unwrap_or_else(|p| p.into_inner());
-            write.insert(
-                key,
-                QuarantineRecord {
-                    strikes: 2,
-                    first_seen_ms: quarantined_at_ms,
-                    last_error: "rebuilt from object store on startup".to_string(),
-                    quarantine_info: Some(QuarantineInfo {
-                        quarantined_path,
-                        quarantined_at_ms,
-                    }),
-                },
-            );
-        }
-    }
-
-    /// Rebuild the registry from files with the `.quarantined.<ts>` pattern in
-    /// the given local filesystem directory.
-    ///
-    /// This is a convenience wrapper for local-filesystem deployments where
-    /// the quarantine directory lives on-disk. For remote object store
-    /// deployments use `rebuild_from_store`.
-    pub fn rebuild_from_dir(
-        &self,
-        engine: QuarantineEngine,
-        dir: &Path,
-        engine_key_from_filename: &dyn Fn(&str) -> Option<(String, String)>,
-    ) {
-        // no-objectstore: legacy startup-only enumeration of pre-migration on-disk quarantine markers; new quarantines route through ObjectStore.
-        let entries = match std::fs::read_dir(dir) {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::warn!(dir = %dir.display(), error = %e, "quarantine rebuild: cannot read dir");
-                return;
-            }
-        };
-        for entry in entries.flatten() {
-            let fname = entry.file_name();
-            let fname_str = match fname.to_str() {
-                Some(s) => s,
-                None => continue,
-            };
-            if !fname_str.contains(".quarantined.") {
-                continue;
-            }
-            let (collection, segment_id) = match engine_key_from_filename(fname_str) {
-                Some(pair) => pair,
-                None => {
-                    tracing::warn!(
-                        file = fname_str,
-                        engine = engine.as_str(),
-                        "quarantine rebuild: cannot parse filename, skipping"
-                    );
-                    continue;
-                }
-            };
-            let quarantined_at_ms = fname_str
-                .rsplit('.')
-                .next()
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-
-            let key = SegmentKey {
-                engine,
-                collection,
-                segment_id,
-            };
-            let quarantined_path = dir.join(fname_str);
-            let mut write = self.entries.write().unwrap_or_else(|p| p.into_inner());
-            write.insert(
-                key,
-                QuarantineRecord {
-                    strikes: 2,
-                    first_seen_ms: quarantined_at_ms,
-                    last_error: "rebuilt from disk on startup".to_string(),
-                    quarantine_info: Some(QuarantineInfo {
-                        quarantined_path,
-                        quarantined_at_ms,
-                    }),
-                },
-            );
-        }
-    }
-
-    /// Snapshot of all currently quarantined segments (for HTTP/metrics).
+    /// Every quarantined segment, for the HTTP debug listing.
     pub fn quarantined_snapshot(&self) -> Vec<QuarantineSnapshot> {
         let read = self.entries.read().unwrap_or_else(|p| p.into_inner());
         read.iter()
             .filter_map(|(key, rec)| {
-                rec.quarantine_info.as_ref().map(|qi| QuarantineSnapshot {
-                    engine: key.engine.to_string(),
-                    collection: key.collection.clone(),
-                    segment_id: key.segment_id.clone(),
-                    quarantined_at_unix_ms: qi.quarantined_at_ms,
+                rec.quarantined_at_ms.map(|at| QuarantineSnapshot {
+                    key: key.clone(),
+                    quarantined_at_unix_ms: at,
                     last_error_summary: rec.last_error.clone(),
                     strikes: rec.strikes,
                 })
@@ -421,36 +151,30 @@ impl QuarantineRegistry {
             .collect()
     }
 
-    /// Count of currently-quarantined segments per `(engine, collection)`.
-    /// Used for the active gauge metric.
-    pub fn active_counts(&self) -> HashMap<(String, String), u64> {
+    /// Count of quarantined segments per engine and owning collection.
+    ///
+    /// Quarantine is permanent within a run, so this count is also the
+    /// cumulative total for the run.
+    pub fn active_counts(&self) -> HashMap<QuarantineCountKey, u64> {
         let read = self.entries.read().unwrap_or_else(|p| p.into_inner());
-        let mut counts: HashMap<(String, String), u64> = HashMap::new();
+        let mut counts: HashMap<QuarantineCountKey, u64> = HashMap::new();
         for (key, rec) in read.iter() {
-            if rec.quarantine_info.is_some() {
-                *counts
-                    .entry((key.engine.to_string(), key.collection.clone()))
-                    .or_insert(0) += 1;
+            if rec.quarantined_at_ms.is_some() {
+                let count_key = QuarantineCountKey {
+                    engine: key.engine(),
+                    scope: key.scope().cloned(),
+                };
+                *counts.entry(count_key).or_insert(0) += 1;
             }
         }
         counts
     }
-
-    /// Cumulative count of segments that have ever been quarantined (i.e., reached
-    /// second strike) per `(engine, collection)`. Same data as `active_counts` in
-    /// this implementation because quarantines are permanent within a process run.
-    /// A separate total counter would only differ if un-quarantine were supported.
-    pub fn total_counts(&self) -> HashMap<(String, String), u64> {
-        self.active_counts()
-    }
 }
 
-/// A point-in-time snapshot of one quarantined entry, used in HTTP response.
+/// One quarantined segment at a point in time.
 #[derive(Debug, Clone)]
 pub struct QuarantineSnapshot {
-    pub engine: String,
-    pub collection: String,
-    pub segment_id: String,
+    pub key: SegmentKey,
     pub quarantined_at_unix_ms: u64,
     pub last_error_summary: String,
     pub strikes: u32,
@@ -468,126 +192,85 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    fn key(engine: QuarantineEngine, collection: &str, segment_id: &str) -> SegmentKey {
-        SegmentKey {
-            engine,
-            collection: collection.to_string(),
-            segment_id: segment_id.to_string(),
+    fn columnar(tenant_id: u64, collection: &str, segment_id: u64) -> SegmentKey {
+        SegmentKey::Columnar {
+            scope: CollectionScope::new(1, tenant_id, collection),
+            segment_id,
         }
     }
 
     #[test]
     fn first_strike_returns_ok() {
         let reg = QuarantineRegistry::new();
-        let k = key(QuarantineEngine::Columnar, "coll", "seg1");
-        assert!(reg.record_failure(k, "crc error", None).is_ok());
+        assert!(
+            reg.record_failure(columnar(1, "coll", 1), "crc error")
+                .is_ok()
+        );
     }
 
     #[test]
     fn second_strike_returns_quarantined() {
         let reg = QuarantineRegistry::new();
-        let k = key(QuarantineEngine::Columnar, "coll", "seg1");
-        reg.record_failure(k.clone(), "crc error", None).unwrap();
-        let err = reg.record_failure(k, "crc error", None).unwrap_err();
+        let k = columnar(1, "coll", 1);
+        reg.record_failure(k.clone(), "crc error").unwrap();
+        let err = reg.record_failure(k, "crc error").unwrap_err();
         assert!(matches!(err, QuarantineError::SegmentQuarantined { .. }));
     }
 
     #[test]
     fn success_clears_strikes() {
         let reg = QuarantineRegistry::new();
-        let k = key(QuarantineEngine::Fts, "coll", "seg2");
-        // First failure — strike 1.
-        reg.record_failure(k.clone(), "crc error", None).unwrap();
-        // Success resets it.
+        let k = columnar(1, "coll", 2);
+        reg.record_failure(k.clone(), "crc error").unwrap();
         reg.record_success(&k);
-        // Failure again — strike 1, not strike 2.
-        assert!(reg.record_failure(k, "crc error", None).is_ok());
+        assert!(reg.record_failure(k, "crc error").is_ok());
     }
 
     #[test]
     fn quarantined_stays_quarantined_after_success_attempt() {
         let reg = QuarantineRegistry::new();
-        let k = key(QuarantineEngine::Vector, "coll", "seg3");
-        reg.record_failure(k.clone(), "crc", None).unwrap();
-        reg.record_failure(k.clone(), "crc", None).unwrap_err();
-        // record_success must not un-quarantine.
+        let k = columnar(1, "coll", 3);
+        reg.record_failure(k.clone(), "crc").unwrap();
+        reg.record_failure(k.clone(), "crc").unwrap_err();
         reg.record_success(&k);
-        let err = reg.record_failure(k, "crc", None).unwrap_err();
+        let err = reg.record_failure(k, "crc").unwrap_err();
         assert!(matches!(err, QuarantineError::SegmentQuarantined { .. }));
     }
 
     #[test]
     fn concurrent_claims_only_one_quarantine() {
-        // Two threads both encounter second failure simultaneously.
         let reg = Arc::new(QuarantineRegistry::new());
-
-        // Pre-seed with one strike.
-        let k = key(QuarantineEngine::Raft, "coll", "seg4");
-        reg.record_failure(k.clone(), "first", None).unwrap();
+        let k = SegmentKey::Raft {
+            group_id: 1,
+            last_included_index: 4,
+        };
+        reg.record_failure(k.clone(), "first").unwrap();
 
         let reg1 = Arc::clone(&reg);
         let k1 = k.clone();
         let reg2 = Arc::clone(&reg);
         let k2 = k.clone();
-
-        let t1 = std::thread::spawn(move || reg1.record_failure(k1, "second", None));
-        let t2 = std::thread::spawn(move || reg2.record_failure(k2, "second", None));
-
+        let t1 = std::thread::spawn(move || reg1.record_failure(k1, "second"));
+        let t2 = std::thread::spawn(move || reg2.record_failure(k2, "second"));
         let r1 = t1.join().unwrap();
         let r2 = t2.join().unwrap();
 
-        // Both must see SegmentQuarantined (one gets it immediately as the
-        // claimer, the other sees the already-quarantined record).
         assert!(r1.is_err() && r2.is_err());
-        let snap = reg.quarantined_snapshot();
-        assert_eq!(snap.len(), 1);
+        assert_eq!(reg.quarantined_snapshot().len(), 1);
     }
 
     #[test]
-    fn rebuild_from_dir_restores_quarantine() {
-        let tmp = tempfile::tempdir().unwrap();
-        let ts = 1_700_000_000_000u64;
-        std::fs::write(tmp.path().join(format!("seg5.quarantined.{ts}")), b"").unwrap();
-
+    fn tenants_with_same_collection_and_segment_are_separate() {
         let reg = QuarantineRegistry::new();
-        reg.rebuild_from_dir(QuarantineEngine::Columnar, tmp.path(), &|fname| {
-            let stem = fname.split(".quarantined.").next()?;
-            Some(("default".to_string(), stem.to_string()))
-        });
+        let a = columnar(10, "orders", 1);
+        let b = columnar(11, "orders", 1);
+        reg.record_failure(a.clone(), "crc").unwrap();
+        reg.record_failure(a.clone(), "crc").unwrap_err();
 
-        let k = key(QuarantineEngine::Columnar, "default", "seg5");
-        let err = reg.record_failure(k, "crc", None).unwrap_err();
-        assert!(
-            matches!(err, QuarantineError::SegmentQuarantined { quarantined_at_unix_ms, .. } if quarantined_at_unix_ms == ts)
-        );
-    }
-
-    #[tokio::test]
-    async fn rebuild_from_store_restores_quarantine() {
-        use object_store::ObjectStoreExt;
-        use object_store::memory::InMemory;
-        use object_store::path::Path as ObjectPath;
-
-        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let ts = 1_700_000_000_111u64;
-        let key_path = ObjectPath::from(format!("seg6.quarantined.{ts}"));
-        store
-            .put(&key_path, object_store::PutPayload::from(b"".as_ref()))
-            .await
-            .unwrap();
-
-        let reg = QuarantineRegistry::new();
-        reg.rebuild_from_store(QuarantineEngine::Columnar, &store, &|fname| {
-            let stem = fname.split(".quarantined.").next()?;
-            Some(("default".to_string(), stem.to_string()))
-        })
-        .await;
-
-        let k = key(QuarantineEngine::Columnar, "default", "seg6");
-        let err = reg.record_failure(k, "crc", None).unwrap_err();
-        assert!(
-            matches!(err, QuarantineError::SegmentQuarantined { quarantined_at_unix_ms, .. } if quarantined_at_unix_ms == ts),
-            "expected ts={ts} but got: {err}"
-        );
+        assert!(reg.is_quarantined(&a));
+        assert!(!reg.is_quarantined(&b));
+        // Tenant B's first failure is its own first strike.
+        assert!(reg.record_failure(b, "crc").is_ok());
+        assert_eq!(reg.active_counts().len(), 1);
     }
 }

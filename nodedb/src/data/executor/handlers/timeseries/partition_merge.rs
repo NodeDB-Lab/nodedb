@@ -381,6 +381,9 @@ fn stage_merge(
         )
         .map_err(|e| storage(&staged_dir, "write", &e))?;
     meta.state = PartitionState::Merged;
+    // Every source of a group shares one TRUNCATE end (`merge_select`), and
+    // the merged partition keeps it.
+    meta.ended_at = group.first().and_then(|entry| entry.meta.ended_at);
     write_meta(&staged_dir, &meta, kek)?;
     Ok(Some((
         MergeManifest {
@@ -456,6 +459,7 @@ mod tests {
             time_key: "timestamp".into(),
             columns: Vec::new(),
             partition_interval: "1h".into(),
+            last_value_cache: false,
         }));
         core.doc_configs.insert(key(), config);
         core.ts_tuning.merge_quiet_ms = 0;

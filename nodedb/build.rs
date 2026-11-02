@@ -4,8 +4,11 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn main() {
-    // Invalidate when the current commit changes.
-    println!("cargo:rerun-if-changed=.git/HEAD");
+    // Invalidate when the current commit changes: when HEAD moves to
+    // another branch, and when the branch HEAD names moves.
+    for watched in git_head_paths() {
+        println!("cargo:rerun-if-changed={watched}");
+    }
 
     // --- git commit ---
     let git_commit = Command::new("git")
@@ -55,6 +58,37 @@ fn main() {
         .unwrap_or_else(|| "unknown".to_owned());
 
     println!("cargo:rustc-env=NODEDB_RUST_VERSION={rust_version}");
+}
+
+/// The files whose change moves the current commit: the HEAD file, and the
+/// ref file and packed refs of the branch it names, each one that exists.
+/// Empty outside a git checkout.
+fn git_head_paths() -> Vec<String> {
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+    };
+    let mut paths = Vec::new();
+    let Some(head) = git(&["rev-parse", "--path-format=absolute", "--git-path", "HEAD"]) else {
+        return paths;
+    };
+    paths.push(head);
+    if let Some(branch) = git(&["symbolic-ref", "-q", "HEAD"]) {
+        for name in [branch.as_str(), "packed-refs"] {
+            if let Some(path) = git(&["rev-parse", "--path-format=absolute", "--git-path", name]) {
+                paths.push(path);
+            }
+        }
+    }
+    // Cargo reruns on every build for a watched path that does not exist.
+    paths.retain(|path| std::path::Path::new(path).exists());
+    paths
 }
 
 /// Howard Hinnant's civil_from_days algorithm.

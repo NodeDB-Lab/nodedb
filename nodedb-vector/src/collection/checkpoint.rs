@@ -77,26 +77,20 @@ pub(crate) struct CollectionSnapshot {
     pub sealed_segments: Vec<SealedSnapshot>,
     pub building_segments: Vec<BuildingSnapshot>,
     /// `(global_vector_id, surrogate_u32)` pairs.
-    #[serde(default)]
     pub surrogate_map: Vec<(u32, u32)>,
     /// `(document_surrogate_u32, [global_vector_ids])` pairs.
-    #[serde(default)]
     pub multi_doc_map: Vec<(u32, Vec<u32>)>,
     /// Quantization mode for the collection-level codec-dispatch index.
     /// Serialised as a u8 matching `VectorQuantization` discriminants.
-    /// 0 = None (default, backward-compatible).
-    #[serde(default)]
+    /// 0 = None.
     pub quantization_tag: u8,
     /// Serialised `PayloadIndexSetSnapshot` (msgpack bytes).
-    /// Empty vec = no payload indexes (default, backward-compatible).
-    #[serde(default)]
+    /// Empty vec = no payload indexes.
     pub payload_index_bytes: Vec<u8>,
     /// Highest WAL LSN whose write is included in this checkpoint. Startup WAL
     /// replay skips records at or below it for this collection so a
     /// straddling-segment record already absorbed here is not re-applied.
-    /// `0` (default) on legacy checkpoints predating this field — those gate
-    /// nothing and replay everything, exactly as before.
-    #[serde(default)]
+    /// `0` means no write is recorded, and it gates nothing.
     pub checkpoint_wal_lsn: u64,
     /// Index type and PQ/IVF parameters. Its HNSW parameters are the
     /// `params_*` fields above.
@@ -104,25 +98,24 @@ pub(crate) struct CollectionSnapshot {
     /// Encoded trained IVF-PQ index. `None` for a non-IVF collection or one
     /// still buffering toward its training threshold.
     pub ivf_bytes: Option<Vec<u8>>,
+    /// System-time span of every node a past cut reads:
+    /// `(node id, surrogate, sys_from, sys_to)`.
+    pub versions: Vec<super::versions::SpanEntry>,
 }
 
 #[derive(Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub(crate) struct SealedSnapshot {
     pub base_id: u32,
     pub hnsw_bytes: Vec<u8>,
-    #[serde(default)]
     pub pq_bytes: Option<Vec<u8>>,
-    #[serde(default)]
     pub pq_codes: Option<Vec<u8>>,
     /// Serialized [`Sq8Codec`] bytes (magic + version + msgpack).
     /// Present when SQ8 quantization is active and PQ is absent.
     /// `None` means no SQ8 quantization for this segment.
-    #[serde(default)]
     pub sq8_bytes: Option<Vec<u8>>,
     /// Pre-quantized SQ8 codes for all vectors in this segment.
     /// Layout: `[v0_d0, v0_d1, ..., v1_d0, ...]` (dim bytes per vector).
     /// `None` when SQ8 is not configured.
-    #[serde(default)]
     pub sq8_codes: Option<Vec<u8>>,
 }
 
@@ -130,7 +123,6 @@ pub(crate) struct SealedSnapshot {
 pub(crate) struct BuildingSnapshot {
     pub base_id: u32,
     pub vectors: Vec<Vec<f32>>,
-    #[serde(default)]
     pub deleted: Vec<bool>,
 }
 
@@ -233,6 +225,7 @@ impl VectorCollection {
             checkpoint_wal_lsn: self.checkpoint_wal_lsn.max(self.applied_wal_lsn),
             index_config: self.index_config.clone(),
             ivf_bytes: self.ivf.as_ref().map(IvfPqIndex::to_bytes).transpose()?,
+            versions: self.versions.to_entries(),
         };
         let msgpack = match zerompk::to_msgpack_vec(&snapshot) {
             Ok(bytes) => bytes,
@@ -357,6 +350,7 @@ impl VectorCollection {
                     _ => None,
                 }
             };
+            let resident_bytes = SealedSegment::measure(&index, sq8.as_ref());
             sealed.push(SealedSegment {
                 index,
                 base_id: ss.base_id,
@@ -364,6 +358,7 @@ impl VectorCollection {
                 pq,
                 tier: StorageTier::L0Ram,
                 mmap_vectors: None,
+                resident_bytes,
             });
         }
 
@@ -445,6 +440,7 @@ impl VectorCollection {
             applied_wal_lsn: snap.checkpoint_wal_lsn,
             builds_completed: 0,
             builds_failed: 0,
+            versions: super::versions::VectorVersions::from_entries(snap.versions),
         })
     }
 }
@@ -572,9 +568,7 @@ mod tests {
     /// `applied_wal_lsn` max — it does NOT move the replay gate. The gate
     /// moves only at checkpoint save (which folds `applied_wal_lsn` into the
     /// persisted watermark via `max`) and at checkpoint load (which exposes
-    /// that persisted watermark as the new gate). A legacy checkpoint
-    /// predating the field decodes to `0` (via `#[serde(default)]`), which
-    /// gates nothing.
+    /// that persisted watermark as the new gate).
     #[test]
     fn checkpoint_roundtrip_preserves_wal_lsn() {
         let mut coll = VectorCollection::new(

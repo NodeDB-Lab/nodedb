@@ -10,16 +10,31 @@ use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::kv::current_ms;
 
+/// Arguments for [`CoreLoop::execute_kv_batch_get`].
+pub(in crate::data::executor) struct KvBatchGetArgs<'a> {
+    pub did: u64,
+    pub tid: u64,
+    pub collection: &'a str,
+    pub keys: &'a [Vec<u8>],
+    pub rls_filters: &'a [u8],
+    /// The system-time cut every base read answers at.
+    pub system_time: nodedb_types::SystemTimeScope,
+}
+
 impl CoreLoop {
     pub(in crate::data::executor) fn execute_kv_batch_get(
         &self,
         task: &ExecutionTask,
-        did: u64,
-        tid: u64,
-        collection: &str,
-        keys: &[Vec<u8>],
-        rls_filters: &[u8],
+        args: KvBatchGetArgs<'_>,
     ) -> Response {
+        let KvBatchGetArgs {
+            did,
+            tid,
+            collection,
+            keys,
+            rls_filters,
+            system_time,
+        } = args;
         debug!(core = self.core_id, %collection, count = keys.len(), "kv batch get");
         let now_ms = current_ms();
 
@@ -30,12 +45,19 @@ impl CoreLoop {
         // always has.
         let results: Vec<Option<Vec<u8>>> = keys
             .iter()
-            .map(
-                |key| match self.kv_overlay_body(task, tid, collection, key) {
+            .map(|key| {
+                match system_time
+                    .merges_txn_overlay()
+                    .then(|| self.kv_overlay_body(task, tid, collection, key))
+                    .flatten()
+                {
                     Some(overlay_result) => overlay_result,
-                    None => self.kv_engine.get(did, tid, collection, key, now_ms),
-                },
-            )
+                    None => self
+                        .kv_engine
+                        .get_at(did, tid, collection, key, system_time, now_ms)
+                        .map(|(value, _)| value),
+                }
+            })
             .collect();
 
         // A row the read policy excludes reads as absent — indistinguishable

@@ -15,6 +15,10 @@
 //! live version at `TileId(prefix, T-1)` is unmodified, which is the
 //! correct bitemporal behaviour — the old system-time fact is preserved;
 //! the new system-time fact records the deletion.
+//!
+//! Every tile version carries its placement: the vShard whose write stored
+//! it. All writes of one tile version come from one write, so they share
+//! one placement.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -36,15 +40,31 @@ use nodedb_types::Surrogate;
 /// Keys are zerompk-encoded coordinates (`Vec<u8>`). Values are either an
 /// encoded `CellPayload` or `CELL_TOMBSTONE_SENTINEL`. Using the encoded form
 /// as the key avoids the need for `Ord` or `Hash` on `CoordValue`.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct TileBuffer {
     /// coord_key → payload bytes. coord_key = zerompk of `Vec<CoordValue>`.
     entries: HashMap<Vec<u8>, Vec<u8>>,
     /// Highest WAL LSN that produced a row or tombstone in this buffer.
     last_lsn: u64,
+    /// The vShard whose write stored this tile version.
+    placement: u32,
 }
 
 impl TileBuffer {
+    /// An empty tile version stored under `placement`.
+    pub fn new(placement: u32) -> Self {
+        Self {
+            entries: HashMap::new(),
+            last_lsn: 0,
+            placement,
+        }
+    }
+
+    /// The vShard whose write stored this tile version.
+    pub fn placement(&self) -> u32 {
+        self.placement
+    }
+
     /// Iterate over all raw coord keys stored in this tile version.
     pub fn all_coord_keys(&self) -> impl Iterator<Item = &[u8]> {
         self.entries.keys().map(|k| k.as_slice())
@@ -182,6 +202,8 @@ pub struct PutCell {
     pub system_from_ms: i64,
     pub valid_from_ms: i64,
     pub valid_until_ms: i64,
+    /// The vShard whose write stores the cell.
+    pub placement: u32,
     pub lsn: u64,
 }
 
@@ -212,6 +234,7 @@ impl Memtable {
             system_from_ms,
             valid_from_ms,
             valid_until_ms,
+            placement,
             lsn,
         } = args;
         let tile = tiles.tile_id(schema, &coord, system_from_ms)?;
@@ -222,47 +245,61 @@ impl Memtable {
             surrogate,
         };
         let bytes = payload.encode()?;
-        self.tiles
-            .entry(tile)
-            .or_default()
-            .push_raw(&coord, bytes, lsn)?;
+        self.buffer(tile, placement)?.push_raw(&coord, bytes, lsn)?;
         Ok(tile)
     }
 
-    /// Append a tombstone version for `(coord, system_from_ms)`. Creates a
-    /// new tile-version entry in the memtable; does NOT mutate any earlier
-    /// version for this coord.
+    /// The buffer of `tile`, created under `placement` when absent. `Err`
+    /// when `tile` holds a version another vShard stored: one tile version
+    /// is one write's, so its cells share one placement.
+    fn buffer(&mut self, tile: TileId, placement: u32) -> ArrayResult<&mut TileBuffer> {
+        let buffer = self
+            .tiles
+            .entry(tile)
+            .or_insert_with(|| TileBuffer::new(placement));
+        if buffer.placement != placement {
+            return Err(nodedb_array::error::ArrayError::InvalidOp {
+                detail: format!(
+                    "tile version ({}, {}) holds vShard {}'s cells; a write of vShard {} \
+                     cannot join it",
+                    tile.hilbert_prefix, tile.system_from_ms, buffer.placement, placement
+                ),
+            });
+        }
+        Ok(buffer)
+    }
+
+    /// Append a tombstone version for `(coord, system_from_ms)`, stored
+    /// under `placement`. Creates a new tile-version entry in the memtable;
+    /// does NOT mutate any earlier version for this coord.
     pub fn delete_cell(
         &mut self,
         schema: &ArraySchema,
         coord: Vec<CoordValue>,
         system_from_ms: i64,
+        placement: u32,
         lsn: u64,
     ) -> ArrayResult<TileId> {
         let tile = tile_id_for_cell(schema, &coord, system_from_ms)?;
-        self.tiles
-            .entry(tile)
-            .or_default()
-            .push_tombstone(&coord, lsn)?;
+        self.buffer(tile, placement)?.push_tombstone(&coord, lsn)?;
         Ok(tile)
     }
 
     /// Append a GDPR erasure version for `(coord, system_from_ms)`. Writes
     /// the `0xFE` sentinel rather than the `0xFF` tombstone. The ceiling
     /// resolver returns `CeilingResult::Erased` for this coord at any
-    /// `system_as_of >= system_from_ms`.
+    /// `system_as_of >= system_from_ms`. The version is stored under
+    /// `placement`.
     pub fn erase_cell(
         &mut self,
         schema: &ArraySchema,
         coord: Vec<CoordValue>,
         system_from_ms: i64,
+        placement: u32,
         lsn: u64,
     ) -> ArrayResult<TileId> {
         let tile = tile_id_for_cell(schema, &coord, system_from_ms)?;
-        self.tiles
-            .entry(tile)
-            .or_default()
-            .push_erasure(&coord, lsn)?;
+        self.buffer(tile, placement)?.push_erasure(&coord, lsn)?;
         Ok(tile)
     }
 
@@ -375,6 +412,7 @@ mod tests {
             system_from_ms: sys,
             valid_from_ms: vf,
             valid_until_ms: vu,
+            placement: 0,
             lsn,
         }
     }
@@ -405,7 +443,7 @@ mod tests {
         m.put_cell(&s, put(coord(1, 1), attrs(1), 100, 100, OPEN_UPPER, 1))
             .unwrap();
         // Delete at a later system_from_ms — must NOT remove the earlier tile.
-        m.delete_cell(&s, coord(1, 1), 200, 2).unwrap();
+        m.delete_cell(&s, coord(1, 1), 200, 0, 2).unwrap();
         // Two tile versions: the live one and the tombstone one.
         assert_eq!(m.tiles.len(), 2);
         // Only one live cell (the tombstone version doesn't count as live).
@@ -506,9 +544,9 @@ mod tests {
         m.put_cell(&s, put(coord(1, 1), attrs(10), 100, 0, OPEN_UPPER, 1))
             .unwrap();
         // Tombstone at (2,2), sys=200
-        m.delete_cell(&s, coord(2, 2), 200, 2).unwrap();
+        m.delete_cell(&s, coord(2, 2), 200, 0, 2).unwrap();
         // GDPR erasure at (3,3), sys=300
-        m.erase_cell(&s, coord(3, 3), 300, 3).unwrap();
+        m.erase_cell(&s, coord(3, 3), 300, 0, 3).unwrap();
 
         // Each write lands in its own tile (different sys_from_ms / different coord→tile).
         // Collect all tile kinds across all tile buffers.
@@ -566,7 +604,7 @@ mod tests {
 
         m.put_cell(&s, put(coord(1, 1), attrs(1), 100, 0, OPEN_UPPER, 1))
             .unwrap();
-        m.delete_cell(&s, coord(1, 2), 100, 2).unwrap();
+        m.delete_cell(&s, coord(1, 2), 100, 0, 2).unwrap();
         for (_, buf) in m.iter() {
             let tile = buf.materialise(&s).unwrap();
             tile.check_stored_identities().unwrap();
@@ -581,5 +619,26 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A tile version keeps the vShard whose write stored it, and a write
+    /// of another vShard cannot join that version.
+    #[test]
+    fn a_tile_version_keeps_its_placement() {
+        let s = schema();
+        let mut m = Memtable::new();
+        let mut first = put(coord(1, 1), attrs(1), 100, 0, OPEN_UPPER, 1);
+        first.placement = 7;
+        let tile = m.put_cell(&s, first).unwrap();
+        assert_eq!(m.tile(&tile).map(TileBuffer::placement), Some(7));
+
+        let mut other = put(coord(1, 2), attrs(2), 100, 0, OPEN_UPPER, 2);
+        other.placement = 8;
+        assert!(m.put_cell(&s, other).is_err());
+        assert!(m.delete_cell(&s, coord(1, 3), 100, 8, 3).is_err());
+        assert_eq!(m.tile(&tile).map(TileBuffer::entry_count), Some(1));
+
+        let erased = m.erase_cell(&s, coord(1, 1), 200, 8, 4).unwrap();
+        assert_eq!(m.tile(&erased).map(TileBuffer::placement), Some(8));
     }
 }

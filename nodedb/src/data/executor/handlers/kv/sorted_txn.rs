@@ -6,21 +6,26 @@
 //! has no tree on this core before COMMIT. A committed index's tree holds none
 //! of its staged writes. Either way the read runs over a transaction-local
 //! tree, built from the collection's base rows with the transaction's staged
-//! writes folded in. A committed index the transaction staged nothing for
-//! answers from its registered tree, which already holds the same rows.
+//! writes folded in. The base rows are the ones visible at the read's scope:
+//! the block's snapshot, or the current rows. A committed index the
+//! transaction staged nothing for answers a current read from its registered
+//! tree, which already holds the same rows. A snapshot read always builds its
+//! tree, since the registered tree holds the current rows.
 
 use tracing::debug;
 
 use nodedb_physical::physical_plan::{SortedIndexRead, SortedIndexSpec};
+use nodedb_types::SystemTimeScope;
 
 use super::sorted_index_compute::{BuildSortedIndexDefParams, build_sorted_index_def};
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::handlers::write_match_cut::write_match_cut;
 use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::kv::current_ms;
 use crate::engine::kv::sorted_index::SortedIndex;
 use crate::engine::kv::sorted_index::manager::SortedIndexDef;
+use crate::engine::kv::{KvEngine, current_ms};
 use crate::types::{DatabaseId, TenantId};
 
 /// Parameters for `execute_kv_sorted_index_txn_read`.
@@ -31,6 +36,9 @@ pub(in crate::data::executor) struct SortedIndexTxnReadParams<'a> {
     pub index_name: &'a str,
     pub pending: Option<&'a SortedIndexSpec>,
     pub read: &'a SortedIndexRead,
+    /// The scope the base rows are read at: `Current`, or the block's
+    /// `TxnSnapshot`.
+    pub system_time: &'a SystemTimeScope,
 }
 
 impl CoreLoop {
@@ -46,9 +54,15 @@ impl CoreLoop {
             index_name,
             pending,
             read,
+            system_time,
         } = params;
         debug!(core = self.core_id, %collection, %index_name, "kv sorted index txn read");
-        let now_ms = current_ms();
+        let cut = match write_match_cut(system_time, "a sorted-index read in a transaction") {
+            Ok(cut) => cut,
+            Err(e) => return self.response_error(task, e),
+        };
+        // A snapshot read judges expiry at the snapshot's wall time.
+        let now_ms = cut.map_or_else(current_ms, KvEngine::cut_wall_ms);
         let coll_key = (
             DatabaseId::new(did),
             TenantId::new(tid),
@@ -66,7 +80,7 @@ impl CoreLoop {
                 Ok(def) => def,
                 Err(e) => return self.response_error(task, e),
             },
-            None if !staged => {
+            None if !staged && cut.is_none() => {
                 return self.answer_from_registered(task, did, tid, index_name, read, now_ms);
             }
             None => match self.kv_engine.sorted_index_def(did, tid, index_name) {
@@ -75,7 +89,10 @@ impl CoreLoop {
             },
         };
 
-        let mut rows = self.kv_engine.collection_rows(did, tid, collection, now_ms);
+        let mut rows = match cut {
+            None => self.kv_engine.collection_rows(did, tid, collection, now_ms),
+            Some(at) => self.kv_engine.collection_rows_at(did, tid, collection, at),
+        };
         if let Some(txn_id) = txn_id {
             self.merge_kv_overlay_into_scan(
                 txn_id,
@@ -240,4 +257,130 @@ fn pending_def(
         window_start_ms: spec.window_start_ms,
         window_end_ms: spec.window_end_ms,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::executor::core_loop::tests::{make_core_with_dir, make_default_task};
+    use crate::data::executor::handlers::transaction::stage_write::kv_row_identity;
+    use crate::engine::kv::KvPutParams;
+    use crate::engine::kv::sorted_index::key::{SortColumn, SortDirection, SortKeyEncoder};
+    use crate::engine::kv::sorted_index::window::WindowConfig;
+    use crate::engine::kv::test_support::row_surrogate;
+    use crate::types::TxnId;
+
+    fn scored(player_id: &str, score: i64) -> Vec<u8> {
+        nodedb_types::json_to_msgpack(&serde_json::json!({
+            "player_id": player_id,
+            "score": score,
+        }))
+        .expect("encode leaderboard row")
+    }
+
+    fn put_at(core: &mut CoreLoop, player_id: &str, score: i64, ordinal: i64) {
+        let guard = core.kv_engine.open_write_scope(Some(ordinal));
+        core.kv_engine
+            .put(KvPutParams {
+                database_id: 0,
+                tenant_id: 1,
+                collection: "players",
+                key: player_id.as_bytes(),
+                value: &scored(player_id, score),
+                ttl_ms: 0,
+                now_ms: 1_000,
+                surrogate: row_surrogate(player_id.as_bytes()),
+            })
+            .expect("a bound row writes");
+        core.kv_engine.close_write_scope(guard);
+    }
+
+    /// The keys a top-k transaction read answers, in rank order.
+    fn txn_top_k(core: &CoreLoop, txn_id: TxnId, system_time: SystemTimeScope) -> Vec<String> {
+        let mut task = make_default_task();
+        task.request.txn_id = Some(txn_id);
+        let read = SortedIndexRead::TopK { k: 10 };
+        let response = core.execute_kv_sorted_index_txn_read(
+            &task,
+            SortedIndexTxnReadParams {
+                did: 0,
+                tid: 1,
+                collection: "players",
+                index_name: "lb",
+                pending: None,
+                read: &read,
+                system_time: &system_time,
+            },
+        );
+        let docs = crate::data::executor::response_codec::decode_response_to_docs(&response)
+            .expect("rows decode");
+        docs.into_iter()
+            .map(|(_, bytes)| {
+                let row = nodedb_types::value_from_msgpack(&bytes).expect("row decodes");
+                let nodedb_types::Value::Object(map) = row else {
+                    panic!("a ranked row is a map: {row:?}");
+                };
+                match map.get("key") {
+                    Some(nodedb_types::Value::String(key)) => key.clone(),
+                    other => panic!("key: {other:?}"),
+                }
+            })
+            .collect()
+    }
+
+    /// A sorted-index read inside a block ranks the rows visible at the
+    /// block's snapshot with the block's staged writes on top. A commit
+    /// after the snapshot is not ranked.
+    #[test]
+    fn a_txn_sorted_read_ranks_the_snapshot_and_its_staged_rows() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        core.kv_engine.register_sorted_index(
+            0,
+            1,
+            "players",
+            SortedIndexDef {
+                name: "lb".into(),
+                collection: "players".into(),
+                key_column: "player_id".into(),
+                encoder: SortKeyEncoder::new(vec![SortColumn {
+                    name: "score".into(),
+                    direction: SortDirection::Desc,
+                }]),
+                window: WindowConfig::none(),
+            },
+        );
+        put_at(&mut core, "p1", 10, 100);
+        put_at(&mut core, "p2", 20, 100);
+        // A concurrent commit after the snapshot at 150.
+        put_at(&mut core, "p1", 30, 200);
+        put_at(&mut core, "p3", 5, 200);
+
+        let txn_id = TxnId::new(7);
+        let coll_key = (DatabaseId::new(0), TenantId::new(1), "players".to_string());
+        core.txn_overlay_mut(txn_id).insert_put(
+            coll_key,
+            row_surrogate(b"p4").as_u32(),
+            &kv_row_identity(b"p4"),
+            scored("p4", 25),
+        );
+
+        let snapshot = SystemTimeScope::TxnSnapshot {
+            ordinal: 150,
+            cut_marker: 0,
+        };
+        assert_eq!(
+            txn_top_k(&core, txn_id, snapshot),
+            vec!["p4".to_string(), "p2".to_string(), "p1".to_string()]
+        );
+        assert_eq!(
+            txn_top_k(&core, txn_id, SystemTimeScope::Current),
+            vec![
+                "p1".to_string(),
+                "p4".to_string(),
+                "p2".to_string(),
+                "p3".to_string()
+            ]
+        );
+    }
 }

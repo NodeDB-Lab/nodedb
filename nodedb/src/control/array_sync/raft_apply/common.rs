@@ -34,6 +34,9 @@ pub(crate) struct AppliedPosition {
     /// when the entry carries none. It is the write's commit instant on the
     /// tenant's observed write high-water, however late this replica applies.
     pub commit_hlc: u64,
+    /// The system-time ordinal the entry's leader assigned, `None` when the
+    /// entry carries none. Every replica stamps the write's versions from it.
+    pub system_ordinal: Option<i64>,
 }
 
 impl AppliedPosition {
@@ -69,6 +72,9 @@ pub(super) struct ArrayWriteSubmit {
     pub apply_key: u64,
     /// The committed entry's commit HLC, `None` when it carries none.
     pub commit_hlc: Option<u64>,
+    /// The system-time ordinal the entry's leader assigned, which every
+    /// replica's cell versions stamp. `None` when the entry carries none.
+    pub system_ordinal: Option<i64>,
     /// Contextual label for the error surfaced to the propose waiter.
     pub op_label: &'static str,
     /// The committed entry the write applies. Its change events stage under
@@ -104,6 +110,7 @@ pub(super) async fn submit_array_write(
         resolved_now_ms,
         apply_key,
         commit_hlc,
+        system_ordinal,
         op_label,
         group_id,
         log_index,
@@ -140,8 +147,9 @@ pub(super) async fn submit_array_write(
                     group_id,
                     log_index,
                 )),
-                // An array cell version takes no system-time ordinal.
-                system_ordinal: None,
+                // Every replica stamps the cell versions at the ordinal the
+                // entry's leader assigned.
+                system_ordinal,
             },
             // Raft committed this entry at a fixed log index and every replica
             // applies it in that order; re-entering the write-admission gate
@@ -161,50 +169,7 @@ pub(super) async fn submit_array_write(
     if response.status != Status::Ok {
         return Err(apply_refusal(op_label, &response));
     }
-    // The response carries the write-version this replica stamped alongside the
-    // payload; an array plan names no user collection, so it is `Lsn::ZERO` here
-    // — reported honestly rather than substituted for.
     Ok(AppliedWrite::from_response(&response))
-}
-
-/// Derive the dispatch vShard for an array op from its coordinate.
-///
-/// When the array has known tile extents the coordinate is mapped to its tile
-/// via the Hilbert-prefix routing (`vshard_for_array_coord`); otherwise the
-/// array name alone selects the vShard. Shared by every array-op apply path so
-/// each concern (op / cell) routes identically.
-pub(super) fn vshard_for_array_op(
-    state: &Arc<SharedState>,
-    tenant_id: TenantId,
-    database_id: DatabaseId,
-    op: &nodedb_array::sync::op::ArrayOp,
-) -> VShardId {
-    use nodedb_array::types::coord::value::CoordValue;
-    use nodedb_cluster::array_routing::{array_vshard_for_name, vshard_for_array_coord};
-
-    let tile_extents = state.array_sync_schemas.tile_extents_in_database(
-        database_id,
-        tenant_id.as_u64(),
-        &op.header.array,
-    );
-    if let Some(extents) = tile_extents {
-        let coord_u64: Vec<u64> = op
-            .coord
-            .iter()
-            .map(|c| match c {
-                CoordValue::Int64(v) | CoordValue::TimestampMs(v) => *v as u64,
-                CoordValue::Float64(v) => v.to_bits(),
-                CoordValue::String(_) => 0,
-            })
-            .collect();
-        VShardId::new(vshard_for_array_coord(
-            &op.header.array,
-            &coord_u64,
-            &extents,
-        ))
-    } else {
-        VShardId::new(array_vshard_for_name(&op.header.array))
-    }
 }
 
 /// Ensure the Data Plane has the array open before dispatching Put/Delete.
@@ -299,7 +264,7 @@ pub(super) fn build_array_request(
         wal_lsn: None,
         resolved_now_ms: None,
         commit_hlc: None,
-        entry_version: None,
+        system_ordinal: None,
         admission: crate::bridge::envelope::Admission::Exempt(
             crate::bridge::envelope::ExemptReason::AlreadyOrdered,
         ),
@@ -354,7 +319,7 @@ mod tests {
             watermark_lsn: Lsn::ZERO,
             error_code: code.map(Box::new),
             stage_vote: None,
-            read_versions: crate::types::ReadVersions::new(),
+            read_vshards: crate::types::ReadShards::new(),
             write_set: Vec::new(),
         }
     }

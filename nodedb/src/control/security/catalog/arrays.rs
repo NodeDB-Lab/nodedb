@@ -197,24 +197,6 @@ impl SystemCatalog {
         Ok(existed)
     }
 
-    /// Legacy DEFAULT-database read API.
-    pub fn get_array(&self, name: &str) -> crate::Result<Option<ArrayCatalogEntry>> {
-        self.get_array_in_database(
-            nodedb_types::TenantId::new(0),
-            nodedb_types::DatabaseId::DEFAULT,
-            name,
-        )
-    }
-
-    /// Legacy DEFAULT-database delete API.
-    pub fn delete_array(&self, name: &str) -> crate::Result<bool> {
-        self.delete_array_in_database(
-            nodedb_types::TenantId::new(0),
-            nodedb_types::DatabaseId::DEFAULT,
-            name,
-        )
-    }
-
     /// Load every entry. Used by `ArrayCatalog::load_from_catalog` at
     /// startup.
     pub fn load_all_arrays(&self) -> crate::Result<Vec<ArrayCatalogEntry>> {

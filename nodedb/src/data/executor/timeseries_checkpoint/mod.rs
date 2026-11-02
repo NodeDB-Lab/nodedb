@@ -64,4 +64,5 @@ mod flush;
 mod load;
 mod rewrite_recovery;
 pub mod schema;
+pub mod series_catalog;
 pub mod stamp;

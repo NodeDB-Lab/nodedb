@@ -33,7 +33,8 @@ pub struct RestoreStats {
     pub crdt_reissued: usize,
     /// Number of individual vectors re-issued durably (Raft/WAL) on restore.
     pub vectors_reissued: usize,
-    /// Number of individual KV rows re-issued durably (Raft/WAL) on restore.
+    /// Number of KV keys re-issued durably on restore, each with every
+    /// version the backup holds.
     pub kv_reissued: usize,
     /// Number of (collection, field) vector-index HNSW/PQ/IVF configs
     /// re-issued durably (Raft/WAL) on restore.
@@ -76,8 +77,8 @@ impl RestoreStats {
     /// columnar count is the number re-issued, so a restore adds it as it
     /// re-issues and a dry run adds the section size.
     pub fn count_sections(&mut self, snap: &TenantDataSnapshot) {
-        self.documents += snap.documents.len() + snap.documents_versioned.len();
-        self.indexes += snap.indexes.len() + snap.indexes_versioned.len();
+        self.documents += snap.documents_versioned.len();
+        self.indexes += snap.indexes_versioned.len();
         self.edges += snap.edges.len();
         self.vectors += snap.vectors.len();
         self.kv_tables += snap.kv_tables.len();

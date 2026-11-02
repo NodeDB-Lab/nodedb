@@ -70,6 +70,7 @@ impl CoreLoop {
                         vector_field: vector_field.as_str(),
                         final_top_k: *final_top_k,
                         bm25: triple_text,
+                        scope,
                     },
                 );
             }

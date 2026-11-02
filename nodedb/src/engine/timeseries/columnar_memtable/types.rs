@@ -51,14 +51,24 @@ pub enum ColumnType {
     Float64,
     /// Integer metric value.
     Int64,
-    /// Tag column — stored as u32 symbol IDs.
+    /// Tag column: a series dimension, stored as u32 symbol IDs. Every
+    /// non-NULL symbol cell is part of the row's series key.
     Symbol,
+    /// String field: not a series dimension. It is stored as u32 ids into a
+    /// per-column dictionary, like a symbol, without the tag cardinality cap.
+    Text,
 }
 
 impl ColumnType {
     /// Whether this is a time column of any kind.
     pub fn is_time(&self) -> bool {
         matches!(self, ColumnType::Timestamp(_))
+    }
+
+    /// Whether the column stores string cells as ids into a per-column
+    /// dictionary: a symbol tag or a text field.
+    pub fn is_dictionary(&self) -> bool {
+        matches!(self, ColumnType::Symbol | ColumnType::Text)
     }
 
     /// The SQL DDL type name a client sees for this column (schema-preview
@@ -71,7 +81,8 @@ impl ColumnType {
             }
             ColumnType::Float64 => "FLOAT",
             ColumnType::Int64 => "BIGINT",
-            ColumnType::Symbol => "VARCHAR",
+            ColumnType::Symbol => "SYMBOL",
+            ColumnType::Text => "VARCHAR",
         }
     }
 }
@@ -111,9 +122,18 @@ impl ColumnarSchema {
             .unwrap_or(nodedb_codec::ColumnCodec::Auto)
     }
 
-    /// Index of the reserved `_ts_system` column, or `None` for non-bitemporal.
+    /// Index of the reserved `_ts_system` column, or `None` when the schema
+    /// carries none.
     pub fn ts_system_idx(&self) -> Option<usize> {
         self.columns.iter().position(|(n, _)| n == TS_SYSTEM)
+    }
+
+    /// Position of the `_ts_series` column, which holds each row's series
+    /// id. `None` when the schema has none.
+    pub fn ts_series_idx(&self) -> Option<usize> {
+        self.columns
+            .iter()
+            .position(|(n, _)| n == nodedb_types::columnar::schema::TS_SERIES)
     }
 }
 
@@ -150,7 +170,7 @@ impl ColumnData {
             ColumnType::Timestamp(_) => Self::Timestamp(Vec::with_capacity(4096)),
             ColumnType::Float64 => Self::Float64(Vec::with_capacity(4096)),
             ColumnType::Int64 => Self::Int64(Vec::with_capacity(4096)),
-            ColumnType::Symbol => Self::Symbol(Vec::with_capacity(4096)),
+            ColumnType::Symbol | ColumnType::Text => Self::Symbol(Vec::with_capacity(4096)),
         }
     }
 
@@ -318,9 +338,9 @@ pub struct ColumnarDrainResult {
     pub row_count: u64,
     pub min_ts: i64,
     pub max_ts: i64,
-    /// Maximum `_ts_system` value across rows (bitemporal only; 0 otherwise).
-    /// Populated on drain by scanning the `_ts_system` column so retention
-    /// can evaluate system-time staleness without re-reading the segment.
+    /// The newest `_ts_system` ordinal across rows (0 when none). Populated
+    /// on drain by scanning the `_ts_system` column, so retention and the
+    /// serialization check read it without re-reading the segment.
     pub max_system_ts: i64,
     pub series_row_counts: HashMap<SeriesId, u64>,
 }
@@ -363,22 +383,50 @@ pub struct ColumnarFlushView<'a> {
     pub row_count: u64,
     pub min_ts: i64,
     pub max_ts: i64,
-    /// Maximum `_ts_system` value across rows (bitemporal only; 0 otherwise).
+    /// The newest `_ts_system` ordinal across rows (0 when none).
     pub max_system_ts: i64,
 }
 
-/// Scan the `_ts_system` column for its maximum, or `0` when the schema has no
-/// such column (non-bitemporal).
+/// The newest `_ts_system` ordinal across the rows, or `0` when the schema
+/// has no such column or no row. The ordinal is kept exact: two writes of one
+/// millisecond carry distinct ordinals.
 ///
 /// Shared by the drain and the borrowed view so the two can never disagree about
 /// the system-time bound a partition records for retention.
-pub(super) fn max_system_ts_of(schema: &ColumnarSchema, columns: &[ColumnData]) -> i64 {
+pub fn max_system_ts_of(schema: &ColumnarSchema, columns: &[ColumnData]) -> i64 {
     schema
         .ts_system_idx()
         .and_then(|idx| columns.get(idx))
-        .map(|col| match col {
-            ColumnData::Timestamp(v) | ColumnData::Int64(v) => v.iter().copied().max().unwrap_or(0),
-            _ => 0,
+        .and_then(|col| match col {
+            ColumnData::Timestamp(v) | ColumnData::Int64(v) => v.iter().copied().max(),
+            _ => None,
         })
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two rows of one millisecond carry distinct ordinals, and the newest
+    /// system time is the larger ordinal itself, not its millisecond.
+    #[test]
+    fn the_newest_system_time_is_the_exact_ordinal() {
+        let schema = ColumnarSchema {
+            columns: vec![
+                ("timestamp".into(), ColumnType::Timestamp(TimeKind::Millis)),
+                (TS_SYSTEM.into(), ColumnType::Int64),
+            ],
+            timestamp_idx: 0,
+            codecs: Vec::new(),
+        };
+        let first = nodedb_types::ms_to_ordinal_upper(5_000) - 10;
+        let second = first + 3;
+        let columns = vec![
+            ColumnData::Timestamp(vec![1, 2]),
+            ColumnData::Int64(vec![second, first]),
+        ];
+        assert_eq!(max_system_ts_of(&schema, &columns), second);
+        assert_eq!(max_system_ts_of(&ColumnarSchema::metric_default(), &[]), 0);
+    }
 }

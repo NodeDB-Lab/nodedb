@@ -3,7 +3,8 @@
 //! The prediction a predicate write inside a session transaction carries.
 //!
 //! A predicate `UPDATE` or `DELETE` in a transaction reads its rows at its
-//! statement, as the transaction sees them. Its plan carries the matched
+//! statement, as the transaction sees them: at the plan's match scope, the
+//! block's snapshot, with the staged writes on top. Its plan carries the matched
 //! surrogates, and the implicit edges of the matched edge documents when the
 //! collection is edge-bearing. The statement's stage refuses a prediction its
 //! rows do not match. The buffered plan keeps the prediction, so a Calvin
@@ -14,6 +15,7 @@
 
 use nodedb_physical::physical_plan::{DocumentOp, OllpPredictedEdge, PhysicalPlan, UpdateValue};
 use nodedb_physical::physical_task::PhysicalTask;
+use nodedb_types::SystemTimeScope;
 
 use super::dependent_recon_plan::{inject_ollp_predicted_edges, inject_ollp_surrogates};
 use super::predicate::predicate_class_for_filters;
@@ -55,7 +57,7 @@ pub async fn predict_txn_bulk_write(
     task: &mut PhysicalTask,
     txn_id: Option<TxnId>,
 ) -> crate::Result<Option<TxnPredictedRead>> {
-    let Some((collection, filters, shape)) = predicate_write(&task.plan) else {
+    let Some((collection, filters, shape, system_time)) = predicate_write(&task.plan) else {
         return Ok(None);
     };
     let (tenant_id, database_id) = (task.tenant_id, task.database_id);
@@ -84,6 +86,9 @@ pub async fn predict_txn_bulk_write(
             prefilter: None,
             identity,
             txn_id,
+            // The scope the stage matches at, so the stage finds the rows
+            // this read predicted: the block's snapshot inside a block.
+            system_time,
         },
     )
     .await?;
@@ -119,9 +124,11 @@ pub async fn predict_txn_bulk_write(
     }))
 }
 
-/// The collection, serialized filters and shape of a predicate write. `None`
-/// for any other plan.
-fn predicate_write(plan: &PhysicalPlan) -> Option<(String, Vec<u8>, PredicateWrite<'_>)> {
+/// The collection, serialized filters, shape and match scope of a predicate
+/// write. `None` for any other plan.
+fn predicate_write(
+    plan: &PhysicalPlan,
+) -> Option<(String, Vec<u8>, PredicateWrite<'_>, SystemTimeScope)> {
     let op = match plan {
         PhysicalPlan::Document(op) => op,
         PhysicalPlan::Vector(_)
@@ -143,6 +150,7 @@ fn predicate_write(plan: &PhysicalPlan) -> Option<(String, Vec<u8>, PredicateWri
             collection,
             filters,
             declared_primary_key,
+            system_time,
             ..
         } => Some((
             collection.to_string(),
@@ -150,16 +158,19 @@ fn predicate_write(plan: &PhysicalPlan) -> Option<(String, Vec<u8>, PredicateWri
             PredicateWrite::Delete {
                 declared_primary_key: declared_primary_key.clone(),
             },
+            *system_time,
         )),
         DocumentOp::BulkUpdate {
             collection,
             filters,
             updates,
+            system_time,
             ..
         } => Some((
             collection.to_string(),
             filters.clone(),
             PredicateWrite::Update { updates },
+            *system_time,
         )),
         DocumentOp::PointGet { .. }
         | DocumentOp::PointPut { .. }

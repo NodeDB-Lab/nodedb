@@ -134,6 +134,7 @@ impl CoreLoop {
                 },
             );
         }
+        self.fold_array_versions(array_id);
 
         match super::super::super::response_codec::encode_count("opened", 1) {
             Ok(bytes) => self.response_with_payload(task, bytes),

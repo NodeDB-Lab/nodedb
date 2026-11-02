@@ -85,7 +85,6 @@ impl CatalogEntry {
             Self::DeleteTopicWithConsumerGroups { .. } => "delete_topic_with_consumer_groups",
             Self::PutConsumerGroupIfAbsent(_) => "put_consumer_group_if_absent",
             Self::DeleteConsumerGroup { .. } => "delete_consumer_group",
-            Self::MigrateConsumerGroupStream { .. } => "migrate_consumer_group_stream",
             Self::PutCheckpoint(_) => "put_checkpoint",
             Self::DeleteCheckpoint { .. } => "delete_checkpoint",
             Self::CompactHistory { .. } => "compact_history",
@@ -156,7 +155,7 @@ mod tests {
             issuer: "https://example.com".into(),
             jwks_uri: "https://example.com/.well-known/jwks.json".into(),
             audience: None,
-            tenant_id: None,
+            tenant_id: 1,
             claim_mapping: vec![],
             created_at_lsn: 0,
         };

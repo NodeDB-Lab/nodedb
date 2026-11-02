@@ -111,6 +111,7 @@ fn purge(
     drop_doc_rows(&write_txn, DOC_TERMS, database_id, tid, owner, "doc_terms")?;
     drop_meta_rows(&write_txn, database_id, tid, owner, meta)?;
     removed += drop_segment_rows(&write_txn, database_id, tid, owner)?;
+    super::history_rows::drop_owned(&write_txn, owner)?;
 
     {
         let mut stats = write_txn

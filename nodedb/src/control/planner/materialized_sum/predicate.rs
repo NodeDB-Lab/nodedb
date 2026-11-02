@@ -19,7 +19,7 @@ use nodedb_physical::physical_plan::{
 };
 use nodedb_types::id::TxnId;
 
-use super::recon::recon_scan_rows;
+use super::recon::{read_cut, recon_scan_rows};
 use super::resolve::{lookup_join_value, source_drives_bindings};
 use super::resolve_target::ResolvedTargets;
 use super::settle::{
@@ -81,7 +81,9 @@ pub(super) async fn resolve_predicate_sum_targets(
         return Ok(Some(Settlement::empty()));
     };
 
-    let read = recon_scan_rows(
+    // The cut the scan's images are validated at, taken before the scan.
+    let observed_at = read_cut(state).await?;
+    let rows = recon_scan_rows(
         state,
         tenant_id,
         database_id,
@@ -97,7 +99,7 @@ pub(super) async fn resolve_predicate_sum_targets(
         state,
         &bindings,
         &scope.updates,
-        &read.rows,
+        &rows,
         tenant_id,
         database_id,
         trace_id,
@@ -107,7 +109,7 @@ pub(super) async fn resolve_predicate_sum_targets(
     // Folded from the SAME scan the resolution came from: a second scan will
     // see a different snapshot, and two snapshots is two totals.
     let crs = crate::control::crs_context::crs_context_for(state);
-    let images = predicate_images(&scope, &read.rows, &crs)?;
+    let images = predicate_images(&scope, &rows, &crs)?;
     let input = SettleInput {
         source_collection: &scope.collection,
         images: &images,
@@ -115,7 +117,7 @@ pub(super) async fn resolve_predicate_sum_targets(
         // observation this settlement rests on is the whole collection: a row
         // that JOINS the match set after the scan has to invalidate it too.
         source_row: None,
-        read_version: read.read_version,
+        observed_at,
         crs: &crs,
     };
     let settlement =

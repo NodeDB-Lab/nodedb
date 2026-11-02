@@ -155,7 +155,8 @@ pub(super) async fn try_string(
         // SELECT LAST_VALUES('collection_name')
         if let Some(collection) = extract_last_values_arg(sql) {
             return Some(
-                last_value::query_last_values(state, identity, database_id, &collection).await,
+                last_value::query_last_values(state, identity, database_id, &collection, txn_ctx)
+                    .await,
             );
         }
     }
@@ -163,8 +164,15 @@ pub(super) async fn try_string(
         // SELECT LAST_VALUE('collection_name', series_id)
         if let Some((collection, series_id)) = extract_last_value_args(sql) {
             return Some(
-                last_value::query_last_value(state, identity, database_id, &collection, series_id)
-                    .await,
+                last_value::query_last_value(
+                    state,
+                    identity,
+                    database_id,
+                    &collection,
+                    series_id,
+                    txn_ctx,
+                )
+                .await,
             );
         }
     }
@@ -413,7 +421,7 @@ mod tests {
         };
         assert!(!crdt_apply_forbidden_in_transaction(&ctx));
 
-        sessions.begin(addr, 0).expect("begin");
+        sessions.begin(addr).expect("begin");
         assert!(crdt_apply_forbidden_in_transaction(&ctx));
         sessions.fail_transaction(addr);
         assert!(crdt_apply_forbidden_in_transaction(&ctx));

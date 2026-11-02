@@ -6,8 +6,13 @@
 //! Each segment has at most one associated DeleteBitmap, stored alongside
 //! the segment as `{segment_id}.del`.
 //!
+//! The bitmap marks every row a write ended: overwritten, deleted, and
+//! purged rows alike. A current read skips every marked row with one probe.
+//! A read at an ordinal tells history from purged rows by the row's
+//! `sys_to` (`crate::versions::SegmentVersions`).
+//!
 //! The bitmap is serialized to bytes for persistence and deserialized on
-//! segment open. Scans consult the bitmap to skip deleted rows.
+//! segment open.
 
 use roaring::RoaringBitmap;
 

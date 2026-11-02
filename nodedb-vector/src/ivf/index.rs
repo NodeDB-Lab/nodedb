@@ -208,6 +208,11 @@ impl IvfPqIndex {
         if self.deleted.contains(id) {
             return None;
         }
+        self.get_vector_raw(id)
+    }
+
+    /// The FP32 vector of `id`, live or soft-deleted.
+    pub fn get_vector_raw(&self, id: u32) -> Option<&[f32]> {
         let &(cell, pos) = self.slots.get(&id)?;
         let start = pos as usize * self.dim;
         self.cells
@@ -243,8 +248,17 @@ impl IvfPqIndex {
     /// Remove every soft-deleted entry. Returns the number removed. Ids of
     /// the remaining entries do not change.
     pub fn compact(&mut self) -> usize {
+        self.compact_retaining(&RoaringBitmap::new())
+    }
+
+    /// [`Self::compact`] that keeps every soft-deleted entry in `retain`. A
+    /// kept entry stays soft-deleted: a search at a past system-time cut
+    /// still reads it.
+    pub fn compact_retaining(&mut self, retain: &RoaringBitmap) -> usize {
         let deleted = std::mem::take(&mut self.deleted);
-        self.retain_entries(|id| !deleted.contains(id))
+        let removed = self.retain_entries(|id| !deleted.contains(id) || retain.contains(id));
+        self.deleted = &deleted & retain;
+        removed
     }
 
     /// Keep the entries whose id satisfies `keep` and rebuild the slot map.

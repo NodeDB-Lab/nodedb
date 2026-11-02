@@ -449,9 +449,9 @@ mod tests {
     fn reader_round_trips_sparse_tiles() {
         let s = schema();
         let mut w = SegmentWriter::new(0xCAFE);
-        w.append_sparse(TileId::snapshot(1), &make_sparse(&s, 1))
+        w.append_sparse(TileId::snapshot(1), 0, &make_sparse(&s, 1))
             .unwrap();
-        w.append_sparse(TileId::snapshot(2), &make_sparse(&s, 2))
+        w.append_sparse(TileId::snapshot(2), 0, &make_sparse(&s, 2))
             .unwrap();
         let bytes = w.finish(None).unwrap();
         let r = SegmentReader::open(&bytes).unwrap();
@@ -467,7 +467,7 @@ mod tests {
     fn reader_round_trips_dense_tile() {
         let s = schema();
         let mut w = SegmentWriter::new(0xBEEF);
-        w.append_dense(TileId::snapshot(1), &DenseTile::empty(&s))
+        w.append_dense(TileId::snapshot(1), 0, &DenseTile::empty(&s))
             .unwrap();
         let bytes = w.finish(None).unwrap();
         let r = SegmentReader::open(&bytes).unwrap();
@@ -486,7 +486,7 @@ mod tests {
         // CRC path which guards the same invariant.)
         let s = schema();
         let mut w = SegmentWriter::new(0x1);
-        w.append_sparse(TileId::snapshot(1), &make_sparse(&s, 1))
+        w.append_sparse(TileId::snapshot(1), 0, &make_sparse(&s, 1))
             .unwrap();
         let mut bytes = w.finish(None).unwrap();
         bytes[12] ^= 0xFF; // corrupt header schema_hash
@@ -497,7 +497,7 @@ mod tests {
     fn reader_rejects_out_of_range_tile() {
         let s = schema();
         let mut w = SegmentWriter::new(0x1);
-        w.append_sparse(TileId::snapshot(1), &make_sparse(&s, 1))
+        w.append_sparse(TileId::snapshot(1), 0, &make_sparse(&s, 1))
             .unwrap();
         let bytes = w.finish(None).unwrap();
         let r = SegmentReader::open(&bytes).unwrap();
@@ -509,11 +509,11 @@ mod tests {
         let s = schema();
         let mut w = SegmentWriter::new(0xCAFE);
         // Three versions of prefix=1 at system_from_ms 100, 200, 300.
-        w.append_sparse(TileId::new(1, 100), &make_sparse(&s, 1))
+        w.append_sparse(TileId::new(1, 100), 0, &make_sparse(&s, 1))
             .unwrap();
-        w.append_sparse(TileId::new(1, 200), &make_sparse(&s, 2))
+        w.append_sparse(TileId::new(1, 200), 0, &make_sparse(&s, 2))
             .unwrap();
-        w.append_sparse(TileId::new(1, 300), &make_sparse(&s, 3))
+        w.append_sparse(TileId::new(1, 300), 0, &make_sparse(&s, 3))
             .unwrap();
         let bytes = w.finish(None).unwrap();
         let r = SegmentReader::open(&bytes).unwrap();
@@ -534,7 +534,7 @@ mod tests {
     fn read_tile_as_of_returns_none_below_first_version() {
         let s = schema();
         let mut w = SegmentWriter::new(0xBEEF);
-        w.append_sparse(TileId::new(1, 100), &make_sparse(&s, 1))
+        w.append_sparse(TileId::new(1, 100), 0, &make_sparse(&s, 1))
             .unwrap();
         let bytes = w.finish(None).unwrap();
         let r = SegmentReader::open(&bytes).unwrap();
@@ -587,11 +587,11 @@ mod tests {
     fn iter_tile_versions_newest_first() {
         let s = schema();
         let mut w = SegmentWriter::new(0xCAFE);
-        w.append_sparse(TileId::new(1, 100), &make_sparse(&s, 1))
+        w.append_sparse(TileId::new(1, 100), 0, &make_sparse(&s, 1))
             .unwrap();
-        w.append_sparse(TileId::new(1, 200), &make_sparse(&s, 2))
+        w.append_sparse(TileId::new(1, 200), 0, &make_sparse(&s, 2))
             .unwrap();
-        w.append_sparse(TileId::new(1, 300), &make_sparse(&s, 3))
+        w.append_sparse(TileId::new(1, 300), 0, &make_sparse(&s, 3))
             .unwrap();
         let bytes = w.finish(None).unwrap();
         let r = SegmentReader::open(&bytes).unwrap();
@@ -607,11 +607,11 @@ mod tests {
     fn iter_tile_versions_respects_system_as_of() {
         let s = schema();
         let mut w = SegmentWriter::new(0xBEEF);
-        w.append_sparse(TileId::new(1, 100), &make_sparse(&s, 1))
+        w.append_sparse(TileId::new(1, 100), 0, &make_sparse(&s, 1))
             .unwrap();
-        w.append_sparse(TileId::new(1, 200), &make_sparse(&s, 2))
+        w.append_sparse(TileId::new(1, 200), 0, &make_sparse(&s, 2))
             .unwrap();
-        w.append_sparse(TileId::new(1, 300), &make_sparse(&s, 3))
+        w.append_sparse(TileId::new(1, 300), 0, &make_sparse(&s, 3))
             .unwrap();
         let bytes = w.finish(None).unwrap();
         let r = SegmentReader::open(&bytes).unwrap();
@@ -715,11 +715,11 @@ mod tests {
     fn read_tile_as_of_finds_exact_match() {
         let s = schema();
         let mut w = SegmentWriter::new(0xDEAD);
-        w.append_sparse(TileId::new(1, 100), &make_sparse(&s, 1))
+        w.append_sparse(TileId::new(1, 100), 0, &make_sparse(&s, 1))
             .unwrap();
-        w.append_sparse(TileId::new(1, 200), &make_sparse(&s, 2))
+        w.append_sparse(TileId::new(1, 200), 0, &make_sparse(&s, 2))
             .unwrap();
-        w.append_sparse(TileId::new(1, 300), &make_sparse(&s, 3))
+        w.append_sparse(TileId::new(1, 300), 0, &make_sparse(&s, 3))
             .unwrap();
         let bytes = w.finish(None).unwrap();
         let r = SegmentReader::open(&bytes).unwrap();
@@ -740,14 +740,14 @@ mod tests {
 
     fn write_plain(s: &crate::schema::ArraySchema, id: TileId) -> Vec<u8> {
         let mut w = SegmentWriter::new(0xCAFE);
-        w.append_sparse(id, &make_sparse(s, 1)).unwrap();
+        w.append_sparse(id, 0, &make_sparse(s, 1)).unwrap();
         w.finish(None).unwrap()
     }
 
     fn write_encrypted(s: &crate::schema::ArraySchema, id: TileId) -> Vec<u8> {
         let kek = test_kek();
         let mut w = SegmentWriter::new(0xCAFE);
-        w.append_sparse(id, &make_sparse(s, 1)).unwrap();
+        w.append_sparse(id, 0, &make_sparse(s, 1)).unwrap();
         w.finish(Some(&kek)).unwrap()
     }
 
@@ -801,9 +801,9 @@ mod tests {
         let s = schema();
         let kek = test_kek();
         let mut w = SegmentWriter::new(0x1234);
-        w.append_sparse(TileId::new(1, 100), &make_sparse(&s, 1))
+        w.append_sparse(TileId::new(1, 100), 0, &make_sparse(&s, 1))
             .unwrap();
-        w.append_sparse(TileId::new(2, 200), &make_sparse(&s, 2))
+        w.append_sparse(TileId::new(2, 200), 0, &make_sparse(&s, 2))
             .unwrap();
         let encrypted = w.finish(Some(&kek)).unwrap();
         let owned = OwnedSegmentReader::open_with_kek(&encrypted, Some(&kek)).unwrap();

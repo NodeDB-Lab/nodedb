@@ -23,10 +23,8 @@ use crate::sync::replica_id::ReplicaId;
 ///
 /// Format: `[LORO_FORMAT_VERSION: u8][loro snapshot bytes…]`
 ///
-/// Increment this constant (and add a migration path) whenever the Loro
-/// snapshot wire format changes in a backward-incompatible way. The version is
-/// checked on every import so that snapshots from an older binary are rejected
-/// with a clear error rather than silently corrupting state.
+/// The version is checked on every import. A snapshot of any other version is
+/// rejected with a clear error rather than silently corrupting state.
 pub const LORO_FORMAT_VERSION: u8 = 1;
 
 /// Maximum enveloped Loro schema snapshot bytes accepted before metadata

@@ -87,6 +87,7 @@ pub async fn resolve_shuffle_aggregate(
         group_by,
         aggregates,
         filters,
+        system_time,
         having,
         limit,
         sort_keys,
@@ -222,6 +223,7 @@ pub async fn resolve_shuffle_aggregate(
         group_by: group_by.clone(),
         aggregates: aggregates.clone(),
         filters: filters.clone(),
+        system_time,
     });
     let plan_bytes = plan_wire::encode(&producer_plan).map_err(|e| crate::Error::Internal {
         detail: format!("shuffle aggregate: encode producer plan: {e}"),
@@ -258,13 +260,12 @@ pub async fn resolve_shuffle_aggregate(
         produce_futures.push(send_produce(transport, node, req));
     }
     // Await ALL producers; any error fails the whole shuffle (no partial result).
-    // Fold every producer's observed read versions: the producers all scan the
-    // SAME single source collection, so the fold holds that collection's
-    // version on each vShard at read time: the comparand the coordinator
-    // records for cross-shard OCC read validation of this aggregate.
-    let mut read_versions = crate::types::ReadVersions::new();
+    // Fold every producer's read vShards: the producers all scan the SAME
+    // single source collection. The transaction read-set homes an entry of
+    // this aggregate on each folded vShard.
+    let mut read_vshards = crate::types::ReadShards::new();
     for result in join_all(produce_futures).await {
-        read_versions.merge(&result?);
+        read_vshards.merge(&result?);
     }
 
     // 7. After ALL producers succeed, dispatch consumers CONCURRENTLY — one per
@@ -340,14 +341,13 @@ pub async fn resolve_shuffle_aggregate(
 
     // The producers report the source collection's versions at read time on
     // their `ShuffleProduceResponse`; the fold above is what this aggregate
-    // observed. Pass it as the OCC read-version comparand so an
-    // in-transaction distributed aggregate records a sound read-set entry (the
-    // aggregate is single-collection, so `record_read_set` attributes it to the
-    // right collection). The core-global `watermark_lsn` is NOT threaded through
-    // the shuffle transport and stays `ZERO`; using it as the read version will
-    // skip required aborts (it advances on writes to ANY collection).
+    // observed. Pass it on so an in-transaction distributed aggregate records
+    // a read-set entry on each vShard it read (the aggregate is
+    // single-collection, so `record_read_set` attributes it to the right
+    // collection). The core-global `watermark_lsn` is NOT threaded through
+    // the shuffle transport and stays `ZERO`.
     Ok(Resolved::Gathered(
-        outcome_to_response(merged, Lsn::ZERO, read_versions),
+        outcome_to_response(merged, Lsn::ZERO, read_vshards),
         Vec::new(),
         Vec::new(),
     ))

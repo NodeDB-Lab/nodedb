@@ -1,14 +1,18 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! Public KvHashTable API: get, put, delete, reap, set_expire, persist.
+//!
+//! Every mutation carries the system-time ordinal of the write. A write that
+//! ends a stored version moves it into the table's history (see
+//! `versioning.rs`), so a read at an earlier ordinal still sees it.
 
 use nodedb_types::Surrogate;
 
 use super::super::entry::{KvEntry, NO_EXPIRY};
-use super::super::hash_helpers::{
-    extract_value_from, free_value_from, hash_key, read_value_from, store_value_in,
-};
+use super::super::hash_helpers::{free_value_from, hash_key, read_value_from, store_value_in};
+use super::super::history::VersionStamp;
 use super::types::{EntryMeta, KvHashTable};
+use super::versioning::{SlotArray, Superseded};
 
 impl KvHashTable {
     /// Get a value by key. Returns None if not found or expired.
@@ -24,27 +28,22 @@ impl KvHashTable {
     /// allocated AFTER the clone's AS-OF point (snapshot isolation).
     /// Returns `None` if the key is missing or expired.
     pub fn get_with_surrogate(&self, key: &[u8], now_ms: u64) -> Option<(&[u8], Surrogate)> {
+        let entry = self.find_entry(key)?;
+        if entry.is_expired(now_ms) {
+            return None;
+        }
+        Some((read_value_from(entry, &self.overflow), entry.surrogate))
+    }
+
+    /// The live entry stored under `key`, primary table first, then the
+    /// rehash source. Expiry-blind.
+    pub(crate) fn find_entry(&self, key: &[u8]) -> Option<&KvEntry> {
         let h = hash_key(key);
-
-        // Check primary table.
         if let Some(entry) = self.probe_find(&self.slots, h, key) {
-            if entry.is_expired(now_ms) {
-                return None;
-            }
-            return Some((read_value_from(entry, &self.overflow), entry.surrogate));
+            return Some(entry);
         }
-
-        // Check rehash source if active.
-        if let Some(old) = &self.rehash_source
-            && let Some(entry) = self.probe_find(old, h, key)
-        {
-            if entry.is_expired(now_ms) {
-                return None;
-            }
-            return Some((read_value_from(entry, &self.overflow), entry.surrogate));
-        }
-
-        None
+        let old = self.rehash_source.as_ref()?;
+        self.probe_find(old, h, key)
     }
 
     /// Get entry metadata without returning the value.
@@ -54,40 +53,24 @@ impl KvHashTable {
     /// Does NOT check expiry — returns metadata even for expired keys,
     /// since the caller needs the original `expire_at_ms` for cancellation.
     pub fn get_entry_meta(&self, key: &[u8]) -> Option<EntryMeta> {
-        let h = hash_key(key);
-
-        if let Some(entry) = self.probe_find(&self.slots, h, key) {
-            return Some(EntryMeta {
-                has_ttl: entry.has_ttl(),
-                expire_at_ms: entry.expire_at_ms,
-            });
-        }
-
-        if let Some(old) = &self.rehash_source
-            && let Some(entry) = self.probe_find(old, h, key)
-        {
-            return Some(EntryMeta {
-                has_ttl: entry.has_ttl(),
-                expire_at_ms: entry.expire_at_ms,
-            });
-        }
-
-        None
+        self.find_entry(key).map(|entry| EntryMeta {
+            has_ttl: entry.has_ttl(),
+            expire_at_ms: entry.expire_at_ms,
+        })
     }
 
-    /// Replace an existing entry's value and expiry, keeping its surrogate.
-    /// Returns the old value. An absent key is not written and returns `None`.
-    pub fn rewrite(&mut self, key: &[u8], value: &[u8], expire_at_ms: u64) -> Option<Vec<u8>> {
-        let h = hash_key(key);
-        let surrogate = self
-            .probe_find(&self.slots, h, key)
-            .or_else(|| {
-                self.rehash_source
-                    .as_ref()
-                    .and_then(|old| self.probe_find(old, h, key))
-            })?
-            .surrogate;
-        self.put(key, value, expire_at_ms, surrogate)
+    /// Replace an existing entry's value and expiry at `ordinal`, keeping its
+    /// surrogate. Returns the old value. An absent key is not written and
+    /// returns `None`.
+    pub fn rewrite(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        expire_at_ms: u64,
+        ordinal: i64,
+    ) -> Option<Vec<u8>> {
+        let surrogate = self.find_entry(key)?.surrogate;
+        self.put(key, value, expire_at_ms, surrogate, ordinal)
     }
 
     /// Read a key's value ignoring expiry.
@@ -99,34 +82,25 @@ impl KvHashTable {
     /// TTL has elapsed by definition, so a `get` would report the row as
     /// already gone and the index entries would be stranded.
     ///
+    /// A live entry that a rehash has not migrated yet exists ONLY in the
+    /// rehash source, so the probe covers both tables.
+    ///
     /// [`get`]: KvHashTable::get
     pub fn get_ignoring_expiry(&self, key: &[u8]) -> Option<&[u8]> {
-        let h = hash_key(key);
-
-        if let Some(entry) = self.probe_find(&self.slots, h, key) {
-            return Some(read_value_from(entry, &self.overflow));
-        }
-
-        // A live entry that a rehash has not migrated yet exists ONLY here —
-        // probing the primary alone would silently skip index cleanup for
-        // exactly the rows a rehash is in the middle of moving.
-        if let Some(old) = &self.rehash_source
-            && let Some(entry) = self.probe_find(old, h, key)
-        {
-            return Some(read_value_from(entry, &self.overflow));
-        }
-
-        None
+        self.find_entry(key)
+            .map(|entry| read_value_from(entry, &self.overflow))
     }
 
-    /// Insert or update a key-value pair. Returns the old value bytes if overwritten.
+    /// Insert or update a key-value pair at system-time `ordinal`. Returns
+    /// the old value bytes if overwritten.
     ///
     /// `surrogate` is the row's bound global identity, never
     /// `Surrogate::ZERO`: `KvEngine` refuses an unbound write before it
     /// reaches the table.
     /// - On insert of a new row, it is recorded in the reverse map.
     /// - On update of an existing row, the entry keeps the surrogate it was
-    ///   first bound under.
+    ///   first bound under, and the replaced version moves into history
+    ///   ([`VersionStamp`]).
     ///
     /// Triggers incremental rehash migration if a rehash is in progress.
     /// Triggers a new rehash if the load factor exceeds the threshold.
@@ -136,6 +110,7 @@ impl KvHashTable {
         value: &[u8],
         expire_at_ms: u64,
         surrogate: Surrogate,
+        ordinal: i64,
     ) -> Option<Vec<u8>> {
         // Progress incremental rehash.
         self.rehash_step();
@@ -144,19 +119,23 @@ impl KvHashTable {
 
         // Check if key exists in primary — update in place (no key copy needed).
         if let Some(idx) = Self::probe_find_index_static(&self.slots, h, key) {
-            // probe_find_index_static guarantees slots[idx] is Some.
-            let old_value = {
+            let superseded = {
                 let slot = self.slots[idx].as_ref()?;
-                let v = extract_value_from(&slot.value, &self.overflow);
+                let superseded = Superseded::of(slot, &self.overflow);
                 free_value_from(&slot.value, &mut self.overflow);
-                v
+                superseded
             };
+            let stamp = VersionStamp::of(ordinal, superseded.sys_from);
             let new_kv_value = store_value_in(&mut self.overflow, value, self.inline_threshold);
-            if let Some(entry) = self.slots[idx].as_mut() {
-                entry.value = new_kv_value;
-                entry.expire_at_ms = expire_at_ms;
+            let entry = self.slots[idx].as_mut()?;
+            entry.value = new_kv_value;
+            entry.expire_at_ms = expire_at_ms;
+            if let VersionStamp::NewVersion(at) = stamp {
+                entry.sys_from = at;
             }
-            return Some(old_value);
+            let new_size = entry.mem_size();
+            self.entry_bytes = self.entry_bytes.saturating_sub(superseded.mem_size) + new_size;
+            return Some(self.end_version(key, superseded, stamp));
         }
 
         // Check rehash source — if found, remove from old and insert into primary.
@@ -164,8 +143,9 @@ impl KvHashTable {
             && let Some(idx) = Self::probe_find_index_static(old_slots, h, key)
         {
             let old_entry = old_slots[idx].take()?;
-            let old_value = extract_value_from(&old_entry.value, &self.overflow);
+            let superseded = Superseded::of(&old_entry, &self.overflow);
             free_value_from(&old_entry.value, &mut self.overflow);
+            let stamp = VersionStamp::of(ordinal, superseded.sys_from);
             let new_kv_value = store_value_in(&mut self.overflow, value, self.inline_threshold);
             // The migrated entry keeps its bound surrogate, and its reverse-map
             // row already names this key.
@@ -175,12 +155,25 @@ impl KvHashTable {
                 value: new_kv_value,
                 expire_at_ms,
                 surrogate: old_entry.surrogate,
+                sys_from: match stamp {
+                    VersionStamp::SameVersion => superseded.sys_from,
+                    VersionStamp::NewVersion(at) => at,
+                },
             };
+            self.entry_bytes =
+                self.entry_bytes.saturating_sub(superseded.mem_size) + new_entry.mem_size();
             Self::robin_hood_insert(&mut self.slots, new_entry);
-            return Some(old_value);
+            return Some(self.end_version(key, superseded, stamp));
         }
 
         // New key — insert into primary. Single key copy here (unavoidable — entry owns key).
+        // A key a delete or a reap ended starts its new version no earlier
+        // than that end, so its versions never overlap. The ended version is
+        // visible below its end only, so the new one may start at it.
+        let sys_from = match self.history.newest_end(key) {
+            Some(end) if end > ordinal => end,
+            _ => ordinal,
+        };
         let kv_value = store_value_in(&mut self.overflow, value, self.inline_threshold);
         self.surrogate_to_key.insert(surrogate.0, key.to_vec());
         let entry = KvEntry {
@@ -189,7 +182,9 @@ impl KvHashTable {
             value: kv_value,
             expire_at_ms,
             surrogate,
+            sys_from,
         };
+        self.entry_bytes += entry.mem_size();
         Self::robin_hood_insert(&mut self.slots, entry);
         self.len += 1;
 
@@ -199,106 +194,78 @@ impl KvHashTable {
         None
     }
 
-    /// Delete a key. Returns true if the key existed and was removed.
-    pub fn delete(&mut self, key: &[u8], now_ms: u64) -> bool {
+    /// Delete a key at system-time `ordinal`. Returns true if the key existed
+    /// and was removed. The removed version moves into history, ended at the
+    /// delete.
+    pub fn delete(&mut self, key: &[u8], ordinal: i64) -> bool {
         let h = hash_key(key);
-
-        // Try primary table.
         if let Some(idx) = Self::probe_find_index_static(&self.slots, h, key) {
-            let Some(entry) = self.slots[idx].take() else {
-                return false;
-            };
-            free_value_from(&entry.value, &mut self.overflow);
-            self.surrogate_to_key.remove(&entry.surrogate.0);
-            Self::repair_after_delete_static(&mut self.slots, idx);
-            self.len -= 1;
-            return true;
+            return self.retire_slot(SlotArray::Primary, idx, ordinal);
         }
-
-        // Try rehash source.
-        if let Some(old_slots) = self.rehash_source.as_mut()
+        if let Some(old_slots) = self.rehash_source.as_ref()
             && let Some(idx) = Self::probe_find_index_static(old_slots, h, key)
         {
-            let Some(entry) = old_slots[idx].take() else {
-                return false;
-            };
-            free_value_from(&entry.value, &mut self.overflow);
-            self.surrogate_to_key.remove(&entry.surrogate.0);
-            Self::repair_after_delete_static(old_slots, idx);
-            self.len -= 1;
-            return true;
+            return self.retire_slot(SlotArray::RehashSource, idx, ordinal);
         }
-
-        // If key doesn't exist at all, nothing to do.
-        let _ = now_ms;
         false
     }
 
-    /// Remove an expired entry by key (called by the expiry wheel reaper).
-    /// Only removes if the entry still exists and its expire_at_ms matches.
-    pub fn reap_expired(&mut self, key: &[u8], expected_expire_ms: u64) -> bool {
+    /// Remove an expired entry by key at system-time `ordinal` (called by
+    /// the expiry wheel reaper). Only removes if the entry still exists and
+    /// its expire_at_ms matches. The reaped version moves into history.
+    pub fn reap_expired(&mut self, key: &[u8], expected_expire_ms: u64, ordinal: i64) -> bool {
         let h = hash_key(key);
-
         if let Some(idx) = Self::probe_find_index_static(&self.slots, h, key)
             && self.slots[idx]
                 .as_ref()
                 .is_some_and(|e| e.expire_at_ms == expected_expire_ms)
         {
-            let Some(entry) = self.slots[idx].take() else {
-                return false;
-            };
-            free_value_from(&entry.value, &mut self.overflow);
-            self.surrogate_to_key.remove(&entry.surrogate.0);
-            Self::repair_after_delete_static(&mut self.slots, idx);
-            self.len -= 1;
-            return true;
+            return self.retire_slot(SlotArray::Primary, idx, ordinal);
         }
-
-        if let Some(old_slots) = self.rehash_source.as_mut()
+        if let Some(old_slots) = self.rehash_source.as_ref()
             && let Some(idx) = Self::probe_find_index_static(old_slots, h, key)
             && old_slots[idx]
                 .as_ref()
                 .is_some_and(|e| e.expire_at_ms == expected_expire_ms)
         {
-            let Some(entry) = old_slots[idx].take() else {
-                return false;
-            };
-            free_value_from(&entry.value, &mut self.overflow);
-            self.surrogate_to_key.remove(&entry.surrogate.0);
-            Self::repair_after_delete_static(old_slots, idx);
-            self.len -= 1;
-            return true;
+            return self.retire_slot(SlotArray::RehashSource, idx, ordinal);
         }
-
         false
     }
 
-    /// Update the TTL of an existing key. Returns true if the key was found.
-    pub fn set_expire(&mut self, key: &[u8], expire_at_ms: u64) -> bool {
+    /// Update the TTL of an existing key at system-time `ordinal`. Returns
+    /// true if the key was found. The version with the old expiry moves into
+    /// history.
+    pub fn set_expire(&mut self, key: &[u8], expire_at_ms: u64, ordinal: i64) -> bool {
         let h = hash_key(key);
-
-        if let Some(idx) = Self::probe_find_index_static(&self.slots, h, key) {
-            if let Some(entry) = self.slots[idx].as_mut() {
-                entry.expire_at_ms = expire_at_ms;
-            }
-            return true;
-        }
-
-        if let Some(old_slots) = self.rehash_source.as_mut()
+        let (array, idx) = if let Some(idx) = Self::probe_find_index_static(&self.slots, h, key) {
+            (SlotArray::Primary, idx)
+        } else if let Some(old_slots) = self.rehash_source.as_ref()
             && let Some(idx) = Self::probe_find_index_static(old_slots, h, key)
         {
-            if let Some(entry) = old_slots[idx].as_mut() {
-                entry.expire_at_ms = expire_at_ms;
+            (SlotArray::RehashSource, idx)
+        } else {
+            return false;
+        };
+        let Some(entry) = self.slot_ref(array, idx) else {
+            return false;
+        };
+        let superseded = Superseded::of(entry, &self.overflow);
+        let stamp = VersionStamp::of(ordinal, superseded.sys_from);
+        if let Some(entry) = self.slot_mut(array, idx) {
+            entry.expire_at_ms = expire_at_ms;
+            if let VersionStamp::NewVersion(at) = stamp {
+                entry.sys_from = at;
             }
-            return true;
         }
-
-        false
+        self.end_version(key, superseded, stamp);
+        true
     }
 
-    /// Remove TTL from a key (make it persistent). Returns true if found.
-    pub fn persist(&mut self, key: &[u8]) -> bool {
-        self.set_expire(key, NO_EXPIRY)
+    /// Remove TTL from a key (make it persistent) at system-time `ordinal`.
+    /// Returns true if found.
+    pub fn persist(&mut self, key: &[u8], ordinal: i64) -> bool {
+        self.set_expire(key, NO_EXPIRY, ordinal)
     }
 }
 
@@ -318,11 +285,11 @@ mod tests {
         let mut t = make_table();
         assert!(t.is_empty());
 
-        t.put(b"key1", b"value1", NO_EXPIRY, Surrogate::new(1));
+        t.put(b"key1", b"value1", NO_EXPIRY, Surrogate::new(1), 1);
         assert_eq!(t.len(), 1);
         assert_eq!(t.get(b"key1", 0), Some(b"value1".as_slice()));
 
-        t.put(b"key2", b"value2", NO_EXPIRY, Surrogate::new(2));
+        t.put(b"key2", b"value2", NO_EXPIRY, Surrogate::new(2), 1);
         assert_eq!(t.len(), 2);
 
         assert!(t.delete(b"key1", 0));
@@ -334,8 +301,11 @@ mod tests {
     #[test]
     fn overwrite_returns_old_value() {
         let mut t = make_table();
-        assert!(t.put(b"k", b"v1", NO_EXPIRY, Surrogate::new(1)).is_none());
-        let old = t.put(b"k", b"v2", NO_EXPIRY, Surrogate::new(1));
+        assert!(
+            t.put(b"k", b"v1", NO_EXPIRY, Surrogate::new(1), 1)
+                .is_none()
+        );
+        let old = t.put(b"k", b"v2", NO_EXPIRY, Surrogate::new(1), 1);
         assert_eq!(old, Some(b"v1".to_vec()));
         assert_eq!(t.get(b"k", 0), Some(b"v2".as_slice()));
         assert_eq!(t.len(), 1);
@@ -350,7 +320,7 @@ mod tests {
     #[test]
     fn lazy_expiry_on_get() {
         let mut t = make_table();
-        t.put(b"k", b"v", 1000, Surrogate::new(1));
+        t.put(b"k", b"v", 1000, Surrogate::new(1), 1);
 
         assert_eq!(t.get(b"k", 999), Some(b"v".as_slice()));
         assert!(t.get(b"k", 1000).is_none()); // Expired.
@@ -360,29 +330,29 @@ mod tests {
     #[test]
     fn set_expire_and_persist() {
         let mut t = make_table();
-        t.put(b"k", b"v", NO_EXPIRY, Surrogate::new(1));
+        t.put(b"k", b"v", NO_EXPIRY, Surrogate::new(1), 1);
 
-        assert!(t.set_expire(b"k", 5000));
+        assert!(t.set_expire(b"k", 5000, 1));
         assert!(t.get(b"k", 4999).is_some());
         assert!(t.get(b"k", 5000).is_none());
 
         // Reset expiry to force it to be visible again — need to re-put.
-        t.put(b"k", b"v", 10000, Surrogate::new(1));
-        assert!(t.persist(b"k"));
+        t.put(b"k", b"v", 10000, Surrogate::new(1), 1);
+        assert!(t.persist(b"k", 1));
         assert!(t.get(b"k", u64::MAX).is_some()); // Never expires.
     }
 
     #[test]
     fn reap_expired_removes_matching() {
         let mut t = make_table();
-        t.put(b"k", b"v", 5000, Surrogate::new(1));
+        t.put(b"k", b"v", 5000, Surrogate::new(1), 1);
 
         // Wrong expire_at_ms — should not reap.
-        assert!(!t.reap_expired(b"k", 9999));
+        assert!(!t.reap_expired(b"k", 9999, 1));
         assert_eq!(t.len(), 1);
 
         // Correct expire_at_ms — should reap.
-        assert!(t.reap_expired(b"k", 5000));
+        assert!(t.reap_expired(b"k", 5000, 1));
         assert_eq!(t.len(), 0);
     }
 
@@ -399,6 +369,7 @@ mod tests {
                 val.as_bytes(),
                 NO_EXPIRY,
                 Surrogate::new(i + 1),
+                1,
             );
         }
 
@@ -412,6 +383,7 @@ mod tests {
                 val.as_bytes(),
                 NO_EXPIRY,
                 Surrogate::new(i + 1),
+                1,
             );
         }
 
@@ -434,8 +406,8 @@ mod tests {
         let small = b"tiny".to_vec(); // 4 bytes — inline.
         let large = vec![0xAB; 100]; // 100 bytes — overflow.
 
-        t.put(b"s", &small, NO_EXPIRY, Surrogate::new(1));
-        t.put(b"l", &large, NO_EXPIRY, Surrogate::new(2));
+        t.put(b"s", &small, NO_EXPIRY, Surrogate::new(1), 1);
+        t.put(b"l", &large, NO_EXPIRY, Surrogate::new(2), 1);
 
         assert_eq!(t.get(b"s", 0), Some(small.as_slice()));
         assert_eq!(t.get(b"l", 0), Some(large.as_slice()));
@@ -452,6 +424,7 @@ mod tests {
                 &(i * 7).to_be_bytes(),
                 NO_EXPIRY,
                 Surrogate::new(i + 1),
+                1,
             );
         }
         assert_eq!(t.len(), 500);
@@ -485,13 +458,13 @@ mod tests {
     fn get_entry_meta_returns_ttl_info() {
         let mut t = make_table();
         // Key without TTL.
-        t.put(b"persistent", b"v", NO_EXPIRY, Surrogate::new(1));
+        t.put(b"persistent", b"v", NO_EXPIRY, Surrogate::new(1), 1);
         let meta = t.get_entry_meta(b"persistent").unwrap();
         assert!(!meta.has_ttl);
         assert_eq!(meta.expire_at_ms, NO_EXPIRY);
 
         // Key with TTL.
-        t.put(b"ephemeral", b"v", 5000, Surrogate::new(2));
+        t.put(b"ephemeral", b"v", 5000, Surrogate::new(2), 1);
         let meta = t.get_entry_meta(b"ephemeral").unwrap();
         assert!(meta.has_ttl);
         assert_eq!(meta.expire_at_ms, 5000);
@@ -506,8 +479,8 @@ mod tests {
         let s1 = Surrogate::new(101);
         let s2 = Surrogate::new(202);
 
-        t.put(b"alpha", b"v1", NO_EXPIRY, s1);
-        t.put(b"beta", b"v2", NO_EXPIRY, s2);
+        t.put(b"alpha", b"v1", NO_EXPIRY, s1, 1);
+        t.put(b"beta", b"v2", NO_EXPIRY, s2, 1);
 
         assert_eq!(t.surrogate_count(), 2);
         assert_eq!(t.key_for_surrogate(s1), Some(b"alpha".as_slice()));
@@ -517,7 +490,7 @@ mod tests {
 
         // Updating an existing key keeps the surrogate it was first bound
         // under (the assigner is idempotent).
-        t.put(b"alpha", b"v1b", NO_EXPIRY, Surrogate::new(303));
+        t.put(b"alpha", b"v1b", NO_EXPIRY, Surrogate::new(303), 1);
         assert_eq!(t.key_for_surrogate(s1), Some(b"alpha".as_slice()));
         assert!(t.key_for_surrogate(Surrogate::new(303)).is_none());
 
@@ -533,13 +506,13 @@ mod tests {
     fn rewrite_keeps_the_bound_surrogate() {
         let mut t = make_table();
         let s = Surrogate::new(7);
-        t.put(b"k", b"v", NO_EXPIRY, s);
+        t.put(b"k", b"v", NO_EXPIRY, s, 1);
 
-        assert_eq!(t.rewrite(b"k", b"v2", NO_EXPIRY), Some(b"v".to_vec()));
+        assert_eq!(t.rewrite(b"k", b"v2", NO_EXPIRY, 1), Some(b"v".to_vec()));
         assert_eq!(t.get(b"k", 0), Some(b"v2".as_slice()));
         assert_eq!(t.key_for_surrogate(s), Some(b"k".as_slice()));
 
-        assert!(t.rewrite(b"absent", b"v", NO_EXPIRY).is_none());
+        assert!(t.rewrite(b"absent", b"v", NO_EXPIRY, 1).is_none());
         assert!(t.get(b"absent", 0).is_none());
         assert_eq!(t.surrogate_count(), 1);
     }
@@ -555,6 +528,7 @@ mod tests {
                 &[0u8; 32],
                 NO_EXPIRY,
                 Surrogate::new(i + 1),
+                1,
             );
         }
 

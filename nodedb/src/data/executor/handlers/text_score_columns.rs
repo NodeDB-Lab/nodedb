@@ -75,7 +75,7 @@ pub(in crate::data::executor) fn score_value(score: DocScore) -> serde_json::Val
 
 impl CoreLoop {
     /// The score columns of `specs`, in order. `eligible` is the set of rows
-    /// the reading query admits.
+    /// the reading query admits. `cut` is the system time the query reads.
     pub(in crate::data::executor) fn text_score_columns<'a>(
         &'a self,
         task: &ExecutionTask,
@@ -83,6 +83,7 @@ impl CoreLoop {
         collection: &'a str,
         specs: &'a [TextScoreSpec],
         eligible: Option<&SurrogateBitmap>,
+        cut: super::search_cut::SearchCut,
     ) -> crate::Result<ScoreColumns<'a>> {
         let database_id = task.request.database_id.as_u64();
         let tenant = TenantId::new(tid);
@@ -91,7 +92,7 @@ impl CoreLoop {
             let scorer = match self.text_index(task, tid, collection, spec.field.as_deref())? {
                 None => None,
                 Some(index) => {
-                    let staged = self.text_staged_view(task, tid, index)?;
+                    let staged = self.text_staged_view(task, tid, index, cut)?;
                     Some(self.inverted.doc_scorer(
                         database_id,
                         tenant,

@@ -93,6 +93,7 @@ async fn gateway_execute_kv_put_get_single_node() {
         key: b"smoke-key".to_vec(),
         rls_filters: vec![],
         surrogate_ceiling: None,
+        system_time: nodedb_types::SystemTimeScope::Current,
     });
     let get_checked = common::authorize_gateway_plan(&node.shared, &ctx, get_plan).await;
     let get_result = gateway.execute(&ctx, get_checked).await;
@@ -145,6 +146,7 @@ async fn gateway_execute_sql_plan_cache_populated() {
             key: b"smoke-key".to_vec(),
             rls_filters: vec![],
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         })))
     };
 
@@ -208,6 +210,7 @@ fn plan_cache_key_construction_and_lookup() {
         key: b"smoke-key".to_vec(),
         rls_filters: vec![],
         surrogate_ceiling: None,
+        system_time: nodedb_types::SystemTimeScope::Current,
     });
     cache.insert(key.clone(), Arc::new(plan));
 

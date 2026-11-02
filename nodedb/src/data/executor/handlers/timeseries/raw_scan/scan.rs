@@ -17,7 +17,9 @@ pub(in crate::data::executor) struct RawScanParams<'a> {
     pub time_range: (i64, i64),
     pub limit: usize,
     pub filter_predicates: &'a [ScanFilter],
-    pub has_filters: bool,
+    /// The WHERE predicates a staged row must match: `filter_predicates`
+    /// without the system cut, which a staged row is newer than.
+    pub staged_filter_predicates: &'a [ScanFilter],
     /// The caller's decoded read policy; empty admits every row. Evaluated
     /// per row after `filter_predicates` and before a row is gathered, so a
     /// row the policy excludes never counts toward `limit`, on memtable,
@@ -30,13 +32,17 @@ pub(in crate::data::executor) struct RawScanParams<'a> {
     /// In-transaction read-your-own-writes: when `Some`, fold this
     /// transaction's staged `TimeseriesOp::Ingest` rows into the result.
     /// Pre-gated by the caller — `None` for autocommit reads and for
-    /// audit-log / `AS OF SYSTEM TIME` reads (committed-only). The
+    /// audit-log / `AS OF SYSTEM TIME` reads (committed-only), `Some` for a
+    /// current read and a transaction snapshot read. The
     /// aggregate branch never reaches this handler, so continuous
     /// aggregates stay committed-only.
     pub txn_id: Option<crate::types::TxnId>,
     /// `ORDER BY` keys as `(column, ascending)`. Empty = the engine's natural
     /// order (memtable rows, then partition rows).
     pub sort_keys: &'a [nodedb_physical::physical_plan::SortKeySpec],
+    /// The row versions the read sees: a partition a TRUNCATE ended at or
+    /// below the cut is not read.
+    pub cut: nodedb_columnar::VersionCut,
 }
 
 impl CoreLoop {
@@ -53,12 +59,13 @@ impl CoreLoop {
             time_range,
             limit,
             filter_predicates,
-            has_filters,
+            staged_filter_predicates,
             rls_predicates,
             computed_columns: computed_columns_bytes,
             all_versions,
             txn_id,
             sort_keys,
+            cut,
         } = params;
 
         // A no-LIMIT SQL `SELECT * FROM <timeseries>` arrives as
@@ -108,6 +115,7 @@ impl CoreLoop {
             filter_predicates,
             rls_predicates,
             limit: gather_limit,
+            cut,
         }) {
             Ok(rows) => rows,
             Err(e) => return self.response_error(task, e),
@@ -126,8 +134,8 @@ impl CoreLoop {
                     txn_id,
                     coll_key: &coll_key,
                     time_range,
-                    filter_predicates,
-                    has_filters,
+                    filter_predicates: staged_filter_predicates,
+                    has_filters: !staged_filter_predicates.is_empty(),
                     rls_predicates,
                     limit: gather_limit,
                 },

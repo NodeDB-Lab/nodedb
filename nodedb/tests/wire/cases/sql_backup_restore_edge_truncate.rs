@@ -7,8 +7,10 @@
 //! Calvin transaction applied at its own ordinal. A TRUNCATE hides the
 //! versions applied below its ordinal. So a TRUNCATE sequenced before the
 //! RESTORE leaves the restored edge, even though the edge's history predates
-//! the TRUNCATE, and a TRUNCATE sequenced after the RESTORE hides it. A
-//! restart reads the same.
+//! the TRUNCATE, and a TRUNCATE sequenced after the RESTORE hides it. The
+//! TRUNCATE's tombstones of the collection's rows stay in their history, and
+//! the RESTORE sets each row current again above them. A restart reads the
+//! same.
 
 use bytes::Bytes;
 use futures::SinkExt;
@@ -65,6 +67,16 @@ async fn edge_live(server: &TestServer) -> bool {
     out
 }
 
+/// Whether both rows read back as current.
+async fn rows_live(server: &TestServer) -> bool {
+    let rows = server
+        .query_text(&format!("SELECT id FROM {COLLECTION}"))
+        .await
+        .unwrap_or_else(|e| panic!("select: {e}"))
+        .join(" ");
+    rows.contains("alice") && rows.contains("bob")
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_truncate_hides_a_restored_edge_only_when_sequenced_after_the_restore() {
     let server = TestServer::start().await;
@@ -98,6 +110,10 @@ async fn a_truncate_hides_a_restored_edge_only_when_sequenced_after_the_restore(
         edge_live(&server).await,
         "a TRUNCATE sequenced before the RESTORE leaves the restored edge"
     );
+    assert!(
+        rows_live(&server).await,
+        "the RESTORE sets the truncated rows current again"
+    );
 
     // A TRUNCATE sequenced after the RESTORE hides the restored edge.
     server
@@ -119,4 +135,5 @@ async fn a_truncate_hides_a_restored_edge_only_when_sequenced_after_the_restore(
     server.graceful_shutdown().await;
     let (server, _dir) = TestServer::open_on_path(dir).await;
     assert!(edge_live(&server).await, "after a restart");
+    assert!(rows_live(&server).await, "the rows after a restart");
 }

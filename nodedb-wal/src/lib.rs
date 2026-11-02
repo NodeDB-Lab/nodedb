@@ -90,7 +90,7 @@ pub use record::{
     FtsDeletePayload, FtsIndexPayload, RecordStamp, RecordTarget, RecordType, SpatialDeletePayload,
     SpatialPutPayload, WalRecord, WalRecordArgs, WriteAbortedPayload,
 };
-pub use record::{NO_EVENT_SOURCE, RecordHeader};
+pub use record::{NO_EVENT_SOURCE, NO_SYSTEM_ORDINAL, RecordHeader};
 #[cfg(not(target_arch = "wasm32"))]
 pub use recovery::{RecoveryInfo, recover};
 #[cfg(not(target_arch = "wasm32"))]

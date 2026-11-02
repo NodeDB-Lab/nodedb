@@ -62,7 +62,7 @@ pub fn bare_ok_response(request_id: RequestId) -> Response {
         watermark_lsn: crate::types::Lsn::ZERO,
         error_code: None,
         stage_vote: None,
-        read_versions: crate::types::ReadVersions::new(),
+        read_vshards: crate::types::ReadShards::new(),
         write_set: Vec::new(),
     }
 }

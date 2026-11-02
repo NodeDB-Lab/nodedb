@@ -23,6 +23,12 @@ use super::columnar_memtable::{ColumnType, ColumnValue};
 /// The ingest format of a resolved batch.
 pub const RESOLVED_INGEST_FORMAT: &str = "ts-resolved";
 
+/// The ingest format of a clone copy: MessagePack rows, as the `msgpack`
+/// format reads them, each carrying its source version's system-time ordinal
+/// in `_ts_system`. Each row keeps that ordinal: the copy is the same logical
+/// version as the source row.
+pub const CLONE_COPY_INGEST_FORMAT: &str = "msgpack-clone-copy";
+
 /// What an install does when the collection schema no longer matches the
 /// schema the batch was resolved against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, zerompk::ToMessagePack, zerompk::FromMessagePack)]
@@ -43,8 +49,6 @@ pub struct ResolvedTsRow {
     /// Index of the input line the row came from. It names the row's
     /// surrogate in the ingest's `surrogates`.
     pub line: u64,
-    /// The row's tags, which name its series with the batch's measurement.
-    pub tags: Vec<(String, String)>,
     /// The row's time-column value, in epoch milliseconds.
     pub timestamp_ms: i64,
     /// The row's values, in the order of the batch's `columns`.
@@ -90,6 +94,10 @@ pub struct ResolvedTsBatch {
     /// Why the resolve rejected its first rejected line. `None` when it
     /// rejected none.
     pub first_rejection: Option<String>,
+    /// Every row keeps the `_ts_system` ordinal it carries: a clone copy of
+    /// source rows. Otherwise the install stamps every row with the batch's
+    /// ordinal.
+    pub carried_system: bool,
 }
 
 /// The schema a resolve resolves against in place of the live one: the
@@ -170,12 +178,12 @@ impl ResolvedTsBatch {
 }
 
 /// The empty value a column the batch does not name takes, as a memtable
-/// fills a column added after rows landed. A symbol or float column takes
-/// SQL NULL, never an empty string. Integer and time columns have no NULL.
+/// fills a column added after rows landed. A symbol, text or float column
+/// takes SQL NULL, never an empty string. Integer and time columns have no NULL.
 pub fn empty_value(column_type: ColumnType) -> ColumnValue {
     match column_type {
         ColumnType::Timestamp(_) => ColumnValue::Timestamp(0),
-        ColumnType::Float64 | ColumnType::Symbol => ColumnValue::Null,
+        ColumnType::Float64 | ColumnType::Symbol | ColumnType::Text => ColumnValue::Null,
         ColumnType::Int64 => ColumnValue::Int64(0),
     }
 }
@@ -187,8 +195,14 @@ pub fn value_fits(value: &ColumnValue, column_type: ColumnType) -> bool {
         (ColumnValue::Timestamp(_), ColumnType::Timestamp(_))
             | (ColumnValue::Float64(_), ColumnType::Float64)
             | (ColumnValue::Int64(_), ColumnType::Int64)
-            | (ColumnValue::Symbol(_), ColumnType::Symbol)
-            | (ColumnValue::Null, ColumnType::Symbol | ColumnType::Float64)
+            | (
+                ColumnValue::Symbol(_),
+                ColumnType::Symbol | ColumnType::Text
+            )
+            | (
+                ColumnValue::Null,
+                ColumnType::Symbol | ColumnType::Text | ColumnType::Float64
+            )
     )
 }
 
@@ -213,7 +227,6 @@ mod tests {
             emits_events: true,
             rows: vec![ResolvedTsRow {
                 line: 0,
-                tags: vec![("host".into(), "a".into())],
                 timestamp_ms: 1_000,
                 values: vec![
                     ColumnValue::Timestamp(1_000),
@@ -225,6 +238,7 @@ mod tests {
             }],
             rejected: 1,
             first_rejection: Some("type conflict on 'value'".into()),
+            carried_system: false,
         };
         let bytes = batch.to_bytes().expect("encode batch");
         assert_eq!(
@@ -258,7 +272,6 @@ mod tests {
     fn a_null_cell_round_trips() {
         let row = ResolvedTsRow {
             line: 0,
-            tags: Vec::new(),
             timestamp_ms: 1_000,
             values: vec![ColumnValue::Timestamp(1_000), ColumnValue::Null],
             absent: vec![1],

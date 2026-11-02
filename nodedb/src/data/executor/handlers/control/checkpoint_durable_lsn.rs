@@ -565,6 +565,7 @@ mod tests {
         core.array_engine
             .put_cells(
                 &id,
+                0,
                 vec![crate::engine::array::wal::ArrayPutCell {
                     coord: vec![CoordValue::Int64(1)],
                     attrs: vec![CellValue::Int64(7)],

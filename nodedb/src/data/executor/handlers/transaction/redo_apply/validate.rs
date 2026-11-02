@@ -213,7 +213,6 @@ impl CoreLoop {
                 tid: scope.tid,
                 collection: scope.collection,
                 paths: &scope.config.index_paths,
-                bitemporal: scope.bitemporal,
                 base_visible: true,
                 crs: &self.crs_context(),
             },

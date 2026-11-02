@@ -303,7 +303,7 @@ impl CoreLoop {
                             declared_primary_key: truncate_primary_keys
                                 .get(collection.as_str())
                                 .and_then(|pk| pk.as_deref()),
-                            tombstone_sys_from: tombstones.as_ref(),
+                            tombstone_sys_from: &tombstones,
                         },
                         &mut ops,
                     )?;
@@ -399,7 +399,14 @@ impl CoreLoop {
         )?;
         // A RESTORE batch stages nothing: its rows and edge versions come
         // from the plan, after every staged write of the transaction.
-        self.serialize_restored_batches(plans, &mut ops, &mut row_changes)?;
+        self.open_restored_arrays(plans)?;
+        self.serialize_restored_batches(
+            task.request.database_id,
+            tid,
+            plans,
+            &mut ops,
+            &mut row_changes,
+        )?;
         Ok((ops, row_changes))
     }
 
@@ -549,7 +556,7 @@ mod tests {
             wal_lsn: None,
             resolved_now_ms: None,
             commit_hlc: None,
-            entry_version: None,
+            system_ordinal: None,
             admission: crate::bridge::envelope::Admission::Exempt(
                 crate::bridge::envelope::ExemptReason::Read,
             ),
@@ -885,6 +892,7 @@ mod tests {
                 "notes",
                 &row_key,
                 &schemaless_body("alice"),
+                core.bitemporal_ordinal(),
             )
             .expect("seed base row");
 
@@ -939,6 +947,7 @@ mod tests {
                     "notes",
                     &row_key,
                     &schemaless_body("old"),
+                    core.bitemporal_ordinal(),
                 )
                 .expect("seed base row");
         }
@@ -958,6 +967,7 @@ mod tests {
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             resolved_sum_targets: Vec::new(),
             declared_primary_key: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
 
         let resp = core.execute_stage_write(&task, TID, &plan);
@@ -998,6 +1008,7 @@ mod tests {
                     "notes",
                     &row_key,
                     &schemaless_body("doomed"),
+                    core.bitemporal_ordinal(),
                 )
                 .expect("seed base row");
         }
@@ -1014,6 +1025,7 @@ mod tests {
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             resolved_sum_targets: Vec::new(),
             declared_primary_key: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
 
         let resp = core.execute_stage_write(&task, TID, &plan);
@@ -1075,6 +1087,7 @@ mod tests {
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             resolved_sum_targets: Vec::new(),
             declared_primary_key: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
 
         let resp = src.execute_resolve_txn(&task, TID, txn, &[plan]);
@@ -1134,6 +1147,7 @@ mod tests {
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 resolved_sum_targets: Vec::new(),
                 declared_primary_key: None,
+                target_system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Document(DocumentOp::Merge {
                 target_collection: QualifiedCollection::new(DatabaseId::DEFAULT, "t"),
@@ -1152,6 +1166,7 @@ mod tests {
                 rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 resolved_sum_targets: Vec::new(),
                 declared_primary_key: None,
+                target_system_time: nodedb_types::SystemTimeScope::Current,
             }),
         ];
 
@@ -1819,27 +1834,43 @@ mod tests {
         assert_eq!(redo.ops.len(), 1);
         assert_eq!(redo.ops[0].record_type, RecordType::Delete as u32);
 
-        // The delete tuple carries the surrogate as its fourth element.
-        let (collection, _doc_id, prov, got_surrogate) =
-            zerompk::from_msgpack::<(String, String, Option<SyncProvenance>, u32)>(
-                &redo.ops[0].payload,
-            )
+        // The delete carries the surrogate and its tombstone's version key.
+        let delete = crate::wal::DocumentDeleteRedo::decode(&redo.ops[0].payload)
             .expect("decode document delete tuple");
-        assert_eq!(collection, "notes");
-        assert!(prov.is_none());
+        assert_eq!(delete.collection, "notes");
+        assert!(delete.provenance.is_none());
         assert_eq!(
-            got_surrogate, surrogate,
+            delete.surrogate, surrogate,
             "delete tuple must carry surrogate"
         );
+        assert!(
+            delete.sys_from.is_some(),
+            "delete tuple must carry its tombstone's version key"
+        );
 
-        // Seed the row in a fresh core, then replay the delete removes it.
+        // Seed the row in a fresh core one ordinal below the tombstone, as
+        // the live run stored it, then replay the delete removes it.
+        let tombstone_at = delete.sys_from.expect("stamped delete");
         let (mut dst, _dst_dir) = make_core();
         let seed = wrap_redo(&RedoRecord {
             version: 1,
             ops: {
-                let mut ops = Vec::new();
-                document_put_sub(&mut ops, "notes", surrogate, "gone", schemaless_body("x"));
-                ops
+                let prov: Option<SyncProvenance> = None;
+                let payload = zerompk::to_msgpack_vec(&(
+                    "notes",
+                    "gone",
+                    schemaless_body("x"),
+                    prov,
+                    surrogate,
+                    tombstone_at - 1,
+                    i64::MIN,
+                    i64::MAX,
+                ))
+                .expect("encode stamped document put sub-record");
+                vec![RedoSubRecord {
+                    record_type: RecordType::Put as u32,
+                    payload,
+                }]
             },
             calvin_stamp: None,
             cross_shard_applied: None,
@@ -1879,7 +1910,9 @@ mod tests {
     }
 
     /// Build a document PUT sub-record directly (test helper mirroring the
-    /// serializer's shape) for seeding rows into a replay target.
+    /// serializer's shape) for seeding rows into a replay target. The row is
+    /// stamped at a fresh `test_stamp`, as every producer stamps one: replay
+    /// skips an unstamped put.
     fn document_put_sub(
         ops: &mut Vec<RedoSubRecord>,
         collection: &str,
@@ -1888,8 +1921,19 @@ mod tests {
         value: Vec<u8>,
     ) {
         let prov: Option<SyncProvenance> = None;
-        let payload = zerompk::to_msgpack_vec(&(collection, doc_id, value, prov, surrogate))
-            .expect("encode document put sub-record");
+        let sys_from =
+            crate::data::executor::handlers::transaction::redo_apply::test_commit::test_stamp();
+        let payload = zerompk::to_msgpack_vec(&(
+            collection,
+            doc_id,
+            value,
+            prov,
+            surrogate,
+            sys_from,
+            i64::MIN,
+            i64::MAX,
+        ))
+        .expect("encode document put sub-record");
         ops.push(RedoSubRecord {
             record_type: RecordType::Put as u32,
             payload,
@@ -2107,6 +2151,7 @@ mod tests {
                 key: b"k".to_vec(),
                 rls_filters: Vec::new(),
                 surrogate_ceiling: None,
+                system_time: nodedb_types::SystemTimeScope::Current,
             })],
         );
         let redo = decode_redo(&resp);
@@ -2838,6 +2883,7 @@ mod tests {
             provenance: None,
             wal_lsn: None,
             system_from: None,
+            restored_versions: Vec::new(),
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             returning: None,
             rls_filters: Vec::new(),
@@ -2868,6 +2914,7 @@ mod tests {
                 schema_bytes,
                 provenance: None,
                 system_from: None,
+                restored_versions: &[],
                 rls_write_check: &nodedb_types::RlsWriteCheck::NoPolicyApplies,
                 returning: None,
                 rls_filters: &[],
@@ -3014,12 +3061,14 @@ mod tests {
             )],
             system_from: None,
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         let delete = PhysicalPlan::Columnar(ColumnarOp::Delete {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "moves"),
             filters: pk_filter("b"),
             system_from: None,
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         for plan in [&update, &delete] {
             let staged = src.execute_stage_write(&make_stage_task(txn), TID, plan);
@@ -3259,9 +3308,21 @@ mod tests {
         )
         .expect("decode resolved batch");
         assert_eq!(batch.measurement, "cpu,load");
+        let host = batch
+            .columns
+            .iter()
+            .position(|(name, _)| name == "host name")
+            .expect("host name column");
         assert_eq!(
-            batch.rows.first().map(|row| row.tags.clone()),
-            Some(vec![("host name".to_string(), "west,1".to_string())])
+            batch
+                .rows
+                .first()
+                .and_then(|row| row.values.get(host).cloned()),
+            Some(
+                crate::engine::timeseries::columnar_memtable::ColumnValue::Symbol(
+                    "west,1".to_string()
+                )
+            )
         );
 
         let record = wrap_redo(&redo);
@@ -3385,7 +3446,7 @@ mod tests {
             cells_msgpack: cells_bytes,
             wal_lsn: 0,
             provenance: None,
-            vshard_id: 0,
+            vshard_id: 3,
         });
         let resp = src.execute_resolve_txn(&task, TID, txn, &[plan]);
         let redo = decode_redo(&resp);
@@ -3396,6 +3457,7 @@ mod tests {
         // uses, back to the faithful cell payload.
         let decoded = decode_put_with_version(&redo.ops[0].payload).expect("decode array put");
         assert_eq!(decoded.array_id, aid);
+        assert_eq!(decoded.vshard_id, 3, "the sub-record carries the placement");
         assert_eq!(decoded.cells, cells);
 
         // Replay into a fresh engine that has the array registered + open.
@@ -3430,6 +3492,12 @@ mod tests {
             !tiles.is_empty(),
             "the replayed + flushed array cell must yield a scannable tile"
         );
+        let store = dst.array_engine.store(&aid).expect("store");
+        assert!(
+            store.newest_stored_tile_stamp_placed(3).is_some(),
+            "the replayed tile keeps the placement its sub-record carries"
+        );
+        assert_eq!(store.newest_stored_tile_stamp_placed(0), None);
     }
 
     /// A mixed transaction — a KV write, a vector insert, and a columnar insert
@@ -3830,6 +3898,7 @@ mod tests {
             projection: Vec::new(),
             rls_filters: Vec::new(),
             prefilter: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         let resp = core.execute_resolve_txn(&task, TID, txn, &[plan]);
         let redo = decode_redo(&resp);
@@ -3995,6 +4064,7 @@ mod tests {
                     nodedb_types::Value::Integer(10),
                 ],
                 Surrogate::new(5),
+                1,
             )
             .expect("seed base row");
         core.columnar_engines.insert(coll_key("m"), engine);
@@ -4019,6 +4089,7 @@ mod tests {
             provenance: None,
             wal_lsn: None,
             system_from: None,
+            restored_versions: Vec::new(),
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
             returning: None,
             rls_filters: Vec::new(),
@@ -4319,6 +4390,7 @@ mod tests {
             .expect("encode filter"),
             system_from: None,
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         for plan in [&insert, &delete] {
             let staged = core.execute_stage_write(&make_stage_task(txn), TID, plan);
@@ -4377,7 +4449,7 @@ mod tests {
         let opened = core.handle_array_open(&task, &aid, &schema_bytes, 0xABCD, 8);
         assert_eq!(opened.status, Status::Ok, "array open: {opened:?}");
         core.array_engine
-            .put_cells(&aid, vec![cell(4)], 1)
+            .put_cells(&aid, 0, vec![cell(4)], 1)
             .expect("commit the cell at 4");
 
         let txn = TxnId::new(65);

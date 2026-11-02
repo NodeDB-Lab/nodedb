@@ -23,6 +23,7 @@ use crate::control::state::SharedState;
 
 use super::super::databases::{DatabaseMap, resolve_databases};
 use super::super::sections::apply_metadata_sections;
+use super::super::target::RestoreMark;
 use super::super::validate::{ValidatedEnvelope, validate_envelope};
 use super::rebind;
 use super::stats::{CollectionRows, RestoreStats};
@@ -46,6 +47,14 @@ pub async fn restore_tenant(
     // A retry of the same envelope carries the same id, so the guard below
     // skips the writes an earlier, failed attempt of it re-issued.
     let restore_id = restore_id_of(envelope_bytes);
+    // The cut the RESTORE takes effect at, closed before the guard reads the
+    // newest write: every write at or below it applied, so the guard sees
+    // each one. A dry run writes nothing and takes no cut.
+    let restore_cut = if dry_run {
+        i64::MAX
+    } else {
+        super::super::cut::take_restore_cut(state).await?
+    };
     if !dry_run {
         refuse_stale_envelope(state, tenant_id, &env, restore_id, force).await?;
     }
@@ -68,8 +77,17 @@ pub async fn restore_tenant(
 
     // Map every backed-up database to its destination, creating each one the
     // destination lacks. Every other section names its database by source id.
-    let databases =
-        resolve_databases(state, tenant_id, &database_blobs, dry_run, restore_id).await?;
+    let databases = resolve_databases(
+        state,
+        tenant_id,
+        &database_blobs,
+        dry_run,
+        RestoreMark {
+            id: restore_id,
+            cut: restore_cut,
+        },
+    )
+    .await?;
     stats.databases = database_blobs.len();
     stats.databases_created = databases.created();
 
@@ -242,7 +260,11 @@ async fn verify_restored(
         state,
         tenant_id,
         expectation,
-        |source| databases.target(source).map(|target| target.dest),
+        |source| {
+            databases
+                .target(source)
+                .map(|target| (target.dest, target.restore_cut))
+        },
         VerificationPhase::Destination,
     )
     .await?;

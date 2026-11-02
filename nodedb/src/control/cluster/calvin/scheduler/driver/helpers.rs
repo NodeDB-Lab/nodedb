@@ -152,6 +152,43 @@ impl Access {
     }
 }
 
+/// The key that names every row of one vShard's lock table: a collection
+/// key with no collection name, which no real collection takes.
+///
+/// A read with no collection (one home of a cross-shard graph read) reads
+/// every row of its home vShard, and its commit validates it against the
+/// vShard's newest version. It holds this key `Shared` on its home. A
+/// session commit's redo holds it `Intent` on its vShard
+/// (`write_admission::admission_keys`). So the redo waits until every
+/// pending transaction that read its vShard whole installed, and a
+/// transaction that reads the vShard whole waits until every admitted redo
+/// there reached its core. Neither installs between the other's validation
+/// and its install.
+pub(crate) fn vshard_key() -> LockKey {
+    LockKey::Collection {
+        collection: Arc::from(""),
+    }
+}
+
+/// Whether a read of no collection, `ks`, reads the vShard of `site`: its
+/// home, or any vShard when the set names no home.
+fn reads_vshard_at(ks: &EngineKeySet, site: LockSite) -> bool {
+    let LockSite::On(vshard) = site else {
+        return true;
+    };
+    match ks {
+        EngineKeySet::Edge { home_vshards, .. } => {
+            home_vshards.is_empty() || home_vshards.as_slice().contains(&vshard)
+        }
+        EngineKeySet::Document { .. }
+        | EngineKeySet::Vector { .. }
+        | EngineKeySet::Kv { .. }
+        | EngineKeySet::Unique { .. }
+        | EngineKeySet::Array { .. }
+        | EngineKeySet::Collection { .. } => true,
+    }
+}
+
 /// Add the keys of `ks` to `keys` for `access` at `site`.
 fn add_key_set(
     keys: &mut BTreeMap<LockKey, LockMode>,
@@ -159,6 +196,17 @@ fn add_key_set(
     access: Access,
     site: LockSite,
 ) {
+    // A read of no collection reads its whole home vShard (see
+    // `vshard_key`). Every other participant only announces it.
+    if access == Access::Read && ks.collection().is_empty() {
+        let mode = if reads_vshard_at(ks, site) {
+            LockMode::Shared
+        } else {
+            LockMode::IntentShared
+        };
+        request(keys, vshard_key(), mode);
+        return;
+    }
     let row_mode = access.row_mode();
     let coll: Arc<str> = Arc::from(ks.collection());
     let whole = LockKey::Collection {

@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! The system-time ordinal each staged columnar row of a resolve takes in a
-//! bitemporal collection.
+//! The system-time ordinal each staged columnar row of a resolve takes.
+//!
+//! A row of a collection that is not bitemporal takes the transaction's
+//! ordinal, which the install raises per key. A bitemporal collection
+//! stamps by the rule below.
 //!
 //! A transaction's columnar versions start from the transaction's ordinal,
 //! the one its document and edge versions take (`doc_ordinal`): the Calvin
@@ -27,8 +30,8 @@ use crate::types::{DatabaseId, TenantId};
 
 impl CoreLoop {
     /// The stamp of every row `overlay` staged in the columnar collection
-    /// `coll_key`, by surrogate. `None` when the collection is not bitemporal
-    /// or has no engine on this core.
+    /// `coll_key`, by surrogate. `None` when the collection has no engine on
+    /// this core.
     ///
     /// `Err` when a base key or a staged row does not decode, or a stored
     /// version does not read.
@@ -42,8 +45,16 @@ impl CoreLoop {
             return Ok(None);
         };
         let schema = engine.schema();
+        // A row of a collection that is not bitemporal versions at the
+        // transaction's ordinal. The install raises it per key, by stored
+        // state alone, so every replica and replay stamps alike.
         if !schema.is_bitemporal() {
-            return Ok(None);
+            return Ok(Some(
+                overlay
+                    .iter_for_collection(coll_key)
+                    .map(|(surrogate, _)| (surrogate, txn_ordinal))
+                    .collect(),
+            ));
         }
         let collection = coll_key.2.as_str();
         let truncated = overlay.is_truncated(coll_key);
@@ -133,9 +144,9 @@ mod tests {
         let coll_key = (DatabaseId::DEFAULT, TenantId::new(1), "bt".to_string());
         let txn = 1_000;
         let mut engine = nodedb_columnar::MutationEngine::new("bt".to_string(), schema());
-        engine.insert(&version(100, 1, 10)).expect("insert");
-        engine.insert(&version(200, 2, 20)).expect("insert");
-        engine.insert(&version(txn + 50, 3, 30)).expect("insert");
+        engine.insert(&version(100, 1, 10), 0).expect("insert");
+        engine.insert(&version(200, 2, 20), 0).expect("insert");
+        engine.insert(&version(txn + 50, 3, 30), 0).expect("insert");
         core.columnar_engines.insert(coll_key.clone(), engine);
 
         let mut overlay = TxnOverlay::new();
@@ -180,8 +191,8 @@ mod tests {
         let coll_key = (DatabaseId::DEFAULT, TenantId::new(1), "bt".to_string());
         let txn = 1_000;
         let mut engine = nodedb_columnar::MutationEngine::new("bt".to_string(), schema());
-        engine.insert(&version(100, 1, 10)).expect("insert");
-        engine.insert(&version(txn + 50, 2, 20)).expect("insert");
+        engine.insert(&version(100, 1, 10), 0).expect("insert");
+        engine.insert(&version(txn + 50, 2, 20), 0).expect("insert");
         core.columnar_engines.insert(coll_key.clone(), engine);
 
         let mut overlay = TxnOverlay::new();

@@ -3,7 +3,8 @@
 //! Vector engine operations dispatched to the Data Plane.
 
 use nodedb_types::{
-    QualifiedCollection, Surrogate, SurrogateBitmap, vector_distance::DistanceMetric,
+    QualifiedCollection, Surrogate, SurrogateBitmap, SystemTimeScope,
+    vector_distance::DistanceMetric,
 };
 
 use crate::physical_plan::PhysicalPlan;
@@ -65,6 +66,10 @@ pub enum VectorOp {
         /// registered payload index of the matching kind. Empty means no
         /// payload pre-filter.
         payload_filters: Vec<nodedb_types::PayloadAtom>,
+        /// The system time the search reads at. `Current` admits live nodes.
+        /// A cut admits the node of each row visible at the cut.
+        /// `TxnSnapshot` merges the transaction's staged writes on top.
+        system_time: SystemTimeScope,
     },
 
     /// Insert a vector into the HNSW index (write path).
@@ -109,6 +114,8 @@ pub enum VectorOp {
         filter_bitmap: Option<SurrogateBitmap>,
         /// RLS post-candidate filters.
         rls_filters: Vec<u8>,
+        /// The system time every field's search reads at.
+        system_time: SystemTimeScope,
     },
 
     /// Soft-delete a vector by internal node ID.
@@ -233,6 +240,8 @@ pub enum VectorOp {
         /// candidate window and attaches each body. The Control Plane keeps
         /// the `top_k` highest-scoring hits that pass.
         filters: Vec<u8>,
+        /// The system time the search reads at.
+        system_time: SystemTimeScope,
     },
 
     /// Delete a document from the sparse inverted index.
@@ -290,6 +299,8 @@ pub enum VectorOp {
         ef_search: usize,
         /// Aggregation mode: "max_sim", "avg_sim", "sum_sim".
         mode: String,
+        /// The system time the search reads at.
+        system_time: SystemTimeScope,
     },
 
     /// Direct vector upsert for vector-primary collections: an existing

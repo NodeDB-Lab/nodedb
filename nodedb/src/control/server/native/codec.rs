@@ -3,7 +3,7 @@
 //! Native protocol framing and serialization.
 //!
 //! Handles reading/writing length-prefixed frames and auto-detecting
-//! whether the client is sending JSON (legacy) or MessagePack (binary).
+//! whether the client is sending JSON (text) or MessagePack (binary).
 
 use nodedb_types::protocol::{FRAME_HEADER_LEN, MAX_FRAME_SIZE, NativeRequest, NativeResponse};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -11,7 +11,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 /// Wire format detected from the first byte of the first payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameFormat {
-    /// Legacy JSON format (first byte is `{` = 0x7B).
+    /// JSON text format (first byte is `{` = 0x7B).
     Json,
     /// MessagePack binary format.
     MessagePack,

@@ -26,10 +26,6 @@ pub(super) const REDACTION_POLICIES: TableDefinition<&str, &[u8]> =
 /// Catalog-shape redaction policy. `rules_json` is the sonic_rs-encoded
 /// version of the runtime `Vec<RedactionRule>` so zerompk can derive the
 /// encoder for the rest of the record.
-///
-/// Map-encoded (`#[msgpack(map)]`) so `display_collection` could be added
-/// with `#[msgpack(default)]`: records written before that field decode
-/// with `display_collection = ""` instead of failing outright.
 #[derive(zerompk::ToMessagePack, zerompk::FromMessagePack, Debug, Clone)]
 #[msgpack(map)]
 pub struct StoredRedactionPolicy {
@@ -37,10 +33,8 @@ pub struct StoredRedactionPolicy {
     /// `db_qualified` collection — the storage/lookup key. Never shown to a
     /// user; see `display_collection`.
     pub collection: String,
-    /// The collection name as the user wrote it, unqualified. Display-only:
-    /// falls back to `collection` when empty (records written before this
-    /// field existed).
-    #[msgpack(default)]
+    /// The collection name as the user wrote it, unqualified. Display-only.
+    /// Never empty.
     pub display_collection: String,
     pub for_role: String,
     pub name: String,
@@ -65,18 +59,22 @@ impl StoredRedactionPolicy {
     pub fn to_runtime(&self) -> crate::Result<RedactionPolicy> {
         let rules: Vec<RedactionRule> = sonic_rs::from_str(&self.rules_json)
             .map_err(|e| catalog_err("deser redaction rules", e))?;
-        // Records written before `display_collection` existed decode it
-        // empty; fall back to `collection`, which was unqualified then.
-        let display_collection = if self.display_collection.is_empty() {
-            self.collection.clone()
-        } else {
-            self.display_collection.clone()
-        };
+        // Every writer stores the display name, so an empty one marks a
+        // malformed row.
+        if self.display_collection.is_empty() {
+            return Err(catalog_err(
+                "deser redaction",
+                format!(
+                    "policy '{}' on '{}' has an empty display_collection",
+                    self.name, self.collection
+                ),
+            ));
+        }
         Ok(RedactionPolicy {
             name: self.name.clone(),
             tenant_id: self.tenant_id,
             collection: self.collection.clone(),
-            display_collection,
+            display_collection: self.display_collection.clone(),
             for_role: self.for_role.clone(),
             rules,
         })
@@ -255,6 +253,15 @@ mod tests {
                 },
             ],
         }
+    }
+
+    /// A row without a display name is malformed and does not rehydrate.
+    #[test]
+    fn a_row_without_display_name_is_refused() {
+        let mut stored =
+            StoredRedactionPolicy::from_runtime(&sample_policy(1, "users", "support")).unwrap();
+        stored.display_collection.clear();
+        assert!(stored.to_runtime().is_err());
     }
 
     #[test]

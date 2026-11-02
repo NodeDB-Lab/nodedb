@@ -313,6 +313,11 @@ impl TableScope {
         self.column_naming
     }
 
+    /// The relation added first. A join write adds its target first.
+    pub(super) fn first_relation(&self) -> Option<&ResolvedTable> {
+        self.order.first().and_then(|key| self.tables.get(key))
+    }
+
     /// Reject a `USING (column)` key that `right_ref`'s relation or every
     /// other relation lacks. Both sides of the join must carry it.
     pub fn check_using_column(&self, right_ref: Option<&str>, column: &str) -> Result<()> {

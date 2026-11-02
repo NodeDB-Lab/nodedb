@@ -68,6 +68,7 @@ async fn an_admitted_entry_holds_its_keys_until_its_apply_starts() {
             vshard.as_u32(),
             &entry_bytes(vshard, &kv_put(coll, b"K")),
             far_deadline(),
+            0,
         )
         .await
         .expect("admit")
@@ -124,6 +125,7 @@ async fn a_contended_sequenced_entry_routes_to_the_sequencer() {
             vshard.as_u32(),
             &entry_bytes(vshard, &kv_put(coll, b"K")),
             far_deadline(),
+            0,
         )
         .await;
     assert!(matches!(
@@ -165,7 +167,7 @@ async fn a_contended_resolved_entry_waits_for_its_keys() {
     let waiter = {
         let gate = LeaderWriteGate::new(&shared);
         let vshard = vshard.as_u32();
-        tokio::spawn(async move { gate.admit(vshard, &bytes, far_deadline()).await })
+        tokio::spawn(async move { gate.admit(vshard, &bytes, far_deadline(), 0).await })
     };
     tokio::task::yield_now().await;
     assert!(
@@ -225,7 +227,12 @@ async fn a_contended_entry_waits_no_longer_than_its_budget() {
     // budget, so this bound fails a gate that waits for the default.
     let refused = tokio::time::timeout(
         Duration::from_secs(5),
-        gate.admit(vshard.as_u32(), &entry_bytes(vshard, &resolved), deadline),
+        gate.admit(
+            vshard.as_u32(),
+            &entry_bytes(vshard, &resolved),
+            deadline,
+            0,
+        ),
     )
     .await
     .expect("the gate ends at the forwarded budget, not the node default");
@@ -240,8 +247,8 @@ async fn a_contended_entry_waits_no_longer_than_its_budget() {
 }
 
 /// The leader stamps a document write with an ordinal of its clock as it
-/// admits the entry, and a later write with a later one. A KV write lands no
-/// system-time version and proposes as sent.
+/// admits the entry, and a later write with a later one. A KV write lands a
+/// version too, so the leader stamps it above both.
 #[tokio::test]
 async fn the_leader_stamps_a_document_write_from_its_clock() {
     let (shared, _dir) = build_shared();
@@ -266,6 +273,7 @@ async fn the_leader_stamps_a_document_write_from_its_clock() {
                 vshard.as_u32(),
                 &entry_bytes(vshard, &put(document_id)),
                 far_deadline(),
+                0,
             )
             .await
             .expect("admit");
@@ -288,8 +296,44 @@ async fn the_leader_stamps_a_document_write_from_its_clock() {
             vshard.as_u32(),
             &entry_bytes(vshard, &kv_put("leader_gate_stamp_kv", b"K")),
             far_deadline(),
+            0,
         )
         .await
         .expect("admit");
-    assert!(kv.entry.is_none(), "a KV write proposes as sent");
+    let stamped = kv.entry.expect("a KV write is stamped");
+    let entry = nodedb::control::wal_replication::ReplicatedEntry::from_bytes(&stamped)
+        .expect("the stamped bytes decode");
+    let kv_stamp = entry.carried_system_ordinal().expect("an ordinal");
+    assert!(
+        kv_stamp > stamps[1],
+        "the KV write stamps after both document writes: {kv_stamp} vs {stamps:?}"
+    );
+}
+
+/// A new leader whose clock trails a read cut an earlier leader closed
+/// stamps above the cut: the gathered floor folds into its clock first.
+#[tokio::test]
+async fn the_leader_stamps_above_the_gathered_floor() {
+    let (shared, _dir) = build_shared();
+    let gate = LeaderWriteGate::new(&shared);
+    let vshard = VShardId::new(0);
+    // A cut a minute ahead of this node's clock.
+    let floor = shared.wal.ordinal_clock().peek() + 60_000_000_000;
+    let admitted = gate
+        .admit(
+            vshard.as_u32(),
+            &entry_bytes(vshard, &kv_put("leader_gate_floor_kv", b"K")),
+            far_deadline(),
+            floor,
+        )
+        .await
+        .expect("admit");
+    let stamped = admitted.entry.expect("a KV write is stamped");
+    let entry = nodedb::control::wal_replication::ReplicatedEntry::from_bytes(&stamped)
+        .expect("the stamped bytes decode");
+    let stamp = entry.carried_system_ordinal().expect("an ordinal");
+    assert!(
+        stamp > floor,
+        "the stamp {stamp} lies above the floor {floor}"
+    );
 }

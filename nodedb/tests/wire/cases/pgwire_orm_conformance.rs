@@ -189,40 +189,17 @@ async fn unqualified_table_resolves_in_default_schema() {
 // ── 4. Isolation level ─────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn set_transaction_isolation_serializable_returns_documented_error_or_accepts() {
+async fn set_transaction_accepts_every_isolation_level() {
     let srv = TestServer::start().await;
-    let result = srv
-        .exec("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
-        .await;
-    match &result {
-        Ok(_) => {} // Accepted — correct
-        Err(e) => {
-            let state = sqlstate(e).unwrap_or("");
-            // 0A000 = feature_not_supported  OR  25001 = active_sql_transaction
-            assert!(
-                ["0A000", "25001", "25P01"].contains(&state),
-                "isolation-level rejection must use documented SQLSTATE, got {state}: {e}"
-            );
-        }
-    }
-}
-
-#[tokio::test]
-async fn set_transaction_isolation_read_committed_behavior_locked_in() {
-    let srv = TestServer::start().await;
-    // At minimum must not panic; silence is acceptable only if it actually runs READ COMMITTED.
-    let result = srv
-        .exec("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
-        .await;
-    match &result {
-        Ok(_) => {}
-        Err(e) => {
-            let state = sqlstate(e).unwrap_or("");
-            assert!(
-                ["0A000", "25001", "25P01"].contains(&state),
-                "unexpected error for READ COMMITTED: {state}: {e}"
-            );
-        }
+    for level in [
+        "SERIALIZABLE",
+        "REPEATABLE READ",
+        "READ COMMITTED",
+        "READ UNCOMMITTED",
+    ] {
+        srv.exec(&format!("SET TRANSACTION ISOLATION LEVEL {level}"))
+            .await
+            .unwrap_or_else(|e| panic!("{level} must be accepted: {e}"));
     }
 }
 

@@ -146,6 +146,28 @@ impl CoreLoop {
                     ))
                 }
             }
+            UndoEntry::EndedMultiVector {
+                index_key,
+                document,
+                members,
+                ended,
+            } => {
+                let restored = self
+                    .vector_collections
+                    .get_mut(&index_key)
+                    .is_some_and(|index| index.revive_multi_vector(document, members, &ended));
+                if restored {
+                    Ok(())
+                } else {
+                    Err(UndoError::mismatch(
+                        entry_index,
+                        format!(
+                            "vector index {index_key:?} cannot revive multi-vector document \
+                             {document:?}: index missing or a node holds no tombstone"
+                        ),
+                    ))
+                }
+            }
             _ => Err(UndoError::mismatch(
                 entry_index,
                 "apply_undo_vector called with non-vector entry",
@@ -384,7 +406,7 @@ mod tests {
         let memory_bytes = memtable.memory_bytes();
         core.columnar_memtables.insert(key.clone(), memtable);
         let mut cache = LastValueCache::new();
-        cache.update(1, 10, 1.0);
+        cache.update(1, 10, 1.0, 1);
         core.ts_last_value_caches.insert(key.clone(), cache.clone());
         let mut catalog = nodedb_types::timeseries::SeriesCatalog::new();
         catalog.resolve(&nodedb_types::timeseries::SeriesKey::new(
@@ -421,7 +443,7 @@ mod tests {
         core.ts_last_value_caches
             .get_mut(&key)
             .expect("cache")
-            .update(1, 20, 2.0);
+            .update(1, 20, 2.0, 20);
         core.ts_series_catalogs
             .get_mut(&key)
             .expect("catalog")
@@ -602,7 +624,7 @@ mod tests {
                 wal_lsn: Some(Lsn::new(lsn)),
                 resolved_now_ms: None,
                 commit_hlc: None,
-                entry_version: None,
+                system_ordinal: None,
                 admission: Admission::Exempt(ExemptReason::AlreadyOrdered),
             },
             Some(Lsn::new(lsn)),
@@ -685,7 +707,7 @@ mod tests {
         let mut engine = nodedb_columnar::MutationEngine::new("m".to_string(), schema);
         for (id, v) in rows {
             engine
-                .insert(&[Value::Integer(*id), Value::Integer(*v)])
+                .insert(&[Value::Integer(*id), Value::Integer(*v)], 1)
                 .expect("seed insert");
         }
         core.columnar_engines.insert(columnar_key(), engine);
@@ -733,6 +755,7 @@ mod tests {
             updates,
             system_from: None,
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
 
         let task = make_default_task();
@@ -767,6 +790,7 @@ mod tests {
             filters: Vec::new(),
             system_from: None,
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
 
         let task = make_default_task();

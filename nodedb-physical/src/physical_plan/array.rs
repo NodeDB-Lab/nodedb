@@ -151,6 +151,7 @@ pub enum ArrayOp {
         provenance: Option<SyncProvenance>,
         /// The vShard every cell of the op homes to: the vShard its tile
         /// hashes to. A Calvin transaction routes and locks the write by it.
+        /// Every tile version the op stores is placed on it.
         vshard_id: u32,
     },
 
@@ -167,9 +168,9 @@ pub enum ArrayOp {
         /// `None` for locally-originated or Raft-replicated writes.
         #[serde(default)]
         provenance: Option<SyncProvenance>,
-        /// The vShard every coordinate of the op homes to: the vShard its
-        /// tile hashes to. A Calvin transaction routes and locks the write
-        /// by it.
+        /// The vShard every coordinate of the op homes to, as for `Put`.
+        /// A Calvin transaction routes and locks the write by it. Every
+        /// tile version the op stores is placed on it.
         vshard_id: u32,
     },
 
@@ -231,7 +232,7 @@ pub enum ArrayOp {
         /// `Vec<ArrayAggPartial>` instead of the finalized scalar rows.
         /// Used by the distributed shard handler so the coordinator can
         /// merge partials across shards before finalizing.
-        /// Single-node SQL callers always pass `false`.
+        /// A caller that wants the finalized rows passes `false`.
         return_partial: bool,
         /// Optional shard bucket. When set, only cells whose tile key routes
         /// to this bucket contribute, so vShards that share one Data Plane

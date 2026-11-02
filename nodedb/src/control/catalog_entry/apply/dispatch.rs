@@ -311,9 +311,6 @@ fn apply_to_inner(entry: &CatalogEntry, catalog: &SystemCatalog) -> crate::Resul
             name,
             ..
         } => consumer_group::delete(*database_id, *tenant_id, stream_name, name, catalog),
-        CatalogEntry::MigrateConsumerGroupStream { def, legacy_stream } => {
-            consumer_group::migrate_stream(def, legacy_stream, catalog)
-        }
         CatalogEntry::PutCheckpoint(record) => checkpoint::put(record, catalog),
         CatalogEntry::DeleteCheckpoint {
             database_id,

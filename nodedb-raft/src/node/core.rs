@@ -143,6 +143,10 @@ pub struct RaftNode<S: LogStorage> {
     /// The highest `replicated_floor` a leader sent this node, or this
     /// node's own as leader. See [`Self::replicated_floor`].
     pub(super) replicated_floor: u64,
+    /// The leadership term in which this node gathered the group's ordinal
+    /// floor from a quorum of voters, `0` for none (see
+    /// [`super::ordinal_floor`]). Volatile: a new term gathers again.
+    pub(super) floor_gathered_term: u64,
 }
 
 /// A leader's commit index as of its last contact with this node.
@@ -193,6 +197,7 @@ impl<S: LogStorage> RaftNode<S> {
             compaction_ceiling: None,
             replica: ReplicaState::Whole,
             replicated_floor: 0,
+            floor_gathered_term: 0,
             config,
         }
     }

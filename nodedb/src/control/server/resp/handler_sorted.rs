@@ -155,6 +155,7 @@ pub(super) async fn handle_zrank(
     let plan = PhysicalPlan::Kv(KvOp::SortedIndexRank {
         index_name: session.collection.clone(),
         primary_key: member.to_vec(),
+        system_time: nodedb_types::SystemTimeScope::Current,
     });
 
     match dispatch_kv(state, session, plan).await {
@@ -201,6 +202,7 @@ pub(super) async fn handle_zrange(
     let plan = PhysicalPlan::Kv(KvOp::SortedIndexTopK {
         index_name: session.collection.clone(),
         k,
+        system_time: nodedb_types::SystemTimeScope::Current,
     });
 
     match dispatch_kv(state, session, plan).await {
@@ -251,6 +253,7 @@ pub(super) async fn handle_zrange(
 pub(super) async fn handle_zcard(session: &RespSession, state: &SharedState) -> RespValue {
     let plan = PhysicalPlan::Kv(KvOp::SortedIndexCount {
         index_name: session.collection.clone(),
+        system_time: nodedb_types::SystemTimeScope::Current,
     });
 
     match dispatch_kv(state, session, plan).await {
@@ -282,6 +285,7 @@ pub(super) async fn handle_zscore(
     let plan = PhysicalPlan::Kv(KvOp::SortedIndexScore {
         index_name: session.collection.clone(),
         primary_key: member.to_vec(),
+        system_time: nodedb_types::SystemTimeScope::Current,
     });
 
     match dispatch_kv(state, session, plan).await {

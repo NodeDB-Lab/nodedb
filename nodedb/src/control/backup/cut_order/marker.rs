@@ -67,6 +67,8 @@ pub(crate) async fn place_marker(
         hlc: marker.hlc,
         restore_point: marker.restore_point,
         barrier: marker.barrier.map(OrderedCut::to_wire),
+        // A backup's cut orders by its watermark, not by an ordinal floor.
+        floor: 0,
     })
     .map_err(|error| Error::Internal {
         detail: format!("backup: encode the Calvin cut marker: {error}"),

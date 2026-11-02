@@ -52,7 +52,6 @@ pub struct MoveTenantJournalEntry {
     /// WAL LSN at the time this entry was last written.
     pub last_durable_lsn: u64,
     /// Key under which the in-cluster temporary snapshot was stored, if any.
-    #[msgpack(default)]
     pub temp_snapshot_key: Option<String>,
 }
 

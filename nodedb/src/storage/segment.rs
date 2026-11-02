@@ -12,8 +12,8 @@ use crate::types::Lsn;
 /// Magic bytes identifying a NodeDB segment file.
 const SEGMENT_MAGIC: [u8; 4] = *b"SYNS";
 
-/// Current segment format version.
-const FORMAT_VERSION: u16 = 2;
+/// Segment format version. A footer stamped with any other version is refused.
+const FORMAT_VERSION: u16 = 1;
 
 /// Domain-specific magic for storage-segment AEAD envelopes.
 ///
@@ -30,7 +30,7 @@ const FOOTER_SIZE: usize = 58;
 /// Footer is written at the end of the file; readers seek to `file_len - FOOTER_SIZE`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SegmentFooter {
-    /// Format version for forward compatibility.
+    /// Format version. Always `FORMAT_VERSION`, checked on read.
     pub format_version: u16,
     /// Identifier of the process/node that created this segment.
     pub created_by: [u8; 32],
@@ -80,6 +80,13 @@ impl SegmentFooter {
         }
 
         let format_version = u16::from_le_bytes([buf[4], buf[5]]);
+        if format_version != FORMAT_VERSION {
+            return Err(crate::Error::SegmentCorrupted {
+                detail: format!(
+                    "unsupported segment format version {format_version}, expected {FORMAT_VERSION}"
+                ),
+            });
+        }
         let mut created_by = [0u8; 32];
         created_by.copy_from_slice(&buf[6..38]);
         let checksum = u32::from_le_bytes([buf[38], buf[39], buf[40], buf[41]]);
@@ -267,6 +274,18 @@ mod tests {
         let mut bytes = [0u8; FOOTER_SIZE];
         bytes[0..4].copy_from_slice(b"NOPE");
         assert!(SegmentFooter::from_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    fn another_format_version_rejected() {
+        let footer = SegmentFooter::new("node-1", 0, Lsn::new(1), Lsn::new(2));
+        let mut bytes = footer.to_bytes();
+        bytes[4..6].copy_from_slice(&(FORMAT_VERSION + 1).to_le_bytes());
+        let err = SegmentFooter::from_bytes(&bytes).unwrap_err();
+        assert!(
+            matches!(err, crate::Error::SegmentCorrupted { .. }),
+            "expected SegmentCorrupted, got {err:?}"
+        );
     }
 
     #[test]

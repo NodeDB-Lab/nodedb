@@ -14,7 +14,7 @@
 //!   `ArrayCellDelete`) apply path — the cluster SQL DML array path.
 //! - [`schema`]: the committed `ArraySchema` apply path.
 //! - [`common`]: shared scaffolding (position id, funnel submit, request
-//!   builder, response await, array-open bootstrap, vShard derivation) reused
+//!   builder, response await, array-open bootstrap) reused
 //!   across all three.
 
 mod cell;

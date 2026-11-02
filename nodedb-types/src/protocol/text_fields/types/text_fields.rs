@@ -12,7 +12,7 @@ use crate::protocol::batch::{BatchDocument, BatchVector};
 /// Each operation uses a subset; unused fields default to `None`/empty.
 ///
 /// Wire format: MsgPack map with `u16` numeric field IDs. `None` fields
-/// are omitted. Unknown keys are ignored by the decoder (forward-compat).
+/// are omitted. The decoder refuses a key no field owns.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TextFields {
     // ── Auth ─────────────────────────────────────────────────

@@ -18,9 +18,7 @@
 
 use std::collections::HashSet;
 
-use nodedb_types::timeseries::PartitionState;
-
-use super::partition_read::{partition_corrupt, read_ts_partition};
+use super::partition_read::{TsPartitionColumns, partition_corrupt, read_ts_partition};
 use super::paths::ts_collection_dir;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::engine::timeseries::columnar_memtable::ColumnData;
@@ -55,7 +53,60 @@ pub(in crate::data::executor) struct FoldPass {
     pub complete: bool,
 }
 
+/// The rows of one root partition, read whole for a fold.
+pub(in crate::data::executor) struct CaggSourceRows {
+    part: TsPartitionColumns,
+    columns: Vec<ColumnData>,
+}
+
+impl CaggSourceRows {
+    /// The rows as a fold reads them.
+    pub(in crate::data::executor) fn source(&self) -> RefreshSource<'_> {
+        RefreshSource {
+            schema: &self.part.schema,
+            columns: &self.columns,
+            symbol_dicts: &self.part.sym_dicts,
+            row_count: self
+                .columns
+                .get(self.part.schema.timestamp_idx)
+                .map_or(0, ColumnData::len),
+        }
+    }
+}
+
 impl CoreLoop {
+    /// Read partition `dir` of `target.root` whole.
+    pub(in crate::data::executor) fn read_cagg_source(
+        &self,
+        target: CaggRoot<'_>,
+        dir: &str,
+    ) -> crate::Result<CaggSourceRows> {
+        let part_dir = ts_collection_dir(
+            &self.data_dir,
+            target.database_id,
+            target.tenant_id,
+            target.root,
+        )
+        .join(dir);
+        let mut part = read_ts_partition(
+            &part_dir,
+            FOLD_SITE,
+            self.segment_keks.ts_segment_kek.as_ref(),
+        )?;
+        let columns: Vec<ColumnData> = std::mem::take(&mut part.columns)
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| {
+                partition_corrupt(
+                    &part_dir,
+                    "column",
+                    FOLD_SITE,
+                    "a schema column did not read",
+                )
+            })?;
+        Ok(CaggSourceRows { part, columns })
+    }
+
     /// Fold the partitions of `root` that an aggregate in `scope` lacks,
     /// reading at most `budget` partitions.
     pub(in crate::data::executor) fn fold_cagg_root(
@@ -88,10 +139,11 @@ impl CoreLoop {
             .ts_registries
             .get(&key)
             .map(|registry| {
+                // A partition a TRUNCATE ended holds no current row, so no
+                // aggregate folds it.
                 registry
-                    .iter()
-                    .filter(|(_, entry)| entry.meta.state != PartitionState::Deleted)
-                    .map(|(_, entry)| entry.dir_name.clone())
+                    .current_partitions()
+                    .map(|entry| entry.dir_name.clone())
                     .filter(|dir| match filter {
                         FoldFilter::Every => true,
                         FoldFilter::Only(names) => names.contains(dir),
@@ -104,36 +156,10 @@ impl CoreLoop {
         let complete = pending.len() <= budget;
         pending.truncate(budget);
 
-        let base = ts_collection_dir(&self.data_dir, database_id, tenant_id, root);
         let mut folded = 0;
         for dir in pending {
-            let part_dir = base.join(&dir);
-            let part = read_ts_partition(
-                &part_dir,
-                FOLD_SITE,
-                self.segment_keks.ts_segment_kek.as_ref(),
-            )?;
-            let columns: Vec<ColumnData> = part
-                .columns
-                .into_iter()
-                .collect::<Option<Vec<_>>>()
-                .ok_or_else(|| {
-                    partition_corrupt(
-                        &part_dir,
-                        "column",
-                        FOLD_SITE,
-                        "a schema column did not read",
-                    )
-                })?;
-            let row_count = columns
-                .get(part.schema.timestamp_idx)
-                .map_or(0, ColumnData::len);
-            let src = RefreshSource {
-                schema: &part.schema,
-                columns: &columns,
-                symbol_dicts: &part.sym_dicts,
-                row_count,
-            };
+            let rows = self.read_cagg_source(target, &dir)?;
+            let src = rows.source();
             self.continuous_agg_mgr.fold_into_chain(
                 FoldTarget {
                     database_id,
@@ -227,12 +253,18 @@ impl CoreLoop {
     /// aggregate rooted at `root`, whatever its refresh policy, and write
     /// the image. A cut aggregate parks the rows no pending cut names.
     /// Retention removes nothing unless this returns `Ok`.
+    ///
+    /// `dropped_through` is the newest time-key value of an expiring
+    /// partition. The image records it before any partition leaves, so a
+    /// read at a transaction snapshot never takes a raw read of that range
+    /// for complete (`raw_dropped_through`).
     pub(in crate::data::executor) fn fold_expiring_partitions(
         &mut self,
         database_id: u64,
         tenant_id: u64,
         root: &str,
         expiring: &HashSet<String>,
+        dropped_through: i64,
         now_ms: i64,
     ) -> crate::Result<()> {
         if self
@@ -258,6 +290,8 @@ impl CoreLoop {
             self.quarantine_cagg_root(database_id, tenant_id, root, e);
         }
         pass?;
+        self.continuous_agg_mgr
+            .note_raw_dropped(database_id, tenant_id, root, dropped_through);
         self.persist_cagg_image(database_id, tenant_id, root)
     }
 
@@ -457,6 +491,42 @@ mod tests {
         core.rollback_undo_log(0, TENANT, undo).expect("rollback");
         core.fold_pending_cagg_partitions(0);
         assert_eq!(totals(&core, "by_host"), (3, SUM_A));
+    }
+
+    /// A truncate leaves the aggregates empty. The partition it ended keeps
+    /// its rows on disk, and no fold reads it again: after the truncate the
+    /// aggregate counts only rows written after it.
+    #[test]
+    fn a_truncate_leaves_the_aggregate_with_the_later_rows_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        register(&mut core, host_def("by_host", RefreshPolicy::OnFlush));
+        core.fold_pending_cagg_partitions(0);
+        assert_eq!(ingest(&mut core, ROWS_A, 1), Status::Ok);
+        flush(&mut core);
+        core.persist_dirty_cagg_images();
+
+        let resp = core.execute_timeseries_truncate(&task_at(3), COLLECTION, None);
+        assert_eq!(resp.status, Status::Ok);
+        let image = crate::engine::timeseries::continuous_agg::decode_image(
+            &std::fs::read(image_path(dir.path())).expect("the truncate rewrites the image"),
+        )
+        .expect("decode");
+        assert!(
+            image.entries.iter().all(|entry| entry.buckets.is_empty()),
+            "the rewritten image holds no bucket"
+        );
+        core.fold_pending_cagg_partitions(0);
+        assert_eq!(
+            totals(&core, "by_host"),
+            (0, 0),
+            "the ended partition is not folded"
+        );
+
+        assert_eq!(ingest(&mut core, ROWS_B, 4), Status::Ok);
+        flush(&mut core);
+        core.fold_pending_cagg_partitions(0);
+        assert_eq!(totals(&core, "by_host"), (2, SUM_AB - SUM_A));
     }
 
     #[test]

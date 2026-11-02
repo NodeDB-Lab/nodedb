@@ -85,7 +85,9 @@ pub async fn run(
             state,
             owner.as_u64(),
             expectation,
-            |_| Ok(target_db_id),
+            // MOVE TENANT drains the source first: no write follows its
+            // re-issue, so every backed-up row is checked.
+            |_| Ok((target_db_id, i64::MAX)),
             VerificationPhase::Move,
         )
         .await

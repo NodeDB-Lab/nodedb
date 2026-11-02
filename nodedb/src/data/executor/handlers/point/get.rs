@@ -23,6 +23,10 @@ pub(in crate::data::executor) struct PointGetParams<'a> {
     /// System-time ordinal cut (`None` = current).
     pub system_as_of: Option<i64>,
     pub valid_at_ms: Option<i64>,
+    /// True for a current read and a transaction snapshot read: the
+    /// reading transaction's staged write of the row answers before the
+    /// stored versions.
+    pub merge_overlay: bool,
 }
 
 impl CoreLoop {
@@ -39,6 +43,7 @@ impl CoreLoop {
             rls_filters,
             system_as_of,
             valid_at_ms,
+            merge_overlay,
         } = p;
         // A key unbound in this database names no row here.
         let Some(surrogate) = surrogate else {
@@ -68,11 +73,42 @@ impl CoreLoop {
         );
 
         let is_temporal_read = system_as_of.is_some() || valid_at_ms.is_some();
+        // A current read and a transaction snapshot read see the
+        // transaction's own staged write of the row first.
+        let staged = if merge_overlay {
+            self.overlay_point_lookup(
+                task,
+                tid,
+                collection,
+                &RowIdentity::from_user_key(document_id),
+                surrogate,
+            )
+        } else {
+            None
+        };
+        // A read at a cut uses the cached current version when it is visible
+        // at the cut: its `sys_from` sits at or below the cut, and no newer
+        // version exists because the cache holds the newest. A valid-time
+        // read walks the row's history, which the cache does not hold.
+        let cached_at_cut = match (&staged, system_as_of, valid_at_ms) {
+            (None, Some(cut), None) => self
+                .doc_cache
+                .get_at(database_id, tid, collection, &storage_key, Some(cut))
+                .map(<[u8]>::to_vec),
+            _ => None,
+        };
 
-        // Fetch data from cache or storage. Temporal reads bypass the
-        // doc cache (cache holds current state) and read the versioned
-        // table directly via Ceiling at the cutoff.
-        let data = if is_temporal_read {
+        // Fetch data from the overlay, the cache, or storage. A temporal read
+        // that the cache cannot answer reads the version visible at the cut
+        // with one seek.
+        let data = if let Some(staged) = staged {
+            match staged {
+                Ok(data) => data,
+                Err(response) => return response,
+            }
+        } else if let Some(data) = cached_at_cut {
+            data
+        } else if is_temporal_read {
             match self.sparse.versioned_get_as_of(
                 database_id,
                 tid,
@@ -87,17 +123,6 @@ impl CoreLoop {
                     return self.response_error(task, ErrorCode::from(e));
                 }
             }
-        } else if let Some(overlay_data) = self.overlay_point_lookup(
-            task,
-            tid,
-            collection,
-            &RowIdentity::from_user_key(document_id),
-            surrogate,
-        ) {
-            match overlay_data {
-                Ok(data) => data,
-                Err(response) => return response,
-            }
         } else {
             let cached = self
                 .doc_cache
@@ -106,10 +131,21 @@ impl CoreLoop {
             if let Some(data) = cached {
                 data
             } else {
-                match self.current_row_body(database_id, tid, collection, &storage_key) {
-                    Ok(Some(data)) => {
-                        self.doc_cache
-                            .put(database_id, tid, collection, &storage_key, &data);
+                match self.sparse.versioned_get_current_with_sys_from(
+                    database_id,
+                    tid,
+                    collection,
+                    &storage_key,
+                ) {
+                    Ok(Some((sys_from, data))) => {
+                        self.doc_cache.put(
+                            database_id,
+                            tid,
+                            collection,
+                            &storage_key,
+                            sys_from,
+                            &data,
+                        );
                         data
                     }
                     Ok(None) => return self.response_with_payload(task, Vec::new()),
@@ -176,7 +212,13 @@ impl CoreLoop {
                 collection.to_string(),
             );
             let with_vector = self
-                .current_primary_vector(task.request.txn_id, &coll_key, &field, surrogate)
+                .current_primary_vector(
+                    task.request.txn_id.filter(|_| merge_overlay),
+                    &coll_key,
+                    &field,
+                    surrogate,
+                    system_as_of,
+                )
                 .and_then(|vector| {
                     super::super::vector_row_column::with_vector_column(&body, &field, &vector)
                 });

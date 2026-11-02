@@ -47,6 +47,8 @@ impl<A: CommitApplier, P: PlanExecutor> RaftRpcHandler for RaftLoop<A, P> {
             RaftRpc::LeaderStatusRequest(req) => Ok(RaftRpc::LeaderStatusResponse(
                 self.leader_status(req.group_id),
             )),
+            // A group leader's ordinal floor exchange.
+            RaftRpc::OrdinalFloorRequest(req) => self.handle_ordinal_floor_rpc(req).await,
             // Authorization lease renewal and barrier, answered by the host hook.
             RaftRpc::AuthLeaseRenewRequest(req) => self.handle_auth_lease_renew_rpc(req).await,
             RaftRpc::AuthBarrierRequest(req) => self.handle_auth_barrier_rpc(req).await,

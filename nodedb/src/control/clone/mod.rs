@@ -6,6 +6,7 @@
 //! the CoW resolution algorithm so storage engines never see `cloned_from`.
 
 pub mod catalog_copy;
+pub mod copy;
 pub mod copyup;
 pub(crate) mod cow_entry;
 pub(crate) mod identity;
@@ -15,7 +16,6 @@ pub mod resolver;
 pub mod tombstone;
 
 pub use catalog_copy::copy_database_metadata;
-pub use copyup::{KvCopyUpParams, perform_clone_copyup, perform_kv_clone_copyup};
 pub use lsn_resolve::wall_ms_to_lsn;
 pub use metadata::ClonePredicatesNote;
 pub use resolver::{CloneReadParams, resolve_read};

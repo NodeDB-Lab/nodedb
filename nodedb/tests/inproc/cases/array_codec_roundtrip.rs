@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-// Integration tests for the structural sparse-tile codec introduced in segment
-// format version 4. Tests cover: large roundtrip, legacy payload compatibility,
-// compression ratio, and mixed sparse+dense segment decoding.
+// Integration tests for the structural sparse-tile codec. Tests cover: large
+// roundtrip, untagged payload refusal, compression ratio, and mixed
+// sparse+dense segment decoding.
 
 use nodedb_array::codec::tile_encode::encode_sparse_tile;
 use nodedb_array::schema::ArraySchemaBuilder;
 use nodedb_array::schema::attr_spec::{AttrSpec, AttrType};
 use nodedb_array::schema::dim_spec::{DimSpec, DimType};
 use nodedb_array::tile::dense_tile::DenseTile;
-use nodedb_array::tile::sparse_tile::{RowKind, SparseRow, SparseTile, SparseTileBuilder};
+use nodedb_array::tile::sparse_tile::{RowKind, SparseRow, SparseTileBuilder};
 use nodedb_array::types::TileId;
 use nodedb_array::types::cell_value::value::CellValue;
 use nodedb_array::types::coord::value::CoordValue;
@@ -71,7 +71,7 @@ fn ten_k_tile_roundtrip_exact_equality() {
 
     let mut seg_writer = SegmentWriter::new(0xDEAD_BEEF);
     seg_writer
-        .append_sparse(TileId::snapshot(1), &tile)
+        .append_sparse(TileId::snapshot(1), 0, &tile)
         .unwrap();
     let bytes = seg_writer.finish(None).unwrap();
 
@@ -95,21 +95,12 @@ fn ten_k_tile_roundtrip_exact_equality() {
     }
 }
 
-/// Test 2: Legacy tile payload (raw zerompk msgpack) is still decodable by the
-/// tag-dispatch layer, even after the segment format was bumped to v4.
+/// Test 2: An untagged tile payload (raw zerompk msgpack) is refused.
 ///
-/// The reader's logic is `match peek_tag { Some(_) => decode_sparse_tile,
-/// None => zerompk::from_msgpack }`. This test proves:
-///   1. `peek_tag` on a real zerompk-of-`SparseTile` payload returns `None`
-///      (so the reader will take the legacy fallback branch, regardless of
-///      whether zerompk emits a map-header or array-header byte).
-///   2. `zerompk::from_msgpack` — the body of that None branch — decodes the
-///      payload back into the original `SparseTile`.
-///
-/// Together these are equivalent to invoking the reader's full dispatch path
-/// with a v3-style payload.
+/// `peek_tag` returns `None` for it, and `decode_sparse_tile` refuses it as
+/// segment corruption.
 #[test]
-fn legacy_v3_tile_payload_readable() {
+fn untagged_tile_payload_refused() {
     let s = simple_schema();
     let mut b = SparseTileBuilder::new(&s);
     for i in 0..5 {
@@ -125,22 +116,18 @@ fn legacy_v3_tile_payload_readable() {
     }
     let tile = b.build();
 
-    // Simulate the v3 writer: raw zerompk with no tag byte.
+    // Raw zerompk with no tag byte.
     let raw_msgpack = zerompk::to_msgpack_vec(&tile).unwrap();
 
-    // The codec's tag dispatch should fall back to zerompk for this payload
-    // (peek_tag returns None for any non-tag byte; reader then tries zerompk).
-    let decoded = nodedb_array::codec::tag::peek_tag(&raw_msgpack);
     assert_eq!(
-        decoded, None,
-        "legacy payload should yield None from peek_tag"
+        nodedb_array::codec::tag::peek_tag(&raw_msgpack),
+        None,
+        "an untagged payload must yield None from peek_tag"
     );
-
-    // Directly decode via zerompk to confirm the legacy path produces the
-    // same tile the new path would.
-    let recovered: SparseTile = zerompk::from_msgpack(&raw_msgpack).unwrap();
-    assert_eq!(recovered.surrogates, tile.surrogates);
-    assert_eq!(recovered.attr_cols, tile.attr_cols);
+    assert!(
+        nodedb_array::codec::decode_sparse_tile(&raw_msgpack).is_err(),
+        "an untagged payload must not decode"
+    );
 }
 
 /// Test 3: Compression ratio — structural codec ≤ 30% of raw msgpack for a
@@ -203,8 +190,8 @@ fn mixed_sparse_dense_segment_decodes() {
     let dense = DenseTile::empty(&s);
 
     let mut w = SegmentWriter::new(0xCAFE_BABE);
-    w.append_sparse(TileId::new(1, 100), &sparse).unwrap();
-    w.append_dense(TileId::new(2, 100), &dense).unwrap();
+    w.append_sparse(TileId::new(1, 100), 0, &sparse).unwrap();
+    w.append_dense(TileId::new(2, 100), 0, &dense).unwrap();
     let bytes = w.finish(None).unwrap();
 
     let r = SegmentReader::open(&bytes).unwrap();

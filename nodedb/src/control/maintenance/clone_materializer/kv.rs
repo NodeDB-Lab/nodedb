@@ -3,10 +3,11 @@
 //! KV engine source-to-target row copy.
 //!
 //! Drives the source `KvOp::MaterializeScan` cursor to completion on the
-//! source shard's owner, and for each non-tombstoned key not yet present in
-//! target dispatches a replicated `KvOp::Put` against target with a fresh
-//! surrogate. Calls the reaper at the end to flip
-//! status to `Materialized` and clear `cloned_from`.
+//! source shard's owner, and copies each non-tombstoned key not yet present
+//! in target into the target with a bound surrogate. Each copy installs at
+//! its source version's own ordinal and expiry, so a snapshot that read the
+//! key through the source reads the same row from the clone. Calls the reaper
+//! at the end to flip status to `Materialized` and clear `cloned_from`.
 //!
 //! ## Idempotency / restart-safety
 //!
@@ -16,11 +17,13 @@
 //! is the atomic Raft proposal at the end of the per-collection pass. The
 //! walker re-runs this function on the next sweep until the reaper succeeds.
 
-use nodedb_types::{DatabaseId, TenantId};
+use nodedb_types::{DatabaseId, SystemTimeScope, TenantId};
 
+use crate::control::clone::copy::{CopyTarget, KvCopy, commit_kv_copies};
 use crate::control::planner::sql_plan_convert::convert::db_qualified;
 use crate::control::security::catalog::{StoredCollection, SystemCatalog};
 use crate::control::state::SharedState;
+use crate::types::KvVersionStamp;
 use nodedb_physical::physical_plan::{KvOp, PhysicalPlan};
 
 use super::dispatch::dispatch_to_owner;
@@ -31,6 +34,13 @@ use super::status::{check_bound_surrogates, checkpoint_progress, mark_materializ
 /// per response. 4096 is a balance for typical clone sizes; very large
 /// collections still complete because the cursor loop drains the source.
 const SCAN_PAGE: usize = 4_096;
+
+/// One source key a scan returned, with its value and version stamps.
+pub(crate) struct SourceKey {
+    pub key: Vec<u8>,
+    pub value: Vec<u8>,
+    pub stamp: KvVersionStamp,
+}
 
 /// Materialize one KV clone collection.
 pub(super) async fn materialize_kv_collection(
@@ -57,29 +67,36 @@ pub(super) async fn materialize_kv_collection(
     loop {
         let (entries, next_cursor) = scan_source_page(
             state,
-            tenant_id,
-            origin.source_database,
-            &source_qualified,
-            &cursor,
+            SourceScan {
+                tenant_id,
+                source_db_id: origin.source_database,
+                source_qualified: &source_qualified,
+                cursor: &cursor,
+                only_key: None,
+            },
         )
         .await?;
 
-        let mut pending: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(entries.len());
-        for (key, value) in entries {
+        let mut pending: Vec<SourceKey> = Vec::with_capacity(entries.len());
+        for entry in entries {
             total_seen += 1;
-            let key_str = String::from_utf8_lossy(&key).into_owned();
-            if tombstoned.contains(&key_str) {
+            let key_str = String::from_utf8_lossy(&entry.key).into_owned();
+            // The catalog is read per key, so a tombstone recorded while the
+            // copy runs counts.
+            if tombstoned.contains(&key_str)
+                || catalog.is_kv_clone_tombstoned(&target_qualified, &key_str)?
+            {
                 continue;
             }
             // Skip keys already in target (idempotent resume + already-copied-up rows).
-            if probe_target_key(state, tenant_id, db_id, &target_qualified, &key).await? {
+            if probe_target_key(state, tenant_id, db_id, &target_qualified, &entry.key).await? {
                 continue;
             }
-            pending.push((key, value));
+            pending.push(entry);
         }
 
         // The page's surrogates in one batch at the target collection's home.
-        let keys: Vec<&[u8]> = pending.iter().map(|(key, _)| key.as_slice()).collect();
+        let keys: Vec<&[u8]> = pending.iter().map(|entry| entry.key.as_slice()).collect();
         let surrogates = crate::control::server::surrogate_exchange::assign_surrogates_routed(
             state,
             nodedb_types::CollectionKey::from_bare(db_id, &coll.name),
@@ -89,20 +106,27 @@ pub(super) async fn materialize_kv_collection(
         )
         .await?;
         check_bound_surrogates(&target_qualified, surrogates.len(), pending.len())?;
-        for ((key, value), surrogate) in pending.into_iter().zip(surrogates) {
-            let plan = PhysicalPlan::Kv(KvOp::Put {
-                collection: nodedb_types::QualifiedCollection::new(db_id, &coll.name),
-                key: key.clone(),
-                value,
-                ttl_ms: 0,
-                surrogate,
-                returning: None,
-                rls_filters: Vec::new(),
-                provenance: None,
-            });
-            dispatch_to_owner(state, tenant_id, db_id, &target_qualified, plan).await?;
-            copied += 1;
-        }
+        let copies: Vec<KvCopy> = pending
+            .into_iter()
+            .zip(surrogates)
+            .map(|(entry, target_surrogate)| KvCopy {
+                key: entry.key,
+                target_surrogate,
+                value: entry.value,
+                stamp: entry.stamp,
+            })
+            .collect();
+        copied += copies.len() as u64;
+        commit_kv_copies(
+            state,
+            CopyTarget {
+                tenant_id,
+                database_id: db_id,
+                collection: &coll.name,
+            },
+            copies,
+        )
+        .await?;
 
         // Persist a chunk-level progress checkpoint so a crash after this
         // batch resumes without re-walking already-copied keys (the per-key
@@ -136,30 +160,68 @@ pub(super) async fn materialize_kv_collection(
     Ok(())
 }
 
-/// Run one source-side `MaterializeScan` round-trip. Returns the entries in
-/// this page (raw `(key, value)` byte pairs) plus the next-cursor; the
-/// cursor is empty when the scan is complete.
-async fn scan_source_page(
+/// Read the one source key `key`, as the live version, with its stamps.
+/// `None` when the source holds no live row for it. The read runs on the
+/// source shard's owner.
+pub(crate) async fn read_source_key(
     state: &SharedState,
     tenant_id: TenantId,
     source_db_id: DatabaseId,
     source_qualified: &str,
-    cursor: &[u8],
-) -> crate::Result<ScanPage> {
+    key: &[u8],
+) -> crate::Result<Option<SourceKey>> {
+    let (entries, _) = scan_source_page(
+        state,
+        SourceScan {
+            tenant_id,
+            source_db_id,
+            source_qualified,
+            cursor: &[],
+            only_key: Some(key),
+        },
+    )
+    .await?;
+    Ok(entries.into_iter().find(|entry| entry.key == key))
+}
+
+/// One source-side scan request.
+struct SourceScan<'a> {
+    tenant_id: TenantId,
+    source_db_id: DatabaseId,
+    source_qualified: &'a str,
+    cursor: &'a [u8],
+    /// The one key to read in place of a page.
+    only_key: Option<&'a [u8]>,
+}
+
+/// Run one source-side `MaterializeScan` round-trip. Returns the entries in
+/// this page plus the next-cursor; the cursor is empty when the scan is
+/// complete.
+async fn scan_source_page(state: &SharedState, scan: SourceScan<'_>) -> crate::Result<ScanPage> {
+    let SourceScan {
+        tenant_id,
+        source_db_id,
+        source_qualified,
+        cursor,
+        only_key,
+    } = scan;
     let plan = PhysicalPlan::Kv(KvOp::MaterializeScan {
         collection: nodedb_types::QualifiedCollection::from_stored(source_qualified.to_string()),
         cursor: cursor.to_vec(),
         count: SCAN_PAGE,
+        // The clone copies the source's live rows.
+        system_time: SystemTimeScope::Current,
+        only_key: only_key.map(<[u8]>::to_vec),
     });
     let payload = dispatch_to_owner(state, tenant_id, source_db_id, source_qualified, plan).await?;
     parse_materialize_scan_payload(&payload)
 }
 
-/// `(key, value)` pairs returned by one materialize-scan page.
-type ScanPage = (Vec<(Vec<u8>, Vec<u8>)>, Vec<u8>);
+/// The entries of one materialize-scan page and the next cursor.
+type ScanPage = (Vec<SourceKey>, Vec<u8>);
 
 /// Parse the msgpack payload emitted by `execute_kv_materialize_scan`:
-///   `[next_cursor: bin, entries: [[key: bin, value: bin], ...]]`.
+///   `[next_cursor: bin, entries: [[key: bin, value: bin, sys_from, expire_at_ms], ...]]`.
 fn parse_materialize_scan_payload(payload: &[u8]) -> crate::Result<ScanPage> {
     use nodedb_query::msgpack_scan;
 
@@ -187,19 +249,20 @@ fn parse_materialize_scan_payload(payload: &[u8]) -> crate::Result<ScanPage> {
     // each complete entry has been structurally consumed from `payload`.
     let mut entries = Vec::new();
     for _ in 0..entry_count {
-        let (pair_len, mut pair_off) =
+        let (entry_len, mut field_off) =
             msgpack_scan::array_header(payload, entry_off).ok_or_else(bad)?;
-        if pair_len != 2 {
+        if entry_len != 4 {
             return Err(bad());
         }
-        let key = msgpack_scan::read_bin_advance(payload, &mut pair_off)
+        let key = msgpack_scan::read_bin_advance(payload, &mut field_off)
             .ok_or_else(bad)?
             .to_vec();
-        let value = msgpack_scan::read_bin_advance(payload, &mut pair_off)
+        let value = msgpack_scan::read_bin_advance(payload, &mut field_off)
             .ok_or_else(bad)?
             .to_vec();
-        entries.push((key, value));
-        entry_off = pair_off;
+        let stamp = KvVersionStamp::read(payload, &mut field_off).ok_or_else(bad)?;
+        entries.push(SourceKey { key, value, stamp });
+        entry_off = field_off;
     }
 
     Ok((entries, next_cursor))
@@ -221,6 +284,7 @@ async fn probe_target_key(
         // target — it must see every source binding regardless of clone
         // ceiling, so reads against the target stay unbounded here.
         surrogate_ceiling: None,
+        system_time: nodedb_types::SystemTimeScope::Current,
     });
     Ok(
         !dispatch_to_owner(state, tenant_id, db_id, target_qualified, plan)

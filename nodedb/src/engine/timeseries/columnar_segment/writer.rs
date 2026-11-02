@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use nodedb_types::timeseries::{PartitionMeta, PartitionState};
 use nodedb_wal::crypto::WalEncryptionKey;
 
-use super::super::columnar_memtable::{ColumnType, ColumnarFlushView, ColumnarSchema};
+use super::super::columnar_memtable::{ColumnarFlushView, ColumnarSchema};
 use super::codec::encode_column;
 use super::encrypt::encrypt_file;
 use super::error::SegmentError;
@@ -95,8 +95,8 @@ impl ColumnarSegmentWriter {
             let file_bytes = maybe_encrypt(kek, &encoded)?;
             durable_write(&partition_dir, &format!("{col_name}.col"), &file_bytes)?;
 
-            // Write symbol dictionary for tag columns.
-            if *col_type == ColumnType::Symbol
+            // Write the dictionary of every symbol and text column.
+            if col_type.is_dictionary()
                 && let Some(dict) = view.symbol_dicts.get(&i)
             {
                 let dict_json = sonic_rs::to_vec(dict)
@@ -147,6 +147,7 @@ impl ColumnarSegmentWriter {
             last_flushed_wal_lsn: flush_wal_lsn,
             column_stats,
             max_system_ts: view.max_system_ts,
+            ended_at: None,
         };
 
         let meta_json = sonic_rs::to_vec(&meta)
@@ -164,6 +165,20 @@ impl ColumnarSegmentWriter {
 
         Ok(meta)
     }
+}
+
+/// Replace the `partition.meta` of the committed partition `partition_dir`
+/// with `meta`, durably and in one atomic rename. Encrypted with `kek` when
+/// one is installed, as the partition's own write encrypts it.
+pub fn write_partition_meta(
+    partition_dir: &Path,
+    meta: &PartitionMeta,
+    kek: Option<&WalEncryptionKey>,
+) -> Result<(), SegmentError> {
+    let meta_json =
+        sonic_rs::to_vec(meta).map_err(|e| SegmentError::Io(format!("serialize meta: {e}")))?;
+    let meta_bytes = maybe_encrypt(kek, &meta_json)?;
+    durable_write(partition_dir, "partition.meta", &meta_bytes)
 }
 
 /// Write the segment file `name` inside `dir` durably: data fsynced before the
@@ -197,7 +212,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::super::super::columnar_memtable::{
-        ColumnValue, ColumnarMemtable, ColumnarMemtableConfig, TimeKind,
+        ColumnType, ColumnValue, ColumnarMemtable, ColumnarMemtableConfig, TimeKind,
     };
     use super::super::reader::ColumnarSegmentReader;
     use super::*;
@@ -471,7 +486,6 @@ mod tests {
 
         let part_dir = tmp.path().join("ts-sparse");
         let sparse = ColumnarSegmentReader::read_sparse_index(&part_dir, None)
-            .unwrap()
             .expect("sparse index should exist");
 
         assert_eq!(sparse.total_rows(), 2048);
@@ -518,7 +532,6 @@ mod tests {
         assert_eq!(ts_col.as_timestamps().len(), 100);
 
         let sparse = ColumnarSegmentReader::read_sparse_index(&part_dir, Some(&kek))
-            .unwrap()
             .expect("sparse index must exist");
         assert_eq!(sparse.total_rows(), 100);
     }

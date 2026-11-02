@@ -65,6 +65,7 @@ fn fulltext_search_isolated() {
             field: None,
             filters: Vec::new(),
             scores: Vec::new(),
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
     assert_eq!(resp_a.status, Status::Ok);
@@ -86,6 +87,7 @@ fn fulltext_search_isolated() {
             field: None,
             filters: Vec::new(),
             scores: Vec::new(),
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
     assert_eq!(resp_b.status, Status::Ok);

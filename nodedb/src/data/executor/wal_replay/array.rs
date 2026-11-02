@@ -17,13 +17,31 @@
 //! Replay never flushes. Its records land in the memtable, and the first
 //! live threshold flush or checkpoint flush after replay writes them with a
 //! stamp that names them.
+//!
+//! ## The version ordinal
+//!
+//! Replay versions each record as the live apply does
+//! (`stamp_array_puts` / `stamp_array_deletes`). A record whose header
+//! carries a system
+//! ordinal (`RecordHeader::system_ordinal`) stamps it, raised above the
+//! array's newest stored version, exactly as the live apply did: the live
+//! apply stamped the same ordinal, a replicated entry's leader's or the one
+//! the local append reserved. A committed redo install inside its Calvin
+//! scope stamps the ordinal its scope carries. A record that carries none
+//! stamps a fresh ordinal above every stored version, so the replayed
+//! version stays newest for its cell.
+//!
+//! A restored-array sub-record of a RESTORE's redo (`ArrayRestoreRedo`)
+//! carries every stamp it installs, the re-asserted ones included, and
+//! replays through `replay_array_restore`.
 
+use super::array_restore::RestoreReplay;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::transaction::undo::UndoEntry;
 use std::sync::Arc;
 
 /// Outcome of preparing an array's store for replay.
-enum ArrayOpen {
+pub(in crate::data::executor) enum ArrayOpen {
     /// The store is open; replay may proceed against it.
     Ready,
     /// The array has no catalog entry on this node. The catalog is a separate
@@ -36,7 +54,7 @@ enum ArrayOpen {
 }
 
 impl CoreLoop {
-    fn ensure_array_open_for_replay(
+    pub(in crate::data::executor) fn ensure_array_open_for_replay(
         &mut self,
         array_id: &nodedb_array::types::ArrayId,
     ) -> crate::Result<ArrayOpen> {
@@ -63,6 +81,7 @@ impl CoreLoop {
             .map_err(|e| crate::Error::Internal {
                 detail: format!("array open during WAL replay: {e}"),
             })?;
+        self.fold_array_versions(array_id);
         Ok(ArrayOpen::Ready)
     }
 
@@ -70,7 +89,7 @@ impl CoreLoop {
     /// tiles a cell write touches and the sync high-water mark it advances.
     /// Returns `false` when the tiles cannot be read; the error is kept on
     /// the apply.
-    fn record_array_tiles_undo<'a>(
+    pub(super) fn record_array_tiles_undo<'a>(
         &mut self,
         array_id: &nodedb_array::types::ArrayId,
         cells: impl IntoIterator<Item = (&'a [nodedb_array::types::coord::value::CoordValue], i64)>,
@@ -122,7 +141,11 @@ impl CoreLoop {
     /// Whether `array_id`'s manifest stamp names an LSN above `record_lsn`.
     /// A replayed record it holds was in flight when the flush that wrote the
     /// stamp ran.
-    fn array_stamp_passes(&self, array_id: &nodedb_array::types::ArrayId, record_lsn: u64) -> bool {
+    pub(super) fn array_stamp_passes(
+        &self,
+        array_id: &nodedb_array::types::ArrayId,
+        record_lsn: u64,
+    ) -> bool {
         self.array_engine
             .store(array_id)
             .is_ok_and(|store| store.manifest().replay.highest() > record_lsn)
@@ -167,6 +190,22 @@ impl CoreLoop {
 
             let tenant_id = record.header.tenant_id;
             let record_lsn = record.header.lsn;
+
+            if is_put && let Some(restored) = crate::wal::ArrayRestoreRedo::decode(&record.payload)
+            {
+                match self.replay_array_restore(record, restored, tombstones) {
+                    RestoreReplay::Applied {
+                        cells,
+                        in_flight: passed,
+                    } => {
+                        puts += cells;
+                        in_flight += usize::from(passed);
+                    }
+                    RestoreReplay::Skipped => skipped += 1,
+                    RestoreReplay::Claimed => {}
+                }
+                continue;
+            }
 
             if is_put {
                 let payload = match decode_put_with_version(&record.payload) {
@@ -227,6 +266,23 @@ impl CoreLoop {
                 if self.claim_for_validation() {
                     continue;
                 }
+                // Every cell lands at the ordinal this apply stamps, as the
+                // live apply does.
+                let mut payload = payload;
+                let outer = self.enter_record_ordinal(record);
+                let versioned =
+                    self.stamp_array_puts(&payload.array_id, payload.vshard_id, &mut payload.cells);
+                self.apply_scope.replicated_ordinal = outer;
+                if let Err(e) = versioned {
+                    self.replay_record_unapplied(
+                        "array",
+                        "stamp_put",
+                        record_lsn,
+                        &format!("committed cells could not be stamped: {e}"),
+                    );
+                    skipped += 1;
+                    continue;
+                }
                 if self.recording_redo_undo()
                     && !self.record_array_tiles_undo(
                         &payload.array_id,
@@ -243,9 +299,13 @@ impl CoreLoop {
                 let cell_count = payload.cells.len();
                 let prov = payload.provenance.clone();
                 let passed = self.array_stamp_passes(&payload.array_id, record_lsn);
-                let stamped =
-                    self.array_engine
-                        .put_cells(&payload.array_id, payload.cells, record_lsn);
+                // Every tile version keeps the placement its record carries.
+                let stamped = self.array_engine.put_cells(
+                    &payload.array_id,
+                    payload.vshard_id,
+                    payload.cells,
+                    record_lsn,
+                );
                 if let Err(e) = stamped {
                     self.replay_record_unapplied(
                         "array",
@@ -325,6 +385,23 @@ impl CoreLoop {
             if self.claim_for_validation() {
                 continue;
             }
+            // Every tombstone lands at the ordinal this apply stamps, as
+            // the live apply does.
+            let mut payload = payload;
+            let outer = self.enter_record_ordinal(record);
+            let versioned =
+                self.stamp_array_deletes(&payload.array_id, payload.vshard_id, &mut payload.cells);
+            self.apply_scope.replicated_ordinal = outer;
+            if let Err(e) = versioned {
+                self.replay_record_unapplied(
+                    "array",
+                    "stamp_delete",
+                    record_lsn,
+                    &format!("committed tombstones could not be stamped: {e}"),
+                );
+                skipped += 1;
+                continue;
+            }
             if self.recording_redo_undo()
                 && !self.record_array_tiles_undo(
                     &payload.array_id,
@@ -341,9 +418,12 @@ impl CoreLoop {
             let cell_count = payload.cells.len();
             let prov = payload.provenance.clone();
             let passed = self.array_stamp_passes(&payload.array_id, record_lsn);
-            let stamped =
-                self.array_engine
-                    .delete_cells(&payload.array_id, payload.cells, record_lsn);
+            let stamped = self.array_engine.delete_cells(
+                &payload.array_id,
+                payload.vshard_id,
+                payload.cells,
+                record_lsn,
+            );
             if let Err(e) = stamped {
                 self.replay_record_unapplied(
                     "array",

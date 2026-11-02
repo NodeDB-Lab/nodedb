@@ -109,11 +109,11 @@ fn ceiling_resolves_correctly_after_crash_mid_write() {
     // "crash" by dropping the engine without flush.
     {
         let mut e = open_engine(&root);
-        e.put_cells(&aid(), vec![put_cell(0, 1, 100, 100)], 1)
+        e.put_cells(&aid(), 0, vec![put_cell(0, 1, 100, 100)], 1)
             .unwrap();
-        e.put_cells(&aid(), vec![put_cell(0, 2, 200, 200)], 2)
+        e.put_cells(&aid(), 0, vec![put_cell(0, 2, 200, 200)], 2)
             .unwrap();
-        e.put_cells(&aid(), vec![put_cell(0, 3, 300, 300)], 3)
+        e.put_cells(&aid(), 0, vec![put_cell(0, 3, 300, 300)], 3)
             .unwrap();
         // engine drops here without flush — memtable is lost, simulating crash.
     }
@@ -123,11 +123,11 @@ fn ceiling_resolves_correctly_after_crash_mid_write() {
     // `stamp_put_cells`. We model it directly: the versioned memtable key is
     // (coord, system_from_ms), so re-applying the same payload is idempotent.
     let mut e = open_engine(&root);
-    e.put_cells(&aid(), vec![put_cell(0, 1, 100, 100)], 1)
+    e.put_cells(&aid(), 0, vec![put_cell(0, 1, 100, 100)], 1)
         .unwrap();
-    e.put_cells(&aid(), vec![put_cell(0, 2, 200, 200)], 2)
+    e.put_cells(&aid(), 0, vec![put_cell(0, 2, 200, 200)], 2)
         .unwrap();
-    e.put_cells(&aid(), vec![put_cell(0, 3, 300, 300)], 3)
+    e.put_cells(&aid(), 0, vec![put_cell(0, 3, 300, 300)], 3)
         .unwrap();
 
     let store = e.store(&aid()).unwrap();
@@ -194,19 +194,19 @@ fn follower_replay_yields_identical_state() {
 
     let writes: Vec<Write> = vec![
         Box::new(|e: &mut ArrayEngine| {
-            e.put_cells(&aid(), vec![put_cell(0, 1, 100, 100)], 1)
+            e.put_cells(&aid(), 0, vec![put_cell(0, 1, 100, 100)], 1)
                 .unwrap();
         }),
         Box::new(|e: &mut ArrayEngine| {
-            e.put_cells(&aid(), vec![put_cell(0, 2, 200, 150)], 2)
+            e.put_cells(&aid(), 0, vec![put_cell(0, 2, 200, 150)], 2)
                 .unwrap();
         }),
         Box::new(|e: &mut ArrayEngine| {
-            e.put_cells(&aid(), vec![put_cell(5, 10, 250, 0)], 3)
+            e.put_cells(&aid(), 0, vec![put_cell(5, 10, 250, 0)], 3)
                 .unwrap();
         }),
         Box::new(|e: &mut ArrayEngine| {
-            e.put_cells(&aid(), vec![put_cell(0, 3, 300, 300)], 4)
+            e.put_cells(&aid(), 0, vec![put_cell(0, 3, 300, 300)], 4)
                 .unwrap();
         }),
     ];

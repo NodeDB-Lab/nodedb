@@ -123,8 +123,9 @@ pub struct OriginArrayInbound {
     /// Server-authoritative producer identity for this session, assigned at
     /// handshake and set via [`Self::set_session_identity`]. Inbound provenance
     /// is stamped from these — never from the wire message — so a client cannot
-    /// spoof another producer's id or replay a fenced epoch. `0` = unidentified
-    /// (legacy / non-fenced) producer, which the gate treats as a no-op.
+    /// spoof another producer's id or replay a fenced epoch. `0` marks an
+    /// unfenced session whose handshake carried no Lite identity. The gate
+    /// treats it as a no-op.
     session_producer_id: std::sync::atomic::AtomicU64,
     session_epoch: std::sync::atomic::AtomicU64,
 }
@@ -182,10 +183,6 @@ impl OriginArrayInbound {
             )
         })
     }
-
-    pub(super) fn schemas(&self) -> &Arc<OriginSchemaRegistry> {
-        &self.schemas
-    }
 }
 
 impl OriginArrayInbound {
@@ -221,7 +218,7 @@ impl OriginArrayInbound {
     /// Bind this session's handshake-assigned producer identity. The session
     /// handler calls this before dispatching each array frame so inbound
     /// provenance is stamped server-authoritatively. `0` leaves the session
-    /// unfenced (legacy / unidentified producer).
+    /// unfenced: its handshake carried no Lite identity.
     pub fn set_session_identity(&self, producer_id: u64, epoch: u64) {
         use std::sync::atomic::Ordering;
         self.session_producer_id
@@ -442,7 +439,7 @@ impl OriginArrayInbound {
             // Stamped with the floor, below.
             incarnation: nodedb_types::Hlc::ZERO,
         };
-        let vshard = self.vshard_for_op(&op);
+        let vshard = self.vshard_for_op(&op)?;
         let entry = ReplicatedEntry::new(
             self.tenant_id.as_u64(),
             self.database_id.as_u64(),

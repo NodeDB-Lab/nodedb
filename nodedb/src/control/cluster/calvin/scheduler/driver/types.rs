@@ -94,7 +94,12 @@ pub(super) struct SliceScope {
     /// Whether the slice holds any local write plan. A slice with none only
     /// validates reads: it commits with no log entry.
     pub writes: bool,
+    /// Every collection the slice writes, as the Data Plane keys it.
     pub collections: Vec<String>,
+    /// Every user collection and array the slice writes, each with its
+    /// kind. The redo entry stamps each one's incarnation from these.
+    pub incarnation_names:
+        Vec<crate::control::planner::calvin::incarnation_names::NamedIncarnation>,
     pub sum_targets: Vec<nodedb_physical::physical_plan::RedoSumTargets>,
     /// The identities the local plans carry, bound in this node's catalog.
     /// Every replica binds them before the redo installs.
@@ -120,6 +125,15 @@ impl SliceScope {
         Self {
             writes: !plans.is_empty(),
             collections: nodedb_physical::physical_plan::written_collections(plans),
+            incarnation_names:
+                crate::control::planner::calvin::incarnation_names::incarnation_names(
+                    plans,
+                    |plan| {
+                        nodedb_physical::physical_plan::written_collections(std::slice::from_ref(
+                            plan,
+                        ))
+                    },
+                ),
             sum_targets:
                 crate::control::wal_replication::transaction_redo::sum_targets::redo_sum_targets(
                     plans,

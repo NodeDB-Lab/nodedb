@@ -228,6 +228,7 @@ mod tests {
             rows: Vec::new(),
             rejected: 0,
             first_rejection: None,
+            carried_system: false,
         }
     }
 

@@ -4,13 +4,13 @@
 
 use nodedb_types::timeseries::PartitionState;
 
-use super::entry::PartitionEntry;
+use super::entry::{PartitionEntry, PartitionKey};
 use super::registry::PartitionRegistry;
 
 impl PartitionRegistry {
     /// Mark a partition as deleted.
-    pub fn mark_deleted(&mut self, start_ts: i64) -> bool {
-        if let Some(entry) = self.partitions.get_mut(&start_ts) {
+    pub fn mark_deleted(&mut self, key: &PartitionKey) -> bool {
+        if let Some(entry) = self.partitions.get_mut(key) {
             entry.meta.state = PartitionState::Deleted;
             true
         } else {
@@ -23,25 +23,31 @@ impl PartitionRegistry {
     /// [`PartitionRegistry::insert_partition`], so a partition that shares
     /// its `min_ts` and is not a source stays reachable. Returns the key
     /// `merged` is filed under.
-    pub fn install_merge(&mut self, merged: PartitionEntry, sources: &[String]) -> i64 {
+    pub fn install_merge(&mut self, merged: PartitionEntry, sources: &[String]) -> PartitionKey {
         self.partitions
             .retain(|_, entry| !sources.contains(&entry.dir_name));
         self.insert_partition(merged)
     }
 
+    /// Take the partition filed under `key` out of the registry. The undo
+    /// of an install calls it once the partition's directory is gone.
+    pub fn remove(&mut self, key: &PartitionKey) -> Option<PartitionEntry> {
+        self.partitions.remove(key)
+    }
+
     /// Remove deleted partitions from the registry (after physical cleanup).
     pub fn purge_deleted(&mut self) -> Vec<String> {
-        let deleted: Vec<(i64, String)> = self
+        let deleted: Vec<PartitionKey> = self
             .partitions
             .iter()
             .filter(|(_, e)| e.meta.state == PartitionState::Deleted)
-            .map(|(&start, e)| (start, e.dir_name.clone()))
+            .map(|(key, _)| key.clone())
             .collect();
 
         let mut dirs = Vec::new();
-        for (start, dir) in deleted {
-            self.partitions.remove(&start);
-            dirs.push(dir);
+        for key in deleted {
+            self.partitions.remove(&key);
+            dirs.push(key.dir_name);
         }
         dirs
     }
@@ -72,6 +78,7 @@ mod tests {
                 last_flushed_wal_lsn: 1,
                 column_stats: std::collections::HashMap::new(),
                 max_system_ts: 0,
+                ended_at: None,
             },
             dir_name: dir.to_string(),
         }
@@ -100,8 +107,8 @@ mod tests {
     fn purge_removes_deleted_entries() {
         let mut reg = PartitionRegistry::new(test_config());
         reg.insert_partition(entry("ts-a", 100, PartitionState::Sealed));
-        reg.insert_partition(entry("ts-b", 200, PartitionState::Sealed));
-        reg.mark_deleted(200);
+        let b = reg.insert_partition(entry("ts-b", 200, PartitionState::Sealed));
+        reg.mark_deleted(&b);
         assert_eq!(reg.purge_deleted(), vec!["ts-b".to_string()]);
         assert_eq!(reg.partition_count(), 1);
     }

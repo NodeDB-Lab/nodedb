@@ -66,6 +66,7 @@ pub(super) fn bulk_dml(
             updates: updates.to_vec(),
             system_from: None,
             rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
+            system_time: nodedb_types::SystemTimeScope::Current,
         })
     } else {
         PhysicalPlan::Columnar(ColumnarOp::Delete {
@@ -73,6 +74,7 @@ pub(super) fn bulk_dml(
             filters: filters.to_vec(),
             system_from: None,
             rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
+            system_time: nodedb_types::SystemTimeScope::Current,
         })
     }
 }

@@ -3,7 +3,7 @@
 //! KV WAL replay: rebuilds in-memory hash tables after crash.
 
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::core_loop::write_index::KeyRepr;
+use crate::data::executor::core_loop::write_note::KeyRepr;
 use crate::data::executor::handlers::transaction::undo::UndoEntry;
 use crate::data::executor::wal_replay::kv_put::KvReplayRecord;
 
@@ -40,7 +40,21 @@ impl CoreLoop {
 
         let now_ms = crate::engine::kv::current_ms();
 
+        // Each record replays in its own KV apply scope, fixed at the
+        // system-time ordinal the record carries: the one its live apply
+        // stamped. Every sub-record of one redo or group record carries that
+        // record's ordinal, so the whole record replays at one ordinal. A
+        // record that carries none draws a fresh ordinal. Records replay in
+        // LSN order, and a version below a key's newest stored version rises
+        // above it, so every key's versions keep their order. The scope of a
+        // record closes when the next record begins or the loop ends. Inside
+        // a committed-redo install the install's scope is open and fixed, and
+        // the record's scope joins it.
+        let mut record_scope = None;
         for record in records {
+            if let Some(scope) = record_scope.take() {
+                self.kv_engine.close_write_scope(scope);
+            }
             if self.replay_halted() {
                 break;
             }
@@ -69,6 +83,7 @@ impl CoreLoop {
             let tombstones = &tombstones.for_database(database_id);
 
             crate::fail_point!(self.fail_scope, "replay::kv_mid_pass");
+            record_scope = Some(self.kv_engine.open_write_scope(record.system_ordinal()));
 
             if is_put {
                 // Absolute-overwrite puts — see `kv_put.rs` for the record
@@ -97,7 +112,6 @@ impl CoreLoop {
                     &record.payload,
                     tenant_id,
                     database_id,
-                    now_ms,
                     record_lsn,
                     tombstones,
                 ) {
@@ -108,18 +122,35 @@ impl CoreLoop {
                     &record.payload,
                     tenant_id,
                     database_id,
-                    now_ms,
                     record_lsn,
                     tombstones,
                 ) {
                     puts += applied;
                     continue;
                 }
+                // A RESTORE's redo carries each restored key with every
+                // version at its backed-up ordinal.
+                if let Some(applied) = self.try_replay_kv_restore(&kv_record, tombstones) {
+                    puts += applied;
+                    continue;
+                }
                 // A committed redo record carries only absolute `kv_put`
-                // post-images and TTL changes. Every other shape is left
+                // post-images, TTL changes and restored keys. Every other shape is left
                 // unclaimed, so the validate pass refuses the record before
                 // any arm writes.
                 if self.applying_committed_redo() {
+                    continue;
+                }
+
+                // A replicated TTL reap: see `wal_replay_kv_reap.rs`.
+                if let Some(applied) = self.try_replay_kv_reap(
+                    &record.payload,
+                    tenant_id,
+                    database_id,
+                    record_lsn,
+                    tombstones,
+                ) {
+                    puts += applied;
                     continue;
                 }
 
@@ -270,12 +301,11 @@ impl CoreLoop {
                         let undo: Vec<UndoEntry> = keys
                             .iter()
                             .filter_map(|key| {
-                                let prior = self.kv_engine.entry_image(
+                                let prior = self.kv_engine.stored_image(
                                     database_id,
                                     tenant_id,
                                     &collection,
                                     key,
-                                    now_ms,
                                 )?;
                                 Some(UndoEntry::KvDelete {
                                     collection: collection.clone(),
@@ -338,6 +368,9 @@ impl CoreLoop {
                     deletes += applied;
                 }
             }
+        }
+        if let Some(scope) = record_scope.take() {
+            self.kv_engine.close_write_scope(scope);
         }
 
         if puts > 0 || deletes > 0 {

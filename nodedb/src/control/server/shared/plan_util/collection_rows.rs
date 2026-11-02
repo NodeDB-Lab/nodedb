@@ -217,6 +217,7 @@ mod tests {
                 count: 0,
                 system_time: nodedb_types::SystemTimeScope::Current,
                 raw_bodies: false,
+                only_row: None,
             }),
             PhysicalPlan::Document(DocumentOp::ApplyBalanceDelta {
                 collection: docs(),
@@ -257,6 +258,7 @@ mod tests {
                 query_entries: vec![(1, 1.0)],
                 top_k: 1,
                 filters: Vec::new(),
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Vector(VectorOp::SparseDelete {
                 collection: docs(),
@@ -284,6 +286,7 @@ mod tests {
                 top_k: 1,
                 ef_search: 0,
                 mode: "max_sim".into(),
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
         ]);
     }

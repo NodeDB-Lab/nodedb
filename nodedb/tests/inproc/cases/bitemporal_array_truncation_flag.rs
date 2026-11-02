@@ -54,6 +54,7 @@ fn open_engine(dir: &TempDir) -> ArrayEngine {
 fn put_cell(e: &mut ArrayEngine, x: i64, v: i64, sys: i64, lsn: u64) {
     e.put_cells(
         &aid(),
+        0,
         vec![ArrayPutCell {
             coord: vec![CoordValue::Int64(x)],
             attrs: vec![CellValue::Int64(v)],

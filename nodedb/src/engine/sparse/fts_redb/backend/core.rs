@@ -17,7 +17,8 @@ use super::segments::CompactCommit;
 use super::shared::redb_err;
 use crate::engine::durability_gate::GatedDatabase;
 use crate::engine::sparse::fts_redb::tables::{
-    DOC_FIELDS, DOC_LENGTHS, DOC_TERMS, INDEX_META, POSTINGS, SEGMENTS, STATS,
+    DOC_FIELDS, DOC_LENGTHS, DOC_TERMS, INDEX_META, POSTINGS, SEGMENTS, STATS, TEXT_ENDED,
+    TEXT_LIVE_BY_FROM, TEXT_LIVE_FROM,
 };
 use crate::storage::quarantine::QuarantineRegistry;
 
@@ -61,6 +62,15 @@ impl RedbFtsBackend {
             write_txn
                 .open_table(SEGMENTS)
                 .map_err(|e| redb_err("create segments table", e))?;
+            write_txn
+                .open_table(TEXT_LIVE_FROM)
+                .map_err(|e| redb_err("create text live_from table", e))?;
+            write_txn
+                .open_table(TEXT_LIVE_BY_FROM)
+                .map_err(|e| redb_err("create text live_by_from table", e))?;
+            write_txn
+                .open_table(TEXT_ENDED)
+                .map_err(|e| redb_err("create text ended table", e))?;
         }
         write_txn.commit().map_err(|e| redb_err("commit init", e))?;
 

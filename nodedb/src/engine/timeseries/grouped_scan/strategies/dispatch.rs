@@ -4,7 +4,7 @@
 //! GROUP BY shape, symbol cardinality, and row count, then resolves the
 //! integer keys to typed group keys.
 
-use super::super::super::columnar_memtable::{ColumnData, ColumnType};
+use super::super::super::columnar_memtable::ColumnData;
 use super::super::types::{GroupedAggResult, ResolvedSchema};
 use super::bucket::aggregate_with_bucket;
 use super::hashed::{
@@ -50,7 +50,7 @@ pub(in crate::engine::timeseries::grouped_scan) fn dispatch_grouping<'a>(
 
     let local_groups = if group_by.is_empty() {
         aggregate_no_group(resolved, columns, mask, row_count, num_aggs)
-    } else if group_by.len() == 1 && resolved.group_cols[0].1 == ColumnType::Symbol {
+    } else if group_by.len() == 1 && resolved.group_cols[0].1.is_dictionary() {
         let (col_idx, _) = resolved.group_cols[0];
         if let Some(data) = columns[col_idx] {
             let sym_ids = data.as_symbols();

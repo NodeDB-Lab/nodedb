@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! CREATE INDEX backfill of a bitemporal collection's versioned index.
+//! CREATE INDEX backfill of a collection's versioned index.
 //!
 //! The versioned index answers a lookup at a system-time cutoff, so it holds
 //! an entry for each value at the system time the value became current. The
 //! backfill walks every version of every row in ascending system time and
 //! writes what the write path writes at that version's time:
 //!
-//! - A live version asserts each of its values live.
+//! - A live version asserts each value it gains live.
 //! - It tombstones each value the previous version held and it drops.
 //! - A tombstone version tombstones every value the previous version held.
 //!
@@ -72,7 +72,7 @@ impl CoreLoop {
                         index_entry(b, doc_id, value, sys_from),
                     )?;
                 }
-                for value in &values {
+                for value in values.difference(&held) {
                     self.sparse
                         .versioned_index_put_in_txn(txn, index_entry(b, doc_id, value, sys_from))?;
                 }

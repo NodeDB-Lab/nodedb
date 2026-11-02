@@ -9,6 +9,7 @@ mod join;
 mod join_cost;
 mod recursive;
 mod search;
+mod search_scope;
 mod spatial;
 mod text_score_bound;
 mod text_search;
@@ -26,6 +27,7 @@ pub(in crate::control::planner::sql_plan_convert) use search::{
     convert_hybrid_search, convert_hybrid_search_triple, convert_sparse_search,
     convert_vector_search,
 };
+pub(in crate::control::planner::sql_plan_convert) use search_scope::search_system_time;
 pub(in crate::control::planner::sql_plan_convert) use spatial::convert_spatial_scan;
 pub(in crate::control::planner::sql_plan_convert) use text_score_bound::{
     TextBodyTail, bound_text_body,

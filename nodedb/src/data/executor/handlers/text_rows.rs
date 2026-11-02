@@ -74,15 +74,17 @@ pub(in crate::data::executor) fn text_row_image(
 
 impl CoreLoop {
     /// Surrogates of `collection` whose row passes `gate`, judged before
-    /// ranking. Staged rows of the issuing transaction are judged on their
-    /// staged body. A staged tombstone or TRUNCATE removes base rows. `None`
-    /// when the gate is open.
+    /// ranking. A read at a cut judges each row's version visible at the
+    /// cut. Staged rows of the issuing transaction are judged on their staged
+    /// body when the cut merges them. A staged tombstone or TRUNCATE removes
+    /// base rows. `None` when the gate is open.
     pub(in crate::data::executor) fn text_eligible_rows(
         &self,
         task: &ExecutionTask,
         tid: u64,
         collection: &str,
         gate: &TextRowGate,
+        cut: super::search_cut::SearchCut,
     ) -> crate::Result<Option<SurrogateBitmap>> {
         if gate.is_open() {
             return Ok(None);
@@ -100,7 +102,7 @@ impl CoreLoop {
             ))
         };
         let coll_key = (database_id, tenant, collection.to_string());
-        let overlay = match task.request.txn_id {
+        let overlay = match task.request.txn_id.filter(|_| cut.merge_overlay) {
             Some(txn_id) => {
                 // Read-your-own-writes refreshes the lease (see the reaper).
                 self.touch_overlay(txn_id);
@@ -111,12 +113,52 @@ impl CoreLoop {
 
         let mut eligible = SurrogateBitmap::new();
         if overlay.is_none_or(|o| o.base_visible(&coll_key)) {
-            self.for_each_current_row(database_id.as_u64(), tid, collection, |key, bytes| {
-                if admits(key, bytes)? {
-                    eligible.insert(key.surrogate());
+            match cut.at {
+                None => {
+                    self.for_each_current_row(
+                        database_id.as_u64(),
+                        tid,
+                        collection,
+                        |key, bytes| {
+                            if admits(key, bytes)? {
+                                eligible.insert(key.surrogate());
+                            }
+                            Ok(ControlFlow::Continue(()))
+                        },
+                    )?;
                 }
-                Ok(ControlFlow::Continue(()))
-            })?;
+                Some(at) => {
+                    // The scan's predicate cannot fail, so an evaluation
+                    // error is held and returned once the scan ends.
+                    let failure: std::cell::RefCell<Option<crate::Error>> =
+                        std::cell::RefCell::new(None);
+                    let predicate = |key: &StorageKey, bytes: &[u8]| match admits(key, bytes) {
+                        Ok(admitted) => admitted,
+                        Err(e) => {
+                            failure.borrow_mut().get_or_insert(e);
+                            false
+                        }
+                    };
+                    let rows = self.sparse.versioned_scan_as_of(
+                        crate::engine::sparse::btree_versioned::VersionedScanParams {
+                            database_id: database_id.as_u64(),
+                            tenant: tid,
+                            coll: collection,
+                            sys_cutoff: Some(at),
+                            valid_at_ms: None,
+                            limit: usize::MAX,
+                        },
+                        &predicate,
+                        &|| false,
+                    )?;
+                    if let Some(e) = failure.into_inner() {
+                        return Err(e);
+                    }
+                    for (key, _) in rows {
+                        eligible.insert(key.surrogate());
+                    }
+                }
+            }
         }
         if let Some(overlay) = overlay {
             for (surrogate, staged) in overlay.iter_for_collection(&coll_key) {

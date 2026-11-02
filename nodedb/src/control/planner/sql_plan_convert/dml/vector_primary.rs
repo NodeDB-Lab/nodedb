@@ -417,10 +417,8 @@ mod tests {
             retention_registry: None,
             array_catalog: None,
             credentials: None,
-            wal: None,
             surrogate_assigner:
                 crate::control::planner::sql_plan_convert::test_support::test_assigner(),
-            cluster_enabled: false,
             bitemporal_retention_registry: None,
             max_vector_dim,
             force_shuffle_join: false,
@@ -430,6 +428,7 @@ mod tests {
             broadcast_threshold_bytes: 8 * 1024 * 1024,
             shuffle_agg_threshold: 10_000,
             prefetched: Default::default(),
+            reads_txn_snapshot: false,
             database_id: crate::types::DatabaseId::DEFAULT,
             tenant_id: crate::types::TenantId::new(0),
         }

@@ -89,6 +89,7 @@ pub(super) fn prepare_entry<'a>(
         log_index,
         applied_key,
         commit_hlc,
+        system_ordinal: scope.system_ordinal,
     };
     let Some(replicated) = decoded else {
         return prepare_generic_entry(ctx, pos, entry, scope, false);
@@ -185,6 +186,7 @@ fn prepare_replicated<'a>(
                     array,
                     incarnation,
                 },
+                vshard: crate::types::VShardId::new(replicated.vshard_id),
                 op_bytes,
                 cell_surrogate,
                 provenance,
@@ -334,6 +336,8 @@ fn prepare_replicated<'a>(
 /// The parts of a `ReplicatedWrite::ArrayOp` its apply takes.
 struct ArrayOpWrite {
     cell: super::array_cell_route::CellWrite,
+    /// The vShard the entry was proposed to: the tile route of the cell.
+    vshard: crate::types::VShardId,
     op_bytes: Vec<u8>,
     cell_surrogate: Option<u32>,
     provenance: Option<Vec<u8>>,
@@ -351,6 +355,7 @@ fn prepare_array_op<'a>(
     Prepared::Exclusive(Box::pin(async move {
         let ArrayOpWrite {
             cell,
+            vshard,
             op_bytes,
             cell_surrogate,
             provenance,
@@ -374,6 +379,7 @@ fn prepare_array_op<'a>(
                 tenant_id: cell.tenant_id,
                 database_id,
                 array: &cell.array,
+                vshard,
             },
             &op_bytes,
             cell_surrogate,

@@ -3,7 +3,7 @@
 //! Bitemporal EdgeStore primitives.
 //!
 //! Key layout appends a 20-digit zero-padded `system_from` ordinal suffix to
-//! the legacy composite key:
+//! the edge's composite key:
 //!
 //! ```text
 //! {collection}\x00{src}\x00{label}\x00{dst}\x00{system_from:020}
@@ -23,6 +23,7 @@
 pub mod collection_scan;
 pub mod cut;
 pub mod keys;
+pub mod newest;
 pub mod payload;
 pub mod purge;
 pub mod query;
@@ -37,7 +38,9 @@ pub use keys::{
     EdgeRef, GDPR_ERASURE_SENTINEL, SYSTEM_TIME_WIDTH, TOMBSTONE_SENTINEL, edge_version_prefix,
     is_gdpr_erasure, is_sentinel, is_tombstone, parse_versioned_edge_key, versioned_edge_key,
 };
+pub use newest::EdgeHomeNewest;
 pub use payload::EdgeValuePayload;
+pub use purge::EdgePurgeCount;
 pub use query::NeighborsAsOfParams;
 pub use read::EdgePropertyReader;
 pub use revert::{EdgeCountChange, EdgeVersionWrite};

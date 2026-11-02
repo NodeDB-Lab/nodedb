@@ -56,9 +56,9 @@ impl From<crate::Error> for ErrorCode {
             | crate::Error::DocumentNotFound { .. } => Self::NotFound,
             crate::Error::RejectedAuthz { resource, .. } => Self::RejectedAuthz { resource },
             // The Control Plane gives both `40001` (serialization_failure).
-            crate::Error::ConflictRetry { .. } | crate::Error::CalvinSerializationConflict => {
-                Self::ConflictRetry
-            }
+            crate::Error::ConflictRetry { .. }
+            | crate::Error::CalvinSerializationConflict
+            | crate::Error::TxnSnapshotTooOld { .. } => Self::ConflictRetry,
             crate::Error::MemoryExhausted { .. } => Self::ResourcesExhausted,
             crate::Error::Backpressure { .. } => Self::ResourcesExhausted,
             crate::Error::AppendOnlyViolation { collection, .. } => {
@@ -282,7 +282,6 @@ impl From<crate::Error> for ErrorCode {
             | crate::Error::SessionIdleTimeout
             | crate::Error::SessionKilledByAdmin
             | crate::Error::SessionUserDropped
-            | crate::Error::OidcProviderTenantUnbound
             | crate::Error::OidcProviderTenantUnavailable { .. }
             | crate::Error::ExternalRoleUndefined { .. }
             | crate::Error::OidcNoDefaultDatabase { .. }

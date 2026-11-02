@@ -135,6 +135,7 @@ mod tests {
                 surrogate: Surrogate::new(1),
             }),
             erased: false,
+            placement: 0,
         }
     }
 

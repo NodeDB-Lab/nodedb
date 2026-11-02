@@ -81,8 +81,8 @@ impl CredentialStore {
     /// via API keys. Returns the user_id.
     ///
     /// `accessible_databases`: if non-empty, the service account is restricted
-    /// to those databases. Empty = legacy = treated as `[DatabaseId::DEFAULT]`
-    /// at auth time.
+    /// to those databases. Empty (no `FOR DATABASE` clause) is treated as
+    /// `[DatabaseId::DEFAULT]` at auth time.
     pub fn create_service_account(
         &self,
         name: &str,

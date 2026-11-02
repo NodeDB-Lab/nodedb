@@ -8,8 +8,10 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::transaction::overlay::ColumnarMatchedRow;
 
 use super::bitemporal::bitemporal_row_visible;
+use super::block_predicates::block_predicates;
 use super::convert::row_to_projected_value;
 use super::filter::row_matches_filters_and_policy;
+use super::flushed_segment::SegmentBlocks;
 
 /// Read-only context for the flushed-segment scan phase. All fields are
 /// borrowed from locals already computed in `execute_columnar_scan`.
@@ -32,9 +34,8 @@ pub(in crate::data::executor) struct FlushedScanCtx<'a> {
     pub ts_system_idx: Option<usize>,
     pub ts_valid_from_idx: Option<usize>,
     pub ts_valid_until_idx: Option<usize>,
-    /// The version each key emits on a bitemporal collection. `None` for a
-    /// collection that is not bitemporal.
-    pub version_gate: Option<&'a super::versions::VersionGate>,
+    /// The row versions the read sees.
+    pub cut: nodedb_columnar::VersionCut,
 }
 
 impl CoreLoop {
@@ -47,8 +48,13 @@ impl CoreLoop {
     /// two steps the live-memtable phase applies — so a row reads identically
     /// from a segment and from the memtable.
     ///
-    /// `Err` when a segment does not open or decode, or a live row holds a
-    /// corrupt cell. No segment is skipped.
+    /// Each row passes the read's version cut before it is built. A segment
+    /// whose every row was created after an `At` cut is not decoded. A
+    /// 1024-row block that holds no row the cut sees, or whose statistics
+    /// rule out a WHERE or policy conjunct, is not decoded either.
+    ///
+    /// `Err` when a segment does not open or decode, or a visible row holds
+    /// a corrupt cell. No segment the cut can see is skipped.
     pub(in crate::data::executor) fn scan_flushed_columnar_segments(
         &self,
         ctx: FlushedScanCtx<'_>,
@@ -72,9 +78,13 @@ impl CoreLoop {
             ts_system_idx,
             ts_valid_from_idx,
             ts_valid_until_idx,
-            version_gate,
+            cut,
         } = ctx;
 
+        let Some(engine) = self.columnar_engines.get(engine_key) else {
+            return Ok(());
+        };
+        let predicates = block_predicates(schema, filter_predicates, rls_predicates);
         if let Some(segments) = self.columnar_flushed_segments.get(engine_key) {
             for (seg_idx, seg_bytes) in segments.iter().enumerate() {
                 if sort_keys.is_empty() && matched.len() >= limit {
@@ -84,22 +94,27 @@ impl CoreLoop {
                 // active memtable virtual segment). Mirror: materialize_scan.rs.
                 let seg_id = seg_idx as u64 + 1;
 
+                // A segment whose every row was created after the cut holds
+                // no version the read sees: it is not decoded.
+                if engine.segment_skippable(seg_id, cut) {
+                    continue;
+                }
+
                 // A segment that does not read refuses the scan. Skipping it
                 // would answer the query without the segment's rows.
                 let segment = self.decode_flushed_segment(
-                    collection,
+                    engine_key,
                     seg_id,
                     seg_bytes,
                     schema.columns.len(),
+                    SegmentBlocks::Visible {
+                        engine,
+                        cut,
+                        predicates: &predicates,
+                    },
                     "columnar_scan",
                 )?;
                 let row_count = segment.row_count();
-
-                // Fetch the delete bitmap for this segment once per segment.
-                let delete_bm = self
-                    .columnar_engines
-                    .get(engine_key)
-                    .and_then(|e| e.delete_bitmap(seg_id));
 
                 // Resolve this segment's per-row surrogate slice once. Held in
                 // lockstep with the segment-bytes Vec, so index `seg_idx` here
@@ -111,8 +126,22 @@ impl CoreLoop {
                     .and_then(|segs| segs.get(seg_idx));
 
                 for row_idx in 0..row_count {
-                    // Skip tombstoned rows.
-                    if delete_bm.is_some_and(|bm| bm.is_deleted(row_idx as u32)) {
+                    // A block the read did not decode holds no row it returns.
+                    if !segment.holds_row(row_idx) {
+                        continue;
+                    }
+                    // A row the cut does not see: ended for a current read,
+                    // outside its interval for a read at an ordinal, purged
+                    // for every read.
+                    let Ok(row_u32) = u32::try_from(row_idx) else {
+                        return Err(crate::Error::Internal {
+                            detail: format!(
+                                "columnar segment {seg_id} of '{collection}': row {row_idx} is \
+                                 past the u32 row index range"
+                            ),
+                        });
+                    };
+                    if !engine.row_visible(seg_id, row_u32, cut) {
                         continue;
                     }
 
@@ -147,12 +176,6 @@ impl CoreLoop {
                         system_as_of,
                         valid_at_ms,
                     ) {
-                        continue;
-                    }
-                    // A superseded version, or a key closed at the cut,
-                    // emits nothing: the gate runs before WHERE, so a
-                    // predicate judges each key's version at the cut.
-                    if version_gate.is_some_and(|gate| !gate.admits(&row)) {
                         continue;
                     }
                     // The query's WHERE predicates, then the caller's read

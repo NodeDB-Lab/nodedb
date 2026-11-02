@@ -94,6 +94,7 @@ async fn resp_gateway_migration_single_node_set_get() {
         key: b"mykey".to_vec(),
         rls_filters: vec![],
         surrogate_ceiling: None,
+        system_time: nodedb_types::SystemTimeScope::Current,
     });
     let get_checked = common::authorize_gateway_plan(&node.shared, &ctx, get_plan).await;
     let get_result = gateway.execute(&ctx, get_checked).await;
@@ -169,6 +170,7 @@ async fn resp_gateway_migration_cross_node_get() {
         key: b"cross-key".to_vec(),
         rls_filters: vec![],
         surrogate_ceiling: None,
+        system_time: nodedb_types::SystemTimeScope::Current,
     });
     let get_checked =
         common::authorize_gateway_plan(&cluster.nodes[1].shared, &ctx, get_plan).await;

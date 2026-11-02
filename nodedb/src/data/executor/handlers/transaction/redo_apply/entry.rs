@@ -24,8 +24,7 @@
 //!    `validate` and `passes`);
 //! 2. materialized-sum folds and hash-chain links on document rows, through
 //!    the open [`RedoApplyScope`];
-//! 3. a collection-floor write version for every collection written, and the
-//!    index-value versions of every document row;
+//! 3. a write note for every collection written;
 //! 4. the record's events, sent once the post-install work succeeded, with
 //!    one publish event per message its transaction published (see
 //!    `events`);
@@ -33,6 +32,7 @@
 //!    journals them.
 
 use nodedb_physical::physical_plan::{RedoOrigin, RedoSumTargets};
+use nodedb_types::calvin::VersionedReadEntry;
 use nodedb_wal::WalRecord;
 use nodedb_wal::record::{RecordType, WalRecordArgs};
 
@@ -45,7 +45,7 @@ use crate::types::TenantId;
 use crate::wal::RedoRecord;
 
 use super::passes::{RedoTarget, final_refusal};
-use super::state::{DeferredWriteKind, RedoApplyPass, RedoApplyScope, TsInstalled};
+use super::state::{DeferredNoteKind, RedoApplyPass, RedoApplyScope, TsInstalled};
 use super::sub_ops::{document_ops, kv_ops, label_ops};
 use crate::engine::timeseries::install_counts::TsInstallCounts;
 
@@ -54,6 +54,14 @@ pub(in crate::data::executor) struct CommittedRedo<'a> {
     pub redo: &'a [u8],
     pub collections: &'a [String],
     pub sum_targets: &'a [RedoSumTargets],
+}
+
+/// The read set of a single-shard snapshot commit and the snapshot ordinal
+/// every read of it observed.
+#[derive(Clone, Copy)]
+pub(in crate::data::executor) struct RedoSnapshot<'a> {
+    pub reads: &'a [VersionedReadEntry],
+    pub ordinal: i64,
 }
 
 impl CoreLoop {
@@ -80,7 +88,8 @@ impl CoreLoop {
         origin: RedoOrigin,
         ts_installs: &mut Vec<TsInstalled>,
     ) -> Response {
-        self.install_redo_into(task, tid, committed, origin, ts_installs)
+        // A Calvin slice's stage vote validated its snapshot.
+        self.install_redo_into(task, tid, committed, origin, ts_installs, None)
     }
 
     /// Install one committed redo record at the LSN the request carries:
@@ -95,7 +104,29 @@ impl CoreLoop {
         committed: CommittedRedo<'_>,
         origin: RedoOrigin,
     ) -> Response {
-        self.install_redo_into(task, tid, committed, origin, &mut Vec::new())
+        self.install_redo_into(task, tid, committed, origin, &mut Vec::new(), None)
+    }
+
+    /// [`Self::install_redo`] for a single-shard snapshot commit: the record
+    /// installs only while nothing its transaction read or replaces holds a
+    /// committed version above `snapshot.ordinal`. A record that fails the
+    /// check is refused with `SerializationConflict` on every replica.
+    pub(in crate::data::executor) fn install_snapshot_redo(
+        &mut self,
+        task: &ExecutionTask,
+        tid: u64,
+        committed: CommittedRedo<'_>,
+        origin: RedoOrigin,
+        snapshot: RedoSnapshot<'_>,
+    ) -> Response {
+        self.install_redo_into(
+            task,
+            tid,
+            committed,
+            origin,
+            &mut Vec::new(),
+            Some(snapshot),
+        )
     }
 
     /// Install one committed redo record from `origin`. When the record
@@ -108,6 +139,7 @@ impl CoreLoop {
         committed: CommittedRedo<'_>,
         origin: RedoOrigin,
         ts_installs: &mut Vec<TsInstalled>,
+        snapshot: Option<RedoSnapshot<'_>>,
     ) -> Response {
         let Some(lsn) = task.wal_lsn() else {
             return self.response_error(
@@ -125,7 +157,23 @@ impl CoreLoop {
         };
         let database_id = task.request.database_id.as_u64();
 
-        let doc_ops = document_ops(&redo.ops);
+        // A clone copy over a row the target holds writes nothing, so no
+        // check judges it.
+        let doc_ops =
+            match self.without_skipped_clone_copies(database_id, tid, document_ops(&redo.ops)) {
+                Ok(ops) => ops,
+                Err(error) => {
+                    return self.response_error(
+                        task,
+                        ErrorCode::RetryableRefusal {
+                            reason: format!(
+                                "a committed redo could not read the rows its clone copies \
+                                 name: {error}"
+                            ),
+                        },
+                    );
+                }
+            };
         // Nothing is written when a check refuses the record, so the refusal
         // is final on every replica.
         let check_scope =
@@ -170,12 +218,26 @@ impl CoreLoop {
         if let Err(refusal) = self.validate_redo_pass(&target, committed.sum_targets) {
             return self.response_error(task, refusal.into_code());
         }
+        // A snapshot transaction commits only while nothing it read or
+        // replaces moved past its snapshot. Nothing is written yet.
+        if let Some(snapshot) = snapshot
+            && let Err(refusal) =
+                self.check_redo_snapshot(task, tid, snapshot.reads, &redo.ops, snapshot.ordinal)
+        {
+            return self.response_error(task, refusal);
+        }
         // The replay arms install the record. Each write they apply takes the
-        // record's stamp: its vShard and the entry it applies.
+        // record's stamp: its vShard and its LSN.
         let stamp = self.task_write_stamp_at(task, lsn);
-        self.write_index.record_stamps.insert(stamp);
+        self.record_stamps.insert(stamp);
+        // Every KV write of the record, and every undo of a refused install,
+        // stamps one system-time ordinal: a rolled-back write replaces its
+        // own version in place and leaves no history.
+        let apply_ordinal = self.kv_apply_ordinal();
+        let kv_scope = self.kv_engine.open_write_scope(apply_ordinal);
         let installed = self.install_redo_pass(&target, committed.sum_targets);
-        self.write_index.record_stamps.remove(lsn);
+        self.kv_engine.close_write_scope(kv_scope);
+        self.record_stamps.remove(lsn);
         let mut scope = match installed {
             Ok(scope) => scope,
             Err(refusal) => return self.response_error(task, refusal.into_code()),
@@ -202,23 +264,16 @@ impl CoreLoop {
             );
             return self.response_error(task, error);
         }
-        // Write versions and the watermark move only once the record is
+        // Write notes and the watermark move only once the record is
         // settled.
-        for version in std::mem::take(&mut scope.write_versions) {
-            match version.kind {
-                DeferredWriteKind::Wipe => self.publish_collection_wipe(
-                    version.db,
-                    version.tenant,
-                    &version.collection,
-                    version.stamp,
-                ),
-                DeferredWriteKind::Row(key) => self.publish_write_version(
-                    version.db,
-                    version.tenant,
-                    &version.collection,
-                    key,
-                    version.stamp,
-                ),
+        for note in std::mem::take(&mut scope.deferred_notes) {
+            match note.kind {
+                DeferredNoteKind::Wipe => {
+                    self.publish_collection_wipe(note.db, note.tenant, &note.collection, note.stamp)
+                }
+                DeferredNoteKind::Row(key) => {
+                    self.publish_write(note.db, note.tenant, &note.collection, key, note.stamp)
+                }
             }
         }
         // Events leave only once the record is settled. Every
@@ -251,17 +306,20 @@ impl CoreLoop {
         }
 
         let tenant = TenantId::new(tid);
+        // The arms noted every document and KV row by key, which folded
+        // those collections into the newest-ordinal cache. Every other
+        // collection's note forgets its cached newest ordinal.
+        let keyed: std::collections::HashSet<&str> = doc_ops
+            .iter()
+            .map(|op| op.collection())
+            .chain(kv_images.iter().map(|image| image.collection.as_str()))
+            .collect();
         for collection in committed.collections {
-            self.note_write(task.request.database_id, tenant, collection, None, stamp);
-        }
-        for write in &scope.doc_writes {
-            self.note_index_write_values(
-                task.request.database_id,
-                tenant,
-                &write.collection,
-                &write.index_tuples,
-                stamp,
-            );
+            if keyed.contains(collection.as_str()) {
+                self.publish_applied(stamp);
+            } else {
+                self.note_write(task.request.database_id, tenant, collection, None, stamp);
+            }
         }
         let write_set = target_write_set(&scope.target_writes);
         self.emit_committed_redo_events(task, scope.doc_writes, kv_images, labels, &rows);
@@ -326,6 +384,7 @@ mod tests {
         .expect("encode redo")
     }
 
+    /// A document put sub-record, stamped as every producer stamps one.
     fn doc_put(collection: &str, document_id: &str, surrogate: u32) -> RedoSubRecord {
         RedoSubRecord {
             record_type: RecordType::Put as u32,
@@ -335,6 +394,9 @@ mod tests {
                 doc_body(document_id),
                 None::<SyncProvenance>,
                 surrogate,
+                super::super::test_commit::test_stamp(),
+                i64::MIN,
+                i64::MAX,
             ))
             .expect("encode doc put"),
         }

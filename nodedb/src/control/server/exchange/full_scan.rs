@@ -49,6 +49,9 @@ pub struct ScanSide<'a> {
     collection: &'a str,
     rls_filters: &'a [u8],
     scan_filters: &'a [u8],
+    /// The system-time scope the scan reads at. `Current` unless the read
+    /// it stands for names one ([`ScanSide::at`]).
+    system_time: SystemTimeScope,
 }
 
 impl<'a> ScanSide<'a> {
@@ -61,6 +64,7 @@ impl<'a> ScanSide<'a> {
             collection,
             rls_filters,
             scan_filters,
+            system_time: SystemTimeScope::Current,
         }
     }
 
@@ -72,12 +76,28 @@ impl<'a> ScanSide<'a> {
             collection,
             rls_filters: &[],
             scan_filters: &[],
+            system_time: SystemTimeScope::Current,
+        }
+    }
+
+    /// This side, read at `system_time`: the scope of the read it stands
+    /// for, so a transaction snapshot or a historical cut survives the
+    /// rewrite to a full scan.
+    pub fn at(self, system_time: SystemTimeScope) -> Self {
+        Self {
+            system_time,
+            ..self
         }
     }
 
     /// The collection name this scan reads.
     pub fn collection(&self) -> &'a str {
         self.collection
+    }
+
+    /// The system-time scope this scan reads at.
+    pub fn system_time(&self) -> SystemTimeScope {
+        self.system_time
     }
 }
 
@@ -115,6 +135,7 @@ pub fn full_scan_plan_for_collection(
     side: ScanSide<'_>,
 ) -> crate::Result<Option<PhysicalPlan>> {
     let collection = side.collection;
+    let system_time = side.system_time;
     // Both predicate sets travel in the slot the RLS filters already use: that
     // slot is evaluated per row before any join match, which is what a local
     // `WHERE` predicate needs too.
@@ -138,7 +159,7 @@ pub fn full_scan_plan_for_collection(
                 projection: Vec::new(),
                 computed_columns: Vec::new(),
                 window_functions: Vec::new(),
-                system_time: SystemTimeScope::Current,
+                system_time,
                 valid_at_ms: None,
                 prefilter: None,
             })
@@ -153,6 +174,7 @@ pub fn full_scan_plan_for_collection(
             sort_keys: Vec::new(),
             match_pattern: None,
             surrogate_ceiling: None,
+            system_time,
         }),
         CollectionType::Columnar(ColumnarProfile::Plain)
         | CollectionType::Columnar(ColumnarProfile::Spatial { .. }) => {
@@ -163,7 +185,7 @@ pub fn full_scan_plan_for_collection(
                 filters: Vec::new(),
                 sort_keys: Vec::new(),
                 rls_filters: side_filters,
-                system_time: SystemTimeScope::Current,
+                system_time,
                 valid_at_ms: None,
                 prefilter: None,
                 computed_columns: Vec::new(),
@@ -184,7 +206,7 @@ pub fn full_scan_plan_for_collection(
                 gap_fill: String::new(),
                 computed_columns: Vec::new(),
                 rls_filters: side_filters,
-                system_time: SystemTimeScope::Current,
+                system_time,
                 valid_at_ms: None,
                 having: Vec::new(),
                 tiering: None,

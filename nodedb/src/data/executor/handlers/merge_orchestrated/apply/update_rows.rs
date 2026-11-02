@@ -25,9 +25,6 @@ pub(super) struct UpdateRowsCtx<'a> {
     pub(super) database_id: u64,
     pub(super) tid: u64,
     pub(super) collection: &'a str,
-    /// Whether the target maintains a secondary vector index. Gated once by
-    /// the caller and threaded into the per-row re-index below.
-    pub(super) has_vectors: bool,
     /// Whether the statement carries a `RETURNING` projection.
     pub(super) returning: bool,
     pub(super) resolved_sum_targets: &'a [nodedb_physical::physical_plan::ResolvedSumTarget],
@@ -65,7 +62,6 @@ impl CoreLoop {
             database_id,
             tid,
             collection,
-            has_vectors,
             returning,
             resolved_sum_targets,
             declared_primary_key,
@@ -87,18 +83,9 @@ impl CoreLoop {
             // The identity INSERT minted for this row, from its MessagePack
             // body: the declared primary key, else the decimal surrogate.
             let row_identity = RowIdentity::of_stored_row(&upd.body, declared_primary_key, upd.key);
-            // `apply_point_put`'s vector step APPENDS (it never replaces),
-            // so an in-place UPDATE must first soft-delete the surrogate's
-            // prior embedding or the stale vector keeps scoring in KNN
-            // search. Push each removal as a `DeleteVector` undo BEFORE the
-            // put's `InsertVector` undos so an abort undeletes the old
-            // vector after removing the new one (reverse order).
-            if has_vectors {
-                for d in self.remove_document_vector_indexes(database_id, tid, collection, upd.key)
-                {
-                    undo_log.push(d.into_delete_undo());
-                }
-            }
+            // `apply_point_put` ends the row's prior vector nodes at the new
+            // version's ordinal and records their undo before its inserts', so
+            // an abort undeletes the old vector after removing the new one.
             match self.apply_point_put(
                 txn,
                 PointPutParams {
@@ -165,7 +152,7 @@ impl CoreLoop {
                         surrogate.as_u32(),
                         row_identity.clone(),
                         upd.body.clone(),
-                        outcome.bitemporal_sys_from,
+                        outcome.version_sys_from,
                     ));
                     if returning {
                         match returning_doc(&upd.body, &upd.key, &identity_column) {

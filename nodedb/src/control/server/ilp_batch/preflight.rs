@@ -246,7 +246,7 @@ mod tests {
         assert_eq!(
             groups[0].catalog_fields,
             vec![
-                ("host".to_owned(), "VARCHAR".to_owned()),
+                ("host".to_owned(), "SYMBOL".to_owned()),
                 ("value".to_owned(), "BIGINT".to_owned()),
                 ("timestamp".to_owned(), "BIGINT".to_owned()),
             ]

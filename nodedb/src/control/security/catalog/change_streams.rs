@@ -8,8 +8,7 @@ use crate::types::DatabaseId;
 use redb::{ReadableDatabase, ReadableTable};
 
 impl SystemCatalog {
-    /// Store a change stream definition under its versioned, length-prefixed
-    /// key.
+    /// Store a change stream definition under its length-prefixed key.
     pub fn put_change_stream(&self, def: &ChangeStreamDef) -> crate::Result<()> {
         let key = stream_key(def.database_id, def.tenant_id, &def.name);
         let bytes =
@@ -87,23 +86,23 @@ impl SystemCatalog {
             .open_table(CHANGE_STREAMS)
             .map_err(|e| catalog_err("open change_streams", e))?;
 
-        let mut streams = std::collections::HashMap::new();
-        let mut range = table
+        let mut streams = Vec::new();
+        for entry in table
             .range(..)
-            .map_err(|e| catalog_err("range change_streams", e))?;
-        while let Some(Ok((_, value))) = range.next() {
-            if let Ok(def) = zerompk::from_msgpack::<ChangeStreamDef>(value.value()) {
-                let identity = (def.database_id, def.tenant_id, def.name.clone());
-                streams.insert(identity, def);
-            }
+            .map_err(|e| catalog_err("range change_streams", e))?
+        {
+            let (_, value) = entry.map_err(|e| catalog_err("read change_stream", e))?;
+            let def = zerompk::from_msgpack::<ChangeStreamDef>(value.value())
+                .map_err(|e| catalog_err("deser change_stream", e))?;
+            streams.push(def);
         }
-        Ok(streams.into_values().collect())
+        Ok(streams)
     }
 }
 
 fn stream_key(database_id: DatabaseId, tenant_id: u64, name: &str) -> String {
     format!(
-        "v2/{:016x}/{:016x}/{:08x}/{}",
+        "{:016x}/{:016x}/{:08x}/{}",
         database_id.as_u64(),
         tenant_id,
         name.len(),

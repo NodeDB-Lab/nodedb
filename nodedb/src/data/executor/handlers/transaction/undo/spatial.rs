@@ -26,7 +26,7 @@ impl CoreLoop {
                 // its reverse map record. A missing index means the entry was
                 // never created (nothing to undo) — safe no-op.
                 if let Some(rtree) = self.spatial_indexes.get_mut(&key) {
-                    rtree.delete(entry_id);
+                    rtree.forget(entry_id);
                 }
                 self.spatial_doc_map
                     .remove(&(key.0, key.1, key.2, key.3, entry_id));
@@ -38,6 +38,7 @@ impl CoreLoop {
                 bbox,
                 document_id,
                 srid,
+                sys_to,
             } => {
                 // Reverse a forward spatial removal: re-insert the entry with
                 // its captured bbox and re-populate the reverse map, matching
@@ -66,7 +67,9 @@ impl CoreLoop {
                         },
                     )
                 })?;
-                rtree.insert(crate::engine::spatial::RTreeEntry { id: entry_id, bbox });
+                // The entry the forward removal ended at `sys_to` leaves
+                // the history and is live from its start again.
+                rtree.restore_ended(entry_id, bbox, sys_to);
                 self.spatial_doc_map
                     .insert((key.0, key.1, key.2, key.3, entry_id), document_id);
                 Ok(())
@@ -163,6 +166,7 @@ mod tests {
                 srid: nodedb_types::geometry::Srid::new(32648).expect("srid"),
                 space: nodedb_types::BboxSpace::Planar,
             },
+            sys_to: nodedb_spatial::rtree::UNVERSIONED,
         };
         core.apply_undo_spatial(0, undo).unwrap();
 

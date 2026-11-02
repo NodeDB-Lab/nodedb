@@ -12,6 +12,7 @@
 //! are not touched. A transaction resolve reads the same scratch rows for the
 //! write events its redo record carries (`events`).
 
+use nodedb_types::columnar::schema::{TS_SERIES, TS_SYSTEM};
 use nodedb_types::timeseries::SeriesCatalog;
 
 use super::raw_scan::emit_memtable_rows_at;
@@ -19,7 +20,7 @@ use crate::bridge::envelope::ErrorCode;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::timeseries::columnar_memtable::{
-    ColumnarMemtable, ColumnarMemtableConfig, ColumnarSchema,
+    ColumnType, ColumnarMemtable, ColumnarMemtableConfig, ColumnarSchema,
 };
 use crate::engine::timeseries::ilp;
 use crate::engine::timeseries::ilp_ingest;
@@ -28,7 +29,7 @@ use crate::types::TenantId;
 impl CoreLoop {
     /// The rows `lines` store in `collection`, each rendered by the raw-scan
     /// row emitter. `now_ms` is the ingest instant: the default timestamp of
-    /// an untimed line and the system time of a bitemporal row.
+    /// an untimed line.
     ///
     /// A `RETURNING` ingest takes every row or none, so a line the memtable
     /// would reject refuses the whole plan before anything is staged.
@@ -89,10 +90,13 @@ impl CoreLoop {
             Some((schema, config)) => {
                 let mut scratch = ColumnarMemtable::new(schema, config);
                 ilp_ingest::evolve_schema(&mut scratch, lines);
+                scratch.add_column(TS_SYSTEM.to_string(), ColumnType::Int64);
+                scratch.add_column(TS_SERIES.to_string(), ColumnType::Int64);
                 scratch
             }
             None => {
                 let mut schema = self.initial_ts_schema(task, tid, collection, lines);
+                ilp_ingest::ensure_system_column(&mut schema);
                 if bitemporal {
                     ilp_ingest::ensure_bitemporal_columns(&mut schema);
                 }
@@ -106,7 +110,13 @@ impl CoreLoop {
             catalog: &mut catalog,
             default_timestamp_ms: now_ms,
             lvc: None,
-            bitemporal: bitemporal.then_some(ilp_ingest::BitempStamps { system_ms: now_ms }),
+            // The scratch rows stamp the last ordinal of the statement
+            // instant. The apply restamps every row with the batch's
+            // ordinal (`ts_batch_ordinal`).
+            stamp: Some(ilp_ingest::RowStamp {
+                system_ordinal: nodedb_types::ms_to_ordinal_upper(now_ms),
+                bitemporal,
+            }),
             collect_row_indices: true,
         });
         (outcome, scratch)

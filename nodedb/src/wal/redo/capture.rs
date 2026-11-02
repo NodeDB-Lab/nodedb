@@ -103,11 +103,11 @@ pub enum CapturedEffect {
         value: Vec<u8>,
         /// `(sys_from, valid_from, valid_until)`: the system-time ordinal,
         /// then the valid-time bounds in milliseconds.
-        version: Option<(i64, i64, i64)>,
+        version: (i64, i64, i64),
     },
     Delete {
         /// The tombstone's system-time ordinal.
-        system_from: Option<i64>,
+        system_from: i64,
     },
     CancelForward,
     EdgePut(EdgePutRedo),
@@ -119,7 +119,11 @@ impl CapturedEntry {
         let effect = match &entry.effect {
             RowEffect::Put { value, version } => CapturedEffect::Put {
                 value: value.clone(),
-                version: version.map(|v| (v.sys_from, v.valid_from_ms, v.valid_until_ms)),
+                version: (
+                    version.sys_from,
+                    version.valid_from_ms,
+                    version.valid_until_ms,
+                ),
             },
             RowEffect::Delete { system_from } => CapturedEffect::Delete {
                 system_from: *system_from,
@@ -140,13 +144,16 @@ impl CapturedEntry {
 
     pub fn into_entry(self) -> WriteSetEntry {
         let effect = match self.effect {
-            CapturedEffect::Put { value, version } => RowEffect::Put {
+            CapturedEffect::Put {
                 value,
-                version: version.map(|(sys_from, valid_from_ms, valid_until_ms)| RowVersion {
+                version: (sys_from, valid_from_ms, valid_until_ms),
+            } => RowEffect::Put {
+                value,
+                version: RowVersion {
                     sys_from,
                     valid_from_ms,
                     valid_until_ms,
-                }),
+                },
             },
             CapturedEffect::Delete { system_from } => RowEffect::Delete { system_from },
             CapturedEffect::CancelForward => RowEffect::CancelForward,
@@ -195,10 +202,10 @@ mod tests {
     fn a_capture_round_trips_every_effect() {
         let identity = nodedb_types::RowIdentity::from_user_key("r1");
         let entries = vec![
-            WriteSetEntry::put(1, identity.clone(), b"v".to_vec())
-                .versioned(Some(RowVersion::open(40))),
-            WriteSetEntry::put(2, identity.clone(), b"w".to_vec())
+            WriteSetEntry::put(1, identity.clone(), b"v".to_vec(), RowVersion::open(40)),
+            WriteSetEntry::put(2, identity.clone(), b"w".to_vec(), RowVersion::open(41))
                 .in_collection("other".to_string()),
+            WriteSetEntry::delete(3, identity.clone(), 42),
             WriteSetEntry::cancel_forward(1, identity),
             WriteSetEntry::edge(EdgeImage::Delete(EdgeDeleteRedo {
                 collection: "g".into(),

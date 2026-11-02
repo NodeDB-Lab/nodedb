@@ -37,16 +37,23 @@ fn rewrite_system_time(
         return Ok(plan_scope);
     };
     // A plan cut at or before the clone's source time is the stricter cut,
-    // and a pinned cut keeps the statement's one read cut.
+    // and a pinned cut keeps the statement's one read cut. Both cuts compare
+    // as ordinals: `AsOf(ms)` reads at the last ordinal of `ms`.
+    let ceiling = nodedb_types::ms_to_ordinal_upper(ms);
     match plan_scope {
-        SystemTimeScope::AsOf(_) | SystemTimeScope::Pinned { .. }
-            if plan_scope.as_of_ms().is_some_and(|plan_ms| plan_ms <= ms) =>
+        SystemTimeScope::AsOf(_)
+        | SystemTimeScope::Pinned { .. }
+        | SystemTimeScope::TxnSnapshot { .. }
+            if plan_scope
+                .as_of_ordinal()
+                .is_some_and(|plan_ordinal| plan_ordinal <= ceiling) =>
         {
             Ok(plan_scope)
         }
         SystemTimeScope::Current
         | SystemTimeScope::AsOf(_)
         | SystemTimeScope::Pinned { .. }
+        | SystemTimeScope::TxnSnapshot { .. }
         | SystemTimeScope::AllVersions => Ok(SystemTimeScope::AsOf(ms)),
     }
 }
@@ -364,6 +371,7 @@ mod tests {
                     group_by: Vec::new(),
                     aggregates: Vec::new(),
                     filters: Vec::new(),
+                    system_time: nodedb_types::SystemTimeScope::Current,
                 }),
             ),
             (
@@ -374,6 +382,7 @@ mod tests {
                     group_by: Vec::new(),
                     aggregates: Vec::new(),
                     filters: Vec::new(),
+                    system_time: nodedb_types::SystemTimeScope::Current,
                 }),
             ),
             (
@@ -391,6 +400,7 @@ mod tests {
                     ann_options: nodedb_types::VectorAnnOptions::default(),
                     skip_payload_fetch: false,
                     payload_filters: Vec::new(),
+                    system_time: nodedb_types::SystemTimeScope::Current,
                 }),
             ),
             (
@@ -406,6 +416,7 @@ mod tests {
                     filters: Vec::new(),
                     rls_filters: Vec::new(),
                     scores: Vec::new(),
+                    system_time: nodedb_types::SystemTimeScope::Current,
                 }),
             ),
             (
@@ -422,6 +433,7 @@ mod tests {
                         alias: "score".to_string(),
                     }],
                     bound: None,
+                    system_time: nodedb_types::SystemTimeScope::Current,
                 }),
             ),
             (
@@ -441,6 +453,7 @@ mod tests {
                     filter_bitmap: None,
                     rls_filters: Vec::new(),
                     score_alias: None,
+                    system_time: nodedb_types::SystemTimeScope::Current,
                 }),
             ),
             (
@@ -463,6 +476,7 @@ mod tests {
                     filter_bitmap: None,
                     rls_filters: Vec::new(),
                     score_alias: None,
+                    system_time: nodedb_types::SystemTimeScope::Current,
                 }),
             ),
             (
@@ -580,5 +594,27 @@ mod tests {
         );
         assert_eq!(rewrite_system_time(None, pinned).unwrap(), pinned);
         assert!(rewrite_system_time(Some(50), SystemTimeScope::AllVersions).is_err());
+    }
+
+    /// A pinned cut inside the millisecond after the clone's source time
+    /// reads past the source time, so the source time caps it.
+    #[test]
+    fn a_pinned_cut_past_the_ceiling_ordinal_reads_at_the_ceiling() {
+        let pinned = SystemTimeScope::Pinned {
+            ordinal: nodedb_types::ms_to_ordinal_upper(100) + 5,
+            cut_marker: 0,
+        };
+        assert_eq!(
+            rewrite_system_time(Some(100), pinned).unwrap(),
+            SystemTimeScope::AsOf(100)
+        );
+        let at_ceiling = SystemTimeScope::Pinned {
+            ordinal: nodedb_types::ms_to_ordinal_upper(100),
+            cut_marker: 0,
+        };
+        assert_eq!(
+            rewrite_system_time(Some(100), at_ceiling).unwrap(),
+            at_ceiling
+        );
     }
 }

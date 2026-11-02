@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! CSRs of one collection at one bitemporal cut, for `AS OF` graph reads.
+//! CSRs of one collection, or of every collection of a tenant, at one
+//! bitemporal cut, for `AS OF` graph reads and transaction-snapshot reads.
 //!
 //! The live CSR holds only the current edges. A read at an earlier system
 //! time, or at a valid-time instant, walks a CSR built from the versioned
@@ -34,7 +35,9 @@ use crate::engine::graph::edge_store::EdgeStore;
 pub struct HistoricalCsrKey {
     pub db: DatabaseId,
     pub tid: TenantId,
-    pub collection: String,
+    /// The collection whose edges the CSR holds, or `None` for every
+    /// collection of the tenant.
+    pub collection: Option<String>,
     /// The system-time ordinal the CSR's edges are read at.
     pub cutoff_ordinal: i64,
     /// The valid-time instant every edge's valid time contains, or `None`.
@@ -110,22 +113,26 @@ impl HistoricalCsrCache {
         system_from: i64,
     ) {
         self.drop_where(|k| {
-            k.db == db
-                && k.tid == tid
-                && k.collection == collection
-                && k.cutoff_ordinal >= system_from
+            k.db == db && k.tid == tid && k.covers(collection) && k.cutoff_ordinal >= system_from
         });
     }
 
     /// Drop every CSR of `collection`.
     pub fn invalidate_collection(&mut self, db: DatabaseId, tid: TenantId, collection: &str) {
-        self.drop_where(|k| k.db == db && k.tid == tid && k.collection == collection);
+        self.drop_where(|k| k.db == db && k.tid == tid && k.covers(collection));
     }
 
     /// Drop every CSR of a `(database, tenant)`. Node labels are tenant-wide,
     /// so a node-label version drops the tenant's CSRs.
     pub fn invalidate_tenant(&mut self, db: DatabaseId, tid: TenantId) {
         self.drop_where(|k| k.db == db && k.tid == tid);
+    }
+
+    /// Drop every CSR whose cut is below `horizon`: a history purge at the
+    /// horizon removed versions it read. A CSR at or above the horizon reads
+    /// no removed version and stays.
+    pub fn drop_below(&mut self, horizon: i64) {
+        self.drop_where(|k| k.cutoff_ordinal < horizon);
     }
 
     /// Drop every CSR.
@@ -166,17 +173,39 @@ fn missing_after_build() -> crate::Error {
     }
 }
 
-/// Build the CSR of `key`: the collection's edges at the cut, each tagged
-/// with the collection, and every node's identity and labels at the cut.
+impl HistoricalCsrKey {
+    /// Whether this CSR holds edges of `collection`.
+    fn covers(&self, collection: &str) -> bool {
+        self.collection
+            .as_deref()
+            .is_none_or(|own| own == collection)
+    }
+
+    /// The CSR's collection for an error message: `*` for every collection.
+    pub fn collection_label(&self) -> &str {
+        self.collection.as_deref().unwrap_or("*")
+    }
+}
+
+/// Build the CSR of `key`: the edges at the cut, each tagged with its
+/// collection, and every node's identity and labels at the cut.
 fn build(key: &HistoricalCsrKey, source: &HistoricalCsrSource<'_>) -> crate::Result<CsrIndex> {
-    let edges = source.store.scan_collection_as_of(
-        key.db.as_u64(),
-        key.tid,
-        &key.collection,
-        None,
-        key.cutoff_ordinal,
-        key.valid_at_ms,
-    )?;
+    let edges = match key.collection.as_deref() {
+        Some(collection) => source.store.scan_collection_as_of(
+            key.db.as_u64(),
+            key.tid,
+            collection,
+            None,
+            key.cutoff_ordinal,
+            key.valid_at_ms,
+        )?,
+        None => source.store.scan_tenant_as_of(
+            key.db.as_u64(),
+            key.tid,
+            key.cutoff_ordinal,
+            key.valid_at_ms,
+        )?,
+    };
     let labels = source
         .store
         .node_labels_at(key.db, key.tid, key.cutoff_ordinal)?;
@@ -199,7 +228,7 @@ fn build(key: &HistoricalCsrKey, source: &HistoricalCsrSource<'_>) -> crate::Res
             &edge.src,
             &edge.label,
             &edge.dst,
-            &key.collection,
+            &edge.collection,
             &edge.properties,
         )?;
     }
@@ -221,7 +250,8 @@ fn build(key: &HistoricalCsrKey, source: &HistoricalCsrSource<'_>) -> crate::Res
                     detail: format!(
                         "historical CSR of '{}' at ordinal {}: node '{node}' label '{label}' \
                          exceeds the distinct node-label limit",
-                        key.collection, key.cutoff_ordinal
+                        key.collection_label(),
+                        key.cutoff_ordinal
                     ),
                 });
             }
@@ -276,7 +306,7 @@ mod tests {
         HistoricalCsrKey {
             db: DB,
             tid: T,
-            collection: "g".into(),
+            collection: Some("g".into()),
             cutoff_ordinal,
             valid_at_ms: None,
         }
@@ -446,5 +476,21 @@ mod tests {
             .get_or_build(key(150), source(&f, 1_000, 0))
             .expect("build");
         assert!(cache.is_empty());
+    }
+
+    /// A purge at a horizon drops the CSRs below it and keeps the rest.
+    #[test]
+    fn a_purge_drops_only_the_csrs_below_its_horizon() {
+        let f = fixture();
+        let mut cache = HistoricalCsrCache::default();
+        for cut in [110, 150, 250] {
+            cache
+                .get_or_build(key(cut), source(&f, 1_000, 4))
+                .expect("build");
+        }
+        cache.drop_below(150);
+        assert!(cache.get(&key(110)).is_none());
+        assert!(cache.get(&key(150)).is_some(), "a CSR at the horizon stays");
+        assert!(cache.get(&key(250)).is_some());
     }
 }

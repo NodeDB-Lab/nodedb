@@ -143,8 +143,8 @@ impl CoreLoop {
             });
         }
 
-        // Advance the collection floor for this committed columnar write, exactly
-        // as `execute_columnar_insert` does.
+        // Note this committed columnar write, exactly as
+        // `execute_columnar_insert` does.
         //
         // The columnar checkpoint stamps its generation with the core watermark
         // and that stamp becomes the replay floor, so the watermark must mean
@@ -266,7 +266,7 @@ impl CoreLoop {
             log.push(outcome.undo_entry(key));
         }
 
-        // Advance the collection floor for this committed columnar write. DELETE
+        // Note this committed columnar write. DELETE
         // replays idempotently, so unlike UPDATE it is not the record whose
         // double-application corrupts — but the watermark is a single claim
         // across all columnar records, and a delete left unstamped understates

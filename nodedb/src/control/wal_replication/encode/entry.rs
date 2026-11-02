@@ -197,6 +197,7 @@ mod tests {
                     rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                     resolved_sum_targets: Vec::new(),
                     declared_primary_key: None,
+                    target_system_time: nodedb_types::SystemTimeScope::Current,
                 }),
             ),
             (
@@ -215,6 +216,7 @@ mod tests {
                     rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
                     resolved_sum_targets: Vec::new(),
                     declared_primary_key: None,
+                    target_system_time: nodedb_types::SystemTimeScope::Current,
                 }),
             ),
             (

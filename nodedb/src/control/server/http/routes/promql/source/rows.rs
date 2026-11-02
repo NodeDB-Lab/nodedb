@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 use std::io::Cursor;
 
-use nodedb_types::columnar::schema::{TS_SYSTEM, TS_VALID_FROM, TS_VALID_UNTIL};
+use nodedb_types::columnar::schema::{TS_SERIES, TS_SYSTEM, TS_VALID_FROM, TS_VALID_UNTIL};
 
 use crate::control::promql::LabelMatcher;
 use crate::control::promql::label::matches_all;
@@ -86,7 +86,11 @@ pub(crate) fn group_rows(
                     })?);
             } else if column == VALUE_COLUMN {
                 value = cell_f64(&cell).map_err(|detail| codec(&metric.name, detail))?;
-            } else if column == TS_SYSTEM || column == TS_VALID_FROM || column == TS_VALID_UNTIL {
+            } else if column == TS_SYSTEM
+                || column == TS_SERIES
+                || column == TS_VALID_FROM
+                || column == TS_VALID_UNTIL
+            {
                 continue;
             } else if let Some(text) = cell.as_str()
                 && !text.is_empty()

@@ -45,7 +45,7 @@ impl SyncSession {
     /// (`!lite_id.is_empty() && epoch > 0`) and a registry is available via
     /// `shared`.  Returns `None` when:
     ///
-    /// * The msg is not a Lite handshake (non-Lite / legacy client).
+    /// * The msg is not a Lite handshake (no Lite identity).
     /// * No `SharedState` is present (unit-test path) — handshake proceeds
     ///   with no fencing.
     /// * `shared` has no `producer_registry` — handshake proceeds with no fencing.

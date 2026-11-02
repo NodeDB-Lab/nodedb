@@ -147,10 +147,18 @@ pub enum SequencerEntry {
     /// Each group's leader then proposes the barrier once its schedulers
     /// passed the marker, and holds the redo of every later transaction
     /// until it applied the barrier. `None` for a cut with no barrier.
+    ///
+    /// `floor` is a system-time ordinal the marker's cut must cover: the
+    /// clock part of a read cut that closes through the marker. Applying
+    /// the marker raises the applied epoch instant to the millisecond of
+    /// `floor`. Every epoch the log holds after the marker carries a later
+    /// instant, so no Calvin version lands at or below a cut a reader
+    /// closed. `0` for a marker that carries no floor.
     CutMarker {
         hlc: u64,
         restore_point: u64,
         barrier: Option<crate::calvin::types::CutBarrierWire>,
+        floor: i64,
     },
     /// The first entry of a sequencer log a cluster restore rebuilt. It sets
     /// the next epoch the sequencer proposes to `next_epoch`, the epoch that

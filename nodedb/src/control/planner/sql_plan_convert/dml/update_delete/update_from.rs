@@ -101,6 +101,9 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_update_from(
             // recon-scans the target rows this join matches.
             resolved_sum_targets: Vec::new(),
             declared_primary_key,
+            // The statement cut pass pins it to the block's snapshot inside
+            // a transaction block.
+            target_system_time: nodedb_types::SystemTimeScope::Current,
         }),
         post_set_op: PostSetOp::None,
         txn_id: None,

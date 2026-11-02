@@ -347,6 +347,7 @@ mod tests {
             key: vec![],
             rls_filters: vec![],
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         let routes = route_plan(
             plan,
@@ -401,6 +402,7 @@ mod tests {
             key: vec![],
             rls_filters: vec![],
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         let routes = route_plan(
             plan,
@@ -510,6 +512,7 @@ mod tests {
                     key: vec![],
                     rls_filters: vec![],
                     surrogate_ceiling: None,
+                    system_time: nodedb_types::SystemTimeScope::Current,
                 })),
             }),
             PhysicalPlan::Meta(MetaOp::MarkSavepoint {
@@ -534,6 +537,8 @@ mod tests {
                 collections: vec![],
                 sum_targets: vec![],
                 origin: nodedb_physical::physical_plan::RedoOrigin::Commit,
+                reads: Vec::new(),
+                snapshot_ordinal: None,
                 calvin: None,
             }),
         ] {

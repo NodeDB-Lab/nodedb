@@ -209,16 +209,16 @@ pub async fn run_archive_cycle(
     let mut archived = 0;
 
     // Collect candidates (sealed or merged, older than cutoff).
-    let candidates: Vec<(i64, String)> = registry
+    let candidates: Vec<(super::partition_registry::PartitionKey, String)> = registry
         .iter()
         .filter(|(_, e)| {
             (e.meta.state == PartitionState::Sealed || e.meta.state == PartitionState::Merged)
                 && e.meta.max_ts < cutoff
         })
-        .map(|(&start, e)| (start, e.dir_name.clone()))
+        .map(|(partition_key, e)| (partition_key.clone(), e.dir_name.clone()))
         .collect();
 
-    for (start_ts, dir_name) in candidates {
+    for (partition_key, dir_name) in candidates {
         let partition_dir = base_dir.join(&dir_name);
         if !partition_dir.exists() {
             continue;
@@ -233,7 +233,7 @@ pub async fn run_archive_cycle(
                     "partition archived to S3"
                 );
                 // Mark as archived in registry.
-                if let Some(entry) = registry.get_mut(start_ts) {
+                if let Some(entry) = registry.get_mut(&partition_key) {
                     entry.meta.state = PartitionState::Archived;
                 }
                 archived += 1;

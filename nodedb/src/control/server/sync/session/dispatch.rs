@@ -295,17 +295,18 @@ mod tests {
             AuthenticatedIdentity::default_database_set(false),
         ));
 
+        let delta = nodedb_types::json_to_msgpack(&serde_json::json!({"status": "active"}))
+            .expect("encode delta");
         let msg = DeltaPushMsg {
             collection: "orders".into(),
             document_id: "o1".into(),
-            delta: nodedb_types::json_to_msgpack(&serde_json::json!({"status": "active"}))
-                .expect("encode delta"),
+            checksum: crc32c::crc32c(&delta),
+            delta,
             peer_id: 1,
             mutation_id: 77,
             device_id: 0,
             delta_signature: [0; 32],
             collection_incarnation: nodedb_types::Hlc::ZERO,
-            checksum: 0,
             device_valid_time_ms: None,
             producer_id: 0,
             epoch: 0,

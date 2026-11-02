@@ -85,6 +85,7 @@ pub fn start_group_log(path: &Path, start: &GroupLogStart<'_>) -> crate::Result<
     storage.save_hard_state(&HardState {
         current_term: start.current_term,
         voted_for: 0,
+        ordinal_floor: 0,
     })?;
     storage.save_applied_index(start.snapshot_index)?;
     Ok(())

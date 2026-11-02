@@ -37,9 +37,6 @@ pub struct CrdtApplyAdmissionRequest<'a> {
 
 pub struct CrdtAdmissionOutcome {
     pub payload: Vec<u8>,
-    /// The versions the apply stamped: the entry's log position on the
-    /// written vShard.
-    pub write_versions: crate::types::ReadVersions,
     /// Operations the admitted delta encoded that the target document already
     /// knew, measured by the preview that fenced this apply. Distinguishes a
     /// client whose writes land from one whose writes are being absorbed —

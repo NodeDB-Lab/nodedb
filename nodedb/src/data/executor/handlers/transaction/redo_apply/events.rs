@@ -42,7 +42,7 @@ use super::sub_ops::{RedoKvOp, RedoLabelOp};
 
 /// One KV key a redo record writes, with the value it held before.
 pub(super) struct KvPriorImage {
-    collection: String,
+    pub(super) collection: String,
     key: Vec<u8>,
     /// `Some` for a put, `None` for a delete.
     new_value: Option<Vec<u8>>,
@@ -185,6 +185,7 @@ impl CoreLoop {
         let document_source = record_source.committed_row_source();
         let deferred: Vec<DeferredWrite> = doc_writes
             .into_iter()
+            .filter(|write| write.emits_event)
             .map(|write| {
                 let id = write.identity.as_str();
                 let new_value = write.new_body.as_deref().map(|body| {

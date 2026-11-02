@@ -50,8 +50,11 @@ impl CoreLoop {
                     Ok(None) => {
                         let key = StorageKey::for_surrogate(*surrogate);
                         let deleted = self
-                            .sparse
-                            .delete(database_id, tid, collection, &key)
+                            .row_version_ordinal(database_id, tid, collection, &key)
+                            .and_then(|sys_from| {
+                                self.sparse
+                                    .delete(database_id, tid, collection, &key, sys_from)
+                            })
                             .map(|_| ())
                             .map_err(ErrorCode::from);
                         if deleted.is_ok() {

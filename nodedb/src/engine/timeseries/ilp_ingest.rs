@@ -13,15 +13,23 @@ use super::ilp::{FieldValue, IlpLine};
 use nodedb_types::columnar::schema::{TS_SYSTEM, TS_VALID_FROM, TS_VALID_UNTIL};
 use nodedb_types::timeseries::{IngestResult, SeriesCatalog, SeriesKey};
 
-pub use super::ilp_schema::{ensure_bitemporal_columns, evolve_schema, infer_schema, new_columns};
+pub use super::ilp_schema::{
+    ensure_bitemporal_columns, ensure_system_column, evolve_schema, infer_schema, new_columns,
+};
 
-/// Bitemporal stamps applied per-row on ingest. `system_ms` is always
-/// engine-assigned (client-supplied values are ignored); the valid-time
-/// pair is client-provided (via `_ts_valid_from` / `_ts_valid_until`
-/// fields in the line's field set) or defaults to the open interval.
+/// The system-time stamp every row of one ingest batch stores.
+///
+/// `system_ordinal` fills `_ts_system` and is always engine-assigned: a
+/// client-supplied value is ignored. On a bitemporal collection the
+/// valid-time pair comes from the line's `_ts_valid_from` /
+/// `_ts_valid_until` fields, or defaults to the open interval.
 #[derive(Clone, Copy)]
-pub struct BitempStamps {
-    pub system_ms: i64,
+pub struct RowStamp {
+    /// The system-time ordinal of the batch.
+    pub system_ordinal: i64,
+    /// Whether the collection is `bitemporal=true`, so the valid-time
+    /// columns take their open-interval defaults.
+    pub bitemporal: bool,
 }
 
 /// What an ILP batch ingest produced.
@@ -53,7 +61,9 @@ pub struct IngestBatchArgs<'a, 'l> {
     pub catalog: &'a mut SeriesCatalog,
     pub default_timestamp_ms: i64,
     pub lvc: Option<&'a mut super::last_value_cache::LastValueCache>,
-    pub bitemporal: Option<BitempStamps>,
+    /// The batch's system-time stamp. `None` stores `_ts_system` from the
+    /// line's own fields, as any other column.
+    pub stamp: Option<RowStamp>,
     /// Record where each accepted row landed, so the caller can read those
     /// exact rows back through the ordinary scan projection.
     pub collect_row_indices: bool,
@@ -77,7 +87,7 @@ pub fn ingest_batch(
         catalog,
         default_timestamp_ms,
         lvc: None,
-        bitemporal: None,
+        stamp: None,
         collect_row_indices: false,
     });
     (outcome.accepted, outcome.rejected)
@@ -85,10 +95,10 @@ pub fn ingest_batch(
 
 /// Ingest a batch of ILP lines with optional last-value cache update.
 ///
-/// When `bitemporal` is `Some`, rows are stamped with the provided
-/// `system_ms` for the `_ts_system` reserved column. `_ts_valid_from` /
-/// `_ts_valid_until` are pulled from the line's field set when present,
-/// defaulting to the open interval `[i64::MIN, i64::MAX)`.
+/// When `stamp` is `Some`, every row stores its `system_ordinal` in the
+/// `_ts_system` column. On a bitemporal stamp `_ts_valid_from` /
+/// `_ts_valid_until` come from the line's field set when present, and
+/// default to the open interval `[i64::MIN, i64::MAX)`.
 pub fn ingest_batch_with_lvc(args: IngestBatchArgs<'_, '_>) -> IngestBatchOutcome {
     let IngestBatchArgs {
         memtable,
@@ -96,7 +106,7 @@ pub fn ingest_batch_with_lvc(args: IngestBatchArgs<'_, '_>) -> IngestBatchOutcom
         catalog,
         default_timestamp_ms,
         mut lvc,
-        bitemporal,
+        stamp,
         collect_row_indices,
     } = args;
     let schema = memtable.schema().clone();
@@ -115,9 +125,9 @@ pub fn ingest_batch_with_lvc(args: IngestBatchArgs<'_, '_>) -> IngestBatchOutcom
             first_rejection.get_or_insert(conflict);
             continue;
         }
-        let key = line_series_key(line);
+        let (ts_ms, values) = line_row(&schema, line, default_timestamp_ms, stamp);
+        let key = row_series_key(line.measurement.as_ref(), &schema, &values);
         let series_id = resolve_series(catalog, &key);
-        let (ts_ms, values) = line_row(&schema, line, default_timestamp_ms, bitemporal);
 
         // `ingest_row` appends at the tail of every column and rolls the
         // partial row back on error, so the row this call lands at is exactly
@@ -138,7 +148,7 @@ pub fn ingest_batch_with_lvc(args: IngestBatchArgs<'_, '_>) -> IngestBatchOutcom
                     accepted_line_indices.push(line_index);
                 }
                 if let Some(ref mut cache) = lvc {
-                    update_last_value(cache, series_id, ts_ms, &values);
+                    update_last_value(cache, &schema, series_id, ts_ms, &values);
                 }
             }
             Err(error) => {
@@ -166,8 +176,8 @@ pub fn ingest_batch_with_lvc(args: IngestBatchArgs<'_, '_>) -> IngestBatchOutcom
 ///
 /// - A numeric column (`Float64`, `Int64`) takes a numeric or boolean field.
 ///   A string field or a tag conflicts.
-/// - A `Symbol` column takes a tag or a string field. A numeric or boolean
-///   field conflicts.
+/// - A `Symbol` or `Text` column takes a tag or a string field, stored as
+///   the column's type. A numeric or boolean field conflicts.
 /// - A `Timestamp` column takes a numeric field or a datetime string.
 /// - An `Int64` or `Timestamp` column refuses an unsigned field past
 ///   `i64::MAX`.
@@ -207,7 +217,7 @@ pub fn line_type_conflict(
         }
         let fits = match column_type {
             ColumnType::Float64 | ColumnType::Int64 => !matches!(value, FieldValue::Str(_)),
-            ColumnType::Symbol => matches!(value, FieldValue::Str(_)),
+            ColumnType::Symbol | ColumnType::Text => matches!(value, FieldValue::Str(_)),
             ColumnType::Timestamp(_) => true,
         };
         if !fits {
@@ -232,14 +242,44 @@ fn field_kind(value: &FieldValue<'_>) -> &'static str {
     }
 }
 
-/// The series key of `line`: its measurement and tags.
-pub fn line_series_key(line: &IlpLine<'_>) -> SeriesKey {
-    let tags: Vec<(String, String)> = line
-        .tags
+/// The series key of a stored row: its measurement's bare collection name
+/// and every non-NULL `Symbol` cell it stores, as `(column, value)`.
+///
+/// The measurement is the routed collection, qualified by its database.
+/// A series catalog belongs to one collection, so the key names the bare
+/// collection: a row moved or restored into another database keeps the
+/// series its catalog names.
+///
+/// The column type decides, never how a writer spelled the value. A
+/// `Symbol` column holds an ILP tag and an ILP string field alike, and a
+/// SQL, JSON or msgpack row carries no tag set at all. A key taken from the
+/// line's tag set would split one collection's rows into different series
+/// by protocol. A row read back and written again (a restore, a clone copy)
+/// also gets the key it had. A `Text` cell is a field and names no tag, so
+/// a high-cardinality string never mints a series.
+///
+/// `values` are the row's cells in `schema` order, as `line_row` and the
+/// resolved ingest build them.
+pub fn row_series_key(
+    measurement: &str,
+    schema: &super::columnar_memtable::ColumnarSchema,
+    values: &[ColumnValue],
+) -> SeriesKey {
+    let tags: Vec<(String, String)> = schema
+        .columns
         .iter()
-        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .zip(values)
+        .filter_map(|((name, column_type), value)| match (column_type, value) {
+            (super::columnar_memtable::ColumnType::Symbol, ColumnValue::Symbol(text)) => {
+                Some((name.clone(), text.clone()))
+            }
+            _ => None,
+        })
         .collect();
-    SeriesKey::new(line.measurement.as_ref(), tags)
+    SeriesKey::new(
+        nodedb_types::QualifiedCollection::bare_of_stored(measurement),
+        tags,
+    )
 }
 
 /// The series ID of `key`, resolved through `catalog`.
@@ -264,9 +304,14 @@ pub fn resolve_series(
     resolved.id
 }
 
-/// Record a stored row in the last-value cache: its first Float64 value.
+/// Record a stored row in the last-value cache: its first Float64 value
+/// that is not NaN (`0.0` when none), at the system-time ordinal its
+/// `_ts_system` cell holds (`0` without one). A float column stores SQL
+/// NULL as NaN, so a stored row reads back the same value
+/// ([`super::last_value_cache::row_last_value`]).
 pub fn update_last_value(
     cache: &mut super::last_value_cache::LastValueCache,
+    schema: &super::columnar_memtable::ColumnarSchema,
     series_id: nodedb_types::timeseries::SeriesId,
     ts_ms: i64,
     values: &[ColumnValue],
@@ -274,11 +319,15 @@ pub fn update_last_value(
     let value = values
         .iter()
         .find_map(|v| match v {
-            ColumnValue::Float64(f) => Some(*f),
+            ColumnValue::Float64(f) if !f.is_nan() => Some(*f),
             _ => None,
         })
         .unwrap_or(0.0);
-    cache.update(series_id, ts_ms, value);
+    let ordinal = match schema.ts_system_idx().and_then(|idx| values.get(idx)) {
+        Some(ColumnValue::Int64(ordinal)) => *ordinal,
+        _ => 0,
+    };
+    cache.update(series_id, ts_ms, value, ordinal);
 }
 
 /// The timestamp and the column values `line` stores under `schema`, in
@@ -287,7 +336,7 @@ pub fn line_row(
     schema: &super::columnar_memtable::ColumnarSchema,
     line: &IlpLine<'_>,
     default_timestamp_ms: i64,
-    bitemporal: Option<BitempStamps>,
+    stamp: Option<RowStamp>,
 ) -> (i64, Vec<ColumnValue>) {
     let ts_ms = line
         .timestamp_ns
@@ -309,7 +358,7 @@ pub fn line_row(
                         col_name,
                     )));
                 }
-                ColumnType::Symbol => {
+                ColumnType::Symbol | ColumnType::Text => {
                     // Look up tag value first (tags are borrowed &str), then
                     // string field value (now an owned String after ILP
                     // unescape). A line that names neither stores NULL, never
@@ -327,12 +376,12 @@ pub fn line_row(
                     values.push(ColumnValue::Float64(val));
                 }
                 ColumnType::Int64 => {
-                    let val = match (bitemporal, col_name.as_str()) {
-                        (Some(b), TS_SYSTEM) => b.system_ms,
-                        (Some(_), TS_VALID_FROM) => {
+                    let val = match (stamp, col_name.as_str()) {
+                        (Some(s), TS_SYSTEM) => s.system_ordinal,
+                        (Some(s), TS_VALID_FROM) if s.bitemporal => {
                             find_field_i64_opt(&line.fields, col_name).unwrap_or(i64::MIN)
                         }
-                        (Some(_), TS_VALID_UNTIL) => {
+                        (Some(s), TS_VALID_UNTIL) if s.bitemporal => {
                             find_field_i64_opt(&line.fields, col_name).unwrap_or(i64::MAX)
                         }
                         _ => find_field_i64(&line.fields, col_name),
@@ -417,6 +466,12 @@ fn find_field_i64<'a>(fields: &[(Cow<'a, str>, FieldValue<'a>)], name: &str) -> 
     find_field_i64_opt(fields, name).unwrap_or(0)
 }
 
+/// The `_ts_system` ordinal `line` carries, as a clone copy's line carries
+/// its source version's ordinal. `None` when the line names none.
+pub fn line_system_ordinal(line: &IlpLine<'_>) -> Option<i64> {
+    find_field_i64_opt(&line.fields, TS_SYSTEM)
+}
+
 fn find_field_i64_opt<'a>(fields: &[(Cow<'a, str>, FieldValue<'a>)], name: &str) -> Option<i64> {
     for (key, value) in fields {
         if key.as_ref() == name {
@@ -452,6 +507,33 @@ mod tests {
             hard_memory_limit: 20 * 1024 * 1024,
             max_tag_cardinality: 10_000,
         }
+    }
+
+    /// One row keys one series in every database: a series catalog belongs
+    /// to its collection, so a moved or restored row keeps its series.
+    #[test]
+    fn a_row_keys_the_same_series_in_every_database() {
+        let schema = super::super::columnar_memtable::ColumnarSchema {
+            columns: vec![
+                ("ts".into(), ColumnType::Timestamp(TimeKind::Millis)),
+                ("host".into(), ColumnType::Symbol),
+                ("v".into(), ColumnType::Float64),
+            ],
+            timestamp_idx: 0,
+            codecs: Vec::new(),
+        };
+        let values = [
+            ColumnValue::Timestamp(1_000),
+            ColumnValue::Symbol("a".into()),
+            ColumnValue::Float64(1.0),
+        ];
+        let in_default = row_series_key("cpu", &schema, &values);
+        assert_eq!(in_default, row_series_key("1024/cpu", &schema, &values));
+        assert_eq!(in_default, row_series_key("1025/cpu", &schema, &values));
+        assert_eq!(
+            in_default,
+            nodedb_types::timeseries::SeriesKey::new("cpu", vec![("host".into(), "a".into())])
+        );
     }
 
     #[test]
@@ -497,6 +579,35 @@ mod tests {
         assert_eq!(ingest_batch(&mut mt, &lines, &mut catalog, 0), (1, 1));
     }
 
+    /// A plain collection's batch stores its ordinal in `_ts_system` and
+    /// leaves every other column to the line, so no valid-time default
+    /// appears.
+    #[test]
+    fn a_plain_batch_stamps_only_the_system_column() {
+        let lines = parse_batch("temp,sensor=s1 reading=22.5 1500000000000000")
+            .expect("valid ILP batch")
+            .into_lines();
+        let mut schema = infer_schema(&lines);
+        super::super::ilp_schema::ensure_system_column(&mut schema);
+        super::super::ilp_schema::ensure_system_column(&mut schema);
+        assert_eq!(
+            schema
+                .columns
+                .iter()
+                .filter(|(n, _)| n == "_ts_system")
+                .count(),
+            1,
+            "the system column is added once"
+        );
+        let sys_idx = schema.ts_system_idx().expect("system column");
+        let stamp = Some(RowStamp {
+            system_ordinal: 7_000_000_123,
+            bitemporal: false,
+        });
+        let (_, values) = line_row(&schema, &lines[0], 0, stamp);
+        assert_eq!(values[sys_idx], ColumnValue::Int64(7_000_000_123));
+    }
+
     #[test]
     fn bitemporal_ingest_stamps_reserved_columns() {
         // Late-arriving IoT backfill: an ILP line with a user-provided
@@ -524,14 +635,17 @@ mod tests {
 
         let mut mt = ColumnarMemtable::new(schema, default_config());
         let mut catalog = SeriesCatalog::new();
-        let stamps = Some(BitempStamps { system_ms: 5_000 });
+        let stamps = Some(RowStamp {
+            system_ordinal: 5_000,
+            bitemporal: true,
+        });
         let outcome = ingest_batch_with_lvc(IngestBatchArgs {
             memtable: &mut mt,
             lines: &lines,
             catalog: &mut catalog,
             default_timestamp_ms: 0,
             lvc: None,
-            bitemporal: stamps,
+            stamp: stamps,
             collect_row_indices: true,
         });
         assert_eq!((outcome.accepted, outcome.rejected), (1, 0));
@@ -662,15 +776,17 @@ mod tests {
     }
 
     #[test]
-    fn string_fields_stored_as_symbol() {
+    fn string_fields_stored_as_text() {
         let input =
-            r#"dns,client=10.0.0.1 qname="bigquery.googleapis.com",elapsed_ms=12.5 1000000000"#;
+            r#"dns,client=10.0.0.1 qname="bigquery.googleapis.com",elapsed_ms=12.5 1000000000"#; // gitleaks:allow
         let lines = parse_batch(input).expect("valid ILP batch").into_lines();
         let schema = infer_schema(&lines);
 
-        // qname should be Symbol, not Float64.
+        // qname is a text field: not Float64, and not a Symbol dimension.
         let qname_col = schema.columns.iter().find(|(n, _)| n == "qname").unwrap();
-        assert_eq!(qname_col.1, ColumnType::Symbol);
+        assert_eq!(qname_col.1, ColumnType::Text);
+        let client_col = schema.columns.iter().find(|(n, _)| n == "client").unwrap();
+        assert_eq!(client_col.1, ColumnType::Symbol);
 
         // Ingest and verify the string value is recoverable.
         let mut mt = ColumnarMemtable::new(schema.clone(), default_config());
@@ -692,6 +808,38 @@ mod tests {
         } else {
             panic!("expected Symbol column data for qname");
         }
+    }
+
+    /// A string field is not a series dimension. A thousand distinct field
+    /// values over one tag value give one series, and the field column is
+    /// not held to the tag cardinality cap.
+    #[test]
+    fn distinct_string_field_values_share_one_series() {
+        let input: String = (0..1000)
+            .map(|i| {
+                let ts_ns = 1_000_000 * (i + 1);
+                format!("log,host=a msg=\"request {i}\",value={i}i {ts_ns}\n")
+            })
+            .collect();
+        let lines = parse_batch(&input).expect("valid ILP batch").into_lines();
+        let schema = infer_schema(&lines);
+        let msg_col = schema.columns.iter().find(|(n, _)| n == "msg").unwrap();
+        assert_eq!(msg_col.1, ColumnType::Text);
+
+        let mut mt = ColumnarMemtable::new(
+            schema,
+            ColumnarMemtableConfig {
+                max_memory_bytes: 10 * 1024 * 1024,
+                hard_memory_limit: 20 * 1024 * 1024,
+                max_tag_cardinality: 10,
+            },
+        );
+        let mut catalog = SeriesCatalog::new();
+        ingest_batch(&mut mt, &lines, &mut catalog, 0);
+
+        assert_eq!(mt.row_count(), 1000, "no row hits the tag cap");
+        assert_eq!(mt.series_count(), 1, "one tag value is one series");
+        assert_eq!(catalog.entries().count(), 1, "the catalog holds one series");
     }
 
     /// A rejected row reports WHY, not just that it happened.
@@ -724,7 +872,7 @@ mod tests {
             catalog: &mut catalog,
             default_timestamp_ms: 0,
             lvc: None,
-            bitemporal: None,
+            stamp: None,
             collect_row_indices: true,
         });
 

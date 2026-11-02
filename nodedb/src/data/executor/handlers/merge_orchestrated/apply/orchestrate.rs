@@ -62,11 +62,6 @@ impl CoreLoop {
         let surrogate_for: HashMap<&str, u32> =
             resolved.iter().map(|(k, s)| (k.as_str(), *s)).collect();
 
-        // Whether the target maintains a secondary vector index. Gated ONCE here
-        // (the schemaless half scans `vector_params` unindexed) and threaded into
-        // the per-row UPDATE re-index below.
-        let has_vectors = self.collection_has_vectors(database_id, tid, params.target_collection);
-
         // Gate every arm on the target's write policy BEFORE the apply
         // transaction opens, so a rejected row leaves nothing written and
         // nothing to unwind.
@@ -171,7 +166,6 @@ impl CoreLoop {
                 database_id,
                 tid,
                 collection: params.target_collection,
-                has_vectors,
                 returning: params.returning.is_some(),
                 resolved_sum_targets: params.resolved_sum_targets,
                 declared_primary_key: params.declared_primary_key,

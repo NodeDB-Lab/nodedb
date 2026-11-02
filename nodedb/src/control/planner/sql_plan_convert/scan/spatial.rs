@@ -24,6 +24,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_spatial_scan(
         projection,
         tenant_id,
         database_id,
+        system_time,
     } = p;
     let collection_key = nodedb_types::CollectionKey::from_bare(database_id, collection);
     let qualified_collection = nodedb_types::QualifiedCollection::new(database_id, collection);
@@ -52,6 +53,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_spatial_scan(
             projection: proj_names,
             rls_filters: Vec::new(),
             prefilter: None,
+            system_time,
         }),
         post_set_op: PostSetOp::None,
         txn_id: None,

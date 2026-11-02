@@ -122,6 +122,7 @@ mod tests {
             rls_filters: Vec::new(),
             scores: Vec::new(),
             bound: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         assert!(inject(&mut plan, &store).is_ok());
         assert!(
@@ -143,6 +144,7 @@ mod tests {
             filters: Vec::new(),
             rls_filters: Vec::new(),
             scores: Vec::new(),
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         assert!(inject(&mut plan, &store).is_ok());
         assert!(
@@ -166,6 +168,7 @@ mod tests {
             filters: Vec::new(),
             rls_filters: Vec::new(),
             scores: Vec::new(),
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         assert!(inject(&mut plan, &store).is_ok());
         assert!(
@@ -198,6 +201,7 @@ mod tests {
             filters: Vec::new(),
             rls_filters: own_bytes,
             scores: Vec::new(),
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         assert!(inject(&mut plan, &store).is_ok());
         let merged: Vec<nodedb_query::scan_filter::ScanFilter> =

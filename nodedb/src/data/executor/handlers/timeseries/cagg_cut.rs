@@ -97,6 +97,11 @@ impl CoreLoop {
         {
             return Ok(());
         }
+        // The cut changes the aggregate's buckets at its own ordinal. A
+        // snapshot read below it refuses: the buckets it saw are gone.
+        let ordinal = self.ts_batch_ordinal(super::TimeseriesApplyMode::Immediate, now_ms);
+        self.continuous_agg_mgr
+            .note_rewritten(db, tid, root, &cut.aggregate, ordinal);
         // The image holds the cut before the apply answers, so the group's
         // applied index never passes a cut a restart would not find.
         if let Err(e) = self.persist_cagg_image(db, tid, root) {

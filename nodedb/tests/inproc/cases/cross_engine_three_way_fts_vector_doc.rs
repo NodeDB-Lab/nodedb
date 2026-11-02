@@ -79,7 +79,7 @@ fn make_req(plan: PhysicalPlan) -> Request {
         wal_lsn: None,
         resolved_now_ms: None,
         commit_hlc: None,
-        entry_version: None,
+        system_ordinal: None,
         admission: nodedb::bridge::envelope::Admission::Admitted,
     }
 }
@@ -282,6 +282,7 @@ fn three_way_fts_vector_doc_bitmap() {
             filters: Vec::new(),
             rls_filters: Vec::new(),
             scores: Vec::new(),
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
 
@@ -340,6 +341,7 @@ fn three_way_fts_vector_doc_bitmap() {
             skip_payload_fetch: false,
             payload_filters: Vec::new(),
             metric: DistanceMetric::L2,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
     let vec_surs = extract_vector_surrogates(&vec_filtered);

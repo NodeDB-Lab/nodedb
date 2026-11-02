@@ -117,8 +117,6 @@ pub fn replay_surrogate_records(
             // ChangePosition only names a replicated log position.
             | RecordType::ChangePosition
             | RecordType::RestorePoint
-            // A node cascade tombstones edges and binds no surrogate.
-            | RecordType::GraphNodeCascade
             // An edge cut hides edge versions and binds no surrogate.
             | RecordType::GraphEdgeCut
             // A snapshot install marker names a group, not a surrogate.

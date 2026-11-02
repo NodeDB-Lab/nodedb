@@ -59,10 +59,15 @@ pub(crate) enum WalDurability {
     /// write's outcome: it cancels the records on a refusal that applied
     /// nothing, and on a Calvin route that applies the write from its own
     /// records.
+    ///
+    /// `system_ordinal` is the system-time ordinal the supplied records
+    /// carry, `None` when they carry none. The apply stamps it, so it writes
+    /// the versions a replay of those records writes.
     CallerSupplied {
         wal_lsn: Option<Lsn>,
         resolved_now_ms: Option<u64>,
         minted: Option<MintedRecords>,
+        system_ordinal: Option<i64>,
     },
 }
 

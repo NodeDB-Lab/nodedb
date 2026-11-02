@@ -186,6 +186,11 @@ pub enum DataPlaneErrorCode {
     ActiveSqlTransaction {
         detail: String,
     },
+    /// A transaction's read or write moved after its snapshot (SQLSTATE
+    /// `40001`). `detail` names the collection and the read or write.
+    SerializationConflict {
+        detail: String,
+    },
     /// A DROP refused because other objects depend on `object` (SQLSTATE
     /// `2BP01`).
     DependentObjectsExist {

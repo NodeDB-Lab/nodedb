@@ -6,7 +6,9 @@
 //! A session stage and a Calvin stage both read BASE with the transaction's
 //! overlay folded in. A Calvin overlay holds the plans staged before this
 //! one, so the check runs at the plan's own turn in the transaction. BASE is
-//! the current version of each row, read by [`CoreLoop::current_rows_where`].
+//! each row's version at the match's cut, read by
+//! [`CoreLoop::rows_where_at`]: the block's snapshot for a session stage, the
+//! current version for a Calvin stage, which applies at commit.
 
 use nodedb_physical::physical_plan::OllpPredictedEdge;
 use nodedb_types::StorageKey;
@@ -71,12 +73,15 @@ pub(in crate::data::executor) fn decode_bulk_filters(
 
 impl CoreLoop {
     /// Each `(row key, body)` that `filters` matches in the collection
-    /// `coll_key` names, as transaction `txn_id` sees it.
+    /// `coll_key` names, as transaction `txn_id` sees it: BASE read at
+    /// `system_as_of` (`None` for the current version, `Some` for the block's
+    /// snapshot ordinal) with the transaction's staged writes on top.
     pub(in crate::data::executor) fn txn_matching_rows(
         &self,
         txn_id: TxnId,
         coll_key: &(DatabaseId, TenantId, String),
         filters: &[ScanFilter],
+        system_as_of: Option<i64>,
     ) -> crate::Result<Vec<(StorageKey, Vec<u8>)>> {
         let (database_id, tenant, collection) = coll_key;
         let (database_id, tid) = (database_id.as_u64(), tenant.as_u64());
@@ -85,7 +90,7 @@ impl CoreLoop {
         let raw_matches = self.strict_aware_matcher(database_id, tid, collection, filters, &crs);
         let held = HeldEvalError::default();
         let matches = |row_key: &StorageKey, body: &[u8]| held.check(|| raw_matches(row_key, body));
-        let mut rows = self.current_rows_where(database_id, tid, collection, &matches)?;
+        let mut rows = self.rows_where_at(database_id, tid, collection, system_as_of, &matches)?;
         self.merge_overlay_into_scan(txn_id, coll_key, &mut rows, &matches);
         held.finish(rows)
     }

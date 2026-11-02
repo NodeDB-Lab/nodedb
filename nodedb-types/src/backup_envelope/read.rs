@@ -212,10 +212,13 @@ mod tests {
     #[test]
     fn rejects_unsupported_version() {
         let mut bytes = EnvelopeWriter::new(meta()).finalize();
-        bytes[4] = 99;
+        bytes[4] = VERSION + 1;
         match parse(&bytes, DEFAULT_MAX_TOTAL_BYTES).unwrap_err() {
-            EnvelopeError::UnsupportedVersion(99) => {}
-            other => panic!("expected UnsupportedVersion(99), got {other:?}"),
+            EnvelopeError::UnsupportedVersion(v) if v == VERSION + 1 => {}
+            other => panic!(
+                "expected UnsupportedVersion({}), got {other:?}",
+                VERSION + 1
+            ),
         }
     }
 
@@ -308,7 +311,7 @@ mod tests {
         assert!(parse(truncated, DEFAULT_MAX_TOTAL_BYTES).is_err());
     }
 
-    /// Asserts `NDBB` magic at [0..4], VERSION == 3 at [4], and that the
+    /// Asserts `NDBB` magic at [0..4], VERSION == 1 at [4], and that the
     /// header CRC at [48..52] covers header bytes [0..48].
     #[test]
     fn golden_backup_envelope_format() {
@@ -319,9 +322,9 @@ mod tests {
         // Magic at [0..4].
         assert_eq!(&bytes[0..4], MAGIC.as_slice(), "magic mismatch");
 
-        // VERSION == 3 at [4].
+        // VERSION == 1 at [4].
         assert_eq!(bytes[4], VERSION, "version mismatch");
-        assert_eq!(bytes[4], 3u8, "expected VERSION == 3");
+        assert_eq!(bytes[4], 1u8, "expected VERSION == 1");
 
         // Header CRC at [48..52] covers [0..48].
         assert!(bytes.len() >= HEADER_LEN, "envelope too short for header");

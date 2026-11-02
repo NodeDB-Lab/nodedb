@@ -484,7 +484,12 @@ pub(super) mod tests {
                         group_id: req.group_id,
                     })
                 }
-                RaftRpc::Ping(req) => Ok(crate::health::handle_ping(1, 0, &req)),
+                RaftRpc::Ping(req) => Ok(crate::health::handle_ping(
+                    1,
+                    0,
+                    &crate::snapshot_board::SnapshotBoard::new(),
+                    &req,
+                )),
                 RaftRpc::AppendEntriesRequest(req) => {
                     Ok(RaftRpc::AppendEntriesResponse(AppendEntriesResponse {
                         term: req.term,
@@ -574,7 +579,7 @@ pub(super) mod tests {
         ) -> crate::rpc_codec::ShuffleProduceResponse {
             crate::rpc_codec::ShuffleProduceResponse {
                 error: None,
-                read_versions: Vec::new(),
+                read_vshards: Vec::new(),
             }
         }
 
@@ -1092,6 +1097,7 @@ pub(super) mod tests {
         let ping = RaftRpc::Ping(crate::rpc_codec::PingRequest {
             sender_id: 2,
             topology_version: 0,
+            oldest_snapshot: crate::snapshot_board::NO_SNAPSHOT_REPORT,
         });
         let reply = client.send_probe_rpc(1, ping).await.unwrap();
 

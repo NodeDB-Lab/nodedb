@@ -114,6 +114,7 @@ fn cross_model_query_vector_graph_relational() {
             skip_payload_fetch: false,
             payload_filters: Vec::new(),
             metric: DistanceMetric::L2,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
     let vector_json = payload_json(&vector_payload);

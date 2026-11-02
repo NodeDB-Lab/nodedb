@@ -132,8 +132,9 @@ pub struct TraverseRequest {
 async fn read_scope(
     state: &SharedState,
     temporal: &TemporalScope,
+    history: crate::control::server::graph_dispatch::GraphHistory<'_>,
 ) -> Result<nodedb_physical::physical_plan::GraphReadScope, DdlError> {
-    crate::control::server::graph_dispatch::graph_read_scope(state, temporal)
+    crate::control::server::graph_dispatch::graph_read_scope(state, temporal, history)
         .await
         .map_err(|e| DdlError::from_error(&e))
 }
@@ -172,7 +173,16 @@ pub async fn traverse(
     let tenant_id = identity.tenant_id;
     check_tenant_graph_depth(state, tenant_id, depth, "DEPTH")?;
     let dir = to_engine_direction(direction);
-    let read_scope = read_scope(state, &temporal).await?;
+    let read_scope = read_scope(
+        state,
+        &temporal,
+        crate::control::server::graph_dispatch::GraphHistory {
+            database_id,
+            tenant_id,
+            collection: Some(&collection),
+        },
+    )
+    .await?;
 
     // Subgraph-shaped dispatcher: emits the `{nodes,edges}` JSON both clients
     // decode. Tree DDL aggregates that only need a flat reachable set call
@@ -250,7 +260,16 @@ pub async fn neighbors(
     authorize_traversal(state, identity, database_id, &collection)?;
     let dir = to_engine_direction(direction);
     let tenant_id = identity.tenant_id;
-    let scope = read_scope(state, &temporal).await?;
+    let scope = read_scope(
+        state,
+        &temporal,
+        crate::control::server::graph_dispatch::GraphHistory {
+            database_id,
+            tenant_id,
+            collection: Some(&collection),
+        },
+    )
+    .await?;
 
     let node_key = node.clone();
     let plan = PhysicalPlan::Graph(GraphOp::Neighbors {
@@ -338,7 +357,16 @@ pub async fn shortest_path(
     let max_depth = clamp_depth(max_depth, "MAX_DEPTH")?;
     let tenant_id = identity.tenant_id;
     check_tenant_graph_depth(state, tenant_id, max_depth, "MAX_DEPTH")?;
-    let read_scope = read_scope(state, &temporal).await?;
+    let read_scope = read_scope(
+        state,
+        &temporal,
+        crate::control::server::graph_dispatch::GraphHistory {
+            database_id,
+            tenant_id,
+            collection: Some(&collection),
+        },
+    )
+    .await?;
     match crate::control::server::graph_dispatch::cross_core_shortest_path(
         state,
         crate::control::server::graph_dispatch::CrossCoreShortestPathParams {

@@ -13,7 +13,7 @@
 //! `seen` set keeps additions from duplicating rows already present.
 //!
 //! The secondary-index lookup path needs the same shape of fix but a
-//! different mechanism: the `INDEXES` table is never staged (only body
+//! different mechanism: the versioned index is never staged (only body
 //! storage is), so `merge_overlay_into_index_lookup` decodes each candidate's
 //! staged body and re-extracts the indexed field via the same
 //! `extract_index_values` the write path uses, rather than re-checking a
@@ -256,7 +256,7 @@ impl CoreLoop {
     /// lookup's doc-ID list, so an in-transaction `WHERE indexed_field =
     /// value` observes the transaction's own uncommitted point writes.
     ///
-    /// The `INDEXES` table (plain or versioned) is never staged — only body
+    /// The versioned index is never staged — only body
     /// storage is. So a staged write that changes whether a document
     /// satisfies `path == value` must be resolved by decoding the
     /// document's staged body and re-extracting `path`, using the exact

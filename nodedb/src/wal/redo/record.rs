@@ -10,10 +10,8 @@
 //! own engine `record_type`, replay reconstitutes a `WalRecord` per sub-op and
 //! feeds it to that engine's existing replay path with no tag loss.
 //!
-//! All three structs are map-encoded (`#[msgpack(map)]`) so fields can be added
-//! additively: an older serialized record that predates a field decodes it to
-//! its default. `version` carries an explicit format generation alongside that
-//! field-level tolerance.
+//! The structs are map-encoded (`#[msgpack(map)]`). A record decodes only
+//! with every field present.
 
 use serde::{Deserialize, Serialize};
 
@@ -30,8 +28,7 @@ use serde::{Deserialize, Serialize};
 )]
 #[msgpack(map)]
 pub struct RedoRecord {
-    /// Format generation of this record. Bumped when the sub-record encoding
-    /// changes in a way field-level defaulting alone cannot express.
+    /// Format generation of this record.
     pub version: u16,
     /// The engine-native sub-records, applied in order on replay.
     pub ops: Vec<RedoSubRecord>,
@@ -42,25 +39,21 @@ pub struct RedoRecord {
     /// `vshard_id`, so the durable redo record and the sequencer acknowledgement
     /// are one write.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[msgpack(default)]
     pub calvin_stamp: Option<CalvinStamp>,
     /// The cross-shard trigger request this record applies. Set on the
     /// receiver's commit, so the request's dedup key is durable in the same
     /// record as its writes, and WAL replay restores the key with them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[msgpack(default)]
     pub cross_shard_applied: Option<CrossShardAppliedKey>,
     /// Rows whose writes ran with another source than the record's: the
     /// BEFORE and SYNC AFTER bodies a client statement fired. See
     /// [`super::row_sources`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[msgpack(default)]
     pub row_sources: Vec<super::row_sources::RedoRowSource>,
     /// The `PUBLISH TO` messages the transaction sent. They commit with the
     /// record: the install emits one event per message, WAL replay rebuilds
     /// the same events, and each topic appends each message once.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[msgpack(default)]
     pub publishes: Vec<RedoPublish>,
     /// The net change of every row the record writes, as its change events
     /// name them. See [`super::row_changes`]. The Control-Plane change stream
@@ -68,13 +61,11 @@ pub struct RedoRecord {
     /// for a record that changes no row a change stream names: an internal
     /// flush, recovery or post-apply record.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[msgpack(default)]
     pub row_changes: Vec<super::row_changes::RedoRowChange>,
     /// The roles of the identity that committed the transaction. Every
     /// replica judges a role-guarded state transition against this set, so
     /// each reaches the same verdict. Empty for a record no user committed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[msgpack(default)]
     pub user_roles: Vec<String>,
 }
 
@@ -102,15 +93,12 @@ pub struct RedoPublish {
     /// know the topic waits until its own metadata apply reaches this index
     /// before it treats the topic as dropped. `0` on a node without a
     /// metadata group.
-    #[serde(default)]
-    #[msgpack(default)]
     pub metadata_floor: u64,
     /// Where the record that carries the message sits in its replicated log.
     /// The apply that installs the record stamps it, so every replica names
     /// the message alike without a lookup. `None` on a node without Raft,
     /// where the record's local LSN names it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[msgpack(default)]
     pub position: Option<PublishPosition>,
 }
 
@@ -232,24 +220,16 @@ pub struct EdgePutRedo {
     /// Frozen bitemporal `system_from` ordinal for deterministic cross-replica
     /// replay. `None` on an autocommit record, which installs at its live
     /// ordinal.
-    #[serde(default)]
-    #[msgpack(default)]
     pub system_from: Option<i64>,
     /// The ordinal the version is applied at, when it differs from
     /// `system_from`: a restored version keeps its historical `system_from`
     /// and is applied at the restore transaction's ordinal. A TRUNCATE cut
     /// compares against it. `None` for every other version.
-    #[serde(default)]
-    #[msgpack(default)]
     pub applied: Option<i64>,
     /// Start of the version's valid time, ms since epoch. `None` takes the
     /// apply's epoch time, or the ordinal's wall time outside Calvin.
-    #[serde(default)]
-    #[msgpack(default)]
     pub valid_from_ms: Option<i64>,
     /// Exclusive end of the version's valid time. `None` leaves it open.
-    #[serde(default)]
-    #[msgpack(default)]
     pub valid_until_ms: Option<i64>,
 }
 
@@ -278,13 +258,9 @@ pub struct EdgeDeleteRedo {
     /// Frozen bitemporal `system_from` ordinal for deterministic cross-replica
     /// replay. `None` on an autocommit record, which installs at its live
     /// ordinal.
-    #[serde(default)]
-    #[msgpack(default)]
     pub system_from: Option<i64>,
     /// The ordinal the tombstone is applied at, when it differs from
     /// `system_from`. See [`EdgePutRedo::applied`].
-    #[serde(default)]
-    #[msgpack(default)]
     pub applied: Option<i64>,
 }
 
@@ -488,32 +464,22 @@ mod tests {
         assert_eq!(stamp.vshard_id, 3);
     }
 
-    /// A record serialized before `calvin_stamp` existed decodes with the field
-    /// defaulted to `None`. Mirrors the legacy-bytes test style for `TxClass`.
+    /// A record map carrying only `version` and `ops` fails to decode.
     #[test]
-    fn decodes_legacy_bytes_without_calvin_stamp_field() {
+    fn a_record_missing_fields_is_refused() {
         #[derive(Serialize, zerompk::ToMessagePack)]
         #[msgpack(map)]
-        struct LegacyRedoRecord {
+        struct PartialRedoRecord {
             version: u16,
             ops: Vec<RedoSubRecord>,
         }
 
-        let legacy = LegacyRedoRecord {
+        let partial = PartialRedoRecord {
             version: 1,
             ops: sample_ops(),
         };
-        let bytes = zerompk::to_msgpack_vec(&legacy).expect("encode legacy");
-
-        let decoded = RedoRecord::from_bytes(&bytes).expect("decode legacy as RedoRecord");
-        assert_eq!(decoded.version, 1);
-        assert_eq!(decoded.ops, sample_ops());
-        assert!(decoded.calvin_stamp.is_none());
-        assert!(decoded.cross_shard_applied.is_none());
-        assert!(decoded.row_sources.is_empty());
-        assert!(decoded.publishes.is_empty());
-        assert!(decoded.row_changes.is_empty());
-        assert!(decoded.user_roles.is_empty());
+        let bytes = zerompk::to_msgpack_vec(&partial).expect("encode partial");
+        assert!(RedoRecord::from_bytes(&bytes).is_err());
     }
 
     /// The committing identity's roles survive the encoding every replica

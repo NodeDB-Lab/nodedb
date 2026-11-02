@@ -65,6 +65,7 @@ fn fulltext_cross_tenant_index_does_not_contaminate_search() {
             field: None,
             filters: Vec::new(),
             scores: Vec::new(),
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
     assert_eq!(resp_baseline.status, Status::Ok);
@@ -113,6 +114,7 @@ fn fulltext_cross_tenant_index_does_not_contaminate_search() {
             field: None,
             filters: Vec::new(),
             scores: Vec::new(),
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
     assert_eq!(resp_after.status, Status::Ok);

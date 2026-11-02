@@ -11,9 +11,8 @@ use std::sync::atomic::AtomicU64;
 /// 0 in single-node / no-Calvin deployments.
 pub struct CalvinCounters {
     /// Count of committed Calvin slices whose stamped redo installed on this
-    /// node. The install records the slice's write versions into the
-    /// per-core write-version index.
-    pub write_versions_recorded: Arc<AtomicU64>,
+    /// node.
+    pub redo_installs: Arc<AtomicU64>,
     /// Count of committed Calvin applies whose participant reported that its
     /// slice of the transaction's reads was no longer current at apply time.
     /// Observation only — the apply still committed.
@@ -25,6 +24,9 @@ pub struct CalvinCounters {
     /// by dispatching a drop of their commit-pending buffer, mirroring
     /// [`CalvinCounters::commits_flushed`].
     pub commits_dropped: Arc<AtomicU64>,
+    /// Count of stamped Calvin redos this node's leaders appended to their
+    /// data-group log. A chunked redo counts once.
+    pub redo_proposals: Arc<AtomicU64>,
     /// Count of stamped Calvin redo copies that applied on this node and
     /// installed nothing: their position was applied, or another copy held
     /// its claim.

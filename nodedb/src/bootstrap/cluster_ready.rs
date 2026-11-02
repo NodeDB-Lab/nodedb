@@ -77,11 +77,6 @@ pub async fn await_cluster_ready(
     // fail-closed, so no client listener can open against a collection
     // whose schema (including strict-mode `StrictSchema`) hasn't been
     // re-registered to every Data Plane core after a restart.
-    // Reconstruct index identity records for catalogs written before the
-    // registry existed, so every index those catalogs hold is listable and
-    // droppable. Idempotent, and a no-op on a catalog that already has them.
-    crate::bootstrap::index_registry_seed::seed_index_registry(shared);
-
     if let Err(e) = rehydrate_schema_registry(shared).await {
         schema_gate.fail(format!("schema registry rehydration failed: {e}"));
         return Err(anyhow::anyhow!("schema registry rehydration failed: {e}"));

@@ -41,6 +41,7 @@ use crate::data::executor::handlers::point::apply_put::PointPutParams;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::crdt::tenant_state::TenantCrdtEngine;
 use crate::engine::document::store::StorageKey;
+use crate::types::TenantId;
 
 /// One CRDT row write to materialize into the sparse store.
 pub(super) struct CrdtMaterializeWrite<'a> {
@@ -90,10 +91,10 @@ impl CoreLoop {
     /// commits and emits the `WriteEvent`, mirroring `execute_point_put`. The
     /// storage key is the hex-encoded surrogate (identical to the native path),
     /// NOT the CRDT `document_id` (the user-facing Loro row id, which the
-    /// `WriteEvent` names the row by); bitemporal
-    /// collections append a version per applied delta (handled inside
-    /// `apply_point_put`), non-bitemporal collections overwrite by key
-    /// (idempotent under replay). Inverted BM25 text indexing is skipped
+    /// `WriteEvent` names the row by); every collection appends a version
+    /// per materialized delta (handled inside `apply_point_put`). The
+    /// live apply paths skip a re-delivered delta: it imports no Loro
+    /// operation. Inverted BM25 text indexing is skipped
     /// (`index_text: false`) — the sync path delivers a separate `FtsIndex`
     /// frame. Any failure is logged and swallowed (the transaction is dropped,
     /// leaving no partial write) so a materialization miss never wedges the
@@ -199,6 +200,18 @@ impl CoreLoop {
         }
 
         self.checkpoint_coordinator.mark_dirty("sparse", 1);
+        // The materialized version is stored history: the tenant's charge
+        // takes it, as a document write's does.
+        if let Err(e) = self.recharge_document_history(task.request.database_id, TenantId::new(tid))
+        {
+            crate::diag::history_charge_stale(&e, "crdt materialize");
+            warn!(
+                core = self.core_id,
+                %collection,
+                error = %e,
+                "document history recharge after a crdt materialize failed; the prior charge stays"
+            );
+        }
 
         // Data → Event Plane. The task carries `EventSource::CrdtSync`, so CDC /
         // change streams observe the synced write while AFTER triggers skip it

@@ -6,5 +6,5 @@
 pub mod pin;
 pub mod sites;
 
-pub use pin::{CutPinning, pin_statement_cuts};
+pub use pin::{CutPinning, pin_plan_txn_snapshot, pin_statement_cuts, pin_txn_snapshot};
 pub use sites::{for_each_cut_site, for_each_cut_site_ref, plan_scopes};

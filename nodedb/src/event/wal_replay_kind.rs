@@ -126,9 +126,6 @@ pub(super) fn row_kind(record_type: RecordType) -> Option<RowRecord> {
         // ChangePosition names a replicated log position; it writes no row.
         | RecordType::ChangePosition
         | RecordType::RestorePoint
-        // A node cascade an older build journalled emitted no event on its
-        // live delete, so replay rebuilds none.
-        | RecordType::GraphNodeCascade
         // A TRUNCATE's edge cut writes no edge version, and its install
         // emits no per-edge event, so replay rebuilds none.
         | RecordType::GraphEdgeCut

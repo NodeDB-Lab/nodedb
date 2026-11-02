@@ -13,8 +13,7 @@ use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use tracing::warn;
 
 /// Database-scoped snapshot table.
-const SNAPSHOT_TABLE_V2: TableDefinition<&[u8], &[u8]> =
-    TableDefinition::new("array_tile_snapshots_v2");
+const SNAPSHOT_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("array_tile_snapshots");
 
 fn store_err(detail: String) -> crate::Error {
     crate::Error::Storage {
@@ -109,7 +108,7 @@ impl OriginSnapshotStore {
             engine: "array_sync".into(),
             detail: format!("snapshot_store init begin_write: {e}"),
         })?;
-        txn.open_table(SNAPSHOT_TABLE_V2)
+        txn.open_table(SNAPSHOT_TABLE)
             .map_err(|e| crate::Error::Storage {
                 engine: "array_sync".into(),
                 detail: format!("snapshot_store init open v2 table: {e}"),
@@ -153,12 +152,12 @@ impl OriginSnapshotStore {
             detail: format!("snapshot_store put begin_write: {e}"),
         })?;
         {
-            let mut table =
-                txn.open_table(SNAPSHOT_TABLE_V2)
-                    .map_err(|e| crate::Error::Storage {
-                        engine: "array_sync".into(),
-                        detail: format!("snapshot_store put open v2 table: {e}"),
-                    })?;
+            let mut table = txn
+                .open_table(SNAPSHOT_TABLE)
+                .map_err(|e| crate::Error::Storage {
+                    engine: "array_sync".into(),
+                    detail: format!("snapshot_store put open v2 table: {e}"),
+                })?;
             table
                 .insert(key.as_slice(), encoded.as_slice())
                 .map_err(|e| crate::Error::Storage {
@@ -187,7 +186,7 @@ impl OriginSnapshotStore {
     ) -> Option<TileSnapshot> {
         let key = snapshot_key(database_id, tenant_id, array, hlc)?;
         let txn = self.db.begin_read().ok()?;
-        let table = txn.open_table(SNAPSHOT_TABLE_V2).ok()?;
+        let table = txn.open_table(SNAPSHOT_TABLE).ok()?;
         let entry = table.get(key.as_slice()).ok()??;
         Self::decode(array, entry.value(), "get")
     }
@@ -206,7 +205,7 @@ impl OriginSnapshotStore {
     ) -> Option<TileSnapshot> {
         let prefix = name_prefix(database_id, tenant_id, array)?;
         let txn = self.db.begin_read().ok()?;
-        let table = txn.open_table(SNAPSHOT_TABLE_V2).ok()?;
+        let table = txn.open_table(SNAPSHOT_TABLE).ok()?;
         let bytes = Self::latest_bytes(&table, &prefix)?;
         Self::decode(array, &bytes, "latest")
     }
@@ -231,7 +230,7 @@ impl OriginSnapshotStore {
             .map_err(|e| store_err(format!("snapshot delete write txn: {e}")))?;
         let removed = {
             let mut table = txn
-                .open_table(SNAPSHOT_TABLE_V2)
+                .open_table(SNAPSHOT_TABLE)
                 .map_err(|e| store_err(format!("open snapshots: {e}")))?;
             let mut keys: Vec<Vec<u8>> = Vec::new();
             for entry in table
@@ -406,7 +405,7 @@ mod tests {
         .unwrap();
         let value = encode_snapshot(&wrong).unwrap();
         let txn = s.db.begin_write().unwrap();
-        let mut table = txn.open_table(SNAPSHOT_TABLE_V2).unwrap();
+        let mut table = txn.open_table(SNAPSHOT_TABLE).unwrap();
         table.insert(key.as_slice(), value.as_slice()).unwrap();
         drop(table);
         txn.commit().unwrap();

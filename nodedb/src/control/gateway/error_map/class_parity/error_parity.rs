@@ -100,7 +100,8 @@ fn classified_sqlstates() -> Vec<(usize, &'static str)> {
         (93, sqlstate::SYNTAX_ERROR),
         (95, sqlstate::SYNTAX_ERROR),
         (96, sqlstate::SYNTAX_ERROR),
-        (97, sqlstate::SYNTAX_ERROR),
+        // A transaction snapshot past its age limit retries the block.
+        (97, sqlstate::SERIALIZATION_FAILURE),
         (98, sqlstate::SYNTAX_ERROR),
         (99, sqlstate::SYNTAX_ERROR),
         (100, sqlstate::SYNTAX_ERROR),

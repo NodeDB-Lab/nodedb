@@ -247,23 +247,17 @@ pub struct InstallSnapshotRequest {
     pub done: bool,
     /// Raft group ID for Multi-Raft routing.
     pub group_id: u64,
-    /// Total snapshot size in bytes. `0` means "unknown" (legacy senders or
-    /// bootstrap stubs). Receivers use this only as an advisory hint; they
-    /// must not reject chunks when `total_size == 0`.
-    #[serde(default)]
-    #[msgpack(default)]
+    /// Total snapshot size in bytes. `0` means "unknown" (bootstrap stubs).
+    /// Receivers use this only as an advisory hint; they must not reject
+    /// chunks when `total_size == 0`.
     pub total_size: u64,
     /// The group's voters as the leader holds them when it sends the final
     /// chunk, the leader included. A snapshot covers the conf changes of its
     /// range, and the receiver never applies them, so it takes the
     /// membership from here. Empty on every other chunk.
-    #[serde(default)]
-    #[msgpack(default)]
     pub voters: Vec<u64>,
     /// The group's learners as the leader holds them when it sends the final
     /// chunk. Empty on every other chunk.
-    #[serde(default)]
-    #[msgpack(default)]
     pub learners: Vec<u64>,
 }
 

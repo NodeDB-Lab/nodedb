@@ -424,6 +424,7 @@ mod tests {
             key: Vec::new(),
             rls_filters: Vec::new(),
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         let vshard =
             nodedb_types::CollectionKey::from_bare(DatabaseId::DEFAULT, &session.collection)
@@ -481,6 +482,7 @@ mod tests {
             key: Vec::new(),
             rls_filters: Vec::new(),
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         })
     }
 

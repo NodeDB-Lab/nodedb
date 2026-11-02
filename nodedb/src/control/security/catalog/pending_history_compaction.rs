@@ -21,7 +21,7 @@ pub(super) const PENDING_HISTORY_COMPACTION: TableDefinition<&str, &[u8]> =
 
 /// One owed compaction: "compact this collection's oplog to this version".
 #[derive(zerompk::ToMessagePack, zerompk::FromMessagePack, Debug, Clone, PartialEq, Eq)]
-#[msgpack(map, allow_unknown_fields)]
+#[msgpack(map)]
 pub struct StoredPendingHistoryCompaction {
     pub database_id: u64,
     pub tenant_id: u64,
@@ -29,10 +29,8 @@ pub struct StoredPendingHistoryCompaction {
     /// Loro version vector the committed entry carries.
     pub target_version_json: String,
     /// Last error a retry observed. Empty until a retry fails.
-    #[msgpack(default)]
     pub last_error: String,
     /// Failed retries of this row.
-    #[msgpack(default)]
     pub attempts: u32,
 }
 

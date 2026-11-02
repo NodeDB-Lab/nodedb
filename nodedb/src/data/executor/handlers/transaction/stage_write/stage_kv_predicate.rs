@@ -5,8 +5,9 @@
 //! (`KvOp::PredicateDelete`) inside a transaction. The KV siblings of
 //! `stage_bulk_update.rs` / `stage_bulk_delete.rs`.
 //!
-//! The row set is the live handler's BASE scan
-//! ([`CoreLoop::kv_predicate_matches`]) folded with the transaction's overlay
+//! The row set is the live handler's BASE scan at the match's cut
+//! ([`CoreLoop::kv_predicate_matches_at`]: the block's snapshot, or the
+//! current rows) folded with the transaction's overlay
 //! via [`CoreLoop::merge_kv_overlay_into_scan`], so a same-transaction earlier
 //! write to a row is observed: tombstoned and truncated rows drop out, staged
 //! puts are re-checked against the predicate, and overlay-only rows that match
@@ -40,6 +41,9 @@ pub(in crate::data::executor) struct StageKvPredicateUpdateParams<'a> {
     pub updates: &'a [(String, Vec<u8>)],
     /// Compiled RLS write policy gating each matched row's staged post-image.
     pub rls_write_check: &'a nodedb_types::RlsWriteCheck,
+    /// The cut BASE is matched at: `None` for the current rows, `Some` for
+    /// the block's snapshot ordinal.
+    pub system_as_of: Option<i64>,
 }
 
 /// Routing identity + payload for one staged `KvOp::PredicateDelete`.
@@ -53,6 +57,8 @@ pub(in crate::data::executor) struct StageKvPredicateDeleteParams<'a> {
     /// Compiled RLS write policy gating each matched row's removal, decided
     /// against its pre-deletion image.
     pub rls_write_check: &'a nodedb_types::RlsWriteCheck,
+    /// See `StageKvPredicateUpdateParams::system_as_of`.
+    pub system_as_of: Option<i64>,
 }
 
 /// One matched row under BASE ∪ OVERLAY: its overlay identity, the
@@ -80,15 +86,18 @@ impl CoreLoop {
             filter_bytes,
             updates,
             rls_write_check,
+            system_as_of,
         } = params;
         let did = task.request.database_id;
         let coll_key: (DatabaseId, TenantId, String) =
             (did, TenantId::new(tid), collection.to_string());
 
-        let matched = match self.stage_kv_predicate_rows(task, txn_id, &coll_key, filter_bytes) {
-            Ok(rows) => rows,
-            Err(resp) => return resp,
-        };
+        let matched =
+            match self.stage_kv_predicate_rows(task, txn_id, &coll_key, filter_bytes, system_as_of)
+            {
+                Ok(rows) => rows,
+                Err(resp) => return resp,
+            };
 
         let mut affected = 0usize;
         for row in matched {
@@ -143,15 +152,18 @@ impl CoreLoop {
             collection,
             filter_bytes,
             rls_write_check,
+            system_as_of,
         } = params;
         let did = task.request.database_id;
         let coll_key: (DatabaseId, TenantId, String) =
             (did, TenantId::new(tid), collection.to_string());
 
-        let matched = match self.stage_kv_predicate_rows(task, txn_id, &coll_key, filter_bytes) {
-            Ok(rows) => rows,
-            Err(resp) => return resp,
-        };
+        let matched =
+            match self.stage_kv_predicate_rows(task, txn_id, &coll_key, filter_bytes, system_as_of)
+            {
+                Ok(rows) => rows,
+                Err(resp) => return resp,
+            };
 
         // Gate every matched row on the write policy BEFORE any tombstone is
         // staged, so a rejected row cannot leave the rows ahead of it already
@@ -191,14 +203,15 @@ impl CoreLoop {
 
     /// The BASE ∪ OVERLAY row set a KV predicate DML stages against, each
     /// row bound to the surrogate its staged entry lands on. The base set is
-    /// the live handler's own scan, so a staged statement and its COMMIT
-    /// replay select rows by one rule.
+    /// the live handler's own scan read at `system_as_of`: the block's
+    /// snapshot, or the current rows.
     fn stage_kv_predicate_rows(
         &self,
         task: &ExecutionTask,
         txn_id: TxnId,
         coll_key: &(DatabaseId, TenantId, String),
         filter_bytes: &[u8],
+        system_as_of: Option<i64>,
     ) -> Result<Vec<KvStageMatch>, Response> {
         let crs = self.crs_context();
         let (did, tid) = (coll_key.0.as_u64(), coll_key.1.as_u64());
@@ -209,7 +222,14 @@ impl CoreLoop {
         // Deterministic: Calvin staging pins the epoch anchor every replica
         // shares, and session staging runs on the leader alone.
         let mut rows = self
-            .kv_predicate_matches(did, tid, collection, filter_bytes, self.kv_read_now_ms())
+            .kv_predicate_matches_at(
+                did,
+                tid,
+                collection,
+                filter_bytes,
+                system_as_of,
+                self.kv_read_now_ms(),
+            )
             .map_err(|e| self.response_error(task, e))?;
 
         // `merge_kv_overlay_into_scan` takes an infallible predicate, so a
@@ -292,7 +312,7 @@ mod tests {
             wal_lsn: None,
             resolved_now_ms: None,
             commit_hlc: None,
-            entry_version: None,
+            system_ordinal: None,
             admission: Admission::Exempt(ExemptReason::Read),
         })
     }
@@ -354,6 +374,7 @@ mod tests {
             collection: "c",
             filter_bytes: &filters_n_gt(2),
             rls_write_check: &nodedb_types::RlsWriteCheck::NoPolicyApplies,
+            system_as_of: None,
         });
         assert_eq!(resp.status, Status::Ok);
         assert_eq!(count_field(&resp, "deleted"), 1);
@@ -395,6 +416,7 @@ mod tests {
             filter_bytes: &filters_n_gt(2),
             updates: &updates,
             rls_write_check: &nodedb_types::RlsWriteCheck::NoPolicyApplies,
+            system_as_of: None,
         });
         assert_eq!(resp.status, Status::Ok);
         assert_eq!(
@@ -428,9 +450,82 @@ mod tests {
             collection: "c",
             filter_bytes: &filters_n_gt(100),
             rls_write_check: &nodedb_types::RlsWriteCheck::NoPolicyApplies,
+            system_as_of: None,
         });
         assert_eq!(resp.status, Status::Ok);
         assert_eq!(count_field(&resp, "deleted"), 0);
         assert!(core.txn_overlays.get(&txn_id).is_none_or(|o| o.is_empty()));
+    }
+
+    /// The newest system-time ordinal any version of `key` carries.
+    fn newest_ordinal(core: &CoreLoop, key: &[u8]) -> i64 {
+        let (rows, _) = core.kv_engine.scan_at(crate::engine::kv::KvVersionedScan {
+            database_id: DatabaseId::DEFAULT.as_u64(),
+            tenant_id: 1,
+            collection: "c",
+            cursor: &[],
+            count: usize::MAX,
+            now_ms: current_ms(),
+            match_pattern: None,
+            surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::AllVersions,
+        });
+        rows.iter()
+            .filter(|row| row.key == key)
+            .map(|row| row.sys_from)
+            .max()
+            .expect("the key has a version")
+    }
+
+    /// Inside a block the predicate matches the rows visible at the block's
+    /// snapshot plus the block's own staged writes. A write committed after
+    /// the snapshot is not matched.
+    #[test]
+    fn predicate_dml_at_the_snapshot_ignores_a_later_commit_and_sees_staged_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        put_base(&mut core, b"a", 5, 10);
+        put_base(&mut core, b"b", 1, 11);
+        let snapshot = newest_ordinal(&core, b"a").max(newest_ordinal(&core, b"b"));
+        // A concurrent commit after the snapshot moves `b` into the predicate.
+        put_base(&mut core, b"b", 9, 11);
+        assert!(newest_ordinal(&core, b"b") > snapshot);
+        let task = make_task();
+        let txn_id = TxnId::new(1);
+        core.txn_overlay_mut(txn_id)
+            .insert_put(coll_key(), 12, &kv_row_identity(b"z"), body(7));
+
+        let resp = core.stage_kv_predicate_delete(StageKvPredicateDeleteParams {
+            task: &task,
+            tid: 1,
+            txn_id,
+            collection: "c",
+            filter_bytes: &filters_n_gt(2),
+            rls_write_check: &nodedb_types::RlsWriteCheck::NoPolicyApplies,
+            system_as_of: Some(snapshot),
+        });
+        assert_eq!(resp.status, Status::Ok);
+        assert_eq!(
+            count_field(&resp, "deleted"),
+            2,
+            "snapshot row `a` and staged `z` match; `b` changed after the snapshot"
+        );
+        let overlay = core.txn_overlays.get(&txn_id).unwrap();
+        assert_eq!(overlay.get(&coll_key(), 10), Some(&Staged::Tombstone));
+        assert_eq!(overlay.get(&coll_key(), 12), Some(&Staged::Tombstone));
+        assert_eq!(overlay.get(&coll_key(), 11), None);
+
+        // The same statement at the current state matches the later commit.
+        let current_txn = TxnId::new(2);
+        let resp = core.stage_kv_predicate_delete(StageKvPredicateDeleteParams {
+            task: &task,
+            tid: 1,
+            txn_id: current_txn,
+            collection: "c",
+            filter_bytes: &filters_n_gt(2),
+            rls_write_check: &nodedb_types::RlsWriteCheck::NoPolicyApplies,
+            system_as_of: None,
+        });
+        assert_eq!(count_field(&resp, "deleted"), 2, "current `a` and `b`");
     }
 }

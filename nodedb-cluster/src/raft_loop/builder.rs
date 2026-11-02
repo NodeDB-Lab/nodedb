@@ -73,7 +73,16 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
             reconcile_notify: tokio::sync::Notify::new(),
             metadata_cache: self.metadata_cache,
             lease_holder_liveness: self.lease_holder_liveness,
+            snapshot_board: self.snapshot_board,
         }
+    }
+
+    /// Exchange oldest-snapshot reports through `board` when this node
+    /// answers a health ping (builder chain). The host shares the `Arc` its
+    /// open snapshots publish to and its health monitor sends from.
+    pub fn with_snapshot_board(mut self, board: Arc<crate::snapshot_board::SnapshotBoard>) -> Self {
+        self.snapshot_board = board;
+        self
     }
 
     /// Replace the per-group apply watcher registry.

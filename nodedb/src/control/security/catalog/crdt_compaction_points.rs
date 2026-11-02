@@ -21,7 +21,7 @@ pub(super) const CRDT_COMPACTION_POINTS: TableDefinition<&str, &[u8]> =
 
 /// The version one collection's CRDT history was last compacted to.
 #[derive(zerompk::ToMessagePack, zerompk::FromMessagePack, Debug, Clone, PartialEq, Eq)]
-#[msgpack(map, allow_unknown_fields)]
+#[msgpack(map)]
 pub struct StoredCompactionPoint {
     pub database_id: u64,
     pub tenant_id: u64,

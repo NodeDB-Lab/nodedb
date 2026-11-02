@@ -396,6 +396,8 @@ pub fn inject_returning_spec(plan: &mut PhysicalPlan, spec: ReturningSpec) {
             | MetaOp::CreateTenantSnapshot { .. }
             | MetaOp::RestoreTenantSnapshot { .. }
             | MetaOp::PurgeDepartedVShards { .. }
+            | MetaOp::PurgeVersionsBelow { .. }
+            | MetaOp::KvDueExpiries { .. }
             | MetaOp::PurgeTenant { .. }
             | MetaOp::UnregisterCollection { .. }
             | MetaOp::UnregisterMaterializedView { .. }
@@ -427,8 +429,7 @@ pub fn inject_returning_spec(plan: &mut PhysicalPlan, spec: ReturningSpec) {
             | MetaOp::ResolveTxn { .. }
             | MetaOp::CalvinResolve { .. }
             | MetaOp::ApplyTransactionRedo { .. }
-            | MetaOp::RestoreRedo(_)
-            | MetaOp::HomeVersions { .. },
+            | MetaOp::RestoreRedo(_),
         )
         | PhysicalPlan::Array(
             ArrayOp::OpenArray { .. }
@@ -547,6 +548,7 @@ mod tests {
             provenance: None,
             wal_lsn: None,
             system_from: None,
+            restored_versions: Vec::new(),
             rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
             returning: None,
             rls_filters: Vec::new(),

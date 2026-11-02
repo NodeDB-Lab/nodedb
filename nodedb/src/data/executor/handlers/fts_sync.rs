@@ -63,12 +63,18 @@ impl CoreLoop {
         let tenant_id = nodedb_types::TenantId::new(tid);
         let database_id = task.request.database_id.as_u64();
         let text = nodedb_fts::DocumentText::from_fields(fields.iter().cloned());
-        match self
-            .inverted
-            .index_document(database_id, tenant_id, collection, surrogate, &text)
-        {
+        // The prior text version ends at the write's system time.
+        let ordinal = self.bitemporal_ordinal();
+        match self.inverted.index_document_at(
+            database_id,
+            tenant_id,
+            collection,
+            surrogate,
+            &text,
+            ordinal,
+        ) {
             Ok(()) => {
-                // Advance the collection floor for this committed FTS write.
+                // Note this committed FTS write.
                 self.note_collection_write(task, collection);
                 if let Some(prov) = provenance {
                     self.sync_commit(prov);
@@ -127,12 +133,17 @@ impl CoreLoop {
         // ── Engine write ────────────────────────────────────────────────────
         let tenant_id = nodedb_types::TenantId::new(tid);
         let database_id = task.request.database_id.as_u64();
-        match self
-            .inverted
-            .remove_document(database_id, tenant_id, collection, surrogate)
-        {
+        // The text version ends at the delete's system time.
+        let ordinal = self.bitemporal_ordinal();
+        match self.inverted.remove_document_at(
+            database_id,
+            tenant_id,
+            collection,
+            surrogate,
+            ordinal,
+        ) {
             Ok(()) => {
-                // Advance the collection floor for this committed FTS delete.
+                // Note this committed FTS delete.
                 self.note_collection_write(task, collection);
                 if let Some(prov) = provenance {
                     self.sync_commit(prov);

@@ -112,8 +112,13 @@ impl CoreLoop {
             params.source_rows,
         )?;
         let strict_schema = self.merge_strict_schema(database_id, tid, params.target_collection);
-        let target_docs =
-            self.collect_target_docs(database_id, tid, params.target_collection, txn_id)?;
+        let target_docs = self.collect_target_docs(
+            database_id,
+            tid,
+            params.target_collection,
+            txn_id,
+            params.target_cut,
+        )?;
         let identity_column = self.identity_column(database_id, tid, params.target_collection);
 
         let mut updates: Vec<MergeUpdate> = Vec::new();

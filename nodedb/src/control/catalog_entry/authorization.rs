@@ -88,7 +88,6 @@ impl CatalogEntry {
             | Self::DeleteTopicWithConsumerGroups { .. }
             | Self::PutConsumerGroupIfAbsent(_)
             | Self::DeleteConsumerGroup { .. }
-            | Self::MigrateConsumerGroupStream { .. }
             | Self::PutCheckpoint(_)
             | Self::DeleteCheckpoint { .. }
             | Self::CompactHistory { .. }

@@ -102,6 +102,8 @@ impl InvertedIndex {
             tid,
             collection: &rebuilt.collection,
             surrogate: Surrogate::new(surrogate),
+            // A rebuild rewrites the current footprint and keeps the history.
+            ordinal: super::UNVERSIONED,
         };
 
         let db = self.inner.backend().db();

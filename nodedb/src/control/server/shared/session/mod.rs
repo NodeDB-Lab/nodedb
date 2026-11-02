@@ -29,7 +29,6 @@ mod node_delete_stage;
 mod notice;
 pub mod outcome;
 pub mod overlay_drop;
-mod own_writes;
 mod params;
 pub mod pending_shard_reads;
 mod predicted_stage;
@@ -48,6 +47,7 @@ mod store;
 pub mod temp_tables;
 mod transaction;
 pub mod txn_expand;
+pub mod txn_snapshot;
 
 pub mod plan_cache;
 pub mod prepared_cache;
@@ -62,7 +62,7 @@ pub use self::deadline::{
 pub use self::outcome::{AbortReason, CommitOutcome, TxnDataPlane};
 pub use self::params::{parse_set_command, parse_show_command};
 pub use self::read_set::{
-    EngineTag, ReadCapture, ReadKey, ReadOrigin, ReadPoint, ReadSetEntry, record_read_set,
+    EngineTag, ReadCapture, ReadKey, ReadPoint, ReadSetEntry, record_read_set,
 };
 pub use self::record_reads::{ResponseReads, record_reads_for_response};
 pub use self::savepoint_ops::SavepointError;
@@ -82,3 +82,4 @@ pub use self::statement_timeout::{InvalidStatementTimeout, parse_statement_timeo
 pub use self::store::SessionStore;
 pub use self::temp_tables::TempTableEntry;
 pub use self::transaction::CommitDrain;
+pub use self::txn_snapshot::{TxnSnapshotCut, ensure_txn_snapshot};

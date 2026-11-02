@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Post-commit cascade for one bulk-deleted row, step by step:
+//! Post-commit cascade for one bulk-deleted row, step by step. The row's
+//! tombstone and its index tombstones committed with the row's own
+//! transaction.
 //!
-//! - Secondary indexes: removes the row's entries. An error fails the
-//!   statement after the row's other steps run (see below).
 //! - Deleted-node bookkeeping, vector index, R-tree, sparse-vector index, doc
-//!   cache, write-version and index write-value tracking: in-memory updates
-//!   that cannot fail.
+//!   cache and the write note: in-memory updates that cannot fail.
 //! - Journal: the row's delete entry joins the statement's write set.
 //! - Event Plane: one delete event per row.
 //! - Inverted index: the delete loop collects removed surrogates and removes
@@ -27,11 +26,38 @@ use crate::data::executor::handlers::partial_refusal::refusal_after_rows;
 use crate::data::executor::handlers::point::apply_put::SpatialEntryId;
 use crate::data::executor::handlers::transaction::stage_write::stored_row_identity;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::document::store::{IndexPath, StorageKey};
+use crate::engine::document::store::StorageKey;
 
 /// Removed rows whose text leaves the inverted index in one write
 /// transaction.
 const BULK_DELETE_TEXT_BATCH: usize = 512;
+
+/// Removed rows whose text has not left the inverted index yet, and the
+/// system time the statement removed them at. Their text versions end there.
+pub(in crate::data::executor) struct PendingText {
+    ordinal: i64,
+    surrogates: Vec<Surrogate>,
+}
+
+impl PendingText {
+    /// No pending row yet, for a statement removing rows at `ordinal`.
+    pub(in crate::data::executor) fn at(ordinal: i64) -> Self {
+        Self {
+            ordinal,
+            surrogates: Vec::new(),
+        }
+    }
+
+    /// Add a removed row.
+    pub(in crate::data::executor) fn push(&mut self, surrogate: Surrogate) {
+        self.surrogates.push(surrogate);
+    }
+
+    /// Number of pending rows.
+    pub(in crate::data::executor) fn len(&self) -> usize {
+        self.surrogates.len()
+    }
+}
 
 /// When a bulk delete flushes its pending text, and the statement it
 /// belongs to.
@@ -85,19 +111,16 @@ pub(in crate::data::executor) struct BulkDeleteRowCascade<'a> {
     /// The row's pre-deletion bytes, as `sparse.delete` returned them —
     /// never re-read.
     pub deleted_bytes: &'a [u8],
-    /// The system time of the tombstone that closed a bitemporal row, `None`
-    /// for a row removed from the plain table.
-    pub tombstone_sys_from: Option<i64>,
+    /// The system time of the tombstone that closed the row.
+    pub tombstone_sys_from: i64,
     /// The collection's strict schema, when it stores Binary Tuples. Decodes
     /// `deleted_bytes` so the row's identity column is readable.
     pub strict_schema: Option<&'a StrictSchema>,
     /// The collection's declared `PRIMARY KEY` column, when it has one.
     pub declared_primary_key: Option<&'a str>,
     pub has_vectors: bool,
-    pub index_paths: &'a [IndexPath],
-    /// The pre-deletion document, when the caller captured one (`RETURNING`
-    /// or an indexed collection). `None` costs this cascade nothing beyond
-    /// skipping the write-value note and the `RETURNING` row.
+    /// The pre-deletion document, when the caller captured one for
+    /// `RETURNING`.
     pub pre_delete_doc: Option<serde_json::Value>,
     pub returning: bool,
 }
@@ -108,14 +131,13 @@ impl CoreLoop {
     /// `returned_docs`.
     ///
     /// Every step runs for the committed row, so its journal entry and event
-    /// are never lost. `Err` is the secondary-index removal error: the
-    /// statement fails with this row counted as removed.
+    /// are never lost.
     pub(in crate::data::executor) fn bulk_delete_row_cascade(
         &mut self,
         cascade: BulkDeleteRowCascade<'_>,
         write_set: &mut Vec<WriteSetEntry>,
         returned_docs: &mut Vec<nodedb_types::Value>,
-    ) -> crate::Result<()> {
+    ) {
         let BulkDeleteRowCascade {
             task,
             database_id,
@@ -127,7 +149,6 @@ impl CoreLoop {
             strict_schema,
             declared_primary_key,
             has_vectors,
-            index_paths,
             pre_delete_doc,
             returning,
         } = cascade;
@@ -143,17 +164,6 @@ impl CoreLoop {
         );
 
         let row_surrogate = storage_key.surrogate();
-        // Cascade: secondary indexes. An error is recorded at its detection
-        // site and returned once the row's remaining steps ran.
-        let secondary = self.sparse.delete_indexes_for_document(
-            task.request.database_id.as_u64(),
-            tid,
-            collection,
-            &storage_key,
-        );
-        if let Err(e) = &secondary {
-            crate::diag::orphaned_index_entry_after_delete(e, collection, "secondary");
-        }
         // The row's graph node keeps its edges here: the delete's own
         // transaction tombstones them with `EdgeDelete` tasks. The node is
         // recorded deleted for edge referential integrity.
@@ -162,8 +172,23 @@ impl CoreLoop {
         // this row's vectors under its surrogate; the delete must
         // soft-delete those nodes and drop the reverse-map entry, or the
         // leaked vector keeps scoring in KNN search in the same process.
+        // A multi-vector document bound to the row ends with it either way.
         if has_vectors {
-            self.remove_document_vector_indexes(database_id, tid, collection, storage_key);
+            self.remove_document_vector_indexes(
+                database_id,
+                tid,
+                collection,
+                storage_key,
+                tombstone_sys_from,
+            );
+        } else {
+            self.end_document_multi_vectors(
+                database_id,
+                tid,
+                collection,
+                storage_key,
+                tombstone_sys_from,
+            );
         }
         // Cascade: the row's R-tree entries and sparse-vector postings, keyed
         // as the put path indexed them. The row is committed, so the undo
@@ -173,12 +198,14 @@ impl CoreLoop {
             tid,
             collection,
             SpatialEntryId::from_storage_key(storage_key),
+            tombstone_sys_from,
         );
         self.remove_document_sparse_indexes(
             database_id,
             tid,
             collection,
             storage_key,
+            tombstone_sys_from,
             &mut Vec::new(),
         );
         self.doc_cache.invalidate(
@@ -187,26 +214,12 @@ impl CoreLoop {
             collection,
             &storage_key,
         );
-        // Record the committed delete's write version against its
-        // surrogate + collection.
+        // Note the committed delete against its surrogate + collection.
         self.note_surrogate_write(task, tid, collection, row_surrogate.as_u32());
-        // Record the removed secondary-index tuples into the
-        // per-index write-value substrate, recomputed from the
-        // pre-delete document (see `index_paths` comment above).
-        if let (Some(stamp), Some(doc)) = (self.task_write_stamp(task), pre_delete_doc.as_ref()) {
-            let tuples = self.index_tuples_for_doc(doc, index_paths);
-            self.note_index_write_values(
-                task.request.database_id,
-                crate::types::TenantId::new(tid),
-                collection,
-                &tuples,
-                stamp,
-            );
-        }
         // The removal, journalled after apply: the plan carries no
-        // pre-dispatch record of it. A delete carries no post-image body. A
-        // bitemporal tombstone carries its version key, so replay closes the
-        // same version.
+        // pre-dispatch record of it. A delete carries no post-image body. The
+        // tombstone carries its version key, so replay closes the same
+        // version.
         write_set.push(removed_row_image(
             row_surrogate.as_u32(),
             row_identity.clone(),
@@ -226,7 +239,6 @@ impl CoreLoop {
         if returning && let Some(doc) = pre_delete_doc {
             returned_docs.push(nodedb_types::Value::from(doc));
         }
-        secondary
     }
 
     /// Remove the text of the rows in `pending` from the inverted index in
@@ -236,20 +248,21 @@ impl CoreLoop {
         database_id: u64,
         tid: u64,
         collection: &str,
-        pending: &mut Vec<Surrogate>,
+        pending: &mut PendingText,
     ) -> crate::Result<()> {
         if let Err(e) = self.inverted.remove_documents(
             database_id,
             crate::types::TenantId::new(tid),
             collection,
-            pending,
+            &pending.surrogates,
+            pending.ordinal,
         ) {
             // Recorded at the detection site: the rows' own transactions have
             // committed, so the statement fails with their entries journalled.
             crate::diag::orphaned_index_entry_after_delete(&e, collection, "inverted");
             return Err(e);
         }
-        pending.clear();
+        pending.surrogates.clear();
         Ok(())
     }
 
@@ -258,7 +271,7 @@ impl CoreLoop {
         &self,
         task: &ExecutionTask,
         flush: TextFlush<'_>,
-        pending: &mut Vec<Surrogate>,
+        pending: &mut PendingText,
     ) -> Result<(), ErrorCode> {
         if pending.len() < flush.at_least {
             return Ok(());
@@ -288,7 +301,7 @@ impl CoreLoop {
         tid: u64,
         collection: &str,
         code: ErrorCode,
-        pending: &mut Vec<Surrogate>,
+        pending: &mut PendingText,
         write_set: Vec<WriteSetEntry>,
     ) -> Response {
         let removed = pending.len() as u64;

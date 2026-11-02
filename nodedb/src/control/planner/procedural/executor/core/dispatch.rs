@@ -112,7 +112,16 @@ impl<'a> StatementExecutor<'a> {
         // read, so a descriptor drain starting in between will otherwise fail
         // the whole procedure. Re-planning is pure, and admission fails closed
         // before granting anything, so an absorbed attempt reads nothing.
+        // The statement plans and reads at its transaction's snapshot, taken
+        // at the transaction's first statement. The commit validates the
+        // body's reads at it.
+        let snapshot = {
+            let mut txn = self.txn.lock().await;
+            let open = self.open_txn(&mut txn).await?;
+            open.txn_ctx()?.txn_snapshot(self.state).await?
+        };
         let ctx = crate::control::planner::context::QueryContext::for_state(self.state);
+        ctx.set_txn_snapshot(snapshot);
         let ctx = &ctx;
         let bound_sql = &bound_sql;
         // A stored-procedure body is server-defined code, not a client
@@ -513,7 +522,7 @@ mod origination_tests {
                     watermark_lsn: Lsn::ZERO,
                     error_code,
                     stage_vote: None,
-                    read_versions: crate::types::ReadVersions::new(),
+                    read_vshards: crate::types::ReadShards::new(),
                     write_set: Vec::new(),
                 };
                 side.response_tx

@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Backward-compatible re-exports from the split trigger fire modules.
-//!
-//! This file exists so that existing call sites (`control::trigger::fire::fire_after_insert`)
-//! continue to work. Import from the specific sub-modules in new code.
+//! Re-exports of the trigger fire functions from their split modules, so a
+//! call site names them as `control::trigger::fire::fire_after_insert`.
 
 pub use super::fire_after::{
     FireAfterDeleteParams, FireAfterInsertParams, FireAfterUpdateParams, ShippedBlock,

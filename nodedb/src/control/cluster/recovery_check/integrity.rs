@@ -335,8 +335,8 @@ fn check_trigger_collections(
 
 /// Check 5: every rls_policy.collection exists in the policy's database.
 ///
-/// A collection qualifier that does not match the policy's database is a
-/// dangling reference too: it names no collection that database holds.
+/// A row with no display name is a dangling reference too: it names no
+/// collection.
 fn check_rls_collections(
     rls: &[StoredRlsPolicy],
     collection_keys: &CollectionKeys,
@@ -552,15 +552,16 @@ mod tests {
         assert!(violations.is_empty(), "{violations:?}");
     }
 
+    /// A row without a display name is malformed and resolves no collection.
     #[test]
-    fn rls_policy_row_without_display_name_resolves_its_qualified_name() {
+    fn rls_policy_row_without_display_name_is_dangling() {
         let violations = rls_violations(&rls_policy(1024, "1024/pat", ""));
-        assert!(violations.is_empty(), "{violations:?}");
+        assert_eq!(violations.len(), 1, "{violations:?}");
     }
 
     #[test]
-    fn rls_policy_qualified_for_another_database_is_dangling() {
-        let violations = rls_violations(&rls_policy(1024, "2048/pat", ""));
+    fn rls_policy_on_a_collection_the_database_lacks_is_dangling() {
+        let violations = rls_violations(&rls_policy(1024, "1024/ghost", "ghost"));
         assert_eq!(violations.len(), 1, "{violations:?}");
     }
 

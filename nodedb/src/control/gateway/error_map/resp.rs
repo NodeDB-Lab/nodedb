@@ -53,6 +53,7 @@ impl GatewayErrorMap {
             | Error::ConflictRetry { .. }
             | Error::CalvinSerializationConflict
             | Error::CalvinParticipantError
+            | Error::TxnSnapshotTooOld { .. }
             | Error::RejectedPrevalidation { .. }
             | Error::RetryableRefusal { .. }
             | Error::AppendOnlyViolation { .. }
@@ -152,7 +153,6 @@ impl GatewayErrorMap {
             | Error::SessionTokenExpired
             | Error::SessionKilledByAdmin
             | Error::SessionUserDropped
-            | Error::OidcProviderTenantUnbound
             | Error::OidcProviderTenantUnavailable { .. }
             | Error::ExternalRoleUndefined { .. }
             | Error::OidcNoDefaultDatabase { .. }

@@ -56,6 +56,7 @@ impl VectorCollection {
         {
             self.delete_inner(old);
             self.surrogate_map.remove(&old);
+            self.versions.forget(old);
         }
         let id = self.insert(vector)?;
         if surrogate != Surrogate::ZERO {
@@ -132,9 +133,14 @@ impl VectorCollection {
         deleted
     }
 
-    /// Look up the surrogate for a global vector ID.
+    /// Look up the surrogate for a global vector ID: the row a live node
+    /// holds, or the row an ended node held, so a hit of a search at a past
+    /// cut resolves.
     pub fn get_surrogate(&self, vector_id: u32) -> Option<Surrogate> {
-        self.surrogate_map.get(&vector_id).copied()
+        self.surrogate_map
+            .get(&vector_id)
+            .copied()
+            .or_else(|| self.versions.ended_surrogate(vector_id))
     }
 
     /// Resolve a surrogate back to its global vector ID, if bound.
@@ -142,12 +148,16 @@ impl VectorCollection {
         self.surrogate_to_local.get(&surrogate).copied()
     }
 
-    /// Soft-delete a vector by global ID.
+    /// Soft-delete a vector by global ID and drop its history: no cut reads
+    /// it again. A row update or delete ends the node instead
+    /// ([`Self::end_at`]), so earlier cuts keep reading it. The undo of an
+    /// insert deletes this way.
     pub fn delete(&mut self, id: u32) -> bool {
         let ok = self.delete_inner(id);
         if ok && let Some(s) = self.surrogate_map.remove(&id) {
             self.surrogate_to_local.remove(&s);
         }
+        self.versions.forget(id);
         ok
     }
 
@@ -237,8 +247,18 @@ impl VectorCollection {
     /// Symmetric to [`Self::delete_inner`]: the vector may live in the IVF
     /// index, the growing segment (the common case for a just-inserted
     /// vector), a sealed HNSW segment, or an in-flight building segment. The
-    /// tombstone is reversed wherever it landed.
+    /// tombstone is reversed wherever it landed. An ended node becomes live
+    /// again: the undo of the write that ended it.
     pub fn undelete(&mut self, id: u32) -> bool {
+        let revived = self.undelete_node(id);
+        if revived {
+            self.versions.revive(id);
+        }
+        revived
+    }
+
+    /// Clear the tombstone of node `id`, whichever segment holds it.
+    fn undelete_node(&mut self, id: u32) -> bool {
         if let Some(ivf) = &mut self.ivf
             && ivf.contains(id)
         {

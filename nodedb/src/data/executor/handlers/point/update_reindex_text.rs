@@ -31,6 +31,9 @@ pub(in crate::data::executor) struct UpdateTextReindex<'a> {
     pub surrogate: Surrogate,
     /// The row's post-update document.
     pub new_doc: &'a serde_json::Value,
+    /// The system-time ordinal of the row version the update wrote: the
+    /// row's prior text version ends there.
+    pub ordinal: i64,
 }
 
 impl CoreLoop {
@@ -51,6 +54,7 @@ impl CoreLoop {
                     tid: TenantId::new(p.tid),
                     collection: p.collection,
                     surrogate: p.surrogate,
+                    ordinal: p.ordinal,
                 },
                 &text,
             )

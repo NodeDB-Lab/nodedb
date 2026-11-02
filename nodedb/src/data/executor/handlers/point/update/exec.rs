@@ -135,15 +135,13 @@ impl CoreLoop {
 
         let bitemporal = self.is_bitemporal(task.request.database_id.as_u64(), tid, collection);
         let database_id = task.request.database_id.as_u64();
-        // The ordinal the apply stamps the row's new version with.
-        let sys_from_for_encode = if bitemporal {
+        // The ordinal the apply stamps the row's new version with. A
+        // `bitemporal=true` strict tuple carries it in its temporal columns.
+        let sys_from_for_encode =
             match self.row_version_ordinal(database_id, tid, collection, &storage_key) {
                 Ok(ordinal) => ordinal,
                 Err(e) => return self.response_error(task, ErrorCode::from(e)),
-            }
-        } else {
-            0
-        };
+            };
         match self.current_row_body(database_id, tid, collection, &storage_key) {
             Ok(Some(current_bytes)) => {
                 // A period lock gates both images of an update: the PRE-image,
@@ -248,23 +246,21 @@ impl CoreLoop {
                     storage_key: &storage_key,
                     current_bytes: &current_bytes,
                     updated_bytes: &updated_bytes,
-                    bitemporal,
                     sys_from: sys_from_for_encode,
                     wal_lsn: task.wal_lsn(),
-                    write_stamp: self.task_write_stamp(task),
                     resolved_sum_targets,
                 });
                 match write_result {
                     Ok(target_write_set) => {
-                        // Record the committed row's write version against
-                        // its surrogate and collection. A read of the row
-                        // from before this update then fails validation.
+                        // Note the committed row's write against its
+                        // surrogate and collection.
                         self.note_surrogate_write(task, tid, collection, surrogate.as_u32());
                         self.doc_cache.put(
                             task.request.database_id.as_u64(),
                             tid,
                             collection,
                             &storage_key,
+                            sys_from_for_encode,
                             &updated_bytes,
                         );
 
@@ -278,6 +274,7 @@ impl CoreLoop {
                                 new_body: &updated_bytes,
                                 is_strict,
                                 has_vectors,
+                                sys_from: sys_from_for_encode,
                             })
                         {
                             return self.response_error(task, e);
@@ -337,7 +334,7 @@ impl CoreLoop {
                             nodedb_query::msgpack_scan::write_kv_i64(&mut payload, "affected", 1);
                             self.response_with_payload(task, payload)
                         };
-                        // A versioned row landed at the system time the
+                        // The row's version landed at the system time the
                         // update encoded it with, valid for all time.
                         response.write_set = match self.stored_row_image(
                             WriteSetRow {
@@ -348,7 +345,7 @@ impl CoreLoop {
                                 identity: document_identity,
                             },
                             &updated_bytes,
-                            bitemporal.then_some(sys_from_for_encode),
+                            sys_from_for_encode,
                         ) {
                             Ok(image) => vec![image],
                             Err(e) => return self.response_error(task, e),
@@ -455,6 +452,7 @@ mod tests {
                     TARGET,
                     &nodedb_types::StorageKey::for_surrogate(surrogate),
                     &doc_format::encode_to_msgpack(&seed),
+                    core.bitemporal_ordinal(),
                 )
                 .expect("seed target row");
         }

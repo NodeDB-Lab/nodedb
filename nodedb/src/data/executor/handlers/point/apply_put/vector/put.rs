@@ -61,8 +61,13 @@ impl CoreLoop {
             storage_key,
             value,
             wal_lsn,
+            sys_from,
+            replaces_row,
         } = params;
         let mut inserted: Vec<VectorIndexKey> = Vec::new();
+        // The vector fields this body carries. Every other vector field of
+        // the row ends at `sys_from` below.
+        let mut present: Vec<String> = Vec::new();
 
         // Vector index: if the strict schema declares Vector(dim) columns,
         // extract float arrays and insert into HNSW so KNN search works.
@@ -81,6 +86,7 @@ impl CoreLoop {
                         },
                         None => continue,
                     };
+                    present.push(field_name.clone());
                     let index_key =
                         Self::vector_index_key(database_id, tid, collection, field_name);
                     self.check_vector_width(&index_key, field_name, floats.len())?;
@@ -114,6 +120,7 @@ impl CoreLoop {
                             field_name,
                             storage_key,
                             floats,
+                            sys_from,
                         },
                         undo,
                     )? {
@@ -168,6 +175,7 @@ impl CoreLoop {
                         },
                         None => continue,
                     };
+                    present.push(field_name.clone());
                     // Use field-qualified key so search can find it.
                     let store_key =
                         Self::vector_index_key(database_id, tid, collection, field_name);
@@ -199,11 +207,35 @@ impl CoreLoop {
                             field_name,
                             storage_key,
                             floats,
+                            sys_from,
                         },
                         undo,
                     )? {
                         inserted.push(store_key);
                     }
+                }
+            }
+        }
+
+        // A vector field the body no longer carries ends at the row version's
+        // system time, as a replaced one does, when the write replaces a
+        // stored row. A first insert keeps a node a direct vector write bound
+        // to the row. A record the restored vector checkpoint holds changes
+        // nothing.
+        if replaces_row && !(wal_lsn != 0 && self.vector_replay_skips(wal_lsn)) {
+            for field in self.document_vector_field_names(database_id, tid, collection) {
+                if present.contains(&field) {
+                    continue;
+                }
+                if let Some(prior) = self.remove_document_vector_index_field(
+                    database_id,
+                    tid,
+                    collection,
+                    &field,
+                    storage_key,
+                    sys_from,
+                ) {
+                    undo.push(prior.into_delete_undo());
                 }
             }
         }
@@ -267,14 +299,12 @@ impl CoreLoop {
 
     /// Shared tail of `apply_point_put_vector_indexes`'s strict and
     /// schemaless arms, once each has resolved its own `index_key` and
-    /// extracted `floats` for `field_name`. Removes this field's prior node
-    /// for the surrogate before inserting the new one — `insert_with_surrogate`
-    /// appends a fresh node rather than replacing, so a second put for the
-    /// same surrogate (a live overwrite, or a replayed duplicate) would
-    /// otherwise leave the stale embedding searchable alongside the new one.
-    /// Per-field (not whole-doc) so a sibling vector field's just-inserted
-    /// node is never clobbered. The remove is idempotent — a no-op on a
-    /// genuine first insert.
+    /// extracted `floats` for `field_name`. Ends this field's prior node for
+    /// the surrogate at the row version's `sys_from`, then inserts the new
+    /// one there, so a current search scores the new embedding only and a
+    /// read at an earlier cut scores the old one. Per-field (not whole-doc)
+    /// so a sibling vector field's just-inserted node is never clobbered.
+    /// The end is a no-op on a genuine first insert.
     ///
     /// Binds the vector node to the document's global surrogate so
     /// cross-engine identity holds: a search hit resolves back to this row's
@@ -284,9 +314,10 @@ impl CoreLoop {
     /// populated via `entry().or_insert_with()` by the caller), and the
     /// collection's typed error when the vector does not fit it.
     ///
-    /// Pushes a `DeleteVector` undo entry for the prior node it removes, a
-    /// `DisplacedVector` entry for an unrecorded node bound to the surrogate,
-    /// and an `InsertVector` entry for the node it inserts.
+    /// Pushes the removal's undo entry for the prior node it ends
+    /// (`DeleteVector` for a recorded node, `DisplacedVector` for an
+    /// unrecorded node bound to the surrogate), and an `InsertVector` entry
+    /// for the node it inserts.
     fn remove_then_insert_vector_field(
         &mut self,
         params: VectorFieldInsert<'_>,
@@ -300,6 +331,7 @@ impl CoreLoop {
             field_name,
             storage_key,
             floats,
+            sys_from,
         } = params;
         if let Some(prior) = self.remove_document_vector_index_field(
             database_id,
@@ -307,26 +339,17 @@ impl CoreLoop {
             collection,
             field_name,
             storage_key,
+            sys_from,
         ) {
             undo.push(prior.into_delete_undo());
         }
         let Some(coll) = self.vector_collections.get_mut(&index_key) else {
             return Ok(false);
         };
-        // A node still bound to the surrogate has no `vector_doc_map` entry:
-        // a direct vector write bound it. `insert_with_surrogate` displaces
-        // such a node, so it is deleted here first, where undo can see it.
+        // The removal above ended the node bound to the surrogate, a direct
+        // vector write's node included, so `insert_at` displaces nothing.
         let surrogate = storage_key.surrogate();
-        if let Some(displaced) = coll.local_for_surrogate(surrogate)
-            && coll.delete(displaced)
-        {
-            undo.push(UndoEntry::DisplacedVector {
-                index_key: index_key.clone(),
-                vector_id: displaced,
-                surrogate,
-            });
-        }
-        let vector_id = coll.insert_with_surrogate(floats, surrogate)?;
+        let vector_id = coll.insert_at(floats, surrogate, sys_from)?;
         self.vector_doc_map.insert(
             (
                 index_key.0,
@@ -473,6 +496,8 @@ mod tests {
                 storage_key,
                 value: &first,
                 wal_lsn: 0,
+                sys_from: 1,
+                replaces_row: true,
             },
             &mut Vec::new(),
         )
@@ -487,6 +512,8 @@ mod tests {
                 storage_key,
                 value: &second,
                 wal_lsn: 0,
+                sys_from: 1,
+                replaces_row: true,
             },
             &mut Vec::new(),
         )
@@ -536,6 +563,8 @@ mod tests {
                 storage_key,
                 value: &doc,
                 wal_lsn: 0,
+                sys_from: 1,
+                replaces_row: true,
             },
             &mut Vec::new(),
         )
@@ -574,6 +603,8 @@ mod tests {
                 storage_key,
                 value: &doc,
                 wal_lsn: 0,
+                sys_from: 1,
+                replaces_row: true,
             },
             &mut Vec::new(),
         )
@@ -586,7 +617,7 @@ mod tests {
             .expect("vector write");
         assert_eq!(live_count(core, db_id, tid, collection, "embedding"), 1);
 
-        let removed = core.remove_document_vector_indexes(db_id, tid, collection, storage_key);
+        let removed = core.remove_document_vector_indexes(db_id, tid, collection, storage_key, 2);
         assert_eq!(removed.len(), 1);
         assert_eq!(
             live_count(core, db_id, tid, collection, "embedding"),
@@ -629,6 +660,8 @@ mod tests {
                 storage_key,
                 value: &doc,
                 wal_lsn: 0,
+                sys_from: 1,
+                replaces_row: true,
             },
             &mut undo,
         )
@@ -696,6 +729,8 @@ mod tests {
                 storage_key,
                 value: &body,
                 wal_lsn: 0,
+                sys_from: 1,
+                replaces_row: true,
             },
             &mut Vec::new(),
         )
@@ -739,6 +774,8 @@ mod tests {
                     storage_key,
                     value: &body,
                     wal_lsn: 0,
+                    sys_from: 1,
+                    replaces_row: true,
                 },
                 &mut Vec::new(),
             );
@@ -784,6 +821,8 @@ mod tests {
                     storage_key,
                     value: &doc,
                     wal_lsn,
+                    sys_from: i64::try_from(wal_lsn).unwrap_or(i64::MAX),
+                    replaces_row: true,
                 },
                 &mut Vec::new(),
             )

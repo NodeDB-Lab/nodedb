@@ -52,10 +52,7 @@ pub fn redo_sum_targets(plans: &[PhysicalPlan]) -> Vec<RedoSumTargets> {
 /// Whether `target` names a target collection its plan defers onto its own
 /// `ApplyBalanceDelta` task.
 fn shipped_on_own_task(target: &ResolvedSumTarget, deferred: &[String]) -> bool {
-    target
-        .target_collection
-        .as_deref()
-        .is_some_and(|collection| deferred.iter().any(|d| d == collection))
+    deferred.contains(&target.target_collection)
 }
 
 type SumTargetSlots<'a> = (&'a str, &'a [ResolvedSumTarget], &'a [String]);

@@ -38,35 +38,6 @@ pub fn delete(
     forget_offsets(database_id, tenant_id, stream_name, name, shared);
 }
 
-/// Re-key an applied group onto its canonical `topic:<name>` stream, carrying
-/// its committed offsets across.
-pub fn migrate_stream(def: &ConsumerGroupDef, legacy_stream: &str, shared: &SharedState) {
-    let canonical = format!("topic:{legacy_stream}");
-    shared.group_registry.migrate_stream(
-        def.database_id,
-        def.tenant_id,
-        legacy_stream,
-        &canonical,
-        &def.name,
-    );
-    if let Err(error) = shared.offset_store.migrate_group_stream(
-        def.database_id,
-        def.tenant_id,
-        legacy_stream,
-        &canonical,
-        &def.name,
-    ) {
-        crate::diag::consumer_group_offsets_retained(
-            &error,
-            def.database_id.as_u64(),
-            def.tenant_id,
-            legacy_stream,
-            &def.name,
-            "migrate_group_stream",
-        );
-    }
-}
-
 /// Raise an applied commit's offsets on this node, when the registered group
 /// is the incarnation the commit targets. The committed-message delivery
 /// cursors and the trigger firing cursors have no registered group: every

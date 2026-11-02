@@ -19,10 +19,12 @@ use crate::control::planner::calvin::retry_budget::OllpRetryBudget;
 use crate::control::planner::calvin::txn_predict::predict_txn_bulk_write;
 use crate::control::server::shared::sql::staging_predicates::is_stageable_write;
 use crate::control::state::SharedState;
+use crate::types::ReadShards;
 use nodedb_physical::physical_task::PhysicalTask;
 
 use super::connection::SessionId;
 use super::node_delete_stage::stage_node_delete_tasks;
+use super::read_set::{ReadCapture, record_read_set};
 use super::staging_gate::{InTxnRoute, StagingGateError, stage_write};
 use super::store::SessionStore;
 use super::txn_expand::expand_for_buffering;
@@ -60,6 +62,15 @@ where
         if let Some(read) = read {
             derived.extend(read.edge_tasks);
         }
+        // A predicate write read its rows at the block's snapshot. The read
+        // joins the transaction's read set, so COMMIT refuses the block when
+        // a row of the collection changed after the snapshot: a row that
+        // joined or left the predicate moves the set the write matched.
+        // A block with no snapshot matched the current rows, and COMMIT
+        // checks the prediction against them.
+        let predicate_read = predicate_class
+            .filter(|_| sessions.tx_snapshot(session_id).is_some())
+            .map(|_| (task.plan.clone(), task.tenant_id));
         let route = if is_stageable_write(&task.plan) {
             let staged = stage_write(state, sessions, session_id, task, dispatch).await;
             match (staged, predicate_class) {
@@ -98,6 +109,20 @@ where
             }
             InTxnRoute::Buffered
         };
+        if let Some((plan, tenant_id)) = predicate_read {
+            record_read_set(
+                state,
+                sessions,
+                session_id,
+                tenant_id,
+                ReadCapture {
+                    plan: &plan,
+                    read_vshards: &ReadShards::new(),
+                    found: false,
+                },
+            )
+            .await;
+        }
         stage_node_delete_tasks(state, sessions, session_id, derived, dispatch).await?;
         return Ok(route);
     }

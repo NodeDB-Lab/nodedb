@@ -3,7 +3,7 @@
 //! Full-text search operations dispatched to the Data Plane.
 
 use nodedb_types::text_search::QueryMode;
-use nodedb_types::{QualifiedCollection, SurrogateBitmap};
+use nodedb_types::{QualifiedCollection, SurrogateBitmap, SystemTimeScope};
 
 /// One per-row BM25 score column: `bm25_score(field, query)` under `alias`.
 #[derive(
@@ -101,6 +101,10 @@ pub enum TextOp {
         rls_filters: Vec<u8>,
         /// Score columns injected into each hit.
         scores: Vec<TextScoreSpec>,
+        /// The system time the read sees. A cut admits the document version
+        /// visible at the cut. `TxnSnapshot` merges the transaction's staged
+        /// writes on top.
+        system_time: SystemTimeScope,
     },
 
     /// Every row `filters` admit, each with its score columns.
@@ -122,6 +126,10 @@ pub enum TextOp {
         /// admitted row. The relational tail still applies its own ORDER BY
         /// and LIMIT over the rows returned.
         bound: Option<ScoreScanBound>,
+        /// The system time the read sees. A cut admits the document version
+        /// visible at the cut. `TxnSnapshot` merges the transaction's staged
+        /// writes on top.
+        system_time: SystemTimeScope,
     },
 
     /// Exact phrase search: all terms must appear consecutively in the document.
@@ -149,6 +157,10 @@ pub enum TextOp {
         rls_filters: Vec<u8>,
         /// Score columns injected into each hit.
         scores: Vec<TextScoreSpec>,
+        /// The system time the read sees. A cut admits the document version
+        /// visible at the cut. `TxnSnapshot` merges the transaction's staged
+        /// writes on top.
+        system_time: SystemTimeScope,
     },
 
     /// Hybrid search: vector similarity + BM25 text, fused via RRF.
@@ -178,6 +190,10 @@ pub enum TextOp {
         /// `rrf_score`. Set by the planner from the SELECT alias for the
         /// `rrf_score(...)` call.
         score_alias: Option<String>,
+        /// The system time the read sees. A cut admits the document version
+        /// visible at the cut. `TxnSnapshot` merges the transaction's staged
+        /// writes on top.
+        system_time: SystemTimeScope,
     },
 
     /// Index a document into the inverted FTS index.
@@ -246,6 +262,10 @@ pub enum TextOp {
         rls_filters: Vec<u8>,
         /// SELECT-list alias for the fused RRF score column.
         score_alias: Option<String>,
+        /// The system time the read sees. A cut admits the document version
+        /// visible at the cut. `TxnSnapshot` merges the transaction's staged
+        /// writes on top.
+        system_time: SystemTimeScope,
     },
 
     /// Bind a collection's per-collection FTS analyzer.

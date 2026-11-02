@@ -187,7 +187,8 @@ async fn dispatch_external_crdt_apply(
         watermark_lsn: Lsn::ZERO,
         error_code: None,
         stage_vote: None,
-        read_versions: outcome.write_versions,
+        // A write scans no vShard a read-set entry names.
+        read_vshards: crate::types::ReadShards::new(),
         write_set: Vec::new(),
     })
 }

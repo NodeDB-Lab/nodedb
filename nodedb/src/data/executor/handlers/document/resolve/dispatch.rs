@@ -137,6 +137,7 @@ impl CoreLoop {
                 declared_primary_key,
                 ollp_predicted_surrogates: _,
                 ollp_predicted_edges: _,
+                system_time,
             } => self.resolve_bulk_update(
                 task,
                 ResolveBulkUpdate {
@@ -149,6 +150,7 @@ impl CoreLoop {
                     rls_write_check,
                     resolved_sum_targets,
                     declared_primary_key: declared_primary_key.as_deref(),
+                    system_time,
                 },
             ),
             DocumentOp::BulkDelete {
@@ -163,6 +165,7 @@ impl CoreLoop {
                 // Read only by overlay staging; a resolved delete removes rows
                 // by storage key.
                 declared_primary_key: _,
+                system_time,
             } => self.resolve_bulk_delete(
                 task,
                 ResolveBulkDelete {
@@ -173,6 +176,7 @@ impl CoreLoop {
                     rls_filters,
                     rls_write_check,
                     resolved_sum_targets,
+                    system_time,
                 },
             ),
             DocumentOp::Merge { .. }

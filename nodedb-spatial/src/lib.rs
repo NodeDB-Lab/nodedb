@@ -62,7 +62,7 @@ pub use persist::{
 };
 pub use planar::{planar_area, planar_distance, planar_dwithin, planar_length, planar_perimeter};
 pub use predicates::{st_contains, st_disjoint, st_distance, st_dwithin, st_intersects, st_within};
-pub use rtree::{RTree, RTreeEntry, SridMismatch, TreeSrid};
+pub use rtree::{CutCandidate, EndedEntry, HistoryRows, RTree, RTreeEntry, SridMismatch, TreeSrid};
 pub use text::{SridCheck, geometry_from_bytes, geometry_from_text};
 pub use validate::{ValidityReason, is_valid, validate_geometry, validity_reason};
 pub use value::{ewkb_of_value, geometry_from_value, value_of_ewkb};

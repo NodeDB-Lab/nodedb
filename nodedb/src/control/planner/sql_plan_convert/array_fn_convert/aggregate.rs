@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! ARRAY_AGG → PhysicalPlan::Array(ArrayOp::Aggregate) or ClusterArray(Agg).
+//! ARRAY_AGG → `PhysicalPlan::ClusterArray(ClusterArrayOp::Agg)`.
 
 use nodedb_array::types::ArrayId;
 use nodedb_sql::ArrayAggVisitArgs;
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::types::TenantId;
-use nodedb_physical::physical_plan::{ArrayOp, ClusterArrayOp};
+use nodedb_physical::physical_plan::ClusterArrayOp;
 
 use super::super::convert::ConvertContext;
 use super::helpers::{decode_schema, load_entry, map_reducer};
@@ -72,46 +72,30 @@ pub(crate) fn convert_agg(
     let aid = ArrayId::in_database(tenant_id, ctx.database_id, name);
     let vshard = ctx.collection_key(name).vshard();
 
-    let plan = if ctx.cluster_enabled {
-        // Encode the reducer for the wire. The coordinator decodes it
-        // and sends per-shard requests via ArrayShardAggReq.
-        let reducer_msgpack =
-            zerompk::to_msgpack_vec(&mapped).map_err(|e| crate::Error::Serialization {
-                format: "msgpack".into(),
-                detail: format!("array reducer encode: {e}"),
-            })?;
-        // The fan-out covers the shards that own a tile of the region's box.
-        let box_ranges = region
-            .as_ref()
-            .map(|r| r.slice.dim_ranges.as_slice())
-            .unwrap_or_default();
-        PhysicalPlan::ClusterArray(ClusterArrayOp::Agg {
-            array_id: aid,
-            attr_idx,
-            reducer_msgpack,
-            group_by_dim: group_by_dim_idx,
-            slice_tile_keys: compute_slice_tile_keys(&schema, box_ranges, entry.prefix_bits),
-            prefix_bits: entry.prefix_bits,
-            system_time,
-            valid_at_ms,
-            region_msgpack,
-            physical,
-        })
-    } else {
-        PhysicalPlan::Array(ArrayOp::Aggregate {
-            array_id: aid,
-            attr_idx,
-            reducer: mapped,
-            group_by_dim: group_by_dim_idx,
-            cell_filter: None,
-            return_partial: false,
-            shard_bucket: None,
-            system_time,
-            valid_at_ms,
-            region_msgpack,
-            physical,
-        })
-    };
+    // Encode the reducer for the wire. The coordinator decodes it and sends
+    // per-shard requests via ArrayShardAggReq.
+    let reducer_msgpack =
+        zerompk::to_msgpack_vec(&mapped).map_err(|e| crate::Error::Serialization {
+            format: "msgpack".into(),
+            detail: format!("array reducer encode: {e}"),
+        })?;
+    // The fan-out covers the shards that own a tile of the region's box.
+    let box_ranges = region
+        .as_ref()
+        .map(|r| r.slice.dim_ranges.as_slice())
+        .unwrap_or_default();
+    let plan = PhysicalPlan::ClusterArray(ClusterArrayOp::Agg {
+        array_id: aid,
+        attr_idx,
+        reducer_msgpack,
+        group_by_dim: group_by_dim_idx,
+        slice_tile_keys: compute_slice_tile_keys(&schema, box_ranges, entry.prefix_bits),
+        prefix_bits: entry.prefix_bits,
+        system_time,
+        valid_at_ms,
+        region_msgpack,
+        physical,
+    });
 
     Ok(vec![PhysicalTask {
         tenant_id,
@@ -154,7 +138,7 @@ mod tests {
     use nodedb_array::schema::{ArraySchemaBuilder, AttrSpec, AttrType, DimSpec, DimType};
     use nodedb_array::types::domain::{Domain, DomainBound};
 
-    fn make_ctx(cluster_enabled: bool) -> ConvertContext {
+    fn make_ctx() -> ConvertContext {
         let schema = ArraySchemaBuilder::new("sales")
             .dim(DimSpec::new(
                 "month".to_string(),
@@ -192,10 +176,8 @@ mod tests {
             retention_registry: None,
             array_catalog: Some(handle),
             credentials: None,
-            wal: None,
             surrogate_assigner:
                 crate::control::planner::sql_plan_convert::test_support::test_assigner(),
-            cluster_enabled,
             bitemporal_retention_registry: None,
             max_vector_dim: 0,
             force_shuffle_join: false,
@@ -205,14 +187,15 @@ mod tests {
             broadcast_threshold_bytes: 8 * 1024 * 1024,
             shuffle_agg_threshold: 10_000,
             prefetched: Default::default(),
+            reads_txn_snapshot: false,
             database_id: crate::types::DatabaseId::DEFAULT,
             tenant_id: crate::types::TenantId::new(0),
         }
     }
 
     #[test]
-    fn single_node_emits_local_agg() {
-        let ctx = make_ctx(false);
+    fn an_aggregate_emits_cluster_agg() {
+        let ctx = make_ctx();
         let tasks = convert_agg(
             sum_args(&ArraySliceAst::default(), &TemporalScope::default()),
             TenantId::new(1),
@@ -221,37 +204,18 @@ mod tests {
         .expect("convert");
         assert_eq!(tasks.len(), 1);
         match &tasks[0].plan {
-            PhysicalPlan::Array(ArrayOp::Aggregate { region_msgpack, .. }) => {
+            PhysicalPlan::ClusterArray(ClusterArrayOp::Agg { region_msgpack, .. }) => {
                 assert!(region_msgpack.is_empty(), "no region reads the whole array");
             }
-            other => panic!("expected local Array variant, got {other:?}"),
+            other => panic!("expected ClusterArray variant, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn cluster_mode_emits_cluster_agg() {
-        let ctx = make_ctx(true);
-        let tasks = convert_agg(
-            sum_args(&ArraySliceAst::default(), &TemporalScope::default()),
-            TenantId::new(1),
-            &ctx,
-        )
-        .expect("convert");
-        assert_eq!(tasks.len(), 1);
-        assert!(
-            matches!(
-                &tasks[0].plan,
-                PhysicalPlan::ClusterArray(ClusterArrayOp::Agg { .. })
-            ),
-            "expected ClusterArray variant"
-        );
     }
 
     /// A box rides to every shard as the encoded region, and the fan-out
     /// covers only the tiles inside it.
     #[test]
     fn a_box_encodes_the_region_and_narrows_the_fan_out() {
-        let ctx = make_ctx(true);
+        let ctx = make_ctx();
         let slice = ArraySliceAst {
             dim_ranges: vec![NamedDimRange {
                 dim: "month".into(),
@@ -290,7 +254,7 @@ mod tests {
 
     #[test]
     fn a_box_on_an_unknown_dim_is_refused() {
-        let ctx = make_ctx(false);
+        let ctx = make_ctx();
         let slice = ArraySliceAst {
             dim_ranges: vec![NamedDimRange {
                 dim: "year".into(),
@@ -319,7 +283,7 @@ mod tests {
         // carry `Option<i64>` (Current | AsOf) and not `SystemTimeScope`: the
         // AllVersions state is made unrepresentable by rejecting it here.
         // Audit-log reads go through ARRAY_SLICE instead.
-        let ctx = make_ctx(false);
+        let ctx = make_ctx();
         let temporal = TemporalScope {
             system_time: nodedb_types::SystemTimeScope::AllVersions,
             ..TemporalScope::default()

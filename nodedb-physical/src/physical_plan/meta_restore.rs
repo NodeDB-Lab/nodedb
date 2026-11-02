@@ -1,14 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The payload of `MetaOp::RestoreRedo`: one batch of a RESTORE's rows and
-//! edge versions, installed as a Calvin transaction.
+//! The payload of `MetaOp::RestoreRedo`: one batch of a RESTORE's rows, KV
+//! keys and edge versions, installed as a Calvin transaction.
 //!
 //! A RESTORE re-issues what a backup captured in the Calvin sequence, so its
 //! writes order against every other transaction, a TRUNCATE included. Each
 //! participant installs the batch at its transaction's turn. A restored row
 //! installs as the backup holds it. A restored edge version keeps its
 //! historical `system_from` and is applied at the transaction's ordinal. A
-//! restored node label version keeps its system time too.
+//! restored node label version keeps its system time too. A restored KV key
+//! installs every version at its backed-up ordinal. A restored array cell
+//! installs every version at its backed-up system time. A restored columnar
+//! key and a restored vector row install every version at its backed-up
+//! interval. Restored timeseries rows append at the batch's turn.
+
+use nodedb_array::types::ArrayId;
+
+use super::meta_restore_keys::{RestoredColumnarKey, RestoredVectorRow};
 
 /// One restored edge version.
 #[derive(
@@ -59,6 +67,24 @@ pub struct RestoredRow {
     pub surrogate: u32,
 }
 
+/// One restored KV key: the key its writers lock.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
+#[msgpack(map)]
+pub struct RestoredKvKey {
+    /// The collection, as the Data Plane stores it.
+    pub collection: String,
+    pub key: Vec<u8>,
+}
+
 /// One restored node's label history and current label set.
 #[derive(
     Debug,
@@ -78,6 +104,27 @@ pub struct RestoredNodeLabels {
     pub versions: Vec<(i64, Vec<String>)>,
     /// The label set the node carries in the backup.
     pub current: Vec<String>,
+}
+
+/// The restored cell versions of one array on the batch's vShard.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
+#[msgpack(map)]
+pub struct RestoredArrayCells {
+    /// The destination array.
+    pub array_id: ArrayId,
+    /// The encoded array restore sub-record of the cells: every backed-up
+    /// version of each coordinate, each at its own system time. The resolve
+    /// adds the versions that set each coordinate's backed-up state again.
+    pub redo: Vec<u8>,
 }
 
 /// One `(collection, key) → surrogate` identity every participant binds
@@ -119,18 +166,41 @@ pub struct RestoredRedo {
     /// sub-records and the change events their install publishes. Empty
     /// when the batch restores edges only.
     pub rows_redo: Vec<u8>,
-    /// Every row `rows_redo` writes.
+    /// Every document row `rows_redo` writes.
     pub rows: Vec<RestoredRow>,
+    /// Every KV key `rows_redo` writes. Each carries every version of the
+    /// key at its backed-up ordinal.
+    pub kv_keys: Vec<RestoredKvKey>,
     /// The restored edge versions, in apply order.
     pub edges: Vec<RestoredEdgeVersion>,
     /// The restored node labels of nodes homed on `vshard`.
-    #[serde(default)]
-    #[msgpack(default)]
     pub node_labels: Vec<RestoredNodeLabels>,
-    /// Every collection the batch writes, as the Data Plane stores it.
+    /// The restored cells of arrays whose cells route to `vshard`.
+    pub arrays: Vec<RestoredArrayCells>,
+    /// Every columnar key `rows_redo` writes. Each carries every version of
+    /// the key at its backed-up interval.
+    pub columnar_keys: Vec<RestoredColumnarKey>,
+    /// Every vector row `rows_redo` writes. Each carries every node of the
+    /// row at its backed-up span.
+    pub vector_rows: Vec<RestoredVectorRow>,
+    /// Every timeseries collection `rows_redo` writes: its series catalog,
+    /// its ended partitions and its restored rows. A timeseries row has no
+    /// key, so its writers lock the collection.
+    pub timeseries: Vec<String>,
+    /// Every user collection the batch writes, as the Data Plane stores it.
+    /// A restored array is no collection: `arrays` names it by its
+    /// `ArrayId`, so a same-name collection never shares its identity.
     pub collections: Vec<String>,
     /// Every identity the rows and edge endpoints are stored under.
     pub identities: Vec<RestoredIdentity>,
+    /// The ordinal the RESTORE takes effect at: a closed cut taken before
+    /// its first batch. A destination row, KV key or array cell with a
+    /// version above it was written after the RESTORE began, and the
+    /// resolve leaves that version current. Every write at or below it
+    /// applied before the first batch resolved, and the resolve sets the
+    /// backup's state again above it. `i64::MAX` for a re-issue that sets
+    /// the backup's state over every destination version.
+    pub restore_cut: i64,
 }
 
 #[cfg(test)]
@@ -146,6 +216,10 @@ mod tests {
                 collection: "people".into(),
                 document_id: "alice".into(),
                 surrogate: 4,
+            }],
+            kv_keys: vec![RestoredKvKey {
+                collection: "sessions".into(),
+                key: b"s1".to_vec(),
             }],
             edges: vec![RestoredEdgeVersion {
                 collection: "knows".into(),
@@ -163,12 +237,26 @@ mod tests {
                 versions: vec![(90, vec!["Person".into()])],
                 current: vec!["Person".into()],
             }],
+            arrays: vec![RestoredArrayCells {
+                array_id: ArrayId::new(nodedb_types::TenantId::new(1), "grid"),
+                redo: vec![4, 5],
+            }],
+            columnar_keys: vec![RestoredColumnarKey {
+                collection: "metrics".into(),
+                surrogate: 6,
+            }],
+            vector_rows: vec![RestoredVectorRow {
+                collection: "docs".into(),
+                surrogate: 8,
+            }],
+            timeseries: vec!["cpu".into()],
             collections: vec!["knows".into(), "people".into()],
             identities: vec![RestoredIdentity {
                 collection: "people".into(),
                 pk_bytes: b"alice".to_vec(),
                 surrogate: 4,
             }],
+            restore_cut: 9,
         };
         let bytes = zerompk::to_msgpack_vec(&batch).expect("encode");
         let decoded: RestoredRedo = zerompk::from_msgpack(&bytes).expect("decode");

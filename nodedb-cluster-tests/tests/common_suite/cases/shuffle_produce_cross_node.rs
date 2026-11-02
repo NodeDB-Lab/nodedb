@@ -115,6 +115,7 @@ fn provider_scan_plan(rows: &[Vec<u8>]) -> Vec<u8> {
         limit: None,
         offset: 0,
         distinct: false,
+        system_time: nodedb_types::SystemTimeScope::Current,
     });
     plan_wire::encode(&plan).expect("encode provider scan plan")
 }

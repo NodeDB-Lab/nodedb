@@ -39,6 +39,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_text_search(
             rls_filters: Vec::new(),
             scores,
             bound: None,
+            system_time: p.system_time,
         },
         // The phrase words go as written. The Data Plane analyzes them with
         // the collection's analyzer, the analysis its indexed text took.
@@ -56,6 +57,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_text_search(
             filters,
             rls_filters: Vec::new(),
             scores,
+            system_time: p.system_time,
         },
         TextSearchShape::Match {
             field,
@@ -81,6 +83,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_text_search(
                 filters,
                 rls_filters: Vec::new(),
                 scores,
+                system_time: p.system_time,
             }
         }
     };

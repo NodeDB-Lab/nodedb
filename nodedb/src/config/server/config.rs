@@ -19,7 +19,7 @@ use super::pitr::PitrSettings;
 use super::retention::RetentionSettings;
 use super::scheduler::SchedulerConfig;
 use super::section::ServerSection;
-use super::snapshot_storage::{QuarantineStorageSettings, SnapshotStorageSettings};
+use super::snapshot_storage::SnapshotStorageSettings;
 use super::tls::{BackupEncryptionSettings, EncryptionSettings};
 use crate::config::EngineConfig;
 
@@ -127,12 +127,6 @@ pub struct ServerConfig {
     /// to local filesystem at `{data_dir}/snapshots`.
     #[serde(default)]
     pub snapshot_storage: Option<SnapshotStorageSettings>,
-
-    /// Quarantine storage configuration.
-    /// Controls where corrupt-segment archives are stored. When absent, defaults
-    /// to local filesystem at `{data_dir}/quarantine`.
-    #[serde(default)]
-    pub quarantine_storage: Option<QuarantineStorageSettings>,
 
     /// Performance tuning knobs for engines, query execution, WAL, bridge,
     /// network, and cluster transport. All fields have sensible defaults;

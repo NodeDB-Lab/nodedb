@@ -62,8 +62,9 @@ fn ts_column_type_to_shared(ts_type: TsColumnType) -> SharedColumnType {
         TsColumnType::Timestamp(TimeKind::Millis) => SharedColumnType::Int64,
         TsColumnType::Float64 => SharedColumnType::Float64,
         TsColumnType::Int64 => SharedColumnType::Int64,
-        // Symbol columns store u32 IDs — represented as Int64 in shared format.
-        TsColumnType::Symbol => SharedColumnType::Int64,
+        // Symbol and text columns store u32 dictionary ids, represented as
+        // Int64 in the shared format.
+        TsColumnType::Symbol | TsColumnType::Text => SharedColumnType::Int64,
     }
 }
 
@@ -110,7 +111,7 @@ fn ts_column_to_shared(
             values: values.clone(),
             valid: None,
         },
-        (TsColumnData::Symbol(sym_ids), TsColumnType::Symbol) => {
+        (TsColumnData::Symbol(sym_ids), TsColumnType::Symbol | TsColumnType::Text) => {
             // Convert u32 symbol IDs to i64 for the shared Int64 column.
             SharedColumnData::Int64 {
                 values: sym_ids.iter().map(|&id| id as i64).collect(),
@@ -201,12 +202,19 @@ pub fn scan_shared_segment(
         ScanPredicate::lte_i64(ts_col_idx, end_ms),
     ];
 
-    // Read timestamp column with predicate pushdown.
-    let ts_decoded = reader.read_column_filtered(ts_col_idx, &predicates)?;
+    // Both columns decode only the blocks the timestamp statistics keep, so
+    // a skipped block decodes in neither column and rows stay aligned.
+    let selection = reader.select_blocks(&predicates);
+    let mut decoded = reader
+        .read_columns_selected(&[ts_col_idx, val_col_idx], &selection)?
+        .into_iter();
+    let (Some(ts_decoded), Some(val_decoded)) = (decoded.next(), decoded.next()) else {
+        return Err(nodedb_columnar::ColumnarError::ColumnOutOfRange {
+            index: val_col_idx,
+            count: reader.column_count(),
+        });
+    };
     let (timestamps, ts_valid) = decoded_to_i64(ts_decoded);
-
-    // Read value column with same predicate pushdown (ensures row alignment).
-    let val_decoded = reader.read_column_filtered(val_col_idx, &predicates)?;
     let (values, val_valid) = decoded_to_f64(val_decoded);
 
     Ok(TsScanResult {

@@ -352,28 +352,17 @@ mod tests {
         let tracker = ProposeTracker::new();
         let mut rx = tracker.register(1, 5, 0xdead_beef);
 
-        // The waiter receives the payload and the versions the apply stamped.
-        let version = nodedb_types::WriteVersion::logged(2, 5);
-        let vshard = crate::types::VShardId::new(3);
-        assert!(tracker.complete(
-            1,
-            5,
-            0xdead_beef,
-            Ok(AppliedWrite {
-                payload: b"result".to_vec(),
-                write_versions: crate::types::ReadVersions::single(vshard, version),
-            }),
-        ));
+        // The waiter receives the payload the apply answered.
+        assert!(tracker.complete(1, 5, 0xdead_beef, Ok(AppliedWrite::new(b"result".to_vec())),));
 
         let result = rx.try_recv().unwrap().unwrap();
         assert_eq!(result.payload, b"result");
-        assert_eq!(result.write_versions.of(vshard), Some(version));
     }
 
     #[test]
     fn propose_tracker_no_waiter_returns_false() {
         let tracker = ProposeTracker::new();
-        assert!(!tracker.complete(1, 99, 0, Ok(AppliedWrite::unversioned(Vec::new()))));
+        assert!(!tracker.complete(1, 99, 0, Ok(AppliedWrite::new(Vec::new()))));
     }
 
     #[test]
@@ -387,9 +376,7 @@ mod tests {
             1,
             5,
             0xbbbb,
-            Ok(AppliedWrite::unversioned(
-                b"other-proposers-payload".to_vec()
-            )),
+            Ok(AppliedWrite::new(b"other-proposers-payload".to_vec())),
         ));
 
         match rx.try_recv().unwrap() {

@@ -10,7 +10,7 @@ use crate::engine::timeseries::columnar_agg::timestamp_range_filter;
 use crate::types::{DatabaseId, TenantId};
 
 use super::partition_scan::{PartitionScan, scan_partitions_parallel};
-use super::row_emit::{emit_memtable_row, row_admitted_by_policy};
+use super::row_emit::{emit_memtable_row, render_system_time, row_admitted_by_policy};
 
 /// Inputs to [`CoreLoop::gather_ts_rows`].
 pub(in crate::data::executor) struct TsGatherParams<'a> {
@@ -25,12 +25,18 @@ pub(in crate::data::executor) struct TsGatherParams<'a> {
     pub rls_predicates: &'a [ScanFilter],
     /// Row ceiling.
     pub limit: usize,
+    /// The row versions the read sees. A partition a TRUNCATE ended at or
+    /// below the cut is not read.
+    pub cut: nodedb_columnar::VersionCut,
 }
 
 impl CoreLoop {
     /// Committed rows of a timeseries collection: memtable rows, then rows
-    /// of every flushed partition in the time range, each admitted by the
-    /// WHERE predicates and then the read policy, up to `limit`.
+    /// of every flushed partition in the time range the cut sees, each
+    /// admitted by the
+    /// WHERE predicates and then the read policy, up to `limit`. Predicates
+    /// read the stored `_ts_system` ordinal. Each admitted row then renders
+    /// its system time ([`render_system_time`]).
     ///
     /// A registered partition whose directory is missing is an error: the
     /// rows it holds are part of the answer.
@@ -47,6 +53,7 @@ impl CoreLoop {
             filter_predicates,
             rls_predicates,
             limit,
+            cut,
         } = p;
         let has_filters = !filter_predicates.is_empty();
         let key = (database_id, tid, collection.to_string());
@@ -117,6 +124,8 @@ impl CoreLoop {
                 if !row_admitted_by_policy(&row, rls_predicates, &crs)? {
                     continue;
                 }
+                let mut row = row;
+                render_system_time(&mut row);
                 results.push(row);
             }
         }
@@ -125,7 +134,7 @@ impl CoreLoop {
         if let Some(registry) = self.ts_registries.get(&key) {
             let query_range = nodedb_types::timeseries::TimeRange::new(time_range.0, time_range.1);
             let partition_dirs: Vec<std::path::PathBuf> = registry
-                .query_partitions(&query_range)
+                .query_partitions(&query_range, cut)
                 .iter()
                 .map(|entry| {
                     super::super::paths::ts_collection_dir(
@@ -159,7 +168,10 @@ impl CoreLoop {
                     },
                     &crs,
                 )?;
-                results.extend(partition_rows);
+                results.extend(partition_rows.into_iter().map(|mut row| {
+                    render_system_time(&mut row);
+                    row
+                }));
                 results.truncate(limit);
             }
         }

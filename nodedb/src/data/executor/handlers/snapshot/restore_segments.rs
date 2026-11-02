@@ -64,7 +64,7 @@ impl CoreLoop {
     ) -> crate::Result<()> {
         for coll_blob in blobs {
             let (database_id, tenant_id, collection) =
-                super::restore::parse_scoped_snapshot_key(&coll_blob.collection_key);
+                super::restore::parse_scoped_snapshot_key(&coll_blob.collection_key)?;
 
             // The collection name is parsed out of a snapshot-supplied key and
             // becomes the last component of the segment directory.
@@ -145,14 +145,18 @@ impl CoreLoop {
 
                 let partition_dir = segment_dir.join(&part_blob.dir_name);
 
-                // Collision check: registry already knows this min_ts key.
-                // Skipped under `replace_mode` (Raft install): the snapshot's
-                // partition OVERWRITES the local one — `registry.import` replaces
-                // the entry keyed by min_ts and the directory is wiped + rewritten
-                // below.
+                // Collision check: the registry already knows this partition
+                // directory. A partition in another directory that shares its
+                // `min_ts` is a different partition and stays. Skipped under
+                // `replace_mode` (Raft install): the snapshot's partition
+                // OVERWRITES the local one — the directory is wiped and
+                // rewritten below, and `insert_partition` replaces the entry
+                // filed for it.
                 if !replace_mode
                     && let Some(registry) = self.ts_registries.get(&reg_key)
-                    && let Some(existing) = registry.get(meta.min_ts)
+                    && let Some(existing) = registry
+                        .key_of_dir(&part_blob.dir_name)
+                        .and_then(|partition_key| registry.get(&partition_key))
                 {
                     let is_identical = existing.meta.row_count == meta.row_count
                         && existing.meta.last_flushed_wal_lsn == meta.last_flushed_wal_lsn;
@@ -322,7 +326,7 @@ impl CoreLoop {
     ) -> crate::Result<()> {
         for (collection_key, bytes) in entries {
             let (database_id, tenant_id, collection) =
-                super::restore::parse_scoped_snapshot_key(collection_key);
+                super::restore::parse_scoped_snapshot_key(collection_key)?;
 
             let engine_key = (
                 nodedb_types::DatabaseId::new(database_id),
@@ -384,14 +388,11 @@ impl CoreLoop {
                 self.columnar_flushed_segments.remove(&engine_key);
             }
             // The snapshot's versions carry ordinals another node stamped.
-            self.fold_columnar_system_ordinals(&engine_key)?;
+            self.fold_columnar_system_ordinals(&engine_key);
             // Re-attach the cross-engine surrogate sidecar under the SAME key so
-            // prefiltered scans see flushed rows post-restore. Old snapshots
-            // carry empty surrogates (non-empty segments): we skip populating
-            // the sidecar, so those rows read as `None`-surrogate and are
-            // conservatively excluded under an active prefilter — the correct
-            // backward-compat behavior. Order is preserved so segment_id ==
-            // index + 1 holds for the sidecar too.
+            // prefiltered scans see flushed rows post-restore. `from_snapshot`
+            // holds it to the flushed segment count, and order is preserved so
+            // segment_id == index + 1 holds for the sidecar too.
             if !flushed_surrogates.is_empty() {
                 self.columnar_flushed_surrogates
                     .insert(engine_key, flushed_surrogates);
@@ -446,6 +447,7 @@ mod tests {
             last_flushed_wal_lsn: 7,
             column_stats: std::collections::HashMap::new(),
             max_system_ts: 0,
+            ended_at: None,
         }
     }
 
@@ -561,7 +563,8 @@ mod tests {
             "metrics".to_string(),
         );
         let registry = core.ts_registries.get(&key).expect("registry registered");
-        assert_eq!(registry.get(5).expect("partition entry").dir_name, "ts-5_6");
+        let partition_key = registry.key_of_dir("ts-5_6").expect("partition entry");
+        assert_eq!(partition_key.min_ts, 5);
     }
 
     mod cagg {

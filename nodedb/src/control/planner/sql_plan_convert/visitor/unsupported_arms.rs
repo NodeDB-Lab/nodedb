@@ -10,6 +10,7 @@ macro_rules! impl_unsupported_convert_visitor_methods {
             _query_vector: &[f32],
             _top_k: usize,
             _ef_search: usize,
+            _temporal: &nodedb_sql::TemporalScope,
         ) -> crate::Result<Vec<nodedb_physical::physical_task::PhysicalTask>> {
             Err(crate::Error::PlanError {
                 detail: "unsupported SqlPlan variant: MultiVectorSearch".to_string(),

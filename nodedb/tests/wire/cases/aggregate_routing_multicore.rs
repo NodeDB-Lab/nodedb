@@ -106,7 +106,8 @@ async fn join_aggregate_on_multiple_cores() {
     );
 }
 
-/// A temporal read of a join side that is not bitemporal is refused.
+/// A valid-time read of a join side that is not bitemporal is refused: only
+/// a bitemporal collection has valid-time columns.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn temporal_join_side_must_be_bitemporal() {
     let server = TestServer::start().await;
@@ -124,7 +125,7 @@ async fn temporal_join_side_must_be_bitemporal() {
         .unwrap_or_else(|e| panic!("seed tj_temporal: {e}"));
     server
         .expect_error(
-            "SELECT COUNT(*) FROM tj_plain FOR SYSTEM_TIME AS OF 1700000000000 \
+            "SELECT COUNT(*) FROM tj_plain FOR VALID_TIME CONTAINS 1700000000000 \
              JOIN tj_temporal ON tj_plain.k = tj_temporal.k",
             "requires a bitemporal collection",
         )

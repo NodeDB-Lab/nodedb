@@ -2,10 +2,10 @@
 
 //! Removing one row's current version inside a caller-owned transaction.
 //!
-//! A bitemporal row is never erased. Its delete appends a tombstone version
-//! at a system time and tombstones every value the closed version held in the
-//! versioned index. History before that system time stays readable with
-//! `AS OF SYSTEM TIME`. Any other row is removed from the plain table.
+//! No row is erased. A delete appends a tombstone version at a system time
+//! and tombstones every value the closed version held in the versioned
+//! index. History before that system time stays readable at any earlier cut
+//! until the purge removes it.
 //!
 //! The point delete and the bulk delete both land each row here, so the two
 //! write the same versions and index tombstones for the same row.
@@ -13,7 +13,7 @@
 use redb::WriteTransaction;
 
 use crate::data::executor::core_loop::CoreLoop;
-use crate::engine::document::store::{StorageKey, extract_index_values};
+use crate::engine::document::store::StorageKey;
 use crate::engine::sparse::btree_versioned::VersionedIndexEntry;
 use crate::types::{DatabaseId, TenantId};
 
@@ -36,22 +36,19 @@ pub(in crate::data::executor) struct CurrentRowRemoval<'a> {
     pub tid: u64,
     pub collection: &'a str,
     pub storage_key: &'a StorageKey,
-    /// The tombstone's system time on a bitemporal collection, `None` on any
-    /// other.
-    pub bitemporal_sys_from: Option<i64>,
+    /// The tombstone's system time.
+    pub sys_from: i64,
 }
 
 /// What [`CoreLoop::remove_current_row_in_txn`] removed.
 pub(in crate::data::executor) struct RemovedRow {
-    /// The removed row's stored body. `None` when no row was there.
+    /// The removed row's stored body. `None` when no row was there. A
+    /// removed row's tombstone lands at the removal's `sys_from`.
     pub prior: Option<Vec<u8>>,
-    /// The tombstone's system time. `Some` only when a bitemporal row was
-    /// closed.
-    pub tombstone_sys_from: Option<i64>,
 }
 
 impl CoreLoop {
-    /// Close a bitemporal row's current version within `txn`. Writes the
+    /// Close a row's current version within `txn`. Writes the
     /// tombstone version at `sys_from` and an index tombstone for each
     /// value the closed version held. Does NOT commit.
     ///
@@ -105,39 +102,46 @@ impl CoreLoop {
             p.collection.to_string(),
         );
         let Some(config) = self.doc_configs.get(&config_key) else {
+            // No registered config names the index paths here (a replay that
+            // runs before the collection registers): tombstone every entry
+            // of the row that is live now, found by walking the index.
+            for (field, value) in self.sparse.versioned_index_tombstone_document_in_txn(
+                txn,
+                p.database_id,
+                p.tid,
+                p.collection,
+                p.storage_key,
+                p.sys_from,
+            )? {
+                tombstoned(&field, &value);
+            }
             return Ok(());
         };
+        if config.index_paths.is_empty() {
+            return Ok(());
+        }
         let doc = self.decode_stored_document(config, p.current_body)?;
-        for path in &config.index_paths {
-            for v in extract_index_values(&doc, &path.path, path.is_array) {
-                let value = if path.case_insensitive {
-                    v.to_lowercase()
-                } else {
-                    v
-                };
-                self.sparse.versioned_index_tombstone_in_txn(
-                    txn,
-                    VersionedIndexEntry {
-                        database_id: p.database_id,
-                        tenant: p.tid,
-                        coll: p.collection,
-                        field: &path.path,
-                        value: &value,
-                        doc_id: p.storage_key,
-                        sys_from: p.sys_from,
-                    },
-                )?;
-                tombstoned(&path.path, &value);
-            }
+        for (field, value) in self.index_tuples_for_doc(&doc, &config.index_paths) {
+            self.sparse.versioned_index_tombstone_in_txn(
+                txn,
+                VersionedIndexEntry {
+                    database_id: p.database_id,
+                    tenant: p.tid,
+                    coll: p.collection,
+                    field: &field,
+                    value: &value,
+                    doc_id: p.storage_key,
+                    sys_from: p.sys_from,
+                },
+            )?;
+            tombstoned(&field, &value);
         }
         Ok(())
     }
 
-    /// Remove one row's current version within `txn`. Does NOT commit.
-    ///
-    /// With a system time, the row's current version is read and closed by
-    /// [`Self::close_version_in_txn`]. Without one, the row is deleted
-    /// from the plain table. A row that is absent removes nothing.
+    /// Remove one row's current version within `txn`: read it through
+    /// `txn` and close it by [`Self::close_version_in_txn`] at `sys_from`.
+    /// A row that is absent removes nothing. Does NOT commit.
     ///
     /// On `Err` the caller MUST drop `txn` without committing.
     pub(in crate::data::executor) fn remove_current_row_in_txn(
@@ -145,27 +149,11 @@ impl CoreLoop {
         txn: &WriteTransaction,
         r: CurrentRowRemoval<'_>,
     ) -> crate::Result<RemovedRow> {
-        let Some(sys_from) = r.bitemporal_sys_from else {
-            let prior = self.sparse.delete_in_txn(
-                txn,
-                r.database_id,
-                r.tid,
-                r.collection,
-                r.storage_key,
-            )?;
-            return Ok(RemovedRow {
-                prior,
-                tombstone_sys_from: None,
-            });
-        };
         let Some(prior) =
             self.sparse
-                .versioned_get_current(r.database_id, r.tid, r.collection, r.storage_key)?
+                .get_in_txn(txn, r.database_id, r.tid, r.collection, r.storage_key)?
         else {
-            return Ok(RemovedRow {
-                prior: None,
-                tombstone_sys_from: None,
-            });
+            return Ok(RemovedRow { prior: None });
         };
         // The caller records the indexed values from the row's pre-image.
         self.close_version_in_txn(
@@ -176,12 +164,9 @@ impl CoreLoop {
                 collection: r.collection,
                 storage_key: r.storage_key,
                 current_body: &prior,
-                sys_from,
+                sys_from: r.sys_from,
             },
         )?;
-        Ok(RemovedRow {
-            prior: Some(prior),
-            tombstone_sys_from: Some(sys_from),
-        })
+        Ok(RemovedRow { prior: Some(prior) })
     }
 }

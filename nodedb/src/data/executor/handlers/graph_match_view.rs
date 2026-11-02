@@ -68,7 +68,8 @@ impl CoreLoop {
             Some(c) if self.is_bitemporal(database_id, tid, c) => {
                 crate::engine::graph::pattern::executor::DocumentCut::Versioned {
                     system_as_of: match scope.system {
-                        GraphSystemCut::AtOrdinal(ordinal) => Some(ordinal),
+                        GraphSystemCut::AtOrdinal(ordinal)
+                        | GraphSystemCut::TxnSnapshot(ordinal) => Some(ordinal),
                         GraphSystemCut::Live | GraphSystemCut::AllVersions => None,
                     },
                     valid_at_ms: scope.valid_at_ms,

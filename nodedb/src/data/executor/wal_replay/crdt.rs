@@ -2,6 +2,7 @@
 
 //! CRDT WAL replay: rebuilds authoritative Loro and sparse document state after crash.
 
+use super::crdt_admission::{replayed_admission, signed_record_metadata};
 use crate::data::executor::core_loop::CoreLoop;
 
 impl CoreLoop {
@@ -188,6 +189,13 @@ impl CoreLoop {
                         }
                     };
                     match applied {
+                        // A delta the restored state already holds imports
+                        // nothing. Its row projected when it first applied,
+                        // so projecting it again appends a duplicate version.
+                        crate::engine::crdt::tenant_state::ValidatedApplyOutcome::Clean {
+                            imported_ops: 0,
+                            ..
+                        } => None,
                         crate::engine::crdt::tenant_state::ValidatedApplyOutcome::Clean {
                             write_set,
                             ..
@@ -229,7 +237,7 @@ impl CoreLoop {
                         ) => {
                             // The detached candidate was rejected and discarded.
                             // The committed record remains a deterministic no-op
-                            // whose collection floor advances on every replica.
+                            // every replica notes as applied.
                             warn!(core = self.core_id, tenant = tid.as_u64(), %collection, %reason, "CRDT WAL delta rejected during replay");
                             if !self.store_replayed_dead_letter(database_id, tid, record.header.lsn) {
                                 continue;
@@ -402,8 +410,8 @@ impl CoreLoop {
                 self.sync_commit(provenance);
             }
             // Every successfully imported payload changed authoritative Loro
-            // state, including a snapshot import that projects no row. Record
-            // its exact durable collection floor either way.
+            // state, including a snapshot import that projects no row. Note it
+            // either way.
             self.note_replay_write(
                 record.header.database_id,
                 tid.as_u64(),
@@ -423,71 +431,6 @@ impl CoreLoop {
         if replayed > 0 {
             tracing::info!(core = self.core_id, replayed, "WAL CRDT replay complete");
         }
-    }
-}
-
-/// Check the admission metadata of a signed record against what its writer
-/// stamps. The writer copies the session's producer id and the frame's seq
-/// into both the provenance and the signing fields, so a signed record
-/// without provenance, or with fields that disagree, is not one it wrote.
-/// Such a record at `lsn` is a corrupt WAL record.
-fn signed_record_metadata(
-    payload: &crate::wal::CrdtDeltaWalPayload,
-    lsn: u64,
-) -> crate::Result<()> {
-    let corrupt =
-        |detail: String| crate::Error::Wal(nodedb_wal::WalError::CorruptRecord { lsn, detail });
-    let Some(signing) = payload.signing else {
-        return Ok(());
-    };
-    let Some(provenance) = payload.provenance.as_ref() else {
-        return Err(corrupt(format!(
-            "signed delta for {} carries no provenance",
-            payload.collection
-        )));
-    };
-    if provenance.producer_id != signing.auth_device_id || provenance.seq != signing.auth_seq_no {
-        return Err(corrupt(format!(
-            "signed delta for {} names producer {} seq {} in its provenance and device {} seq {} \
-             in its signing fields",
-            payload.collection,
-            provenance.producer_id,
-            provenance.seq,
-            signing.auth_device_id,
-            signing.auth_seq_no
-        )));
-    }
-    Ok(())
-}
-
-/// The signing admission a committed record replays under: the one its live
-/// apply ran under.
-///
-/// A signed record carries the signing fields the session admitted, already
-/// verified, so it replays preverified. An absent required signature still
-/// refuses it, as it did live. An unsigned record replays the live local
-/// apply's admission: no signature, checked against the collection's signing
-/// policy.
-fn replayed_admission(
-    payload: &crate::wal::CrdtDeltaWalPayload,
-) -> crate::engine::crdt::tenant_state::DeltaSigningAdmission {
-    match payload.signing {
-        Some(signing) => crate::engine::crdt::tenant_state::DeltaSigningAdmission {
-            auth: nodedb_crdt::CrdtAuthContext {
-                user_id: signing.auth_user_id,
-                device_id: signing.auth_device_id,
-                seq_no: signing.auth_seq_no,
-                delta_signature: signing.delta_signature,
-                ..nodedb_crdt::CrdtAuthContext::default()
-            },
-            required: signing.required,
-            preverified: true,
-        },
-        None => crate::engine::crdt::tenant_state::DeltaSigningAdmission {
-            auth: nodedb_crdt::CrdtAuthContext::default(),
-            required: false,
-            preverified: false,
-        },
     }
 }
 
@@ -615,7 +558,7 @@ mod crdt_replay_tests {
     /// Replay holds the mark the same way: advancing it would turn the
     /// re-push after a restart into a `Duplicate` and drop the write.
     #[test]
-    fn replay_stale_v4_holds_authenticated_sequence_watermark() {
+    fn replay_stale_fence_holds_authenticated_sequence_watermark() {
         let tid = TenantId::new(9);
         let provenance = nodedb_types::sync::wire::SyncProvenance {
             producer_id: 77,
@@ -1057,20 +1000,9 @@ mod crdt_replay_tests {
             "matching fenced retry must rebuild its sparse projection"
         );
         assert_eq!(
-            h.core.write_index.collection_version(
-                &crate::data::executor::core_loop::write_index::CollKey {
-                    vshard: crate::data::executor::core_loop::write_index::tests::replay_home(
-                        db, collection
-                    ),
-                    db,
-                    tenant: tid,
-                    collection: Box::from(collection),
-                }
-            ),
-            Some(crate::data::executor::core_loop::write_index::tests::local(
-                3
-            )),
-            "only the correctly fenced retry advances the replay write version"
+            h.core.watermark,
+            crate::types::Lsn::new(3),
+            "the matching fenced retry is noted as applied"
         );
     }
 
@@ -1241,23 +1173,9 @@ mod crdt_replay_tests {
         h
     }
 
-    /// The replayed version of `users`, as the WAL LSN it was written at.
-    fn users_write_lsn(h: &CoreHarness, tid: TenantId) -> Option<crate::types::Lsn> {
-        use crate::data::executor::core_loop::write_index::tests::{local, replay_home};
-        let version = h.core.write_index.collection_version(
-            &crate::data::executor::core_loop::write_index::CollKey {
-                vshard: replay_home(DatabaseId::DEFAULT, "users"),
-                db: DatabaseId::DEFAULT,
-                tenant: tid,
-                collection: Box::from("users"),
-            },
-        )?;
-        assert_eq!(
-            version,
-            local(version.local),
-            "a single-node replay records a local version"
-        );
-        Some(crate::types::Lsn::new(version.local))
+    /// The newest WAL record replay noted as applied, `None` before any.
+    fn replayed_through(h: &CoreHarness) -> Option<crate::types::Lsn> {
+        (h.core.watermark > crate::types::Lsn::ZERO).then_some(h.core.watermark)
     }
 
     /// A replayed rejection the full queue refuses stops replay at its
@@ -1293,7 +1211,7 @@ mod crdt_replay_tests {
                 .is_empty()
         );
         assert_eq!(
-            users_write_lsn(&h, tid),
+            replayed_through(&h),
             Some(crate::types::Lsn::new(19)),
             "the refused record is not counted as replayed"
         );
@@ -1319,7 +1237,7 @@ mod crdt_replay_tests {
             .get_crdt_engine(DatabaseId::DEFAULT, tid)
             .expect("engine");
         assert_eq!(engine.dead_letters().count(), 0, "nothing queued");
-        assert_eq!(users_write_lsn(&h, tid), Some(crate::types::Lsn::new(19)));
+        assert_eq!(replayed_through(&h), Some(crate::types::Lsn::new(19)));
     }
 
     /// A record whose stored entry the engine restored replays as that
@@ -1353,7 +1271,7 @@ mod crdt_replay_tests {
                 .count(),
             1
         );
-        assert_eq!(users_write_lsn(&h, tid), Some(crate::types::Lsn::new(20)));
+        assert_eq!(replayed_through(&h), Some(crate::types::Lsn::new(20)));
     }
 
     /// A stored entry that does not decode fails the engine open, and replay

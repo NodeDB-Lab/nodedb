@@ -2,7 +2,7 @@
 
 //! [`OriginSchemaRegistry`] — per-array `SchemaDoc` cache with redb persistence.
 //!
-//! Entries live in `array_schema_docs_v2`, structurally keyed by database ID,
+//! Entries live in `array_schema_docs`, structurally keyed by database ID,
 //! tenant ID, and a length-delimited UTF-8 array name.
 
 use std::collections::HashMap;
@@ -19,7 +19,7 @@ use crate::Error;
 use crate::types::DatabaseId;
 
 /// redb table: `[database_id: u64 BE][tenant_id: u64 BE][name_len: u16 BE][array name bytes]` → persisted schema.
-const SCHEMA_DOCS_V2: TableDefinition<&[u8], &[u8]> = TableDefinition::new("array_schema_docs_v2");
+const SCHEMA_DOCS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("array_schema_docs");
 
 type SchemaKey = (DatabaseId, u64, String);
 
@@ -61,7 +61,7 @@ impl OriginSchemaRegistry {
                 engine: "array_sync".into(),
                 detail: format!("schema_registry begin_write init: {e}"),
             })?;
-            txn.open_table(SCHEMA_DOCS_V2).map_err(|e| Error::Storage {
+            txn.open_table(SCHEMA_DOCS).map_err(|e| Error::Storage {
                 engine: "array_sync".into(),
                 detail: format!("schema_registry open v2 table init: {e}"),
             })?;
@@ -294,7 +294,7 @@ impl OriginSchemaRegistry {
             detail: format!("schema_registry persist begin_write '{array}': {e}"),
         })?;
         {
-            let mut table = txn.open_table(SCHEMA_DOCS_V2).map_err(|e| Error::Storage {
+            let mut table = txn.open_table(SCHEMA_DOCS).map_err(|e| Error::Storage {
                 engine: "array_sync".into(),
                 detail: format!("schema_registry persist open v2 table '{array}': {e}"),
             })?;
@@ -344,7 +344,7 @@ impl OriginSchemaRegistry {
             engine: "array_sync".into(),
             detail: format!("schema_registry load_all begin_read: {e}"),
         })?;
-        let table = txn.open_table(SCHEMA_DOCS_V2).map_err(|e| Error::Storage {
+        let table = txn.open_table(SCHEMA_DOCS).map_err(|e| Error::Storage {
             engine: "array_sync".into(),
             detail: format!("schema_registry load_all open table: {e}"),
         })?;

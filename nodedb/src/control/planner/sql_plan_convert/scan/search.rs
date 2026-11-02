@@ -57,6 +57,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_vector_search(
             ann_options,
             skip_payload_fetch: p.skip_payload_fetch,
             payload_filters,
+            system_time: p.system_time,
         }),
         post_set_op: PostSetOp::None,
         txn_id: None,
@@ -97,6 +98,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_sparse_search(
             query_entries: p.query_entries.to_vec(),
             top_k: *p.top_k,
             filters: serialize_filters(p.filters)?,
+            system_time: p.system_time,
         }),
         post_set_op: PostSetOp::None,
         txn_id: None,
@@ -200,6 +202,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_hybrid_search(
         score_alias,
         tenant_id,
         database_id,
+        system_time,
     } = p;
     let collection_key = nodedb_types::CollectionKey::from_bare(database_id, collection);
     let qualified_collection = nodedb_types::QualifiedCollection::new(database_id, collection);
@@ -223,6 +226,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_hybrid_search(
             filter_bitmap: None,
             rls_filters: Vec::new(),
             score_alias: score_alias.map(|s| s.to_string()),
+            system_time,
         }),
         post_set_op: PostSetOp::None,
         txn_id: None,
@@ -250,6 +254,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_hybrid_search_tripl
         score_alias,
         tenant_id,
         database_id,
+        system_time,
     } = p;
     let collection_key = nodedb_types::CollectionKey::from_bare(database_id, collection);
     let qualified_collection = nodedb_types::QualifiedCollection::new(database_id, collection);
@@ -276,6 +281,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_hybrid_search_tripl
             filter_bitmap: None,
             rls_filters: Vec::new(),
             score_alias: score_alias.map(|s| s.to_string()),
+            system_time,
         }),
         post_set_op: PostSetOp::None,
         txn_id: None,

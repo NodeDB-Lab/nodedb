@@ -101,11 +101,10 @@ impl FunctionLanguage {
 
 /// Serializable user-defined function record for redb storage.
 #[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
-#[msgpack(map, allow_unknown_fields)]
+#[msgpack(map)]
 pub struct StoredFunction {
     pub tenant_id: u64,
-    /// Database namespace. Missing in legacy records means `default`.
-    #[msgpack(default)]
+    /// Database namespace.
     pub database_id: DatabaseId,
     pub name: String,
     pub parameters: Vec<FunctionParam>,
@@ -116,48 +115,30 @@ pub struct StoredFunction {
     /// For WASM functions: empty (binary stored separately).
     pub body_sql: String,
     /// Compiled SQL expression for procedural bodies.
-    #[msgpack(default)]
     pub compiled_body_sql: Option<String>,
     pub volatility: FunctionVolatility,
     /// Security mode: INVOKER (default) or DEFINER.
-    #[msgpack(default)]
     pub security: FunctionSecurity,
     /// Implementation language: SQL (default) or WASM.
-    #[msgpack(default)]
     pub language: FunctionLanguage,
     /// SHA-256 hash of the WASM binary (for WASM functions only).
     /// Used to look up the binary in the `_system.wasm_modules` table.
-    #[msgpack(default)]
     pub wasm_hash: Option<String>,
     /// WASM bytes carried only in a replicated `PutFunction` proposal.
     /// Catalog persistence clears this field after the content-addressed blob
     /// has been installed locally by the entry applier.
-    #[msgpack(default)]
     pub wasm_module: Option<Vec<u8>>,
     /// Complete dependency list carried with every replicated function
-    /// definition. Missing from legacy proposals and catalog rows means none.
-    #[msgpack(default)]
+    /// definition.
     pub dependencies: Vec<Dependency>,
-    /// Fuel budget for WASM functions (default 1_000_000).
-    #[msgpack(default = "default_wasm_fuel")]
+    /// Fuel budget for WASM functions.
     pub wasm_fuel: u64,
-    /// Memory limit for WASM functions in bytes (default 16 MB).
-    #[msgpack(default = "default_wasm_memory")]
+    /// Memory limit for WASM functions in bytes.
     pub wasm_memory: usize,
     pub owner: String,
     pub created_at: u64,
     /// Monotonic descriptor version, stamped by the metadata applier.
-    #[msgpack(default)]
     pub descriptor_version: u64,
     /// HLC stamped by the metadata applier at commit time.
-    #[msgpack(default)]
     pub modification_hlc: nodedb_types::Hlc,
-}
-
-fn default_wasm_fuel() -> u64 {
-    1_000_000
-}
-
-fn default_wasm_memory() -> usize {
-    16 * 1024 * 1024
 }

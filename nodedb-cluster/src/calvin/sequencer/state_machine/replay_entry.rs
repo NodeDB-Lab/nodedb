@@ -111,10 +111,13 @@ impl ReplayEntry {
                 vshard,
                 reason,
             },
+            // The floor folds into the applied epoch instant at apply. No
+            // scheduler reads it.
             SequencerEntry::CutMarker {
                 hlc,
                 restore_point,
                 barrier,
+                floor: _,
             } => Self::CutMarker {
                 hlc,
                 restore_point,

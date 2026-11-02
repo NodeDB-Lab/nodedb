@@ -37,11 +37,8 @@ impl CoreLoop {
             UndoEntry::PutDocument {
                 collection,
                 document_id,
-                old_value,
-                bitemporal_sys_from,
-                bitemporal_index_tuples,
-                secondary_index_added,
-                secondary_index_removed,
+                version_sys_from,
+                index_tuples,
                 chain_hash_prior,
             } => {
                 let ctx = UndoDocumentContext {
@@ -53,55 +50,22 @@ impl CoreLoop {
                 };
                 let storage_key = document_id;
                 let surrogate = document_id.surrogate();
-                if let Some(sys_from) = bitemporal_sys_from {
-                    // Bitemporal op: never wrote the non-versioned table, so
-                    // physically remove the appended version row (+ its index
-                    // entries) instead of a plain put/delete. `versioned_get_current`
-                    // recomputes from the remaining rows, so removing the newest
-                    // version restores the prior one automatically.
-                    self.undo_bitemporal_write(ctx, sys_from, &bitemporal_index_tuples)?;
-                } else {
-                    let result = if let Some(old) = old_value {
-                        self.sparse
-                            .put(database_id, tid, &collection, &storage_key, &old)
-                            .map(|_| ())
-                    } else {
-                        self.sparse
-                            .delete(database_id, tid, &collection, &storage_key)
-                            .map(|_| ())
-                    };
-                    result.map_err(|e| {
-                        let err = UndoError::failed(
-                            entry_index,
-                            format!("document restore on {collection}/{document_id}"),
-                            e,
-                        );
-                        error!(
-                            core = self.core_id,
-                            entry_index,
-                            collection = %collection,
-                            document_id = %document_id,
-                            error = %err,
-                            "transaction undo: document restore failed; shard state unknown"
-                        );
-                        err
-                    })?;
-                }
-                // Reverse plain secondary-index mutations: undo the inserts and
-                // restore the stale entries this put removed. Empty on the
-                // bitemporal path (its index reversal happened in
-                // `undo_bitemporal_write` above), so this is a no-op there.
-                self.undo_secondary_index(ctx, &secondary_index_added, &secondary_index_removed)?;
-                // Revert inverted index: remove the postings this rolled-back
-                // put wrote. FATAL on failure — a rollback that leaves stale FTS
-                // postings behind is the same silent-partial-success corruption
-                // the primary-store restore guards against.
+                // Physically remove the appended version and its index
+                // entries. The row's current version is the newest remaining
+                // one, so removing the put's version restores the prior one.
+                self.undo_version_write(ctx, version_sys_from, &index_tuples)?;
+                // Revert inverted index: the text version this rolled-back put
+                // started leaves, and the version it ended is live again.
+                // FATAL on failure — a rollback that leaves stale FTS postings
+                // behind is the same silent-partial-success corruption the
+                // primary-store restore guards against.
                 self.inverted
-                    .remove_document(
+                    .undo_text_version(
                         database_id,
                         crate::types::TenantId::new(tid),
                         &collection,
                         surrogate,
+                        version_sys_from,
                     )
                     .map_err(|e| {
                         let err = UndoError::failed(
@@ -131,9 +95,8 @@ impl CoreLoop {
                 collection,
                 document_id,
                 old_value,
-                bitemporal_sys_from,
-                bitemporal_index_tuples,
-                secondary_index_tuples,
+                version_sys_from,
+                index_tuples,
                 chain_hash_prior,
             } => {
                 let ctx = UndoDocumentContext {
@@ -145,39 +108,14 @@ impl CoreLoop {
                 };
                 let storage_key = document_id;
                 let surrogate = document_id.surrogate();
-                if let Some(sys_from) = bitemporal_sys_from {
-                    self.undo_bitemporal_write(ctx, sys_from, &bitemporal_index_tuples)?;
-                } else {
-                    self.sparse
-                        .put(database_id, tid, &collection, &storage_key, &old_value)
-                        .map(|_| ())
-                        .map_err(|e| {
-                            let err = UndoError::failed(
-                                entry_index,
-                                format!("document re-insert on {collection}/{document_id}"),
-                                e,
-                            );
-                            error!(
-                                core = self.core_id,
-                                entry_index,
-                                collection = %collection,
-                                document_id = %document_id,
-                                error = %err,
-                                "transaction undo: document re-insert failed; shard state unknown"
-                            );
-                            err
-                        })?;
-                }
-                // Restore the plain secondary-index entries the forward delete
-                // cascade removed. Empty on the bitemporal path (no plain
-                // INDEXES entries there), so this is a no-op for it.
-                self.undo_secondary_index(ctx, &[], &secondary_index_tuples)?;
-                // Re-index the restored document into the full-text inverted
-                // index. The forward delete cascade removed its postings
-                // unconditionally, so a rollback that restored the row but not
-                // its postings would leave it restored-but-unsearchable. FATAL
-                // on failure — a half-restored FTS index is corruption.
-                self.reindex_restored_document_fts(ctx, surrogate, &old_value)?;
+                // Removing the tombstone makes the deleted version current
+                // again, and removing the index tombstones makes its values
+                // findable again.
+                self.undo_version_write(ctx, version_sys_from, &index_tuples)?;
+                // Restore the text version the forward delete ended, so the
+                // restored row is searchable and its history is whole again.
+                // FATAL on failure — a half-restored FTS index is corruption.
+                self.restore_deleted_document_fts(ctx, surrogate, &old_value, version_sys_from)?;
                 // Evict any cached copy of the reversed document (see the
                 // PutDocument branch): reversing a delete restores the row, so a
                 // stale post-delete cache entry must not linger.
@@ -190,12 +128,11 @@ impl CoreLoop {
         }
     }
 
-    /// Physically reverse a bitemporal versioned write inside a single
-    /// caller-owned redb write transaction: remove the version/tombstone row
-    /// appended at `sys_from`, plus every versioned index entry written at
-    /// the same system time. redb is single-writer, so all removals share one
-    /// transaction.
-    fn undo_bitemporal_write(
+    /// Physically reverse a versioned write in one redb write transaction:
+    /// remove the version or tombstone appended at `sys_from`, plus every
+    /// index entry written at the same system time. redb is single-writer, so
+    /// all removals share one transaction.
+    pub(super) fn undo_version_write(
         &self,
         ctx: UndoDocumentContext<'_>,
         sys_from: i64,
@@ -211,7 +148,7 @@ impl CoreLoop {
         let map_err = |stage: &str, e: crate::Error| {
             let err = UndoError::failed(
                 entry_index,
-                format!("bitemporal {stage} on {collection}/{document_id}"),
+                format!("version {stage} on {collection}/{document_id}"),
                 e,
             );
             error!(
@@ -220,7 +157,7 @@ impl CoreLoop {
                 collection = %collection,
                 document_id = %document_id,
                 error = %err,
-                "transaction undo: bitemporal version removal failed; shard state unknown"
+                "transaction undo: version removal failed; shard state unknown"
             );
             err
         };
@@ -256,56 +193,6 @@ impl CoreLoop {
                 },
             )
         })?;
-        Ok(())
-    }
-
-    /// Reverse plain (non-bitemporal) secondary-index mutations from a
-    /// rolled-back document write.
-    ///
-    /// `to_remove` were INSERTED on the forward path → delete them; `to_restore`
-    /// were REMOVED on the forward path (stale UPDATE entries, or a DELETE's
-    /// cascade) → re-insert them. Fatal on failure like the primary-store
-    /// restore, so a partial index rollback surfaces as `RollbackFailed` rather
-    /// than silently diverging the secondary index from the primary store.
-    fn undo_secondary_index(
-        &self,
-        ctx: UndoDocumentContext<'_>,
-        to_remove: &[(String, String)],
-        to_restore: &[(String, String)],
-    ) -> Result<(), UndoError> {
-        let UndoDocumentContext {
-            database_id,
-            tid,
-            entry_index,
-            collection,
-            document_id,
-        } = ctx;
-        let map_err = |stage: &str, e: crate::Error| {
-            let err = UndoError::failed(
-                entry_index,
-                format!("secondary-index {stage} on {collection}/{document_id}"),
-                e,
-            );
-            error!(
-                core = self.core_id,
-                entry_index,
-                collection = %collection,
-                document_id = %document_id,
-                error = %err,
-                "transaction undo: secondary-index reversal failed; shard state unknown"
-            );
-            err
-        };
-        for (field, value) in to_remove {
-            self.sparse
-                .index_remove(database_id, tid, collection, field, value, document_id)
-                .map_err(|e| map_err("remove", e))?;
-        }
-        for (field, value) in to_restore {
-            self.sparse
-                .index_put(database_id, tid, collection, field, value, document_id)
-                .map_err(|e| map_err("restore", e))?;
-        }
         Ok(())
     }
 
@@ -362,8 +249,7 @@ impl CoreLoop {
     }
 }
 
-/// Unit tests for document undo — bitemporal version reversal, hash-chain
-/// reversal, and backward-compatibility of the plain (non-versioned) path.
+/// Unit tests for document undo: version reversal and hash-chain reversal.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -439,11 +325,8 @@ mod tests {
         let entry = UndoEntry::PutDocument {
             collection: "c".into(),
             document_id: d1,
-            old_value: None,
-            bitemporal_sys_from: Some(t),
-            bitemporal_index_tuples: vec![("status".into(), "active".into())],
-            secondary_index_added: Vec::new(),
-            secondary_index_removed: Vec::new(),
+            version_sys_from: t,
+            index_tuples: vec![("status".into(), "active".into())],
             chain_hash_prior: None,
         };
         core.apply_undo_document(DB, TID, 0, entry).unwrap();
@@ -494,9 +377,8 @@ mod tests {
             collection: "c".into(),
             document_id: d1,
             old_value: b"v1".to_vec(),
-            bitemporal_sys_from: Some(2_000),
-            bitemporal_index_tuples: vec![("status".into(), "active".into())],
-            secondary_index_tuples: Vec::new(),
+            version_sys_from: 2_000,
+            index_tuples: vec![("status".into(), "active".into())],
             chain_hash_prior: None,
         };
         core.apply_undo_document(DB, TID, 0, entry).unwrap();
@@ -532,11 +414,8 @@ mod tests {
         let restore = UndoEntry::PutDocument {
             collection: "c".into(),
             document_id: storage_key(0),
-            old_value: None,
-            bitemporal_sys_from: None,
-            bitemporal_index_tuples: Vec::new(),
-            secondary_index_added: Vec::new(),
-            secondary_index_removed: Vec::new(),
+            version_sys_from: 1,
+            index_tuples: Vec::new(),
             chain_hash_prior: Some(Some(head(1, "h0"))),
         };
         core.apply_undo_document(DB, TID, 0, restore).unwrap();
@@ -546,11 +425,8 @@ mod tests {
         let genesis = UndoEntry::PutDocument {
             collection: "c".into(),
             document_id: storage_key(0),
-            old_value: None,
-            bitemporal_sys_from: None,
-            bitemporal_index_tuples: Vec::new(),
-            secondary_index_added: Vec::new(),
-            secondary_index_removed: Vec::new(),
+            version_sys_from: 1,
+            index_tuples: Vec::new(),
             chain_hash_prior: Some(None),
         };
         core.apply_undo_document(DB, TID, 0, genesis).unwrap();
@@ -558,23 +434,22 @@ mod tests {
     }
 
     #[test]
-    fn plain_put_undo_restores_or_removes_the_surrogate_row() {
+    fn put_undo_restores_the_prior_version_or_removes_the_row() {
         let dir = tempfile::tempdir().unwrap();
         let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
 
-        // Overwrite case: current holds "new", undo restores "old". `undo`
-        // reads the row through the entry's storage key, so the seeded row
-        // and the entry share one surrogate.
+        // Overwrite case: "old" at 10, the put's "new" at 20. Undo removes
+        // the version at 20, so "old" is current again. `undo` reads the row
+        // through the entry's storage key, so the seeded row and the entry
+        // share one surrogate.
         let key1 = storage_key(1);
-        core.sparse.put(DB, TID, "c", &key1, b"new").unwrap();
+        core.sparse.put(DB, TID, "c", &key1, b"old", 10).unwrap();
+        core.sparse.put(DB, TID, "c", &key1, b"new", 20).unwrap();
         let overwrite = UndoEntry::PutDocument {
             collection: "c".into(),
             document_id: key1,
-            old_value: Some(b"old".to_vec()),
-            bitemporal_sys_from: None,
-            bitemporal_index_tuples: Vec::new(),
-            secondary_index_added: Vec::new(),
-            secondary_index_removed: Vec::new(),
+            version_sys_from: 20,
+            index_tuples: Vec::new(),
             chain_hash_prior: None,
         };
         core.apply_undo_document(DB, TID, 0, overwrite).unwrap();
@@ -582,38 +457,50 @@ mod tests {
             core.sparse.get(DB, TID, "c", &key1).unwrap(),
             Some(b"old".to_vec())
         );
+        assert_eq!(
+            core.sparse
+                .versioned_latest_sys_from(DB, TID, "c", &key1)
+                .unwrap(),
+            Some(10),
+            "the rolled-back version leaves no trace in history"
+        );
 
-        // Insert case: undo deletes the row.
+        // Insert case: undo removes the only version.
         let key2 = storage_key(2);
-        core.sparse.put(DB, TID, "c", &key2, b"inserted").unwrap();
+        core.sparse
+            .put(DB, TID, "c", &key2, b"inserted", 30)
+            .unwrap();
         let insert = UndoEntry::PutDocument {
             collection: "c".into(),
             document_id: key2,
-            old_value: None,
-            bitemporal_sys_from: None,
-            bitemporal_index_tuples: Vec::new(),
-            secondary_index_added: Vec::new(),
-            secondary_index_removed: Vec::new(),
+            version_sys_from: 30,
+            index_tuples: Vec::new(),
             chain_hash_prior: None,
         };
         core.apply_undo_document(DB, TID, 0, insert).unwrap();
         assert!(core.sparse.get(DB, TID, "c", &key2).unwrap().is_none());
+        assert_eq!(
+            core.sparse
+                .versioned_latest_sys_from(DB, TID, "c", &key2)
+                .unwrap(),
+            None
+        );
     }
 
     #[test]
-    fn plain_delete_undo_reinserts_the_surrogate_row() {
+    fn delete_undo_removes_the_tombstone() {
         let dir = tempfile::tempdir().unwrap();
         let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
 
-        // Row was deleted by the forward op; undo re-inserts its prior value.
         let key1 = storage_key(1);
+        core.sparse.put(DB, TID, "c", &key1, b"prior", 10).unwrap();
+        core.sparse.delete(DB, TID, "c", &key1, 20).unwrap();
         let entry = UndoEntry::DeleteDocument {
             collection: "c".into(),
             document_id: key1,
             old_value: b"prior".to_vec(),
-            bitemporal_sys_from: None,
-            bitemporal_index_tuples: Vec::new(),
-            secondary_index_tuples: Vec::new(),
+            version_sys_from: 20,
+            index_tuples: Vec::new(),
             chain_hash_prior: None,
         };
         core.apply_undo_document(DB, TID, 0, entry).unwrap();

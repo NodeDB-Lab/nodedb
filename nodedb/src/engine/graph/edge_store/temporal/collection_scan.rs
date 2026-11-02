@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! One collection's edges at a bitemporal cut, read by a range scan over
-//! that collection's key prefix.
+//! Edges at a bitemporal cut, read by a range scan over one collection's
+//! key prefix, or over every collection of a tenant.
 
 use redb::{ReadableDatabase, ReadableTable};
 
@@ -15,6 +15,8 @@ use crate::engine::graph::edge_store::store::{EDGES, EdgeStore, redb_err};
 /// One edge of a collection at a cut: the version it resolves to there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CutEdge {
+    /// The collection the edge belongs to.
+    pub collection: String,
     pub src: String,
     pub label: String,
     pub dst: String,
@@ -28,6 +30,7 @@ pub struct CutEdge {
 /// The version a base edge resolves to while its versions stream past in
 /// ascending system time.
 struct BaseResolution {
+    collection: String,
     src: String,
     label: String,
     dst: String,
@@ -55,15 +58,47 @@ impl EdgeStore {
         cutoff_ordinal: i64,
         valid_at_ms: Option<i64>,
     ) -> crate::Result<Vec<CutEdge>> {
+        self.scan_as_of(
+            db,
+            tid,
+            Some(collection),
+            label,
+            cutoff_ordinal,
+            valid_at_ms,
+        )
+    }
+
+    /// The edges of every collection of `(db, tid)` live at
+    /// `cutoff_ordinal`, in key order. Each base edge resolves as
+    /// [`EdgeStore::scan_collection_as_of`] resolves it.
+    pub fn scan_tenant_as_of(
+        &self,
+        db: u64,
+        tid: TenantId,
+        cutoff_ordinal: i64,
+        valid_at_ms: Option<i64>,
+    ) -> crate::Result<Vec<CutEdge>> {
+        self.scan_as_of(db, tid, None, None, cutoff_ordinal, valid_at_ms)
+    }
+
+    /// The edges of `collection`, or of every collection when `None`, live
+    /// at `cutoff_ordinal`.
+    fn scan_as_of(
+        &self,
+        db: u64,
+        tid: TenantId,
+        collection: Option<&str>,
+        label: Option<&str>,
+        cutoff_ordinal: i64,
+        valid_at_ms: Option<i64>,
+    ) -> crate::Result<Vec<CutEdge>> {
         if cutoff_ordinal < 0 {
             return Err(crate::Error::BadRequest {
-                detail: format!(
-                    "scan_collection_as_of: negative system-time cutoff {cutoff_ordinal}"
-                ),
+                detail: format!("edge scan at a cut: negative system-time cutoff {cutoff_ordinal}"),
             });
         }
         let t = tid.as_u64();
-        let prefix = format!("{collection}\x00");
+        let prefix = collection.map_or_else(String::new, |c| format!("{c}\x00"));
         let read_txn = self
             .db
             .begin_read()
@@ -91,14 +126,18 @@ impl EdgeStore {
             if label.is_some_and(|wanted| wanted != edge_label) {
                 continue;
             }
-            let same_base = current
-                .as_ref()
-                .is_some_and(|base| base.src == src && base.label == edge_label && base.dst == dst);
+            let same_base = current.as_ref().is_some_and(|base| {
+                base.collection == coll
+                    && base.src == src
+                    && base.label == edge_label
+                    && base.dst == dst
+            });
             if !same_base {
                 if let Some(done) = current.take() {
                     push_resolved(&mut out, done);
                 }
                 current = Some(BaseResolution {
+                    collection: coll.to_string(),
                     src: src.to_string(),
                     label: edge_label.to_string(),
                     dst: dst.to_string(),
@@ -133,6 +172,7 @@ impl EdgeStore {
 fn push_resolved(out: &mut Vec<CutEdge>, base: BaseResolution) {
     if let Some(payload) = base.payload {
         out.push(CutEdge {
+            collection: base.collection,
             src_surrogate: payload.src(),
             dst_surrogate: payload.dst(),
             src: base.src,

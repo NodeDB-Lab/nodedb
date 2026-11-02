@@ -142,7 +142,12 @@ pub async fn match_query(
         .map_err(|e| DdlError::internal(format!("serialize match query: {e}")))?;
 
     let tenant_id = identity.tenant_id;
-    let scope = graph_dispatch::graph_read_scope(state, temporal)
+    let history = graph_dispatch::GraphHistory {
+        database_id,
+        tenant_id,
+        collection: None,
+    };
+    let scope = graph_dispatch::graph_read_scope(state, temporal, history)
         .await
         .map_err(|e| DdlError::from_error(&e))?;
     let read = graph_dispatch::GraphRead { scope, ..read };

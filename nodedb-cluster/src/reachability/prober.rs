@@ -53,6 +53,7 @@ impl ReachabilityProber for TransportProber {
         let rpc = RaftRpc::Ping(PingRequest {
             sender_id: self.self_node_id,
             topology_version: 0,
+            oldest_snapshot: crate::snapshot_board::NO_SNAPSHOT_REPORT,
         });
         self.transport.send_probe_rpc(peer, rpc).await.map(|_| ())
     }

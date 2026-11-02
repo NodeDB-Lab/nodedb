@@ -5,18 +5,21 @@ pub mod core_route;
 pub mod hash_chain;
 pub mod id;
 pub mod lsn;
-pub mod read_versions;
+pub mod read_shards;
 pub mod record_home;
 pub mod replay_stamp;
 pub mod snapshot;
 pub mod snapshot_calvin;
+pub mod snapshot_index;
+pub mod snapshot_lane;
+pub mod source_stamp;
 
 pub use consistency::ReadConsistency;
 pub use core_route::core_for_vshard;
 pub use id::{DatabaseId, DocumentId, RequestId, TenantId, TxnId, VShardId};
 pub use lsn::Lsn;
 pub use nodedb_types::{KeyRepr, SpanId, TraceId};
-pub use read_versions::ReadVersions;
+pub use read_shards::ReadShards;
 pub use record_home::{HomedRecord, RecordHomes};
 pub use snapshot::{
     ArrayCellsBlob, NodeLabelVersionEntry, NodeLabelsEntry, SurrogateBindEntry, TenantDataSnapshot,
@@ -25,3 +28,5 @@ pub use snapshot::{
 pub use snapshot_calvin::{
     CoveredCutBarrier, CutBarrierLog, CutFloor, GroupCalvinCut, VShardCalvinState,
 };
+pub use snapshot_index::{FieldIndexImage, VectorIndexHistory};
+pub use source_stamp::{DocVersionStamp, KvVersionStamp};

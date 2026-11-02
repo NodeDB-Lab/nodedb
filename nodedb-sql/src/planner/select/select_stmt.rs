@@ -188,10 +188,11 @@ pub(super) fn plan_select(
                 &where_projection,
                 &catalog.crs_context(),
             )? {
+                let mut plan = plan;
+                plan.set_search_temporal(temporal);
                 refuse_dropped_clauses(
                     &plan,
                     SearchBodyClauses {
-                        temporal: &temporal,
                         has_subqueries: !subquery_joins.is_empty(),
                         aggregates: has_aggregation(select, functions),
                         distinct: select.distinct.is_some(),

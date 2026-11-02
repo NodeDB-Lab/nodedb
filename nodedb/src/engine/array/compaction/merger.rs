@@ -9,17 +9,17 @@
 //! flush overwrites the earlier one — last-write-wins semantics that
 //! match the memtable.
 //!
-//! When `audit_retain_ms` is set, the merger applies cell-level retention
+//! When a retention horizon is set, the merger applies cell-level retention
 //! after the initial merge. Tile-versions are sparse: each version only
-//! stores the cells written at that `system_from_ms`. The retention merger
-//! therefore operates at cell granularity per Hilbert prefix group, not at
-//! the tile-version level, to avoid dropping cells that live exclusively in
-//! an older out-of-horizon version.
+//! stores the cells written at that system-time ordinal. The retention
+//! merger therefore operates at cell granularity per Hilbert prefix group,
+//! not at the tile-version level, to avoid dropping cells that live
+//! exclusively in an older out-of-horizon version.
 //!
 //! The output is written via [`SegmentWriter`] in TileId order, which
 //! preserves Hilbert ordering for the next compaction pass.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 
 use nodedb_array::ArrayResult;
 use nodedb_array::query::retention::encode_coord_key;
@@ -68,18 +68,17 @@ impl CompactionMerger {
     /// single file at two levels. Allocation happens in the caller because
     /// merging only needs a shared borrow of the store.
     ///
-    /// When `audit_retain_ms` is `Some(w)`, out-of-horizon tile versions
-    /// (those with `system_from_ms < now_ms - w`) are collapsed into a
-    /// single synthetic ceiling tile per Hilbert prefix. Cell-level semantics
-    /// are preserved: each coordinate's newest out-of-horizon state is
-    /// carried forward (unless GDPR-erased), so no cells are silently lost.
+    /// When `retention_horizon` is `Some(h)`, the tile versions at or below
+    /// the ordinal `h` are collapsed into a single synthetic ceiling tile per
+    /// Hilbert prefix, stamped `h`. Each coordinate's newest state at or
+    /// below `h`, the one a read at `h` sees, is carried forward (unless
+    /// GDPR-erased), so no cell visible at the horizon is lost.
     pub fn run(
         store: &ArrayStore,
         inputs: &[String],
         output_id: String,
         output_level: u8,
-        audit_retain_ms: Option<i64>,
-        now_ms: i64,
+        retention_horizon: Option<i64>,
     ) -> Result<CompactionOutput, CompactionError> {
         let schema = store.schema().clone();
         let schema_hash = store.schema_hash();
@@ -102,20 +101,32 @@ impl CompactionMerger {
             for (tile_idx, entry) in reader.tiles().iter().enumerate() {
                 let tile_id = entry.tile_id;
                 let payload = reader.read_tile(tile_idx)?;
-                merged
+                let tile = merged
                     .entry(tile_id)
-                    .or_insert_with(|| MergedTile::empty(&schema))
-                    .absorb(&schema, &payload)?;
+                    .or_insert_with(|| MergedTile::empty(entry.placement));
+                // One tile version is one write's: every copy of it carries
+                // the same placement.
+                if tile.placement != entry.placement {
+                    return Err(nodedb_array::ArrayError::SegmentCorruption {
+                        detail: format!(
+                            "compaction: tile version ({}, {}) is stored under vShards {} \
+                             and {}",
+                            tile_id.hilbert_prefix,
+                            tile_id.system_from_ms,
+                            tile.placement,
+                            entry.placement
+                        ),
+                    }
+                    .into());
+                }
+                tile.absorb(&schema, &payload)?;
             }
         }
 
         // Apply retention if configured.
-        let merged = match audit_retain_ms {
+        let merged = match retention_horizon {
             None => merged,
-            Some(retain_ms) => {
-                let horizon_ms = now_ms.saturating_sub(retain_ms);
-                apply_retention(merged, &schema, horizon_ms)?
-            }
+            Some(horizon) => apply_retention(merged, horizon)?,
         };
 
         let kek = store.kek().cloned();
@@ -165,23 +176,23 @@ impl CompactionMerger {
 /// Apply cell-level retention to the merged tile map.
 ///
 /// For each Hilbert prefix group:
-/// - Tile versions with `system_from_ms >= horizon_ms` are in-horizon and
-///   pass through unchanged.
-/// - Tile versions with `system_from_ms < horizon_ms` are out-of-horizon.
-///   Their cells are collapsed into a single synthetic ceiling tile:
-///     - For each coordinate, the newest out-of-horizon row wins.
-///     - Coordinates already covered by any in-horizon tile version are
-///       excluded from the ceiling (the in-horizon version supersedes them).
+/// - Tile versions above the ordinal `horizon` pass through unchanged.
+/// - Tile versions at or below `horizon` are collapsed into one synthetic
+///   ceiling tile stamped `horizon`:
+///     - For each coordinate, the newest row at or below `horizon` wins: the
+///       row a read at `horizon` sees. A newer row above the horizon does not
+///       remove it, since a read between the horizon and that row still
+///       needs it.
 ///     - GDPR-erased coordinates are excluded entirely — the erasure is
 ///       propagated by omission.
+///     - A tombstone is kept: a segment outside this merge can still hold an
+///       older version of its cell that the tombstone hides.
 ///
-/// The ceiling tile receives `system_from_ms = horizon_ms - 1` so it sorts
-/// strictly before all in-horizon tiles within the same prefix in the output
-/// segment (TileId order is `(prefix, system_from_ms)` ascending).
+/// The ceiling tile sorts before every version above the horizon within the
+/// same prefix (TileId order is `(prefix, system_from_ms)` ascending).
 fn apply_retention(
     merged: BTreeMap<TileId, MergedTile>,
-    schema: &ArraySchema,
-    horizon_ms: i64,
+    horizon: i64,
 ) -> Result<BTreeMap<TileId, MergedTile>, CompactionError> {
     // Group tile versions by hilbert_prefix.
     let mut by_prefix: HashMap<u64, Vec<(TileId, MergedTile)>> = HashMap::new();
@@ -195,57 +206,37 @@ fn apply_retention(
     let mut out: BTreeMap<TileId, MergedTile> = BTreeMap::new();
 
     for (prefix, versions) in by_prefix {
-        // Partition into inside-horizon and outside-horizon.
-        let mut inside: Vec<(TileId, MergedTile)> = Vec::new();
+        // Partition into versions above the horizon and versions at or
+        // below it.
         let mut outside: Vec<(TileId, MergedTile)> = Vec::new();
         for (tile_id, mt) in versions {
-            if tile_id.system_from_ms >= horizon_ms {
-                inside.push((tile_id, mt));
+            if tile_id.system_from_ms > horizon {
+                out.insert(tile_id, mt);
             } else {
                 outside.push((tile_id, mt));
             }
         }
 
-        // Collect coord keys present in any in-horizon version so they can
-        // be excluded from the ceiling (the in-horizon version supersedes).
-        let mut inhorizon_coord_keys: HashSet<Vec<u8>> = HashSet::new();
-        for (_tile_id, mt) in &inside {
-            for row in &mt.rows {
-                let key = encode_coord_key(&row.coord)?;
-                inhorizon_coord_keys.insert(key);
-            }
-        }
-
-        // Pass in-horizon tiles through unchanged.
-        for (tile_id, mt) in inside {
-            out.insert(tile_id, mt);
-        }
-
-        // Nothing to collapse.
-        if outside.is_empty() {
-            continue;
-        }
-
-        // Sort outside-horizon versions newest → oldest.
+        // Sort the versions at or below the horizon newest → oldest.
         outside.sort_by_key(|(tid, _)| std::cmp::Reverse(tid.system_from_ms));
+        // The ceiling stands for the newest collapsed version, so it keeps
+        // that version's placement. No version means nothing to collapse.
+        let Some(placement) = outside.first().map(|(_, mt)| mt.placement) else {
+            continue;
+        };
 
-        // Build ceiling: coord → (newest out-of-horizon row).
-        // Maps encoded coord key → MergedRow.
+        // Build ceiling: coord → its newest row at or below the horizon.
         let mut ceiling_rows: HashMap<Vec<u8>, MergedRow> = HashMap::new();
         for (_tile_id, mt) in outside {
             for row in mt.rows {
                 let key = encode_coord_key(&row.coord)?;
-                // Skip coords already covered by in-horizon versions.
-                if inhorizon_coord_keys.contains(&key) {
-                    continue;
-                }
                 // First occurrence (newest) wins.
                 ceiling_rows.entry(key).or_insert(row);
             }
         }
 
         // Build synthetic ceiling MergedTile, excluding GDPR-erased coords.
-        let mut ceiling_tile = MergedTile::empty(schema);
+        let mut ceiling_tile = MergedTile::empty(placement);
         // Deterministic order for stable segment output.
         let mut ceiling_vec: Vec<(Vec<u8>, MergedRow)> = ceiling_rows.into_iter().collect();
         ceiling_vec.sort_by(|a, b| a.0.cmp(&b.0));
@@ -258,11 +249,7 @@ fn apply_retention(
         }
 
         if !ceiling_tile.rows.is_empty() {
-            // Place ceiling just below the horizon so it sorts before all
-            // in-horizon tiles for this prefix.
-            let ceiling_sys_ms = horizon_ms.saturating_sub(1);
-            let ceiling_tile_id = TileId::new(prefix, ceiling_sys_ms);
-            out.insert(ceiling_tile_id, ceiling_tile);
+            out.insert(TileId::new(prefix, horizon), ceiling_tile);
         }
     }
 
@@ -277,13 +264,14 @@ fn build_segment_bytes(
 ) -> ArrayResult<Vec<u8>> {
     let mut writer = SegmentWriter::new(schema_hash);
     for (tile_id, mt) in tiles {
+        let placement = mt.placement;
         let tile = mt.into_sparse(schema)?;
         // Skip tiles that have neither live rows nor sentinel rows.
         let has_any_rows = tile.nnz() > 0 || !tile.row_kinds.is_empty();
         if !has_any_rows {
             continue;
         }
-        writer.append_sparse(tile_id, &tile)?;
+        writer.append_sparse(tile_id, placement, &tile)?;
     }
     writer.finish(kek)
 }
@@ -302,15 +290,20 @@ struct MergedRow {
 /// Per-tile merge accumulator. Stores the in-progress `coord → row` map so
 /// subsequent absorbs can override earlier versions — last-write-wins.
 /// Sentinel rows (Tombstone, GdprErased) are stored and passed through
-/// unchanged; retention logic in [`apply_retention`] handles cell-level
-/// expiry when `audit_retain_ms` is set.
+/// unchanged. Retention logic in [`apply_retention`] handles cell-level
+/// expiry when a retention horizon is set.
 struct MergedTile {
     rows: Vec<MergedRow>,
+    /// The vShard whose write stored the tile version.
+    placement: u32,
 }
 
 impl MergedTile {
-    fn empty(_schema: &ArraySchema) -> Self {
-        Self { rows: Vec::new() }
+    fn empty(placement: u32) -> Self {
+        Self {
+            rows: Vec::new(),
+            placement,
+        }
     }
 
     fn absorb(&mut self, schema: &ArraySchema, payload: &TilePayload) -> ArrayResult<()> {
@@ -419,6 +412,7 @@ mod tests {
     fn put_versioned(e: &mut ArrayEngine, x: i64, y: i64, v: i64, sys_ms: i64, lsn: u64) {
         e.put_cells(
             &aid(),
+            0,
             vec![ArrayPutCell {
                 coord: vec![CoordValue::Int64(x), CoordValue::Int64(y)],
                 attrs: vec![CellValue::Int64(v)],
@@ -447,12 +441,54 @@ mod tests {
         put_versioned(&mut e, 0, 0, 30, 300, 3);
         put_versioned(&mut e, 0, 0, 40, 400, 4);
         assert_eq!(e.store(&aid()).unwrap().manifest().segments.len(), 4);
-        let merged = e.maybe_compact(&aid(), None, 0).unwrap();
+        let merged = e.maybe_compact(&aid(), None).unwrap();
         assert!(merged);
         let m = e.store(&aid()).unwrap().manifest();
         assert_eq!(m.segments.len(), 1);
         // All 4 tile versions (distinct system_from_ms) must survive.
         assert_eq!(m.segments[0].tile_count, 4);
+    }
+
+    /// A merge with a horizon keeps the version a read at the horizon sees,
+    /// even when a newer version above the horizon supersedes it, and drops
+    /// the versions that version supersedes.
+    #[test]
+    fn retention_keeps_the_version_visible_at_the_horizon() {
+        use nodedb_array::query::ceiling::CeilingResult;
+
+        let dir = TempDir::new().unwrap();
+        let mut cfg = ArrayEngineConfig::new(dir.path().to_path_buf());
+        cfg.flush_cell_threshold = 1;
+        let mut e = ArrayEngine::new(cfg).unwrap();
+        e.open_array(aid(), schema(), 0x1).unwrap();
+        put_versioned(&mut e, 0, 0, 10, 100, 1);
+        put_versioned(&mut e, 0, 0, 20, 200, 2);
+        put_versioned(&mut e, 0, 0, 30, 300, 3);
+        put_versioned(&mut e, 0, 0, 40, 400, 4);
+        assert!(e.maybe_compact(&aid(), Some(250)).unwrap());
+
+        let store = e.store(&aid()).unwrap();
+        assert_eq!(
+            store.manifest().segments[0].tile_count,
+            3,
+            "the ceiling at 250 plus the versions at 300 and 400"
+        );
+        let at = |sys: i64| match store
+            .ceiling_for_coord(&[CoordValue::Int64(0), CoordValue::Int64(0)], sys, None)
+            .unwrap()
+        {
+            CeilingResult::Live(p) => p.attrs,
+            other => panic!("expected a live cell at {sys}: {other:?}"),
+        };
+        assert_eq!(at(250), vec![CellValue::Int64(20)]);
+        assert_eq!(at(299), vec![CellValue::Int64(20)]);
+        assert_eq!(at(300), vec![CellValue::Int64(30)]);
+        assert!(matches!(
+            store
+                .ceiling_for_coord(&[CoordValue::Int64(0), CoordValue::Int64(0)], 249, None)
+                .unwrap(),
+            CeilingResult::NotFound
+        ));
     }
 
     /// The compacted segment's name must come out of the store's monotonic
@@ -474,7 +510,7 @@ mod tests {
             put_one(&mut e, i, 0, i, lsn);
             flush_if_full(&mut e, &aid(), lsn);
         }
-        assert!(e.maybe_compact(&aid(), None, 0).unwrap());
+        assert!(e.maybe_compact(&aid(), None).unwrap());
 
         let (root, compacted_id) = {
             let store = e.store(&aid()).unwrap();
@@ -526,6 +562,7 @@ mod tests {
         // Segment 2: tombstone at (2,0) system=200
         e.delete_cells(
             &aid(),
+            0,
             vec![ArrayDeleteCell {
                 coord: vec![CoordValue::Int64(2), CoordValue::Int64(0)],
                 system_from_ms: 200,
@@ -540,6 +577,7 @@ mod tests {
         // Segment 3: GDPR erasure at (3,0) system=300
         e.gdpr_erase_cell(
             &aid(),
+            0,
             vec![CoordValue::Int64(3), CoordValue::Int64(0)],
             300,
             5,
@@ -554,7 +592,7 @@ mod tests {
             .unwrap();
 
         loop {
-            if !e.maybe_compact(&aid(), None, 0).unwrap() {
+            if !e.maybe_compact(&aid(), None).unwrap() {
                 break;
             }
         }
@@ -612,7 +650,7 @@ mod tests {
             i64::MAX,
         ))
         .unwrap();
-        let mut merged = MergedTile::empty(&s);
+        let mut merged = MergedTile::empty(0);
         merged.absorb_sparse(&s, &b.build()).unwrap();
         let tile = merged.into_sparse(&s).unwrap();
         tile.check_stored_identities().unwrap();

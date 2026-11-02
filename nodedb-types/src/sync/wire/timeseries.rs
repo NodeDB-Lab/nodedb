@@ -41,14 +41,11 @@ pub struct TimeseriesPushMsg {
     /// Per-series sync watermark: highest LSN already synced for each series.
     /// Only samples after these watermarks are included.
     pub watermarks: HashMap<u64, u64>,
-    /// Stable identity of the originating producer. 0 for legacy clients.
-    #[serde(default)]
+    /// Stable identity of the originating producer.
     pub producer_id: u64,
     /// Monotonic epoch counter incremented on every producer restart.
-    #[serde(default)]
     pub epoch: u64,
     /// Per-stream monotonic sequence number within the epoch.
-    #[serde(default)]
     pub seq: u64,
 }
 

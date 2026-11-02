@@ -65,6 +65,7 @@ pub(super) fn execution_error(context: &str, error: crate::Error) -> ClusterErro
         | crate::Error::ConflictRetry { .. }
         | crate::Error::CalvinSerializationConflict
         | crate::Error::CalvinParticipantError
+        | crate::Error::TxnSnapshotTooOld { .. }
         | crate::Error::RejectedPrevalidation { .. }
         | crate::Error::RetryableRefusal { .. }
         | crate::Error::AppendOnlyViolation { .. }
@@ -169,7 +170,6 @@ pub(super) fn execution_error(context: &str, error: crate::Error) -> ClusterErro
         | crate::Error::SessionTokenExpired
         | crate::Error::SessionKilledByAdmin
         | crate::Error::SessionUserDropped
-        | crate::Error::OidcProviderTenantUnbound
         | crate::Error::OidcProviderTenantUnavailable { .. }
         | crate::Error::ExternalRoleUndefined { .. }
         | crate::Error::OidcNoDefaultDatabase { .. }
@@ -207,7 +207,7 @@ mod tests {
             watermark_lsn: Lsn::ZERO,
             error_code: code.map(Box::new),
             stage_vote: None,
-            read_versions: crate::types::ReadVersions::new(),
+            read_vshards: crate::types::ReadShards::new(),
             write_set: Vec::new(),
         }
     }

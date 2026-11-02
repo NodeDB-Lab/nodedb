@@ -40,6 +40,13 @@ impl Scheduler {
         let read_results = Arc::clone(&self.read_results);
         // Woken when a cut's barrier is proposed or applied on this node.
         let shared = Arc::clone(&self.shared);
+        // Woken when the sequencer defers or drops an input for this vShard
+        // to the catch-up replay.
+        let catch_up_wake = self
+            .sequencer_state_machine
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .catch_up_wake(self.vshard_id);
         // Set when a tick left armed catch-up unreplayed. The next open-gate
         // pass fires the tick at once to resume it.
         let mut catch_up_resume = false;
@@ -190,6 +197,13 @@ impl Scheduler {
                             break;
                         }
                     }
+                }
+
+                _ = catch_up_wake.notified() => {
+                    // An input the replay owes applied: replay it now. A
+                    // closed intake gate resumes the drain once it opens.
+                    catch_up_resume =
+                        !intake_open || self.drain_catch_up() == CatchUpDrain::Remaining;
                 }
 
                 _ = stall_tick.tick() => {

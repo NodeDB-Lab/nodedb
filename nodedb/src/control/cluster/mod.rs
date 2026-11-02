@@ -20,7 +20,6 @@ pub mod execution_error_wire;
 pub mod forwarded_budget;
 pub mod handle;
 pub mod init;
-pub mod leased_read;
 pub mod left_vshard_forget;
 pub mod linearizable_read;
 pub mod metadata_applier;

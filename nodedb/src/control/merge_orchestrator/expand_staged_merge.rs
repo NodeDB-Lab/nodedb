@@ -133,6 +133,7 @@ async fn resolve_merge_arms(
         clauses,
         rls_write_check,
         declared_primary_key,
+        target_system_time,
         ..
     }) = &task.plan
     else {
@@ -178,6 +179,9 @@ async fn resolve_merge_arms(
             // carry their own resolution.
             resolved_sum_targets: Vec::new(),
             declared_primary_key: declared_primary_key.clone(),
+            // The block's snapshot: the target rows match at it with the
+            // transaction's staged writes merged on top.
+            target_system_time: *target_system_time,
         })));
     // Passing `txn_id` lets the RESOLVE pass fold TARGET's staging overlay,
     // so a MERGE reuses a prior statement's row instead of duplicating it.

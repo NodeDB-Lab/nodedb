@@ -73,11 +73,11 @@ impl ClusterArrayExecutor {
             .await
             .map_err(coord_err)?;
         // Each leg read both arrays on its vShard.
-        note_array_reads(left, &result.read_versions);
-        note_array_reads(right, &result.read_versions);
+        note_array_reads(left, &result.read_vshards);
+        note_array_reads(right, &result.read_vshards);
         // A temporal read ends with one summary row, as a local elementwise
         // op answers.
-        if system_time.is_temporal() || valid_at_ms.is_some() {
+        if system_time.is_historical() || valid_at_ms.is_some() {
             let summary = nodedb_types::json_to_msgpack(&serde_json::json!({
                 "truncated_before_horizon": result.truncated_before_horizon
             }))

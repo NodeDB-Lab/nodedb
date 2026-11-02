@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::CalvinError;
 
+use super::incarnation::CalvinIncarnation;
 use super::lock_wire::TxnIdWire;
 use super::primitives::{DependentReadSpec, VersionedReadSet};
 use super::read_write_set::ReadWriteSet;
@@ -23,12 +24,6 @@ use super::read_write_set::ReadWriteSet;
 /// the participating-vshard set. The `participating_vshards` field is skipped
 /// during serialization and re-derived on decode to keep serialized bytes
 /// byte-deterministic.
-///
-/// Map-encoded (`#[msgpack(map)]`) so fields can be added additively: an older
-/// serialized `TxClass` that predates a field decodes it to its default (the
-/// field carries `#[serde(default)]` + `#[msgpack(default)]`). This is what
-/// lets `TxClass` bytes already on the sequencer Raft log survive a schema
-/// addition and still replay on restart.
 #[derive(
     Debug,
     Clone,
@@ -56,8 +51,6 @@ pub struct TxClass {
     /// this tenant; cross-tenant transactions are rejected at construction.
     pub tenant_id: TenantId,
     /// Database scope used for collection homing, execution, WAL, and CDC.
-    #[serde(default)]
-    #[msgpack(default)]
     pub database_id: DatabaseId,
     /// Optional dependent-read specification.
     ///
@@ -68,7 +61,6 @@ pub struct TxClass {
     ///
     /// `None` for static-set transactions (the common case).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[msgpack(default)]
     pub dependent_reads: Option<DependentReadSpec>,
     /// LSN-versioned, predicate-aware read-set captured during the session.
     ///
@@ -76,82 +68,63 @@ pub struct TxClass {
     /// time plus the point/predicate identity, so a participant can validate
     /// the read at the commit serialization point (the local commit vote on
     /// a stage response). Empty for pure-write and autocommit transactions.
-    #[serde(default)]
-    #[msgpack(default)]
     pub versioned_reads: VersionedReadSet,
+    /// The system-time ordinal every read in `versioned_reads` observed: the
+    /// transaction block's snapshot. A participant votes commit only while no
+    /// committed version of a read it validates, or of a row the transaction
+    /// replaces or deletes, sits above it. `None` for a transaction with no
+    /// snapshot (autocommit, pure write): its stage validates nothing.
+    pub snapshot_ordinal: Option<i64>,
     /// Optional lock-table owner id for this transaction, propagated to
     /// `SequencedTxn.lock_owner`. `Some(R)` when the committing session holds
     /// read reservations under `R` — the commit batch then acquires its keys as
-    /// `R` and self-upgrades those shared reservations. `None` (default) for
-    /// transactions with no reservation. Wire-additive: decodes to `None` on
-    /// older log entries.
-    #[serde(default)]
-    #[msgpack(default)]
+    /// `R` and self-upgrades those shared reservations. `None` for
+    /// transactions with no reservation.
     pub lock_owner: Option<TxnIdWire>,
     /// The metadata-group index the coordinator had applied when it planned
     /// the transaction. Every replica's scheduler runs the transaction only
     /// once its own metadata apply reached this index, so it never writes a
     /// collection this node has not registered yet. `0` holds nothing.
-    #[serde(default)]
-    #[msgpack(default)]
     pub metadata_floor: u64,
     /// WAL event-source code every participant stamps on the transaction's
     /// writes, so a server-run body's writes fire no triggers. `0` is the
     /// client default.
-    #[serde(default)]
-    #[msgpack(default)]
     pub event_source: u8,
     /// Indexes into `plans` of the plans a trigger body buffered. Every
     /// participant commits their rows under the trigger source, so they fire
     /// no trigger. Empty for a transaction no body joined.
-    #[serde(default)]
-    #[msgpack(default)]
     pub body_plans: Vec<u32>,
     /// Opaque msgpack-encoded `PUBLISH TO` messages the transaction's trigger
     /// bodies sent, decoded by the `nodedb` crate. The participant named by
     /// [`TxClass::publish_vshard`] commits them in its redo record. Empty for
     /// a transaction that published nothing.
-    #[serde(default)]
-    #[msgpack(default)]
     pub publishes: Vec<u8>,
     /// Opaque msgpack-encoded dedup key of the cross-shard trigger request
     /// the transaction applies, decoded by the `nodedb` crate. The participant
     /// named by [`TxClass::applied_key_home`] writes it into its redo record,
     /// so the key is durable exactly when the request's writes are. Empty
     /// for every other transaction.
-    #[serde(default)]
-    #[msgpack(default)]
     pub applied_key: Vec<u8>,
     /// The vShard the cross-shard request addresses.
-    #[serde(default)]
-    #[msgpack(default)]
     pub applied_key_vshard: u32,
     /// Every user collection the plans name, with the incarnation the
     /// coordinator's catalog held when it planned the transaction. A
     /// participant whose catalog no longer holds one votes abort, so the
     /// transaction never lands in a same-name recreate.
-    #[serde(default)]
-    #[msgpack(default)]
     pub incarnations: Vec<CalvinIncarnation>,
     /// The plan manifest when the plans travel as parts (see
     /// [`super::multi_part`]). `plans` is empty then. `None` for a
     /// transaction whose plans ride its own sequencer entry.
-    #[serde(default)]
-    #[msgpack(default)]
     pub multi_part: Option<super::multi_part::MultiPartPlans>,
     /// The RESTORE that re-issues the transaction's writes. Every participant
     /// raises the tenant's restore mark under it instead of the user write
     /// mark, so a retry of the same RESTORE finds only its own marks. `0` for
     /// every other transaction.
-    #[serde(default)]
-    #[msgpack(default)]
     pub restore_id: u64,
     /// The roles of the identity whose writes the transaction commits. Every
     /// participant's redo record carries them, so every replica judges a
     /// role-guarded state transition against the same set. Empty for a
     /// transaction no user wrote.
-    #[serde(default)]
-    #[msgpack(default)]
     pub user_roles: Vec<String>,
     /// Cached participating-vshard set. Re-derived on decode; not serialized.
     #[serde(skip)]
@@ -297,6 +270,7 @@ impl TxClass {
             database_id,
             dependent_reads,
             versioned_reads,
+            snapshot_ordinal: None,
             lock_owner: None,
             metadata_floor: 0,
             event_source: 0,
@@ -442,25 +416,6 @@ impl TxClass {
     }
 }
 
-/// A user collection a Calvin transaction names, and the incarnation its
-/// coordinator planned against.
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    zerompk::ToMessagePack,
-    zerompk::FromMessagePack,
-)]
-pub struct CalvinIncarnation {
-    /// The collection as the plans name it: database-qualified outside the
-    /// default database.
-    pub collection: String,
-    pub incarnation: nodedb_types::Hlc,
-}
-
 /// `vshards` as ascending, distinct ids. The redo homes take the lowest
 /// and search the rest.
 fn ascending_vshards(vshards: &[VShardId]) -> Vec<u32> {
@@ -477,8 +432,8 @@ mod tests {
         VersionedReadEntry, VersionedReadSet,
     };
     use super::*;
+    use nodedb_types::KeyRepr;
     use nodedb_types::id::CollectionKey;
-    use nodedb_types::{KeyRepr, WriteVersion};
 
     fn doc_set(collection: &str, surrogates: Vec<u32>) -> EngineKeySet {
         EngineKeySet::Document {
@@ -776,14 +731,12 @@ mod tests {
                 engine: EngineTag::Kv,
                 collection: "kv_col".to_owned(),
                 key: ReadKeyIdent::Point(KeyRepr::KvKey(Box::from(&b"k1"[..]))),
-                read_version: WriteVersion::logged(0, 7),
                 home_vshard: None,
             },
             VersionedReadEntry {
                 engine: EngineTag::Document,
                 collection: "doc_col".to_owned(),
                 key: ReadKeyIdent::Predicate,
-                read_version: WriteVersion::logged(2, 11),
                 home_vshard: None,
             },
         ])
@@ -804,7 +757,7 @@ mod tests {
     #[test]
     fn versioned_reads_survive_msgpack_roundtrip() {
         let reads = sample_versioned_reads();
-        let tx = TxClass::new(
+        let mut tx = TxClass::new(
             ReadWriteSet::new(vec![]),
             two_home_write_set(),
             vec![0x09, 0x09],
@@ -813,36 +766,35 @@ mod tests {
             reads.clone(),
         )
         .expect("valid TxClass");
+        tx.set_snapshot_ordinal(Some(4_200));
 
         let bytes = zerompk::to_msgpack_vec(&tx).expect("encode TxClass");
         let mut decoded: TxClass = zerompk::from_msgpack(&bytes).expect("decode TxClass");
         decoded.restore_derived().expect("restore derived");
 
-        // Every read version and the Point/Predicate distinction survive exactly.
+        // Every read, the Point/Predicate distinction, and the snapshot
+        // ordinal survive exactly.
         assert_eq!(decoded.versioned_reads, reads);
         assert_eq!(decoded.versioned_reads.len(), 2);
+        assert_eq!(decoded.snapshot_ordinal, Some(4_200));
         let point = decoded
             .versioned_reads
             .iter()
             .find(|e| matches!(e.key, ReadKeyIdent::Point(_)))
             .expect("point entry");
-        assert_eq!(point.read_version, WriteVersion::logged(0, 7));
         assert_eq!(
             point.key,
             ReadKeyIdent::Point(KeyRepr::KvKey(Box::from(&b"k1"[..])))
         );
-        let predicate = decoded
-            .versioned_reads
-            .iter()
-            .find(|e| matches!(e.key, ReadKeyIdent::Predicate))
-            .expect("predicate entry");
-        assert_eq!(predicate.read_version, WriteVersion::logged(2, 11));
+        assert!(
+            decoded
+                .versioned_reads
+                .iter()
+                .any(|e| matches!(e.key, ReadKeyIdent::Predicate)),
+            "predicate entry"
+        );
     }
 
-    /// Mirror of `TxClass`'s wire shape from BEFORE `versioned_reads` existed:
-    /// map-encoded with the original fields only. Proves an old serialized
-    /// `TxClass` (no `versioned_reads` key) still decodes — the field defaults
-    /// to empty — so Raft-logged transactions survive the schema addition.
     #[test]
     fn database_scope_survives_msgpack_roundtrip() {
         let tx = TxClass::new_in_database(
@@ -862,9 +814,10 @@ mod tests {
         assert_eq!(decoded.participating_vshards(), tx.participating_vshards());
     }
 
+    /// A `TxClass` map carrying only its first four fields.
     #[derive(zerompk::ToMessagePack)]
     #[msgpack(map)]
-    struct LegacyTxClass {
+    struct TxClassMissingFields {
         read_set: ReadWriteSet,
         write_set: ReadWriteSet,
         plans: Vec<u8>,
@@ -872,29 +825,15 @@ mod tests {
     }
 
     #[test]
-    fn decodes_legacy_bytes_without_versioned_reads_field() {
-        let legacy = LegacyTxClass {
+    fn tx_class_missing_fields_is_refused() {
+        let partial = TxClassMissingFields {
             read_set: ReadWriteSet::new(vec![]),
             write_set: two_home_write_set(),
             plans: vec![0x01, 0x02],
             tenant_id: TenantId::new(3),
         };
-        let bytes = zerompk::to_msgpack_vec(&legacy).expect("encode legacy");
-
-        let mut decoded: TxClass = zerompk::from_msgpack(&bytes).expect("decode legacy as TxClass");
-        decoded.restore_derived().expect("restore derived");
-
-        assert!(decoded.versioned_reads.is_empty());
-        assert!(decoded.dependent_reads.is_none());
-        assert_eq!(decoded.tenant_id, TenantId::new(3));
-        assert_eq!(decoded.database_id, DatabaseId::DEFAULT);
-        assert_eq!(decoded.plans, vec![0x01, 0x02]);
-        assert_eq!(decoded.participating_vshards().len(), 2);
-        assert_eq!(decoded.metadata_floor, 0, "a legacy class holds nothing");
-        assert_eq!(decoded.event_source, 0, "a legacy class is a client's");
-        assert!(decoded.body_plans.is_empty());
-        assert!(decoded.publishes.is_empty());
-        assert_eq!(decoded.restore_id, 0, "a legacy class re-issues no RESTORE");
+        let bytes = zerompk::to_msgpack_vec(&partial).expect("encode partial");
+        assert!(zerompk::from_msgpack::<TxClass>(&bytes).is_err());
     }
 
     /// The event-source code survives the codec, so every participant stamps

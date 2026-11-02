@@ -62,9 +62,7 @@ pub type VShardEnvelopeHandler = Arc<
 /// [`super::handle_rpc`]) so it can be passed directly to
 /// [`NexarTransport::serve`] for incoming RPC dispatch.
 ///
-/// The `F: RequestForwarder` generic parameter was removed in C-δ.6 when the
-/// SQL-string forwarding path was retired. Cross-node SQL routing now goes
-/// through `gateway.execute / ExecuteRequest` (C-β path).
+/// Cross-node SQL routing goes through `gateway.execute / ExecuteRequest`.
 pub struct RaftLoop<A: CommitApplier, P: PlanExecutor = NoopPlanExecutor> {
     pub(super) node_id: u64,
     pub(super) multi_raft: Arc<Mutex<MultiRaft>>,
@@ -305,6 +303,8 @@ pub struct RaftLoop<A: CommitApplier, P: PlanExecutor = NoopPlanExecutor> {
     pub(super) metadata_cache: Option<Arc<RwLock<MetadataCache>>>,
     /// SWIM Dead records and Raft contact samples for the lease-GC sweep.
     pub(super) lease_holder_liveness: Arc<crate::lease_liveness::LeaseHolderLiveness>,
+    /// The oldest-snapshot reports a health ping and its pong exchange.
+    pub(super) snapshot_board: Arc<crate::snapshot_board::SnapshotBoard>,
 }
 
 impl<A: CommitApplier> RaftLoop<A> {
@@ -365,6 +365,7 @@ impl<A: CommitApplier> RaftLoop<A> {
             reconcile_notify: tokio::sync::Notify::new(),
             metadata_cache: None,
             lease_holder_liveness: Arc::new(crate::lease_liveness::LeaseHolderLiveness::new()),
+            snapshot_board: Arc::new(crate::snapshot_board::SnapshotBoard::new()),
         }
     }
 }

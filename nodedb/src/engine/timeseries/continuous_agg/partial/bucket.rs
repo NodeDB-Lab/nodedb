@@ -27,6 +27,10 @@ pub struct PartialAggregate {
     pub count: u64,
     /// One state per column slot of the aggregate's layout.
     pub columns: Vec<ColumnPartial>,
+    /// The newest `_ts_system` ordinal of any row folded into this bucket,
+    /// `0` for none. A read at ordinal `S` can use the bucket only when this
+    /// is at or below `S`: no row it holds is newer than the read.
+    pub max_ordinal: i64,
 }
 
 impl PartialAggregate {
@@ -39,12 +43,14 @@ impl PartialAggregate {
             columns: (0..layout.len())
                 .map(|slot| ColumnPartial::with_sketches(layout.sketches(slot)))
                 .collect(),
+            max_ordinal: 0,
         }
     }
 
     /// Fold `other`, a bucket of the same layout, into this one.
     pub fn merge(&mut self, other: &PartialAggregate) {
         self.count += other.count;
+        self.max_ordinal = self.max_ordinal.max(other.max_ordinal);
         for (mine, theirs) in self.columns.iter_mut().zip(&other.columns) {
             mine.merge(theirs);
         }
@@ -55,6 +61,7 @@ impl PartialAggregate {
     /// `None` takes nothing.
     pub fn merge_mapped(&mut self, other: &PartialAggregate, map: &[Option<usize>]) {
         self.count += other.count;
+        self.max_ordinal = self.max_ordinal.max(other.max_ordinal);
         for (mine, source) in self.columns.iter_mut().zip(map) {
             if let Some(theirs) = source.and_then(|slot| other.columns.get(slot)) {
                 mine.merge(theirs);

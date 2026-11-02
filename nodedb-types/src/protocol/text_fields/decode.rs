@@ -9,63 +9,6 @@ use crate::protocol::batch::{BatchDocument, BatchVector};
 use super::field_ids::*;
 use super::types::TextFields;
 
-/// Consume and discard the next MsgPack value from `reader`.
-///
-/// Uses the "try-and-back-up" property of zerompk readers: a failed
-/// typed read restores the format byte, so we can try each type in
-/// order without permanently advancing the cursor.
-///
-/// Used for forward-compat: unknown field IDs are skipped rather than rejected.
-fn skip_msgpack_value<'de, R: zerompk::Read<'de>>(reader: &mut R) -> zerompk::Result<()> {
-    // Nil
-    if reader.read_nil().is_ok() {
-        return Ok(());
-    }
-    // Boolean
-    if reader.read_boolean().is_ok() {
-        return Ok(());
-    }
-    // Signed integers (handles neg fixint, int8/16/32/64)
-    if reader.read_i64().is_ok() {
-        return Ok(());
-    }
-    // Unsigned integers (handles uint8/16/32/64 and pos fixint that i64 may miss)
-    if reader.read_u64().is_ok() {
-        return Ok(());
-    }
-    // Floats
-    if reader.read_f32().is_ok() {
-        return Ok(());
-    }
-    if reader.read_f64().is_ok() {
-        return Ok(());
-    }
-    // String
-    if reader.read_string().is_ok() {
-        return Ok(());
-    }
-    // Binary
-    if reader.read_binary().is_ok() {
-        return Ok(());
-    }
-    // Array: read length then skip each element
-    if let Ok(len) = reader.read_array_len() {
-        for _ in 0..len {
-            skip_msgpack_value(reader)?;
-        }
-        return Ok(());
-    }
-    // Map: read length then skip each key-value pair
-    if let Ok(len) = reader.read_map_len() {
-        for _ in 0..len {
-            skip_msgpack_value(reader)?; // key
-            skip_msgpack_value(reader)?; // value
-        }
-        return Ok(());
-    }
-    Err(zerompk::Error::BufferTooSmall)
-}
-
 impl<'a> zerompk::FromMessagePack<'a> for TextFields {
     fn read<R: zerompk::Read<'a>>(reader: &mut R) -> zerompk::Result<Self> {
         let map_len = reader.read_map_len()?;
@@ -354,9 +297,11 @@ impl<'a> zerompk::FromMessagePack<'a> for TextFields {
                 FID_ALLOWED_IDS => {
                     out.allowed_ids = Some(Vec::<String>::read(reader)?);
                 }
-                // Unknown field ID — skip value for forward compatibility.
-                _ => {
-                    skip_msgpack_value(reader)?;
+                // A field ID the encoder never writes is a malformed frame.
+                unknown => {
+                    return Err(zerompk::Error::UnknownKey(format!(
+                        "text field id {unknown}"
+                    )));
                 }
             }
         }
@@ -392,8 +337,9 @@ mod tests {
         assert!(decoded.ef_search.is_none());
     }
 
+    /// A field ID no `TextFields` field owns is refused, never skipped.
     #[test]
-    fn textfields_unknown_field_tolerance() {
+    fn textfields_unknown_field_is_refused() {
         let known = TextFields {
             sql: Some("SELECT 2".into()),
             top_k: Some(10),
@@ -415,9 +361,10 @@ mod tests {
         buf.push(9u8);
         buf.push(10u8);
 
-        let decoded: TextFields = zerompk::from_msgpack(&buf).expect("decode with unknown field");
-        assert_eq!(decoded.sql.as_deref(), Some("SELECT 2"));
-        assert_eq!(decoded.top_k, Some(10));
+        assert!(matches!(
+            zerompk::from_msgpack::<TextFields>(&buf),
+            Err(zerompk::Error::UnknownKey(_))
+        ));
     }
 
     #[test]

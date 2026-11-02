@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Single-segment compaction: drop deleted rows from one segment, write a new one.
+//! Single-segment compaction: drop purged rows from one segment, write a new one.
 
 use nodedb_mem::ScopedMemory;
 use nodedb_types::columnar::{ColumnType, ColumnarSchema};
@@ -10,6 +10,7 @@ use crate::delete_bitmap::DeleteBitmap;
 use crate::error::ColumnarError;
 use crate::memtable::ColumnarMemtable;
 use crate::reader::{DecodedColumn, SegmentReader, decoded_cell_value};
+use crate::versions::SegmentVersions;
 use crate::writer::SegmentWriter;
 
 /// Default compaction threshold: compact when >20% of rows are deleted.
@@ -17,19 +18,28 @@ pub const DEFAULT_DELETE_RATIO_THRESHOLD: f64 = 0.2;
 
 /// Result of a compaction operation.
 pub struct CompactionResult {
-    /// The new compacted segment bytes. `None` if all rows were deleted.
+    /// The new compacted segment bytes. `None` if every row was purged.
     pub segment: Option<Vec<u8>>,
-    /// Number of live rows in the new segment.
+    /// Number of rows the new segment holds: open rows and history.
     pub live_rows: usize,
-    /// Number of rows removed (deleted).
+    /// Number of purged rows dropped.
     pub removed_rows: usize,
+    /// Old row index to new row index. `None` for a dropped row.
+    pub row_map: Vec<Option<u32>>,
+    /// The stamps of the new segment's rows: `sys_from` of every row and
+    /// `sys_to` of every ended row kept as history.
+    pub versions: SegmentVersions,
+    /// The delete bitmap of the new segment: every kept row a write ended.
+    pub ended: DeleteBitmap,
 }
 
-/// Compact a single segment by removing deleted rows.
+/// Compact a single segment by removing purged rows.
 ///
-/// Reads the segment, skips rows marked in the delete bitmap, and writes
-/// a new segment with only live rows. Returns `None` segment if all rows
-/// were deleted.
+/// A row the delete bitmap marks and `versions` gives no `sys_to` is purged
+/// and dropped. A marked row with a `sys_to` is history: it stays, keeps
+/// its `sys_from` and `sys_to`, and stays marked. Returns `None` segment if
+/// every row was purged. Apply the result with
+/// `MutationEngine::install_compacted_segment`.
 ///
 /// When `kek` is `Some`, the output segment is wrapped in an AES-256-GCM
 /// SEGC envelope. The input segment must be plaintext (the caller is
@@ -40,6 +50,7 @@ pub struct CompactionResult {
 pub fn compact_segment(
     segment_data: &[u8],
     deletes: &DeleteBitmap,
+    versions: &SegmentVersions,
     schema: &ColumnarSchema,
     profile_tag: u8,
     memory: &ScopedMemory,
@@ -47,14 +58,19 @@ pub fn compact_segment(
 ) -> Result<CompactionResult, ColumnarError> {
     let reader = SegmentReader::open(segment_data)?;
     let total_rows = reader.row_count() as usize;
-    let deleted = deletes.deleted_count() as usize;
-    let live = total_rows.saturating_sub(deleted);
+    let purged = |row: u32| deletes.is_deleted(row) && versions.sys_to(row).is_none();
+    let removed = (0..total_rows)
+        .filter(|&row| u32::try_from(row).is_ok_and(purged))
+        .count();
 
-    if live == 0 {
+    if removed == total_rows {
         return Ok(CompactionResult {
             segment: None,
             live_rows: 0,
             removed_rows: total_rows,
+            row_map: vec![None; total_rows],
+            versions: SegmentVersions::new(),
+            ended: DeleteBitmap::new(),
         });
     }
 
@@ -67,14 +83,24 @@ pub fn compact_segment(
         decoded_cols.push(reader.read_column(i)?);
     }
 
-    // Build a new memtable with only live rows.
+    // Build a new memtable with every row that is not purged.
     let mut memtable = ColumnarMemtable::new(schema);
     let col_len = schema.columns.len();
     let _row_guard = memory.reserve(col_len * std::mem::size_of::<usize>() * 3)?;
     let mut row_values = Vec::with_capacity(col_len);
+    let mut row_map = Vec::with_capacity(total_rows);
+    let mut new_versions = SegmentVersions::new();
+    let mut ended = DeleteBitmap::new();
+    let mut next_row: u32 = 0;
 
     for row_idx in 0..total_rows {
-        if deletes.is_deleted(row_idx as u32) {
+        let row = u32::try_from(row_idx).map_err(|_| {
+            ColumnarError::Serialization(format!(
+                "segment row {row_idx} is past the u32 row index range"
+            ))
+        })?;
+        if purged(row) {
+            row_map.push(None);
             continue;
         }
 
@@ -85,6 +111,15 @@ pub fn compact_segment(
         }
 
         memtable.append_row(&row_values)?;
+        new_versions.push(versions.sys_from(row).unwrap_or(i64::MIN));
+        if deletes.is_deleted(row)
+            && let Some(sys_to) = versions.sys_to(row)
+        {
+            new_versions.end(next_row, sys_to);
+            ended.mark_deleted(next_row);
+        }
+        row_map.push(Some(next_row));
+        next_row += 1;
     }
 
     let (schema, columns, row_count) = memtable.drain();
@@ -94,7 +129,10 @@ pub fn compact_segment(
     Ok(CompactionResult {
         segment: Some(new_segment),
         live_rows: row_count,
-        removed_rows: deleted,
+        removed_rows: removed,
+        row_map,
+        versions: new_versions,
+        ended,
     })
 }
 
@@ -134,6 +172,7 @@ mod tests {
     use crate::writer::SegmentWriter;
 
     use super::compact_segment;
+    use crate::versions::SegmentVersions;
 
     fn test_schema() -> ColumnarSchema {
         ColumnarSchema::new(vec![
@@ -175,8 +214,16 @@ mod tests {
             deletes.mark_deleted(i);
         }
 
-        let result = compact_segment(&segment, &deletes, &test_schema(), 0, &test_memory(), None)
-            .expect("compact");
+        let result = compact_segment(
+            &segment,
+            &deletes,
+            &SegmentVersions::new(),
+            &test_schema(),
+            0,
+            &test_memory(),
+            None,
+        )
+        .expect("compact");
 
         assert_eq!(result.live_rows, 90);
         assert_eq!(result.removed_rows, 10);
@@ -209,8 +256,16 @@ mod tests {
             deletes.mark_deleted(i);
         }
 
-        let result = compact_segment(&segment, &deletes, &test_schema(), 0, &test_memory(), None)
-            .expect("compact");
+        let result = compact_segment(
+            &segment,
+            &deletes,
+            &SegmentVersions::new(),
+            &test_schema(),
+            0,
+            &test_memory(),
+            None,
+        )
+        .expect("compact");
 
         assert_eq!(result.live_rows, 0);
         assert_eq!(result.removed_rows, 10);
@@ -222,8 +277,16 @@ mod tests {
         let segment = write_segment(50);
         let deletes = DeleteBitmap::new();
 
-        let result = compact_segment(&segment, &deletes, &test_schema(), 0, &test_memory(), None)
-            .expect("compact");
+        let result = compact_segment(
+            &segment,
+            &deletes,
+            &SegmentVersions::new(),
+            &test_schema(),
+            0,
+            &test_memory(),
+            None,
+        )
+        .expect("compact");
 
         assert_eq!(result.live_rows, 50);
         assert_eq!(result.removed_rows, 0);
@@ -236,8 +299,16 @@ mod tests {
         let mut deletes = DeleteBitmap::new();
         deletes.mark_deleted(0); // Delete first row.
 
-        let result = compact_segment(&segment, &deletes, &test_schema(), 0, &test_memory(), None)
-            .expect("compact");
+        let result = compact_segment(
+            &segment,
+            &deletes,
+            &SegmentVersions::new(),
+            &test_schema(),
+            0,
+            &test_memory(),
+            None,
+        )
+        .expect("compact");
         let new_seg = result.segment.as_ref().expect("segment");
         let reader = SegmentReader::open(new_seg).expect("open");
 
@@ -303,8 +374,16 @@ mod tests {
 
         let mut deletes = DeleteBitmap::new();
         deletes.mark_deleted(0);
-        let result =
-            compact_segment(&segment, &deletes, &schema, 0, &test_memory(), None).expect("compact");
+        let result = compact_segment(
+            &segment,
+            &deletes,
+            &SegmentVersions::new(),
+            &schema,
+            0,
+            &test_memory(),
+            None,
+        )
+        .expect("compact");
         let new_seg = result.segment.as_ref().expect("segment");
         let reader = SegmentReader::open(new_seg).expect("open");
         let indices: Vec<usize> = (0..schema.columns.len()).collect();
@@ -317,5 +396,35 @@ mod tests {
                 assert_eq!(&got, want, "row {row} column '{}'", def.name);
             }
         }
+    }
+
+    /// An ended row with a `sys_to` is history: compaction keeps it, its
+    /// stamps, and its mark. A marked row without one is purged and goes.
+    #[test]
+    fn compact_keeps_history_and_drops_purged_rows() {
+        let segment = write_segment(4);
+        let mut deletes = DeleteBitmap::new();
+        deletes.mark_deleted(0);
+        deletes.mark_deleted(2);
+        let versions = SegmentVersions::from_parts(vec![10, 11, 12, 13], [(2, 20)]);
+
+        let result = compact_segment(
+            &segment,
+            &deletes,
+            &versions,
+            &test_schema(),
+            0,
+            &test_memory(),
+            None,
+        )
+        .expect("compact");
+
+        assert_eq!(result.removed_rows, 1);
+        assert_eq!(result.live_rows, 3);
+        assert_eq!(result.row_map, vec![None, Some(0), Some(1), Some(2)]);
+        assert_eq!(result.versions.sys_from(1), Some(12));
+        assert_eq!(result.versions.sys_to(1), Some(20));
+        assert!(result.ended.is_deleted(1));
+        assert!(!result.ended.is_deleted(0));
     }
 }

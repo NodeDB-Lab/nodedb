@@ -64,3 +64,27 @@ pub const STATS: TableDefinition<(u64, u64, &str, &str), &[u8]> =
 /// value = compressed segment bytes. `segment_id` format `"L{level}:{id:016x}"`.
 pub const SEGMENTS: TableDefinition<(u64, u64, &str, &str, &str), &[u8]> =
     TableDefinition::new("text.segments");
+
+/// System-time start of a document's indexed version a retained snapshot
+/// can read below: key = `(database_id, tenant_id, collection, field,
+/// surrogate)`, value = the `sys_from` ordinal of the write that indexed it.
+/// A live document without a row here is visible at every retained cut.
+pub const TEXT_LIVE_FROM: TableDefinition<(u64, u64, &str, &str, u32), i64> =
+    TableDefinition::new("text.live_from");
+
+/// `TEXT_LIVE_FROM` ordered by ordinal: key = `(database_id, tenant_id,
+/// collection, field, sys_from, surrogate)`, value unused. A read at a cut
+/// ranges over the documents indexed after it.
+pub const TEXT_LIVE_BY_FROM: TableDefinition<(u64, u64, &str, &str, i64, u32), u8> =
+    TableDefinition::new("text.live_by_from");
+
+/// The key of one ended text version: `(database_id, tenant_id, collection,
+/// field, sys_to, surrogate, sys_from)`.
+pub type TextEndedKey = (u64, u64, &'static str, &'static str, i64, u32, i64);
+
+/// Ended document versions a retained snapshot can read, keyed by
+/// [`TextEndedKey`]. The value is the MessagePack `Vec<String>` of the
+/// version's analyzed tokens in order. A read at a cut ranges over the
+/// versions ended after it. A purge ranges over the versions ended at or
+/// below its horizon.
+pub const TEXT_ENDED: TableDefinition<TextEndedKey, &[u8]> = TableDefinition::new("text.ended");

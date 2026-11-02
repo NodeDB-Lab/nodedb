@@ -2,12 +2,11 @@
 
 //! Physical-plan execution trait for leader-based request routing.
 //!
-//! [`PlanExecutor`]: the physical-plan execution path introduced in C-β.
-//! The legacy [`RequestForwarder`] SQL-string path was deleted in C-δ.6.
+//! [`PlanExecutor`]: the physical-plan execution path.
 
 use crate::rpc_codec::{ExecuteRequest, ExecuteResponse, TypedClusterError};
 
-// ── Physical-plan execution (C-β) ────────────────────────────────────────────
+// ── Physical-plan execution ──────────────────────────────────────────────────
 
 /// Sink for streamed result chunks driven by [`PlanExecutor::execute_plan_streaming`].
 ///
@@ -20,17 +19,16 @@ use crate::rpc_codec::{ExecuteRequest, ExecuteResponse, TypedClusterError};
 /// stream was reset or finished early): the producer MUST stop pulling and
 /// return without writing a terminal frame.
 ///
-/// `read_versions` are that frame's read versions, one per vShard it read,
-/// distinct from the core-global `watermark_lsn`. The shuffle fan-out sink
-/// folds them so the producer can report what its scan observed for
-/// cross-shard OCC validation. The plain `ExecuteStream` sink carries only
-/// `watermark_lsn` on the wire and ignores them.
+/// `read_vshards` are the vShards that frame read, distinct from the
+/// core-global `watermark_lsn`. The shuffle fan-out sink folds them so the
+/// producer can report the vShards its scan read. The plain `ExecuteStream`
+/// sink carries only `watermark_lsn` on the wire and ignores them.
 pub trait ChunkSink: Send {
     fn send_chunk(
         &mut self,
         payload: Vec<u8>,
         watermark_lsn: u64,
-        read_versions: Vec<nodedb_types::ShardVersion>,
+        read_vshards: Vec<u32>,
     ) -> impl std::future::Future<Output = crate::error::Result<()>> + Send;
 }
 
@@ -65,6 +63,26 @@ pub trait PlanExecutor: Send + Sync + 'static {
         req: ExecuteRequest,
         sink: impl ChunkSink,
     ) -> impl std::future::Future<Output = Option<TypedClusterError>> + Send;
+
+    /// Close the read cut `ordinal` on this node before it answers a read
+    /// index for it: fold `ordinal` into the node's ordinal clock, so every
+    /// write it reserves later stamps above it, then wait until every write
+    /// that reserved an ordinal at or below it applied here. Refused once
+    /// `timeout` passes.
+    fn close_read_cut(
+        &self,
+        ordinal: i64,
+        timeout: std::time::Duration,
+    ) -> impl std::future::Future<Output = Result<(), ReadCutUnclosed>> + Send;
+}
+
+/// A read cut whose writes did not all apply on the leader within the
+/// caller's bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("the read cut did not close within {waited_ms}ms")]
+pub struct ReadCutUnclosed {
+    /// How long the leader waited.
+    pub waited_ms: u64,
 }
 
 /// No-op executor for single-node mode or testing.
@@ -87,5 +105,14 @@ impl PlanExecutor for NoopPlanExecutor {
             code: 0,
             message: "streaming plan execution not available (single-node mode)".into(),
         })
+    }
+
+    /// A node without a host reserves no ordinal, so every cut is closed.
+    async fn close_read_cut(
+        &self,
+        _ordinal: i64,
+        _timeout: std::time::Duration,
+    ) -> Result<(), ReadCutUnclosed> {
+        Ok(())
     }
 }

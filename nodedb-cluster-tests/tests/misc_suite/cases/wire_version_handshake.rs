@@ -84,7 +84,7 @@ impl RaftRpcHandler for EchoHandler {
     ) -> nodedb_cluster::rpc_codec::ShuffleProduceResponse {
         nodedb_cluster::rpc_codec::ShuffleProduceResponse {
             error: None,
-            read_versions: Vec::new(),
+            read_vshards: Vec::new(),
         }
     }
 
@@ -224,7 +224,7 @@ impl RaftRpcHandler for SentinelHandler {
                 code: 0,
                 message: "sentinel: unexpected produce dispatch".into(),
             }),
-            read_versions: Vec::new(),
+            read_vshards: Vec::new(),
         }
     }
 

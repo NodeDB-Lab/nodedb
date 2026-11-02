@@ -88,6 +88,7 @@ impl RaftSequencerProposer {
         &self,
         leader: u64,
         bytes: Vec<u8>,
+        cut_floor: i64,
     ) -> Result<ProposeDispatch, SequencerProposeError> {
         let Some(shared) = self.shared.upgrade() else {
             return Err(SequencerProposeError::ShutDown);
@@ -106,7 +107,7 @@ impl RaftSequencerProposer {
         tokio::spawn(async move {
             let _permit = permit;
             let rpc = RaftRpc::DataProposeRequest(DataProposeRequest {
-                target: ProposeTarget::Sequencer,
+                target: ProposeTarget::Sequencer { cut_floor },
                 bytes,
             });
             match transport.send_rpc(leader, rpc).await {
@@ -133,8 +134,15 @@ impl RaftSequencerProposer {
     }
 }
 
-impl SequencerProposer for RaftSequencerProposer {
-    fn propose(&self, bytes: Vec<u8>) -> Result<ProposeDispatch, SequencerProposeError> {
+impl RaftSequencerProposer {
+    /// Append `bytes` to the local sequencer group when this node leads it,
+    /// else forward them to the leader. `cut_floor` travels with the entry
+    /// either way.
+    fn propose_with_floor(
+        &self,
+        bytes: Vec<u8>,
+        cut_floor: i64,
+    ) -> Result<ProposeDispatch, SequencerProposeError> {
         let leader = {
             let mut mr = self.multi_raft.lock().unwrap_or_else(|p| p.into_inner());
             let route = sequencer_route(
@@ -144,13 +152,27 @@ impl SequencerProposer for RaftSequencerProposer {
             )?;
             match route {
                 SequencerRoute::Local => {
-                    mr.propose_to_group(SEQUENCER_GROUP_ID, bytes)?;
+                    mr.propose_to_sequencer(bytes, cut_floor)?;
                     return Ok(ProposeDispatch::Local);
                 }
                 SequencerRoute::Forward { leader } => leader,
             }
         };
-        self.forward(leader, bytes)
+        self.forward(leader, bytes, cut_floor)
+    }
+}
+
+impl SequencerProposer for RaftSequencerProposer {
+    fn propose(&self, bytes: Vec<u8>) -> Result<ProposeDispatch, SequencerProposeError> {
+        self.propose_with_floor(bytes, 0)
+    }
+
+    fn propose_cut_marker(
+        &self,
+        bytes: Vec<u8>,
+        cut_floor: i64,
+    ) -> Result<ProposeDispatch, SequencerProposeError> {
+        self.propose_with_floor(bytes, cut_floor)
     }
 }
 

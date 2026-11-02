@@ -47,10 +47,7 @@ impl KvEngine {
         // an unnamed collection gets no checkpoint file — which would drop this
         // registration from the checkpoint while WAL truncation deleted the
         // record that carries it.
-        self.hash_to_tenant.entry(tkey).or_insert(tenant_id);
-        self.hash_to_collection
-            .entry(tkey)
-            .or_insert_with(|| collection.to_string());
+        self.register_table_identity(tkey, database_id, tenant_id, collection);
 
         let entries = self.collection_rows(database_id, tenant_id, collection, now_ms);
         self.sorted_indexes
@@ -519,15 +516,14 @@ mod tests {
         );
     }
 
-    /// TRUNCATE must take the sorted indexes with the rows.
+    /// TRUNCATE empties the sorted indexes with the rows and keeps them
+    /// registered.
     ///
-    /// They live in their own manager rather than in the `KvIndexSet` that
-    /// `truncate` drops, so forgetting them strands the tree. That is the same
-    /// hard-wrong-answer as an unreaped expiry, by another route: `rank` / `top_k`
-    /// never re-check the table, so a truncated collection would keep serving
-    /// ranked keys for rows that no longer exist.
+    /// `rank` / `top_k` read the tree alone, so a tree left full would keep
+    /// ranking removed rows. A dropped registration would leave a later write
+    /// unranked while the catalog still names the index.
     #[test]
-    fn sorted_index_cleaned_on_truncate() {
+    fn sorted_index_emptied_but_kept_on_truncate() {
         let mut e = make_engine();
         let n = now();
 
@@ -555,8 +551,25 @@ mod tests {
         );
         assert_eq!(
             e.sorted_index_top_k(0, 1, "lb", 10, n),
-            None,
-            "the sorted index itself must be gone, as the secondary indexes are"
+            Some(Vec::new()),
+            "the sorted index stays registered and empty"
+        );
+
+        e.put(KvPutParams {
+            database_id: 0,
+            tenant_id: 1,
+            collection: "players",
+            key: b"p2",
+            value: &mp_obj(&[("player_id", "p2"), ("score", "50")]),
+            ttl_ms: 0,
+            now_ms: n,
+            surrogate: row_surrogate(b"p2"),
+        })
+        .expect("a bound row writes");
+        assert_eq!(
+            e.sorted_index_rank(0, 1, "lb", b"p2", n),
+            Some(1),
+            "a write after the truncate files into the kept index"
         );
     }
 

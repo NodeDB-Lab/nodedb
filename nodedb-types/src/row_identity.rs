@@ -62,9 +62,8 @@ impl StorageKey {
 
     /// Parse a redb key back into a `StorageKey`.
     ///
-    /// Returns `None` unless `key` is exactly 8 lowercase hex characters.
-    /// This handles legacy non-surrogate document IDs gracefully: a value
-    /// that fails to parse is not a minted storage key. Allocation-free.
+    /// Returns `None` unless `key` is exactly 8 lowercase hex characters: a
+    /// value that fails to parse is not a minted storage key. Allocation-free.
     pub fn parse(key: &str) -> Option<Self> {
         if key.len() != 8
             || !key

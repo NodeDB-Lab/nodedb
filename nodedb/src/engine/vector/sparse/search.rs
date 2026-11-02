@@ -26,7 +26,8 @@ pub struct SparseSearchResult {
 /// Search the sparse inverted index for documents most similar to the query.
 ///
 /// Computes dot-product scores by iterating query dimensions and accumulating
-/// weights from posting lists. Returns top-K results sorted by score descending.
+/// weights from the live posting lists. Returns top-K results sorted by
+/// score descending.
 ///
 /// Complexity: O(Σ postings_length for query dimensions + K log K).
 pub fn dot_product_topk(
@@ -37,10 +38,7 @@ pub fn dot_product_topk(
     if query.is_empty() || index.is_empty() || top_k == 0 {
         return Vec::new();
     }
-
-    // Accumulate scores per document.
     let mut scores: HashMap<u32, f32> = HashMap::new();
-
     for &(dim, q_weight) in query.entries() {
         if let Some(postings) = index.get_postings(dim) {
             for &(doc_id, doc_weight) in postings {
@@ -48,7 +46,46 @@ pub fn dot_product_topk(
             }
         }
     }
+    top_k_of(index, &scores, top_k)
+}
 
+/// [`dot_product_topk`] over the versions visible at system-time ordinal
+/// `at`: the live versions started at or below `at`, and the ended versions
+/// whose span holds `at`.
+pub fn dot_product_topk_at(
+    index: &SparseInvertedIndex,
+    query: &SparseVector,
+    top_k: usize,
+    at: i64,
+) -> Vec<SparseSearchResult> {
+    if query.is_empty() || top_k == 0 {
+        return Vec::new();
+    }
+    let history = index.history();
+    let mut scores: HashMap<u32, f32> = HashMap::new();
+    for &(dim, q_weight) in query.entries() {
+        if let Some(postings) = index.get_postings(dim) {
+            for &(id, doc_weight) in postings {
+                if history.live_visible_at(id, at) {
+                    *scores.entry(id).or_insert(0.0) += q_weight * doc_weight;
+                }
+            }
+        }
+        for &(id, doc_weight) in history.ended_postings(dim) {
+            if history.ended_visible_at(id, at) {
+                *scores.entry(id).or_insert(0.0) += q_weight * doc_weight;
+            }
+        }
+    }
+    top_k_of(index, &scores, top_k)
+}
+
+/// The `top_k` highest of `scores`, best first, with each id resolved.
+fn top_k_of(
+    index: &SparseInvertedIndex,
+    scores: &HashMap<u32, f32>,
+    top_k: usize,
+) -> Vec<SparseSearchResult> {
     if scores.is_empty() {
         return Vec::new();
     }
@@ -56,7 +93,7 @@ pub fn dot_product_topk(
     // Top-K selection via min-heap bounded to K entries.
     let mut heap: BinaryHeap<std::cmp::Reverse<HeapEntry>> = BinaryHeap::with_capacity(top_k + 1);
 
-    for (doc_id, score) in &scores {
+    for (doc_id, score) in scores {
         heap.push(std::cmp::Reverse(HeapEntry {
             score: *score,
             doc_id: *doc_id,
@@ -66,20 +103,16 @@ pub fn dot_product_topk(
         }
     }
 
-    // Drain heap into results (highest score first).
     // `into_sorted_vec` on `BinaryHeap<Reverse<T>>` returns ascending `Reverse`
     // order, which is descending actual score order.
-    let results: Vec<SparseSearchResult> = heap
-        .into_sorted_vec()
+    heap.into_sorted_vec()
         .into_iter()
         .map(|std::cmp::Reverse(entry)| SparseSearchResult {
             internal_id: entry.doc_id,
             score: entry.score,
             doc_id: index.resolve_doc_id(entry.doc_id).map(String::from),
         })
-        .collect();
-
-    results
+        .collect()
 }
 
 /// Min-heap entry: ordered by score ascending so the heap root is the minimum.
@@ -161,6 +194,36 @@ mod tests {
         let query = SparseVector::empty();
         let results = dot_product_topk(&idx, &query, 10);
         assert!(results.is_empty());
+    }
+
+    /// Insert at 10, overwrite at 20, delete at 30: each cut scores the
+    /// version visible there.
+    #[test]
+    fn a_read_at_a_cut_scores_the_version_visible_there() {
+        let mut idx = SparseInvertedIndex::new();
+        idx.insert_at("doc1", &make_sv(&[(10, 1.0)]), 10);
+        idx.insert_at("doc1", &make_sv(&[(10, 2.0)]), 20);
+        idx.insert_at("doc2", &make_sv(&[(10, 0.5)]), 15);
+        idx.delete_at("doc1", 30);
+        let query = make_sv(&[(10, 1.0)]);
+        let at = |s: i64| -> Vec<(String, f32)> {
+            dot_product_topk_at(&idx, &query, 10, s)
+                .into_iter()
+                .map(|r| (r.doc_id.unwrap_or_default(), r.score))
+                .collect()
+        };
+        assert!(at(5).is_empty());
+        assert_eq!(at(12), vec![("doc1".to_string(), 1.0)]);
+        assert_eq!(
+            at(25),
+            vec![("doc1".to_string(), 2.0), ("doc2".to_string(), 0.5)]
+        );
+        assert_eq!(at(30), vec![("doc2".to_string(), 0.5)]);
+        let current: Vec<String> = dot_product_topk(&idx, &query, 10)
+            .into_iter()
+            .filter_map(|r| r.doc_id)
+            .collect();
+        assert_eq!(current, vec!["doc2".to_string()]);
     }
 
     #[test]

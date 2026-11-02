@@ -218,10 +218,10 @@ async fn push(
     let msg = DeltaPushMsg {
         collection: COLL.into(),
         document_id: ROW.into(),
+        checksum: crc32c::crc32c(&delta),
         delta,
         peer_id: doc.peer_id(),
         mutation_id,
-        checksum: 0,
         device_valid_time_ms: None,
         producer_id: 0,
         epoch: 0,

@@ -47,6 +47,9 @@ pub(in crate::data::executor) struct StageBulkUpdateParams<'a> {
     /// The rows the Control Plane read at this statement. `None` when the
     /// plan carries none.
     pub prediction: Option<TxnPrediction<'a>>,
+    /// The cut BASE is matched at: `None` for each row's current version,
+    /// `Some` for the block's snapshot ordinal.
+    pub system_as_of: Option<i64>,
 }
 
 impl CoreLoop {
@@ -69,6 +72,7 @@ impl CoreLoop {
             declared_primary_key,
             returning,
             prediction,
+            system_as_of,
         } = params;
         let database_id = task.request.database_id;
         let coll_key: (DatabaseId, TenantId, String) =
@@ -85,9 +89,9 @@ impl CoreLoop {
         }
 
         // The BASE ∪ OVERLAY matching set: the transaction's own staged
-        // writes fold into BASE, read at each row's current version.
+        // writes fold into BASE, read at the match's cut.
         let rows = match decode_bulk_filters(filter_bytes)
-            .and_then(|filters| self.txn_matching_rows(txn_id, &coll_key, &filters))
+            .and_then(|filters| self.txn_matching_rows(txn_id, &coll_key, &filters, system_as_of))
         {
             Ok(rows) => rows,
             Err(e) => return self.response_error(task, e),

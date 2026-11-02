@@ -39,10 +39,12 @@ pub(in crate::data::executor) struct CollectUpdateRows<'a> {
     /// Declared `PRIMARY KEY` column of a schemaless target, `None`
     /// otherwise. `Some` makes the post-image guard below run.
     pub declared_primary_key: Option<&'a str>,
-    /// The system time the statement's new versions land at on a bitemporal
-    /// target, `None` on any other. A bitemporal target is read at its
-    /// current versions, and a strict one encodes the time into each tuple.
-    pub bitemporal_sys_from: Option<i64>,
+    /// The system time the statement's new versions land at. A
+    /// `bitemporal=true` strict target encodes it into each tuple.
+    pub sys_from: i64,
+    /// The ordinal the target rows are matched at: `None` for each row's
+    /// current version, `Some` for a transaction block's snapshot.
+    pub target_cut: Option<i64>,
 }
 
 impl CoreLoop {
@@ -64,12 +66,13 @@ impl CoreLoop {
             strict_schema,
             config_key,
             declared_primary_key,
-            bitemporal_sys_from,
+            sys_from,
+            target_cut,
         } = ctx;
         let database_id = task.request.database_id.as_u64();
-        // Read the TARGET as the transaction's CURRENT view = base ∪ overlay:
-        // `None` (autocommit write path) is base-only; `Some(txn)` (COMMIT-time
-        // RESOLVE) folds rows staged earlier in the same transaction.
+        // Read the TARGET at `target_cut`. An autocommit read takes committed
+        // storage only. A block's statement-time RESOLVE carries its
+        // transaction and folds the rows staged earlier in it.
         let txn_id = task.request.txn_id;
         let target_coll_key: (DatabaseId, TenantId, String) = (
             task.request.database_id,
@@ -78,16 +81,21 @@ impl CoreLoop {
         );
 
         // Scan the target collection for rows passing the target-only filters,
-        // folded with the transaction's staging overlay. The scan already yields
-        // each matched row's CURRENT body (overlay put superseding base, staged
+        // folded with the transaction's staging overlay. The scan yields each
+        // matched row's body at the cut (overlay put superseding base, staged
         // insert appended), so the body is used directly — a base `sparse.get`
         // would miss a row this transaction only staged.
-        // Each row is at its current version, so a bitemporal target matches.
         let target_rows = match txn_id {
-            Some(txn_id) => self.txn_matching_rows(txn_id, &target_coll_key, target_filters)?,
-            None => {
-                self.current_matching_rows(database_id, tid, target_collection, target_filters)?
+            Some(txn_id) => {
+                self.txn_matching_rows(txn_id, &target_coll_key, target_filters, target_cut)?
             }
+            None => self.matching_rows_at(
+                database_id,
+                tid,
+                target_collection,
+                target_filters,
+                target_cut,
+            )?,
         };
 
         let mut rows: Vec<ResolvedUpdateRow> = Vec::new();
@@ -218,24 +226,23 @@ impl CoreLoop {
             // strict schema does not declare.
             let updated_bytes = if let Some(schema) = strict_schema {
                 let ndb_val: nodedb_types::Value = target_doc.clone().into();
-                match bitemporal_sys_from {
+                if schema.bitemporal {
                     // The version's system time lives in a bitemporal tuple,
                     // valid for all time, as a point update encodes it.
-                    Some(sys_from) if schema.bitemporal => {
-                        super::super::strict_format::value_to_binary_tuple_bitemporal(
-                            &ndb_val,
-                            schema,
-                            sys_from,
-                            i64::MIN,
-                            i64::MAX,
-                            target_collection,
-                        )?
-                    }
-                    _ => super::super::strict_format::value_to_binary_tuple(
+                    super::super::strict_format::value_to_binary_tuple_bitemporal(
+                        &ndb_val,
+                        schema,
+                        sys_from,
+                        i64::MIN,
+                        i64::MAX,
+                        target_collection,
+                    )?
+                } else {
+                    super::super::strict_format::value_to_binary_tuple(
                         &ndb_val,
                         schema,
                         target_collection,
-                    )?,
+                    )?
                 }
             } else {
                 doc_format::encode_to_msgpack(&target_doc)

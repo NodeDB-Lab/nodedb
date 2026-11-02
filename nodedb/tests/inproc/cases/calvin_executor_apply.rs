@@ -65,7 +65,7 @@ fn make_request(plan: PhysicalPlan) -> Request {
         wal_lsn: None,
         resolved_now_ms: None,
         commit_hlc: None,
-        entry_version: None,
+        system_ordinal: None,
         admission: nodedb::bridge::envelope::Admission::Admitted,
     }
 }
@@ -117,6 +117,7 @@ fn kv_get(coll: &str, key: &[u8]) -> PhysicalPlan {
         key: key.to_vec(),
         rls_filters: Vec::new(),
         surrogate_ceiling: None,
+        system_time: nodedb_types::SystemTimeScope::Current,
     })
 }
 
@@ -141,6 +142,7 @@ fn stage_and_resolve(
             epoch_system_ms: 0,
             versioned_reads: Vec::new(),
             body_plans: Vec::new(),
+            snapshot_ordinal: None,
         }),
     );
     let redo = send_ok(
@@ -176,6 +178,8 @@ fn install(
             reply: reply.clone(),
             user_write: true,
         }),
+        reads: Vec::new(),
+        snapshot_ordinal: None,
     }));
     request.wal_lsn = Some(Lsn::new(lsn));
     tx.try_push(BridgeRequest::unfloored(request)).unwrap();

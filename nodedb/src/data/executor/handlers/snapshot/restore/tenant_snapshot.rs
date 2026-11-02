@@ -215,7 +215,10 @@ impl CoreLoop {
                             );
                         }
                     };
-                let (vp_db, vp_tid, coll_key) = parse_vector_snapshot_key(key, tenant_id);
+                let (vp_db, vp_tid, coll_key) = match parse_vector_snapshot_key(key) {
+                    Ok(parts) => parts,
+                    Err(e) => return self.response_error(task, e),
+                };
                 let map_key = (
                     nodedb_types::DatabaseId::new(vp_db),
                     crate::types::TenantId::new(vp_tid),
@@ -241,7 +244,10 @@ impl CoreLoop {
                             );
                         }
                     };
-                let (ic_db, ic_tid, coll_key) = parse_vector_snapshot_key(key, tenant_id);
+                let (ic_db, ic_tid, coll_key) = match parse_vector_snapshot_key(key) {
+                    Ok(parts) => parts,
+                    Err(e) => return self.response_error(task, e),
+                };
                 let map_key = (
                     nodedb_types::DatabaseId::new(ic_db),
                     crate::types::TenantId::new(ic_tid),
@@ -250,10 +256,8 @@ impl CoreLoop {
                 self.index_configs.insert(map_key, cfg);
             }
 
-            // Restore vector collections.
-            // Snapshot keys are `"{db}:{tid}:{coll_key}"` (new format) or, for
-            // legacy snapshots, `"{tid}:{coll_key}"`. Parse the leading numeric
-            // components back-compatibly; `coll_key` may itself contain `:`.
+            // Restore vector collections. Snapshot keys are
+            // `"{db}:{tid}:{coll_key}"`, and `coll_key` can contain `:`.
             for (key, bytes) in &snap.vectors {
                 let vectors: Vec<(u32, Vec<f32>, Option<nodedb_types::Surrogate>)> =
                     match zerompk::from_msgpack(bytes) {
@@ -270,29 +274,42 @@ impl CoreLoop {
                         }
                     };
                 let count = vectors.len() as u64;
-                let (database_id, vector_tid, coll_key) = parse_vector_snapshot_key(key, tenant_id);
+                let (database_id, vector_tid, coll_key) = match parse_vector_snapshot_key(key) {
+                    Ok(parts) => parts,
+                    Err(e) => return self.response_error(task, e),
+                };
                 let multi_documents: std::collections::HashSet<nodedb_types::Surrogate> = snap
                     .vector_multi_documents
                     .iter()
                     .filter(|(members_key, _)| members_key == key)
                     .flat_map(|(_, documents)| documents.iter().copied())
                     .collect();
-                if let Err(e) = self.restore_vector_collection(
+                let history = match super::index_images::vector_history_of(&snap, key) {
+                    Ok(history) => history,
+                    Err(e) => return self.response_error(task, e),
+                };
+                if let Err(e) = self.restore_vector_collection(super::engines::VectorInstall {
                     database_id,
-                    vector_tid,
+                    tenant_id: vector_tid,
                     coll_key,
                     vectors,
-                    &multi_documents,
+                    multi_documents: &multi_documents,
+                    history,
                     replace_mode,
-                ) {
+                }) {
                     return self.response_error(task, e);
                 }
                 vectors_written += count;
             }
 
+            // Sparse vector indexes and spatial R-trees, each with its history.
+            if let Err(e) = self.install_index_images(&snap) {
+                return self.response_error(task, e);
+            }
+
             // Restore KV tables, each under the database and tenant its key names.
             for (table_key, bytes) in &snap.kv_tables {
-                let entries: Vec<crate::engine::kv::hash_table::KvSnapshotRow> =
+                let table: crate::engine::kv::hash_table::KvSnapshotTable =
                     match zerompk::from_msgpack(bytes) {
                         Ok(e) => e,
                         Err(e) => {
@@ -306,8 +323,8 @@ impl CoreLoop {
                             );
                         }
                     };
-                let count = entries.len() as u64;
-                if let Err(e) = self.restore_kv_table(table_key, entries) {
+                let count = table.rows.len() as u64;
+                if let Err(e) = self.restore_kv_table(table_key, table) {
                     return self.response_error(task, e);
                 }
                 kv_written += count;
@@ -359,6 +376,19 @@ impl CoreLoop {
                 crdt_constraints_written += 1;
             }
 
+            // Series catalogs first: every restored row then resolves its key
+            // to the id it carries.
+            for (key, bytes) in &snap.ts_series_catalogs {
+                if let Err(e) = self.restore_ts_series_catalog(key, bytes, replace_mode) {
+                    return self.response_error(
+                        task,
+                        ErrorCode::Internal {
+                            detail: format!("restore: series catalog of {key} failed: {e}"),
+                        },
+                    );
+                }
+            }
+
             // Restore timeseries memtables and flush each to an on-disk segment
             // for durability. A flush failure is fatal to the whole restore —
             // consistent with how `restore_flushed_ts_segments` treats durability
@@ -385,6 +415,20 @@ impl CoreLoop {
                     task,
                     ErrorCode::Internal {
                         detail: format!("restore: flushed ts segment restore failed: {e}"),
+                    },
+                );
+            }
+
+            // The install replaced the rows every enabled last-value cache
+            // of the tenant was built from.
+            if let Err(e) = self.rebuild_last_value_caches_of(
+                task.request.database_id,
+                crate::types::TenantId::new(tenant_id),
+            ) {
+                return self.response_error(
+                    task,
+                    ErrorCode::Internal {
+                        detail: format!("restore: last-value cache rebuild failed: {e}"),
                     },
                 );
             }
@@ -577,10 +621,37 @@ mod tests {
     fn kv_snapshot(
         rows: Vec<crate::engine::kv::hash_table::KvSnapshotRow>,
     ) -> (Vec<u8>, crate::data::executor::task::ExecutionTask) {
+        kv_snapshot_table(crate::engine::kv::hash_table::KvSnapshotTable {
+            rows,
+            history: Vec::new(),
+        })
+    }
+
+    /// A live snapshot row at ordinal `100`.
+    fn kv_row(
+        key: &[u8],
+        value: &[u8],
+        expire_at_ms: u64,
+        surrogate: u32,
+    ) -> crate::engine::kv::hash_table::KvSnapshotRow {
+        crate::engine::kv::hash_table::KvSnapshotRow {
+            key: key.to_vec(),
+            value: value.to_vec(),
+            expire_at_ms,
+            surrogate,
+            sys_from: 100,
+        }
+    }
+
+    /// A tenant snapshot whose KV section holds `table` in collection `kvt`,
+    /// with the task a Raft install dispatches it under.
+    fn kv_snapshot_table(
+        table: crate::engine::kv::hash_table::KvSnapshotTable,
+    ) -> (Vec<u8>, crate::data::executor::task::ExecutionTask) {
         let snap = crate::types::TenantDataSnapshot {
             kv_tables: vec![(
                 "0:0:kvt".to_string(),
-                zerompk::to_msgpack_vec(&rows).expect("encode entries"),
+                zerompk::to_msgpack_vec(&table).expect("encode table"),
             )],
             ..Default::default()
         };
@@ -604,7 +675,7 @@ mod tests {
     fn a_snapshot_installed_kv_row_is_found_under_its_surrogate() {
         let dir = TempDir::new().expect("tempdir");
         let mut core = open_core(dir.path());
-        let (bytes, task) = kv_snapshot(vec![(b"alice".to_vec(), b"v".to_vec(), 0, 4242)]);
+        let (bytes, task) = kv_snapshot(vec![kv_row(b"alice", b"v", 0, 4242)]);
 
         let response = core.execute_restore_tenant_snapshot(&task, 0, &bytes, true, &[], &[]);
         assert_eq!(response.status, Status::Ok, "restore must succeed");
@@ -615,13 +686,95 @@ mod tests {
         );
     }
 
+    /// A snapshot install keeps every KV version at the ordinal the source
+    /// stamped: the live row, the version it replaced, and a deleted key's
+    /// version. A read at any cut answers as on the source.
+    #[test]
+    fn a_snapshot_install_keeps_kv_ordinals_and_history() {
+        use crate::engine::kv::hash_table::{
+            KvSnapshotKeyHistory, KvSnapshotTable, KvSnapshotVersion,
+        };
+        use nodedb_types::SystemTimeScope;
+
+        let dir = TempDir::new().expect("tempdir");
+        let mut core = open_core(dir.path());
+        let version = |sys_from, sys_to, value: &[u8], surrogate| KvSnapshotVersion {
+            sys_from,
+            sys_to,
+            value: value.to_vec(),
+            expire_at_ms: 0,
+            surrogate,
+        };
+        let mut live = kv_row(b"k", b"new", 0, 7);
+        live.sys_from = 500;
+        let (bytes, task) = kv_snapshot_table(KvSnapshotTable {
+            rows: vec![live],
+            history: vec![
+                KvSnapshotKeyHistory {
+                    key: b"k".to_vec(),
+                    versions: vec![version(100, 500, b"old", 7)],
+                },
+                KvSnapshotKeyHistory {
+                    key: b"gone".to_vec(),
+                    versions: vec![version(200, 300, b"x", 8)],
+                },
+            ],
+        });
+
+        let response = core.execute_restore_tenant_snapshot(&task, 0, &bytes, true, &[], &[]);
+        assert_eq!(response.status, Status::Ok, "restore must succeed");
+
+        let at = |key: &[u8], ordinal: i64| {
+            core.kv_engine
+                .get_at(
+                    0,
+                    0,
+                    "kvt",
+                    key,
+                    SystemTimeScope::Pinned {
+                        ordinal,
+                        cut_marker: 0,
+                    },
+                    0,
+                )
+                .map(|(value, _)| value)
+        };
+        assert_eq!(at(b"k", 99), None);
+        assert_eq!(at(b"k", 150), Some(b"old".to_vec()));
+        assert_eq!(at(b"k", 499), Some(b"old".to_vec()));
+        assert_eq!(at(b"k", 500), Some(b"new".to_vec()));
+        assert_eq!(at(b"gone", 250), Some(b"x".to_vec()));
+        assert_eq!(at(b"gone", 300), None);
+        assert_eq!(
+            core.kv_engine.export_snapshot(0, 0, "kvt"),
+            Some(KvSnapshotTable {
+                rows: vec![{
+                    let mut row = kv_row(b"k", b"new", 0, 7);
+                    row.sys_from = 500;
+                    row
+                }],
+                history: vec![
+                    KvSnapshotKeyHistory {
+                        key: b"gone".to_vec(),
+                        versions: vec![version(200, 300, b"x", 8)],
+                    },
+                    KvSnapshotKeyHistory {
+                        key: b"k".to_vec(),
+                        versions: vec![version(100, 500, b"old", 7)],
+                    },
+                ],
+            }),
+            "a second snapshot of the installed table carries the same versions"
+        );
+    }
+
     /// A snapshot KV row that carries no surrogate fails the install instead
     /// of installing a row no identity reaches.
     #[test]
     fn a_snapshot_kv_row_without_a_surrogate_fails_the_install() {
         let dir = TempDir::new().expect("tempdir");
         let mut core = open_core(dir.path());
-        let (bytes, task) = kv_snapshot(vec![(b"alice".to_vec(), b"v".to_vec(), 0, 0)]);
+        let (bytes, task) = kv_snapshot(vec![kv_row(b"alice", b"v", 0, 0)]);
 
         let response = core.execute_restore_tenant_snapshot(&task, 0, &bytes, true, &[], &[]);
         assert_eq!(response.status, Status::Error);
@@ -635,7 +788,7 @@ mod tests {
     fn raft_install_checkpoints_kv_synchronously() {
         let dir = TempDir::new().expect("tempdir");
         let mut core = open_core(dir.path());
-        let (bytes, task) = kv_snapshot(vec![(b"k1".to_vec(), b"v1".to_vec(), 0, 11)]);
+        let (bytes, task) = kv_snapshot(vec![kv_row(b"k1", b"v1", 0, 11)]);
 
         let response = core.execute_restore_tenant_snapshot(&task, 0, &bytes, true, &[], &[]);
         assert_eq!(response.status, Status::Ok, "restore must succeed");
@@ -710,14 +863,15 @@ mod tests {
         let mut core = open_core(dir.path());
         let vectors: Vec<(u32, Vec<f32>, Option<nodedb_types::Surrogate>)> =
             vec![(0, vec![1.0, 0.0], None)];
-        let result = core.restore_vector_collection(
-            0,
-            0,
-            "emb",
+        let result = core.restore_vector_collection(super::super::engines::VectorInstall {
+            database_id: 0,
+            tenant_id: 0,
+            coll_key: "emb",
             vectors,
-            &std::collections::HashSet::new(),
-            true,
-        );
+            multi_documents: &std::collections::HashSet::new(),
+            history: crate::types::VectorIndexHistory::default(),
+            replace_mode: true,
+        });
         assert!(result.is_err(), "an unbound snapshot vector is refused");
         let key = CoreLoop::vector_index_key(0, 0, "emb", "");
         assert!(

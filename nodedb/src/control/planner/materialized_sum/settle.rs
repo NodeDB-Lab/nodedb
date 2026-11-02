@@ -55,10 +55,11 @@
 //! The read happens before execution, so the source rows can move underneath
 //! it, and a delta folded from a moved image is a wrong total that nothing
 //! downstream can detect. So every settlement stamps the read it was folded
-//! from as a [`ReadSetEntry`]. The entry travels on the transaction's Calvin
-//! read-set, and the source core's `read_set_still_current` check votes ABORT —
-//! before any row is mutated — when the rows it was folded from have been
-//! written since. The statement then retries against a fresh read.
+//! from as a [`ReadSetEntry`], at the read cut the read took first. The entry
+//! travels on the transaction's read-set, and the source core's apply votes
+//! ABORT — before any row is mutated — when a committed version of the rows
+//! it was folded from has an ordinal above that cut. The statement then
+//! retries against a fresh read.
 
 use rust_decimal::Decimal;
 
@@ -71,7 +72,7 @@ use nodedb_types::id::TxnId;
 use nodedb_types::{CollectionKey, Surrogate};
 
 use crate::control::server::shared::session::read_set::{
-    EngineTag, ReadKey, ReadOrigin, ReadPoint, ReadSetEntry,
+    EngineTag, ReadKey, ReadPoint, ReadSetEntry,
 };
 use crate::engine::document::store::StorageKey;
 use crate::query::{sum_target_is_co_resident, sum_target_vshard};
@@ -91,8 +92,8 @@ pub(super) struct SettleInput<'a> {
     /// that row. `None` for a predicate-shaped write, whose observation is the
     /// whole collection and whose entry is collection-scoped accordingly.
     pub source_row: Option<Surrogate>,
-    /// Version the images were read at, on the source collection's vShard.
-    pub read_version: nodedb_types::WriteVersion,
+    /// The ordinal of the read cut the images' read took before it read.
+    pub observed_at: i64,
     /// Resolves SRIDs in the binding's value expression.
     pub crs: &'a nodedb_crs::CrsContext<'a>,
 }
@@ -274,22 +275,14 @@ fn image_read_entry(
             },
             None => ReadKey::Predicate,
         },
-        read_version: input.read_version,
-        // A DERIVATION read, never a read-your-own-write. The delta shipped to
-        // the target rests entirely on the image. The statement writes the
-        // source collection too, so an entry marked `Session` here will be
-        // dropped by the own-write exclusion and the fold will never be
-        // validated against a concurrent writer.
-        //
-        // Inside a transaction the image is read through its staging overlay.
-        // `read_version` is still the committed version, because a
-        // staged write moves no write version. So the entry aborts the commit
-        // when another transaction commits a write to the row first. It never
-        // aborts on this transaction's own staged writes, which the image
-        // already includes. For a row that exists only in the overlay, the
-        // entry asserts that the base still holds no committed write to that
-        // surrogate. A concurrent commit of that row invalidates it.
-        origin: ReadOrigin::PlanDerivation,
+        // Inside a transaction the image is read through its staging
+        // overlay, and a staged write moves no committed version. So the
+        // entry aborts the commit when another transaction commits a write
+        // to the row after the cut. It never aborts on this transaction's own
+        // staged writes, which the image already includes. For a row that
+        // exists only in the overlay, the entry asserts that the base still
+        // holds no committed write to that surrogate.
+        observed_at: Some(input.observed_at),
         home: None,
     }
 }
@@ -407,7 +400,7 @@ mod tests {
             source_collection: &source,
             images: &images,
             source_row: Some(Surrogate::new(11)),
-            read_version: nodedb_types::WriteVersion::logged(3, 42),
+            observed_at: 42,
             crs: &nodedb_crs::CrsContext::builtin_only(),
         };
         let settlement = settle_cross_shard_images(
@@ -443,7 +436,7 @@ mod tests {
             source_collection: &source,
             images: &images,
             source_row: Some(Surrogate::new(11)),
-            read_version: nodedb_types::WriteVersion::logged(3, 42),
+            observed_at: 42,
             crs: &nodedb_crs::CrsContext::builtin_only(),
         };
         let settlement = settle_cross_shard_images(
@@ -484,7 +477,7 @@ mod tests {
             source_collection: &source,
             images: &images,
             source_row: Some(Surrogate::new(11)),
-            read_version: nodedb_types::WriteVersion::logged(3, 42),
+            observed_at: 42,
             crs: &nodedb_crs::CrsContext::builtin_only(),
         };
         let settlement = settle_cross_shard_images(
@@ -509,7 +502,7 @@ mod tests {
             source_collection: &source,
             images: &images,
             source_row: Some(Surrogate::new(11)),
-            read_version: nodedb_types::WriteVersion::logged(3, 42),
+            observed_at: 42,
             crs: &nodedb_crs::CrsContext::builtin_only(),
         };
         let settlement = settle_cross_shard_images(
@@ -538,7 +531,7 @@ mod tests {
             source_collection: &source,
             images: &images,
             source_row: Some(Surrogate::new(11)),
-            read_version: nodedb_types::WriteVersion::logged(3, 42),
+            observed_at: 42,
             crs: &nodedb_crs::CrsContext::builtin_only(),
         };
         // A binding whose target IS the source collection is co-resident by
@@ -568,7 +561,7 @@ mod tests {
             source_collection: &source,
             images: &images,
             source_row: Some(Surrogate::new(11)),
-            read_version: nodedb_types::WriteVersion::logged(3, 42),
+            observed_at: 42,
             crs: &nodedb_crs::CrsContext::builtin_only(),
         };
         let settlement = settle_cross_shard_images(
@@ -589,9 +582,9 @@ mod tests {
             }
         );
         assert_eq!(
-            settlement.reads[0].read_version,
-            nodedb_types::WriteVersion::logged(3, 42),
-            "the entry carries the version the image read observed"
+            settlement.reads[0].observed_at,
+            Some(42),
+            "the entry carries the cut the image read took"
         );
     }
 
@@ -606,7 +599,7 @@ mod tests {
             source_collection: &source,
             images: &images,
             source_row: None,
-            read_version: nodedb_types::WriteVersion::logged(3, 42),
+            observed_at: 42,
             crs: &nodedb_crs::CrsContext::builtin_only(),
         };
         let settlement = settle_cross_shard_images(

@@ -63,8 +63,8 @@ pub(super) async fn resolve_gather(
     //
     // An in-transaction read (`txn_id.is_some()`) also keeps the
     // materialize path: streaming collapses per-core watermarks into one
-    // value, but a transaction must record each participating shard's own
-    // read version for optimistic-concurrency validation, so it takes the
+    // value, but a transaction must record each participating shard for
+    // snapshot validation, so it takes the
     // `gather_all_vshards` branch below whose `GatherOutcome` preserves
     // `shard_watermarks`.
     if !as_aggregate && txn_id.is_none() && child.is_streamable_unordered_scan() {
@@ -120,13 +120,13 @@ pub(super) async fn resolve_gather(
     {
         captures.push(DistributedReadCapture {
             scan_plan,
-            read_versions: outcome.read_versions.clone(),
+            read_vshards: outcome.read_vshards.clone(),
         });
     }
 
     let payload = outcome.merged_rows(as_aggregate)?;
     Ok(Resolved::Gathered(
-        outcome_to_response(payload, outcome.watermark_lsn, outcome.read_versions),
+        outcome_to_response(payload, outcome.watermark_lsn, outcome.read_vshards),
         outcome.shard_watermarks,
         std::mem::take(captures),
     ))
@@ -145,7 +145,7 @@ pub(super) async fn resolve_broadcast(
         outcome_to_response(
             outcome.merged_rows(false)?,
             outcome.watermark_lsn,
-            outcome.read_versions,
+            outcome.read_vshards,
         ),
         outcome.shard_watermarks,
         std::mem::take(captures),

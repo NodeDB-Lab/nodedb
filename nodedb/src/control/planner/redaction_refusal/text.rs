@@ -165,6 +165,7 @@ mod tests {
             filters: Vec::new(),
             rls_filters: Vec::new(),
             scores,
+            system_time: nodedb_types::SystemTimeScope::Current,
         })
     }
 
@@ -208,6 +209,7 @@ mod tests {
             rls_filters: Vec::new(),
             scores: vec![score(Some("ssn"))],
             bound: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         assert_refused(check(&scan, &store));
     }
@@ -226,6 +228,7 @@ mod tests {
             filters: Vec::new(),
             rls_filters: Vec::new(),
             scores: Vec::new(),
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         assert_refused(check(&phrase, &store));
     }

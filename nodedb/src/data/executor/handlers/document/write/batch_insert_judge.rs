@@ -103,7 +103,6 @@ impl CoreLoop {
             surrogates,
             if_absent,
         } = page;
-        let bitemporal = self.is_bitemporal(database_id, tid, collection);
         let identity_column = self.identity_column(database_id, tid, collection);
         landing_rows(
             collection,
@@ -112,18 +111,8 @@ impl CoreLoop {
             RowProbe {
                 stored: |i: usize| {
                     let key = StorageKey::for_surrogate(surrogates[i]);
-                    if bitemporal {
-                        self.sparse.versioned_exists_current_in_txn(
-                            txn,
-                            database_id,
-                            tid,
-                            collection,
-                            &key,
-                        )
-                    } else {
-                        self.sparse
-                            .exists_in_txn(txn, database_id, tid, collection, &key)
-                    }
+                    self.sparse
+                        .exists_in_txn(txn, database_id, tid, collection, &key)
                 },
                 describe: |i: usize| {
                     let (document_id, body) = &documents[i];

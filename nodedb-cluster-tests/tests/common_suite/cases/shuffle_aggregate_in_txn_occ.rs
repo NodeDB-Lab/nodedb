@@ -8,26 +8,21 @@
 //! An interactive transaction can WRITE several collections and READ another via
 //! a distributed GROUP BY that the planner lowers to `Exchange{ShuffleAggregate}`.
 //! The coordinator fans partial-state PRODUCERs to the source collection's
-//! owner(s); each producer scans the collection and reports the scanned
-//! collection's write version at read time back on its
-//! `ShuffleProduceResponse`. The coordinator max-folds those and records the
-//! aggregate's read-set entry with that version.
+//! owner(s); each producer scans the collection and reports the vShards it read
+//! back on its `ShuffleProduceResponse`. The coordinator folds them and records
+//! the aggregate's read-set entry on each.
 //!
-//! The shuffle-aggregate resolver must not record `WriteVersion::ZERO` as the
-//! read version. At the cross-shard COMMIT barrier the read-only participant is
-//! revalidated with `write_version(coll) <= read_version`. With a zero read
-//! version and any prior write to the collection, the write version is above
-//! zero, so the comparison is false → a SPURIOUS serialization abort (SQLSTATE 40001) for a
-//! read that was never concurrently written. This suite bounds the behavior from
-//! BOTH sides:
+//! At the cross-shard COMMIT barrier the read-only participant is revalidated at
+//! the transaction's snapshot ordinal: it aborts only when a committed version of
+//! the read collection sits above the snapshot. This suite bounds the behavior
+//! from BOTH sides:
 //!
 //! * `commits_when_not_concurrently_written` — the read collection is NOT written
-//!   during the txn, so the recorded real version still validates and COMMIT must
-//!   SUCCEED. This is exactly what the ZERO→real-version fix unblocks; before the
-//!   fix this direction spuriously aborted with 40001.
-//! * `aborts_on_stale_read` — a confirmed-visible concurrent write advances the
-//!   read collection past the captured version, so COMMIT must STILL abort with
-//!   40001. This guards the fix against degrading into a blanket "always valid".
+//!   during the txn, so no version sits above the snapshot and COMMIT must
+//!   SUCCEED.
+//! * `aborts_on_stale_read` — a confirmed-visible concurrent write lands a version
+//!   of the read collection above the snapshot, so COMMIT must abort with 40001.
+//!   This guards the validation against degrading into a blanket "always valid".
 //!
 //! ## Why a single node reproduces it
 //!
@@ -35,7 +30,7 @@
 //! node with 4 Data-Plane cores leads every data group locally AND has a cluster
 //! transport + the shuffle producer hook installed, so it can BOTH resolve a
 //! distributed `Exchange{ShuffleAggregate}` (producer/consumer loop back to the
-//! same node over the real RPC path, so the producer-side read-version reporting
+//! same node over the real RPC path, so the producer-side read-vShard reporting
 //! is genuinely exercised) AND route a cross-shard COMMIT through the
 //! multi-participant Calvin barrier that revalidates read-only participants.
 //!
@@ -148,8 +143,7 @@ async fn spawn_node_with_collections()
     .await;
 
     // Seed metrics with committed low-cardinality GROUP BY rows so the aggregate
-    // read observes real data AND metrics' committed write version is non-zero
-    // (the exact precondition that made the pre-fix ZERO read-version abort).
+    // read observes real data and metrics holds committed versions.
     node.client
         .simple_query(&format!(
             "INSERT INTO {metrics} (id, k, v) VALUES \
@@ -193,12 +187,9 @@ async fn spawn_node_with_collections()
     (node, data_dir, metrics, w1, w2)
 }
 
-/// The AGGREGATE read is NOT concurrently written, so its recorded real read
-/// version still validates at the barrier and COMMIT must SUCCEED. This is the
-/// direction the producer-side ZERO→real read-version fix unblocks: before it,
-/// the shuffle-aggregate recorded read version `0`, and the barrier's
-/// `write_version(metrics) <= 0` check (metrics has committed writes, so its
-/// write version is above zero) spuriously aborted the COMMIT with 40001.
+/// The AGGREGATE read is NOT concurrently written, so no version of metrics
+/// sits above the snapshot. The barrier validates the read and COMMIT must
+/// SUCCEED, though metrics holds committed versions below the snapshot.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn shuffle_aggregate_read_commits_when_not_concurrently_written() {
     let (node, _data_dir, metrics, w1, w2) = spawn_node_with_collections().await;
@@ -209,7 +200,7 @@ async fn shuffle_aggregate_read_commits_when_not_concurrently_written() {
     // buffered writes, leaving the transaction OPEN. The two INSERTs buffer on the
     // coordinator, so at COMMIT the write set spans two vShards → the Calvin
     // barrier; the aggregate SELECT registers metrics' vShard as a read-only
-    // participant with a captured (real, non-zero) read version.
+    // participant homed on the vShards the producers read.
     let agg = agg_sql(&metrics);
     let block = format!(
         "BEGIN; \
@@ -230,7 +221,7 @@ async fn shuffle_aggregate_read_commits_when_not_concurrently_written() {
         .unwrap_or_else(|e| {
             panic!(
                 "COMMIT of an in-txn distributed aggregate read that was NOT concurrently \
-                 written must succeed (the producer-side read-version fix); got: {}",
+                 written must succeed; got: {}",
                 pg_detail(&e)
             )
         });
@@ -271,9 +262,9 @@ async fn shuffle_aggregate_read_commits_when_not_concurrently_written() {
 }
 
 /// The precision control: the SAME shape, but a confirmed-visible concurrent write
-/// advances `metrics` past the captured aggregate read version. COMMIT must STILL
-/// abort with SQLSTATE 40001 — the barrier revalidates metrics' read-only slice
-/// at its real read version and finds it stale. Guards the fix against becoming a
+/// lands a version of `metrics` above the snapshot. COMMIT must STILL abort with
+/// SQLSTATE 40001 — the barrier revalidates metrics' read-only slice at the
+/// snapshot ordinal and finds it stale. Guards the validation against becoming a
 /// blanket "always valid".
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn shuffle_aggregate_read_occ_aborts_on_stale_read() {
@@ -293,8 +284,8 @@ async fn shuffle_aggregate_read_occ_aborts_on_stale_read() {
         .await
         .expect("open cross-shard txn: distributed aggregate read + buffer writes");
 
-    // Concurrent writer on a SEPARATE connection advances metrics past the
-    // captured aggregate read version by inserting a new row.
+    // Concurrent writer on a SEPARATE connection lands a version of metrics
+    // above the snapshot by inserting a new row.
     let (writer, writer_conn) = open_client(&node).await;
     writer
         .simple_query(&format!(

@@ -64,9 +64,7 @@ pub struct IndexConfig {
     /// to the index is checked against it, so a producer emitting the wrong
     /// embedding width is rejected at the write rather than discovered as poor
     /// search results. `0` = never declared, in which case the index adopts
-    /// the width of the first vector it sees. Defaulted on decode so indexes
-    /// snapshotted before the field existed keep loading.
-    #[serde(default)]
+    /// the width of the first vector it sees.
     pub declared_dim: usize,
 }
 

@@ -307,12 +307,12 @@ async fn replicated_delete_removes_the_consumer_group_and_its_offsets() {
     assert!(stored_group_streams(&server).is_empty());
 }
 
-/// A replicated `MigrateConsumerGroupStream` re-keys the group onto its
-/// canonical stream and carries its committed offsets across.
+/// A replicated `DeleteTopicWithConsumerGroups` removes only the groups on the
+/// topic's `topic:<name>` stream. A group on a change stream that shares the
+/// bare name keeps its row, its registration, and its offsets.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn replicated_migrate_rekeys_the_group_and_carries_its_offsets() {
+async fn replicated_topic_delete_keeps_a_same_named_stream_group() {
     let server = TestServer::start().await;
-    let stream = canonical_stream();
     apply_entry(&server, &create_topic_entry());
     apply_entry(
         &server,
@@ -322,38 +322,26 @@ async fn replicated_migrate_rekeys_the_group_and_carries_its_offsets() {
         .shared
         .offset_store
         .commit_offset(database(), TENANT, TOPIC, GROUP, PARTITION, 5_u64)
-        .expect("commit a legacy offset");
+        .expect("commit a change-stream offset");
 
-    apply_entry(
-        &server,
-        &CatalogEntry::MigrateConsumerGroupStream {
-            def: Box::new(group(TOPIC)),
-            legacy_stream: TOPIC.to_string(),
-        },
-    );
+    apply_entry(&server, &delete_topic_entry());
 
     assert!(
         server
             .shared
             .group_registry
             .get(database(), TENANT, TOPIC, GROUP)
-            .is_none(),
-        "the legacy registration must be gone"
+            .is_some(),
+        "the change stream's group is not a topic group"
     );
-    let live = server
-        .shared
-        .group_registry
-        .get(database(), TENANT, &stream, GROUP)
-        .expect("the group must resolve under its canonical stream");
-    assert_eq!(live.stream_name, stream);
-    assert_eq!(stored_group_streams(&server), vec![stream.clone()]);
+    assert_eq!(stored_group_streams(&server), vec![TOPIC.to_string()]);
     assert_eq!(
         server
             .shared
             .offset_store
-            .get_offset(database(), TENANT, &stream, GROUP, PARTITION)
+            .get_offset(database(), TENANT, TOPIC, GROUP, PARTITION)
             .index,
         5,
-        "the migration must carry the committed cursor across"
+        "the change stream's cursor survives DROP TOPIC"
     );
 }

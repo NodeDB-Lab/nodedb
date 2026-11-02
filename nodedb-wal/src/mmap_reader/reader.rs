@@ -508,6 +508,7 @@ mod tests {
             apply_key: 0,
             event_source: crate::record::NO_EVENT_SOURCE,
             commit_hlc: 0,
+            system_ordinal: crate::record::NO_SYSTEM_ORDINAL,
             crc32c: 0,
         };
         std::fs::write(&path, header.to_bytes()).unwrap();
@@ -532,6 +533,7 @@ mod tests {
             apply_key: 0,
             event_source: crate::record::NO_EVENT_SOURCE,
             commit_hlc: 0,
+            system_ordinal: crate::record::NO_SYSTEM_ORDINAL,
             crc32c: 0,
         };
         std::fs::write(&path, header.to_bytes()).unwrap();

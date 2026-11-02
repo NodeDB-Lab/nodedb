@@ -20,6 +20,7 @@ pub mod node;
 pub mod pitr;
 pub mod retriable;
 pub mod shared_steps;
+pub mod snapshot_rows;
 pub mod wait;
 
 pub use cluster::{GroupLeader, GroupPosition, StoppedCluster, StoppedNodeInfo, TestCluster};

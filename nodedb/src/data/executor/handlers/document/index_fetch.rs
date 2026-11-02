@@ -4,14 +4,9 @@
 //!
 //! Both `WHERE indexed_field = value` entry points (the native
 //! `IndexLookup` op and the pgwire-rewritten `IndexedFetch` op) resolve
-//! doc IDs through `DocumentEngine::index_lookup`. Bitemporal collections
-//! never populate the plain `INDEXES` table — every secondary-index write
-//! lands in the versioned index and every body lives on the versioned
-//! document table — so both handlers branch on `self.is_bitemporal(..)`
-//! exactly as `execute_document_scan` does: the doc-ID probe goes through
-//! the versioned index and the body fetch through `versioned_get_current`.
-//! Non-bitemporal collections keep the byte-identical plain
-//! `range_scan` + `sparse.get` path.
+//! doc IDs through the versioned index: a doc matches at a cut when its
+//! version visible at the cut holds exactly the value. Bodies come from the
+//! versioned document table at the same cut.
 
 use nodedb_types::StorageKey;
 use tracing::{debug, warn};
@@ -42,18 +37,19 @@ pub(in crate::data::executor) struct IndexedFetchParams<'a> {
     pub projection: &'a [String],
     pub limit: usize,
     pub offset: usize,
-    /// `FOR SYSTEM_TIME AS OF <ms>` cutoff on a bitemporal collection, as
-    /// the last system-time ordinal of that millisecond. `None` for the
-    /// current state.
+    /// System-time ordinal cut of the read. `None` for the current state.
     pub system_as_of: Option<i64>,
+    /// True for a current read and a transaction snapshot read: the
+    /// transaction's staged writes merge on top of the versions read.
+    pub merge_overlay: bool,
 }
 
 impl CoreLoop {
     /// Execute a secondary index lookup: find all doc IDs where `path = value`.
     ///
-    /// Delegates to `DocumentEngine::index_lookup`, which reads the plain
-    /// `INDEXES` table for ordinary collections and the versioned index for
-    /// bitemporal ones. Returns a JSON array of document IDs as the payload.
+    /// Delegates to `DocumentEngine::index_lookup`, which reads the
+    /// versioned index at the current state. Returns a JSON array of
+    /// document IDs as the payload.
     pub(in crate::data::executor) fn execute_document_index_lookup(
         &mut self,
         task: &ExecutionTask,
@@ -70,13 +66,12 @@ impl CoreLoop {
             "document index lookup"
         );
 
-        let bitemporal = self.is_bitemporal(task.request.database_id.as_u64(), tid, collection);
         let doc_engine = crate::engine::document::store::DocumentEngine::new(
             &self.sparse,
             task.request.database_id.as_u64(),
             tid,
         );
-        match doc_engine.index_lookup(collection, path, value, bitemporal) {
+        match doc_engine.index_lookup(collection, path, value, None) {
             Ok(mut doc_ids) => {
                 if let Some(txn_id) = task.request.txn_id {
                     let config_key = (
@@ -137,10 +132,9 @@ impl CoreLoop {
     /// via `encode_raw_document_rows` — the same wire format as a document
     /// scan — so the pgwire decoder doesn't need a special case.
     ///
-    /// Bitemporal collections resolve doc IDs through the versioned index and
-    /// bodies through `versioned_get_current` (which hides tombstoned /
-    /// superseded values); ordinary collections use the plain index and
-    /// `sparse.get`.
+    /// Doc IDs come from the versioned index at the read's cut, and bodies
+    /// from the version visible at the same cut, so a doc matches exactly
+    /// when its visible version holds the value.
     ///
     /// The compound-predicate residual (`filters`) IS applied to each fetched
     /// body — committed or staged — so a row matching the indexed term but
@@ -162,6 +156,7 @@ impl CoreLoop {
             limit,
             offset,
             system_as_of,
+            merge_overlay,
         } = params;
         debug!(
             core = self.core_id,
@@ -174,26 +169,17 @@ impl CoreLoop {
         );
 
         let database_id = task.request.database_id.as_u64();
-        let bitemporal = self.is_bitemporal(database_id, tid, collection);
-        // An `AS OF` read answers from the versioned index at its cutoff: a
-        // row matches when its newest entry at or before the cutoff is live.
-        // The planner refuses `AS OF` on a plain collection, so only a
-        // bitemporal collection carries a cutoff.
-        let as_of = system_as_of.filter(|_| bitemporal);
-        let looked_up = match as_of {
-            Some(cut) => self.sparse.versioned_index_lookup_as_of(
-                database_id,
-                tid,
-                collection,
-                path,
-                value,
-                Some(cut),
-            ),
-            None => {
-                crate::engine::document::store::DocumentEngine::new(&self.sparse, database_id, tid)
-                    .index_lookup(collection, path, value, bitemporal)
-            }
-        };
+        // A read at a cut answers from the versioned index at that cut: a row
+        // matches when its newest entry at or before the cut is live.
+        let as_of = system_as_of;
+        let looked_up = self.sparse.versioned_index_lookup_as_of(
+            database_id,
+            tid,
+            collection,
+            path,
+            value,
+            as_of,
+        );
         let mut doc_ids: Vec<StorageKey> = match looked_up {
             Ok(ids) => ids,
             Err(e) => return self.response_error(task, ErrorCode::from(e)),
@@ -217,8 +203,8 @@ impl CoreLoop {
             }
         });
 
-        // Read-your-own-writes for the index-lookup path: the INDEXES table
-        // (plain or versioned) is never staged, only body storage is, so a
+        // Read-your-own-writes for the index-lookup path: the index is never
+        // staged, only body storage is, so a
         // staged insert/update/delete that changes `path == value` is
         // invisible to `doc_engine.index_lookup` above. Decode each
         // candidate's staged body and re-extract `path` the same way the
@@ -253,9 +239,14 @@ impl CoreLoop {
                 }
             }
         };
-        // An `AS OF` read never sees the overlay, whose staged bodies are
-        // current-version only, as the document scan does.
-        if let (Some(txn_id), None) = (task.request.txn_id, as_of) {
+        // A historical read never sees the overlay, as the document scan
+        // does. A transaction snapshot read sees it.
+        let overlay_txn = if merge_overlay {
+            task.request.txn_id
+        } else {
+            None
+        };
+        if let Some(txn_id) = overlay_txn {
             let (is_array, case_insensitive) = self.index_path_flags(&config_key, path);
             if let Err(e) = self.merge_overlay_into_index_lookup(
                 super::super::transaction::overlay::IndexOverlayMergeParams {
@@ -294,20 +285,19 @@ impl CoreLoop {
             // the staged `Put` bytes and only falls back to a base fetch of
             // the current version when the overlay has nothing staged for
             // this surrogate.
-            // An `AS OF` read takes each row's version as of the cutoff.
-            let fetched = match as_of {
-                Some(cut) => self.sparse.versioned_get_as_of(
-                    database_id,
-                    tid,
-                    collection,
-                    doc_id,
-                    Some(cut),
-                    None,
-                ),
-                None => self.overlay_or_base_body(task.request.txn_id, &coll_key, doc_id, || {
-                    self.current_row_body(database_id, tid, collection, doc_id)
-                }),
-            };
+            // A read at a cut takes each row's version as of the cutoff.
+            let fetched =
+                self.overlay_or_base_body(overlay_txn, &coll_key, doc_id, || match as_of {
+                    Some(cut) => self.sparse.versioned_get_as_of(
+                        database_id,
+                        tid,
+                        collection,
+                        doc_id,
+                        Some(cut),
+                        None,
+                    ),
+                    None => self.current_row_body(database_id, tid, collection, doc_id),
+                });
             match fetched {
                 Ok(Some(bytes)) => {
                     // A row matching the indexed term but failing the residual
@@ -374,8 +364,8 @@ impl CoreLoop {
                     rows.push((doc_id, payload));
                 }
                 Ok(None) => {
-                    // Index entry pointed at a deleted doc — skip, don't
-                    // fail. A future compaction will purge the orphan.
+                    // The overlay staged the row's delete, or the row's
+                    // version at the cut is gone: no row.
                 }
                 Err(e) => {
                     return self.response_error(task, ErrorCode::from(e));

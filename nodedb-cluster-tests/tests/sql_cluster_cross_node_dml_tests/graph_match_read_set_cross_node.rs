@@ -1,20 +1,19 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! A cluster MATCH inside a transaction puts every vShard it read on the
-//! transaction's read-set, each at the watermark that vShard served.
+//! transaction's read-set.
 //!
 //! With a replication factor of 1, a pattern over a graph whose node keys
 //! cover every data group reads edges on every node. Another transaction then
 //! writes an edge on a vShard led by a different node than the reader's
-//! coordinator. The reader's COMMIT must fail with a serialization error:
-//!
-//! - over pgwire, read-only: the commit checks each home vShard's write floor
-//!   on its leader;
-//! - over the native protocol, with a write: the commit goes through Calvin,
-//!   whose participants include every vShard the MATCH read.
+//! coordinator. The reader also writes one log row, so its COMMIT checks its
+//! reads and must fail with a serialization error, over pgwire and over the
+//! native protocol: the commit goes through Calvin, whose participants
+//! include every vShard the MATCH read.
 //!
 //! A control transaction with no concurrent write commits, so the check does
-//! not abort everything.
+//! not abort everything. A read-only transaction read every edge at its
+//! snapshot, so it commits across a concurrent edge.
 
 use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
@@ -221,7 +220,8 @@ async fn a_concurrent_edge_on_a_read_vshard_aborts_the_match_transaction() {
             )
         });
 
-    // pgwire, read-only: a concurrent edge on a remote vShard aborts COMMIT.
+    // pgwire, read-only: the MATCH read its snapshot, so COMMIT succeeds
+    // across a concurrent edge.
     coordinator
         .client
         .simple_query("BEGIN")
@@ -232,6 +232,36 @@ async fn a_concurrent_edge_on_a_read_vshard_aborts_the_match_transaction() {
         .simple_query(&match_sql)
         .await
         .unwrap_or_else(|e| panic!("in-txn MATCH: {}", pg_detail(&e)));
+    concurrent_edge(writer, probe, remote_sources[0], "fresh_read_only").await;
+    coordinator
+        .client
+        .simple_query("COMMIT")
+        .await
+        .unwrap_or_else(|e| {
+            panic!(
+                "a read-only MATCH transaction commits at its snapshot: {}",
+                pg_detail(&e)
+            )
+        });
+
+    // pgwire, with a write: a concurrent edge on a remote vShard aborts COMMIT.
+    coordinator
+        .client
+        .simple_query("BEGIN")
+        .await
+        .expect("BEGIN");
+    coordinator
+        .client
+        .simple_query(&match_sql)
+        .await
+        .unwrap_or_else(|e| panic!("in-txn MATCH: {}", pg_detail(&e)));
+    coordinator
+        .client
+        .simple_query(&format!(
+            "INSERT INTO {LOG} (id, value) VALUES ('entry_pg', '1')"
+        ))
+        .await
+        .unwrap_or_else(|e| panic!("buffer a pgwire log row: {}", pg_detail(&e)));
     concurrent_edge(writer, probe, remote_sources[0], "fresh_pg").await;
     let err = coordinator
         .client

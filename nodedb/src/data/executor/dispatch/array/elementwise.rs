@@ -44,10 +44,14 @@ pub(in crate::data::executor) struct ElementwiseParams<'a> {
     /// Only cells whose tile key routes to this bucket take part. `None`
     /// includes every cell.
     pub shard_bucket: Option<ShardBucket>,
-    /// System-time cutoff for both sides. `None` = live read.
+    /// System-time ordinal cutoff for both sides. `None` = live read.
     pub system_as_of: Option<i64>,
     /// Valid-time point for both sides. `None` = no valid-time filter.
     pub valid_at_ms: Option<i64>,
+    /// True for a live read and a transaction snapshot read: both sides
+    /// fold the transaction's staged cells, and no horizon summary row is
+    /// appended for the system cut.
+    pub merge_overlay: bool,
 }
 
 /// The temporal scope one operand is read at.
@@ -56,6 +60,7 @@ struct SideScan {
     shard_bucket: Option<ShardBucket>,
     system_as_of: Option<i64>,
     valid_at_ms: Option<i64>,
+    merge_overlay: bool,
 }
 
 impl CoreLoop {
@@ -73,11 +78,13 @@ impl CoreLoop {
             shard_bucket,
             system_as_of,
             valid_at_ms,
+            merge_overlay,
         } = p;
         let scan = SideScan {
             shard_bucket,
             system_as_of,
             valid_at_ms,
+            merge_overlay,
         };
         let attr_idx = attr_idx as usize;
         if let Err(resp) = self.ensure_array_open(task, left) {
@@ -184,7 +191,7 @@ impl CoreLoop {
             cell.attrs = vec![result];
             rows.push(Value::ArrayCell(cell));
         }
-        if system_as_of.is_some() || valid_at_ms.is_some() {
+        if (system_as_of.is_some() && !merge_overlay) || valid_at_ms.is_some() {
             rows.push(horizon_summary(left_truncated || right_truncated));
         }
         encode_value_rows(self, task, &rows)
@@ -195,8 +202,9 @@ impl CoreLoop {
     /// tiles and whether the system-time cutoff predates the retained
     /// history.
     ///
-    /// A read with no system-time cutoff merges the transaction's staged
-    /// cells. `AS OF SYSTEM TIME` reads committed history, so it skips them.
+    /// A live read and a transaction snapshot read merge the transaction's
+    /// staged cells. `AS OF SYSTEM TIME` reads committed history, so it
+    /// skips them.
     /// The overlay merges before the union and the surrogate filter, so
     /// `cell_filter` still applies to both sides and an outer-join
     /// fallthrough from a staged cell drops exactly as one from a base cell.
@@ -217,10 +225,10 @@ impl CoreLoop {
         let (mut tiles, truncated_before_horizon) = store
             .scan_shard_tiles_at(cutoff, scan.valid_at_ms, scan.shard_bucket, None)
             .map_err(|e| format!("array elementwise scan '{}': {e}", array_id.name))?;
-        let overlay_txn = if scan.system_as_of.is_some() {
-            None
-        } else {
+        let overlay_txn = if scan.merge_overlay {
             task.request.txn_id
+        } else {
+            None
         };
         self.merge_array_overlay_tiles(
             ArrayOverlayMergeParams {
@@ -410,7 +418,7 @@ mod tests {
             wal_lsn: None,
             resolved_now_ms: None,
             commit_hlc: None,
-            entry_version: None,
+            system_ordinal: None,
             admission: crate::bridge::envelope::Admission::Admitted,
         }
     }
@@ -469,10 +477,22 @@ mod tests {
         }
 
         fn send_plan(&mut self, plan: PhysicalPlan) -> crate::bridge::envelope::Response {
+            self.send_request(plan, None)
+        }
+
+        /// Send `plan` as a write that stamps `system_ordinal`, or as a
+        /// local request that stamps a fresh ordinal when it is `None`.
+        fn send_request(
+            &mut self,
+            plan: PhysicalPlan,
+            system_ordinal: Option<i64>,
+        ) -> crate::bridge::envelope::Response {
             let id = self.next_id;
             self.next_id += 1;
+            let mut request = make_request(plan, id);
+            request.system_ordinal = system_ordinal;
             self.req_tx
-                .try_push(BridgeRequest::unfloored(make_request(plan, id)))
+                .try_push(BridgeRequest::unfloored(request))
                 .unwrap();
             self.core.tick();
             let resp = self.resp_rx.try_pop().unwrap();
@@ -492,15 +512,25 @@ mod tests {
             assert_eq!(r.status, Status::Ok, "open failed: {r:?}");
         }
 
+        /// The apply stamps the write's ordinal. A test cell's nonzero
+        /// `system_from_ms` names a millisecond: the put stamps that
+        /// millisecond's first ordinal, as a replicated entry's leader
+        /// assigns it, so `AS OF` reads and audit rows see that millisecond. A zero `system_from_ms` applies as a local
+        /// write that stamps a fresh ordinal.
         fn put(&mut self, aid: &ArrayId, cells: Vec<ArrayPutCell>, lsn: u64) {
+            let stamp_ms = cells.first().map_or(0, |c| c.system_from_ms);
+            let system_ordinal = (stamp_ms != 0).then(|| stamp_ms * nodedb_types::NANOS_PER_MS);
             let bytes = zerompk::to_msgpack_vec(&cells).unwrap();
-            let r = self.send(ArrayOp::Put {
-                array_id: aid.clone(),
-                cells_msgpack: bytes,
-                wal_lsn: lsn,
-                provenance: None,
-                vshard_id: 0,
-            });
+            let r = self.send_request(
+                PhysicalPlan::Array(ArrayOp::Put {
+                    array_id: aid.clone(),
+                    cells_msgpack: bytes,
+                    wal_lsn: lsn,
+                    provenance: None,
+                    vshard_id: 0,
+                }),
+                system_ordinal,
+            );
             assert_eq!(r.status, Status::Ok, "put failed: {r:?}");
         }
 

@@ -175,10 +175,10 @@ pub(crate) fn execution_error_to_typed(err: crate::Error) -> TypedClusterError {
         | crate::Error::SequencerUnavailable
         | crate::Error::SessionCapExceeded { .. }
         | crate::Error::SessionIdleTimeout
+        | crate::Error::TxnSnapshotTooOld { .. }
         | crate::Error::SessionTokenExpired
         | crate::Error::SessionKilledByAdmin
         | crate::Error::SessionUserDropped
-        | crate::Error::OidcProviderTenantUnbound
         | crate::Error::OidcProviderTenantUnavailable { .. }
         | crate::Error::ExternalRoleUndefined { .. }
         | crate::Error::OidcNoDefaultDatabase { .. }

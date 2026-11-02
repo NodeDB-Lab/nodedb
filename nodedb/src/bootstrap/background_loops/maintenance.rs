@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! Maintenance loops: collection GC, owed-work retries, orphaned drain
-//! sweep, and the clone materializer sweep.
+//! sweep, the clone materializer sweep, and the version cleanup pass.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -163,5 +163,53 @@ pub fn spawn_clone_materializer_sweep(shared: &Arc<SharedState>, config: &Server
     info!(
         interval_ms = sweep_ms,
         "clone materializer background sweep running"
+    );
+}
+
+/// Background version cleanup.
+///
+/// Every interval it computes the cleanup horizon and purges every core's
+/// history below it (`control::version_cleanup`). An interval of `0` turns
+/// it off. A failed pass files its own report and the next one retries.
+pub fn spawn_version_cleanup(shared: &Arc<SharedState>, config: &ServerConfig) {
+    let tuning = config.tuning.version_cleanup.clone();
+    let Some(interval) = tuning.interval() else {
+        info!("version cleanup off: history grows without bound");
+        return;
+    };
+    let batch = tuning.batch();
+    let state = Arc::clone(shared);
+    spawn_loop(
+        &shared.loop_registry,
+        &shared.shutdown,
+        "version_cleanup",
+        ShutdownPhase::DrainingControlPlane,
+        move |mut shutdown| async move {
+            let mut tick = tokio::time::interval(interval);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    _ = shutdown.wait_cancelled() => break,
+                    _ = tick.tick() => {}
+                }
+                if shutdown.is_cancelled() {
+                    break;
+                }
+                match crate::control::version_cleanup::run_cleanup_pass(&state, batch).await {
+                    Ok(Some(outcome)) => tracing::debug!(
+                        horizon = outcome.horizon,
+                        rounds = outcome.rounds,
+                        "version cleanup pass"
+                    ),
+                    Ok(None) => {}
+                    Err(e) => tracing::warn!(error = %e, "version cleanup pass failed"),
+                }
+            }
+        },
+    );
+    info!(
+        interval_ms = tuning.interval_ms,
+        batch_units = batch,
+        "version cleanup running"
     );
 }

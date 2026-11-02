@@ -50,6 +50,17 @@ impl From<SequencerProposeError> for crate::Error {
 /// applied: a leader change can drop it. The scheduler learns that an entry
 /// is applied from the completion registry, and proposes it again until then.
 pub trait SequencerProposer: Send + Sync {
-    /// Propose one msgpack-encoded `SequencerEntry`.
+    /// Propose one msgpack-encoded `SequencerEntry` that carries no cut
+    /// floor.
     fn propose(&self, bytes: Vec<u8>) -> Result<ProposeDispatch, SequencerProposeError>;
+
+    /// Propose one msgpack-encoded `SequencerEntry::CutMarker` whose
+    /// `floor` is `cut_floor`. The sequencer leader records the floor as it
+    /// appends the marker, so every epoch it appends after it carries a
+    /// later instant (`MultiRaft::propose_to_sequencer`).
+    fn propose_cut_marker(
+        &self,
+        bytes: Vec<u8>,
+        cut_floor: i64,
+    ) -> Result<ProposeDispatch, SequencerProposeError>;
 }

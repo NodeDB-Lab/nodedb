@@ -25,32 +25,24 @@ pub const GRAPH_STATS: TableDefinition<(u64, u64, &str), &[u8]> =
 
 /// Aggregate counters for a `(tenant, collection)` pair. Written as the
 /// `summary` row kind.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
+#[msgpack(map)]
 pub struct SummaryRow {
     pub edge_count: u64,
     pub distinct_node_count: u64,
     pub distinct_label_count: u64,
-    /// `1` means counters use source-home logical ownership. Legacy rows decode
-    /// as zero and are served by exact edge-identity scans until rebuilt.
-    #[serde(default)]
+    /// `1` means counters use source-home logical ownership. `0` marks the
+    /// summary for exact edge-identity scans until a rebuild.
     pub ownership_version: u8,
-}
-
-#[derive(zerompk::ToMessagePack, zerompk::FromMessagePack)]
-#[msgpack(map)]
-struct SummaryRowV1 {
-    edge_count: u64,
-    distinct_node_count: u64,
-    distinct_label_count: u64,
-    #[msgpack(default)]
-    ownership_version: u8,
-}
-
-#[derive(zerompk::ToMessagePack, zerompk::FromMessagePack)]
-struct LegacySummaryRow {
-    edge_count: u64,
-    distinct_node_count: u64,
-    distinct_label_count: u64,
 }
 
 impl SummaryRow {
@@ -64,38 +56,17 @@ impl SummaryRow {
     }
 
     pub fn encode(&self) -> crate::Result<Vec<u8>> {
-        zerompk::to_msgpack_vec(&SummaryRowV1 {
-            edge_count: self.edge_count,
-            distinct_node_count: self.distinct_node_count,
-            distinct_label_count: self.distinct_label_count,
-            ownership_version: self.ownership_version,
-        })
-        .map_err(|e| crate::Error::Storage {
+        zerompk::to_msgpack_vec(self).map_err(|e| crate::Error::Storage {
             engine: "graph".into(),
             detail: format!("encode SummaryRow: {e}"),
         })
     }
 
     pub fn decode(bytes: &[u8]) -> crate::Result<Self> {
-        if let Ok(row) = zerompk::from_msgpack::<SummaryRowV1>(bytes) {
-            return Ok(Self {
-                edge_count: row.edge_count,
-                distinct_node_count: row.distinct_node_count,
-                distinct_label_count: row.distinct_label_count,
-                ownership_version: row.ownership_version,
-            });
-        }
-        zerompk::from_msgpack::<LegacySummaryRow>(bytes)
-            .map(|row| Self {
-                edge_count: row.edge_count,
-                distinct_node_count: row.distinct_node_count,
-                distinct_label_count: row.distinct_label_count,
-                ownership_version: 0,
-            })
-            .map_err(|e| crate::Error::Storage {
-                engine: "graph".into(),
-                detail: format!("decode SummaryRow: {e}"),
-            })
+        zerompk::from_msgpack(bytes).map_err(|e| crate::Error::Storage {
+            engine: "graph".into(),
+            detail: format!("decode SummaryRow: {e}"),
+        })
     }
 }
 
@@ -218,15 +189,11 @@ pub struct CollectionStats {
     /// Logical edge identities populated only by exact scans. They let the
     /// Control Plane union dual-home physical replicas exactly; ownership-aware
     /// live snapshots use source-owned persistent counters and leave this empty.
-    #[serde(default)]
-    #[msgpack(default)]
     pub logical_edges: Vec<(String, String, String)>,
     /// True when this result came from an exact physical-edge scan. A live
-    /// broadcast that observes even one legacy core repeats the broadcast in
-    /// exact mode on every core so legacy and ownership-aware summaries are
+    /// broadcast that observes one scan-marked core repeats the broadcast in
+    /// exact mode on every core. Scan-marked and ownership-aware summaries are
     /// never combined approximately.
-    #[serde(default)]
-    #[msgpack(default)]
     pub exact_scan: bool,
 }
 
@@ -248,17 +215,23 @@ impl CollectionStats {
 mod tests {
     use super::*;
 
+    #[derive(zerompk::ToMessagePack)]
+    #[msgpack(map)]
+    struct SummaryWithoutOwnership {
+        edge_count: u64,
+        distinct_node_count: u64,
+        distinct_label_count: u64,
+    }
+
     #[test]
-    fn summary_decode_marks_legacy_counters_as_unowned() {
-        let bytes = zerompk::to_msgpack_vec(&LegacySummaryRow {
+    fn summary_decode_refuses_missing_ownership_version() {
+        let bytes = zerompk::to_msgpack_vec(&SummaryWithoutOwnership {
             edge_count: 2,
             distinct_node_count: 4,
             distinct_label_count: 1,
         })
-        .expect("encode legacy summary");
-        let decoded = SummaryRow::decode(&bytes).expect("decode legacy summary");
-        assert_eq!(decoded.edge_count, 2);
-        assert_eq!(decoded.ownership_version, 0);
+        .expect("encode summary without ownership");
+        assert!(SummaryRow::decode(&bytes).is_err());
     }
 
     #[test]

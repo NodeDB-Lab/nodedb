@@ -341,7 +341,7 @@ impl TenantCrdtEngine {
         wire: ViolationType,
     ) -> ValidatedApplyOutcome {
         // No authenticated user identity is threaded to the apply path in this
-        // layer, so the DLQ records `0` (unauthenticated/legacy).
+        // layer, so the DLQ records `0` (unauthenticated).
         let user_id = 0u64;
         let tenant_id = self.tenant_id().as_u64();
 

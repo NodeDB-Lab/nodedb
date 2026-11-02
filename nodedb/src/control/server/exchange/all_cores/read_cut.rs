@@ -16,6 +16,11 @@
 //! strictly in log order, so every edge version sequenced before the marker
 //! is at or below the cut, and every version sequenced after it is above.
 //! Every node applies the same log, so every node resolves the same cut.
+//!
+//! A marker can carry a floor: an ordinal its cut must cover. Applying the
+//! marker raises the recorded instant to the floor's millisecond, and the
+//! sequencer leader mints every later epoch above it. The first applied
+//! copy of a marker fixes its instant.
 
 use std::time::Duration;
 
@@ -60,7 +65,9 @@ pub(super) async fn resolve_plan_cut(
         }
     };
     if *marker != 0 {
-        let cut = resolve_read_cut(state, *marker).await?;
+        // A historical run's marker carries its pinned ordinal as its floor,
+        // as the statement's own copy did. A live run's cut is the marker's.
+        let cut = resolve_read_cut(state, *marker, (*system_as_of).unwrap_or(0)).await?;
         match *system_as_of {
             Some(pinned) => state.wal.ordinal_clock().update_from_remote(pinned),
             None => *system_as_of = Some(cut),
@@ -78,8 +85,17 @@ pub(super) async fn resolve_plan_cut(
 /// local Calvin scheduler passed it, within the running statement's
 /// deadline. Returns the cut as a system-time ordinal: `0` when no epoch
 /// applied before the marker, so no Calvin edge version is visible.
-pub(crate) async fn resolve_read_cut(state: &SharedState, marker: u64) -> crate::Result<i64> {
-    resolve_read_cut_by(state, marker, StatementDeadline::of_statement(state)).await
+///
+/// `floor` is the ordinal the cut must cover, `0` for none. The marker
+/// carries it: the cut is at or above it, and every Calvin epoch sequenced
+/// after the marker stamps above it, whatever the sequencer leader's clock
+/// reads (`SequencerEntry::CutMarker::floor`).
+pub(crate) async fn resolve_read_cut(
+    state: &SharedState,
+    marker: u64,
+    floor: i64,
+) -> crate::Result<i64> {
+    resolve_read_cut_by(state, marker, floor, StatementDeadline::of_statement(state)).await
 }
 
 /// [`resolve_read_cut`] bounded by `statement`. A marker that did not apply
@@ -87,6 +103,7 @@ pub(crate) async fn resolve_read_cut(state: &SharedState, marker: u64) -> crate:
 pub(crate) async fn resolve_read_cut_by(
     state: &SharedState,
     marker: u64,
+    floor: i64,
     statement: StatementDeadline,
 ) -> crate::Result<i64> {
     let proposer = state
@@ -102,6 +119,7 @@ pub(crate) async fn resolve_read_cut_by(
         hlc: marker,
         restore_point: 0,
         barrier: None,
+        floor,
     })
     .map_err(|error| crate::Error::Internal {
         detail: format!("graph read cut: encode the cut marker: {error}"),
@@ -110,7 +128,7 @@ pub(crate) async fn resolve_read_cut_by(
     let deadline = statement.tokio_instant();
     let mut last_refusal = None;
     loop {
-        if let Err(error) = proposer.propose(entry.clone()) {
+        if let Err(error) = proposer.propose_cut_marker(entry.clone(), floor) {
             last_refusal = Some(error.to_string());
         }
         let attempt = deadline.min(tokio::time::Instant::now() + MARKER_RETRY);

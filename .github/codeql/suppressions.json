@@ -165,6 +165,12 @@
       "path": "nodedb/src/control/security/keystore/wal_key.rs",
       "sink": "^\\s*(let\\ expected\\ =\\ nodedb_wal::crypto::WalEncryptionKey::with_epoch\\(\\&\\[0x24u8;\\ 32\\],\\ \\[0u8;\\ 4\\]\\);)\\s*$",
       "reason": "Test-only: inside #[cfg(test)] mod tests, a fixed key and epoch build the expected key for a round-trip check against a fixture key file. No production key or nonce comes from it."
+    },
+    {
+      "rule": "rust/hard-coded-cryptographic-value",
+      "path": "nodedb/src/control/security/credential/store/core.rs",
+      "sink": "^\\s*let (password_hash = hash_password_argon2\\(\"\", &Argon2Config::default\\(\\)\\)|scram_salted_password = compute_scram_salted_password\\(\"\", &salt\\);)\\s*$",
+      "reason": "Test-only: inside #[cfg(test)] mod tests, an empty password seeds a stored user so the test can check that CredentialStore::open refuses empty derived credentials. No production credential comes from it."
     }
   ]
 }

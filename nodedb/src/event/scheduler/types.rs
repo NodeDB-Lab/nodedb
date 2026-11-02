@@ -64,10 +64,9 @@ impl ScheduleScope {
 
 /// Persistent definition of a scheduled job. Stored in the system catalog.
 #[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
-#[msgpack(map, allow_unknown_fields)]
+#[msgpack(map)]
 pub struct ScheduleDef {
     /// Database that owns this schedule and its procedural body.
-    #[msgpack(default)]
     pub database_id: u64,
     /// Tenant that owns this schedule.
     pub tenant_id: u64,
@@ -88,7 +87,6 @@ pub struct ScheduleDef {
     /// Target collection inferred from the SQL body (e.g., "orders" from
     /// `DELETE FROM orders ...`). Used for shard affinity in cluster mode.
     /// `None` for cross-collection or opaque jobs → runs on `_system` coordinator.
-    #[msgpack(default)]
     pub target_collection: Option<String>,
     /// Owner (creator). Job runs with this user's privileges.
     pub owner: String,
@@ -97,15 +95,10 @@ pub struct ScheduleDef {
 }
 
 /// A completed job execution record.
-///
-/// New records use a named map encoding so fields may be added without
-/// invalidating persisted history. The history reader separately accepts the
-/// exact pre-database positional representation.
 #[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
-#[msgpack(map, allow_unknown_fields)]
+#[msgpack(map)]
 pub struct JobRun {
-    /// Database that owns the schedule. Legacy history defaults to `DEFAULT`.
-    #[msgpack(default)]
+    /// Database that owns the schedule.
     pub database_id: u64,
     /// Schedule name.
     pub schedule_name: String,

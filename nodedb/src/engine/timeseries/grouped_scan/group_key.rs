@@ -38,7 +38,7 @@ pub(super) fn key_cell(
         return GroupCell::Null;
     }
     match ty {
-        ColumnType::Symbol => u32::try_from(part)
+        ColumnType::Symbol | ColumnType::Text => u32::try_from(part)
             .ok()
             .and_then(|id| dict.and_then(|d| d.get(id)))
             .map_or(GroupCell::Null, |text| GroupCell::Text(text.to_owned())),

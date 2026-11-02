@@ -71,6 +71,9 @@ pub struct JoinGroupInfo {
 pub struct PingRequest {
     pub sender_id: u64,
     pub topology_version: u64,
+    /// The sender's oldest-snapshot report (see `snapshot_board`).
+    /// `NO_SNAPSHOT_REPORT` on a bare probe.
+    pub oldest_snapshot: i64,
 }
 
 /// Health check pong.
@@ -78,6 +81,9 @@ pub struct PingRequest {
 pub struct PongResponse {
     pub responder_id: u64,
     pub topology_version: u64,
+    /// The responder's oldest-snapshot report (see `snapshot_board`).
+    /// `NO_SNAPSHOT_REPORT` from a responder with no board.
+    pub oldest_snapshot: i64,
 }
 
 /// Push topology update to a peer.

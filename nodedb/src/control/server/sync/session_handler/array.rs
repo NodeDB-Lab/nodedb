@@ -658,7 +658,7 @@ mod tests {
         use crate::control::security::identity::{AuthMethod, AuthenticatedIdentity, Role};
         use crate::control::state::SharedState;
         use crate::control::wal_replication::{AppliedOutput, AsyncRaftProposer};
-        use crate::types::{DatabaseId, ReadVersions, TenantId};
+        use crate::types::{DatabaseId, TenantId};
         use crate::wal::WalManager;
 
         pub(super) const ARRAY: &str = "reject-class-array";
@@ -688,7 +688,7 @@ mod tests {
                 let first = calls.fetch_add(1, Ordering::SeqCst) == 0;
                 Box::pin(async move {
                     if first {
-                        Ok((Vec::new(), ReadVersions::new()))
+                        Ok(Vec::new())
                     } else {
                         Err(capacity_refusal())
                     }
@@ -736,6 +736,22 @@ mod tests {
                     doc.schema_hlc(),
                 )
                 .expect("import schema");
+            // A schema import also puts the array's row in the catalog, which
+            // routes each synced cell to its tile vShard.
+            let entry = crate::control::array_sync::catalog_register::catalog_entry_of(
+                crate::types::TenantId::new(TENANT),
+                DatabaseId::DEFAULT,
+                ARRAY,
+                &snapshot,
+                doc.schema_hlc(),
+            )
+            .expect("catalog row");
+            shared
+                .array_catalog
+                .write()
+                .expect("array catalog lock")
+                .register(entry)
+                .expect("register array");
         }
 
         /// A read-write session on `ARRAY` whose proposer is `proposer`.

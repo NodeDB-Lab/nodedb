@@ -29,10 +29,14 @@ impl CoreLoop {
         let mut deleted = 0usize;
         let mut skipped = 0usize;
 
+        // Each record applies at the system ordinal its live apply stamped,
+        // so a replayed node starts and ends where the live one did.
+        let outer_ordinal = self.apply_scope.replicated_ordinal;
         for record in records {
             if self.replay_halted() {
                 break;
             }
+            self.apply_scope.replicated_ordinal = record.system_ordinal().or(outer_ordinal);
             let logical_type = record.logical_record_type();
 
             let record_type = RecordType::from_raw(logical_type);
@@ -111,6 +115,22 @@ impl CoreLoop {
             }
 
             if is_vector_put {
+                // A RESTORE's vector rows (`vector_restore`) open with their
+                // own discriminator pair, so no insert shape decodes as one.
+                if let Some(applied) = self.try_replay_vector_restore(
+                    &record.payload,
+                    tenant_id,
+                    database_id,
+                    record_lsn,
+                    &tombstones,
+                ) {
+                    if applied {
+                        inserted += 1;
+                    } else {
+                        skipped += 1;
+                    }
+                    continue;
+                }
                 // A `VectorPut` payload has two shapes, one per writer
                 // (`wal_dispatch::vector::encode`): the 6-element single
                 // insert and the 4-element batch. Both carry every vector's
@@ -275,6 +295,7 @@ impl CoreLoop {
                         skipped += 1;
                         continue;
                     }
+                    let ordinal = self.bitemporal_ordinal();
                     let index = match self.ensure_vector_collection(&index_key, &index_key, dim) {
                         Ok(index) => index,
                         Err(e) => {
@@ -289,7 +310,7 @@ impl CoreLoop {
                     };
                     // Checked as a whole before any vector lands, so a record
                     // holding one vector of another width applies nothing.
-                    if let Err(e) = index.insert_batch_with_surrogates(&vectors, &surrogates) {
+                    if let Err(e) = index.insert_batch_at(&vectors, &surrogates, ordinal) {
                         self.replay_record_rejected(
                             "vector",
                             record_lsn,
@@ -322,6 +343,7 @@ impl CoreLoop {
                 }
             }
         }
+        self.apply_scope.replicated_ordinal = outer_ordinal;
 
         if inserted > 0 || deleted > 0 {
             tracing::info!(

@@ -146,6 +146,7 @@ async fn pgwire_not_leader_retry_uses_shared_gateway() {
         key: vec![],
         rls_filters: vec![],
         surrogate_ceiling: None,
+        system_time: nodedb_types::SystemTimeScope::Current,
     }));
     gateway
         .plan_cache

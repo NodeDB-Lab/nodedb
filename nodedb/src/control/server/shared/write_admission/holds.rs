@@ -17,13 +17,24 @@
 //! The keys are never held across a Data-Plane apply. A write that holds keys
 //! waits only for the apply loop to start its entry, which never waits for a
 //! lock. So no held key waits for a Calvin transaction to finish.
+//!
+//! The write's ordinal reservation is held the same way: from the leader's
+//! stamp until the apply loop starts the entry. The apply registers its own
+//! reservation before it starts, and holds it until the apply completed
+//! (`read_cut::reservations`), so a read cut at or above the ordinal closes
+//! only once the write applied here.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 
+use crate::control::read_cut::OrdinalReservation;
 use crate::types::VShardId;
 
 use super::gate::WriteAdmissionGuard;
+
+/// One ordinal reservation a write through a vShard holds until its apply
+/// starts.
+type VShardReservation = (VShardId, OrdinalReservation);
 
 /// One write's keys, held for their `Drop`.
 struct Held {
@@ -37,6 +48,9 @@ struct Inner {
     holds: BTreeMap<(u64, u64), Vec<Held>>,
     /// Per group, the highest log index whose apply started on this node.
     started: HashMap<u64, u64>,
+    /// Ordinal reservations by the `(group_id, log_index)` of the write's
+    /// entry, with the vShard the write lands on.
+    reservations: BTreeMap<(u64, u64), Vec<(VShardId, OrdinalReservation)>>,
 }
 
 /// Every replicated write's held keys on this node, by entry.
@@ -85,23 +99,59 @@ impl AdmissionHolds {
         };
     }
 
+    /// Hold `reservation` until the apply of entry `log_index` of
+    /// `group_id` starts on this node. An entry whose apply started already
+    /// releases it at once.
+    pub fn hold_reservation(
+        &self,
+        group_id: u64,
+        log_index: u64,
+        vshard: VShardId,
+        reservation: OrdinalReservation,
+    ) {
+        // Dropped after the table's mutex: a release takes the reservation
+        // registry's mutex.
+        let _released = {
+            let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+            if inner
+                .started
+                .get(&group_id)
+                .is_some_and(|started| *started >= log_index)
+            {
+                Some(reservation)
+            } else {
+                inner
+                    .reservations
+                    .entry((group_id, log_index))
+                    .or_default()
+                    .push((vshard, reservation));
+                None
+            }
+        };
+    }
+
     /// The apply of entry `log_index` of `group_id` started on this node,
-    /// after every entry of the group below it. Release the keys every write
-    /// through it holds.
+    /// after every entry of the group below it. Release the keys and the
+    /// ordinal reservations every write through it holds.
     pub fn release_through(&self, group_id: u64, log_index: u64) {
-        let _released: Vec<Vec<Held>> = {
+        let _released: (Vec<Vec<Held>>, Vec<Vec<VShardReservation>>) = {
             let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
             let started = inner.started.entry(group_id).or_default();
             *started = (*started).max(log_index);
-            let through: Vec<(u64, u64)> = inner
-                .holds
-                .range((group_id, 0)..=(group_id, log_index))
-                .map(|(key, _)| *key)
-                .collect();
-            through
+            let range = (group_id, 0)..=(group_id, log_index);
+            let through: Vec<(u64, u64)> =
+                inner.holds.range(range.clone()).map(|(k, _)| *k).collect();
+            let keys = through
                 .into_iter()
                 .filter_map(|key| inner.holds.remove(&key))
-                .collect()
+                .collect();
+            let through: Vec<(u64, u64)> =
+                inner.reservations.range(range).map(|(k, _)| *k).collect();
+            let reservations = through
+                .into_iter()
+                .filter_map(|key| inner.reservations.remove(&key))
+                .collect();
+            (keys, reservations)
         };
     }
 
@@ -111,8 +161,12 @@ impl AdmissionHolds {
     /// The entries of the dropped holds can still be unstarted. Each one's
     /// admission ticket recorded its landing index, so the vShard's next
     /// scheduler stages nothing before it applied.
+    ///
+    /// The vShard left this node, so no read here observes it: the ordinal
+    /// reservations of its writes release too. A read of the vShard on its
+    /// new owners closes its cut there.
     pub fn release_vshard(&self, vshard: VShardId) {
-        let _released: Vec<Held> = {
+        let _released: (Vec<Held>, Vec<(VShardId, OrdinalReservation)>) = {
             let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
             let mut released = Vec::new();
             inner.holds.retain(|_, held| {
@@ -123,7 +177,16 @@ impl AdmissionHolds {
                 *held = kept;
                 !held.is_empty()
             });
-            released
+            let mut reservations = Vec::new();
+            inner.reservations.retain(|_, held| {
+                let (gone, kept): (Vec<_>, Vec<_>) = std::mem::take(held)
+                    .into_iter()
+                    .partition(|(v, _)| *v == vshard);
+                reservations.extend(gone);
+                *held = kept;
+                !held.is_empty()
+            });
+            (released, reservations)
         };
     }
 
@@ -202,6 +265,35 @@ mod tests {
         holds.hold(4, 10, VShardId::new(1), guard(&lock_manager, 1));
         holds.release_through(5, 20);
         assert_eq!(held_keys(&lock_manager), 1);
+    }
+
+    /// A write's ordinal reservation stays open until its entry's apply
+    /// starts, and one landing after the start releases at once.
+    #[test]
+    fn a_reservation_releases_when_its_entry_starts() {
+        let registry = crate::control::read_cut::OrdinalReservations::new();
+        let holds = AdmissionHolds::new();
+        let (_, first) = registry.reserve_with(|| Some(10));
+        let (_, second) = registry.reserve_with(|| Some(20));
+        holds.hold_reservation(4, 10, VShardId::new(1), first.expect("reserved"));
+        holds.hold_reservation(4, 11, VShardId::new(1), second.expect("reserved"));
+        holds.release_through(4, 10);
+        assert!(
+            registry.blocking(10).is_none(),
+            "the started entry released"
+        );
+        assert!(registry.blocking(20).is_some(), "the next entry holds");
+        holds.release_vshard(VShardId::new(1));
+        assert!(
+            registry.blocking(20).is_none(),
+            "a departed vShard releases"
+        );
+        let (_, late) = registry.reserve_with(|| Some(30));
+        holds.hold_reservation(4, 9, VShardId::new(1), late.expect("reserved"));
+        assert!(
+            registry.blocking(30).is_none(),
+            "a started entry releases at once"
+        );
     }
 
     /// A stopped scheduler drops the holds on its table.

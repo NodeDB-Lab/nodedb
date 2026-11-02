@@ -66,9 +66,6 @@ pub fn stamp_put(
         }
         CatalogEntry::PutChangeStream(row) => row.modification_hlc = after(prior, clock, now),
         CatalogEntry::PutConsumerGroupIfAbsent(def) => def.modification_hlc = prior.unwrap_or(now),
-        CatalogEntry::MigrateConsumerGroupStream { def, .. } => {
-            def.modification_hlc = after(prior, clock, now);
-        }
         CatalogEntry::PutArray(row) => {
             row.modification_hlc = after(prior, clock, now);
             // A create names its incarnation. ALTER and MOVE TENANT carry the

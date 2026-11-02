@@ -133,7 +133,7 @@ pub fn eval_filters_to_bitmask<'a>(
                     .ok_or(UnsupportedPredicate::new(f, "literal is not an instant"))?;
                 i64_column_mask(rt, f, col_data.as_timestamps(), fv, row_count)?
             }
-            ColumnType::Symbol => {
+            ColumnType::Symbol | ColumnType::Text => {
                 let filter_str = f
                     .value
                     .as_str()

@@ -202,12 +202,12 @@ async fn timeseries_partial_record_flush_does_not_duplicate_on_replay() {
     h.spawn();
     h.wait_ready();
 
-    // `id` is BIGINT, not TEXT, deliberately: only `host` may be a symbol
-    // column, so `host` alone drives the dictionary and the cardinality ceiling
-    // means exactly what this test says it means.
+    // `host` is the one `SYMBOL` column, so it alone drives the tag
+    // dictionary and the cardinality ceiling means exactly what this test
+    // says it means. A `TEXT` column is a field and has no ceiling.
     h.exec(
         "CREATE COLLECTION crash_card \
-         COLUMNS (id BIGINT, ts BIGINT TIME_KEY, host TEXT, value FLOAT) \
+         COLUMNS (id BIGINT, ts BIGINT TIME_KEY, host SYMBOL, value FLOAT) \
          WITH (engine='timeseries')",
     )
     .await;

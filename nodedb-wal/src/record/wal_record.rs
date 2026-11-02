@@ -3,8 +3,8 @@
 //! `WalRecord` — header + payload with encryption + checksum helpers.
 
 use super::header::{
-    ENCRYPTED_FLAG, HEADER_SIZE, MAX_WAL_PAYLOAD_SIZE, NO_EVENT_SOURCE, RecordHeader,
-    WAL_FORMAT_VERSION, WAL_MAGIC,
+    ENCRYPTED_FLAG, HEADER_SIZE, MAX_WAL_PAYLOAD_SIZE, NO_EVENT_SOURCE, NO_SYSTEM_ORDINAL,
+    RecordHeader, WAL_FORMAT_VERSION, WAL_MAGIC,
 };
 use crate::error::{Result, WalError};
 use crate::preamble::PREAMBLE_SIZE;
@@ -30,6 +30,9 @@ pub struct RecordTarget {
     /// HLC wall time, in nanoseconds, the record's write committed at. See
     /// [`RecordHeader::commit_hlc`].
     pub commit_hlc: u64,
+    /// The system-time ordinal the record's write stamps. See
+    /// [`RecordHeader::system_ordinal`].
+    pub system_ordinal: i64,
 }
 
 /// The header fields that tie a record to the write that appended it.
@@ -43,14 +46,18 @@ pub struct RecordStamp {
     /// HLC wall time, in nanoseconds, the record's write committed at. See
     /// [`RecordHeader::commit_hlc`].
     pub commit_hlc: u64,
+    /// The system-time ordinal the record's write stamps. See
+    /// [`RecordHeader::system_ordinal`].
+    pub system_ordinal: i64,
 }
 
 impl RecordStamp {
-    /// No proposal key, no row write, and no commit HLC.
+    /// No proposal key, no row write, no commit HLC, and no system ordinal.
     pub const NONE: Self = Self {
         apply_key: 0,
         event_source: NO_EVENT_SOURCE,
         commit_hlc: 0,
+        system_ordinal: NO_SYSTEM_ORDINAL,
     };
 }
 
@@ -83,14 +90,15 @@ impl WalRecord {
         Self::new_stamped(args, RecordStamp::NONE)
     }
 
-    /// [`Self::new`] with the proposal key, event source and commit HLC of
-    /// `stamp`. They ride the header, inside the CRC and the encryption AAD,
+    /// [`Self::new`] with the proposal key, event source, commit HLC and
+    /// system ordinal of `stamp`. They ride the header, inside the CRC and the encryption AAD,
     /// so the record and its stamp are durable together.
     pub fn new_stamped(args: WalRecordArgs<'_>, stamp: RecordStamp) -> Result<Self> {
         let RecordStamp {
             apply_key,
             event_source,
             commit_hlc,
+            system_ordinal,
         } = stamp;
         let WalRecordArgs {
             record_type,
@@ -122,6 +130,7 @@ impl WalRecord {
                 apply_key,
                 event_source,
                 commit_hlc,
+                system_ordinal,
                 crc32c: 0,
             };
             let header_bytes = temp_header.to_bytes();
@@ -152,6 +161,7 @@ impl WalRecord {
             apply_key,
             event_source,
             commit_hlc,
+            system_ordinal,
             crc32c: 0,
         };
 
@@ -173,6 +183,12 @@ impl WalRecord {
     /// [`NO_EVENT_SOURCE`] for a record that carries no row write.
     pub fn event_source(&self) -> u8 {
         self.header.event_source
+    }
+
+    /// The system-time ordinal the record's write stamps, `None` for a
+    /// record whose write carries none.
+    pub fn system_ordinal(&self) -> Option<i64> {
+        (self.header.system_ordinal != NO_SYSTEM_ORDINAL).then_some(self.header.system_ordinal)
     }
 
     /// Decrypt the payload if the record is encrypted.
@@ -424,17 +440,20 @@ mod tests {
                     apply_key: 7,
                     event_source: code,
                     commit_hlc: 11,
+                    system_ordinal: 13,
                 },
             )
             .expect("record");
             assert_eq!(record.event_source(), code);
             assert_eq!(record.apply_key(), 7);
+            assert_eq!(record.system_ordinal(), Some(13));
             record
                 .verify_checksum()
                 .expect("checksum covers the source");
             let decoded = RecordHeader::from_bytes(&record.header.to_bytes());
             assert_eq!(decoded.event_source, code);
             assert_eq!(decoded.commit_hlc, 11);
+            assert_eq!(decoded.system_ordinal, 13);
         }
     }
 }

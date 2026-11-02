@@ -7,23 +7,18 @@
 //! to `Exchange{Gather{HashJoin}}` BY DEFAULT (no forced shuffle): the `HashJoin`
 //! is routed to the LEFT/probe collection's vShard and the RIGHT/build collection
 //! is GATHERED across all vShards, with a per-collection `DistributedReadCapture`
-//! emitted for each side. The native dispatch loop once DROPPED those captures, so
-//! an in-txn distributed read on native recorded only the collapsed left
-//! collection — the build side's read-version was discarded, its vShard never
-//! revalidated at the Calvin barrier, and a concurrent build-side write silently
-//! committed a stale join — now fixed by feeding the same captures pgwire uses.
+//! emitted for each side. The native dispatch loop feeds the same captures
+//! pgwire uses, so the build side's vShard is revalidated at the Calvin barrier
+//! and a concurrent build-side write aborts the stale join.
 //!
-//! Cases bounding the fixed behavior:
-//!  * `commits_when_neither_side_concurrently_written` — clean commit MUST SUCCEED
-//!    (captures carry the sound collection write version, not an over-aborting watermark).
+//! Cases bounding the behavior:
+//!  * `commits_when_neither_side_concurrently_written` — clean commit MUST SUCCEED.
 //!  * `occ_aborts_on_stale_probe_read` — a stale LEFT/probe read MUST abort.
 //!  * `occ_aborts_on_stale_build_read` — a stale RIGHT/build read (pgwire rival)
-//!    MUST abort: the native build-side capture hole is closed on the Gather path.
+//!    MUST abort: the native build-side capture is recorded on the Gather path.
 //!  * `occ_aborts_on_native_writer_stale_read` — the build-side rival is a NATIVE
-//!    autocommit INSERT. Pre-fix the gateway leader-local autocommit path never
-//!    proposed a Raft entry nor bumped the collection write version, so the read never went
-//!    stale and COMMIT silently succeeded; routing native writes through Raft
-//!    closes that lost-update cell.
+//!    autocommit INSERT routed through Raft, which lands a version above the
+//!    snapshot, so COMMIT must abort.
 //!
 //! Determinism: each rival write is confirmed VISIBLE (autocommit `SELECT`) before
 //! COMMIT, so the read is provably stale and the abort guaranteed. Native surfaces
@@ -177,9 +172,7 @@ async fn spawn_node_with_collections() -> (
     .await;
 
     // Seed left and right with three matching join keys so the join returns real
-    // rows AND each side's committed write version is non-zero (gives the
-    // stale-read cases a real baseline version to advance past, and the
-    // commits-clean case a non-zero version that must still validate).
+    // rows AND each side holds committed versions below the snapshot.
     node.client
         .simple_query(&format!(
             "INSERT INTO {left} (id, jk, val) VALUES \
@@ -241,8 +234,7 @@ async fn spawn_node_with_collections() -> (
 /// gather join read of `left`/`right` + two buffered writes on distinct vShards,
 /// leaving the transaction OPEN. The two INSERTs buffer on the coordinator, so at
 /// COMMIT the write set spans two vShards → the Calvin barrier; the join SELECT
-/// registers BOTH join sides' vShards as read-only participants with captured real
-/// read versions.
+/// registers BOTH join sides' vShards as read-only participants.
 async fn begin_join_read_and_buffer_writes(
     driver: &NativeClient,
     left: &str,
@@ -299,8 +291,8 @@ async fn concurrent_write_and_confirm(node: &TestClusterNode, coll: &str) {
 }
 
 /// NATIVE concurrent writer: the rival autocommit INSERT rides a SEPARATE native
-/// client, exercising the gateway leader-local autocommit-write path that must now
-/// PROPOSE through Raft and bump the collection write version. Confirmed visible before COMMIT.
+/// client, exercising the gateway leader-local autocommit-write path that
+/// proposes through Raft and lands a version. Confirmed visible before COMMIT.
 async fn native_concurrent_write_and_confirm(node: &TestClusterNode, coll: &str) {
     let writer = pinned_native_client(node);
     writer
@@ -312,10 +304,8 @@ async fn native_concurrent_write_and_confirm(node: &TestClusterNode, coll: &str)
     confirm_rival_visible(node, coll).await;
 }
 
-/// Neither join side is concurrently written, so both recorded real read versions
-/// still validate at the barrier and COMMIT must SUCCEED. Proves the captured
-/// read-versions are the sound per-collection write versions — an inflated
-/// global watermark would over-abort this clean commit.
+/// Neither join side is concurrently written, so no version of either sits above
+/// the snapshot. Both reads validate at the barrier and COMMIT must SUCCEED.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_gather_join_commits_when_neither_side_concurrently_written() {
     let (node, _data_dir, driver, left, right, w1, w2) = spawn_node_with_collections().await;
@@ -368,8 +358,8 @@ async fn native_gather_join_commits_when_neither_side_concurrently_written() {
     node.shutdown().await;
 }
 
-/// A confirmed-visible concurrent write to the LEFT/probe collection advances it
-/// past the captured probe read version. COMMIT must abort with a serialization
+/// A confirmed-visible concurrent write to the LEFT/probe collection lands a
+/// version above the snapshot. COMMIT must abort with a serialization
 /// failure — the barrier revalidates the probe side's read-only slice and finds it
 /// stale.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -380,8 +370,8 @@ async fn native_gather_join_occ_aborts_on_stale_probe_read() {
 
     begin_join_read_and_buffer_writes(&driver, &left, &right, &w1, &w2).await;
 
-    // Concurrent writer advances the LEFT (probe) collection past the captured
-    // probe read version; confirmed visible before COMMIT for determinism.
+    // Concurrent writer lands a version of the LEFT (probe) collection above the
+    // snapshot; confirmed visible before COMMIT for determinism.
     concurrent_write_and_confirm(&node, &left).await;
 
     let err = driver
@@ -406,12 +396,10 @@ async fn native_gather_join_occ_aborts_on_stale_probe_read() {
 
 /// THE LOAD-BEARING CASE. A confirmed-visible concurrent write to the RIGHT/build
 /// collection ONLY must STILL abort the COMMIT with a serialization failure.
-/// Pre-fix, the native dispatch loop DROPPED the Gather resolver's build-side
-/// capture and `extract_collection(Exchange{Gather{HashJoin}})` returned only the
-/// left collection, so NO read-set entry existed for the build collection — its
-/// vShard was never validated at the barrier and this transaction would have
-/// SILENTLY committed a stale join result. The abort here proves the build side is
-/// now recorded on the NATURAL gather path over native and the hole is closed.
+/// `extract_collection(Exchange{Gather{HashJoin}})` returns only the left
+/// collection, so the build-side capture the native dispatch loop records is
+/// its only read-set entry. The abort proves the build side is recorded on the
+/// NATURAL gather path over native.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_gather_join_occ_aborts_on_stale_build_read() {
     let (node, _data_dir, driver, left, right, w1, w2) = spawn_node_with_collections().await;
@@ -420,14 +408,14 @@ async fn native_gather_join_occ_aborts_on_stale_build_read() {
 
     begin_join_read_and_buffer_writes(&driver, &left, &right, &w1, &w2).await;
 
-    // Concurrent writer advances the RIGHT (build) collection ONLY — the LEFT side
-    // stays current. Pre-fix this write went undetected at commit on native.
+    // Concurrent writer lands a version of the RIGHT (build) collection ONLY —
+    // the LEFT side stays current.
     concurrent_write_and_confirm(&node, &right).await;
 
-    let err = driver.commit().await.expect_err(
-        "COMMIT of a stale in-txn native gather join (BUILD side) must abort — the hole this \
-         closes; pre-fix native silently committed",
-    );
+    let err = driver
+        .commit()
+        .await
+        .expect_err("COMMIT of a stale in-txn native gather join (BUILD side) must abort");
     assert!(
         is_serialization_abort(&err),
         "expected serialization abort for the stale BUILD-side read (hole closed), got: {err}"
@@ -462,11 +450,8 @@ async fn native_gather_join_occ_aborts_on_stale_build_read() {
 
 /// THE NATIVE-WRITER / NATIVE-READER CELL. Same stale-build-read scenario, but the
 /// rival autocommit INSERT rides a SEPARATE native client, driving the gateway's
-/// leader-local autocommit-write path. Pre-fix that path applied the row via a
-/// leader-local SPSC dispatch that never proposed a Raft entry nor bumped the build
-/// collection's write version, so the captured build version never went stale
-/// and the COMMIT SILENTLY succeeded (undetected lost-update). Routing native
-/// autocommit writes through Raft advances the build side, so COMMIT must abort.
+/// leader-local autocommit-write path. That path proposes through Raft and lands
+/// a version of the build side above the snapshot, so COMMIT must abort.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_gather_join_occ_aborts_on_native_writer_stale_read() {
     let (node, _data_dir, driver, left, right, w1, w2) = spawn_node_with_collections().await;
@@ -475,14 +460,13 @@ async fn native_gather_join_occ_aborts_on_native_writer_stale_read() {
 
     begin_join_read_and_buffer_writes(&driver, &left, &right, &w1, &w2).await;
 
-    // NATIVE autocommit writer advances the RIGHT (build) collection ONLY. Pre-fix
-    // this native write bumped no OCC floor, so the stale read went undetected.
+    // NATIVE autocommit writer lands a version of the RIGHT (build) collection
+    // ONLY.
     native_concurrent_write_and_confirm(&node, &right).await;
 
     let err = driver.commit().await.expect_err(
-        "COMMIT of a stale in-txn native gather join whose build side was advanced by a NATIVE \
-         autocommit writer must abort — pre-fix the native write bumped no OCC floor and this \
-         silently committed",
+        "COMMIT of a stale in-txn native gather join whose build side a NATIVE autocommit \
+         writer wrote must abort",
     );
     assert!(
         is_serialization_abort(&err),

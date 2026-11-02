@@ -16,37 +16,60 @@
 
 use std::collections::BTreeSet;
 
-use nodedb_cluster::calvin::types::TxClass;
+use nodedb_cluster::calvin::types::{IncarnationKind, TxClass};
 use nodedb_types::{CollectionKey, Hlc};
 use tracing::error;
 
 use super::super::scheduler::Scheduler;
+use crate::control::array_catalog::named_incarnation::{
+    array_gate_key, array_holds_incarnation, read_mirror,
+};
 use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
 use crate::control::write_gate::{self, GateKey, SharedGate};
 
 impl Scheduler {
-    /// Hold the gate of every collection `tx_class` names, and report whether
-    /// one no longer holds its planned incarnation on this replica.
+    /// Hold the gate of every collection and array `tx_class` names, and
+    /// report whether one no longer holds its planned incarnation on this
+    /// replica. A collection holds its collection gate. An array holds its
+    /// own incarnation's gate, never a same-name collection's.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn check_incarnations(
         &self,
         tx_class: &TxClass,
     ) -> (bool, Vec<SharedGate>) {
         let tenant_id = tx_class.tenant_id.as_u64();
         let database_id = tx_class.database_id;
-        let keys: BTreeSet<GateKey> = tx_class
-            .incarnations
-            .iter()
-            .map(|named| {
-                let key = CollectionKey::from_qualified_str(database_id, &named.collection)
-                    .unwrap_or_else(|_| CollectionKey::from_bare(database_id, &named.collection));
-                GateKey::Collection {
-                    database_id: key.database_id().as_u64(),
-                    tenant_id,
-                    name: key.name().to_string(),
-                }
-            })
-            .collect();
+        let mirror = read_mirror(&self.shared.array_catalog);
         let mut superseded = false;
+        let mut keys: BTreeSet<GateKey> = BTreeSet::new();
+        for named in &tx_class.incarnations {
+            match named.kind {
+                IncarnationKind::Collection => {
+                    let key = CollectionKey::from_qualified_str(database_id, &named.collection)
+                        .unwrap_or_else(|_| {
+                            CollectionKey::from_bare(database_id, &named.collection)
+                        });
+                    keys.insert(GateKey::Collection {
+                        database_id: key.database_id().as_u64(),
+                        tenant_id,
+                        name: key.name().to_string(),
+                    });
+                }
+                IncarnationKind::Array => match array_gate_key(
+                    &mirror,
+                    tx_class.tenant_id,
+                    database_id,
+                    &named.collection,
+                    named.incarnation,
+                ) {
+                    Some(key) => {
+                        keys.insert(key);
+                    }
+                    // An unstamped write of an array this replica does not
+                    // hold has nothing to write into.
+                    None => superseded = true,
+                },
+            }
+        }
         let mut gates = Vec::with_capacity(keys.len());
         for key in keys {
             // A reclaim holds a gate exclusive only after the catalog dropped
@@ -58,15 +81,23 @@ impl Scheduler {
         }
         let catalog = self.shared.credentials.catalog();
         for named in &tx_class.incarnations {
-            if named.incarnation == Hlc::ZERO {
-                continue;
-            }
-            match catalog.holds_incarnation(
-                database_id,
-                tenant_id,
-                &named.collection,
-                named.incarnation,
-            ) {
+            let holds = match named.kind {
+                IncarnationKind::Array => Ok(array_holds_incarnation(
+                    &mirror,
+                    tx_class.tenant_id,
+                    database_id,
+                    &named.collection,
+                    named.incarnation,
+                )),
+                IncarnationKind::Collection if named.incarnation == Hlc::ZERO => Ok(true),
+                IncarnationKind::Collection => catalog.holds_incarnation(
+                    database_id,
+                    tenant_id,
+                    &named.collection,
+                    named.incarnation,
+                ),
+            };
+            match holds {
                 Ok(true) => {}
                 Ok(false) => superseded = true,
                 Err(e) => {
@@ -152,7 +183,82 @@ mod tests {
         CalvinIncarnation {
             collection: collection.into(),
             incarnation,
+            kind: IncarnationKind::Collection,
         }
+    }
+
+    fn named_array(array: &str, incarnation: Hlc) -> CalvinIncarnation {
+        CalvinIncarnation {
+            collection: array.into(),
+            incarnation,
+            kind: IncarnationKind::Array,
+        }
+    }
+
+    /// Register array `name` in the default database at `incarnation`.
+    fn register_array(scheduler: &Scheduler, name: &str, incarnation: Hlc) {
+        let mut mirror = scheduler
+            .shared
+            .array_catalog
+            .write()
+            .unwrap_or_else(|p| p.into_inner());
+        mirror
+            .register(crate::control::array_catalog::ArrayCatalogEntry {
+                array_id: nodedb_array::types::ArrayId::in_database(
+                    nodedb_types::TenantId::new(1),
+                    DatabaseId::DEFAULT,
+                    name,
+                ),
+                name: name.to_string(),
+                schema_msgpack: vec![0x90],
+                schema_hash: 7,
+                created_at_ms: 0,
+                prefix_bits: 8,
+                audit_retain_ms: None,
+                minimum_audit_retain_ms: None,
+                modification_hlc: incarnation,
+                incarnation,
+            })
+            .expect("register");
+    }
+
+    /// An array holds its own incarnation's gate. A purge of a same-name
+    /// collection holds the collection gate exclusive and leaves the array's
+    /// write alone. A recreated array no longer holds the planned
+    /// incarnation.
+    #[tokio::test]
+    async fn an_array_holds_its_own_gate_and_incarnation() {
+        let txn_id = TxnId::new(6, 0);
+        let (scheduler, _dir) = scheduler_with_pending(txn_id, CommitState::Staged);
+        let planned = Hlc::new(9_100, 0);
+        register_array(&scheduler, "grid", planned);
+        let collection_purge = write_gate::exclusive(GateKey::Collection {
+            database_id: DatabaseId::DEFAULT.as_u64(),
+            tenant_id: 1,
+            name: "grid".into(),
+        })
+        .await;
+
+        let mut tx_class = make_sequenced_txn(6, 0).tx_class;
+        std::sync::Arc::make_mut(&mut tx_class)
+            .set_incarnations(vec![named_array("grid", planned)]);
+        let (superseded, gates) = scheduler.check_incarnations(&tx_class);
+        assert!(!superseded, "the collection gate is not the array's");
+        assert_eq!(gates.len(), 1);
+        drop(gates);
+        drop(collection_purge);
+
+        let rekey = write_gate::exclusive(GateKey::Array(planned)).await;
+        let (superseded, gates) = scheduler.check_incarnations(&tx_class);
+        assert!(superseded, "a rekey of the array holds its gate");
+        assert!(gates.is_empty());
+        drop(rekey);
+
+        let mut stale = make_sequenced_txn(6, 1).tx_class;
+        std::sync::Arc::make_mut(&mut stale)
+            .set_incarnations(vec![named_array("grid", Hlc::new(9_000, 0))]);
+        let (superseded, _gates) = scheduler.check_incarnations(&stale);
+        assert!(superseded, "a dropped incarnation is not the array's");
     }
 
     /// A transaction staged against `orders` before a purge and a same-name

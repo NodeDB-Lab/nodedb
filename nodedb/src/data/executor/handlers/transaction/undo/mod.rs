@@ -15,9 +15,11 @@ pub(super) mod entry;
 pub(in crate::data::executor) mod error;
 pub(in crate::data::executor) mod fts_doc;
 pub(super) mod graph_node;
+pub(in crate::data::executor) mod history_version;
 pub(super) mod kv;
 pub(in crate::data::executor) mod memory;
 pub(super) mod rollback;
+pub(in crate::data::executor) mod row_version;
 pub(super) mod spatial;
 pub(in crate::data::executor) mod spatial_row;
 pub(super) mod stats;
@@ -28,6 +30,7 @@ pub(in crate::data::executor) mod vector_truncate;
 pub(in crate::data::executor) mod vector_write;
 
 pub(in crate::data::executor) use entry::{
-    ColumnarTruncateUndo, TimeseriesIngestUndo, TimeseriesTruncateUndo, UndoEntry,
+    ColumnarTruncateUndo, TimeseriesEndedInstallUndo, TimeseriesIngestUndo, TimeseriesTruncateUndo,
+    UndoEntry,
 };
 pub(in crate::data::executor) use error::UndoError;

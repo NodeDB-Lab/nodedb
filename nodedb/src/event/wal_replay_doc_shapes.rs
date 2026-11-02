@@ -2,8 +2,7 @@
 
 //! Decoders for the surrogate-carrying document `Put` / `Delete` payloads.
 //!
-//! A `bitemporal=true` collection's record appends its version stamp to the
-//! plain tuple:
+//! A stamped record appends its version key to the plain tuple:
 //!
 //! * a put is `(collection, document_id, value, provenance, surrogate)`, or
 //!   that tuple plus `(sys_from, valid_from_ms, valid_until_ms)`;
@@ -13,28 +12,10 @@
 //! `sys_from` is the version's system-time ordinal. An event carries its
 //! millisecond, the unit `_ts_system` renders.
 //!
-//! MessagePack tuples decode only at their exact arity, so each decoder tries
-//! the bitemporal form, then the plain one.
+//! `crate::wal::DocumentPutRedo` / `crate::wal::DocumentDeleteRedo` decode
+//! both forms. This module maps them to the event view.
 
-use nodedb_types::sync::wire::SyncProvenance;
-
-/// The bitemporal put tuple.
-type BitemporalPut = (
-    String,
-    String,
-    Vec<u8>,
-    Option<SyncProvenance>,
-    u32,
-    i64,
-    i64,
-    i64,
-);
-/// The plain put tuple.
-type PlainPut = (String, String, Vec<u8>, Option<SyncProvenance>, u32);
-/// The bitemporal delete tuple.
-type BitemporalDelete = (String, String, Option<SyncProvenance>, u32, i64);
-/// The plain delete tuple.
-type PlainDelete = (String, String, Option<SyncProvenance>, u32);
+use crate::wal::{DocumentDeleteRedo, DocumentPutRedo};
 
 /// A decoded document put.
 pub(super) struct DocPut {
@@ -50,45 +31,29 @@ pub(super) struct DocPut {
 
 /// Decode a surrogate-carrying document put in either form.
 pub(super) fn decode_doc_put(payload: &[u8]) -> Option<DocPut> {
-    if let Ok((collection, document_id, value, _prov, _surrogate, sys, valid_from, _until)) =
-        zerompk::from_msgpack::<BitemporalPut>(payload)
-    {
-        return Some(DocPut {
-            collection,
-            document_id,
-            value,
-            stamps: Some((
-                nodedb_types::ordinal_to_ms(sys),
-                (valid_from != i64::MIN).then_some(valid_from),
-            )),
-        });
-    }
-    zerompk::from_msgpack::<PlainPut>(payload).ok().map(
-        |(collection, document_id, value, _prov, _surrogate)| DocPut {
-            collection,
-            document_id,
-            value,
-            stamps: None,
-        },
-    )
+    DocumentPutRedo::decode(payload).map(|put| DocPut {
+        collection: put.collection,
+        document_id: put.document_id,
+        value: put.value,
+        stamps: put.stamp.map(|stamp| {
+            (
+                nodedb_types::ordinal_to_ms(stamp.sys_from),
+                (stamp.valid_from_ms != i64::MIN).then_some(stamp.valid_from_ms),
+            )
+        }),
+    })
 }
 
 /// Decode a surrogate-carrying document delete in either form, as
 /// `(collection, document_id)`.
 pub(super) fn decode_doc_delete(payload: &[u8]) -> Option<(String, String)> {
-    if let Ok((collection, document_id, _prov, _surrogate, _sys)) =
-        zerompk::from_msgpack::<BitemporalDelete>(payload)
-    {
-        return Some((collection, document_id));
-    }
-    zerompk::from_msgpack::<PlainDelete>(payload)
-        .ok()
-        .map(|(collection, document_id, _prov, _surrogate)| (collection, document_id))
+    DocumentDeleteRedo::decode(payload).map(|delete| (delete.collection, delete.document_id))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nodedb_types::sync::wire::SyncProvenance;
 
     #[test]
     fn a_bitemporal_put_decodes_with_its_stamp() {

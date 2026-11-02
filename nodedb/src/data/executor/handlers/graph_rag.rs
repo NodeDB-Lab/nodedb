@@ -77,6 +77,7 @@ pub(in crate::data::executor) struct GraphRagFusionParams<'a> {
 }
 
 /// The vector leg of a fusion, and the cut whose graph names its hits.
+#[derive(Clone, Copy)]
 pub(in crate::data::executor) struct VectorLeg<'a> {
     pub tenant_id: u64,
     pub collection: &'a str,
@@ -190,23 +191,14 @@ impl CoreLoop {
         task: &ExecutionTask,
         leg: VectorLeg<'_>,
     ) -> Result<VectorNodeScores, Response> {
+        let hits = self.vector_leg_hits(task, &leg)?;
         let VectorLeg {
             tenant_id,
             collection,
-            query_vector,
-            vector_top_k,
-            vector_field,
             scope,
+            ..
         } = leg;
         let database_id = task.request.database_id.as_u64();
-        let hits = self.vector_leg_hits(
-            task,
-            tenant_id,
-            collection,
-            query_vector,
-            vector_top_k,
-            vector_field,
-        )?;
         if hits.is_empty() {
             return Ok((Vec::new(), HashMap::new(), Vec::new()));
         }
@@ -246,16 +238,22 @@ impl CoreLoop {
     /// paired with its surrogate when the entry carries one, in rank order.
     ///
     /// `Err(response)` when the index is missing or the query does not fit
-    /// it. An empty index yields no hits.
+    /// it. An empty index yields no hits. The leg ranks the nodes visible at
+    /// `leg.scope`'s cut, the live nodes for a live scope.
     pub(in crate::data::executor) fn vector_leg_hits(
         &self,
         task: &ExecutionTask,
-        tenant_id: u64,
-        collection: &str,
-        query_vector: &[f32],
-        vector_top_k: usize,
-        vector_field: &str,
+        leg: &VectorLeg<'_>,
     ) -> Result<Vec<(SearchResult, Option<Surrogate>)>, Response> {
+        let VectorLeg {
+            tenant_id,
+            collection,
+            query_vector,
+            vector_top_k,
+            vector_field,
+            scope,
+        } = *leg;
+        let at = scope.pinned_ordinal();
         let database_id = task.request.database_id.as_u64();
         let index_key =
             CoreLoop::vector_index_key(database_id, tenant_id, collection, vector_field);
@@ -272,6 +270,7 @@ impl CoreLoop {
             vector_top_k,
             ef,
             None,
+            at,
         ) {
             Ok(results) => results,
             Err(code) => return Err(self.response_error(task, code)),

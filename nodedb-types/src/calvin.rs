@@ -10,7 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{KeyRepr, WriteVersion};
+use crate::KeyRepr;
 
 pub use crate::calvin_passive::{PassiveKey, PassiveReadKeyId};
 
@@ -377,13 +377,16 @@ pub enum ReadKeyIdent {
     },
 }
 
-/// One versioned, predicate-aware read observed by a transaction, carried on
-/// the replicated Calvin `TxClass` so participants can validate it at the
-/// commit serialization point.
+/// One predicate-aware read observed by a transaction, carried on the
+/// replicated Calvin `TxClass` and on a single-shard redo so participants
+/// can validate it at the commit serialization point.
 ///
-/// `read_version` is a data-group log position, so any replica of the read's
-/// vShard validates it. The enclosing `TxClass` scopes the tenant;
-/// per-database scoping is carried by the transaction as a whole.
+/// The transaction read every entry at one snapshot ordinal, which travels
+/// once beside the read set. An entry is valid while no committed version of
+/// what it observed carries an ordinal above that snapshot. Stored versions
+/// carry the same ordinals on every replica, so every replica of the read's
+/// vShard reaches one verdict. The enclosing `TxClass` scopes the tenant.
+/// Per-database scoping is carried by the transaction as a whole.
 #[derive(
     Debug,
     Clone,
@@ -401,13 +404,11 @@ pub struct VersionedReadEntry {
     pub collection: String,
     /// Point-key or collection-scoped-predicate identity of the observation.
     pub key: ReadKeyIdent,
-    /// The version of what the read observed on its home vShard.
-    pub read_version: WriteVersion,
-    /// The vShard whose write versions validate this read. `None` homes the
+    /// The vShard whose stored versions validate this read. `None` homes the
     /// read to its collection's vShard. A graph read names the key vShard it
     /// read edges on, because edges live on their endpoints' vShards. A homed
     /// read with an empty `collection` observed every collection there, so it
-    /// validates against the vShard's latest version.
+    /// validates against the vShard's newest version.
     pub home_vshard: Option<u32>,
 }
 
@@ -415,9 +416,8 @@ pub struct VersionedReadEntry {
 ///
 /// Empty for pure-write transactions and for autocommit statements (which
 /// accumulate no session read-set). Populated at commit time from the neutral
-/// session read-set, and validated per-participant against the local
-/// write-version index at Calvin stage time (the commit vote on
-/// a stage response).
+/// session read-set, and validated per-participant against the stored
+/// versions at Calvin stage time (the commit vote on a stage response).
 #[derive(
     Debug,
     Clone,

@@ -16,6 +16,7 @@ use crate::data::executor::handlers::kv::field::KvFieldSetArgs;
 use crate::data::executor::handlers::kv::predicate::KvPredicateCtx;
 use crate::data::executor::handlers::kv::transfer::{TransferItemParams, TransferParams};
 use crate::data::executor::handlers::kv::ttl::KvTtlTarget;
+use crate::data::executor::handlers::write_match_cut::autocommit_match_cut;
 use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
 use nodedb_physical::physical_plan::KvOp;
@@ -254,6 +255,8 @@ impl CoreLoop {
                 source_rls_write_check,
                 dest_rls_write_check,
             }),
+            // A resolve reads no transaction overlay: only a current-state
+            // predicate resolves here. A block's predicate write stages.
             KvOp::PredicateUpdate {
                 collection,
                 filters,
@@ -261,8 +264,30 @@ impl CoreLoop {
                 rls_write_check,
                 returning,
                 rls_filters,
-            } => self.resolve_kv_predicate_update(
-                KvPredicateCtx {
+                system_time,
+            } => autocommit_match_cut(system_time, "a KV predicate UPDATE").and_then(|()| {
+                self.resolve_kv_predicate_update(
+                    KvPredicateCtx {
+                        did,
+                        tid,
+                        collection: collection.as_str(),
+                        filters,
+                        rls_write_check,
+                        returning: returning.as_ref(),
+                        rls_filters,
+                    },
+                    updates,
+                )
+            }),
+            KvOp::PredicateDelete {
+                collection,
+                filters,
+                rls_write_check,
+                returning,
+                rls_filters,
+                system_time,
+            } => autocommit_match_cut(system_time, "a KV predicate DELETE").and_then(|()| {
+                self.resolve_kv_predicate_delete(KvPredicateCtx {
                     did,
                     tid,
                     collection: collection.as_str(),
@@ -270,23 +295,7 @@ impl CoreLoop {
                     rls_write_check,
                     returning: returning.as_ref(),
                     rls_filters,
-                },
-                updates,
-            ),
-            KvOp::PredicateDelete {
-                collection,
-                filters,
-                rls_write_check,
-                returning,
-                rls_filters,
-            } => self.resolve_kv_predicate_delete(KvPredicateCtx {
-                did,
-                tid,
-                collection: collection.as_str(),
-                filters,
-                rls_write_check,
-                returning: returning.as_ref(),
-                rls_filters,
+                })
             }),
             KvOp::InsertIfAbsent {
                 collection,
@@ -454,6 +463,7 @@ mod tests {
                 key: b"seed".to_vec(),
                 rls_filters: Vec::new(),
                 surrogate_ceiling: None,
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             None,
         )
@@ -517,6 +527,7 @@ mod tests {
             key: b"k".to_vec(),
             rls_filters: Vec::new(),
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         };
         let t = task();
         let resp = h.core.execute_kv_resolve_write(&t, did(), TID, &op);

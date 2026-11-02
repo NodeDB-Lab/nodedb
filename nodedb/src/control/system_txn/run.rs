@@ -186,10 +186,9 @@ pub(super) fn refuse_unbufferable<'t>(
                 index: first_index + offset,
                 total,
                 source: crate::Error::NotInTransactionBlock {
-                    statement: match task.plan.collection() {
-                        Some(collection) => format!("a non-transactional write to '{collection}'"),
-                        None => "a non-transactional write".to_owned(),
-                    },
+                    statement: crate::control::server::shared::session::staging_gate::non_transactional_write(
+                        &task.plan,
+                    ),
                 },
             });
         }
@@ -236,6 +235,7 @@ pub(super) async fn dispatch_staged(
             wal_lsn: None,
             resolved_now_ms: None,
             minted: None,
+            system_ordinal: None,
         },
     )
     .await

@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 pub mod apply;
+pub mod catch_up_wake;
 pub mod core;
 pub mod counters;
+mod forward;
 pub mod history;
 pub mod parts;
 pub mod replay_cache;

@@ -46,6 +46,10 @@ pub enum TileKind {
 )]
 pub struct TileEntry {
     pub tile_id: TileId,
+    /// The placement the writer stored the tile version under. A store that
+    /// hosts several shards tags each version with the shard whose write
+    /// stored it. A store with one placement writes `0`.
+    pub placement: u32,
     pub kind: TileKind,
     pub offset: u64,
     pub length: u32,
@@ -53,9 +57,17 @@ pub struct TileEntry {
 }
 
 impl TileEntry {
-    pub fn new(tile_id: TileId, kind: TileKind, offset: u64, length: u32, mbr: TileMBR) -> Self {
+    pub fn new(
+        tile_id: TileId,
+        placement: u32,
+        kind: TileKind,
+        offset: u64,
+        length: u32,
+        mbr: TileMBR,
+    ) -> Self {
         Self {
             tile_id,
+            placement,
             kind,
             offset,
             length,
@@ -71,7 +83,7 @@ mod tests {
     #[test]
     fn tile_entry_round_trip_msgpack() {
         let mbr = TileMBR::new(0, 0);
-        let e = TileEntry::new(TileId::snapshot(42), TileKind::Sparse, 100, 256, mbr);
+        let e = TileEntry::new(TileId::snapshot(42), 7, TileKind::Sparse, 100, 256, mbr);
         let bytes = zerompk::to_msgpack_vec(&e).unwrap();
         let d: TileEntry = zerompk::from_msgpack(&bytes).unwrap();
         assert_eq!(d, e);

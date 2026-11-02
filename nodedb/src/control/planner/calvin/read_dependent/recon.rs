@@ -28,6 +28,7 @@ pub(super) async fn read_kv_row(
         key: key.to_vec(),
         rls_filters: Vec::new(),
         surrogate_ceiling: None,
+        system_time: nodedb_types::SystemTimeScope::Current,
     });
     let gateway = state.installed_gateway()?;
     let ctx = crate::control::gateway::core::QueryContext {

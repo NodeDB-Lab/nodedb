@@ -49,6 +49,7 @@ fn kv_protocol_command_sequence() {
             key: b"key1".to_vec(),
             rls_filters: Vec::new(),
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
     assert_eq!(payload, b"value1");
@@ -86,6 +87,7 @@ fn kv_protocol_command_sequence() {
             key: b"key1".to_vec(),
             rls_filters: Vec::new(),
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
     assert_eq!(payload, b"value2");
@@ -103,6 +105,7 @@ fn kv_protocol_command_sequence() {
             key: b"key1".to_vec(),
             rls_filters: Vec::new(),
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
     assert_eq!(resp.status, Status::Ok);
@@ -140,6 +143,7 @@ fn kv_protocol_command_sequence() {
             key: b"key1".to_vec(),
             rls_filters: Vec::new(),
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
     assert_eq!(resp.status, Status::Ok);
@@ -187,6 +191,7 @@ fn kv_protocol_command_sequence() {
                 b"missing".to_vec(),
             ],
             rls_filters: Vec::new(),
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
 
@@ -280,6 +285,7 @@ fn kv_and_vector_coexist() {
             key: b"user:3".to_vec(),
             rls_filters: Vec::new(),
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
     assert_eq!(payload, b"data:3");
@@ -305,6 +311,7 @@ fn kv_and_vector_coexist() {
             skip_payload_fetch: false,
             payload_filters: Vec::new(),
             metric: DistanceMetric::L2,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
 }
@@ -350,6 +357,7 @@ fn ttl_expiry_produces_expired_key_info() {
             key: b"s1".to_vec(),
             rls_filters: Vec::new(),
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
     assert_eq!(resp.status, Status::Ok);
@@ -394,6 +402,7 @@ fn ttl_expiry_produces_expired_key_info() {
             key: b"persistent".to_vec(),
             rls_filters: Vec::new(),
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
     assert_eq!(payload, b"forever");
@@ -452,6 +461,7 @@ fn kv_field_get_and_set() {
             key: b"u1".to_vec(),
             fields: vec!["name".into(), "age".into()],
             rls_filters: Vec::new(),
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
     let result: serde_json::Value = payload_value(&payload);
@@ -496,6 +506,7 @@ fn kv_field_get_and_set() {
             key: b"u1".to_vec(),
             fields: vec!["region".into()],
             rls_filters: Vec::new(),
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
     let result: serde_json::Value = payload_value(&payload);
@@ -562,6 +573,7 @@ fn kv_truncate_clears_all() {
             key: b"k0".to_vec(),
             rls_filters: Vec::new(),
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
     assert_eq!(resp.status, Status::Ok);
@@ -642,6 +654,7 @@ fn kv_index_write_amp_ratio_matches() {
             match_pattern: None,
             sort_keys: Vec::new(),
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
     let json: serde_json::Value = payload_value(&payload);
@@ -717,6 +730,7 @@ fn kv_mass_expiry_respects_reap_budget() {
             key: b"survivor".to_vec(),
             rls_filters: Vec::new(),
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
     assert_eq!(payload, b"alive");
@@ -738,6 +752,7 @@ fn kv_mass_expiry_respects_reap_budget() {
             key: b"survivor".to_vec(),
             rls_filters: Vec::new(),
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
     assert_eq!(payload, b"alive");

@@ -111,9 +111,9 @@ fn try_extract_with_extra_filters(
     }
 }
 
-/// The SELECT clauses a WHERE-derived search plan has no slot for.
-pub(super) struct SearchBodyClauses<'a> {
-    pub temporal: &'a crate::temporal::TemporalScope,
+/// The SELECT clauses a WHERE-derived search plan has no slot for. The
+/// statement's `AS OF` has a slot: the search reads at it.
+pub(super) struct SearchBodyClauses {
     pub has_subqueries: bool,
     pub aggregates: bool,
     pub distinct: bool,
@@ -122,10 +122,8 @@ pub(super) struct SearchBodyClauses<'a> {
 
 /// Refuse a WHERE-derived search plan whose SELECT carries a clause the plan
 /// cannot hold. Returning the plan would answer the query without it.
-pub(super) fn refuse_dropped_clauses(plan: &SqlPlan, clauses: SearchBodyClauses<'_>) -> Result<()> {
-    let dropped = if clauses.temporal.is_temporal() {
-        Some("AS OF")
-    } else if clauses.has_subqueries {
+pub(super) fn refuse_dropped_clauses(plan: &SqlPlan, clauses: SearchBodyClauses) -> Result<()> {
+    let dropped = if clauses.has_subqueries {
         Some("a WHERE subquery")
     } else if clauses.aggregates {
         Some("aggregation")
@@ -294,6 +292,8 @@ fn plan_text_from_where(
         filters: extra_filter_to_filters(extra_filters, table)?,
         scores: Vec::new(),
         projection: projection.to_vec(),
+        // The statement's `AS OF` is set where the search is planned.
+        temporal: crate::temporal::TemporalScope::default(),
     })))
 }
 
@@ -340,6 +340,7 @@ fn plan_vector_from_where(
         // Key conjuncts move here in the same post-pass.
         pk_prefilter: None,
         projection: projection.to_vec(),
+        temporal: crate::temporal::TemporalScope::default(),
     }))
 }
 
@@ -374,6 +375,7 @@ fn plan_multi_vector_from_where(
         top_k: DEFAULT_TOP_K,
         ef_search: DEFAULT_TOP_K * DEFAULT_EF_SEARCH_MULTIPLIER,
         projection: projection.to_vec(),
+        temporal: crate::temporal::TemporalScope::default(),
     }))
 }
 
@@ -434,6 +436,7 @@ fn plan_spatial_from_where(
         // this in `apply_limit`.
         limit: usize::MAX,
         projection: computed_tail::body_projection(projection),
+        temporal: crate::temporal::TemporalScope::default(),
     };
     // The spatial scan evaluates no expression. A computed SELECT item runs
     // in a tail over the matched rows.

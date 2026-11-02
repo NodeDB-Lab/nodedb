@@ -69,6 +69,14 @@ impl SequencerProposer for CapturingProposer {
             Err(SequencerProposeError::NoLeader)
         }
     }
+
+    fn propose_cut_marker(
+        &self,
+        bytes: Vec<u8>,
+        _cut_floor: i64,
+    ) -> Result<ProposeDispatch, SequencerProposeError> {
+        self.propose(bytes)
+    }
 }
 
 /// Make the fixture node the elected leader of the data group that owns

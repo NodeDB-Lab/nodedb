@@ -73,18 +73,34 @@ pub struct PartitionMeta {
     /// Per-column statistics (codec, min/max/sum/count/cardinality).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub column_stats: HashMap<String, nodedb_codec::ColumnStatistics>,
-    /// Maximum `_ts_system` value across rows in this partition
-    /// (bitemporal only; 0 for non-bitemporal partitions). Retention on
-    /// bitemporal collections uses this instead of `max_ts` so that
-    /// late-arriving backfill survives an event-time-based TTL.
+    /// The newest `_ts_system` system-time ordinal across rows in this
+    /// partition, 0 when no row carries one. Retention on bitemporal
+    /// collections uses its millisecond instead of `max_ts`, so late-arriving
+    /// backfill survives an event-time-based TTL.
     #[serde(default)]
     pub max_system_ts: i64,
+    /// The system-time ordinal a `TRUNCATE` ended every row of this partition
+    /// at. `None` while the rows are current. An ended partition stays as
+    /// history: a read before the end still sees its rows.
+    #[serde(default)]
+    pub ended_at: Option<i64>,
 }
 
 impl PartitionMeta {
     /// Whether this partition's time range overlaps a query range.
     pub fn overlaps(&self, range: &TimeRange) -> bool {
         self.min_ts <= range.end_ms && range.start_ms <= self.max_ts
+    }
+
+    /// Whether a read at system-time ordinal `at` sees rows of this
+    /// partition past any `TRUNCATE` end. `None` reads the current rows,
+    /// which an ended partition no longer holds.
+    pub fn open_at(&self, at: Option<i64>) -> bool {
+        match (self.ended_at, at) {
+            (None, _) => true,
+            (Some(_), None) => false,
+            (Some(end), Some(at)) => end > at,
+        }
     }
 
     /// Whether this partition is queryable (Active, Sealed, or Merged).
@@ -297,6 +313,7 @@ mod tests {
             last_flushed_wal_lsn: 42,
             column_stats: HashMap::new(),
             max_system_ts: 0,
+            ended_at: None,
         };
         assert!(meta.is_queryable());
         assert!(meta.overlaps(&TimeRange::new(1500, 2500)));
@@ -316,7 +333,33 @@ mod tests {
             last_flushed_wal_lsn: 0,
             column_stats: HashMap::new(),
             max_system_ts: 0,
+            ended_at: None,
         };
         assert!(!meta.is_queryable());
+    }
+
+    #[test]
+    fn an_ended_partition_is_open_only_before_its_end() {
+        let mut meta = PartitionMeta {
+            min_ts: 0,
+            max_ts: 0,
+            row_count: 1,
+            size_bytes: 0,
+            schema_version: 1,
+            state: PartitionState::Sealed,
+            interval_ms: 0,
+            last_flushed_wal_lsn: 0,
+            column_stats: HashMap::new(),
+            max_system_ts: 5,
+            ended_at: None,
+        };
+        assert!(meta.open_at(None) && meta.open_at(Some(1)));
+        meta.ended_at = Some(10);
+        assert!(
+            !meta.open_at(None),
+            "a current read skips an ended partition"
+        );
+        assert!(meta.open_at(Some(9)));
+        assert!(!meta.open_at(Some(10)));
     }
 }

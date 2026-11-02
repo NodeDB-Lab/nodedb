@@ -390,6 +390,39 @@ pub enum GraphOp {
 }
 
 impl GraphOp {
+    /// The bitemporal scope a graph read op reads at, mutable, so the
+    /// Control Plane can pin it. `None` exactly where [`Self::read_scope`]
+    /// answers `None`.
+    pub fn read_scope_mut(&mut self) -> Option<&mut GraphReadScope> {
+        match self {
+            GraphOp::Hop { scope, .. }
+            | GraphOp::Neighbors { scope, .. }
+            | GraphOp::NeighborsMulti { scope, .. }
+            | GraphOp::Path { scope, .. }
+            | GraphOp::Subgraph { scope, .. }
+            | GraphOp::RagFusion { scope, .. }
+            | GraphOp::Algo { scope, .. }
+            | GraphOp::Match { scope, .. }
+            | GraphOp::MatchContinuation { scope, .. }
+            | GraphOp::MatchVarLenResume { scope, .. }
+            | GraphOp::TemporalNeighbors { scope, .. } => Some(scope),
+            GraphOp::EdgePut { .. }
+            | GraphOp::EdgePutBatch { .. }
+            | GraphOp::EdgeDelete { .. }
+            | GraphOp::ResolveEdgeDelete(_)
+            | GraphOp::EdgeDeleteBatch { .. }
+            | GraphOp::BspSuperstep(_)
+            | GraphOp::WccSuperstep(_)
+            | GraphOp::SetNodeLabels { .. }
+            | GraphOp::RemoveNodeLabels { .. }
+            | GraphOp::Stats { .. }
+            | GraphOp::NodeEdgeGuard { .. }
+            | GraphOp::NodePresenceGuard { .. }
+            | GraphOp::TruncateEdges { .. }
+            | GraphOp::NodePresenceRead { .. } => None,
+        }
+    }
+
     /// The bitemporal scope a graph read op reads at. `None` for a write, a
     /// guard, a stats read, or a superstep: a superstep carries its own cut
     /// marker in its plan.

@@ -424,7 +424,7 @@ mod tests {
     }
 
     fn applied() -> ProposeResult {
-        Ok(AppliedWrite::unversioned(b"real".to_vec()))
+        Ok(AppliedWrite::new(b"real".to_vec()))
     }
 
     /// A follower applies entries nobody on it waits for. Their stored

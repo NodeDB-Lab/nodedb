@@ -12,6 +12,15 @@ use crate::calvin::types::{CutBarrierWire, SchedulerInput};
 
 use super::core::{Delivery, NOT_YET_APPLIED, SequencerRestorePoint, SequencerStateMachine};
 
+/// The fields of one applied `SequencerEntry::CutMarker`.
+pub(super) struct CutMarkerEntry {
+    pub hlc: u64,
+    pub restore_point: u64,
+    pub barrier: Option<CutBarrierWire>,
+    /// The ordinal the marker's cut must cover, `0` for none.
+    pub floor: i64,
+}
+
 impl SequencerStateMachine {
     /// A restored sequencer log opens with the epoch that followed its
     /// restore point. No epoch below it is minted again, and no epoch
@@ -27,18 +36,28 @@ impl SequencerStateMachine {
         }
     }
 
-    /// Record a restore point's place in this log, then fan the cut marker
-    /// out to every vShard scheduler this node hosts. Same delivery as
+    /// Fold the marker's floor into the applied epoch instant, record a
+    /// restore point's place in this log, then fan the cut marker out to
+    /// every vShard scheduler this node hosts. Same delivery as
     /// `ReserveRead`: a marker for an armed vShard, or one dropped at a full
     /// channel, is replayed by the scheduler's catch-up drain in log order.
     /// Every scheduler shares one copy of the marker's `barrier`.
-    pub(super) fn apply_cut_marker(
-        &mut self,
-        index: u64,
-        hlc: u64,
-        restore_point: u64,
-        barrier: Option<CutBarrierWire>,
-    ) {
+    ///
+    /// The fold runs first, so the instant the marker records covers its
+    /// floor. Every replica applies the same log, so every replica records
+    /// the same instant. A leader seeds every later epoch instant above the
+    /// applied one.
+    pub(super) fn apply_cut_marker(&mut self, index: u64, marker: CutMarkerEntry) {
+        let CutMarkerEntry {
+            hlc,
+            restore_point,
+            barrier,
+            floor,
+        } = marker;
+        if floor > 0 {
+            let floor_ms = nodedb_types::ordinal_to_ms(floor);
+            self.last_epoch_system_ms = self.last_epoch_system_ms.max(Some(floor_ms));
+        }
         if restore_point != 0
             && let Some(hook) = &self.restore_point_hook
         {
@@ -144,6 +163,7 @@ mod tests {
                 hlc: 900,
                 restore_point: 0,
                 barrier: None,
+                floor: 0,
             }),
         );
         sm.apply(
@@ -152,6 +172,7 @@ mod tests {
                 hlc: 1_000,
                 restore_point: 77,
                 barrier: Some(CutBarrierWire { capture: None }),
+                floor: 0,
             }),
         );
 
@@ -191,6 +212,7 @@ mod tests {
                 hlc,
                 restore_point: 0,
                 barrier: None,
+                floor: 0,
             })
         };
         sm.apply(1, &marker(10));
@@ -199,6 +221,43 @@ mod tests {
         assert_eq!(
             *seen.lock().unwrap(),
             [(10, 1, None), (20, 3, Some(1_800_000_000_000))]
+        );
+    }
+
+    /// A marker's floor raises the applied epoch instant to the floor's
+    /// millisecond before the marker records its instant. A floor below the
+    /// applied instant changes nothing.
+    #[test]
+    fn a_cut_marker_floor_raises_the_applied_epoch_instant() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        let mut sm =
+            SequencerStateMachine::new(HashMap::new(), CalvinCompletionRegistry::new_detached())
+                .with_cut_instant_hook(Arc::new(move |hlc, _index, instant| {
+                    sink.lock().unwrap().push((hlc, instant));
+                }));
+        sm.apply(1, &floor(4, 1_800_000_000_000));
+        let floored = |hlc, floor| {
+            encode(&SequencerEntry::CutMarker {
+                hlc,
+                restore_point: 0,
+                barrier: None,
+                floor,
+            })
+        };
+        // An ordinal inside millisecond 1_800_000_000_500.
+        let ahead = nodedb_types::ms_to_ordinal_upper(1_800_000_000_500) - 7;
+        sm.apply(2, &floored(10, ahead));
+        assert_eq!(sm.last_epoch_system_ms(), Some(1_800_000_000_500));
+        sm.apply(3, &floored(20, 1));
+        assert_eq!(sm.last_epoch_system_ms(), Some(1_800_000_000_500));
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [(10, Some(1_800_000_000_500)), (20, Some(1_800_000_000_500))]
+        );
+        assert!(
+            nodedb_types::ms_to_ordinal_upper(1_800_000_000_500) >= ahead,
+            "the recorded instant's cut covers the floor"
         );
     }
 }

@@ -11,7 +11,8 @@
 //! secondary-index replay lives in `wal_replay_kv_index.rs`.
 //!
 //! The absolute-overwrite `kv_put` / `kv_batch_put` arms live in `kv_put.rs`,
-//! which also documents why those records carry the row surrogate.
+//! which also documents why those records carry the row surrogate. A
+//! RESTORE's `kv_restore` keys replay in `kv_restore.rs`.
 //!
 //! Split by engine concern: `kv` (`replay_kv_wal`), CRDT record decoders
 //! (`crdt`, `crdt_list`, and `crdt_doc`) coordinated by `crdt_ordered` into
@@ -19,9 +20,14 @@
 //! `replay_array_wal`).
 
 mod array;
+mod array_restore;
 mod crdt;
+mod crdt_admission;
 mod crdt_doc;
 mod crdt_list;
 mod crdt_ordered;
 mod kv;
 pub(in crate::data::executor) mod kv_put;
+mod kv_restore;
+
+pub(in crate::data::executor) use array::ArrayOpen;

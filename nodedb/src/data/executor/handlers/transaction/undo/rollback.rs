@@ -16,12 +16,20 @@ impl CoreLoop {
     /// caller **must** answer `RollbackFailed`. The core's state is then
     /// unknown: the core fail-stops when that response leaves it, and a
     /// restart rebuilds the state through WAL replay.
+    ///
+    /// A rollback lowers stored versions in a way no write note describes,
+    /// and the newest-ordinal cache can hold a value read while the reversed
+    /// writes stood. So the cache forgets every value, and the next read
+    /// recomputes it from the restored storage.
     pub(in crate::data::executor) fn rollback_undo_log(
         &mut self,
         did: u64,
         tid: u64,
         undo_log: Vec<UndoEntry>,
     ) -> Result<(), UndoError> {
+        if !undo_log.is_empty() {
+            self.forget_newest_ordinals();
+        }
         let total = undo_log.len();
         for (rev_idx, entry) in undo_log.into_iter().rev().enumerate() {
             // Convert reversed index back to original forward-order index for
@@ -49,9 +57,13 @@ impl CoreLoop {
             UndoEntry::PutDocument { .. } | UndoEntry::DeleteDocument { .. } => {
                 self.apply_undo_document(did, tid, entry_index, entry)
             }
+            UndoEntry::HistoryVersion(undo) => {
+                self.apply_undo_history_version(did, tid, entry_index, *undo)
+            }
             UndoEntry::InsertVector { .. }
             | UndoEntry::DeleteVector { .. }
-            | UndoEntry::DisplacedVector { .. } => self.apply_undo_vector(tid, entry_index, entry),
+            | UndoEntry::DisplacedVector { .. }
+            | UndoEntry::EndedMultiVector { .. } => self.apply_undo_vector(tid, entry_index, entry),
             UndoEntry::VectorCollectionCreated { index_key } => {
                 self.vector_collections.remove(&index_key);
                 Ok(())
@@ -63,15 +75,21 @@ impl CoreLoop {
             UndoEntry::EdgeCut(undo) => self.apply_undo_edge_cut(entry_index, *undo),
             UndoEntry::KvPut { .. }
             | UndoEntry::KvDelete { .. }
-            | UndoEntry::KvTtl { .. }
-            | UndoEntry::KvTruncate { .. } => self.apply_undo_kv(did, tid, entry_index, entry),
+            | UndoEntry::KvTruncate { .. }
+            | UndoEntry::KvHistory { .. } => self.apply_undo_kv(did, tid, entry_index, entry),
             UndoEntry::ColumnarInsert { .. }
             | UndoEntry::ColumnarUpdate { .. }
-            | UndoEntry::ColumnarDelete { .. } => self.apply_undo_columnar(entry_index, entry),
+            | UndoEntry::ColumnarDelete { .. } => {
+                let undone = self.apply_undo_columnar(entry_index, entry);
+                // The undone version leaves the history charge.
+                self.recharge_all_columnar_history();
+                undone
+            }
             UndoEntry::ColumnarEngineCreated { collection_key } => {
                 self.columnar_engines.remove(&collection_key);
                 self.columnar_flushed_segments.remove(&collection_key);
                 self.columnar_flushed_surrogates.remove(&collection_key);
+                self.recharge_columnar_history(&collection_key);
                 Ok(())
             }
             UndoEntry::TimeseriesIngest(_) => self.apply_undo_timeseries(entry_index, entry),
@@ -80,6 +98,9 @@ impl CoreLoop {
             }
             UndoEntry::TimeseriesTruncate(undo) => {
                 self.apply_undo_timeseries_truncate(entry_index, *undo)
+            }
+            UndoEntry::TimeseriesEndedInstall(undo) => {
+                self.apply_undo_ts_ended_install(entry_index, undo)
             }
             UndoEntry::StatsRestore { .. } => self.apply_undo_stats(entry_index, entry),
             UndoEntry::MarkNodeDeleted { .. } => self.apply_undo_mark_node(entry_index, entry),
@@ -259,20 +280,16 @@ mod tests {
             UndoEntry::PutDocument {
                 collection: "c".into(),
                 document_id: d1,
-                old_value: None,
-                bitemporal_sys_from: Some(1_000),
-                bitemporal_index_tuples: vec![("status".into(), "active".into())],
-                secondary_index_added: Vec::new(),
-                secondary_index_removed: Vec::new(),
+                version_sys_from: 1_000,
+                index_tuples: vec![("status".into(), "active".into())],
                 chain_hash_prior: None,
             },
             UndoEntry::DeleteDocument {
                 collection: "c".into(),
                 document_id: d1,
                 old_value: b"v1".to_vec(),
-                bitemporal_sys_from: Some(2_000),
-                bitemporal_index_tuples: vec![("status".into(), "active".into())],
-                secondary_index_tuples: Vec::new(),
+                version_sys_from: 2_000,
+                index_tuples: vec![("status".into(), "active".into())],
                 chain_hash_prior: None,
             },
         ];

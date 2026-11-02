@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Bitemporal branch of the native-protocol RANGE scan.
+//! The native-protocol RANGE scan.
 //!
-//! A `bitemporal=true` document collection keeps every write on the versioned
-//! redb table (see `versioned_put_in_txn`); its plain INDEXES / DOCUMENTS
-//! tables are empty. `execute_range_scan`'s index probe + plain-table fallback
-//! therefore return ZERO rows for such a collection. This helper reads the
-//! newest live version per `doc_id` from the versioned namespace — mirroring
-//! the current-state scan in `execute_document_scan` — filters by the range
-//! bounds, then sorts + limits + encodes exactly like the non-bitemporal
-//! full-scan fallback.
+//! Every document collection keeps its rows and index entries versioned. A
+//! field with a plain secondary index narrows the scan through the versioned
+//! range lookup: the index names every row whose current version holds a
+//! value in range, and only those rows are read. Any other field reads the
+//! current version of every row. Both paths run the same range and RLS
+//! predicate on each body, then sort by `field`, cap at `limit` and encode,
+//! so the path a collection takes is not observable.
 
 use tracing::warn;
 
@@ -31,14 +30,12 @@ fn decode_body(body: &[u8], schema: Option<&StrictSchema>) -> crate::Result<serd
     doc_format::decode_document_or_binary_tuple(body, schema, "versioned row body")
 }
 
-/// Range-bound test matching the secondary-index path in
-/// `btree_index::range_scan`: redb scans the half-open key range
-/// `[prefix+lower, prefix+upper)`, i.e. **inclusive lower, exclusive upper**,
-/// comparing keys **lexically** (byte order) on the field's string form.
-/// The field value here is stringified via `extract_index_values`
-/// (`json_scalar_to_string`) — the exact same encoding the index keys on — so
-/// bitemporal and non-bitemporal scans admit the same rows for the same data.
-/// A `None` bound is unbounded on that end.
+/// Range-bound test matching the versioned range lookup: **inclusive lower,
+/// exclusive upper**, comparing **lexically** (byte order) on the field's
+/// string form. The field value here is stringified via
+/// `extract_index_values` (`json_scalar_to_string`), the exact encoding the
+/// index keys on, so the index-narrowed and full-scan paths admit the same
+/// rows. A `None` bound is unbounded on that end.
 fn value_in_bounds(value: &str, lower: Option<&[u8]>, upper: Option<&[u8]>) -> bool {
     let v = value.as_bytes();
     if let Some(l) = lower
@@ -55,9 +52,9 @@ fn value_in_bounds(value: &str, lower: Option<&[u8]>, upper: Option<&[u8]>) -> b
 }
 
 impl CoreLoop {
-    /// Bitemporal RANGE scan: current-version rows whose `field` falls in
+    /// RANGE scan: current-version rows whose `field` falls in
     /// `[lower, upper)`, sorted ascending by `field` and capped at `limit`.
-    pub(in crate::data::executor) fn execute_range_scan_bitemporal(
+    pub(in crate::data::executor) fn execute_range_scan_versioned(
         &self,
         task: &ExecutionTask,
         args: super::snapshot::RangeScanArgs<'_>,
@@ -182,21 +179,41 @@ impl CoreLoop {
         // version. A statement that goes over its deadline mid-scan stops here
         // and the check below turns the short result into an error.
         let deadline = crate::data::executor::deadline::DeadlineCheck::for_task(task);
-        let mut scanned = match self.sparse.versioned_scan_as_of(
-            crate::engine::sparse::btree_versioned::VersionedScanParams {
-                database_id: task.request.database_id.as_u64(),
-                tenant: tid,
-                coll: collection,
-                sys_cutoff: None,
-                valid_at_ms: None,
-                limit: scan_limit,
-            },
-            &predicate,
-            &|| deadline.expired(),
-        ) {
+        let database_id = task.request.database_id.as_u64();
+        let scanned = match self.range_index_candidates(&config_key, field, lower, upper) {
+            // The index names the candidates. Each one's current body runs
+            // the same predicate the full scan runs.
+            Some(index_range) => index_range.and_then(|keys| {
+                let mut rows = Vec::new();
+                for key in keys {
+                    if deadline.expired() {
+                        break;
+                    }
+                    if let Some(body) = self.sparse.get(database_id, tid, collection, &key)?
+                        && predicate(&key, &body)
+                    {
+                        rows.push((key, body));
+                    }
+                }
+                Ok(rows)
+            }),
+            None => self.sparse.versioned_scan_as_of(
+                crate::engine::sparse::btree_versioned::VersionedScanParams {
+                    database_id,
+                    tenant: tid,
+                    coll: collection,
+                    sys_cutoff: None,
+                    valid_at_ms: None,
+                    limit: scan_limit,
+                },
+                &predicate,
+                &|| deadline.expired(),
+            ),
+        };
+        let mut scanned = match scanned {
             Ok(rows) => rows,
             Err(e) => {
-                warn!(core = self.core_id, error = %e, "versioned range scan failed");
+                warn!(core = self.core_id, error = %e, "range scan failed");
                 return self.response_error(task, ErrorCode::from(e));
             }
         };
@@ -261,9 +278,8 @@ impl CoreLoop {
             return self.response_error(task, ErrorCode::ResourcesExhausted);
         }
 
-        // Sort ascending by `field` and cap at `limit` — the same ordering the
-        // secondary-index range path yields (index-key order) and the same
-        // truncation the non-bitemporal fallback applies.
+        // Sort ascending by `field` and cap at `limit`, whichever path read
+        // the rows.
         let sort_keys = [nodedb_physical::physical_plan::SortKeySpec::column(
             field, true,
         )];
@@ -277,5 +293,56 @@ impl CoreLoop {
             Ok(payload) => self.response_with_payload(task, payload),
             Err(e) => self.response_error(task, ErrorCode::from(e)),
         }
+    }
+
+    /// The rows a range scan reads when `field` carries a plain secondary
+    /// index: every row whose current version holds a value in
+    /// `[lower, upper)`, from the versioned range lookup. `None` when the
+    /// index cannot narrow the scan: no index on `field`, an array,
+    /// case-folded or partial index (whose entries are not the field's plain
+    /// string form for every row), or a bound that is not UTF-8.
+    fn range_index_candidates(
+        &self,
+        config_key: &(crate::types::DatabaseId, crate::types::TenantId, String),
+        field: &str,
+        lower: Option<&[u8]>,
+        upper: Option<&[u8]>,
+    ) -> Option<crate::Result<Vec<nodedb_types::StorageKey>>> {
+        let config = self.doc_configs.get(config_key)?;
+        let plain_index = config.index_paths.iter().any(|path| {
+            path.path == field
+                && !path.is_array
+                && !path.case_insensitive
+                && path.predicate.is_none()
+        });
+        if !plain_index {
+            return None;
+        }
+        let lower = match lower {
+            Some(bytes) => Some(std::str::from_utf8(bytes).ok()?),
+            None => None,
+        };
+        let upper = match upper {
+            Some(bytes) => Some(std::str::from_utf8(bytes).ok()?),
+            None => None,
+        };
+        let entries = self.sparse.versioned_index_range_as_of(
+            crate::engine::sparse::btree_versioned::VersionedIndexRange {
+                database_id: config_key.0.as_u64(),
+                tenant: config_key.1.as_u64(),
+                coll: &config_key.2,
+                field,
+                lower,
+                upper,
+                sys_cutoff: None,
+            },
+        );
+        Some(entries.map(|entries| {
+            let mut keys: Vec<nodedb_types::StorageKey> =
+                entries.into_iter().map(|(_, key)| key).collect();
+            keys.sort_unstable();
+            keys.dedup();
+            keys
+        }))
     }
 }

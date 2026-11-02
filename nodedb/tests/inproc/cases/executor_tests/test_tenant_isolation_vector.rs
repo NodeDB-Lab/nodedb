@@ -53,6 +53,7 @@ fn vector_search_isolated() {
             skip_payload_fetch: false,
             payload_filters: Vec::new(),
             metric: DistanceMetric::L2,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
     assert_eq!(resp_a.status, Status::Ok);
@@ -77,6 +78,7 @@ fn vector_search_isolated() {
             skip_payload_fetch: false,
             payload_filters: Vec::new(),
             metric: DistanceMetric::L2,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
     // Tenant B has no vector index for this collection — the engine returns

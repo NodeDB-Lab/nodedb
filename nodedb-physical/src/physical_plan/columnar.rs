@@ -47,11 +47,12 @@ pub enum ColumnarInsertIntent {
     /// the row with `RejectedConstraint` (SQLSTATE 23505) instead of the
     /// `Insert` tombstone-and-append behavior above.
     InsertUnique,
-    /// A RESTORE re-issue of backed-up rows. A bitemporal row keeps the
-    /// `_ts_system` ordinal its row carries, the stamp its original write
-    /// took, and the insert folds it into the shared clock. A duplicate PK
-    /// behaves as `Insert`. Only the restore path builds it: a client
-    /// statement never chooses its own system time.
+    /// A RESTORE re-issue of backed-up row versions. Each row installs at
+    /// the `sys_from` and `sys_to` its `restored_versions` entry carries, the
+    /// stamps its original writes took, and the insert folds them into the
+    /// shared clock. A bitemporal row's `_ts_system` takes its `sys_from`.
+    /// Only the restore path builds it: a client statement never chooses its
+    /// own system time.
     Restore,
 }
 
@@ -141,7 +142,7 @@ pub enum ColumnarOp {
         /// This is required for columns whose SQL type is ambiguous at the
         /// Value level (e.g. JSON arrives as `Value::String` but must be
         /// stored in `ColumnData::Json`, not `ColumnData::String`).
-        /// Empty `vec![]` only in legacy test fixtures that do not carry schema.
+        /// Empty when the caller carries no schema.
         #[serde(default)]
         schema_bytes: Vec<u8>,
         /// Sync provenance: identifies the originating peer and sequence for idempotency.
@@ -161,6 +162,15 @@ pub enum ColumnarOp {
         /// fresh ordinal per row.
         #[serde(default)]
         system_from: Option<i64>,
+        /// The stamps of each row of a RESTORE re-issue
+        /// (`ColumnarInsertIntent::Restore`), index-aligned with the rows in
+        /// `payload`. Each row installs at exactly its `sys_from` and ends at
+        /// its `sys_to`, so the restored history equals the backed-up one.
+        /// The WAL record and the replicated entry carry it, so a restart
+        /// replay and every replica install the same versions. Empty for
+        /// every other insert.
+        #[serde(default)]
+        restored_versions: Vec<nodedb_types::columnar::RestoredVersion>,
         /// Compiled row-level-security WRITE predicate (`Vec<ScanFilter>` as
         /// MessagePack), or the reason no predicate is attached. Carried only
         /// for the ON CONFLICT DO UPDATE shape, whose merged post-image
@@ -209,6 +219,12 @@ pub enum ColumnarOp {
         /// row's post-image once the assignments have been applied, or the
         /// reason no predicate is attached.
         rls_write_check: RlsWriteCheck,
+        /// The rows `filters` matches: `Current` for the newest committed
+        /// version of each key, `TxnSnapshot` inside a transaction block for
+        /// the rows visible at the block's snapshot with its staged writes
+        /// merged on top. Only the match reads at this scope.
+        #[serde(default)]
+        system_time: SystemTimeScope,
     },
 
     /// Delete rows matching filter predicates.
@@ -230,6 +246,9 @@ pub enum ColumnarOp {
         /// pre-image of every row this removes, or the reason no predicate is
         /// attached.
         rls_write_check: RlsWriteCheck,
+        /// See `ColumnarOp::Update::system_time`.
+        #[serde(default)]
+        system_time: SystemTimeScope,
     },
 
     /// Update rows the Control Plane already resolved to concrete images.

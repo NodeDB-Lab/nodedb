@@ -8,9 +8,8 @@
 //! rows. The one ordering that guards rows lives in retention: it writes
 //! the image before it removes a partition.
 //!
-//! The image lives inside the root collection's directory, so a TRUNCATE
-//! (which renames the directory aside), a purge, and a truncate undo carry
-//! it with the partitions it describes.
+//! The image lives inside the root collection's directory. A TRUNCATE
+//! removes it and resets the aggregates, and its undo writes it back.
 //!
 //! Every core registers every aggregate, and every core sees the same data
 //! directory. Only the core that owns the root's vShard flushes the root,
@@ -60,7 +59,8 @@ impl CoreLoop {
         let view = self
             .continuous_agg_mgr
             .export_image(database_id, tenant_id, root);
-        if view.entries.is_empty() && view.orphans.is_empty() {
+        if view.entries.is_empty() && view.orphans.is_empty() && view.raw_dropped_through.is_none()
+        {
             return self.remove_cagg_image(database_id, tenant_id, root);
         }
         let bytes = encode_image(&view)?;
@@ -128,6 +128,52 @@ impl CoreLoop {
                 detail: format!("remove {}/{CAGG_IMAGE_FILE}: {e}", dir.display()),
             }),
         }
+    }
+
+    /// Remove `root`'s image and return its bytes, so a TRUNCATE leaves its
+    /// aggregates empty and its undo can put the image back. `None` when the
+    /// root has no image or another core owns it.
+    pub(in crate::data::executor) fn take_cagg_image(
+        &self,
+        database_id: u64,
+        tenant_id: u64,
+        root: &str,
+    ) -> crate::Result<Option<Vec<u8>>> {
+        if !self.owns_cagg_root(database_id, root) {
+            return Ok(None);
+        }
+        let path =
+            ts_collection_dir(&self.data_dir, database_id, tenant_id, root).join(CAGG_IMAGE_FILE);
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => {
+                return Err(crate::Error::Storage {
+                    engine: "timeseries".into(),
+                    detail: format!("read {}: {e}", path.display()),
+                });
+            }
+        };
+        self.remove_cagg_image(database_id, tenant_id, root)?;
+        Ok(Some(bytes))
+    }
+
+    /// Write back an image [`Self::take_cagg_image`] removed. The caller
+    /// resets the root's aggregates next, so they reload it.
+    pub(in crate::data::executor) fn put_back_cagg_image(
+        &self,
+        database_id: u64,
+        tenant_id: u64,
+        root: &str,
+        bytes: &[u8],
+    ) -> crate::Result<()> {
+        let dir = ts_collection_dir(&self.data_dir, database_id, tenant_id, root);
+        nodedb_wal::segment::atomic_write_fsync(&dir, CAGG_IMAGE_FILE, bytes).map_err(|e| {
+            crate::Error::Storage {
+                engine: "timeseries".into(),
+                detail: format!("write {}/{CAGG_IMAGE_FILE}: {e}", dir.display()),
+            }
+        })
     }
 
     /// Read the image of one root collection. An absent file is an empty

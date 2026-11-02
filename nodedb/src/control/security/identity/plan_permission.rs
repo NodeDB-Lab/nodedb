@@ -281,6 +281,8 @@ pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Perm
             | MetaOp::CreateTenantSnapshot { .. }
             | MetaOp::RestoreTenantSnapshot { .. }
             | MetaOp::PurgeDepartedVShards { .. }
+            | MetaOp::PurgeVersionsBelow { .. }
+            | MetaOp::KvDueExpiries { .. }
             | MetaOp::UnregisterCollection { .. }
             | MetaOp::UnregisterMaterializedView { .. }
             | MetaOp::QueryCollectionSize { .. }
@@ -375,10 +377,6 @@ pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Perm
 
         // Hash-chain verification reads every stored row of one collection.
         PhysicalPlan::Meta(MetaOp::VerifyHashChain { .. }) => Permission::Read,
-
-        // A home version check reads the versions a transaction's own reads
-        // observed, and no row.
-        PhysicalPlan::Meta(MetaOp::HomeVersions { .. }) => Permission::Read,
 
         // Array engine: query ops are reads, put/delete are writes, OpenArray is DDL, flush/compact are admin.
         PhysicalPlan::Array(

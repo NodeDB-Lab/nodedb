@@ -42,6 +42,7 @@ pub(super) fn compensation_hint_for_dispatch_error(e: &crate::Error) -> Compensa
         | crate::Error::ConflictRetry { .. }
         | crate::Error::CalvinSerializationConflict
         | crate::Error::CalvinParticipantError
+        | crate::Error::TxnSnapshotTooOld { .. }
         | crate::Error::RetryableRefusal { .. }
         | crate::Error::VShardAdmissionCapacityExceeded { .. }
         | crate::Error::CrdtAdmissionRetriesExhausted { .. }
@@ -161,7 +162,6 @@ pub(super) fn compensation_hint_for_dispatch_error(e: &crate::Error) -> Compensa
         | crate::Error::SessionTokenExpired
         | crate::Error::SessionKilledByAdmin
         | crate::Error::SessionUserDropped
-        | crate::Error::OidcProviderTenantUnbound
         | crate::Error::OidcProviderTenantUnavailable { .. }
         | crate::Error::ExternalRoleUndefined { .. }
         | crate::Error::OidcNoDefaultDatabase { .. }
@@ -197,6 +197,7 @@ fn compensation_hint_for_code(code: &ErrorCode) -> CompensationHint {
         | ErrorCode::ResourcesExhausted
         | ErrorCode::DispatchCapacity { .. }
         | ErrorCode::ConflictRetry
+        | ErrorCode::SerializationConflict { .. }
         | ErrorCode::OllpRetryRequired
         | ErrorCode::CrdtFrontierMismatch { .. }
         | ErrorCode::CollectionDraining { .. }

@@ -124,7 +124,7 @@ pub(crate) async fn mint_many_at_home(
     );
     let deadline = crate::control::server::shared::session::StatementDeadline::of_statement(state)
         .tokio_instant();
-    let (payload, _versions) = propose_replicated_entry(state, proposer, entry, deadline).await?;
+    let payload = propose_replicated_entry(state, proposer, entry, deadline).await?;
     // The apply answers the winner of every identity, in entry order.
     let winners: Vec<u32> =
         zerompk::from_msgpack(&payload).map_err(|e| crate::Error::Serialization {

@@ -176,6 +176,9 @@ pub(super) fn document_write(op: &DocumentOp) -> Option<ReplicatedWrite> {
             // Carried on the record so a staged replay keys each removed row
             // by its identity — see `decode/document.rs`.
             declared_primary_key,
+            // Every replica re-derives the matches over its current state, so
+            // only a current-state match replicates as a predicate.
+            system_time: nodedb_types::SystemTimeScope::Current,
         } => document::bulk_delete(
             collection.as_str(),
             filters,
@@ -199,6 +202,8 @@ pub(super) fn document_write(op: &DocumentOp) -> Option<ReplicatedWrite> {
             // Carried on the record so an applier can enforce NOT NULL on the
             // computed post-image — see `decode/document.rs`.
             declared_primary_key,
+            // See `BulkDelete`.
+            system_time: nodedb_types::SystemTimeScope::Current,
         } => document::bulk_update(
             collection.as_str(),
             filters,
@@ -250,6 +255,7 @@ pub(super) fn document_write(op: &DocumentOp) -> Option<ReplicatedWrite> {
             rls_write_check: _,
             resolved_sum_targets,
             declared_primary_key,
+            target_system_time: nodedb_types::SystemTimeScope::Current,
         } => document_join::merge_apply(
             JoinFields {
                 target_collection: target_collection.as_str(),
@@ -287,6 +293,7 @@ pub(super) fn document_write(op: &DocumentOp) -> Option<ReplicatedWrite> {
             rls_write_check: _,
             resolved_sum_targets,
             declared_primary_key,
+            target_system_time: nodedb_types::SystemTimeScope::Current,
         } => document_join::update_from_join_apply(
             JoinFields {
                 target_collection: target_collection.as_str(),
@@ -319,6 +326,9 @@ pub(super) fn document_write(op: &DocumentOp) -> Option<ReplicatedWrite> {
         | DocumentOp::UpdateFromJoin {
             source_rows: None, ..
         } => return None,
+        // A join matching at a transaction snapshot stages in its block and
+        // never proposes as a join.
+        DocumentOp::Merge { .. } | DocumentOp::UpdateFromJoin { .. } => return None,
         DocumentOp::Truncate {
             collection,
             restart_identity,
@@ -332,7 +342,8 @@ pub(super) fn document_write(op: &DocumentOp) -> Option<ReplicatedWrite> {
             declared_primary_key.as_deref(),
         ),
         // OLLP-prepared bulk plans route via the cross-shard Calvin path, not
-        // single-shard Raft proposal.
+        // single-shard Raft proposal. A plan matching at a transaction
+        // snapshot stages in its block and never proposes as a predicate.
         DocumentOp::BulkDelete { .. } | DocumentOp::BulkUpdate { .. } => return None,
 
         // Verdict is already on the plan (`RlsWriteCheck::DecidedEarlierInRequest`),

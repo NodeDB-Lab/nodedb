@@ -104,7 +104,8 @@ impl CoreLoop {
             TimeseriesOp::ReadAggregate {
                 collection,
                 aggregate,
-            } => self.execute_ts_read_aggregate(task, collection.as_str(), aggregate),
+                system_time,
+            } => self.execute_ts_read_aggregate(task, collection.as_str(), aggregate, *system_time),
         }
     }
 }
@@ -266,7 +267,7 @@ mod tests {
             wal_lsn: envelope_lsn.map(Lsn::new),
             resolved_now_ms: None,
             commit_hlc: None,
-            entry_version: None,
+            system_ordinal: None,
             admission: Admission::Admitted,
         })
     }

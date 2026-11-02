@@ -52,7 +52,8 @@ fn bitmap_cutoff(temporal: &TemporalScope) -> Option<SystemTimeScope> {
     match temporal.system_time {
         scope @ (SystemTimeScope::Current
         | SystemTimeScope::AsOf(_)
-        | SystemTimeScope::Pinned { .. }) => Some(scope),
+        | SystemTimeScope::Pinned { .. }
+        | SystemTimeScope::TxnSnapshot { .. }) => Some(scope),
         SystemTimeScope::AllVersions => None,
     }
 }

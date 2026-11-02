@@ -193,6 +193,7 @@ fn sort_merge_join_completeness_past_50k_cap() {
             right_rls_filters: Vec::new(),
             left_input: None,
             right_input: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
 
@@ -263,6 +264,7 @@ fn nested_loop_join_completeness_past_50k_cap() {
             right_rls_filters: Vec::new(),
             left_input: None,
             right_input: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
 
@@ -607,6 +609,7 @@ fn sort_merge_join_left_over_budget_surfaces_error() {
             right_rls_filters: Vec::new(),
             left_input: None,
             right_input: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
 
@@ -653,6 +656,7 @@ fn sort_merge_join_right_over_budget_surfaces_error() {
             right_rls_filters: Vec::new(),
             left_input: None,
             right_input: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
 
@@ -698,6 +702,7 @@ fn nested_loop_join_left_over_budget_surfaces_error() {
             right_rls_filters: Vec::new(),
             left_input: None,
             right_input: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
 
@@ -743,6 +748,7 @@ fn nested_loop_join_right_over_budget_surfaces_error() {
             right_rls_filters: Vec::new(),
             left_input: None,
             right_input: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
 
@@ -800,6 +806,7 @@ fn no_limit_join_output_over_budget_surfaces_error() {
             right_rls_filters: Vec::new(),
             left_input: None,
             right_input: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
 

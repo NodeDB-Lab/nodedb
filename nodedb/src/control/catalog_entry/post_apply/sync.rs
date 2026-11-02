@@ -434,9 +434,6 @@ pub fn apply_post_apply_side_effects_sync(entry: &CatalogEntry, shared: &Arc<Sha
         } => {
             consumer_group::delete(*database_id, *tenant_id, stream_name, name, shared);
         }
-        CatalogEntry::MigrateConsumerGroupStream { def, legacy_stream } => {
-            consumer_group::migrate_stream(def, legacy_stream, shared);
-        }
         CatalogEntry::PutCheckpoint(_)
         | CatalogEntry::DeleteCheckpoint { .. }
         | CatalogEntry::CompactHistory { .. } => {

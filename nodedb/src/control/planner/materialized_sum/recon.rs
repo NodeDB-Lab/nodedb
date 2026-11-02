@@ -31,6 +31,15 @@
 //! returns the base value of a row it rewrote. The delta settled from such an
 //! image is wrong by that row's staged contribution.
 //!
+//! # The cut a settled read observes
+//!
+//! A read a delta is settled from takes a read cut first ([`read_cut`]), then
+//! reads. The cut's ordinal travels with the images onto the read-set entry.
+//! A delta settled from them holds only while no committed version of the
+//! rows has a later ordinal, so the apply validates the read at that ordinal.
+//! A write between the cut and the read can only abort the statement, never
+//! let a moved image through.
+//!
 //! # Plane discipline
 //!
 //! Runs on the coordinator's Control Plane (Tokio). The scan goes through the
@@ -42,21 +51,14 @@ use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TraceId, TxnId};
 use nodedb_physical::physical_plan::{DocumentOp, PhysicalPlan};
 
-/// What a plan-time reconnaissance read observed, and the version it observed
-/// it at.
-///
-/// The version travels with the rows because a delta settled from them is only
-/// as good as the images it was folded from: the caller stamps it onto a
-/// read-set entry so the Calvin OCC check aborts the statement if the source
-/// rows moved between this read and the apply. Rows without their version will
-/// be a silently stale total.
-pub(crate) struct ReconRead<T> {
-    /// The decoded rows.
-    pub rows: T,
-    /// The source collection's version on its vShard at read time — the
-    /// comparand OCC validation checks the read against. Every replica
-    /// numbers versions alike, so any replica can have served the read.
-    pub read_version: nodedb_types::WriteVersion,
+/// The ordinal of a read cut taken now: every version committed after it,
+/// and every version it does not cover, has a higher ordinal. A read that
+/// settles a delta takes it before it reads.
+pub(crate) async fn read_cut(state: &SharedState) -> crate::Result<i64> {
+    let now_ms = nodedb_types::ordinal_to_ms(nodedb_types::wall_now_ns_i64());
+    Ok(crate::control::read_cut::statement_cap(state, now_ms)
+        .await?
+        .cap)
 }
 
 /// Scan `collection` for the rows `filters` matches, returning each row's full
@@ -80,7 +82,7 @@ pub(in crate::control::planner) async fn recon_scan_rows(
     txn_id: Option<TxnId>,
     collection: &str,
     filters: Vec<u8>,
-) -> crate::Result<ReconRead<Vec<serde_json::Value>>> {
+) -> crate::Result<Vec<serde_json::Value>> {
     let scan_plan = PhysicalPlan::Document(DocumentOp::Scan {
         collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
         filters,
@@ -96,15 +98,13 @@ pub(in crate::control::planner) async fn recon_scan_rows(
         prefilter: None,
     });
 
-    let read = execute_read(state, tenant_id, database_id, txn_id, collection, scan_plan).await?;
+    let payloads =
+        execute_read(state, tenant_id, database_id, txn_id, collection, scan_plan).await?;
     let mut rows = Vec::new();
-    for payload in &read.rows {
+    for payload in &payloads {
         rows.extend(decode_rows(payload.as_slice()));
     }
-    Ok(ReconRead {
-        rows,
-        read_version: read.read_version,
-    })
+    Ok(rows)
 }
 
 /// Read the ONE stored row `surrogate` addresses, or `None` when no such row
@@ -133,7 +133,7 @@ pub(crate) async fn recon_point_row(
     collection: &str,
     document_id: &str,
     surrogate: Surrogate,
-) -> crate::Result<ReconRead<Option<serde_json::Value>>> {
+) -> crate::Result<Option<serde_json::Value>> {
     let get_plan = PhysicalPlan::Document(DocumentOp::PointGet {
         collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
         document_id: document_id.to_owned(),
@@ -148,17 +148,14 @@ pub(crate) async fn recon_point_row(
         valid_at_ms: None,
     });
 
-    let read = execute_read(state, tenant_id, database_id, txn_id, collection, get_plan).await?;
+    let payloads =
+        execute_read(state, tenant_id, database_id, txn_id, collection, get_plan).await?;
     // A point get answers with the row's normalized MessagePack body, and with
     // an EMPTY payload when the row is absent.
-    Ok(ReconRead {
-        rows: read
-            .rows
-            .iter()
-            .find(|payload| !payload.is_empty())
-            .and_then(|payload| nodedb_types::json_from_msgpack(payload.as_slice()).ok()),
-        read_version: read.read_version,
-    })
+    Ok(payloads
+        .iter()
+        .find(|payload| !payload.is_empty())
+        .and_then(|payload| nodedb_types::json_from_msgpack(payload.as_slice()).ok()))
 }
 
 /// Run one read plan through the gateway, returning the raw payloads.
@@ -168,14 +165,9 @@ pub(crate) async fn recon_point_row(
 /// write with no target to address — so every plan-time read routes through
 /// the gateway.
 ///
-/// The read validates on `collection`'s vShard, so its version is the one
-/// the read reported for that vShard. A vShard the read reported no version
-/// of had no write the serving core knew of, so the read observed it at
-/// `WriteVersion::ZERO`.
-///
-/// The version is the collection's COMMITTED version whether or not `txn_id`
-/// is set: a staged write moves no write version. So an entry stamped with it
-/// still detects a concurrent commit to the rows read, and never this
+/// Inside a transaction the read also folds the staging overlay. A staged
+/// write moves no committed version, so the apply's check of a settled read
+/// detects a concurrent commit to the rows read, and never this
 /// transaction's own staged writes.
 async fn execute_read(
     state: &SharedState,
@@ -184,9 +176,9 @@ async fn execute_read(
     txn_id: Option<TxnId>,
     collection: &str,
     plan: PhysicalPlan,
-) -> crate::Result<ReconRead<Vec<Vec<u8>>>> {
-    let validation_vshard =
-        nodedb_types::CollectionKey::from_qualified_str(database_id, collection)?.vshard();
+) -> crate::Result<Vec<Vec<u8>>> {
+    // A name that resolves to no collection key is refused before the read.
+    nodedb_types::CollectionKey::from_qualified_str(database_id, collection)?;
     let gateway = state.installed_gateway()?;
     let gw_ctx = crate::control::gateway::core::QueryContext {
         tenant_id,
@@ -199,13 +191,7 @@ async fn execute_read(
     };
     // A shard verdict keeps its own typed error.
     let outcome = gateway.execute_internal_outcome(&gw_ctx, plan).await?;
-    Ok(ReconRead {
-        read_version: outcome
-            .read_versions
-            .of(validation_vshard)
-            .unwrap_or_default(),
-        rows: outcome.payloads,
-    })
+    Ok(outcome.payloads)
 }
 
 /// Decode a document-scan payload into one document per row.

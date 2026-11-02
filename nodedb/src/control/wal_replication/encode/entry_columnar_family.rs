@@ -33,6 +33,7 @@ pub(super) fn columnar_write(op: &ColumnarOp) -> crate::Result<Option<Replicated
             // as it admits the entry (`ReplicatedEntry::system_ordinal`), and
             // every replica's funnel stamps that run.
             system_from: _,
+            restored_versions,
             // Plain insert: policy decided at plan time. ON CONFLICT DO UPDATE defers —
             // its merged row exists only in the handler, so the guard below refuses it.
             rls_write_check,
@@ -48,6 +49,7 @@ pub(super) fn columnar_write(op: &ColumnarOp) -> crate::Result<Option<Replicated
                 on_conflict_updates,
                 surrogates,
                 schema_bytes,
+                restored_versions,
                 provenance: encode_provenance(provenance),
                 returning: encode_returning(returning),
                 rls_filters,
@@ -62,8 +64,10 @@ pub(super) fn columnar_write(op: &ColumnarOp) -> crate::Result<Option<Replicated
             // (`ReplicatedEntry::system_ordinal`), as for `Update` below.
             system_from: _,
             rls_write_check,
+            system_time,
         } => {
             refuse_governed_predicate_dml(collection.as_str(), rls_write_check)?;
+            refuse_snapshot_predicate_dml(collection.as_str(), system_time)?;
             columnar::bulk_delete(collection.as_str(), filters)
         }
         ColumnarOp::Update {
@@ -74,8 +78,10 @@ pub(super) fn columnar_write(op: &ColumnarOp) -> crate::Result<Option<Replicated
             // (`ReplicatedEntry::system_ordinal`), as for an insert.
             system_from: _,
             rls_write_check,
+            system_time,
         } => {
             refuse_governed_predicate_dml(collection.as_str(), rls_write_check)?;
+            refuse_snapshot_predicate_dml(collection.as_str(), system_time)?;
             columnar::bulk_update(collection.as_str(), filters, updates)
         }
 
@@ -137,6 +143,25 @@ fn refuse_governed_merge(
 /// Refuse a predicate `UPDATE` / `DELETE` on a collection that carries an RLS
 /// write policy — see [`columnar_write`]'s `Delete` / `Update` arms for the
 /// full reasoning.
+/// Refuse a columnar predicate UPDATE/DELETE that matches at any scope but
+/// the current state. Every replica re-derives the matches over its current
+/// state, so a snapshot-scoped match cannot replicate as a predicate. A
+/// block's predicate write stages instead.
+fn refuse_snapshot_predicate_dml(
+    collection: &str,
+    system_time: &nodedb_types::SystemTimeScope,
+) -> crate::Result<()> {
+    if system_time.is_current() {
+        return Ok(());
+    }
+    Err(crate::Error::PlanError {
+        detail: format!(
+            "columnar predicate UPDATE/DELETE on '{collection}' matching at {system_time:?} \
+             cannot be replicated as a predicate: a replica matches the current state"
+        ),
+    })
+}
+
 fn refuse_governed_predicate_dml(
     collection: &str,
     rls_write_check: &nodedb_types::RlsWriteCheck,

@@ -205,6 +205,7 @@ mod tests {
                 apply_key,
                 event_source: nodedb_wal::NO_EVENT_SOURCE,
                 commit_hlc: 0,
+                system_ordinal: nodedb_wal::NO_SYSTEM_ORDINAL,
             },
         )
         .expect("build WAL record")
@@ -260,6 +261,7 @@ mod tests {
                 apply_key: 0,
                 event_source: nodedb_wal::NO_EVENT_SOURCE,
                 commit_hlc: 9_000_000,
+                system_ordinal: nodedb_wal::NO_SYSTEM_ORDINAL,
             },
         )
         .expect("build WAL record");

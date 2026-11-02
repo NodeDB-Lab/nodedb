@@ -4,7 +4,7 @@
 //!
 //! On startup, replays `TimeseriesBatch` records into the per-core
 //! columnar memtable. A record the collection's replay stamp names is in a
-//! partition already, or a truncate removed it, and is skipped
+//! partition already, and is skipped
 //! (`timeseries_checkpoint::stamp`). A committed-redo apply runs the same arm
 //! without that skip (`replay_policy`).
 //!
@@ -19,13 +19,69 @@ use super::timeseries_wal_decode::{ColumnarReplayArgs, TimeseriesReplayArgs};
 use crate::wal::{DecodedBatchRecord, decode_batch_record};
 
 impl CoreLoop {
+    /// Apply the ended-partition sub-record `redo` of `record`. Returns
+    /// whether it applied. A dropped collection skips it, and an install
+    /// that fails reports the record unapplied.
+    fn replay_ts_ended_partition(
+        &mut self,
+        record: &nodedb_wal::WalRecord,
+        redo: crate::wal::TimeseriesEndedPartitionRedo,
+        tombstones: &nodedb_wal::TombstoneSet,
+    ) -> bool {
+        let lsn = record.header.lsn;
+        let database_id = DatabaseId::new(record.header.database_id);
+        if tombstones.is_tombstoned(
+            database_id.as_u64(),
+            record.header.tenant_id,
+            &redo.collection,
+            lsn,
+        ) {
+            return false;
+        }
+        let key = (
+            database_id,
+            crate::types::TenantId::new(record.header.tenant_id),
+            redo.collection,
+        );
+        if redo.meta.ended_at.is_none() {
+            self.replay_record_unapplied(
+                "timeseries",
+                "ended_partition",
+                lsn,
+                &format!("ended partition of '{}' carries no ended_at", key.2),
+            );
+            return false;
+        }
+        // The validate pass writes nothing.
+        if self.claim_for_validation() {
+            return false;
+        }
+        let partition = super::timeseries::ended_install::EndedPartitionInstall {
+            meta: redo.meta,
+            files: redo.files,
+        };
+        // A committed-redo install records the undo that removes the
+        // partition when the record rolls back.
+        let mut undo = Vec::new();
+        let undo_log = self.recording_redo_undo().then_some(&mut undo);
+        let installed = self.install_ts_ended_partition(&key, partition, undo_log);
+        self.record_redo_undo(undo);
+        match installed {
+            Ok(_) => true,
+            Err(e) => {
+                self.replay_record_unapplied("timeseries", "ended_partition", lsn, &e.to_string());
+                false
+            }
+        }
+    }
+
     /// Replay WAL timeseries records to rebuild in-memory memtable state after crash.
     ///
     /// Called once during startup, after `open()` but before the event loop.
     /// Processes `TimeseriesBatch` records and the columnar-family truncate
     /// records, ignoring records for other vShards. Skips every record its
     /// collection's replay stamp names, and never replays a record a later
-    /// truncate of its collection already removed.
+    /// erasing truncate of its collection already removed.
     pub fn replay_timeseries_wal(
         &mut self,
         records: &[nodedb_wal::WalRecord],
@@ -35,16 +91,7 @@ impl CoreLoop {
         use crate::data::executor::wal_replay_columnar_truncate::TruncateFloors;
         use nodedb_wal::record::RecordType;
 
-        let bitemporal = |key: &(DatabaseId, crate::types::TenantId, String)| {
-            self.is_bitemporal(key.0.as_u64(), key.1.as_u64(), &key.2)
-        };
-        let mut truncate_floors = TruncateFloors::collect(
-            records,
-            num_cores,
-            self.core_id,
-            &self.ts_replay.stamps,
-            &bitemporal,
-        );
+        let truncate_floors = TruncateFloors::collect(records, num_cores, self.core_id);
         let mut replayed = 0usize;
         let mut skipped = 0usize;
         // Records replayed below the highest LSN their collection's stamp
@@ -89,7 +136,6 @@ impl CoreLoop {
             self.begin_ts_record(records, index, num_cores, &mut current);
 
             if is_truncate {
-                truncate_floors.pass(record);
                 if self.replay_truncate_record(record, tombstones) {
                     replayed += 1;
                 } else {
@@ -98,6 +144,47 @@ impl CoreLoop {
                 continue;
             }
 
+            // A RESTORE's ended timeseries partition opens with its own
+            // discriminator pair. Its install is idempotent by the
+            // partition's identity, so a restart replays it as a no-op.
+            // A RESTORE's series catalog installs ahead of the rows it
+            // serves, in log order.
+            if let Some(redo) = crate::wal::TimeseriesSeriesCatalogRedo::decode(&record.payload) {
+                if self.replay_ts_series_catalog(
+                    DatabaseId::new(record.header.database_id),
+                    record.header.tenant_id,
+                    record.header.lsn,
+                    redo,
+                    tombstones,
+                ) {
+                    replayed += 1;
+                } else {
+                    skipped += 1;
+                }
+                continue;
+            }
+            if let Some(redo) = crate::wal::TimeseriesEndedPartitionRedo::decode(&record.payload) {
+                if self.replay_ts_ended_partition(record, redo, tombstones) {
+                    replayed += 1;
+                } else {
+                    skipped += 1;
+                }
+                continue;
+            }
+
+            // A RESTORE's columnar keys (`columnar_restore`) open with their
+            // own discriminator pair, so no other shape decodes as one.
+            if let Some(applied) = self.try_replay_columnar_restore(
+                &record.payload,
+                record.header.tenant_id,
+                DatabaseId::new(record.header.database_id),
+                record.header.lsn,
+                tombstones,
+                &truncate_floors,
+            ) {
+                replayed += applied;
+                continue;
+            }
             // A transaction's columnar row images (`columnar_image`) are a
             // disjoint map shape too, tried first for the same reason as the
             // DML shapes below.
@@ -118,11 +205,10 @@ impl CoreLoop {
             let redo_apply = self.applying_committed_redo();
 
             // Predicate DML (`columnar_dml`) rides the same `TimeseriesBatch`
-            // record type but a disjoint map shape from both `ColumnarWalRecord`
-            // and the legacy tuples (see `ColumnarDmlWalRecord`'s doc comment),
-            // so it must be tried BEFORE `decode_batch_record` below — that
-            // decoder's tuple fallbacks would otherwise mis-classify it as a
-            // malformed row-payload record and drop it.
+            // record type but a map shape disjoint from `ColumnarWalRecord`
+            // and the ingest tuple (see `ColumnarDmlWalRecord`'s doc comment),
+            // so it must be tried BEFORE `decode_batch_record` below. That
+            // decoder refuses it, and the record would be dropped.
             if !redo_apply
                 && let Some(applied) = self.try_replay_columnar_predicate_dml(
                     &record.payload,
@@ -155,9 +241,8 @@ impl CoreLoop {
             }
 
             // Decode the record. A columnar insert is a map-shaped
-            // `ColumnarWalRecord` carrying per-row surrogates. The shorter
-            // tuple shapes decode with empty surrogates. A timeseries record
-            // among them names no ingest format, and its replay refuses it.
+            // `ColumnarWalRecord` carrying per-row surrogates. A timeseries
+            // ingest is the six-element tuple.
             // Records iterate in LSN order (guaranteed by the WAL segment
             // layout), so provenance-aware replay processes seq in order.
             let Ok(DecodedBatchRecord {
@@ -170,6 +255,7 @@ impl CoreLoop {
                 conflict_policy,
                 default_timestamp_ms,
                 system_from,
+                restored_versions,
             }) = decode_batch_record(&record.payload)
             else {
                 self.replay_record_unapplied(
@@ -197,20 +283,20 @@ impl CoreLoop {
                 skipped += 1;
                 continue;
             }
-            // A later truncate of this collection removed this row.
+            // A later erasing truncate of this collection removed this row.
             if truncate_floors.covers(&key, record_lsn) {
                 skipped += 1;
                 continue;
             }
 
-            // A partition holds this record, or a truncate removed it. A
+            // A partition holds this record. A
             // restart gate only: see `replay_policy`.
             if self.ts_replay_skips(&key, record_lsn) {
                 skipped += 1;
                 continue;
             }
 
-            if redo_apply && kind.as_deref() == Some("columnar") {
+            if redo_apply && kind == "columnar" {
                 skipped += 1;
                 continue;
             }
@@ -223,7 +309,7 @@ impl CoreLoop {
                 .get(&key)
                 .is_some_and(|stamp| stamp.rows.highest() > record_lsn);
 
-            let accepted = match kind.as_deref() {
+            let accepted = match kind.as_str() {
                 // The columnar floor is consulted HERE and not above the `kind`
                 // match, because it is the columnar engines' floor and this
                 // record type is shared: a `timeseries` record routes to
@@ -231,7 +317,7 @@ impl CoreLoop {
                 // does not cover and whose replay it must therefore not gate.
                 // Gating one engine's records on another engine's durability
                 // would drop the writes outright.
-                Some("columnar")
+                "columnar"
                     if self.replay_watermark_skips(
                         self.floors.replay_floors.columnar.covers(record_lsn),
                     ) =>
@@ -244,7 +330,7 @@ impl CoreLoop {
                     skipped += 1;
                     continue;
                 }
-                Some("columnar") => self.replay_columnar_payload(
+                "columnar" => self.replay_columnar_payload(
                     tid_id,
                     db_id,
                     ColumnarReplayArgs {
@@ -255,9 +341,10 @@ impl CoreLoop {
                         surrogates: record_surrogates,
                         conflict_policy,
                         system_from,
+                        restored_versions,
                     },
                 ),
-                Some("timeseries") | None => self.replay_timeseries_payload(
+                "timeseries" => self.replay_timeseries_payload(
                     tid_id,
                     db_id,
                     TimeseriesReplayArgs {
@@ -267,9 +354,10 @@ impl CoreLoop {
                         provenance: record_provenance,
                         format: record_format.as_deref(),
                         default_timestamp_ms,
+                        system_ordinal: record.system_ordinal(),
                     },
                 ),
-                Some(other) => {
+                other => {
                     self.replay_record_rejected(
                         "timeseries",
                         record_lsn,
@@ -315,24 +403,7 @@ impl CoreLoop {
 #[cfg(test)]
 mod tests {
     use crate::data::executor::core_loop::CoreLoop;
-    use crate::data::executor::core_loop::write_index::CollKey;
-    use crate::data::executor::core_loop::write_index::tests::local;
-    use crate::types::{DatabaseId, TenantId};
-
-    /// The collection key a replayed write of `collection` in database 0
-    /// records under: the collection's home vShard.
-    fn replayed_key(collection: &str) -> CollKey {
-        let vshard =
-            nodedb_types::CollectionKey::from_qualified_str(DatabaseId::new(0), collection)
-                .expect("collection key")
-                .vshard();
-        CollKey {
-            vshard,
-            db: DatabaseId::new(0),
-            tenant: TenantId::new(7),
-            collection: Box::from(collection),
-        }
-    }
+    use crate::types::{DatabaseId, Lsn, TenantId};
     use crate::wal::{DecodedBatchRecord, decode_batch_record};
     use nodedb_types::Surrogate;
     use nodedb_types::columnar::ColumnarWalRecord;
@@ -376,13 +447,16 @@ mod tests {
         }
     }
 
-    /// A one-row msgpack `Value::Object` columnar payload: `{col: "v"}`.
+    /// A one-row msgpack `Value::Object` columnar payload: `{id: "r1", col: "v"}`.
     fn row_payload(col: &str, value: &str) -> Vec<u8> {
         let mut obj = std::collections::HashMap::new();
         obj.insert(
             col.to_string(),
             nodedb_types::Value::String(value.to_string()),
         );
+        // Every columnar row carries its `id` identity, as the planner fills
+        // it.
+        obj.insert("id".to_string(), nodedb_types::Value::String("r1".into()));
         // Mirror the production columnar-insert write path, which encodes rows
         // with the PLAIN msgpack writer (`value_to_msgpack`) and reads them back
         // with `value_from_msgpack`. `zerompk::to_msgpack_vec(&Value)` would emit
@@ -481,6 +555,7 @@ mod tests {
             surrogates: Vec::new(),
             conflict_policy: Vec::new(),
             system_from: None,
+            restored_versions: Vec::new(),
         };
         let payload = zerompk::to_msgpack_vec(&rec).expect("encode columnar wal record");
         WalRecord::new(WalRecordArgs {
@@ -513,7 +588,7 @@ mod tests {
         };
         let mut engine = nodedb_columnar::MutationEngine::new("m".to_string(), schema);
         engine
-            .insert(&[Value::Integer(1), Value::Integer(10)])
+            .insert(&[Value::Integer(1), Value::Integer(10)], 1)
             .expect("seed row");
         h.core.columnar_engines.insert(
             (DatabaseId::new(0), TenantId::new(7), "m".to_string()),
@@ -536,6 +611,7 @@ mod tests {
             surrogates: Vec::new(),
             conflict_policy: policy.encode().expect("encode policy"),
             system_from: None,
+            restored_versions: Vec::new(),
         };
         let record = WalRecord::new(WalRecordArgs {
             record_type: RecordType::TimeseriesBatch as u32,
@@ -592,6 +668,7 @@ mod tests {
             surrogates: Vec::new(),
             conflict_policy: Vec::new(),
             system_from: Some(first),
+            restored_versions: Vec::new(),
         };
         let record = WalRecord::new(WalRecordArgs {
             record_type: RecordType::TimeseriesBatch as u32,
@@ -619,8 +696,8 @@ mod tests {
             let engine = h.core.columnar_engines.get(&key).expect("engine");
             let ts_idx = engine.schema().ts_system_idx().expect("bitemporal schema");
             engine
-                .scan_memtable_rows()
-                .map(|row| match row.expect("read").get(ts_idx) {
+                .scan_memtable_versions(nodedb_columnar::VersionCut::All)
+                .map(|row| match row.expect("read").2.get(ts_idx) {
                     Some(Value::Integer(ordinal)) => *ordinal,
                     other => panic!("no _ts_system ordinal: {other:?}"),
                 })
@@ -654,12 +731,11 @@ mod tests {
     /// WAL replay threads the record LSN into `replay_task` so
     /// `execute_columnar_insert`'s `note_collection_write(task, ..)` call
     /// (gated on `task.wal_lsn().is_some()`) fires during WAL replay too, not
-    /// just on live writes. This proves the collection version in
-    /// `WriteVersionIndex` is populated end-to-end through
+    /// just on live writes. The note reaches the watermark end-to-end through
     /// `replay_timeseries_wal` -> `replay_columnar_payload` ->
     /// `execute_columnar_insert`.
     #[test]
-    fn columnar_insert_replay_populates_the_collection_write_version() {
+    fn columnar_insert_replay_notes_its_record() {
         let mut h = make_core();
         let record = columnar_wal_record("events_wv", 123, 7);
 
@@ -670,12 +746,9 @@ mod tests {
         );
 
         assert_eq!(
-            h.core
-                .write_index
-                .collection_version(&replayed_key("events_wv")),
-            Some(local(123)),
-            "columnar insert replay must record the record's version as the \
-             collection write version"
+            h.core.watermark,
+            Lsn::new(123),
+            "columnar insert replay must note its record as applied"
         );
     }
 
@@ -723,10 +796,8 @@ mod tests {
         );
 
         assert_eq!(
-            h.core
-                .write_index
-                .collection_version(&replayed_key("events_ungated")),
-            Some(local(150)),
+            h.core.watermark,
+            Lsn::new(150),
             "a record above the floor must be applied"
         );
     }
@@ -814,9 +885,9 @@ mod tests {
         );
     }
 
-    /// A timeseries record that names no ingest format is not a shape any
-    /// writer produces. Restart replay halts on it with nothing applied. It
-    /// never guesses a format from the payload bytes.
+    /// A timeseries record that names an empty ingest format is not a shape
+    /// any writer produces. Restart replay halts on it with nothing applied.
+    /// It never guesses a format from the payload bytes.
     #[test]
     fn a_timeseries_record_without_a_format_halts_replay() {
         let mut h = make_core();
@@ -831,6 +902,8 @@ mod tests {
             "metrics_unformatted".to_string(),
             sample,
             Option::<SyncProvenance>::None,
+            String::new(),
+            1_000i64,
         ))
         .expect("encode timeseries tuple");
         let record = WalRecord::new(WalRecordArgs {
@@ -924,6 +997,7 @@ mod tests {
             surrogates: vec![Surrogate::new(100), Surrogate::new(101)],
             conflict_policy: Vec::new(),
             system_from: None,
+            restored_versions: Vec::new(),
         };
         let bytes = zerompk::to_msgpack_vec(&rec).expect("encode map record");
 
@@ -936,7 +1010,7 @@ mod tests {
             surrogates,
             ..
         } = decode_batch_record(&bytes).expect("decode map record");
-        assert_eq!(kind.as_deref(), Some("columnar"));
+        assert_eq!(kind, "columnar");
         assert_eq!(collection, "events");
         assert_eq!(payload, vec![7, 8, 9]);
         assert_eq!(provenance, Some(prov));
@@ -944,82 +1018,22 @@ mod tests {
         assert_eq!(surrogates, vec![Surrogate::new(100), Surrogate::new(101)]);
     }
 
+    /// The four-element and two-element tuples are not record shapes.
     #[test]
-    fn legacy_columnar_tuple_decodes_with_empty_surrogates() {
-        // Pre-surrogate columnar records were a 4-tuple array. They must still
-        // replay, with surrogates defaulting to empty.
+    fn short_tuples_are_not_record_shapes() {
         let prov: Option<SyncProvenance> = None;
-        let bytes = zerompk::to_msgpack_vec(&(
+        let four = zerompk::to_msgpack_vec(&(
             "columnar".to_string(),
             "events".to_string(),
             vec![1u8, 2, 3],
             prov,
         ))
-        .expect("encode legacy columnar tuple");
+        .expect("encode four-element tuple");
+        assert!(decode_batch_record(&four).is_err());
 
-        let DecodedBatchRecord {
-            kind,
-            collection,
-            payload,
-            provenance,
-            format,
-            surrogates,
-            ..
-        } = decode_batch_record(&bytes).expect("decode legacy tuple");
-        assert_eq!(kind.as_deref(), Some("columnar"));
-        assert_eq!(collection, "events");
-        assert_eq!(payload, vec![1, 2, 3]);
-        assert_eq!(provenance, None);
-        assert_eq!(format, None);
-        assert!(surrogates.is_empty());
-    }
-
-    #[test]
-    fn legacy_timeseries_tuple_unaffected() {
-        // Timeseries records share the same WAL record type but use the
-        // "timeseries" kind tag and never carried surrogates. They must
-        // continue decoding via the tuple fallback with empty surrogates.
-        let prov: Option<SyncProvenance> = None;
-        let bytes = zerompk::to_msgpack_vec(&(
-            "timeseries".to_string(),
-            "metrics".to_string(),
-            vec![4u8, 5, 6],
-            prov,
-        ))
-        .expect("encode timeseries tuple");
-
-        let DecodedBatchRecord {
-            kind,
-            collection,
-            payload,
-            format,
-            surrogates,
-            ..
-        } = decode_batch_record(&bytes).expect("decode timeseries tuple");
-        assert_eq!(kind.as_deref(), Some("timeseries"));
-        assert_eq!(collection, "metrics");
-        assert_eq!(payload, vec![4, 5, 6]);
-        assert_eq!(format, None);
-        assert!(surrogates.is_empty());
-    }
-
-    #[test]
-    fn legacy_untagged_two_tuple_decodes() {
-        let bytes = zerompk::to_msgpack_vec(&("metrics".to_string(), vec![1u8, 2]))
-            .expect("encode 2-tuple");
-        let DecodedBatchRecord {
-            kind,
-            collection,
-            payload,
-            format,
-            surrogates,
-            ..
-        } = decode_batch_record(&bytes).expect("decode 2-tuple");
-        assert_eq!(kind, None);
-        assert_eq!(collection, "metrics");
-        assert_eq!(payload, vec![1, 2]);
-        assert_eq!(format, None);
-        assert!(surrogates.is_empty())
+        let two = zerompk::to_msgpack_vec(&("metrics".to_string(), vec![1u8, 2]))
+            .expect("encode two-element tuple");
+        assert!(decode_batch_record(&two).is_err());
     }
 
     /// Every timeseries ingest record carries its statement instant. The
@@ -1056,7 +1070,7 @@ mod tests {
             default_timestamp_ms,
             ..
         } = decode_batch_record(&bytes).expect("decode ingest record");
-        assert_eq!(kind.as_deref(), Some("timeseries"));
+        assert_eq!(kind, "timeseries");
         assert_eq!(collection, "cpu");
         assert_eq!(format.as_deref(), Some("ilp"));
         assert_eq!(default_timestamp_ms, Some(1_700_000_000_123));

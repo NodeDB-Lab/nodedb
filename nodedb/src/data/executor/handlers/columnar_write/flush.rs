@@ -187,7 +187,7 @@ mod tests {
         let mut engine = MutationEngine::new("flush_test".to_string(), schema);
         for (id, tag) in [(1, "a"), (2, "b"), (3, "a")] {
             engine
-                .insert(&[Value::Integer(id), Value::String(tag.to_string())])
+                .insert(&[Value::Integer(id), Value::String(tag.to_string())], id)
                 .expect("insert");
         }
         engine

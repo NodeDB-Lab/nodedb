@@ -22,8 +22,8 @@ pub enum WireVersionError {
         supported_max: WireVersion,
     },
 
-    /// The raw bytes could not be decoded as either a versioned envelope or
-    /// a raw v1 inner type.
+    /// The raw bytes could not be decoded as a versioned envelope or its
+    /// inner type.
     #[error("wire decode failure: {0}")]
     DecodeFailure(String),
 

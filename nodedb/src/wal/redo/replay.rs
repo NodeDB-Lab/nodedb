@@ -57,7 +57,7 @@
 use std::borrow::Cow;
 
 use nodedb_wal::WalRecord;
-use nodedb_wal::record::{RecordType, WalRecordArgs};
+use nodedb_wal::record::{RecordStamp, RecordType, WalRecordArgs};
 
 use super::{RedoRecord, WriteGroupRecord};
 use crate::data::executor::core_loop::CoreLoop;
@@ -76,6 +76,10 @@ use crate::data::executor::core_loop::CoreLoop;
 /// bring the database up silently missing committed writes. The same holds for
 /// a sub-record that cannot be reconstituted: the group's ops are one atomic
 /// unit, so dropping one of them applies a torn transaction.
+///
+/// Each sub-record carries its enclosing record's system ordinal
+/// (`RecordHeader::system_ordinal`), the ordinal the live apply of the record
+/// stamped.
 ///
 /// Reconstituted records are always plaintext (`encryption_key: None`): the
 /// enclosing record was already decrypted when the WAL was read into memory, so
@@ -101,17 +105,26 @@ fn reconstitute_redo_records(records: &[WalRecord]) -> crate::Result<Vec<WalReco
             }
             _ => continue,
         };
+        // Every sub-record takes the system ordinal of its record, so every
+        // write of the record replays at the ordinal its live apply stamped.
+        let stamp = RecordStamp {
+            system_ordinal: record.header.system_ordinal,
+            ..RecordStamp::NONE
+        };
         for sub in ops {
-            out.push(WalRecord::new(WalRecordArgs {
-                record_type: sub.record_type,
-                lsn,
-                tenant_id: record.header.tenant_id,
-                vshard_id: record.header.vshard_id,
-                database_id: record.header.database_id,
-                payload: sub.payload,
-                encryption_key: None,
-                preamble_bytes: None,
-            })?);
+            out.push(WalRecord::new_stamped(
+                WalRecordArgs {
+                    record_type: sub.record_type,
+                    lsn,
+                    tenant_id: record.header.tenant_id,
+                    vshard_id: record.header.vshard_id,
+                    database_id: record.header.database_id,
+                    payload: sub.payload,
+                    encryption_key: None,
+                    preamble_bytes: None,
+                },
+                stamp,
+            )?);
         }
     }
     Ok(out)
@@ -295,6 +308,55 @@ mod tests {
             assert_eq!(r.header.lsn, 77);
             assert_eq!(r.header.tenant_id, 9);
             assert_eq!(r.header.vshard_id, 3);
+        }
+    }
+
+    /// Every sub-record replays at the system ordinal its record carries, the
+    /// one the record's live apply stamped.
+    #[test]
+    fn reconstitute_carries_the_record_system_ordinal() {
+        let redo = RedoRecord {
+            version: 1,
+            ops: vec![
+                RedoSubRecord {
+                    record_type: RecordType::Put as u32,
+                    payload: vec![1],
+                },
+                RedoSubRecord {
+                    record_type: RecordType::Delete as u32,
+                    payload: vec![2],
+                },
+            ],
+            calvin_stamp: None,
+            cross_shard_applied: None,
+            row_sources: Vec::new(),
+            publishes: Vec::new(),
+            row_changes: Vec::new(),
+            user_roles: Vec::new(),
+        };
+        let outer = WalRecord::new_stamped(
+            WalRecordArgs {
+                record_type: RecordType::TransactionRedo as u32,
+                lsn: 40,
+                tenant_id: 1,
+                vshard_id: 0,
+                database_id: 0,
+                payload: redo.to_bytes().expect("encode redo record"),
+                encryption_key: None,
+                preamble_bytes: None,
+            },
+            RecordStamp {
+                system_ordinal: 1_800_000_000_000_000_042,
+                ..RecordStamp::NONE
+            },
+        )
+        .expect("wal record");
+
+        let recon =
+            reconstitute_redo_records(std::slice::from_ref(&outer)).expect("well-formed redo");
+        assert_eq!(recon.len(), 2);
+        for r in &recon {
+            assert_eq!(r.system_ordinal(), Some(1_800_000_000_000_000_042));
         }
     }
 

@@ -87,6 +87,7 @@ pub(super) async fn consumer_loop(config: ConsumerConfig, metrics: Arc<CoreMetri
         cdc_router,
         num_cores,
         slab_account,
+        watermark_flush_interval,
     } = config;
 
     let core_id = rx.core_id();
@@ -119,7 +120,11 @@ pub(super) async fn consumer_loop(config: ConsumerConfig, metrics: Arc<CoreMetri
     // Events committed to the WAL but not delivered before a restart are
     // recovered first. If that suffix is no longer in the WAL, the node
     // fail-stops rather than resume from a position it cannot prove it reached.
-    let boot_end = last_wal_lsn(&wal);
+    // Boot replays the log as it opened. A record this process appends after
+    // that is live: the outcome floor decides when it is final. The log's
+    // next LSN cannot bound boot replay: an append takes its LSN before its
+    // record is readable, so recovery would find nothing there and pass it.
+    let boot_end = wal.recovered_through();
     let mut recovery = Some(Recovery::new(persisted, boot_end));
     let mut cursor = RingCursor::new();
 
@@ -337,6 +342,7 @@ pub(super) async fn consumer_loop(config: ConsumerConfig, metrics: Arc<CoreMetri
             guard.safe(),
             &mut dirty_watermark,
             &mut last_watermark_flush,
+            watermark_flush_interval,
         );
 
         empty_polls = empty_polls.saturating_add(1);
@@ -606,13 +612,15 @@ mod tests {
             cdc_router,
             num_cores: 1,
             slab_account: Arc::new(crate::event::slab_budget::ConsumerSlabAccount::new(0)),
+            watermark_flush_interval: crate::event::consumer_helpers::WATERMARK_FLUSH_INTERVAL,
         });
 
-        // The consumer starts and reads its boot WAL bound while this sleeps.
-        // So the burst below lands mid-run, above that bound.
+        // The consumer starts and runs its boot recovery while this sleeps.
+        // So the burst below lands mid-run, above the log as it opened.
         tokio::time::sleep(Duration::from_millis(200)).await;
-        // Every write is logged, durable and final before its event leaves,
-        // as on the write path. The burst has no await point, so the parked
+        // Every write is logged and durable before its event leaves, and
+        // settles after, as on the write path: a core emits before its final
+        // response. The burst has no await point, so the parked
         // consumer takes nothing from the ring until it ends. A small ring
         // keeps its first events and drops the rest. The consumer then takes
         // the kept events and rebuilds every write from the WAL: the kept
@@ -644,11 +652,11 @@ mod tests {
             // floor calls final is readable by catch-up.
             wal.sync().expect("wal sync");
             window.note_minted(lsn);
-            window.settle();
             last_lsn = lsn;
             if !producers[0].emit(ring_event(i, i, lsn)) {
                 dropped += 1;
             }
+            window.settle();
         }
 
         let expected_crdt = WRITES;
@@ -700,6 +708,69 @@ mod tests {
         );
     }
 
+    /// A record that took its LSN before the consumer started, but that boot
+    /// replay cannot read yet, is live. Its ring event is delivered once the
+    /// record is final: boot recovery does not pass it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_record_appended_before_the_consumer_starts_is_delivered() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (wal, watermark_store, shared, trigger_dlq, cdc_router) =
+            crate::event::test_utils::event_test_deps(&dir);
+        register_sinks(&shared);
+        crate::event::sink_ledger::load_sink_state(&shared, &wal, &watermark_store, 1)
+            .expect("load sink state");
+
+        // The write takes its LSN. Its record stays buffered, not yet readable.
+        let window = shared.outcome_floor.open_write();
+        let provenance: Option<SyncProvenance> = None;
+        let payload = zerompk::to_msgpack_vec(&(COLLECTION, "o-1", value(1), provenance, 0u32))
+            .expect("put payload");
+        let lsn = wal
+            .appender(NO_APPLY_KEY)
+            .with_event_source(crate::event::EventSource::User)
+            .append_put(
+                TenantId::new(TENANT),
+                VShardId::new(0),
+                DatabaseId::DEFAULT,
+                &payload,
+            )
+            .expect("append put");
+
+        let (mut producers, mut consumers) = create_event_bus_with_capacity(1, 16);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (shutdown_bus, _) =
+            crate::control::shutdown::ShutdownBus::new(Arc::clone(&shared.shutdown));
+        let mut handle = spawn_consumer(ConsumerConfig {
+            rx: consumers.remove(0),
+            shutdown: shutdown_rx,
+            shutdown_bus,
+            wal: Arc::clone(&wal),
+            watermark_store: Arc::clone(&watermark_store),
+            shared_state: Arc::clone(&shared),
+            trigger_dlq,
+            cdc_router,
+            num_cores: 1,
+            slab_account: Arc::new(crate::event::slab_budget::ConsumerSlabAccount::new(0)),
+            watermark_flush_interval: crate::event::consumer_helpers::WATERMARK_FLUSH_INTERVAL,
+        });
+        // The consumer runs its boot recovery while the record is buffered.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        wal.sync().expect("wal sync");
+        window.note_minted(lsn);
+        producers[0].emit(ring_event(1, 1, lsn));
+        window.settle();
+        wait_for_mv_count(&shared, 1).await;
+        assert_eq!(totals(&shared).mv_sum, 1);
+
+        shutdown_tx.send(true).expect("signal consumer shutdown");
+        handle.wait_for_exit().await;
+    }
+
+    /// A flush interval no restart test process reaches, however loaded the
+    /// machine is: the first process dies before any watermark persists.
+    const NO_PERIODIC_FLUSH: Duration = Duration::from_secs(24 * 60 * 60);
+
     /// One process of the restart test: its state, its consumer and the
     /// deltas its Lite session received.
     struct Node {
@@ -744,6 +815,7 @@ mod tests {
             cdc_router,
             num_cores: 1,
             slab_account: Arc::new(crate::event::slab_budget::ConsumerSlabAccount::new(0)),
+            watermark_flush_interval: NO_PERIODIC_FLUSH,
         });
         Node {
             wal,
@@ -759,7 +831,9 @@ mod tests {
 
     /// Log and emit writes `range`, as the write path does: the WAL record and
     /// the ring event carry the write's one commit HLC, so an event WAL replay
-    /// or catch-up rebuilds dates and routes as the live event does.
+    /// or catch-up rebuilds dates and routes as the live event does. Each
+    /// write emits before its outcome settles, as a core emits before its
+    /// final response.
     fn write(node: &mut Node, range: std::ops::RangeInclusive<u64>) {
         for i in range {
             let commit_hlc = crate::event::test_utils::test_commit_hlc();
@@ -787,10 +861,10 @@ mod tests {
                 .expect("append put");
             node.wal.sync().expect("wal sync");
             window.note_minted(lsn);
-            window.settle();
             let mut event = ring_event(i, i, lsn);
             event.commit_hlc = Some(commit_hlc);
             node.producers[0].emit(event);
+            window.settle();
         }
     }
 

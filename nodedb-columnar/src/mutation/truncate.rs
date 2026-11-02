@@ -10,13 +10,15 @@ use nodedb_types::surrogate::Surrogate;
 use crate::delete_bitmap::DeleteBitmap;
 use crate::memtable::ColumnarMemtable;
 use crate::pk_index::PkIndex;
+use crate::versions::{SegmentVersions, VersionChains};
 
 use super::engine::MutationEngine;
 
 /// Every row-bearing part of a `MutationEngine`, taken out by
 /// [`MutationEngine::truncate`] and put back by
-/// [`MutationEngine::restore_truncated`]. Holds every bitemporal version and
-/// every tombstone exactly as they were, so a restore is exact.
+/// [`MutationEngine::restore_truncated`]. Holds every version, its stamps,
+/// every chain, and every tombstone exactly as they were, so a restore is
+/// exact.
 pub struct TruncatedRows {
     memtable: ColumnarMemtable,
     pk_index: PkIndex,
@@ -24,6 +26,8 @@ pub struct TruncatedRows {
     delete_bitmaps: HashMap<u64, DeleteBitmap>,
     memtable_row_counter: u32,
     memtable_surrogates: Vec<Option<Surrogate>>,
+    versions: HashMap<u64, SegmentVersions>,
+    chains: VersionChains,
 }
 
 impl MutationEngine {
@@ -51,6 +55,8 @@ impl MutationEngine {
             delete_bitmaps: std::mem::take(&mut self.delete_bitmaps),
             memtable_row_counter: std::mem::replace(&mut self.memtable_row_counter, 0),
             memtable_surrogates: std::mem::take(&mut self.memtable_surrogates),
+            versions: std::mem::take(&mut self.versions),
+            chains: std::mem::take(&mut self.chains),
         }
     }
 
@@ -64,6 +70,8 @@ impl MutationEngine {
             delete_bitmaps,
             memtable_row_counter,
             memtable_surrogates,
+            versions,
+            chains,
         } = rows;
         self.memtable = memtable;
         self.pk_index = pk_index;
@@ -71,6 +79,8 @@ impl MutationEngine {
         self.delete_bitmaps = delete_bitmaps;
         self.memtable_row_counter = memtable_row_counter;
         self.memtable_surrogates = memtable_surrogates;
+        self.versions = versions;
+        self.chains = chains;
     }
 }
 
@@ -96,10 +106,11 @@ mod tests {
                 .insert_with_surrogate(
                     &[Value::Integer(i), Value::String(format!("r{i}"))],
                     Surrogate(100 + i as u32),
+                    10 + i,
                 )
                 .expect("insert");
         }
-        engine.delete(&Value::Integer(1)).expect("delete");
+        engine.delete(&Value::Integer(1), 20).expect("delete");
         engine
     }
 
@@ -113,13 +124,15 @@ mod tests {
         assert_eq!(engine.live_row_count(), 0);
         assert_eq!(engine.memtable().row_count(), 0);
         assert!(engine.delete_bitmaps().is_empty());
+        assert!(engine.version_chains().is_empty());
+        assert!(engine.segment_versions(0).is_none());
         assert!(engine.memtable_surrogates().is_empty());
         assert_eq!(engine.scan_memtable_rows().count(), 0);
         assert_eq!(engine.memtable().flush_threshold(), 7);
         assert_eq!(engine.next_segment_id(), 1);
 
         engine
-            .insert(&[Value::Integer(9), Value::String("z".into())])
+            .insert(&[Value::Integer(9), Value::String("z".into())], 30)
             .expect("insert after truncate");
         assert_eq!(engine.live_row_count(), 1);
         assert_eq!(engine.scan_memtable_rows().count(), 1);
@@ -135,7 +148,7 @@ mod tests {
 
         let pre = engine.truncate();
         engine
-            .insert(&[Value::Integer(9), Value::String("z".into())])
+            .insert(&[Value::Integer(9), Value::String("z".into())], 30)
             .expect("insert after truncate");
         engine.restore_truncated(pre);
 
@@ -156,6 +169,11 @@ mod tests {
             "the tombstone deleted before the truncate stays deleted"
         );
         assert_eq!(engine.memtable_surrogates().len(), 4);
+        let one = engine
+            .version_chains()
+            .last(&crate::pk_index::encode_pk(&Value::Integer(1)))
+            .expect("the deleted row's chain is back");
+        assert_eq!(engine.sys_to_at(one), Some(20));
     }
 
     #[test]

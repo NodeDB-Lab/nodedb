@@ -31,6 +31,11 @@ pub struct TimeseriesSchema {
     /// `1d`, `1M`, `1y`, `AUTO`, `UNBOUNDED`). A flush cuts one partition per
     /// interval its rows fall in.
     pub partition_interval: String,
+    /// `SET LAST_VALUE_CACHE`: the Data Plane keeps the newest value of
+    /// every series, built from the stored rows when the flag turns on, and
+    /// drops the cache when it turns off.
+    #[serde(default)]
+    pub last_value_cache: bool,
 }
 
 impl TimeseriesSchema {

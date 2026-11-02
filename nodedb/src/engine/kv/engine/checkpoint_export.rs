@@ -6,8 +6,10 @@
 //! The engine keys its tables by an FxHash of `(database_id, tenant_id,
 //! collection)`, which is not reversible. The checkpoint writer needs the
 //! human-readable identity back so it can name one file per collection, so it
-//! resolves each table through the `hash_to_tenant` / `hash_to_collection`
-//! reverse maps the engine already maintains alongside `tables`.
+//! resolves each table through the `hash_to_database` / `hash_to_tenant` /
+//! `hash_to_collection` reverse maps the engine maintains alongside `tables`.
+
+use nodedb_types::DatabaseId;
 
 use super::super::hash_table::KvHashTable;
 use super::super::index::KvIndexSet;
@@ -16,6 +18,8 @@ use super::KvEngine;
 
 /// One live KV collection paired with the identity its table is keyed by.
 pub struct KvCollectionRef<'a> {
+    /// Owning database.
+    pub database_id: DatabaseId,
     /// Owning tenant.
     pub tenant_id: u64,
     /// Db-qualified collection name (`"{database_id}/{name}"` outside the
@@ -33,19 +37,21 @@ pub struct KvCollectionRef<'a> {
 }
 
 impl KvEngine {
-    /// Iterate every live collection with its `(tenant_id, collection)` identity.
+    /// Iterate every live collection with its `(database_id, tenant_id,
+    /// collection)` identity.
     ///
     /// Driven by the identity map rather than by `tables`, because a collection
     /// can hold index registrations before it holds a single row, and those
     /// registrations must reach the checkpoint too.
     ///
-    /// Skips any entry whose tenant mapping is missing. That is unreachable
-    /// while the two maps are populated together on every path that creates a
+    /// Skips any entry whose database or tenant mapping is missing. That is
+    /// unreachable while the maps are populated together on every path that creates a
     /// collection, but an unattributable collection cannot be given a checkpoint
     /// filename, so there is nothing this could do with it but skip.
     pub fn live_collections(&self) -> impl Iterator<Item = KvCollectionRef<'_>> {
         self.hash_to_collection.iter().filter_map(|(tkey, name)| {
             Some(KvCollectionRef {
+                database_id: *self.hash_to_database.get(tkey)?,
                 tenant_id: *self.hash_to_tenant.get(tkey)?,
                 collection: name.as_str(),
                 table_key: *tkey,

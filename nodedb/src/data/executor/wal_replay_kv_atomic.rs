@@ -21,7 +21,7 @@ use nodedb_physical::physical_plan::KvCounterShape;
 use tracing::warn;
 
 use super::core_loop::CoreLoop;
-use crate::data::executor::core_loop::write_index::KeyRepr;
+use crate::data::executor::core_loop::write_note::KeyRepr;
 use crate::data::executor::handlers::kv::declared_body::fit_replayed_kv_image;
 use crate::engine::kv::{AtomicError, AtomicKeyCtx};
 

@@ -12,7 +12,8 @@ use super::shared::redb_err;
 use crate::engine::sparse::fts_redb::keys::{KeyOwner, segment_key};
 use crate::engine::sparse::fts_redb::scan;
 use crate::engine::sparse::fts_redb::tables::SEGMENTS;
-use crate::storage::quarantine::engines::validate_fts_segment_bytes;
+use crate::storage::quarantine::CollectionScope;
+use crate::storage::quarantine::engines::{FtsSegmentRef, validate_fts_segment_bytes};
 
 pub(super) fn write(
     backend: &RedbFtsBackend,
@@ -59,10 +60,17 @@ pub(super) fn read(
     };
 
     if let Some(reg) = &backend.quarantine_registry {
-        let validated = validate_fts_segment_bytes(reg, bytes, index.collection(), segment_id)
-            .map_err(|e| crate::Error::SegmentCorrupted {
+        let scope = CollectionScope::new(database_id, tid, index.collection());
+        let segment = FtsSegmentRef {
+            scope: &scope,
+            field: index.field_name(),
+            segment_id,
+        };
+        let validated = validate_fts_segment_bytes(reg, bytes, &segment).map_err(|e| {
+            crate::Error::SegmentCorrupted {
                 detail: e.to_string(),
-            })?;
+            }
+        })?;
         Ok(Some(validated))
     } else {
         Ok(Some(bytes))

@@ -213,13 +213,7 @@ mod tests {
         );
         let import = core.execute_crdt_import_snapshot(&task, 1, "docs", &snapshot);
         assert_eq!(import.status, Status::Ok);
-        assert_eq!(
-            import.read_versions.of(task.request.vshard_id),
-            Some(nodedb_types::WriteVersion::local_after(
-                nodedb_types::WriteVersion::ZERO,
-                73
-            ))
-        );
+        assert!(import.read_vshards.is_empty(), "a write reads no vShard");
         assert_eq!(import.watermark_lsn, crate::types::Lsn::new(73));
         let before = core
             .execute_crdt_read(&task, "docs", "one")
@@ -466,13 +460,7 @@ mod tests {
             },
         );
         assert_eq!(applied.status, Status::Ok);
-        assert_eq!(
-            applied.read_versions.of(task.request.vshard_id),
-            Some(nodedb_types::WriteVersion::local_after(
-                nodedb_types::WriteVersion::ZERO,
-                91
-            ))
-        );
+        assert!(applied.read_vshards.is_empty(), "a write reads no vShard");
         assert_eq!(applied.watermark_lsn, crate::types::Lsn::new(91));
         assert!(
             core.crdt_engines
@@ -529,7 +517,7 @@ mod tests {
             sparse_before
         );
 
-        let legacy = core.execute_crdt_apply(
+        let unfenced = core.execute_crdt_apply(
             &task,
             super::super::crdt_apply::CrdtApplyParams {
                 collection: "docs",
@@ -548,9 +536,9 @@ mod tests {
             },
         );
         assert_eq!(
-            legacy.status,
+            unfenced.status,
             Status::Ok,
-            "legacy unfenced apply remains supported"
+            "an unfenced apply without provenance is admitted"
         );
     }
 }

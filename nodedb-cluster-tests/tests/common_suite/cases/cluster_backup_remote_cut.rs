@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
+use nodedb::engine::kv::hash_table::KvSnapshotTable;
 use nodedb_test_support::fail_point::{FailAction, FailGuard};
 use nodedb_types::backup_envelope::{
     DEFAULT_MAX_TOTAL_BYTES, DatabaseDataSection, parse_encrypted,
@@ -124,11 +125,11 @@ fn envelope_holds_kv_row(envelope: &[u8], collection: &str, key: &[u8]) -> bool 
         })
         .flat_map(|snapshot| snapshot.kv_tables)
         .filter(|(name, _)| *name == table_key)
-        .filter_map(|(_, rows)| {
-            zerompk::from_msgpack::<Vec<(Vec<u8>, Vec<u8>, u64, u32)>>(&rows).ok()
+        .map(|(_, table)| {
+            zerompk::from_msgpack::<KvSnapshotTable>(&table).expect("decode the KV table section")
         })
-        .flatten()
-        .any(|(row_key, _, _, _)| row_key.windows(key.len()).any(|window| window == key))
+        .flat_map(|table| table.rows)
+        .any(|row| row.key.windows(key.len()).any(|window| window == key))
 }
 
 async fn connect(pg_addr: std::net::SocketAddr) -> tokio_postgres::Client {

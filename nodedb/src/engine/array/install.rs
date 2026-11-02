@@ -82,15 +82,28 @@ impl ArrayEngine {
                             system_from_ms: version.system_from_ms,
                             valid_from_ms: payload.valid_from_ms,
                             valid_until_ms: payload.valid_until_ms,
+                            placement: version.placement,
                             lsn: 0,
                         },
                     )?;
                 }
                 None if version.erased => {
-                    memtable.erase_cell(&schema, version.coord, version.system_from_ms, 0)?;
+                    memtable.erase_cell(
+                        &schema,
+                        version.coord,
+                        version.system_from_ms,
+                        version.placement,
+                        0,
+                    )?;
                 }
                 None => {
-                    memtable.delete_cell(&schema, version.coord, version.system_from_ms, 0)?;
+                    memtable.delete_cell(
+                        &schema,
+                        version.coord,
+                        version.system_from_ms,
+                        version.placement,
+                        0,
+                    )?;
                 }
             }
         }
@@ -166,6 +179,7 @@ mod tests {
                 surrogate: Surrogate::new(1),
             }),
             erased: false,
+            placement: 5,
         }
     }
 
@@ -220,6 +234,14 @@ mod tests {
                     .iter()
                     .any(|(c, t)| c[0] == CoordValue::Int64(2) && *t == 50)
             );
+            // Each version keeps the vShard that stored it.
+            let placements: Vec<(i64, u32)> = export_store(engine.store(&aid()).expect("store"))
+                .expect("export")
+                .into_iter()
+                .map(|v| (v.system_from_ms, v.placement))
+                .collect();
+            assert!(placements.contains(&(0, 0)), "{placements:?}");
+            assert!(placements.contains(&(50, 5)), "{placements:?}");
         };
         expected(&engine);
         assert!(

@@ -54,20 +54,7 @@ impl VectorCollection {
             IndexType::Hnsw => nodedb_types::VectorIndexType::Hnsw,
         };
 
-        let hnsw_mem: usize = self
-            .sealed
-            .iter()
-            .map(|s| s.index.memory_usage_bytes())
-            .sum();
-        let sq8_mem: usize = self
-            .sealed
-            .iter()
-            .filter_map(|s| s.sq8.as_ref().map(|(_, data)| data.len()))
-            .sum();
-        let growing_mem = growing_vectors * self.dim * std::mem::size_of::<f32>();
-        let building_mem = building_vectors * self.dim * std::mem::size_of::<f32>();
-        let ivf_mem = self.ivf.as_ref().map_or(0, |ivf| ivf.memory_bytes());
-        let memory_bytes = hnsw_mem + sq8_mem + growing_mem + building_mem + ivf_mem;
+        let memory_bytes = self.index_memory_bytes();
 
         let disk_bytes: usize = self
             .sealed
@@ -116,5 +103,27 @@ impl VectorCollection {
             builds_completed: self.builds_completed,
             builds_failed: self.builds_failed,
         }
+    }
+}
+
+impl VectorCollection {
+    /// Bytes the index holds in RAM: sealed HNSW graphs, SQ8 codes, the
+    /// growing and building segments, and the IVF-PQ index.
+    fn index_memory_bytes(&self) -> usize {
+        let sealed_mem: usize = self.sealed.iter().map(|s| s.resident_bytes).sum();
+        let growing_vectors = self.growing.len();
+        let building_vectors: usize = self.building.iter().map(|s| s.flat.len()).sum();
+        let growing_mem = growing_vectors * self.dim * std::mem::size_of::<f32>();
+        let building_mem = building_vectors * self.dim * std::mem::size_of::<f32>();
+        let ivf_mem = self.ivf.as_ref().map_or(0, |ivf| ivf.memory_bytes());
+        sealed_mem + growing_mem + building_mem + ivf_mem
+    }
+
+    /// Bytes the collection holds resident, live and history: the index
+    /// (ended nodes stay in it until compaction removes them) and the node
+    /// spans. It reads counts the writes keep, never walks a graph, so a
+    /// governor charge follows it at every write.
+    pub fn resident_bytes(&self) -> usize {
+        self.index_memory_bytes() + self.versions.memory_bytes()
     }
 }

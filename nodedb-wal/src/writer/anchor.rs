@@ -46,6 +46,7 @@ impl WalWriter {
             database_id: 0,
             event_source: NO_EVENT_SOURCE,
             commit_hlc: 0,
+            system_ordinal: crate::record::NO_SYSTEM_ORDINAL,
         };
         let payload = TimeAnchorPayload::new(hlc_wall_ns).to_bytes();
         let lsn = self.append_reserving(target, &payload, 0, 0)?;

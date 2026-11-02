@@ -145,7 +145,7 @@ impl PhysicalPlan {
         // pure-catalog plan must run exactly once (broadcasting overcounts).
         match self {
             // Catalog sub-plan: inherit child's sharded-ness. No sub-plan:
-            // legacy per-shard scan → always sharded.
+            // a per-shard scan → always sharded.
             PhysicalPlan::Query(QueryOp::Aggregate { input, .. }) => match input {
                 Some(child) => child.is_sharded_source(),
                 None => true,

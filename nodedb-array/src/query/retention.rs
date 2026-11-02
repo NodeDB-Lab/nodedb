@@ -349,7 +349,7 @@ mod tests {
     fn build_segment(pairs: Vec<(TileId, SparseTile)>) -> Vec<u8> {
         let mut w = SegmentWriter::new(0xBEEF);
         for (id, tile) in pairs {
-            w.append_sparse(id, &tile).unwrap();
+            w.append_sparse(id, 0, &tile).unwrap();
         }
         w.finish(None).unwrap()
     }

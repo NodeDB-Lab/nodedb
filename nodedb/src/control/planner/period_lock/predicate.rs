@@ -36,7 +36,7 @@ pub(super) async fn resolve_predicate_period_values(
     effect: PeriodLockEffect,
     def: &PeriodLockDef,
 ) -> crate::Result<Vec<ResolvedSumTarget>> {
-    let read = recon_scan_rows(
+    let rows = recon_scan_rows(
         scope.state,
         scope.tenant_id,
         scope.database_id,
@@ -50,7 +50,7 @@ pub(super) async fn resolve_predicate_period_values(
     // pre- and post-image resolves through the same call regardless of how
     // many rows or images share a period value.
     let mut resolved = ResolvedTargets::new();
-    for row in &read.rows {
+    for row in &rows {
         resolve_period_value(scope, def, row, &mut resolved).await?;
         if matches!(effect, PeriodLockEffect::Assign) {
             let new_row = crate::query::apply_update_assignments(

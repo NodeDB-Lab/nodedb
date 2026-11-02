@@ -233,6 +233,7 @@ pub(in super::super) fn convert_upsert(
                 provenance: None,
                 wal_lsn: None,
                 system_from: None,
+                restored_versions: Vec::new(),
                 rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
                 // Filled by the later `inject_returning_spec` / row-level-security
                 // passes — see the plain-insert site above.

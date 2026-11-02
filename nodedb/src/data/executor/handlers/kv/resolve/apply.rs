@@ -5,7 +5,12 @@
 //!
 //! Drift check: every mutation's `precondition` is checked before the first
 //! mutation runs, all-or-nothing; a failure returns `OllpRetryRequired` —
-//! same contract the columnar resolved-row apply uses.
+//! same contract the columnar resolved-row apply uses. Every replica judges
+//! expiry at the instant the proposer stamped on the entry, so every replica
+//! reaches one verdict.
+//!
+//! A `Reap` mutation checks the stored expiry instead, blind to any clock,
+//! inside its own apply: a mismatch is a no-op on every replica alike.
 
 use nodedb_physical::physical_plan::KvResolvedMutation;
 use tracing::debug;
@@ -35,6 +40,10 @@ impl CoreLoop {
         let now_ms = self.kv_ttl_now_ms(task);
 
         for mutation in mutations {
+            // A reap decides by the stored expiry at its apply.
+            if matches!(mutation, KvResolvedMutation::Reap { .. }) {
+                continue;
+            }
             let current = self.kv_engine.get(
                 did,
                 tid,
@@ -236,6 +245,21 @@ impl CoreLoop {
                 self.kv_engine.persist(did, tid, collection.as_str(), key);
                 self.note_kv_write(task, did, tid, collection.as_str(), key);
             }
+            // An expiry is no row change event, as the local reap never was.
+            // The reaped version ends at its expiry instant on every replica.
+            KvResolvedMutation::Reap {
+                collection,
+                key,
+                expire_at_ms,
+            } => {
+                if self
+                    .kv_engine
+                    .reap_due(did, tid, collection.as_str(), key, *expire_at_ms)
+                    .is_some()
+                {
+                    self.note_kv_write(task, did, tid, collection.as_str(), key);
+                }
+            }
         }
         Ok(())
     }
@@ -302,6 +326,7 @@ mod tests {
                 key: b"seed".to_vec(),
                 rls_filters: Vec::new(),
                 surrogate_ceiling: None,
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             None,
         )
@@ -474,5 +499,99 @@ mod tests {
         };
         let resp = apply(&mut h, &outcome);
         assert_eq!(resp.error_code.as_deref(), Some(&ErrorCode::NotFound));
+    }
+
+    fn reap(key: &[u8], expire_at_ms: u64) -> KvResolveOutcome {
+        KvResolveOutcome {
+            mutations: vec![KvResolvedMutation::Reap {
+                collection: QualifiedCollection::new(DatabaseId::DEFAULT, COLLECTION),
+                key: key.to_vec(),
+                expire_at_ms,
+            }],
+            response_payload: Vec::new(),
+        }
+    }
+
+    /// Put `key` at ordinal 100, expiring at `expire_at_ms`.
+    fn put_expiring(core: &mut CoreLoop, key: &[u8], expire_at_ms: u64) {
+        let scope = core.kv_engine.open_write_scope(Some(100));
+        core.kv_engine
+            .put_with_absolute_expiry(
+                crate::engine::kv::KvPutParams {
+                    database_id: did(),
+                    tenant_id: TID,
+                    collection: COLLECTION,
+                    key,
+                    value: b"v",
+                    ttl_ms: 1,
+                    now_ms: 1,
+                    surrogate: crate::engine::kv::test_support::row_surrogate(key),
+                },
+                expire_at_ms,
+            )
+            .expect("a bound row writes");
+        core.kv_engine.close_write_scope(scope);
+    }
+
+    /// A reap ends the entry whose expiry it names, at that expiry's last
+    /// ordinal, whatever clock the apply reads.
+    #[test]
+    fn a_reap_ends_the_entry_it_names_at_its_expiry_instant() {
+        let mut h = make_core();
+        put_expiring(&mut h.core, b"s", 1_500);
+        let resp = apply(&mut h, &reap(b"s", 1_500));
+        assert_eq!(resp.status, Status::Ok, "{:?}", resp.error_code);
+        let versions = h.core.kv_engine.get_at(
+            did(),
+            TID,
+            COLLECTION,
+            b"s",
+            nodedb_types::SystemTimeScope::AsOf(1_499),
+            u64::MAX,
+        );
+        assert!(
+            versions.is_some(),
+            "a cut before the expiry reads the value"
+        );
+        assert!(stored(&h.core, COLLECTION, b"s").is_none());
+    }
+
+    /// A reap of an expiry the key no longer holds is a no-op, never an
+    /// error: a write replaced the TTL before the reap applied.
+    #[test]
+    fn a_reap_of_a_replaced_expiry_changes_nothing() {
+        let mut h = make_core();
+        put_expiring(&mut h.core, b"s", u64::MAX - 1);
+        let resp = apply(&mut h, &reap(b"s", 1_500));
+        assert_eq!(resp.status, Status::Ok, "{:?}", resp.error_code);
+        assert_eq!(stored(&h.core, COLLECTION, b"s"), Some(b"v".to_vec()));
+    }
+
+    /// The drift check judges expiry at the instant the entry carries, not
+    /// at the replica's clock: a replica whose clock passed the expiry still
+    /// sees the value the proposer saw, and reaches the proposer's verdict.
+    #[test]
+    fn the_drift_check_judges_expiry_at_the_carried_instant() {
+        let mut h = make_core();
+        put_expiring(&mut h.core, b"s", 5_000);
+        let outcome = KvResolveOutcome {
+            mutations: vec![KvResolvedMutation::Delete {
+                collection: QualifiedCollection::new(DatabaseId::DEFAULT, COLLECTION),
+                key: b"s".to_vec(),
+                precondition: Some(b"v".to_vec()),
+            }],
+            response_payload: Vec::new(),
+        };
+        let mut t = task();
+        t.resolved_now_ms = Some(4_000);
+        let resp = h.core.execute_kv_resolved_write(
+            &t,
+            did(),
+            TID,
+            &outcome.mutations,
+            &outcome.response_payload,
+            &RlsWriteCheck::decided_earlier_in_request(),
+        );
+        assert_eq!(resp.status, Status::Ok, "{:?}", resp.error_code);
     }
 }

@@ -84,6 +84,7 @@ mod tests {
             filters: Vec::new(),
             system_from: None,
             rls_write_check: check,
+            system_time: nodedb_types::SystemTimeScope::Current,
         })
     }
 

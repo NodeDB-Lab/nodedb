@@ -48,26 +48,75 @@ impl CoreLoop {
                 total_bytes = total_bytes.saturating_add(seg.len() as u64);
             }
         }
+        // Row-version stamps and chains: the bytes history holds beside the
+        // segments.
+        if let Some(engine) = self.columnar_engines.get(&columnar_key) {
+            total_bytes = total_bytes.saturating_add(engine.version_memory_bytes() as u64);
+        }
 
-        // Vector collections: byte-count is engine-internal and not
-        // currently exposed as a cheap accessor. Contribution is 0
-        // until that accessor lands; operators still see the
-        // sparse + KV + columnar sum below.
-        let _ = self.vector_collections.get(&key);
+        // Vector indexes, multi-vector members included: every node, live
+        // and ended, and the node spans.
+        let field_prefix = format!("{collection}:");
+        for ((d, t, k), index) in &self.vector_collections {
+            if *d == key.0 && *t == tid && (k == collection || k.starts_with(&field_prefix)) {
+                total_bytes = total_bytes.saturating_add(index.resident_bytes() as u64);
+            }
+        }
+        // Sparse-vector indexes and R-trees, live postings and entries with
+        // their history.
+        for ((d, t, c, _), index) in &self.sparse_vector_indexes {
+            if *d == key.0 && *t == tid && c == collection {
+                total_bytes = total_bytes.saturating_add(index.resident_bytes() as u64);
+            }
+        }
+        for ((d, t, c, _), rtree) in &self.spatial_indexes {
+            if *d == key.0 && *t == tid && c == collection {
+                total_bytes = total_bytes.saturating_add(rtree.resident_bytes() as u64);
+            }
+        }
+        // Timeseries partitions on disk, the ones a TRUNCATE ended included
+        // until the cleanup horizon purges them.
+        if let Some(registry) = self.ts_registries.get(&key) {
+            for (_, entry) in registry.iter() {
+                if entry.meta.state != nodedb_types::timeseries::PartitionState::Deleted {
+                    total_bytes = total_bytes.saturating_add(entry.meta.size_bytes);
+                }
+            }
+        }
 
-        // Sparse documents: count bytes via redb range scan of the
-        // `{tenant}:{collection}:` prefix. Cheap O(N) over the
-        // collection's rows — for millions of rows this is a handful
-        // of redb btree seeks + iteration.
-        total_bytes = total_bytes.saturating_add(self.sparse.approx_bytes_for_collection(
-            database_id,
-            tenant_id,
-            collection,
-        ));
+        // Edge versions and ended full-text versions. A store that does not
+        // read fails the query, as the document scan below does.
+        let history = self
+            .edge_store
+            .collection_version_bytes(database_id, tid, collection)
+            .and_then(|edges| {
+                self.inverted
+                    .text_history_bytes(database_id, tid, collection)
+                    .map(|text| edges.saturating_add(text))
+            });
+        match history {
+            Ok(bytes) => total_bytes = total_bytes.saturating_add(bytes),
+            Err(e) => {
+                return self.response_error(task, crate::bridge::envelope::ErrorCode::from(e));
+            }
+        }
 
-        // Inverted index postings share the sparse redb and don't
-        // offer a cheap per-collection byte count today; covered by
-        // the sparse scan's range-sum approximation.
+        // Sparse documents: count the bytes of every stored version, history
+        // and tombstones included, via a redb range scan of the
+        // collection's prefix. O(N) in stored versions. A scan that fails
+        // fails the query: a short count reads as a small collection.
+        match self
+            .sparse
+            .approx_bytes_for_collection(database_id, tenant_id, collection)
+        {
+            Ok(bytes) => total_bytes = total_bytes.saturating_add(bytes),
+            Err(e) => {
+                return self.response_error(task, crate::bridge::envelope::ErrorCode::from(e));
+            }
+        }
+
+        // Live inverted-index postings share the sparse redb, and the sparse
+        // scan's range sum covers them.
 
         let mut payload = Vec::with_capacity(8);
         payload.extend_from_slice(&total_bytes.to_le_bytes());
@@ -80,7 +129,7 @@ impl CoreLoop {
             watermark_lsn: self.watermark,
             error_code: None,
             stage_vote: None,
-            read_versions: crate::types::ReadVersions::new(),
+            read_vshards: crate::types::ReadShards::new(),
             write_set: Vec::new(),
         }
     }

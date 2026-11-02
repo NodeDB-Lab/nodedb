@@ -51,8 +51,6 @@ pub struct ColumnarDmlWalRecord {
     /// raised above the key's bound row at apply. Replay stamps what the
     /// live write stamped. `None` for a writer that leaves the stamp to the
     /// apply.
-    #[serde(default)]
-    #[msgpack(default)]
     pub system_from: Option<i64>,
 }
 
@@ -123,6 +121,7 @@ mod tests {
             surrogates: Vec::new(),
             conflict_policy: Vec::new(),
             system_from: None,
+            restored_versions: Vec::new(),
         };
         let bytes = zerompk::to_msgpack_vec(&rec).expect("encode");
         let as_dml_record: Result<ColumnarDmlWalRecord, _> = zerompk::from_msgpack(&bytes);

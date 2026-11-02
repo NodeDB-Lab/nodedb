@@ -12,10 +12,12 @@ pub(crate) mod cell_route;
 pub(crate) mod ddl;
 pub mod entry;
 pub(crate) mod georef;
+pub(crate) mod named_incarnation;
 pub mod persist;
 pub mod registry;
 pub(crate) mod retention;
 pub(crate) mod schema_recode;
+pub(crate) mod tile_vshard;
 
 pub use entry::{ArrayCatalogEntry, ArrayMove};
 pub use registry::{ArrayCatalog, ArrayCatalogHandle};

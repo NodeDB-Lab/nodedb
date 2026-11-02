@@ -73,6 +73,7 @@
 
 mod decoded;
 mod format;
+mod history_codec;
 mod index_decode;
 mod index_export;
 mod index_format;

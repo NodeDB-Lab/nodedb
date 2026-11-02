@@ -4,9 +4,9 @@
 //! WAL record payload to a [`WriteEvent`].
 //!
 //! These are the per-record-type payload decoders that `wal_replay::record_to_events`
-//! dispatches to. Each `Put` / `Delete` payload may carry one of several arities
-//! (document with/without surrogate/provenance, KV point / batch); the parser
-//! tries them in most-specific-first order and returns the first that decodes.
+//! dispatches to. Each `Put` / `Delete` payload is a KV, document or edge
+//! shape. The parser tries them in a fixed order and returns the first that
+//! decodes.
 //!
 //! `wal_replay` parses each `TransactionRedo` sub-op with these same parsers.
 //! Every event takes its identity and event source from the [`ReplayScope`].
@@ -14,7 +14,6 @@
 use std::sync::Arc;
 
 use nodedb_types::RowIdentity;
-use nodedb_types::sync::wire::SyncProvenance;
 use tracing::warn;
 
 use crate::event::types::{EdgeEndpoints, RecordPosition, RowId, WriteEvent, WriteOp};
@@ -69,67 +68,6 @@ pub(super) fn parse_put_record(
             Some((system, valid)) => (Some(system), valid),
             None => crate::event::bitemporal_extract::extract_stamps(Some(&value)),
         };
-        return Some(WriteEvent {
-            sequence: *sequence,
-            collection: Arc::from(collection.as_str()),
-            op: WriteOp::Insert,
-            row_id: RowId::row(RowIdentity::from_user_key(document_id)),
-            lsn,
-            record: Some(RecordPosition::first(lsn)),
-            database_id,
-            tenant_id,
-            vshard_id,
-            source: sources.document,
-            new_value: Some(Arc::from(value.as_slice())),
-            old_value: None,
-            system_time_ms,
-            valid_time_ms,
-            user_id: None,
-            statement_digest: None,
-            commit_hlc,
-            image_fault: None,
-        });
-    }
-
-    // Try document put with provenance (legacy arity): (collection, document_id, value, provenance)
-    if let Ok((collection, document_id, value, _prov)) =
-        zerompk::from_msgpack::<(String, String, Vec<u8>, Option<SyncProvenance>)>(payload)
-    {
-        *sequence += 1;
-        let (system_time_ms, valid_time_ms) =
-            crate::event::bitemporal_extract::extract_stamps(Some(&value));
-        return Some(WriteEvent {
-            sequence: *sequence,
-            collection: Arc::from(collection.as_str()),
-            op: WriteOp::Insert,
-            row_id: RowId::row(RowIdentity::from_user_key(document_id)),
-            lsn,
-            record: Some(RecordPosition::first(lsn)),
-            database_id,
-            tenant_id,
-            vshard_id,
-            source: sources.document,
-            new_value: Some(Arc::from(value.as_slice())),
-            old_value: None,
-            system_time_ms,
-            valid_time_ms,
-            user_id: None,
-            statement_digest: None,
-            commit_hlc,
-            image_fault: None,
-        });
-    }
-
-    // Try document put (legacy arity): (collection, document_id, value)
-    if let Ok((collection, document_id, value)) =
-        zerompk::from_msgpack::<(String, String, Vec<u8>)>(payload)
-    {
-        // Distinguish from graph edge put which is (src_id, label, dst_id, props).
-        // Document put has exactly 3 elements; edge put has 4.
-        // If the third element parsed as Vec<u8> is the actual doc value, this is a doc put.
-        *sequence += 1;
-        let (system_time_ms, valid_time_ms) =
-            crate::event::bitemporal_extract::extract_stamps(Some(&value));
         return Some(WriteEvent {
             sequence: *sequence,
             collection: Arc::from(collection.as_str()),
@@ -322,61 +260,8 @@ pub(super) fn parse_delete_record(
     }
 
     // Try document delete with surrogate, plain or bitemporal. PointDelete, a
-    // transaction's redo, and the post-apply write-set redo helper emit it;
-    // try it before the 3-tuple so a surrogate-carrying record isn't misdecoded.
+    // transaction's redo, and the post-apply write-set redo helper emit it.
     if let Some((collection, document_id)) = decode_doc_delete(payload) {
-        *sequence += 1;
-        return Some(WriteEvent {
-            sequence: *sequence,
-            collection: Arc::from(collection.as_str()),
-            op: WriteOp::Delete,
-            row_id: RowId::row(RowIdentity::from_user_key(document_id)),
-            lsn,
-            record: Some(RecordPosition::first(lsn)),
-            database_id,
-            tenant_id,
-            vshard_id,
-            source: sources.document,
-            new_value: None,
-            old_value: None,
-            system_time_ms: None,
-            valid_time_ms: None,
-            user_id: None,
-            statement_digest: None,
-            commit_hlc,
-            image_fault: None,
-        });
-    }
-
-    // Try document delete with provenance (older arity): (collection, document_id, provenance)
-    if let Ok((collection, document_id, _prov)) =
-        zerompk::from_msgpack::<(String, String, Option<SyncProvenance>)>(payload)
-    {
-        *sequence += 1;
-        return Some(WriteEvent {
-            sequence: *sequence,
-            collection: Arc::from(collection.as_str()),
-            op: WriteOp::Delete,
-            row_id: RowId::row(RowIdentity::from_user_key(document_id)),
-            lsn,
-            record: Some(RecordPosition::first(lsn)),
-            database_id,
-            tenant_id,
-            vshard_id,
-            source: sources.document,
-            new_value: None,
-            old_value: None,
-            system_time_ms: None,
-            valid_time_ms: None,
-            user_id: None,
-            statement_digest: None,
-            commit_hlc,
-            image_fault: None,
-        });
-    }
-
-    // Try document delete (legacy arity): (collection, document_id)
-    if let Ok((collection, document_id)) = zerompk::from_msgpack::<(String, String)>(payload) {
         *sequence += 1;
         return Some(WriteEvent {
             sequence: *sequence,

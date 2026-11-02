@@ -20,6 +20,8 @@ pub(in crate::data::executor) struct SparseSearchParams<'a> {
     /// Serialized `Vec<ScanFilter>`: the statement's residual `WHERE`.
     /// Empty when none applies.
     pub filters: &'a [u8],
+    /// The system time the search reads at.
+    pub system_time: nodedb_types::SystemTimeScope,
 }
 
 impl CoreLoop {
@@ -92,11 +94,14 @@ impl CoreLoop {
         };
 
         let database_id = task.request.database_id.as_u64();
+        // The document's live version ends at this write's system time, so a
+        // read at an earlier cut still scores it.
+        let ordinal = self.bitemporal_ordinal();
         let index = self.get_or_create_sparse_index(database_id, tid, collection, field_name);
-        index.insert(doc_id, &sv);
+        index.insert_at(doc_id, &sv, ordinal);
         self.checkpoint_coordinator.mark_dirty("vector", 1);
         // Sparse vectors are keyed by `doc_id: String` — no cross-engine
-        // surrogate — so only the collection floor is recorded.
+        // surrogate — so the write is noted with no row key.
         self.note_collection_write(task, collection);
         self.response_ok(task)
     }
@@ -120,7 +125,14 @@ impl CoreLoop {
             query_entries,
             top_k,
             filters,
+            system_time,
         } = params;
+        // A read at a cut scores the version of each document visible there.
+        // A transaction snapshot also merges the block's staged writes.
+        let cut = match super::search_cut::SearchCut::of(system_time) {
+            Ok(cut) => cut,
+            Err(e) => return self.response_error(task, e),
+        };
         debug!(
             core = self.core_id,
             %collection,
@@ -130,19 +142,6 @@ impl CoreLoop {
             filtered = !filters.is_empty(),
             "sparse search"
         );
-
-        let database_id = task.request.database_id.as_u64();
-        let key = Self::sparse_index_key(database_id, tid, collection, field_name);
-        let Some(index) = self.sparse_vector_indexes.get(&key) else {
-            // No index exists — return empty results (not an error).
-            return match super::super::response_codec::encode(&Vec::<
-                super::super::response_codec::VectorSearchHit,
-            >::new())
-            {
-                Ok(payload) => self.response_with_payload(task, payload),
-                Err(e) => self.response_error(task, ErrorCode::from(e)),
-            };
-        };
 
         let query = match nodedb_types::SparseVector::from_entries(query_entries.to_vec()) {
             Ok(sv) => sv,
@@ -174,19 +173,57 @@ impl CoreLoop {
             }
         };
 
+        let database_id = task.request.database_id.as_u64();
+        let key = Self::sparse_index_key(database_id, tid, collection, field_name);
         // Each hit's `id` is its surrogate's storage key and `doc_id` stays
         // unset, as in the dense vector search. The Control-Plane translator
-        // resolves the surrogate to the user PK.
-        let hits = match super::vector_sparse_window::rank_sparse_window(
-            top_k,
-            &residual,
-            &self.crs_context(),
-            |k| crate::engine::vector::sparse::search::dot_product_topk(index, &query, k),
-            |hit| self.attach_body(database_id, tid, collection, true, hit),
-        ) {
-            Ok(hits) => hits,
-            Err(e) => return self.response_error(task, e),
+        // resolves the surrogate to the user PK. An absent index ranks
+        // nothing, and the staged rows still merge below.
+        let mut hits = match self.sparse_vector_indexes.get(&key) {
+            None => Vec::new(),
+            Some(index) => match super::vector_sparse_window::rank_sparse_window(
+                top_k,
+                &residual,
+                &self.crs_context(),
+                |k| match cut.at {
+                    Some(at) => crate::engine::vector::sparse::search::dot_product_topk_at(
+                        index, &query, k, at,
+                    ),
+                    None => {
+                        crate::engine::vector::sparse::search::dot_product_topk(index, &query, k)
+                    }
+                },
+                |hit| self.attach_body(database_id, tid, collection, true, cut.at, hit),
+            ) {
+                Ok(hits) => hits,
+                Err(e) => return self.response_error(task, e),
+            },
         };
+
+        // A historical read sees committed rows only, never staged ones. With
+        // a residual filter the Control Plane makes the top-k cut, so every
+        // ranked and staged hit travels.
+        if let Some(txn_id) = task.request.txn_id.filter(|_| cut.merge_overlay) {
+            let truncate_to = if residual.is_empty() {
+                top_k
+            } else {
+                usize::MAX
+            };
+            if let Err(e) = self.merge_sparse_overlay_into_search(
+                super::transaction::overlay::SparseMergeParams {
+                    txn_id,
+                    database_id: task.request.database_id,
+                    tid: crate::types::TenantId::new(tid),
+                    collection,
+                    field_name,
+                    query: &query,
+                    truncate_to,
+                },
+                &mut hits,
+            ) {
+                return self.response_error(task, e);
+            }
+        }
 
         match super::super::response_codec::encode(&hits) {
             Ok(payload) => self.response_with_payload(task, payload),
@@ -210,14 +247,15 @@ impl CoreLoop {
 
         let database_id = task.request.database_id.as_u64();
         let key = Self::sparse_index_key(database_id, tid, collection, field_name);
+        let ordinal = self.bitemporal_ordinal();
         let Some(index) = self.sparse_vector_indexes.get_mut(&key) else {
             return self.response_error(task, ErrorCode::NotFound);
         };
 
-        if index.delete(doc_id) {
+        if index.delete_at(doc_id, ordinal) {
             self.checkpoint_coordinator.mark_dirty("vector", 1);
             // Sparse vectors are keyed by `doc_id: String` — no cross-engine
-            // surrogate — so only the collection floor is recorded.
+            // surrogate — so the write is noted with no row key.
             self.note_collection_write(task, collection);
             self.response_ok(task)
         } else {
@@ -233,8 +271,6 @@ mod tests {
         Admission, ExemptReason, PhysicalPlan, Priority, Request, Status,
     };
     use crate::data::executor::core_loop::CoreLoop;
-    use crate::data::executor::core_loop::write_index::tests::local;
-    use crate::data::executor::core_loop::write_index::{CollKey, KeyRepr, WriteKey};
     use crate::types::{DatabaseId, Lsn, ReadConsistency, RequestId, TenantId, TraceId, VShardId};
     use nodedb_bridge::buffer::RingBuffer;
     use nodedb_physical::physical_plan::VectorOp;
@@ -292,6 +328,7 @@ mod tests {
                 ann_options: Default::default(),
                 skip_payload_fetch: false,
                 payload_filters: Vec::new(),
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             deadline: Instant::now() + Duration::from_secs(5),
             priority: Priority::Normal,
@@ -306,13 +343,13 @@ mod tests {
             wal_lsn: Some(Lsn::new(lsn)),
             resolved_now_ms: None,
             commit_hlc: None,
-            entry_version: None,
+            system_ordinal: None,
             admission: Admission::Exempt(ExemptReason::Read),
         })
     }
 
     #[test]
-    fn sparse_insert_populates_collection_floor_only_no_surrogate_entry() {
+    fn sparse_insert_notes_its_write() {
         let mut h = make_core();
         let task = make_task_with_lsn(41);
 
@@ -326,31 +363,10 @@ mod tests {
         );
         assert_eq!(response.status, Status::Ok);
 
-        let coll_key = CollKey {
-            vshard: VShardId::new(0),
-            db: DatabaseId::DEFAULT,
-            tenant: TenantId::new(1),
-            collection: Box::from("sparse_docs"),
-        };
         assert_eq!(
-            h.core.write_index.collection_version(&coll_key),
-            Some(local(41)),
-            "sparse insert must advance the collection write version"
-        );
-
-        // Sparse vectors carry no cross-engine surrogate: no would-be
-        // per-key `Surrogate` entry must exist for this write.
-        let would_be_key = WriteKey {
-            vshard: VShardId::new(0),
-            db: DatabaseId::DEFAULT,
-            tenant: TenantId::new(1),
-            collection: Box::from("sparse_docs"),
-            key: KeyRepr::Surrogate(0),
-        };
-        assert_eq!(
-            h.core.write_index.key_version(&would_be_key),
-            None,
-            "sparse insert must not record a per-key surrogate entry"
+            h.core.watermark,
+            Lsn::new(41),
+            "sparse insert must note its write"
         );
     }
 }

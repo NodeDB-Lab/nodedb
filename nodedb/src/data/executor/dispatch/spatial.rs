@@ -58,6 +58,7 @@ impl CoreLoop {
                 projection,
                 rls_filters,
                 prefilter,
+                system_time,
             } => self.execute_spatial_scan(super::super::handlers::spatial::SpatialScanParams {
                 task,
                 tid,
@@ -71,6 +72,7 @@ impl CoreLoop {
                 projection,
                 rls_filters,
                 prefilter: prefilter.as_ref(),
+                system_time: *system_time,
             }),
         }
     }

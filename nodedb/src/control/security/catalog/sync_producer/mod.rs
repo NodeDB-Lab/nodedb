@@ -17,4 +17,4 @@ pub use hwm::SYNC_PRODUCER_HWM;
 pub use join_token::JOIN_TOKEN_STATES;
 pub use peer_binding::{PeerBindingKey, SYNC_PEER_BINDINGS, StoredPeerBinding};
 pub use registration::{SYNC_PRODUCERS, StoredProducerRegistration};
-pub use signing::{CRDT_SIGNING_KEYS, CRDT_SIGNING_ROOT_METADATA};
+pub use signing::CRDT_SIGNING_ROOT_METADATA;

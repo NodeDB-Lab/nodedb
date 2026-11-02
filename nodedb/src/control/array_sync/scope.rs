@@ -12,7 +12,7 @@ use std::sync::{Arc, RwLock};
 
 use nodedb_array::sync::hlc::Hlc;
 
-use crate::types::{DatabaseId, TenantId};
+use crate::types::{DatabaseId, TenantId, VShardId};
 
 /// Full scoped identity of an array: `(database, tenant, array name)`.
 ///
@@ -38,6 +38,9 @@ pub struct ArrayOpTarget<'a> {
     pub database_id: DatabaseId,
     /// Array name, unique within `(database_id, tenant_id)`.
     pub array: &'a str,
+    /// The vShard the entry was proposed to: the tile route of the op's
+    /// cell. Every replica applies the cell on it and places it there.
+    pub vshard: VShardId,
 }
 
 /// Authenticated `(database, tenant)` scope an array sync server serves.

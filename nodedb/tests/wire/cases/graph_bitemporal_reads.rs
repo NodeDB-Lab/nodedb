@@ -73,6 +73,8 @@ fn assert_nodes(blob: &str, present: &[&str], all: &[&str], what: &str) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn neighbors_as_of_reads_the_graph_before_the_change() {
     let server = TestServer::start().await;
+    let start = now_ms();
+    tick().await;
     let cut = changed_graph(&server, "bt_nbr").await;
     let all = ["b", "c", "d"];
 
@@ -94,11 +96,24 @@ async fn neighbors_as_of_reads_the_graph_before_the_change() {
 
     // A read at a time before every write sees no edge.
     let empty = server
-        .query_text("GRAPH NEIGHBORS IN 'bt_nbr' OF 'a' AS OF SYSTEM TIME 1000")
+        .query_text(&format!(
+            "GRAPH NEIGHBORS IN 'bt_nbr' OF 'a' AS OF SYSTEM TIME {start}"
+        ))
         .await
         .expect("neighbors before every write")
         .join("");
     assert_nodes(&empty, &[], &all, "neighbors before every write");
+
+    // A collection without bitemporal=true keeps history only for the
+    // snapshot age limit, so a read further back is refused.
+    let refused = server
+        .query_text("GRAPH NEIGHBORS IN 'bt_nbr' OF 'a' AS OF SYSTEM TIME 1000")
+        .await
+        .expect_err("a read past the history window is refused");
+    assert!(
+        refused.contains("history"),
+        "the refusal names the history window: {refused}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -41,6 +41,10 @@ pub struct IndexDocScope<'a> {
     pub collection: &'a str,
     /// Global surrogate identity of the document.
     pub surrogate: Surrogate,
+    /// System-time ordinal of the write: the document's prior indexed
+    /// version ends there, and the version it indexes starts there.
+    /// [`super::UNVERSIONED`] keeps no history.
+    pub ordinal: i64,
 }
 
 impl InvertedIndex {
@@ -108,11 +112,34 @@ impl InvertedIndex {
         surrogate: Surrogate,
         text: &DocumentText,
     ) -> crate::Result<()> {
+        self.index_document_at(
+            database_id,
+            tid,
+            collection,
+            surrogate,
+            text,
+            super::UNVERSIONED,
+        )
+    }
+
+    /// [`Self::index_document`] at system-time ordinal `ordinal`: the
+    /// document's prior indexed version ends there, and the new one starts
+    /// there.
+    pub fn index_document_at(
+        &self,
+        database_id: u64,
+        tid: TenantId,
+        collection: &str,
+        surrogate: Surrogate,
+        text: &DocumentText,
+        ordinal: i64,
+    ) -> crate::Result<()> {
         let doc = IndexDocScope {
             database_id,
             tid,
             collection,
             surrogate,
+            ordinal,
         };
         let db = self.inner.backend().db();
         let write_txn = db.begin_write().map_err(|e| inverted_err("write txn", e))?;
@@ -162,6 +189,11 @@ impl InvertedIndex {
         // means a previous version of the document holds postings that may
         // need retracting.
         let prior_len = prior_doc_length(txn, doc, index)?;
+        // The prior version's tokens leave for the history before the
+        // strip below removes its postings.
+        if let Some(len) = prior_len {
+            self.end_text_version_in_txn(txn, doc, index, len)?;
+        }
 
         // Retract the document from every term the previous version put it in
         // that the new text does not: the loop below only touches terms
@@ -219,6 +251,7 @@ impl InvertedIndex {
         };
 
         Self::update_stats_in_txn(txn, database_id, tid, index, count_delta, total_delta)?;
+        self.start_text_version_in_txn(txn, doc, index)?;
 
         debug!(
             database_id,

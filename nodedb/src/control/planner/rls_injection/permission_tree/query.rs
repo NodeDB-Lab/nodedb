@@ -196,6 +196,7 @@ mod tests {
             max_iterations: 10,
             distinct: false,
             limit: 0,
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         assert!(apply(&mut plan, &cache).is_ok());
         match &plan {
@@ -267,6 +268,7 @@ mod tests {
             group_by: Vec::new(),
             aggregates: Vec::new(),
             filters: Vec::new(),
+            system_time: nodedb_types::SystemTimeScope::Current,
             having: Vec::new(),
             limit: 0,
             sub_group_by: Vec::new(),

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! ARRAY_ELEMENTWISE → PhysicalPlan::ClusterArray(Elementwise) or
-//! Array(Elementwise).
+//! ARRAY_ELEMENTWISE → `PhysicalPlan::ClusterArray(ClusterArrayOp::Elementwise)`.
 //!
 //! A cell routes by its tile key, and the tile key is a function of the
 //! schema's dims and tile extents alone. Two arrays with one schema hash and
@@ -15,7 +14,7 @@ use nodedb_sql::types_array::ArrayBinaryOpAst;
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::types::TenantId;
-use nodedb_physical::physical_plan::{ArrayOp, ClusterArrayOp};
+use nodedb_physical::physical_plan::ClusterArrayOp;
 
 use super::super::convert::ConvertContext;
 use super::helpers::{decode_schema, load_entry, map_binary_op};
@@ -83,28 +82,15 @@ pub(crate) fn convert_elementwise(
     let right = ArrayId::in_database(tenant_id, ctx.database_id, right_name);
     let vshard = ctx.collection_key(left_name).vshard();
     let op = map_binary_op(op);
-    let plan = if ctx.cluster_enabled {
-        PhysicalPlan::ClusterArray(ClusterArrayOp::Elementwise {
-            left,
-            right,
-            op,
-            attr_idx,
-            prefix_bits: lentry.prefix_bits,
-            system_time,
-            valid_at_ms,
-        })
-    } else {
-        PhysicalPlan::Array(ArrayOp::Elementwise {
-            left,
-            right,
-            op,
-            attr_idx,
-            cell_filter: None,
-            shard_bucket: None,
-            system_time,
-            valid_at_ms,
-        })
-    };
+    let plan = PhysicalPlan::ClusterArray(ClusterArrayOp::Elementwise {
+        left,
+        right,
+        op,
+        attr_idx,
+        prefix_bits: lentry.prefix_bits,
+        system_time,
+        valid_at_ms,
+    });
     Ok(vec![PhysicalTask {
         tenant_id,
         vshard_id: vshard,
@@ -124,7 +110,7 @@ mod tests {
 
     /// A catalog holding `(name, schema_hash, prefix_bits)` arrays of one
     /// 1-D shape.
-    fn make_ctx(cluster_enabled: bool, arrays: &[(&str, u64, u8)]) -> ConvertContext {
+    fn make_ctx(arrays: &[(&str, u64, u8)]) -> ConvertContext {
         let schema = ArraySchemaBuilder::new("grid")
             .dim(DimSpec::new(
                 "x".to_string(),
@@ -160,10 +146,8 @@ mod tests {
             retention_registry: None,
             array_catalog: Some(handle),
             credentials: None,
-            wal: None,
             surrogate_assigner:
                 crate::control::planner::sql_plan_convert::test_support::test_assigner(),
-            cluster_enabled,
             bitemporal_retention_registry: None,
             max_vector_dim: 0,
             force_shuffle_join: false,
@@ -173,6 +157,7 @@ mod tests {
             broadcast_threshold_bytes: 8 * 1024 * 1024,
             shuffle_agg_threshold: 10_000,
             prefetched: Default::default(),
+            reads_txn_snapshot: false,
             database_id: crate::types::DatabaseId::DEFAULT,
             tenant_id: crate::types::TenantId::new(0),
         }
@@ -208,7 +193,7 @@ mod tests {
 
     #[test]
     fn a_cluster_op_carries_the_as_of_scope() {
-        let ctx = make_ctx(true, &[("l", 7, 8), ("r", 7, 8)]);
+        let ctx = make_ctx(&[("l", 7, 8), ("r", 7, 8)]);
         let tasks = convert_at(&ctx, as_of(1_000, 2_000)).expect("convert");
         assert!(matches!(
             &tasks[0].plan,
@@ -221,22 +206,8 @@ mod tests {
     }
 
     #[test]
-    fn a_local_op_carries_the_as_of_scope() {
-        let ctx = make_ctx(false, &[("l", 7, 8), ("r", 7, 8)]);
-        let tasks = convert_at(&ctx, as_of(1_000, 2_000)).expect("convert");
-        assert!(matches!(
-            &tasks[0].plan,
-            PhysicalPlan::Array(ArrayOp::Elementwise {
-                system_time: nodedb_types::SystemTimeScope::AsOf(1_000),
-                valid_at_ms: Some(2_000),
-                ..
-            })
-        ));
-    }
-
-    #[test]
     fn all_system_versions_are_refused() {
-        let ctx = make_ctx(true, &[("l", 7, 8), ("r", 7, 8)]);
+        let ctx = make_ctx(&[("l", 7, 8), ("r", 7, 8)]);
         let temporal = TemporalScope {
             system_time: nodedb_types::SystemTimeScope::AllVersions,
             valid_time: nodedb_sql::temporal::ValidTime::Any,
@@ -250,7 +221,7 @@ mod tests {
 
     #[test]
     fn a_cluster_plans_a_fan_out_with_the_shared_routing() {
-        let ctx = make_ctx(true, &[("l", 7, 8), ("r", 7, 8)]);
+        let ctx = make_ctx(&[("l", 7, 8), ("r", 7, 8)]);
         let tasks = convert(&ctx).expect("convert");
         match &tasks[0].plan {
             PhysicalPlan::ClusterArray(ClusterArrayOp::Elementwise {
@@ -269,21 +240,8 @@ mod tests {
     }
 
     #[test]
-    fn a_single_node_plans_a_local_op() {
-        let ctx = make_ctx(false, &[("l", 7, 8), ("r", 7, 8)]);
-        let tasks = convert(&ctx).expect("convert");
-        assert!(matches!(
-            &tasks[0].plan,
-            PhysicalPlan::Array(ArrayOp::Elementwise {
-                shard_bucket: None,
-                ..
-            })
-        ));
-    }
-
-    #[test]
     fn arrays_with_different_routing_are_refused() {
-        let ctx = make_ctx(true, &[("l", 7, 8), ("r", 7, 10)]);
+        let ctx = make_ctx(&[("l", 7, 8), ("r", 7, 10)]);
         let err = convert(&ctx).expect_err("refused");
         assert!(
             matches!(&err, crate::Error::PlanError { detail } if detail.contains("prefix_bits")),
@@ -293,7 +251,7 @@ mod tests {
 
     #[test]
     fn arrays_with_different_schemas_are_refused() {
-        let ctx = make_ctx(true, &[("l", 7, 8), ("r", 9, 8)]);
+        let ctx = make_ctx(&[("l", 7, 8), ("r", 9, 8)]);
         let err = convert(&ctx).expect_err("refused");
         assert!(
             matches!(&err, crate::Error::PlanError { detail } if detail.contains("different schemas")),

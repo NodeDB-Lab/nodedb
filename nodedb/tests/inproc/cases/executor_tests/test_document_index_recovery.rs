@@ -86,6 +86,7 @@ fn document_indexes_consistent_after_simulated_crash() {
             field: None,
             filters: Vec::new(),
             scores: Vec::new(),
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
     let text_json = payload_json(&text_payload);
@@ -133,6 +134,7 @@ fn document_indexes_consistent_after_simulated_crash() {
             field: None,
             filters: Vec::new(),
             scores: Vec::new(),
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
     let text_after_json = payload_json(&text_after);
@@ -160,6 +162,7 @@ fn document_indexes_consistent_after_simulated_crash() {
             field: None,
             filters: Vec::new(),
             scores: Vec::new(),
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
     let text_a2_json = payload_json(&text_a2);

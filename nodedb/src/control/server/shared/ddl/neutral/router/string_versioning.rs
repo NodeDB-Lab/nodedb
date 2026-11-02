@@ -408,7 +408,7 @@ mod tests {
             session_id: SessionId::from(&addr),
         };
         assert!(!restore_forbidden_in_transaction(&ctx));
-        sessions.begin(addr, 0).expect("begin");
+        sessions.begin(addr).expect("begin");
         assert!(restore_forbidden_in_transaction(&ctx));
         sessions.fail_transaction(addr);
         assert!(restore_forbidden_in_transaction(&ctx));

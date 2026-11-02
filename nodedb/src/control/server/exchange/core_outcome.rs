@@ -28,17 +28,17 @@ pub(crate) fn classify_core_response(collected: crate::Result<Response>) -> Core
     Ok(Some(resp))
 }
 
-/// The versions every core reported, a `NotFound` refusal's included. A
-/// refusal observed its vShards with no matching row, and a read validates
-/// that observation at the versions the refusal reported.
-pub(crate) fn reported_versions<'a>(
+/// The vShards every core read, a `NotFound` refusal's included. A refusal
+/// read its vShards with no matching row, and a transaction validates that
+/// read on each of them.
+pub(crate) fn reported_vshards<'a>(
     collected: impl IntoIterator<Item = &'a crate::Result<Response>>,
-) -> crate::types::ReadVersions {
-    let mut versions = crate::types::ReadVersions::new();
+) -> crate::types::ReadShards {
+    let mut shards = crate::types::ReadShards::new();
     for resp in collected.into_iter().flatten() {
-        versions.merge(&resp.read_versions);
+        shards.merge(&resp.read_vshards);
     }
-    versions
+    shards
 }
 
 /// Require every core to answer, and return the answers in core order.
@@ -73,7 +73,7 @@ mod tests {
             watermark_lsn: Lsn::ZERO,
             error_code: code.map(Box::new),
             stage_vote: None,
-            read_versions: crate::types::ReadVersions::new(),
+            read_vshards: crate::types::ReadShards::new(),
             write_set: Vec::new(),
         }
     }

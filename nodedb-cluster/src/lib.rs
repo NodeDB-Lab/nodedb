@@ -71,6 +71,7 @@ pub mod routing_liveness;
 pub mod routing_membership;
 pub mod rpc_codec;
 pub mod shard_split;
+pub mod snapshot_board;
 pub mod subsystem;
 pub mod swim;
 pub mod sync_frame_versioned;
@@ -104,7 +105,7 @@ pub use decommission::{
 pub use error::{
     CalvinError, ClusterError, MigrationCheckpointError, MigrationRecoveryError, Result,
 };
-pub use forward::{ChunkSink, NoopPlanExecutor, PlanExecutor};
+pub use forward::{ChunkSink, NoopPlanExecutor, PlanExecutor, ReadCutUnclosed};
 pub use ghost::{GhostStub, GhostTable};
 pub use health::{HealthConfig, HealthMonitor};
 pub use lease_liveness::{
@@ -148,6 +149,7 @@ pub use rpc_codec::{
     ShufflePushEnd, ShufflePushRequest, SortKey, SubmitCalvinInboxRequest,
     SubmitCalvinInboxResponse, SubmitCalvinTxnRequest, SubmitCalvinTxnResponse, TypedClusterError,
 };
+pub use snapshot_board::{NO_SNAPSHOT_REPORT, SnapshotBoard};
 pub use topology::{ClusterTopology, NodeInfo, NodeState};
 pub use transport::{
     IDENTITY_MISMATCH_QUIC_ERROR, NexarTransport, NoopIdentityStore, PeerIdentityStore,
@@ -175,7 +177,6 @@ pub use metadata_group::{
 pub use migration_executor::recover_in_flight_migrations;
 pub use quic_transport::{QuicTransport, QuicTransportConfig};
 
-pub use array_routing::{tile_id_of_coord, vshard_for_array_coord, vshard_for_array_tile};
 pub use distributed_join::{BroadcastJoinRequest, JoinStrategy, ShufflePartition, select_strategy};
 pub use lifecycle::{
     DecommissionResult, handle_learner_promotion, handle_node_join, plan_decommission,

@@ -145,9 +145,10 @@ impl CoreLoop {
         ) {
             return false;
         }
+        let ordinal = self.bitemporal_ordinal();
         match self.vector_collections.get_mut(&index_key) {
             Some(index) => {
-                index.delete(vector_id);
+                index.end_at(vector_id, ordinal);
                 true
             }
             None => false,

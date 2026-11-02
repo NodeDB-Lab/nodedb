@@ -2,8 +2,8 @@
 
 //! Which user collection a physical plan reads or writes.
 //!
-//! Redaction, clone interception, read-set tracking, own-write floors, and
-//! metering all key on this answer. Every operation family is matched
+//! Redaction, clone interception, read-set tracking, and metering all key on
+//! this answer. Every operation family is matched
 //! variant by variant, so a new variant fails to compile until it is decided.
 
 use crate::bridge::envelope::PhysicalPlan;
@@ -34,9 +34,8 @@ pub(crate) fn extract_collection(plan: &PhysicalPlan) -> Option<&str> {
         PhysicalPlan::Crdt(op) => Some(op.collection().as_str()),
         PhysicalPlan::Query(op) => query_collection(op),
         PhysicalPlan::Meta(op) => meta_collection(op),
-        // An array is a collection for read-set tracking and the commit
-        // validator's own-write exclusion: a same-transaction slice after a
-        // staged put must key on the name the put's write floor records.
+        // An array is a collection for read-set tracking: a slice keys on the
+        // array's name, as a put to it does.
         PhysicalPlan::Array(op) => Some(op.primary_array().name.as_str()),
         PhysicalPlan::ClusterArray(op) => Some(op.array_id().name.as_str()),
         PhysicalPlan::ClusterEvent(op) => cluster_event_collection(op),

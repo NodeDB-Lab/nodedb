@@ -11,6 +11,8 @@ use nodedb_wal::TimeAnchors;
 use nodedb_wal::segmented::{SegmentedWal, SegmentedWalConfig};
 use nodedb_wal::writer::WalWriterConfig;
 
+use crate::types::Lsn;
+
 /// WAL manager: owns the segmented WAL and coordinates appends + sync.
 ///
 /// The WAL is the single source of truth for durability. Every mutation
@@ -38,6 +40,9 @@ pub struct WalManager {
     /// group-commit leader in [`WalManager::wait_durable`] after a successful
     /// `sync()`, never past what that fsync actually made durable.
     pub(super) durable_lsn: AtomicU64,
+    /// The last LSN in the log when it opened. Boot replays exactly the
+    /// records at or below it. A record above it was appended by this process.
+    pub(super) recovered_through: Lsn,
     /// Async group-commit leader election: the first `wait_durable` caller to
     /// acquire this becomes the leader and performs the single coalesced fsync
     /// covering every concurrently-buffered write. Async so waiting for
@@ -70,6 +75,15 @@ impl WalManager {
     /// by a successful group-commit fsync in [`WalManager::wait_durable`].
     pub fn durable_through(&self) -> u64 {
         self.durable_lsn.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// The last LSN in the log when it opened, `Lsn::ZERO` for a new log.
+    ///
+    /// Fixed at open, so a reader learns what boot replays even after this
+    /// process appended. The next LSN cannot tell it: an append takes its LSN
+    /// before its record is readable.
+    pub fn recovered_through(&self) -> Lsn {
+        self.recovered_through
     }
 
     /// Return the stable in-memory root for per-user CRDT signing keys.
@@ -203,6 +217,7 @@ impl WalManager {
             }
         };
 
+        let recovered_through = Lsn::new(wal.next_lsn().saturating_sub(1));
         Ok(Self {
             wal: Arc::new(Mutex::new(wal)),
             wal_dir,
@@ -210,6 +225,7 @@ impl WalManager {
             crdt_signing_root: None,
             audit_wal,
             durable_lsn: AtomicU64::new(0),
+            recovered_through,
             commit_lock: tokio::sync::Mutex::new(()),
             durable_notify: tokio::sync::Notify::new(),
             time_anchors,

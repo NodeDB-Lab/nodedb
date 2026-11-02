@@ -16,7 +16,7 @@ use tracing::{error, warn};
 
 use crate::calvin::sequencer::entry::SequencerEntry;
 use crate::calvin::sequencer::epoch_guard::{EpochCheck, SequencerHalt, classify};
-use crate::calvin::types::{EpochBatch, SchedulerInput, TxnIdWire};
+use crate::calvin::types::{EpochBatch, SchedulerInput};
 use crate::calvin::{AbortCause, ParticipantVote, TxnId, VerdictOutcome};
 
 use super::core::{Delivery, SequencerStateMachine};
@@ -170,7 +170,16 @@ impl SequencerStateMachine {
                 hlc,
                 restore_point,
                 barrier,
-            } => self.apply_cut_marker(index, hlc, restore_point, barrier),
+                floor,
+            } => self.apply_cut_marker(
+                index,
+                super::restore::CutMarkerEntry {
+                    hlc,
+                    restore_point,
+                    barrier,
+                    floor,
+                },
+            ),
             SequencerEntry::TxnPart {
                 epoch,
                 position,
@@ -428,70 +437,6 @@ impl SequencerStateMachine {
             .fetch_add(dropped, Ordering::Relaxed);
         self.metrics.epochs_applied.fetch_add(1, Ordering::Relaxed);
         self.last_applied_epoch = batch.epoch;
-    }
-
-    /// Record `vshard_id`'s completion ack for `txn`, with its apply result,
-    /// and log the ack at its Raft `index`.
-    ///
-    /// The first ack of a vShard in log order answers for it, on every node
-    /// alike: the result depends on the log alone. Only the vShard's
-    /// data-group leader proposes an ack, so a node that left the group adds
-    /// none. `from_node` names the proposer for tracing.
-    fn apply_completion_ack(
-        &self,
-        index: u64,
-        txn: TxnId,
-        vshard_id: u32,
-        from_node: u64,
-        result: Vec<u8>,
-    ) {
-        tracing::trace!(
-            epoch = txn.epoch,
-            position = txn.position,
-            vshard_id,
-            from_node,
-            "sequencer apply: completion ack"
-        );
-        self.completion_registry
-            .note_completion_ack_with(txn, vshard_id, result);
-        self.completion_registry
-            .applied_acks
-            .record(crate::calvin::AppliedCompletionAck {
-                index,
-                txn,
-                vshard_id,
-            });
-    }
-
-    /// Send a reservation `input` for `owner` to `vshard`'s scheduler.
-    ///
-    /// Same delivery as the epoch-batch fan-out: an armed vShard, or a full
-    /// or closed channel, leaves the input to the catch-up replay. This node
-    /// may not host the vShard. Then nothing is sent. `what` names the input
-    /// in the warnings.
-    fn forward_reservation(
-        &self,
-        index: u64,
-        vshard: u32,
-        owner: TxnIdWire,
-        input: SchedulerInput,
-        what: &'static str,
-    ) {
-        match self.deliver(index, vshard, input) {
-            Delivery::NotHosted | Delivery::Sent | Delivery::Deferred => {}
-            Delivery::DroppedFull => warn!(
-                vshard,
-                owner_epoch = owner.epoch,
-                owner_position = owner.position,
-                what,
-                "sequencer apply: vshard channel full (backpressure); \
-                 reservation input left to the catch-up replay"
-            ),
-            Delivery::DroppedClosed => warn!(
-                vshard,
-                what, "sequencer apply: vshard sender gone; scheduler may have exited"
-            ),
-        }
     }
 }
 

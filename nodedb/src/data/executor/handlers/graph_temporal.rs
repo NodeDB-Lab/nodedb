@@ -80,9 +80,9 @@ impl CoreLoop {
             Ok(edges) => edges,
             Err(e) => return self.response_error(task, ErrorCode::from(e)),
         };
-        // A live read inside a transaction sees that transaction's own staged
-        // edge writes in this collection.
-        let edges = match (scope.is_live(), task.request.txn_id) {
+        // A live read and a transaction snapshot read inside a transaction
+        // see that transaction's own staged edge writes in this collection.
+        let edges = match (scope.merges_txn_overlay(), task.request.txn_id) {
             (true, Some(txn_id)) => {
                 self.touch_overlay(txn_id);
                 super::graph::graph_txn_merge::merge_graph_txn_overlay_collection_edges(

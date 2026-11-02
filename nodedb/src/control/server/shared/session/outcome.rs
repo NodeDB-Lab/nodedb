@@ -30,8 +30,9 @@ pub enum CommitOutcome {
 /// adapter to reproduce the SQLSTATE (and, where the payload allows, the
 /// message) the pre-extraction path emitted.
 pub enum AbortReason {
-    /// Snapshot-isolation conflict: a read key's collection advanced past the
-    /// read LSN. pgwire/native → `40001` serialization failure.
+    /// Serialization conflict: a committed version of something the
+    /// transaction read or writes has an ordinal above its snapshot. Every
+    /// protocol answers `40001` serialization failure.
     Serialization,
     /// `SessionStore::commit` reported no committable transaction. → `25000`.
     NoTransaction,

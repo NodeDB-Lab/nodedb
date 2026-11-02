@@ -4,10 +4,8 @@ use std::sync::Arc;
 
 use super::CoreLoop;
 use crate::engine::document::store::StorageKey;
+use crate::engine::sparse::btree_versioned::VersionedIndexEntry;
 use crate::engine::sparse::doc_cache::DocCache;
-
-/// (added, removed) secondary-index (field, value) tuples.
-type SecondaryIndexDiff = (Vec<(String, String)>, Vec<(String, String)>);
 
 /// Shared parameters for [`CoreLoop::apply_secondary_indexes_in_txn`].
 pub(in crate::data::executor) struct SecondaryIndexInputs<'a> {
@@ -18,6 +16,9 @@ pub(in crate::data::executor) struct SecondaryIndexInputs<'a> {
     pub new_doc: &'a serde_json::Value,
     pub doc_id: &'a StorageKey,
     pub index_paths: &'a [crate::engine::document::store::IndexPath],
+    /// The system-time ordinal of the row version this write appends. Every
+    /// index entry the write adds or tombstones carries it.
+    pub sys_from: i64,
 }
 
 impl CoreLoop {
@@ -109,6 +110,13 @@ impl CoreLoop {
     /// defaults.
     /// Apply vector engine tuning. Must land before the checkpoint restore:
     /// restored collections take its seal threshold.
+    /// Set the commit snapshot window: a commit whose snapshot trails its
+    /// own ordinal by more is refused on every replica. Every node runs one
+    /// value.
+    pub fn set_commit_snapshot_window(&mut self, window: std::time::Duration) {
+        self.maintenance.version_purge.commit_window_ns = super::version_purge::window_ns(window);
+    }
+
     pub fn set_vector_tuning(&mut self, tuning: nodedb_types::config::tuning::VectorTuning) {
         self.vector_tuning = tuning;
     }
@@ -122,32 +130,29 @@ impl CoreLoop {
 
     /// Apply the secondary-index SET diff within an already-open write txn.
     ///
-    /// Routes writes through [`SparseEngine::index_put_in_txn`] /
-    /// [`SparseEngine::index_remove_in_txn`] so the document + index entries
-    /// commit atomically with the caller's `WriteTransaction`. There is no
-    /// own-transaction variant: every caller already holds the row's write
-    /// txn, and a nested `begin_write` deadlocks redb's single-writer lock.
+    /// Every entry lands in the versioned index at `sys_from`, the ordinal of
+    /// the row version the caller appends, inside the caller's
+    /// `WriteTransaction`. There is no own-transaction variant: every caller
+    /// already holds the row's write txn, and a nested `begin_write`
+    /// deadlocks redb's single-writer lock.
     ///
-    /// `old_doc` is the pre-write document (`None` for a fresh insert). The set
-    /// of indexed values is diffed against the new document: values only in the
-    /// new set are inserted, values only in the old set are removed — so an
-    /// UPDATE that changes a field value drops the stale entry. Returns
-    /// `(added, removed)` as `(field, value)` tuples.
+    /// `old_doc` is the row's current document before the write (`None` when
+    /// it has none). Values only in the new set get a live entry. Values only
+    /// in the old set get a tombstone, so a read at `sys_from` or later no
+    /// longer finds the row under them, and a read below `sys_from` still
+    /// does. Returns every `(field, value)` pair written at `sys_from`: a
+    /// rollback removes exactly those entries.
     ///
     /// An index write that fails propagates rather than being stepped over.
     /// The entries land in the CALLER'S transaction alongside the row body, so
     /// every caller returns before `txn.commit()` and redb rolls both halves
     /// back — the row does not exist, rather than existing with an index that
-    /// cannot find it. Stepping over the failure would be permanent, not
-    /// transient: nothing re-derives the missing entry, the next write to the
-    /// document diffs against the values this one believed it wrote, and a
-    /// lookup on the indexed field can no longer distinguish "no such row"
-    /// from "the row is there and the index forgot it".
+    /// cannot find it.
     pub(in crate::data::executor) fn apply_secondary_indexes_in_txn(
         &mut self,
         txn: &redb::WriteTransaction,
         inputs: SecondaryIndexInputs<'_>,
-    ) -> crate::Result<SecondaryIndexDiff> {
+    ) -> crate::Result<Vec<(String, String)>> {
         let SecondaryIndexInputs {
             database_id,
             tid,
@@ -156,45 +161,47 @@ impl CoreLoop {
             new_doc,
             doc_id,
             index_paths,
+            sys_from,
         } = inputs;
         let crs = self.crs_context();
-        let mut added = Vec::new();
-        let mut removed = Vec::new();
+        let mut written = Vec::new();
         for index_path in index_paths {
             let new_vals = index_values_for(new_doc, index_path, &crs);
             let old_vals = old_doc
                 .map(|d| index_values_for(d, index_path, &crs))
                 .unwrap_or_default();
             for v in new_vals.difference(&old_vals) {
-                self.sparse.index_put_in_txn(
+                self.sparse.versioned_index_put_in_txn(
                     txn,
-                    crate::engine::sparse::btree_index::IndexEntryTxn {
+                    VersionedIndexEntry {
                         database_id,
-                        tenant_id: tid,
-                        collection,
+                        tenant: tid,
+                        coll: collection,
                         field: &index_path.path,
                         value: v,
-                        document_id: doc_id,
+                        doc_id,
+                        sys_from,
                     },
                 )?;
-                added.push((index_path.path.clone(), v.clone()));
+                written.push((index_path.path.clone(), v.clone()));
             }
             for v in old_vals.difference(&new_vals) {
-                self.sparse.index_remove_in_txn(
+                self.sparse.versioned_index_tombstone_in_txn(
                     txn,
-                    crate::engine::sparse::btree_index::IndexEntryTxn {
+                    VersionedIndexEntry {
                         database_id,
-                        tenant_id: tid,
-                        collection,
+                        tenant: tid,
+                        coll: collection,
                         field: &index_path.path,
                         value: v,
-                        document_id: doc_id,
+                        doc_id,
+                        sys_from,
                     },
                 )?;
-                removed.push((index_path.path.clone(), v.clone()));
+                written.push((index_path.path.clone(), v.clone()));
             }
         }
-        Ok((added, removed))
+        Ok(written)
     }
 
     /// Pause writes to a vShard (during Phase 3 migration cutover).

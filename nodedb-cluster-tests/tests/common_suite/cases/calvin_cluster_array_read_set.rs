@@ -5,14 +5,13 @@
 //! A 3-node cluster holds the array `grid`, whose cells spread over the tile
 //! vShards of several nodes, and the keyed collection `log`. A transaction
 //! reads an `ARRAY_SLICE` that spans the tiles of several shards, then
-//! writes `log`. Each shard leg reports its vShard's write version, even
-//! when it matched no cell, and COMMIT validates the read on every covered
-//! vShard.
+//! writes `log`. Each shard leg reports its vShard, even when it matched no
+//! cell, and COMMIT validates the read on every covered vShard.
 //!
 //! - No write to `grid` after the read: the COMMIT succeeds.
-//! - A cell written to a covered tile after the read moves that vShard's
-//!   version past the read's, so the COMMIT aborts with SQLSTATE 40001 and
-//!   the transaction's write is not visible.
+//! - A cell written to a covered tile after the read lands a version above
+//!   the snapshot, so the COMMIT aborts with SQLSTATE 40001 and the
+//!   transaction's write is not visible.
 
 use super::calvin_multishard_fixture::{Fixture, data_rows, keyed_ddl, row_count};
 use super::calvin_replica_content::{run_retrying, strict_session};

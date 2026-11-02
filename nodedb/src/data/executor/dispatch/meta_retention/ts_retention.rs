@@ -82,7 +82,11 @@ impl CoreLoop {
             task.request.tenant_id,
             collection.to_string(),
         );
-        let expired: Vec<(i64, String)> = self
+        let expired: Vec<(
+            crate::engine::timeseries::partition_registry::PartitionKey,
+            String,
+            i64,
+        )> = self
             .ts_registries
             .get(&ts_key)
             .map(|registry| {
@@ -90,14 +94,14 @@ impl CoreLoop {
                     .iter()
                     .filter(|(_, e)| {
                         let axis_ts = if bitemporal && e.meta.max_system_ts > 0 {
-                            e.meta.max_system_ts
+                            nodedb_types::ordinal_to_ms(e.meta.max_system_ts)
                         } else {
                             e.meta.max_ts
                         };
                         axis_ts < cutoff
                             && e.meta.state != nodedb_types::timeseries::PartitionState::Deleted
                     })
-                    .map(|(&start, e)| (start, e.dir_name.clone()))
+                    .map(|(key, e)| (key.clone(), e.dir_name.clone(), e.meta.max_ts))
                     .collect()
             })
             .unwrap_or_default();
@@ -116,16 +120,26 @@ impl CoreLoop {
         let database_id = task.request.database_id.as_u64();
         let tenant_id = task.request.tenant_id.as_u64();
         if !expired.is_empty() {
-            let expiring: HashSet<String> = expired.iter().map(|(_, dir)| dir.clone()).collect();
-            if let Err(e) =
-                self.fold_expiring_partitions(database_id, tenant_id, collection, &expiring, now_ms)
-            {
+            let expiring: HashSet<String> = expired.iter().map(|(_, dir, _)| dir.clone()).collect();
+            let dropped_through = expired
+                .iter()
+                .map(|(_, _, max_ts)| *max_ts)
+                .max()
+                .unwrap_or(i64::MIN);
+            if let Err(e) = self.fold_expiring_partitions(
+                database_id,
+                tenant_id,
+                collection,
+                &expiring,
+                dropped_through,
+                now_ms,
+            ) {
                 return self.response_error(task, e);
             }
         }
         let mut removed: Vec<String> = Vec::new();
         if let Some(registry) = self.ts_registries.get_mut(&ts_key) {
-            for (start_ts, dir_name) in expired {
+            for (partition_key, dir_name, _) in expired {
                 let partition_path = ts_base.join(&dir_name);
                 if partition_path.exists()
                     && let Err(e) = std::fs::remove_dir_all(&partition_path)
@@ -137,7 +151,7 @@ impl CoreLoop {
                     );
                     continue;
                 }
-                registry.mark_deleted(start_ts);
+                registry.mark_deleted(&partition_key);
                 removed.push(dir_name);
                 deleted += 1;
             }
@@ -158,22 +172,25 @@ impl CoreLoop {
             self.persist_dirty_cagg_images();
         }
 
+        // A last-value read below this ordinal finds the evicted series gone
+        // and refuses rather than answer without them.
+        let evict_ordinal = self.ts_batch_ordinal(
+            crate::data::executor::handlers::timeseries::TimeseriesApplyMode::Immediate,
+            now_ms,
+        );
         if let Some(lvc) = self.ts_last_value_caches.get_mut(&ts_key) {
-            let evicted = lvc.evict_older_than(cutoff);
+            let evicted = lvc.evict_older_than(cutoff, evict_ordinal);
             if !evicted.is_empty() {
                 tracing::debug!(
                     collection,
                     evicted = evicted.len(),
                     "evicted stale LVC entries"
                 );
-                // Drop the same series from the catalog. Leaving them behind
-                // would let it accumulate every series the collection ever saw
-                // while the cache it exists to serve has already released them.
-                if let Some(catalog) = self.ts_series_catalogs.get_mut(&ts_key) {
-                    for id in evicted {
-                        catalog.forget(id);
-                    }
-                }
+                // The catalog keeps the evicted series. This pass runs at a
+                // time local to each node, and the id a key resolves to
+                // depends on every key the catalog holds, so forgetting one
+                // here would let replicas give a later key different ids.
+                // Only a replicated drop or purge removes a catalog.
             }
         }
 
@@ -227,6 +244,34 @@ mod tests {
                     .count()
             })
             .unwrap_or(0)
+    }
+
+    /// Evicting stale last values keeps every series id: a key ingested
+    /// again resolves to the id it had.
+    #[test]
+    fn eviction_keeps_the_series_ids() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        let key = (
+            DatabaseId::DEFAULT,
+            TenantId::new(TENANT),
+            COLLECTION.to_string(),
+        );
+        core.ts_last_value_caches.insert(
+            key.clone(),
+            crate::engine::timeseries::last_value_cache::LastValueCache::new(),
+        );
+        assert_eq!(ingest(&mut core, ROWS_A, 1), Status::Ok);
+        let held = core.ts_series_catalogs.get(&key).expect("catalog").clone();
+        let resp = core.meta_enforce_timeseries_retention(&retention_task(), COLLECTION, 1, &[]);
+        assert_eq!(resp.status, Status::Ok, "{:?}", resp.error_code);
+        assert!(
+            core.ts_last_value_caches
+                .get(&key)
+                .is_some_and(|cache| cache.is_empty()),
+            "the stale values left the cache"
+        );
+        assert_eq!(core.ts_series_catalogs.get(&key), Some(&held));
     }
 
     #[test]
@@ -344,6 +389,7 @@ mod tests {
             time_key: "timestamp".into(),
             columns: Vec::new(),
             partition_interval: "1h".into(),
+            last_value_cache: false,
         }));
         core.doc_configs.insert(
             (

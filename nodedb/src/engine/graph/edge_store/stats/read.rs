@@ -5,8 +5,9 @@
 //! ## Complexity
 //!
 //! - `as_of = None` (live snapshot): O(1) summary read + O(distinct_labels) label scan.
-//!   Legacy or missing ownership-aware summaries fall back to a full EDGES prefix scan
-//!   and carry edge identities so the Control Plane can deduplicate dual-home replicas.
+//!   A summary marked for scan (`ownership_version == 0`) or an absent summary falls
+//!   back to a full EDGES prefix scan. The scan carries edge identities so the Control
+//!   Plane can deduplicate dual-home replicas.
 //!
 //! - `as_of = Some(ts)`: falls back to a full EDGES prefix scan for the matching
 //!   collection, materialising counts at the given system-time ordinal. O(edges-in-collection).
@@ -36,9 +37,9 @@ impl EdgeStore {
     /// Returns zeros when no edges exist — not an error.
     ///
     /// When `as_of` is `None` the result is served from the persistent summary
-    /// row (O(1) + O(distinct_labels)). A legacy or absent ownership-aware
-    /// summary falls back to a full prefix scan of EDGES and returns logical
-    /// identities for exact cross-core deduplication.
+    /// row (O(1) + O(distinct_labels)). A summary marked for scan, or an
+    /// absent one, falls back to a full prefix scan of EDGES and returns
+    /// logical identities for exact cross-core deduplication.
     ///
     /// When `as_of` is `Some(ordinal)` the function performs a full prefix scan
     /// of EDGES and materialises counts at that system-time ordinal.
@@ -60,7 +61,8 @@ impl EdgeStore {
     ///
     /// With `as_of = None`: scans `GRAPH_STATS` summary rows for the tenant
     /// (O(collections-with-stats)), then does O(distinct_labels) label scan
-    /// per collection. Legacy or absent summaries fall back to EDGES scans.
+    /// per collection. Summaries marked for scan, or absent ones, fall back to
+    /// EDGES scans.
     ///
     /// With `as_of = Some(ts)`: scans all EDGES for the tenant once, grouping by
     /// collection and materialising counts at ordinal `ts`. O(total-edges-for-tenant).

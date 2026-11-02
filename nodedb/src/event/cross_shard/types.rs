@@ -10,19 +10,16 @@
 /// Packaged by the source Event Plane, sent via `VShardEnvelope(CrossShardEvent)`,
 /// received and executed by the target Event Plane's `CrossShardReceiver`.
 ///
-/// The current wire encoding is a versioned MessagePack map: receivers accept
-/// unknown fields so later versions remain forward-compatible. The receiver
-/// separately recognizes the exact legacy positional encoding; malformed
-/// payloads that match neither representation are rejected.
+/// The wire encoding is a MessagePack map. A payload that is not this exact
+/// map is rejected.
 #[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
-#[msgpack(map, allow_unknown_fields)]
+#[msgpack(map)]
 pub struct CrossShardWriteRequest {
     /// SQL statement to execute on the target shard.
     pub sql: String,
     /// Tenant context for the execution.
     pub tenant_id: u64,
     /// Database context for the trigger body execution.
-    #[msgpack(default)]
     pub database_id: u64,
     /// vShard that owns the source write.
     pub source_vshard: u32,
@@ -33,7 +30,6 @@ pub struct CrossShardWriteRequest {
     /// Body that emitted this request within the source write, such as
     /// `trigger/<database>/<name>`. The receiver deduplicates on
     /// `(source_vshard, source_lsn, source_sequence, origin)`.
-    #[msgpack(default)]
     pub origin: String,
     /// Cascade depth to prevent infinite trigger chains.
     pub cascade_depth: u32,

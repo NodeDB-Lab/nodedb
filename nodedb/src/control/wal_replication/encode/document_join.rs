@@ -9,7 +9,7 @@
 //! never proposes.
 
 use super::super::types::ReplicatedWrite;
-use super::document::{WireReturning, wire_target_bindings, wire_targets};
+use super::document::{WireReturning, wire_target_bindings};
 use nodedb_physical::physical_plan::document::MergeClauseOp;
 use nodedb_physical::physical_plan::{ResolvedSumTarget, RowSource};
 
@@ -49,8 +49,7 @@ pub(super) fn merge_apply(
         resolved_insert_identities: merge.resolved_insert_identities.to_vec(),
         source_rows: join.source_rows.to_vec(),
         rls_filters: returning.rls_filters.to_vec(),
-        resolved_sum_targets: wire_targets(join.resolved_sum_targets),
-        resolved_sum_target_bindings: wire_target_bindings(join.resolved_sum_targets),
+        resolved_sum_targets: wire_target_bindings(join.resolved_sum_targets),
         declared_primary_key: join.declared_primary_key.map(str::to_owned),
     }
 }
@@ -72,8 +71,7 @@ pub(super) fn update_from_join_apply(
         returning: returning.returning,
         source_rows: join.source_rows.to_vec(),
         rls_filters: returning.rls_filters.to_vec(),
-        resolved_sum_targets: wire_targets(join.resolved_sum_targets),
-        resolved_sum_target_bindings: wire_target_bindings(join.resolved_sum_targets),
+        resolved_sum_targets: wire_target_bindings(join.resolved_sum_targets),
         declared_primary_key: join.declared_primary_key.map(str::to_owned),
     }
 }

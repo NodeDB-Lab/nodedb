@@ -2,6 +2,8 @@
 
 //! Tombstone compaction for [`HnswIndex`]: drops deleted nodes and remaps ids.
 
+use roaring::RoaringBitmap;
+
 use super::HnswIndex;
 use crate::hnsw::graph::types::Node;
 
@@ -20,7 +22,20 @@ impl HnswIndex {
     /// tombstoned (removed). Repairs edges so the entry point reaches every
     /// remaining node.
     pub fn compact_with_map(&mut self) -> (usize, Vec<u32>) {
-        let tombstone_count = self.tombstone_count();
+        self.compact_with_map_retaining(&RoaringBitmap::new())
+    }
+
+    /// [`Self::compact_with_map`] that keeps every soft-deleted node whose
+    /// local id is in `retain`. A kept node stays soft-deleted under its new
+    /// id: a search at a past system-time cut still reads it.
+    pub fn compact_with_map_retaining(&mut self, retain: &RoaringBitmap) -> (usize, Vec<u32>) {
+        let removed = |id: usize, node: &Node| node.deleted && !retain.contains(id as u32);
+        let tombstone_count = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(id, node)| removed(*id, node))
+            .count();
         if tombstone_count == 0 {
             let identity: Vec<u32> = (0..self.nodes.len() as u32).collect();
             return (0, identity);
@@ -30,8 +45,8 @@ impl HnswIndex {
 
         let mut id_map: Vec<u32> = Vec::with_capacity(self.nodes.len());
         let mut new_id = 0u32;
-        for node in &self.nodes {
-            if node.deleted {
+        for (id, node) in self.nodes.iter().enumerate() {
+            if removed(id, node) {
                 id_map.push(u32::MAX);
             } else {
                 id_map.push(new_id);
@@ -40,8 +55,8 @@ impl HnswIndex {
         }
 
         let mut new_nodes: Vec<Node> = Vec::with_capacity(new_id as usize);
-        for node in self.nodes.drain(..) {
-            if node.deleted {
+        for (old_id, node) in self.nodes.drain(..).enumerate() {
+            if id_map[old_id] == u32::MAX {
                 continue;
             }
             let remapped_neighbors: Vec<Vec<u32>> = node
@@ -64,7 +79,7 @@ impl HnswIndex {
             new_nodes.push(Node {
                 storage: node.storage,
                 neighbors: remapped_neighbors,
-                deleted: false,
+                deleted: node.deleted,
             });
         }
 

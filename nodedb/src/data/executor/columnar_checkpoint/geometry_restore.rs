@@ -48,6 +48,7 @@
 
 use super::super::core_loop::CoreLoop;
 use crate::bridge::envelope::PhysicalPlan;
+use crate::data::executor::handlers::columnar_read::flushed_segment::SegmentBlocks;
 use crate::types::{DatabaseId, TenantId};
 use nodedb_physical::physical_plan::{ColumnarInsertIntent, ColumnarOp};
 use nodedb_types::RlsWriteCheck;
@@ -83,7 +84,7 @@ impl CoreLoop {
 
         // Every fallible read runs before the spatial maps change, so a
         // refused restore leaves them as the spatial checkpoint loaded them.
-        let mut rows = self.restored_flushed_rows(engine, segments, &schema, collection)?;
+        let mut rows = self.restored_flushed_rows(key, engine, segments, &schema)?;
         let memtable_segment_id = engine.memtable_segment_id();
         for row_idx in 0..engine.memtable().row_count() {
             let Some(row) = engine.get_memtable_row(row_idx)? else {
@@ -141,6 +142,7 @@ impl CoreLoop {
                 provenance: None,
                 wal_lsn: None,
                 system_from: None,
+                restored_versions: Vec::new(),
                 // No predicate here: this restore re-derives an index from
                 // rows that are already durable and admits no new write. The
                 // writing identity that admitted those rows is gone.
@@ -156,6 +158,9 @@ impl CoreLoop {
         // restored row set in mixed SRIDs refuses the restore, as an
         // unreadable row does.
         self.index_columnar_geometry_columns(&task, &schema, collection, &docs)?;
+        // The engine is not installed yet, so the indexer stamps no start.
+        // The history rebuild installs every start and every ended entry.
+        self.restore_columnar_geometry_history(key, engine, segments)?;
         Ok(indexed)
     }
 
@@ -170,23 +175,31 @@ impl CoreLoop {
     /// corruption report.
     fn restored_flushed_rows(
         &self,
+        key: &(DatabaseId, TenantId, String),
         engine: &nodedb_columnar::MutationEngine,
         segments: &[Vec<u8>],
         schema: &nodedb_types::columnar::ColumnarSchema,
-        collection: &str,
     ) -> crate::Result<Vec<Vec<nodedb_types::value::Value>>> {
         let mut out = Vec::new();
         for (seg_idx, seg_bytes) in segments.iter().enumerate() {
             let seg_id = seg_idx as u64 + 1;
             let segment = self.decode_flushed_segment(
-                collection,
+                key,
                 seg_id,
                 seg_bytes,
                 schema.columns.len(),
+                SegmentBlocks::Visible {
+                    engine,
+                    cut: nodedb_columnar::VersionCut::Current,
+                    predicates: &[],
+                },
                 "columnar_checkpoint_geometry_restore",
             )?;
             let delete_bm = engine.delete_bitmap(seg_id);
             for row_idx in 0..segment.row_count() {
+                if !segment.holds_row(row_idx) {
+                    continue;
+                }
                 if delete_bm.is_some_and(|bm| bm.is_deleted(row_idx as u32)) {
                     continue;
                 }
@@ -253,10 +266,13 @@ mod tests {
         let key = key();
         let mut engine = MutationEngine::new(key.2.clone(), schema());
         engine
-            .insert(&[
-                Value::String("a".into()),
-                Value::String(r#"{"type":"Point","coordinates":[1.0,2.0]}"#.into()),
-            ])
+            .insert(
+                &[
+                    Value::String("a".into()),
+                    Value::String(r#"{"type":"Point","coordinates":[1.0,2.0]}"#.into()),
+                ],
+                1,
+            )
             .expect("insert");
         let segment_id = engine.next_segment_id();
         let (seg_schema, columns, row_count) = engine.memtable_mut().drain_optimized();

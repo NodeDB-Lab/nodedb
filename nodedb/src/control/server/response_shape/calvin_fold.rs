@@ -228,6 +228,7 @@ mod tests {
             key: Vec::new(),
             rls_filters: Vec::new(),
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         assert!(calvin_tag_for_plan(&plan).is_none());
     }

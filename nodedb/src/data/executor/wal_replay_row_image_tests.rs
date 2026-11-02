@@ -119,7 +119,7 @@ fn request(plan: PhysicalPlan, wal_lsn: Option<crate::types::Lsn>) -> Request {
         wal_lsn,
         resolved_now_ms: None,
         commit_hlc: None,
-        entry_version: None,
+        system_ordinal: None,
         admission: Admission::Admitted,
     }
 }
@@ -256,6 +256,7 @@ fn bulk_update(owner: &str, note: &str) -> PhysicalPlan {
         rls_write_check: RlsWriteCheck::NoPolicyApplies,
         resolved_sum_targets: Vec::new(),
         declared_primary_key: None,
+        system_time: nodedb_types::SystemTimeScope::Current,
     })
 }
 
@@ -352,8 +353,6 @@ fn edge_workload(journal: &Journal, core: &mut CoreLoop) {
 /// replay rebuilds in memory.
 #[derive(Debug, PartialEq)]
 struct StoredState {
-    rows: Vec<(String, Vec<u8>)>,
-    indexes: Vec<(String, Vec<u8>)>,
     versions: Vec<(String, Vec<u8>)>,
     versioned_indexes: Vec<(String, Vec<u8>)>,
     live_vectors: usize,
@@ -368,8 +367,6 @@ fn stored_state(core: &mut CoreLoop) -> StoredState {
     neighbors.sort();
     let sparse = &core.sparse;
     StoredState {
-        rows: sparse.scan_all_for_tenant(DB, TID).expect("rows"),
-        indexes: sparse.scan_indexes_for_tenant(DB, TID).expect("indexes"),
         versions: sparse
             .scan_versioned_documents_for_tenant(DB, TID)
             .expect("versions"),
@@ -414,12 +411,11 @@ fn run_live(
 fn document_writes_replay_onto_a_base_to_the_live_state() {
     let live_dir = tempfile::tempdir().expect("tempdir");
     let (live, journal) = run_live(live_dir.path(), document_workload);
-    assert!(!live.rows.is_empty(), "the workload stores current rows");
+    assert!(!live.versions.is_empty(), "the workload stores versions");
     assert!(
-        !live.indexes.is_empty(),
+        !live.versioned_indexes.is_empty(),
         "the workload stores index entries"
     );
-    assert!(!live.versions.is_empty(), "the workload stores versions");
     assert_eq!(live.live_vectors, 2, "o1 and o3 keep their vectors");
 
     let base = tempfile::tempdir().expect("tempdir");

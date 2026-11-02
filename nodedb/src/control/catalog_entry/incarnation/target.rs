@@ -387,8 +387,7 @@ pub fn written_row(entry: &CatalogEntry) -> Option<(RowKey<'_>, Incarnation)> {
             RowKey::ChangeStream(row.database_id.as_u64(), row.tenant_id, &row.name),
             Incarnation::unversioned(row.modification_hlc),
         ),
-        CatalogEntry::PutConsumerGroupIfAbsent(row)
-        | CatalogEntry::MigrateConsumerGroupStream { def: row, .. } => (
+        CatalogEntry::PutConsumerGroupIfAbsent(row) => (
             RowKey::ConsumerGroup(
                 row.database_id.as_u64(),
                 row.tenant_id,

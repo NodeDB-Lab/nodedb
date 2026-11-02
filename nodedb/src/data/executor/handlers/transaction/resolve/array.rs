@@ -47,14 +47,14 @@ pub(super) fn serialize_array_op(op: &ArrayOp, ops: &mut Vec<RedoSubRecord>) -> 
             array_id,
             cells_msgpack,
             provenance,
+            vshard_id,
             ..
         } => {
-            let bytes = encode_put_spliced(array_id, cells_msgpack, provenance).map_err(|e| {
-                crate::Error::Serialization {
+            let bytes = encode_put_spliced(array_id, *vshard_id, cells_msgpack, provenance)
+                .map_err(|e| crate::Error::Serialization {
                     format: "msgpack".into(),
                     detail: format!("array resolve put encode: {e}"),
-                }
-            })?;
+                })?;
             ops.push(RedoSubRecord {
                 record_type: RecordType::ArrayPut as u32,
                 payload: bytes,
@@ -65,14 +65,13 @@ pub(super) fn serialize_array_op(op: &ArrayOp, ops: &mut Vec<RedoSubRecord>) -> 
             array_id,
             coords_msgpack,
             provenance,
+            vshard_id,
             ..
         } => {
-            let bytes =
-                encode_delete_spliced(array_id, coords_msgpack, provenance).map_err(|e| {
-                    crate::Error::Serialization {
-                        format: "msgpack".into(),
-                        detail: format!("array resolve delete encode: {e}"),
-                    }
+            let bytes = encode_delete_spliced(array_id, *vshard_id, coords_msgpack, provenance)
+                .map_err(|e| crate::Error::Serialization {
+                    format: "msgpack".into(),
+                    detail: format!("array resolve delete encode: {e}"),
                 })?;
             ops.push(RedoSubRecord {
                 record_type: RecordType::ArrayDelete as u32,

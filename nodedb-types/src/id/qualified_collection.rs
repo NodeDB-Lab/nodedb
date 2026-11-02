@@ -12,6 +12,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use super::DatabaseId;
+use crate::error::NodeDbError;
 
 /// A collection name qualified by its database.
 ///
@@ -59,6 +60,34 @@ impl QualifiedCollection {
         &self.0
     }
 
+    /// The database a stored collection name belongs to: the `{id}/`
+    /// qualifier [`Self::new`] writes outside the default database, else
+    /// the default database.
+    ///
+    /// A collection name never holds a `/`. A `/` after a non-numeric head
+    /// marks a malformed stored name and returns a serialization error.
+    pub fn database_of_stored(qualified: &str) -> Result<DatabaseId, NodeDbError> {
+        match qualified.split_once('/') {
+            None => Ok(DatabaseId::DEFAULT),
+            Some((head, _)) => head.parse::<u64>().map(DatabaseId::new).map_err(|e| {
+                NodeDbError::serialization(
+                    "qualified collection name",
+                    format!("collection '{qualified}' has a non-numeric database qualifier: {e}"),
+                )
+            }),
+        }
+    }
+
+    /// The bare collection name of a stored name: the name without the
+    /// `{id}/` qualifier [`Self::new`] writes outside the default database.
+    /// A stored name in the default database is its bare name.
+    pub fn bare_of_stored(qualified: &str) -> &str {
+        match qualified.split_once('/') {
+            Some((head, bare)) if head.parse::<u64>().is_ok() => bare,
+            _ => qualified,
+        }
+    }
+
     /// The collection name [`Self::new`] qualified for `database_id`: the
     /// catalog key a collection lookup in that database takes.
     pub fn collection_name(&self, database_id: DatabaseId) -> &str {
@@ -79,6 +108,42 @@ impl fmt::Display for QualifiedCollection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stored_name_names_its_bare_collection() {
+        assert_eq!(QualifiedCollection::bare_of_stored("users"), "users");
+        assert_eq!(QualifiedCollection::bare_of_stored("7/users"), "users");
+        assert_eq!(
+            QualifiedCollection::bare_of_stored(
+                QualifiedCollection::new(DatabaseId::new(9), "a/b").as_str()
+            ),
+            "a/b"
+        );
+    }
+
+    #[test]
+    fn a_stored_name_names_its_database() {
+        assert_eq!(
+            QualifiedCollection::database_of_stored("users").expect("bare name"),
+            DatabaseId::DEFAULT
+        );
+        assert_eq!(
+            QualifiedCollection::database_of_stored("7/users").expect("qualified name"),
+            DatabaseId::new(7)
+        );
+        let qualified = QualifiedCollection::new(DatabaseId::new(9), "orders");
+        assert_eq!(
+            QualifiedCollection::database_of_stored(qualified.as_str()).expect("qualified name"),
+            DatabaseId::new(9)
+        );
+    }
+
+    #[test]
+    fn a_non_numeric_qualifier_is_refused() {
+        let err = QualifiedCollection::database_of_stored("tenant/users")
+            .expect_err("a non-numeric qualifier must fail");
+        assert_eq!(err.code(), crate::error::ErrorCode::SERIALIZATION);
+    }
 
     #[test]
     fn default_database_yields_bare_name() {

@@ -67,12 +67,11 @@ pub struct ExecuteResponse {
     /// writes/errors. Mirrors [`ExecuteStreamChunk::watermark_lsn`]: raw `u64`
     /// on the wire, converted to `Lsn` at the coordinator via `Lsn::new`.
     pub watermark_lsn: u64,
-    /// The read versions the executing node's cores observed, one per vShard
-    /// read. A write reports the versions it recorded. Empty for errors other
-    /// than a read that found no row. The
-    /// comparand for cross-shard OCC read validation, distinct from the
-    /// core-global `watermark_lsn`.
-    pub read_versions: Vec<nodedb_types::ShardVersion>,
+    /// The vShards the executing node's cores read. Empty for a write and
+    /// for errors other than a read that found no row. The transaction
+    /// read-set homes an entry on each. Distinct from the core-global
+    /// `watermark_lsn`.
+    pub read_vshards: Vec<u32>,
 }
 
 /// Typed error returned by the remote executor.
@@ -146,32 +145,28 @@ pub struct ExecuteStreamEnd {
 }
 
 impl ExecuteResponse {
-    pub fn ok(
-        payloads: Vec<Vec<u8>>,
-        watermark_lsn: u64,
-        read_versions: Vec<nodedb_types::ShardVersion>,
-    ) -> Self {
+    pub fn ok(payloads: Vec<Vec<u8>>, watermark_lsn: u64, read_vshards: Vec<u32>) -> Self {
         Self {
             success: true,
             payloads,
             error: None,
             watermark_lsn,
-            read_versions,
+            read_vshards,
         }
     }
-    /// A refusal that still observed the versions a read validates: a read
+    /// A refusal that still read vShards a transaction validates: a read
     /// that found no row.
-    pub fn refused_with_versions(
+    pub fn refused_with_vshards(
         error: TypedClusterError,
         watermark_lsn: u64,
-        read_versions: Vec<nodedb_types::ShardVersion>,
+        read_vshards: Vec<u32>,
     ) -> Self {
         Self {
             success: false,
             payloads: vec![],
             error: Some(error),
             watermark_lsn,
-            read_versions,
+            read_vshards,
         }
     }
 
@@ -181,7 +176,7 @@ impl ExecuteResponse {
             payloads: vec![],
             error: Some(error),
             watermark_lsn: 0,
-            read_versions: Vec::new(),
+            read_vshards: Vec::new(),
         }
     }
 }

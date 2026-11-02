@@ -48,6 +48,7 @@ fn kv_put_get_delete() {
             key: b"key1".to_vec(),
             rls_filters: Vec::new(),
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
     assert_eq!(payload, b"value1");
@@ -85,6 +86,7 @@ fn kv_put_get_delete() {
             key: b"key1".to_vec(),
             rls_filters: Vec::new(),
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
     assert_eq!(resp.status, Status::Ok);
@@ -145,6 +147,7 @@ fn kv_overwrite_returns_ok() {
             key: b"k".to_vec(),
             rls_filters: Vec::new(),
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
     assert_eq!(payload, b"v2");
@@ -197,6 +200,7 @@ fn kv_batch_put_and_get() {
             ),
             keys,
             rls_filters: Vec::new(),
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
 }
@@ -249,6 +253,7 @@ fn kv_scan_returns_entries() {
             match_pattern: None,
             sort_keys: Vec::new(),
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
 
@@ -303,6 +308,7 @@ fn kv_scan_with_match_pattern() {
             match_pattern: Some("user:*".into()),
             sort_keys: Vec::new(),
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
 
@@ -386,6 +392,7 @@ fn kv_expire_and_persist() {
             key: b"k".to_vec(),
             rls_filters: Vec::new(),
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }),
     );
     assert_eq!(payload, b"v");
@@ -588,6 +595,7 @@ fn kv_tenant_isolation() {
             key: b"k".to_vec(),
             rls_filters: Vec::new(),
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         }))
     };
     tx.try_push(nodedb::bridge::dispatch::BridgeRequest::unfloored(req))

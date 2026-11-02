@@ -2,7 +2,7 @@
 
 //! Versioned wire envelope for cluster messages.
 //!
-//! # On-wire layout (v2 envelope)
+//! # On-wire layout
 //!
 //! ```text
 //! [0xc1] [version u16 BE] [inner_len u32 BE] [inner bytes]
@@ -13,18 +13,17 @@
 //! starting with `0xc1` is therefore guaranteed to be one of our
 //! versioned envelopes and never a raw `zerompk`-encoded `T`.
 //!
-//! Bytes not starting with `0xc1` are rejected — raw v1 frames are
-//! not accepted.
+//! Bytes not starting with `0xc1` are rejected. Raw frames without an
+//! envelope are not accepted.
 //!
-//! An envelope with `version > WireVersion::CURRENT.0` is rejected
-//! with [`WireVersionError::UnsupportedVersion`] and is never silently
-//! misdecoded.
+//! An envelope with any version other than `WireVersion::CURRENT` is
+//! rejected and is never silently misdecoded.
 
 use super::error::WireVersionError;
 use super::types::WireVersion;
 
 /// MessagePack reserved marker. Never emitted by valid msgpack
-/// encoders; used here as the unambiguous start byte of a v2 envelope.
+/// encoders; used here as the unambiguous start byte of an envelope.
 const ENVELOPE_MARKER: u8 = 0xc1;
 
 /// Length of the fixed envelope header (marker + version + inner_len).
@@ -38,7 +37,7 @@ pub struct Versioned<T> {
     pub inner: T,
 }
 
-/// Encode `value` into a v2 versioned envelope.
+/// Encode `value` into a versioned envelope.
 pub fn encode_versioned<T>(value: &T) -> Result<Vec<u8>, WireVersionError>
 where
     T: zerompk::ToMessagePack,
@@ -52,41 +51,21 @@ where
 /// Decode a versioned wire message.
 ///
 /// Bytes must begin with the reserved [`ENVELOPE_MARKER`] (`0xc1`).
-/// Bytes without the marker are rejected — raw v1 frames are not accepted.
+/// Bytes without the marker are rejected. Raw frames are not accepted.
 ///
-/// An envelope with `version > WireVersion::CURRENT.0` is rejected
-/// with [`WireVersionError::UnsupportedVersion`].
+/// An envelope with version 0 is a [`WireVersionError::DecodeFailure`]. Any
+/// other version than `WireVersion::CURRENT` is a
+/// [`WireVersionError::UnsupportedVersion`].
 pub fn decode_versioned<T>(bytes: &[u8]) -> Result<T, WireVersionError>
 where
     T: zerompk::FromMessagePackOwned,
 {
-    match parse_envelope(bytes)? {
-        Some((version_raw, inner_bytes)) => {
-            // Version 0 inside the envelope is malformed — reject loudly.
-            if version_raw == 0 {
-                return Err(WireVersionError::DecodeFailure(
-                    "v2 envelope with version 0 is invalid".to_string(),
-                ));
-            }
-            let peer_version = WireVersion(version_raw);
-            if peer_version > WireVersion::CURRENT {
-                return Err(WireVersionError::UnsupportedVersion {
-                    peer_version,
-                    supported_min: WireVersion::CURRENT,
-                    supported_max: WireVersion::CURRENT,
-                });
-            }
-            zerompk::from_msgpack(inner_bytes).map_err(|e| {
-                WireVersionError::DecodeFailure(format!("decode inner (v{peer_version}): {e}"))
-            })
-        }
-        None => Err(WireVersionError::DecodeFailure(
-            "missing envelope marker: raw v1 frames are not accepted".to_string(),
-        )),
-    }
+    let (peer_version, inner_bytes) = parse_current_envelope(bytes)?;
+    zerompk::from_msgpack(inner_bytes)
+        .map_err(|e| WireVersionError::DecodeFailure(format!("decode inner ({peer_version}): {e}")))
 }
 
-/// Wrap arbitrary pre-encoded bytes in a v2 versioned envelope.
+/// Wrap arbitrary pre-encoded bytes in a versioned envelope.
 pub fn wrap_bytes_versioned(inner: &[u8]) -> Result<Vec<u8>, WireVersionError> {
     encode_envelope(WireVersion::CURRENT.0, inner)
 }
@@ -94,34 +73,38 @@ pub fn wrap_bytes_versioned(inner: &[u8]) -> Result<Vec<u8>, WireVersionError> {
 /// Unwrap a versioned envelope and return the inner bytes.
 ///
 /// Bytes must begin with the reserved [`ENVELOPE_MARKER`] (`0xc1`).
-/// Missing marker, version 0, or `version > CURRENT` are all errors.
+/// Missing marker, version 0, or any version other than `CURRENT` are all
+/// errors.
 pub fn unwrap_bytes_versioned(bytes: &[u8]) -> Result<&[u8], WireVersionError> {
-    match parse_envelope(bytes)? {
-        Some((version_raw, inner)) => {
-            if version_raw == 0 {
-                return Err(WireVersionError::DecodeFailure(
-                    "v2 envelope with version 0 is invalid".to_string(),
-                ));
-            }
-            let peer_version = WireVersion(version_raw);
-            if peer_version > WireVersion::CURRENT {
-                return Err(WireVersionError::UnsupportedVersion {
-                    peer_version,
-                    supported_min: WireVersion::CURRENT,
-                    supported_max: WireVersion::CURRENT,
-                });
-            }
-            Ok(inner)
-        }
-        None => Err(WireVersionError::DecodeFailure(
-            "missing envelope marker: raw v1 frames are not accepted".to_string(),
-        )),
-    }
+    parse_current_envelope(bytes).map(|(_, inner)| inner)
 }
 
 // ── Envelope encoding / parsing helpers ────────────────────────────────────
 
-/// Encode a v2 envelope: `[ENVELOPE_MARKER][version u16 BE][inner_len u32 BE][inner]`.
+/// Parse an envelope and refuse every version other than `WireVersion::CURRENT`.
+fn parse_current_envelope(bytes: &[u8]) -> Result<(WireVersion, &[u8]), WireVersionError> {
+    let Some((version_raw, inner)) = parse_envelope(bytes)? else {
+        return Err(WireVersionError::DecodeFailure(
+            "missing envelope marker: raw frames are not accepted".to_string(),
+        ));
+    };
+    if version_raw == 0 {
+        return Err(WireVersionError::DecodeFailure(
+            "envelope with version 0 is invalid".to_string(),
+        ));
+    }
+    let peer_version = WireVersion(version_raw);
+    if peer_version != WireVersion::CURRENT {
+        return Err(WireVersionError::UnsupportedVersion {
+            peer_version,
+            supported_min: WireVersion::CURRENT,
+            supported_max: WireVersion::CURRENT,
+        });
+    }
+    Ok((peer_version, inner))
+}
+
+/// Encode an envelope: `[ENVELOPE_MARKER][version u16 BE][inner_len u32 BE][inner]`.
 fn encode_envelope(version: u16, inner: &[u8]) -> Result<Vec<u8>, WireVersionError> {
     if inner.len() > u32::MAX as usize {
         return Err(WireVersionError::DecodeFailure(format!(
@@ -137,14 +120,12 @@ fn encode_envelope(version: u16, inner: &[u8]) -> Result<Vec<u8>, WireVersionErr
     Ok(buf)
 }
 
-/// Parse a v2 envelope.
+/// Parse an envelope.
 ///
 /// - `Ok(Some((version, inner)))`: well-formed envelope.
-/// - `Ok(None)`: bytes do not begin with [`ENVELOPE_MARKER`] (treat as
-///   v1 raw).
+/// - `Ok(None)`: bytes do not begin with [`ENVELOPE_MARKER`].
 /// - `Err(...)`: bytes begin with [`ENVELOPE_MARKER`] but the header is
-///   truncated or the declared length overruns the buffer. We reject
-///   loudly rather than fall back to v1, because a corrupted v2
+///   truncated or the declared length overruns the buffer. A corrupted
 ///   envelope must not be silently misinterpreted.
 fn parse_envelope(bytes: &[u8]) -> Result<Option<(u16, &[u8])>, WireVersionError> {
     if bytes.is_empty() || bytes[0] != ENVELOPE_MARKER {
@@ -152,7 +133,7 @@ fn parse_envelope(bytes: &[u8]) -> Result<Option<(u16, &[u8])>, WireVersionError
     }
     if bytes.len() < ENVELOPE_HEADER_LEN {
         return Err(WireVersionError::DecodeFailure(format!(
-            "v2 envelope truncated: header needs {} bytes, got {}",
+            "envelope truncated: header needs {} bytes, got {}",
             ENVELOPE_HEADER_LEN,
             bytes.len()
         )));
@@ -161,11 +142,11 @@ fn parse_envelope(bytes: &[u8]) -> Result<Option<(u16, &[u8])>, WireVersionError
     let inner_len = u32::from_be_bytes([bytes[3], bytes[4], bytes[5], bytes[6]]) as usize;
     let inner_start = ENVELOPE_HEADER_LEN;
     let inner_end = inner_start.checked_add(inner_len).ok_or_else(|| {
-        WireVersionError::DecodeFailure("v2 envelope inner length overflows usize".to_string())
+        WireVersionError::DecodeFailure("envelope inner length overflows usize".to_string())
     })?;
     if inner_end > bytes.len() {
         return Err(WireVersionError::DecodeFailure(format!(
-            "v2 envelope truncated: declared inner_len={inner_len}, available={}",
+            "envelope truncated: declared inner_len={inner_len}, available={}",
             bytes.len() - inner_start
         )));
     }
@@ -192,7 +173,7 @@ mod tests {
     }
 
     #[test]
-    fn v2_roundtrip() {
+    fn envelope_roundtrip() {
         let orig = Payload {
             value: 42,
             label: "hello".to_string(),
@@ -259,15 +240,24 @@ mod tests {
 
     #[test]
     fn truncated_envelope_header_is_loud_error() {
-        // Marker present but header is truncated → must NOT silently fall
-        // back to raw v1 (the bytes also can't decode as T, but the
-        // error must explicitly name the truncated envelope).
+        // Marker present but header is truncated. The error must name the
+        // truncated envelope.
         let bytes = vec![ENVELOPE_MARKER, 0x00, 0x02];
         let err = decode_versioned::<Payload>(&bytes).unwrap_err();
         match err {
             WireVersionError::DecodeFailure(msg) => assert!(msg.contains("truncated")),
             other => panic!("expected DecodeFailure(truncated), got {other}"),
         }
+    }
+
+    #[test]
+    fn next_version_is_unsupported_on_unwrap() {
+        let bytes = encode_envelope(WireVersion::CURRENT.0 + 1, b"inner").unwrap();
+        let err = unwrap_bytes_versioned(&bytes).unwrap_err();
+        assert!(
+            matches!(err, WireVersionError::UnsupportedVersion { .. }),
+            "must reject a version other than CURRENT, got: {err}"
+        );
     }
 
     #[test]

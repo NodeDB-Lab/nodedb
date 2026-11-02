@@ -30,4 +30,4 @@ mod writer;
 pub use error::SegmentError;
 pub use mmap::{ColumnMmap, observability};
 pub use reader::ColumnarSegmentReader;
-pub use writer::ColumnarSegmentWriter;
+pub use writer::{ColumnarSegmentWriter, write_partition_meta};

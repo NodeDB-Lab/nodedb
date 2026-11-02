@@ -25,8 +25,7 @@ pub struct ResyncRequestMsg {
     /// Collection scope (empty = all collections).
     pub collection: String,
     /// Shape the gap was detected on; Origin re-snapshots this shape.
-    /// Empty string if the caller does not know the shape (e.g. legacy path).
-    #[serde(default)]
+    /// Empty string if the caller does not know the shape.
     pub shape_id: String,
 }
 

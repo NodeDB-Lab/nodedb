@@ -183,9 +183,11 @@ impl CoreLoop {
         self.with_ts_schema(database_id, tid, collection, |schema| {
             match schema.columns.get(schema.timestamp_idx) {
                 Some((_, ColumnType::Timestamp(kind))) => *kind,
-                Some((_, ColumnType::Int64 | ColumnType::Float64 | ColumnType::Symbol)) | None => {
-                    TimeKind::Millis
-                }
+                Some((
+                    _,
+                    ColumnType::Int64 | ColumnType::Float64 | ColumnType::Symbol | ColumnType::Text,
+                ))
+                | None => TimeKind::Millis,
             }
         })
         .unwrap_or(TimeKind::Millis)
@@ -205,7 +207,7 @@ pub(in crate::data::executor) enum TsGroupKeyKind {
     Integer,
     /// A floating-point column.
     Float,
-    /// A dictionary symbol, or a column with no resolvable storage type.
+    /// A symbol tag or a text field, both dictionary strings.
     Text,
 }
 
@@ -219,8 +221,21 @@ fn kind_of_storage(storage: ColumnType) -> TsGroupKeyKind {
         ColumnType::Timestamp(TimeKind::Instant(kind)) => TsGroupKeyKind::Instant(kind),
         ColumnType::Int64 | ColumnType::Timestamp(TimeKind::Millis) => TsGroupKeyKind::Integer,
         ColumnType::Float64 => TsGroupKeyKind::Float,
-        ColumnType::Symbol => TsGroupKeyKind::Text,
+        ColumnType::Symbol | ColumnType::Text => TsGroupKeyKind::Text,
     }
+}
+
+/// The declared type keyword that makes a timeseries column a series
+/// dimension.
+const SYMBOL_KEYWORD: &str = "SYMBOL";
+
+/// Whether the declared type text names the `SYMBOL` keyword. Modifiers
+/// after the keyword, such as `NOT NULL`, do not change the answer.
+fn declares_symbol(declared_type: &str) -> bool {
+    declared_type
+        .split(|c: char| c.is_whitespace() || c == '(' || c == ',')
+        .find(|token| !token.is_empty())
+        .is_some_and(|token| token.eq_ignore_ascii_case(SYMBOL_KEYWORD))
 }
 
 /// Map a declared SQL type onto the memtable's storage type.
@@ -229,6 +244,10 @@ fn kind_of_storage(storage: ColumnType) -> TsGroupKeyKind {
 /// kind comes from the declared type: `TIMESTAMP` and `TIMESTAMPTZ` are
 /// instants, while a `BIGINT` time key (or any other spelling) is `Millis`.
 /// The engine-assigned system-time column is `Millis` too.
+///
+/// A `SYMBOL` column is a series dimension. `TEXT`, `VARCHAR`, `STRING` and
+/// every other string-shaped type is a text field, never part of the series
+/// key.
 fn memtable_column_type(declared_type: &str, is_time_key: bool) -> ColumnType {
     use nodedb_types::columnar::ColumnType as DeclaredType;
 
@@ -241,15 +260,16 @@ fn memtable_column_type(declared_type: &str, is_time_key: bool) -> ColumnType {
         }
         Some(DeclaredType::SystemTimestamp) => ColumnType::Timestamp(TimeKind::Millis),
         _ if is_time_key => ColumnType::Timestamp(TimeKind::Millis),
+        _ if declares_symbol(declared_type) => ColumnType::Symbol,
         Some(DeclaredType::Int64) => ColumnType::Int64,
         // The memtable has no boolean column; ILP ingest widens booleans to
         // f64, so a declared BOOLEAN lands in the same place.
         Some(DeclaredType::Float64 | DeclaredType::Bool | DeclaredType::Decimal { .. }) => {
             ColumnType::Float64
         }
-        // Everything else — TEXT, UUID, JSON, and any type the memtable
-        // cannot represent natively — is stored as a dictionary symbol.
-        _ => ColumnType::Symbol,
+        // Everything else (TEXT, UUID, JSON, and any type the memtable
+        // cannot represent natively) is a text field.
+        _ => ColumnType::Text,
     }
 }
 
@@ -298,6 +318,7 @@ mod tests {
         assert_eq!(kind_of_storage(ColumnType::Int64), TsGroupKeyKind::Integer);
         assert_eq!(kind_of_storage(ColumnType::Float64), TsGroupKeyKind::Float);
         assert_eq!(kind_of_storage(ColumnType::Symbol), TsGroupKeyKind::Text);
+        assert_eq!(kind_of_storage(ColumnType::Text), TsGroupKeyKind::Text);
     }
 
     #[test]
@@ -309,9 +330,26 @@ mod tests {
         );
         assert_eq!(memtable_column_type("FLOAT", false), ColumnType::Float64);
         assert_eq!(memtable_column_type("BOOLEAN", false), ColumnType::Float64);
-        assert_eq!(memtable_column_type("TEXT", false), ColumnType::Symbol);
-        assert_eq!(memtable_column_type("VARCHAR", false), ColumnType::Symbol);
-        assert_eq!(memtable_column_type("UUID", false), ColumnType::Symbol);
+        assert_eq!(memtable_column_type("TEXT", false), ColumnType::Text);
+        assert_eq!(memtable_column_type("VARCHAR", false), ColumnType::Text);
+        assert_eq!(memtable_column_type("VARCHAR(64)", false), ColumnType::Text);
+        assert_eq!(memtable_column_type("STRING", false), ColumnType::Text);
+        assert_eq!(memtable_column_type("UUID", false), ColumnType::Text);
+    }
+
+    /// Only the `SYMBOL` keyword declares a series dimension, in any case and
+    /// with any trailing modifier.
+    #[test]
+    fn symbol_declares_a_dimension() {
+        assert_eq!(memtable_column_type("SYMBOL", false), ColumnType::Symbol);
+        assert_eq!(memtable_column_type("symbol", false), ColumnType::Symbol);
+        assert_eq!(
+            memtable_column_type("SYMBOL NOT NULL", false),
+            ColumnType::Symbol
+        );
+        assert_eq!(memtable_column_type("SYMBOL,", false), ColumnType::Symbol);
+        assert_eq!(memtable_column_type("SYMBOLS", false), ColumnType::Text);
+        assert!(memtable_column_type("SYMBOL", true).is_time());
     }
 
     #[test]
@@ -323,11 +361,11 @@ mod tests {
     }
 
     #[test]
-    fn unknown_types_fall_back_to_symbol() {
+    fn unknown_types_fall_back_to_text() {
         assert_eq!(
             memtable_column_type("SOMETHING_ELSE", false),
-            ColumnType::Symbol
+            ColumnType::Text
         );
-        assert_eq!(memtable_column_type("", false), ColumnType::Symbol);
+        assert_eq!(memtable_column_type("", false), ColumnType::Text);
     }
 }

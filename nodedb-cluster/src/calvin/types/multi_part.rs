@@ -89,8 +89,6 @@ pub struct PlanPart {
     /// part, one byte range of its task's encoding.
     pub plans: Vec<u8>,
     /// Set on a chunk part.
-    #[serde(default)]
-    #[msgpack(default)]
     pub chunk: Option<TaskChunk>,
 }
 

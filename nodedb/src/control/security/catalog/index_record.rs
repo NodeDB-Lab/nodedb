@@ -101,14 +101,6 @@ impl IndexKind {
             .into_iter()
             .find(|k| k.drop_keyword() == Some(upper.as_str()))
     }
-
-    /// Resolve an owner-ledger `object_type` back to its kind. Used by the
-    /// boot-time migration that seeds the registry from legacy ledger rows.
-    pub fn from_owner_object_type(object_type: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|k| k.owner_object_type() == object_type)
-    }
 }
 
 /// One index's identity and lifecycle state.
@@ -151,13 +143,13 @@ impl StoredIndexRecord {
 mod tests {
     use super::*;
 
+    /// Each kind files ownership under its own `object_type`.
     #[test]
-    fn owner_object_types_round_trip() {
-        for kind in IndexKind::ALL {
-            assert_eq!(
-                IndexKind::from_owner_object_type(kind.owner_object_type()),
-                Some(kind)
-            );
+    fn owner_object_types_are_distinct() {
+        for (i, a) in IndexKind::ALL.into_iter().enumerate() {
+            for b in IndexKind::ALL.into_iter().skip(i + 1) {
+                assert_ne!(a.owner_object_type(), b.owner_object_type());
+            }
         }
     }
 

@@ -5,7 +5,8 @@
 //! A snapshot install writes no WAL records. Engine state it leaves only in
 //! memory has no copy a restart can rebuild it from, so every memory-only
 //! engine the install writes is checkpointed here: KV, CRDT, columnar,
-//! timeseries memtables, vectors, spatial R-trees, and the CSR's node labels.
+//! timeseries memtables, vectors, sparse vector indexes, spatial R-trees, and
+//! the CSR's node labels.
 //! The redb-backed stores (documents, full-text postings, graph edges, node
 //! label versions) commit durably at write time and need no step.
 //!
@@ -33,6 +34,8 @@ impl CoreLoop {
         self.checkpoint_coordinator
             .record_flush("vector", vector.files_written);
         self.floors.vector_durable_lsn = vector.durable_lsn;
+
+        self.floors.sparse_vector_durable_lsn = self.checkpoint_sparse_vector_indexes()?;
 
         let spatial = self.checkpoint_spatial_indexes()?;
         self.floors.spatial_durable_lsn = spatial.durable_lsn;

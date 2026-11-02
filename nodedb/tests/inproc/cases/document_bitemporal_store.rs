@@ -92,7 +92,7 @@ fn bitemporal_multiple_puts_retain_history_via_versioned_get_as_of() {
 }
 
 #[test]
-fn non_bitemporal_collection_uses_legacy_storage() {
+fn non_bitemporal_collection_keeps_versions_too() {
     let (sparse, _d) = open();
     let mut engine = DocumentEngine::new(&sparse, 0, 1);
     engine.register_collection(CollectionConfig::new("c"));
@@ -100,9 +100,8 @@ fn non_bitemporal_collection_uses_legacy_storage() {
         .put("c", &key(1), &serde_json::json!({"v": 1}))
         .unwrap();
 
-    // The versioned table must be empty for this collection because
-    // writes went to the legacy path.
-    let bitemporal_rows = sparse
+    // Every collection stores its rows as versions.
+    let current_rows = sparse
         .versioned_scan_as_of(
             VersionedScanParams {
                 database_id: 0,
@@ -116,11 +115,11 @@ fn non_bitemporal_collection_uses_legacy_storage() {
             &nodedb::engine::sparse::scan_stop::never_stop,
         )
         .unwrap();
-    assert!(
-        bitemporal_rows.is_empty(),
-        "non-bitemporal collection should not populate the versioned table"
+    assert_eq!(
+        current_rows.len(),
+        1,
+        "a collection that is not bitemporal still writes a version"
     );
-    // And the legacy read still works.
     let got = engine.get("c", &key(1)).unwrap().unwrap();
     assert_eq!(got["v"], 1);
 }

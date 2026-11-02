@@ -24,7 +24,7 @@ use crate::control::security::catalog::{DatabaseDescriptor, DatabaseStatus};
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TenantId};
 
-use super::target::DatabaseTarget;
+use super::target::{DatabaseTarget, RestoreMark};
 
 /// The destination database of every backed-up database, keyed by source id.
 #[derive(Debug, Default)]
@@ -82,7 +82,7 @@ pub(super) async fn resolve_databases(
     tenant_id: u64,
     blobs: &[DatabaseBlob],
     dry_run: bool,
-    restore_id: u64,
+    restore: RestoreMark,
 ) -> Result<DatabaseMap, Error> {
     let catalog = state.credentials.catalog();
     let mut map = DatabaseMap::default();
@@ -106,7 +106,8 @@ pub(super) async fn resolve_databases(
             DatabaseTarget {
                 source: DatabaseId::new(blob.database_id),
                 dest,
-                restore_id,
+                restore_id: restore.id,
+                restore_cut: restore.cut,
             },
         );
     }

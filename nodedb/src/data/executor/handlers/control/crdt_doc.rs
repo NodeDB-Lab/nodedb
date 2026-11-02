@@ -561,7 +561,7 @@ mod tests {
         );
         let key = StorageKey::for_surrogate(SURROGATE);
         core.sparse
-            .put(DB, TID, COLL, &key, &[0xc1])
+            .put(DB, TID, COLL, &key, &[0xc1], core.bitemporal_ordinal())
             .expect("overwrite the stored row");
         core.doc_cache.invalidate(DB, TID, COLL, &key);
     }

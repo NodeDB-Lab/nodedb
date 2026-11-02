@@ -172,22 +172,34 @@ impl CoreLoop {
         };
 
         let storage_key = nodedb_types::StorageKey::for_surrogate(surrogate);
-        if let Err(e) = self.sparse.put(
-            task.request.database_id.as_u64(),
-            tid,
-            collection,
-            &storage_key,
-            &msgpack,
-        ) {
-            error!(
-                core = self.core_id,
-                %collection,
-                doc_id = %doc_id,
-                error = %e,
-                "spatial sync: sparse document write failed"
-            );
-            return self.response_error(task, e);
-        }
+        let database_id = task.request.database_id.as_u64();
+        let written = self
+            .row_version_ordinal(database_id, tid, collection, &storage_key)
+            .and_then(|sys_from| {
+                self.sparse
+                    .put(
+                        database_id,
+                        tid,
+                        collection,
+                        &storage_key,
+                        &msgpack,
+                        sys_from,
+                    )
+                    .map(|_| sys_from)
+            });
+        let sys_from = match written {
+            Ok(sys_from) => sys_from,
+            Err(e) => {
+                error!(
+                    core = self.core_id,
+                    %collection,
+                    doc_id = %doc_id,
+                    error = %e,
+                    "spatial sync: sparse document write failed"
+                );
+                return self.response_error(task, e);
+            }
+        };
 
         // ── 2. Update R-tree ────────────────────────────────────────────────
         let entry_id = fnv1a_hash(doc_id.as_bytes());
@@ -199,12 +211,13 @@ impl CoreLoop {
             entry_id,
         );
 
-        // If the surrogate was previously inserted, remove the stale entry
-        // first so the R-tree doesn't accumulate duplicate bboxes.
+        // If the surrogate was previously inserted, end the stale entry at
+        // the write's ordinal first so the R-tree doesn't accumulate
+        // duplicate bboxes.
         if let Some(rtree) = self.spatial_indexes.get_mut(&spatial_key)
-            && self.spatial_doc_map.contains_key(&doc_map_key)
+            && let Some(prior_doc) = self.spatial_doc_map.get(&doc_map_key)
         {
-            rtree.delete(entry_id);
+            rtree.end_at(entry_id, prior_doc, sys_from);
         }
 
         let memory = nodedb_mem::ScopedMemory::new(
@@ -227,11 +240,13 @@ impl CoreLoop {
         }
         // An EMPTY geometry has no extent: its row is stored, not indexed.
         if !geometry.is_empty() {
-            rtree.insert(RTreeEntry { id: entry_id, bbox });
+            rtree.insert_at(RTreeEntry { id: entry_id, bbox }, sys_from);
             self.spatial_doc_map.insert(doc_map_key, doc_id);
+        } else {
+            self.spatial_doc_map.remove(&doc_map_key);
         }
 
-        // Advance the collection floor for this committed spatial write.
+        // Note this committed spatial write.
         self.note_collection_write(task, collection);
 
         // Advance HWM and return gate result payload when provenance is present.
@@ -296,21 +311,27 @@ impl CoreLoop {
         );
 
         let storage_key = nodedb_types::StorageKey::for_surrogate(surrogate);
-        if let Err(e) = self.sparse.delete(
-            task.request.database_id.as_u64(),
-            tid,
-            collection,
-            &storage_key,
-        ) {
-            error!(
-                core = self.core_id,
-                %collection,
-                doc_id = %doc_id,
-                error = %e,
-                "spatial sync: sparse document delete failed"
-            );
-            return self.response_error(task, e);
-        }
+        let database_id = task.request.database_id.as_u64();
+        let removed = self
+            .row_version_ordinal(database_id, tid, collection, &storage_key)
+            .and_then(|sys_from| {
+                self.sparse
+                    .delete(database_id, tid, collection, &storage_key, sys_from)
+                    .map(|_| sys_from)
+            });
+        let sys_to = match removed {
+            Ok(sys_to) => sys_to,
+            Err(e) => {
+                error!(
+                    core = self.core_id,
+                    %collection,
+                    doc_id = %doc_id,
+                    error = %e,
+                    "spatial sync: sparse document delete failed"
+                );
+                return self.response_error(task, e);
+            }
+        };
 
         let db_id = task.request.database_id;
         let tenant_id = TenantId::new(tid);
@@ -324,12 +345,21 @@ impl CoreLoop {
             entry_id,
         );
 
+        // The entry ends at the delete's ordinal: a read at an earlier cut
+        // still finds it.
+        let prior_doc = self.spatial_doc_map.remove(&doc_map_key);
         if let Some(rtree) = self.spatial_indexes.get_mut(&spatial_key) {
-            rtree.delete(entry_id);
+            match prior_doc {
+                Some(prior_doc) => {
+                    rtree.end_at(entry_id, &prior_doc, sys_to);
+                }
+                None => {
+                    rtree.forget(entry_id);
+                }
+            }
         }
-        self.spatial_doc_map.remove(&doc_map_key);
 
-        // Advance the collection floor for this committed spatial delete.
+        // Note this committed spatial delete.
         self.note_collection_write(task, collection);
 
         if let Some(prov) = provenance {

@@ -508,6 +508,7 @@ mod tests {
                 rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
                 returning: None,
                 rls_filters: Vec::new(),
+                system_time: nodedb_types::SystemTimeScope::Current,
             },
             KvOp::PredicateDelete {
                 collection: collection(),
@@ -515,6 +516,7 @@ mod tests {
                 rls_write_check: nodedb_types::RlsWriteCheck::pending_injection(),
                 returning: None,
                 rls_filters: Vec::new(),
+                system_time: nodedb_types::SystemTimeScope::Current,
             },
         ];
         for op in ops {
@@ -709,6 +711,7 @@ mod tests {
         let mut plan = PhysicalPlan::Kv(KvOp::SortedIndexTopK {
             index_name: "leaderboard".into(),
             k: 10,
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         match inject(&mut plan, &store) {
             Err(crate::Error::PlanError { detail }) => {
@@ -726,14 +729,17 @@ mod tests {
             KvOp::SortedIndexRank {
                 index_name: "leaderboard".into(),
                 primary_key: b"p1".to_vec(),
+                system_time: nodedb_types::SystemTimeScope::Current,
             },
             KvOp::SortedIndexRange {
                 index_name: "leaderboard".into(),
                 score_min: None,
                 score_max: None,
+                system_time: nodedb_types::SystemTimeScope::Current,
             },
             KvOp::SortedIndexCount {
                 index_name: "leaderboard".into(),
+                system_time: nodedb_types::SystemTimeScope::Current,
             },
         ] {
             let mut plan = PhysicalPlan::Kv(op);
@@ -751,6 +757,7 @@ mod tests {
         let mut plan = PhysicalPlan::Kv(KvOp::SortedIndexTopK {
             index_name: "leaderboard".into(),
             k: 10,
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         let before = plan.clone();
         assert!(inject_without_policy(&mut plan).is_ok());

@@ -49,6 +49,8 @@ pub(in crate::data::executor) struct KvGetParams<'a> {
     pub key: &'a [u8],
     pub rls_filters: &'a [u8],
     pub surrogate_ceiling: Option<u32>,
+    /// The system-time cut the base read answers at.
+    pub system_time: nodedb_types::SystemTimeScope,
 }
 
 /// Parameters for a KV point write (`PUT` / `INSERT` / `INSERT ... IF ABSENT`).

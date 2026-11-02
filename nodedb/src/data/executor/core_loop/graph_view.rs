@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! The CSR a graph read walks: the live partition, or a historical CSR of
-//! one collection at the read's bitemporal cut.
+//! The CSR a graph read walks: the live partition, or a historical CSR at
+//! the read's bitemporal cut.
 //!
 //! A read handler borrows the core shared, so it cannot build a CSR. The
 //! dispatcher calls [`CoreLoop::prepare_csr_view`] first, which builds or
@@ -19,8 +19,9 @@ use super::CoreLoop;
 
 impl CoreLoop {
     /// Build or reuse the CSR a read at `scope` walks. A live scope needs
-    /// nothing. A historical scope builds the CSR of `collection` at the cut
-    /// from the versioned edge store, unless this core's cache holds it.
+    /// nothing. A historical scope builds the CSR of `collection`, or of
+    /// every collection when `None`, at the cut from the versioned edge
+    /// store, unless this core's cache holds it.
     pub(in crate::data::executor) fn prepare_csr_view(
         &mut self,
         database_id: u64,
@@ -62,7 +63,8 @@ impl CoreLoop {
                     .ok_or_else(|| crate::Error::Internal {
                         detail: format!(
                             "historical CSR of '{}' at ordinal {} was not prepared before the read",
-                            key.collection, key.cutoff_ordinal
+                            key.collection_label(),
+                            key.cutoff_ordinal
                         ),
                     })
             }
@@ -85,17 +87,10 @@ fn historical_key(
             detail: ALL_VERSIONS_REFUSED.into(),
         });
     };
-    let Some(collection) = collection else {
-        return Err(crate::Error::BadRequest {
-            detail: "a graph read AS OF a system or valid time must name its collection: \
-                     edge versions are stored per collection"
-                .into(),
-        });
-    };
     Ok(Some(HistoricalCsrKey {
         db: DatabaseId::new(database_id),
         tid: TenantId::new(tid),
-        collection: collection.to_string(),
+        collection: collection.map(str::to_string),
         cutoff_ordinal,
         valid_at_ms: scope.valid_at_ms,
     }))

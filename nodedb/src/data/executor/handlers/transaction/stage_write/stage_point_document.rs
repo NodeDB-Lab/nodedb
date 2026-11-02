@@ -44,10 +44,9 @@ impl CoreLoop {
             return self.response_error(ctx.task, refusal);
         }
         let storage_key = StorageKey::for_surrogate(ctx.surrogate);
-        let bitemporal = self.is_bitemporal(ctx.database_id, ctx.tid, ctx.collection);
 
         let overlay_pk = self.stage_overlay_pk(ctx);
-        let present = match self.stage_pk_present(ctx, &storage_key, bitemporal, overlay_pk) {
+        let present = match self.stage_pk_present(ctx, &storage_key, overlay_pk) {
             Ok(p) => p,
             Err(e) => return self.response_error(ctx.task, e),
         };
@@ -106,9 +105,8 @@ impl CoreLoop {
         // and an earlier statement in this transaction may already have
         // tombstoned it.
         let storage_key = StorageKey::for_surrogate(ctx.surrogate);
-        let bitemporal = self.is_bitemporal(ctx.database_id, ctx.tid, ctx.collection);
         let overlay_pk = self.stage_overlay_pk(ctx);
-        let present = match self.stage_pk_present(ctx, &storage_key, bitemporal, overlay_pk) {
+        let present = match self.stage_pk_present(ctx, &storage_key, overlay_pk) {
             Ok(p) => p,
             Err(e) => return self.response_error(ctx.task, e),
         };

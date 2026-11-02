@@ -404,6 +404,7 @@ mod tests {
                 key: Vec::new(),
                 rls_filters: Vec::new(),
                 surrogate_ceiling: None,
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             post_set_op: nodedb_physical::physical_task::PostSetOp::None,
             txn_id: None,

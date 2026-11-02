@@ -85,7 +85,7 @@ pub(in crate::data::executor) fn ts_record_loads(
         let Ok(decoded) = decode_batch_record(&record.payload) else {
             continue;
         };
-        if decoded.kind.as_deref() == Some("columnar") {
+        if decoded.kind == "columnar" {
             continue;
         }
         let key = (
@@ -345,7 +345,6 @@ mod tests {
             rows: vec![
                 crate::engine::timeseries::resolved_ingest::ResolvedTsRow {
                     line: 0,
-                    tags: Vec::new(),
                     timestamp_ms: 1,
                     values: Vec::new(),
                     absent: Vec::new(),
@@ -355,6 +354,7 @@ mod tests {
             ],
             rejected: 0,
             first_rejection: None,
+            carried_system: false,
         };
         let encoded = batch.to_bytes().expect("encode batch");
         let payload = crate::control::server::wal_dispatch::encode_timeseries_ingest_payload(

@@ -6,10 +6,12 @@
 //!
 //! The pre-image is taken before the write: the collection's write mark
 //! (`VectorCollection::write_mark`, which covers a trained IVF-PQ index too),
-//! and for a vector-primary collection the sidecar row and payload bitmap
-//! entries of every named row. The undo withdraws every node the write inserted, puts
-//! every binding and tombstone back, and restores the sidecars and bitmap
-//! entries. A collection the write created is removed again.
+//! and for a vector-primary collection the version floor of every named
+//! sidecar row and the payload bitmap entries of every named row. The undo
+//! withdraws every node the write inserted, puts every binding and tombstone
+//! back, removes the sidecar version the write appended
+//! ([`super::row_version`]) and restores the bitmap entries. A collection
+//! the write created is removed again.
 
 use std::collections::HashMap;
 
@@ -19,6 +21,7 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::vector_direct_row::VectorIndexKey;
 use crate::engine::vector::collection::VectorWriteMark;
 
+use super::row_version::{RowVersionFloor, WrittenRows};
 use super::{UndoEntry, UndoError};
 
 /// The pre-image of one vector write.
@@ -31,9 +34,9 @@ pub(in crate::data::executor) struct VectorWriteUndo {
     pub mark: Option<VectorWriteMark>,
     /// Whether the write found no `vector_params` entry for the key.
     pub params_absent: bool,
-    /// Sidecar bytes of every named surrogate, `None` when absent. Empty for
-    /// a write that stores no sidecar.
-    pub sidecars: Vec<(Surrogate, Option<Vec<u8>>)>,
+    /// The sidecar row of every named surrogate and its newest version
+    /// before the write. Empty for a write that stores no sidecar.
+    pub sidecars: Vec<RowVersionFloor>,
     /// Payload bitmap rows of the named nodes that were live.
     pub payload_rows: Vec<(u32, HashMap<String, Value>)>,
 }
@@ -69,8 +72,7 @@ impl CoreLoop {
         if sidecars {
             for &surrogate in surrogates {
                 let key = StorageKey::for_surrogate(surrogate);
-                let bytes = self.sparse.get(database_id, tid, collection, &key)?;
-                sidecar_rows.push((surrogate, bytes));
+                sidecar_rows.push(self.row_version_floor(database_id, tid, collection, key)?);
             }
         }
         let mut payload_rows = Vec::new();
@@ -129,17 +131,16 @@ impl CoreLoop {
 
         // The bitmap entries of the rows the write left behind go first: their
         // fields sit in the sidecars the write stored.
-        for (surrogate, _) in &sidecars {
+        for RowVersionFloor { key, .. } in &sidecars {
             let Some(coll) = self.vector_collections.get(&index_key) else {
                 break;
             };
-            let Some(id) = coll.local_for_surrogate(*surrogate) else {
+            let Some(id) = coll.local_for_surrogate(key.surrogate()) else {
                 continue;
             };
-            let key = StorageKey::for_surrogate(*surrogate);
             let current = self
                 .sparse
-                .get(database_id, tid, &collection, &key)
+                .get(database_id, tid, &collection, key)
                 .map_err(|e| {
                     UndoError::failed(entry_index, format!("reading the sidecar of {key}"), e)
                 })?;
@@ -185,25 +186,15 @@ impl CoreLoop {
             self.vector_params.remove(&index_key);
         }
 
-        for (surrogate, prior) in sidecars {
-            let key = StorageKey::for_surrogate(surrogate);
-            let restored = match &prior {
-                Some(bytes) => self
-                    .sparse
-                    .put(database_id, tid, &collection, &key, bytes)
-                    .map(drop),
-                None => self
-                    .sparse
-                    .delete(database_id, tid, &collection, &key)
-                    .map(drop),
-            };
-            restored.map_err(|e| {
-                UndoError::failed(entry_index, format!("restoring the sidecar of {key}"), e)
-            })?;
-            self.doc_cache
-                .invalidate(database_id, tid, &collection, &key);
-        }
-        Ok(())
+        self.remove_written_row_versions(
+            WrittenRows {
+                entry_index,
+                database_id,
+                tid,
+                collection: &collection,
+            },
+            &sidecars,
+        )
     }
 }
 
@@ -307,6 +298,51 @@ mod tests {
             coll.insert(vector(300)).unwrap(),
             256,
             "the id counter is back"
+        );
+    }
+
+    /// A rolled-back vector-primary write removes the sidecar version it
+    /// appended: the row reads as before at every system time.
+    #[test]
+    fn a_rolled_back_write_removes_its_sidecar_version() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        let key: VectorIndexKey = (DatabaseId::DEFAULT, TenantId::new(TID), "docs:".into());
+        let surrogate = Surrogate::new(9);
+        let row = StorageKey::for_surrogate(surrogate);
+        core.sparse
+            .put(0, TID, "docs", &row, b"before", 100)
+            .expect("seed sidecar");
+
+        let undo = core
+            .capture_vector_write_undo(VectorWriteTarget {
+                index_key: &key,
+                tid: TID,
+                collection: "docs",
+                surrogates: &[surrogate],
+                ids: &[],
+                sidecars: true,
+            })
+            .expect("capture undo");
+        let UndoEntry::VectorWrite(undo) = undo else {
+            panic!("a vector write captures a VectorWrite undo");
+        };
+        core.sparse
+            .put(0, TID, "docs", &row, b"after", 200)
+            .expect("write sidecar");
+        core.apply_undo_vector_write(0, *undo)
+            .expect("undo vector write");
+
+        assert_eq!(
+            core.sparse.get(0, TID, "docs", &row).unwrap(),
+            Some(b"before".to_vec())
+        );
+        assert_eq!(
+            core.sparse
+                .versioned_latest_sys_from(0, TID, "docs", &row)
+                .unwrap(),
+            Some(100),
+            "the rolled-back version leaves no history"
         );
     }
 

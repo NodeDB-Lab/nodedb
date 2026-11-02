@@ -6,7 +6,8 @@
 //! from the envelope's own rows and compares it with the tally the backup
 //! recorded. A mismatch refuses the envelope: nothing is written. The
 //! recomputation also keeps what the destination check needs: the expected
-//! tallies, the key of every keyed row, and every row with a TTL.
+//! tallies, the key or `(key, stamp)` of every keyed row, each key's current
+//! state, and every row with a TTL.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -27,16 +28,34 @@ use super::walk::{BindIndex, DocShape, PartKey, Shapes, Tallies, Walk};
 pub(crate) struct ExpiringRow {
     pub part: PartKey,
     pub key: KeyHash,
+    /// The version's start, for a versioned part.
+    pub stamp: Option<i64>,
     pub hash: [u8; 32],
     pub expire_at_ms: u64,
 }
 
 /// The rows the destination must hold for one backed-up database.
+///
+/// A RESTORE writes in the Calvin sequence and erases no history, so the
+/// destination can hold more versions of a key than the backup: its own
+/// writes, and the version that sets the backup's state again above them.
+/// What the destination must hold follows the RESTORE's cut rule
+/// (`verify::destination`).
+/// The row hashes at each `(key, stamp)` version of one versioned part.
+pub(crate) type PartVersions = HashMap<(KeyHash, i64), Vec<[u8; 32]>>;
+
 #[derive(Default)]
 pub(crate) struct ExpectedRows {
     pub tallies: Tallies,
-    /// The key of every row of each keyed part.
+    /// The key of every unversioned row of each keyed part.
     pub keys: HashMap<PartKey, HashSet<KeyHash>>,
+    /// The `(key, stamp)` of every version of each versioned part, with the
+    /// hash of each row there: a multi-vector document holds several.
+    pub versions: HashMap<PartKey, PartVersions>,
+    /// The hash of every keyless row of each keyless part, with its count.
+    pub keyless: HashMap<PartKey, HashMap<[u8; 32], u64>>,
+    /// The current state of every key of each versioned part.
+    pub states: HashMap<PartKey, HashMap<KeyHash, [u8; 32]>>,
     pub expiring: Vec<ExpiringRow>,
 }
 
@@ -50,15 +69,41 @@ pub(crate) fn expect_rows(
         let part: PartKey = (row.collection, row.part);
         rows.tallies.entry(part.clone()).or_default().add(&row.hash);
         if let Some(key) = row.key {
-            rows.keys.entry(part.clone()).or_default().insert(key);
+            match row.stamp {
+                Some(stamp) => {
+                    rows.versions
+                        .entry(part.clone())
+                        .or_default()
+                        .entry((key, stamp))
+                        .or_default()
+                        .push(row.hash);
+                }
+                None => {
+                    rows.keys.entry(part.clone()).or_default().insert(key);
+                }
+            }
+            if let Some(state) = row.state {
+                rows.states
+                    .entry(part.clone())
+                    .or_default()
+                    .insert(key, state);
+            }
             if row.expire_at_ms != 0 {
                 rows.expiring.push(ExpiringRow {
                     part,
                     key,
+                    stamp: row.stamp,
                     hash: row.hash,
                     expire_at_ms: row.expire_at_ms,
                 });
             }
+        } else {
+            *rows
+                .keyless
+                .entry(part)
+                .or_default()
+                .entry(row.hash)
+                .or_default() += 1;
         }
     })?;
     Ok(rows)

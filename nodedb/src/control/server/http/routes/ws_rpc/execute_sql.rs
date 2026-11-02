@@ -90,7 +90,6 @@ pub async fn execute_sql(
         output_schema: Some(&output_schema),
         database_id,
         sequences: &sequences,
-        client_session: None,
     };
     let routed = {
         let _request = shared.tenant_request_guard(tenant_id);
@@ -235,6 +234,7 @@ pub async fn execute_sql(
                     rls_write_check: _,
                     resolved_sum_targets: _,
                     declared_primary_key: _,
+                    target_system_time: _,
                 },
             ) = &task.plan
             {
@@ -288,6 +288,7 @@ pub async fn execute_sql(
                     rls_write_check: _,
                     resolved_sum_targets: _,
                     declared_primary_key: _,
+                    target_system_time: _,
                 },
             ) = &task.plan
             {
@@ -595,6 +596,7 @@ mod tests {
             key: Vec::new(),
             rls_filters: Vec::new(),
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         })
     }
 

@@ -17,6 +17,7 @@ use nodedb_spatial::Metric;
 use nodedb_types::SurrogateBitmap;
 
 use super::prefilter::prefilter_admits;
+use crate::data::executor::handlers::search_cut::SearchCut;
 
 /// Parameters for [`CoreLoop::spatial_full_scan`].
 pub(super) struct SpatialFullScanParams<'a> {
@@ -32,10 +33,13 @@ pub(super) struct SpatialFullScanParams<'a> {
     pub attr_filters: &'a [ScanFilter],
     pub rls_filters: &'a [ScanFilter],
     pub prefilter: Option<&'a SurrogateBitmap>,
+    /// The system time the scan reads at.
+    pub cut: SearchCut,
 }
 
 impl CoreLoop {
-    /// Full scan when no R-tree exists for the field.
+    /// Full scan when no R-tree exists for the field. Each row is read at
+    /// the scan's cut.
     pub(super) fn spatial_full_scan(&self, params: SpatialFullScanParams<'_>) -> Response {
         let crs = self.crs_context();
         let SpatialFullScanParams {
@@ -51,6 +55,7 @@ impl CoreLoop {
             attr_filters,
             rls_filters,
             prefilter,
+            cut,
         } = params;
         debug!(core = self.core_id, %collection, "spatial full scan (no R-tree index yet)");
         let metric = match Metric::resolve(&crs, query_geom.srid) {
@@ -65,11 +70,12 @@ impl CoreLoop {
         let budget = self.query_tuning.max_scan_result_bytes;
         let scan_limit =
             crate::data::executor::handlers::scan_budget::fetch_limit_for(usize::MAX, 0, budget);
-        let entries = match self.scan_collection(
+        let entries = match self.spatial_scan_rows(
             task.request.database_id.as_u64(),
             tid,
             collection,
             scan_limit,
+            cut.at,
         ) {
             Ok(e) => e,
             Err(e) => {
@@ -139,7 +145,9 @@ impl CoreLoop {
             ));
         }
 
-        if let Some(txn_id) = task.request.txn_id {
+        // The issuing transaction's staged writes merge into a current read
+        // and a read at its own snapshot.
+        if let Some(txn_id) = task.request.txn_id.filter(|_| cut.merge_overlay) {
             let coll_key = (
                 task.request.database_id,
                 crate::types::TenantId::new(tid),

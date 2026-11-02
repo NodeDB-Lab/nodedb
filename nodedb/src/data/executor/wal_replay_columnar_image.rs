@@ -8,7 +8,7 @@
 //! The install removes every displaced base row by key, then writes every
 //! image verbatim under its surrogate, then runs the side effects a live
 //! columnar insert runs (memtable flush, geometry index, aggregate cache,
-//! checkpoint dirtiness, collection write floor).
+//! checkpoint dirtiness, collection write note).
 //!
 //! A bitemporal collection keeps every base row as history. A base key the
 //! transaction removes (a delete, or an update that changes the key) closes
@@ -38,15 +38,18 @@ struct ImageRow {
     surrogate: Surrogate,
     prior_pk: Option<Value>,
     image: Option<Value>,
-    /// The stamp the transaction's resolve fixed, for a bitemporal
-    /// collection.
+    /// The stamp the transaction's resolve fixed for the row's version.
     system_from: Option<i64>,
 }
 
 /// How an install removes the base rows its record displaces.
 enum Removals {
-    /// Mark each base row deleted: a collection that is not bitemporal.
-    Erase(Vec<Value>),
+    /// End each base row at the transaction's stamp: a collection that is
+    /// not bitemporal. The ended row stays as history.
+    Erase {
+        pks: Vec<Value>,
+        system_from: Option<i64>,
+    },
     /// Close each base key with a tombstone at its stamp: a bitemporal
     /// collection.
     Close(Vec<(Value, i64)>),
@@ -55,7 +58,7 @@ enum Removals {
 impl Removals {
     fn len(&self) -> usize {
         match self {
-            Self::Erase(pks) => pks.len(),
+            Self::Erase { pks, .. } => pks.len(),
             Self::Close(closes) => closes.len(),
         }
     }
@@ -197,6 +200,7 @@ impl CoreLoop {
                 provenance: None,
                 wal_lsn: Some(record_lsn),
                 system_from: None,
+                restored_versions: Vec::new(),
                 rls_write_check: nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
                 returning: None,
                 rls_filters: Vec::new(),
@@ -264,13 +268,14 @@ impl CoreLoop {
             }
         };
 
-        let mut images: Vec<(Surrogate, Vec<Value>, Value)> = Vec::with_capacity(rows.len());
+        let mut images: Vec<(Surrogate, Vec<Value>, Value, i64)> = Vec::with_capacity(rows.len());
         for row in rows {
             if let Some(image) = &row.image {
                 let values = image_values(&schema, image)?;
                 // The image keeps the ordinal its transaction stamped.
                 self.observe_columnar_row_ordinal(&schema, &values);
-                images.push((row.surrogate, values, image.clone()));
+                let stamp = self.columnar_system_ordinal(row.system_from, 0);
+                images.push((row.surrogate, values, image.clone(), stamp));
             }
         }
         let priors: Vec<Value> = rows.iter().filter_map(|r| r.prior_pk.clone()).collect();
@@ -290,11 +295,13 @@ impl CoreLoop {
         let removals = self.image_removals(&key, &schema, rows)?;
         let mut undo = Vec::new();
         let removed = match &removals {
-            Removals::Erase(pks) => self.apply_columnar_delete_pks(
+            Removals::Erase { pks, system_from } => self.apply_columnar_delete_pks(
                 &key,
                 &schema,
                 pks,
-                ColumnarDeleteMode::Erase,
+                ColumnarDeleteMode::Erase {
+                    system_from: *system_from,
+                },
                 recording.then_some(&mut undo),
             ),
             Removals::Close(closes) => self.apply_columnar_close_pks_at(
@@ -324,8 +331,10 @@ impl CoreLoop {
                 .columnar_engines
                 .get(&key)
                 .map_or(0, |engine| engine.memtable().row_count());
-            let rows: Vec<Vec<Value>> =
-                images.iter().map(|(_, values, _)| values.clone()).collect();
+            let rows: Vec<Vec<Value>> = images
+                .iter()
+                .map(|(_, values, _, _)| values.clone())
+                .collect();
             let (inserted_pks, displaced) =
                 self.columnar_insert_undo_state(&key, &rows, ColumnarInsertIntent::Put);
             self.record_redo_undo([UndoEntry::ColumnarInsert {
@@ -340,9 +349,9 @@ impl CoreLoop {
                 detail: format!("columnar engine of '{collection}' vanished during install"),
             });
         };
-        for (surrogate, values, _) in &images {
+        for (surrogate, values, _, stamp) in &images {
             engine
-                .insert_with_surrogate(values, *surrogate)
+                .insert_with_surrogate(values, *surrogate, *stamp)
                 .map_err(|e| ErrorCode::Internal {
                     detail: format!("columnar image install into '{collection}': {e}"),
                 })?;
@@ -363,7 +372,7 @@ impl CoreLoop {
                     )
                 })?;
         }
-        let objects: Vec<Value> = images.into_iter().map(|(_, _, image)| image).collect();
+        let objects: Vec<Value> = images.into_iter().map(|(_, _, image, _)| image).collect();
         let delta = self
             .index_columnar_geometry_columns(task, &schema, collection, &objects)
             .map_err(ErrorCode::from)?;
@@ -402,9 +411,11 @@ impl CoreLoop {
         rows: &[ImageRow],
     ) -> Result<Removals, ErrorCode> {
         if !schema.is_bitemporal() {
-            return Ok(Removals::Erase(
-                rows.iter().filter_map(|r| r.prior_pk.clone()).collect(),
-            ));
+            // Every row of one record carries the transaction's one stamp.
+            return Ok(Removals::Erase {
+                pks: rows.iter().filter_map(|r| r.prior_pk.clone()).collect(),
+                system_from: rows.iter().find_map(|r| r.system_from),
+            });
         }
         let collection = key.2.as_str();
         let mut closes = Vec::new();
@@ -493,7 +504,7 @@ mod tests {
             .enumerate()
         {
             engine
-                .insert_with_surrogate(&version(ts, id, v), Surrogate::new(s as u32 + 1))
+                .insert_with_surrogate(&version(ts, id, v), Surrogate::new(s as u32 + 1), ts)
                 .expect("seed");
         }
         core.columnar_engines.insert(key.clone(), engine);
@@ -551,20 +562,11 @@ mod tests {
         assert!(!bound(3) && closed(3));
         assert!(bound(4));
 
-        let stored: Vec<Vec<Value>> = engine
-            .scan_memtable_rows()
-            .map(|row| row.expect("read"))
-            .collect();
-        let read = |cut: Option<i64>| -> Vec<(i64, i64)> {
-            let gate = core
-                .columnar_version_gate(&key, cut, false)
-                .expect("gate")
-                .expect("bitemporal");
-            let mut out: Vec<(i64, i64)> = stored
-                .iter()
-                .filter(|row| gate.admits(row))
-                .map(|row| match (&row[3], &row[4]) {
-                    (Value::Integer(id), Value::Integer(v)) => (*id, *v),
+        let read = |cut: nodedb_columnar::VersionCut| -> Vec<(i64, i64)> {
+            let mut out: Vec<(i64, i64)> = engine
+                .scan_memtable_versions(cut)
+                .map(|row| match row.expect("read").2.as_slice() {
+                    [_, _, _, Value::Integer(id), Value::Integer(v)] => (*id, *v),
                     other => panic!("unexpected cells {other:?}"),
                 })
                 .collect();
@@ -572,12 +574,12 @@ mod tests {
             out
         };
         assert_eq!(
-            read(None),
+            read(nodedb_columnar::VersionCut::Current),
             vec![(1, 11), (4, 30)],
             "the state after the commit"
         );
         assert_eq!(
-            read(Some(txn - 1)),
+            read(nodedb_columnar::VersionCut::At(txn - 1)),
             vec![(1, 10), (2, 20), (3, 30)],
             "the state before the commit"
         );

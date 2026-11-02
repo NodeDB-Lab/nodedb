@@ -260,6 +260,7 @@ mod tests {
                 key: b"seed".to_vec(),
                 rls_filters: Vec::new(),
                 surrogate_ceiling: None,
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             None,
         )

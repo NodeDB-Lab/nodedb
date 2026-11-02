@@ -5,7 +5,7 @@
 //! The lines are ingested into a scratch memtable that carries the
 //! collection's current schema, evolved for the lines (`returning_preview`).
 //! Each line the scratch memtable accepts becomes one resolved row: its
-//! series tags, its values in the scratch schema's column order, and, when
+//! values in the scratch schema's column order, and, when
 //! some Event Plane consumer reads the collection or the statement projects
 //! rows, its scan image. The live memtable is not touched.
 
@@ -13,10 +13,10 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::timeseries::columnar_memtable::ColumnarSchema;
 use crate::engine::timeseries::ilp;
-use crate::engine::timeseries::ilp_ingest::{self, BitempStamps};
+use crate::engine::timeseries::ilp_ingest::{self, RowStamp};
 use crate::engine::timeseries::resolved_ingest::{ResolvedTsBatch, ResolvedTsRow, TsDriftPolicy};
 use crate::types::TenantId;
-use nodedb_types::columnar::schema::{TS_SYSTEM, TS_VALID_FROM, TS_VALID_UNTIL};
+use nodedb_types::columnar::schema::{TS_SERIES, TS_SYSTEM, TS_VALID_FROM, TS_VALID_UNTIL};
 
 use super::raw_scan::emit_memtable_rows_at;
 
@@ -26,7 +26,7 @@ pub(in crate::data::executor) struct TsResolveInput<'a> {
     pub collection: &'a str,
     /// Canonical line protocol, every row's timestamp stamped.
     pub lines: &'a [String],
-    /// The statement instant: the system time of a bitemporal row.
+    /// The statement instant: the timestamp of an untimed row.
     pub now_ms: i64,
     pub drift: TsDriftPolicy,
     /// Whether the statement projects its stored rows, so every row needs
@@ -78,9 +78,15 @@ impl CoreLoop {
             );
         }
         let schema = scratch.schema().clone();
-        let bitemporal = self
-            .is_bitemporal(task.request.database_id.as_u64(), tid.as_u64(), collection)
-            .then_some(BitempStamps { system_ms: now_ms });
+        let bitemporal =
+            self.is_bitemporal(task.request.database_id.as_u64(), tid.as_u64(), collection);
+        // The resolved rows carry the last ordinal of the statement instant
+        // in `_ts_system`. The apply restamps every row with the batch's
+        // ordinal (`ts_batch_ordinal`).
+        let stamp = RowStamp {
+            system_ordinal: nodedb_types::ms_to_ordinal_upper(now_ms),
+            bitemporal,
+        };
         let emits_events = self
             .events
             .interest
@@ -101,7 +107,7 @@ impl CoreLoop {
                     ),
                 });
             };
-            let (timestamp_ms, values) = ilp_ingest::line_row(&schema, line, now_ms, bitemporal);
+            let (timestamp_ms, values) = ilp_ingest::line_row(&schema, line, now_ms, Some(stamp));
             let image = match images.get(position) {
                 Some(row) => {
                     let mut bytes = Vec::new();
@@ -117,14 +123,9 @@ impl CoreLoop {
             };
             rows.push(ResolvedTsRow {
                 line: *line_index as u64,
-                tags: line
-                    .tags
-                    .iter()
-                    .map(|(key, value)| (key.to_string(), value.to_string()))
-                    .collect(),
                 timestamp_ms,
                 values,
-                absent: unnamed_columns(&schema, line, bitemporal.is_some()),
+                absent: unnamed_columns(&schema, line, bitemporal),
                 image,
             });
         }
@@ -139,13 +140,15 @@ impl CoreLoop {
             rows,
             rejected: outcome.rejected as u64,
             first_rejection: outcome.first_rejection,
+            carried_system: false,
         })
     }
 }
 
-/// Positions in `schema` that `line` does not name. The time column and, in
-/// a bitemporal collection, the system and valid-time columns always hold a
-/// value. Every other column holds one only when a tag or field names it.
+/// Positions in `schema` that `line` does not name. The time column, the
+/// system-time and series-id columns and, in a bitemporal collection, the
+/// valid-time columns always hold a value. Every other column holds one only when a tag
+/// or field names it.
 fn unnamed_columns(schema: &ColumnarSchema, line: &ilp::IlpLine<'_>, bitemporal: bool) -> Vec<u32> {
     schema
         .columns
@@ -153,8 +156,9 @@ fn unnamed_columns(schema: &ColumnarSchema, line: &ilp::IlpLine<'_>, bitemporal:
         .enumerate()
         .filter(|(index, (name, _))| {
             let stamped = *index == schema.timestamp_idx
-                || (bitemporal
-                    && matches!(name.as_str(), TS_SYSTEM | TS_VALID_FROM | TS_VALID_UNTIL));
+                || name == TS_SYSTEM
+                || name == TS_SERIES
+                || (bitemporal && matches!(name.as_str(), TS_VALID_FROM | TS_VALID_UNTIL));
             let named = line.tags.iter().any(|(key, _)| key.as_ref() == name)
                 || line.fields.iter().any(|(key, _)| key.as_ref() == name);
             !stamped && !named

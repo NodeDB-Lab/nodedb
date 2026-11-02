@@ -107,8 +107,8 @@ fn rewrite_segment(store: &mut ArrayStore, action: &SegmentPurgeAction) -> Resul
         } else {
             // Build new segment bytes from surviving tiles + ceiling tiles.
             let mut all_output_ids: Vec<TileId> = surviving.clone();
-            for (ceiling_id, _) in &action.emit_ceiling_tiles {
-                all_output_ids.push(*ceiling_id);
+            for ceiling in &action.emit_ceiling_tiles {
+                all_output_ids.push(ceiling.tile_id);
             }
             all_output_ids.sort();
 
@@ -118,15 +118,16 @@ fn rewrite_segment(store: &mut ArrayStore, action: &SegmentPurgeAction) -> Resul
             let mut new_tile_count: u32 = 0;
 
             for output_id in &all_output_ids {
-                if let Some((_cid, ceiling_tile)) = action
+                if let Some(ceiling) = action
                     .emit_ceiling_tiles
                     .iter()
-                    .find(|(cid, _)| cid == output_id)
+                    .find(|ceiling| ceiling.tile_id == *output_id)
                 {
+                    let ceiling_tile = &ceiling.tile;
                     let has_rows = ceiling_tile.nnz() > 0 || !ceiling_tile.row_kinds.is_empty();
                     if has_rows {
                         writer
-                            .append_sparse(*output_id, ceiling_tile)
+                            .append_sparse(*output_id, ceiling.placement, ceiling_tile)
                             .map_err(|e| ArrayError::SegmentCorruption {
                                 detail: format!("purge: append ceiling tile: {e}"),
                             })?;
@@ -134,9 +135,11 @@ fn rewrite_segment(store: &mut ArrayStore, action: &SegmentPurgeAction) -> Resul
                         new_tile_count += 1;
                     }
                 } else if surviving.contains(output_id) {
-                    let tile_idx = source_tiles
+                    let (tile_idx, placement) = source_tiles
                         .iter()
-                        .position(|e| e.tile_id == *output_id)
+                        .enumerate()
+                        .find(|(_, e)| e.tile_id == *output_id)
+                        .map(|(idx, e)| (idx, e.placement))
                         .ok_or_else(|| ArrayError::SegmentCorruption {
                             detail: format!(
                                 "purge: surviving tile {:?} not in source reader",
@@ -148,11 +151,12 @@ fn rewrite_segment(store: &mut ArrayStore, action: &SegmentPurgeAction) -> Resul
                         TilePayload::Sparse(tile) => {
                             let has_rows = tile.nnz() > 0 || !tile.row_kinds.is_empty();
                             if has_rows {
-                                writer.append_sparse(*output_id, tile).map_err(|e| {
-                                    ArrayError::SegmentCorruption {
+                                // A surviving version keeps its placement.
+                                writer
+                                    .append_sparse(*output_id, placement, tile)
+                                    .map_err(|e| ArrayError::SegmentCorruption {
                                         detail: format!("purge: append sparse tile: {e}"),
-                                    }
-                                })?;
+                                    })?;
                                 update_bounds(&mut new_min_tile, &mut new_max_tile, *output_id);
                                 new_tile_count += 1;
                             }
@@ -309,6 +313,7 @@ mod tests {
         engine
             .put_cells(
                 &test_aid(),
+                0,
                 vec![ArrayPutCell {
                     coord: vec![CoordValue::Int64(x)],
                     attrs: vec![CellValue::Int64(v)],
@@ -322,11 +327,11 @@ mod tests {
             .unwrap();
     }
 
-    fn run_purge(e: &mut ArrayEngine, horizon_ms: i64) -> u64 {
+    fn run_purge(e: &mut ArrayEngine, horizon: i64) -> u64 {
         let schema = test_schema();
         let plan = {
             let store = e.store(&test_aid()).unwrap();
-            super::super::plan::plan(store, horizon_ms, &schema).unwrap()
+            super::super::plan::plan(store, horizon, &schema).unwrap()
         };
         let store = e.store_mut(&test_aid()).unwrap();
         super::execute(store, plan).unwrap()
@@ -334,8 +339,52 @@ mod tests {
 
     #[test]
     fn execute_rewrites_segment_dropping_tiles() {
-        // Two tiles in one segment: one outside horizon, one inside.
-        // After purge: 1 dropped, 1 surviving, ceiling added.
+        // Three versions of one cell in one segment. The two at or below the
+        // horizon collapse into a ceiling at the horizon that holds the
+        // version a read at the horizon sees. The version above it stays.
+        use nodedb_array::query::ceiling::CeilingResult;
+
+        let dir = TempDir::new().unwrap();
+        let mut cfg = ArrayEngineConfig::new(dir.path().to_path_buf());
+        cfg.flush_cell_threshold = 4096;
+        let mut e = ArrayEngine::new(cfg).unwrap();
+        let schema = test_schema();
+        e.open_array(test_aid(), schema.clone(), 0x1).unwrap();
+        put_cell(&mut e, 1, 10, 100, 1);
+        put_cell(&mut e, 1, 30, 300, 2);
+        put_cell(&mut e, 1, 60, 600, 3);
+        e.flush(
+            &test_aid(),
+            crate::types::replay_stamp::ReplayStamp::through(3),
+        )
+        .unwrap();
+
+        let horizon = 500;
+        let dropped = run_purge(&mut e, horizon);
+
+        assert_eq!(dropped, 2, "both versions at or below the horizon go");
+        let store = e.store(&test_aid()).unwrap();
+        assert!(!store.manifest().segments.is_empty());
+        let at = |sys: i64| match store
+            .ceiling_for_coord(&[CoordValue::Int64(1)], sys, None)
+            .unwrap()
+        {
+            CeilingResult::Live(p) => p.attrs,
+            other => panic!("expected a live cell at {sys}: {other:?}"),
+        };
+        assert_eq!(
+            at(horizon),
+            vec![CellValue::Int64(30)],
+            "visible at horizon"
+        );
+        assert_eq!(at(599), vec![CellValue::Int64(30)]);
+        assert_eq!(at(600), vec![CellValue::Int64(60)]);
+    }
+
+    #[test]
+    fn execute_keeps_a_version_whose_successor_is_above_the_horizon() {
+        // The only version at or below the horizon is the one a read at the
+        // horizon sees: nothing goes.
         let dir = TempDir::new().unwrap();
         let mut cfg = ArrayEngineConfig::new(dir.path().to_path_buf());
         cfg.flush_cell_threshold = 4096;
@@ -346,16 +395,47 @@ mod tests {
         put_cell(&mut e, 1, 60, 600, 2);
         e.flush(
             &test_aid(),
-            crate::types::replay_stamp::ReplayStamp::through(3),
+            crate::types::replay_stamp::ReplayStamp::through(2),
         )
         .unwrap();
+        assert_eq!(run_purge(&mut e, 500), 0);
+    }
 
-        let horizon = 500;
-        let dropped = run_purge(&mut e, horizon);
+    #[test]
+    fn execute_removes_a_cell_whose_tombstone_is_at_or_below_the_horizon() {
+        use nodedb_array::query::ceiling::CeilingResult;
 
-        assert_eq!(dropped, 1, "one tile-version must be dropped");
-        let m = e.store(&test_aid()).unwrap().manifest();
-        assert!(!m.segments.is_empty(), "segment must remain after purge");
+        let dir = TempDir::new().unwrap();
+        let mut cfg = ArrayEngineConfig::new(dir.path().to_path_buf());
+        cfg.flush_cell_threshold = 4096;
+        let mut e = ArrayEngine::new(cfg).unwrap();
+        let schema = test_schema();
+        e.open_array(test_aid(), schema.clone(), 0x1).unwrap();
+        put_cell(&mut e, 4, 40, 100, 1);
+        e.delete_cells(
+            &test_aid(),
+            0,
+            vec![crate::engine::array::wal::ArrayDeleteCell {
+                coord: vec![CoordValue::Int64(4)],
+                system_from_ms: 200,
+                erasure: false,
+            }],
+            2,
+        )
+        .unwrap();
+        e.flush(
+            &test_aid(),
+            crate::types::replay_stamp::ReplayStamp::through(2),
+        )
+        .unwrap();
+        assert_eq!(run_purge(&mut e, 500), 2);
+        let store = e.store(&test_aid()).unwrap();
+        assert!(matches!(
+            store
+                .ceiling_for_coord(&[CoordValue::Int64(4)], i64::MAX, None)
+                .unwrap(),
+            CeilingResult::NotFound
+        ));
     }
 
     #[test]
@@ -369,7 +449,7 @@ mod tests {
         let schema = test_schema();
         e.open_array(test_aid(), schema.clone(), 0x1).unwrap();
         put_cell(&mut e, 2, 20, 100, 1);
-        e.gdpr_erase_cell(&test_aid(), vec![CoordValue::Int64(2)], 200, 2)
+        e.gdpr_erase_cell(&test_aid(), 0, vec![CoordValue::Int64(2)], 200, 2)
             .unwrap();
         e.flush(
             &test_aid(),
@@ -389,8 +469,9 @@ mod tests {
 
     #[test]
     fn execute_idempotent_when_replan_after_partial() {
-        // First purge run drops the outside tile. Second run sees nothing
-        // droppable. Dropped count must be 0 on second run.
+        // First purge run collapses the two versions at or below the
+        // horizon. The second run finds only the ceiling there: nothing to
+        // drop.
         let dir = TempDir::new().unwrap();
         let mut cfg = ArrayEngineConfig::new(dir.path().to_path_buf());
         cfg.flush_cell_threshold = 4096;
@@ -398,7 +479,8 @@ mod tests {
         let schema = test_schema();
         e.open_array(test_aid(), schema.clone(), 0x1).unwrap();
         put_cell(&mut e, 3, 30, 100, 1);
-        put_cell(&mut e, 3, 35, 700, 2);
+        put_cell(&mut e, 3, 33, 300, 2);
+        put_cell(&mut e, 3, 35, 700, 3);
         e.flush(
             &test_aid(),
             crate::types::replay_stamp::ReplayStamp::through(3),
@@ -407,7 +489,7 @@ mod tests {
 
         let horizon = 500;
         let d1 = run_purge(&mut e, horizon);
-        assert_eq!(d1, 1);
+        assert_eq!(d1, 2);
 
         let d2 = run_purge(&mut e, horizon);
         assert_eq!(d2, 0, "second purge run must drop nothing");

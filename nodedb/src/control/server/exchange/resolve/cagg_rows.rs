@@ -18,11 +18,16 @@ use crate::types::DatabaseId;
 /// Finalized rows of continuous aggregate `name`, one msgpack map per
 /// bucket and group, or `None` when `name` is not a continuous aggregate
 /// of the caller's tenant in `database_id`.
+///
+/// `system_time` is the cut the read sees. Inside a transaction block the
+/// planner pins it to the block's snapshot, so every read of the block sees
+/// the rows the aggregate held at the snapshot.
 pub(super) async fn continuous_aggregate_rows(
     state: &SharedState,
     identity: &AuthenticatedIdentity,
     database_id: DatabaseId,
     name: &str,
+    system_time: nodedb_types::SystemTimeScope,
 ) -> crate::Result<Option<Vec<Vec<u8>>>> {
     let tenant = identity.tenant_id.as_u64();
     let db = database_id.as_u64();
@@ -38,6 +43,7 @@ pub(super) async fn continuous_aggregate_rows(
     let plan = PhysicalPlan::Timeseries(TimeseriesOp::ReadAggregate {
         collection: nodedb_types::QualifiedCollection::new(database_id, &root),
         aggregate: name.to_string(),
+        system_time,
     });
     let payload = dispatch_to_owner(
         state,

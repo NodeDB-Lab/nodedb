@@ -15,6 +15,17 @@ use crate::data::executor::handlers::columnar_write::RemovedSpatialEntry;
 use crate::data::executor::handlers::transaction::undo::UndoEntry;
 use crate::engine::document::store::StorageKey;
 
+/// One document write the spatial indexes take: the row, its incoming body,
+/// and the system-time ordinal of the version it stores.
+pub(in crate::data::executor) struct SpatialIndexPut<'a> {
+    pub database_id: u64,
+    pub tid: u64,
+    pub collection: &'a str,
+    pub storage_key: StorageKey,
+    pub value: &'a [u8],
+    pub sys_from: i64,
+}
+
 /// Entry id of one row in a spatial R-tree: `fnv1a_hash` of the row's identity text.
 ///
 /// A document row hashes its rendered storage key; a columnar row hashes its
@@ -59,16 +70,25 @@ impl CoreLoop {
     /// Every geometry's SRID is checked against its field's R-tree before
     /// anything changes. A geometry in an SRID other than a non-empty
     /// index's fails the put with `Error::MixedSrid` and leaves every index
-    /// untouched; the caller's abort path then drops the row write.
+    /// untouched; the caller's abort path then drops the row write. An index
+    /// that holds ended entries keeps its SRID while its live entries are
+    /// gone.
+    ///
+    /// The prior entries end at `sys_from`, the put's system-time ordinal,
+    /// and the new entries start there.
     pub(in crate::data::executor) fn apply_point_put_spatial(
         &mut self,
-        database_id: u64,
-        tid: u64,
-        collection: &str,
-        storage_key: StorageKey,
-        value: &[u8],
+        put: SpatialIndexPut<'_>,
         undo: &mut Vec<UndoEntry>,
     ) -> crate::Result<()> {
+        let SpatialIndexPut {
+            database_id,
+            tid,
+            collection,
+            storage_key,
+            value,
+            sys_from,
+        } = put;
         // Rendered once here; every reverse-map / hash use below shares it.
         let document_id = storage_key.to_string();
         let document_id = document_id.as_str();
@@ -127,13 +147,14 @@ impl CoreLoop {
         // blindly pushes a fresh entry even when one with this `entry_id`
         // already exists, so a live geometry UPDATE, a WAL replay, or the
         // crash-recovery rebuild would otherwise leave stale duplicate bbox
-        // entries scoring alongside the new one. Clear any prior geometry for
+        // entries scoring alongside the new one. End any prior geometry for
         // this document first (idempotent — a no-op on a genuine first insert).
         self.remove_document_spatial_indexes_with_undo(
             database_id,
             tid,
             collection,
             spatial_entry_id,
+            sys_from,
             undo,
         );
         let entry_id = spatial_entry_id.as_u64();
@@ -159,7 +180,10 @@ impl CoreLoop {
                     index_srid: m.index.code(),
                     row_srid: m.entry.code(),
                 })?;
-            rtree.insert(crate::engine::spatial::RTreeEntry { id: entry_id, bbox });
+            rtree.insert_at(
+                crate::engine::spatial::RTreeEntry { id: entry_id, bbox },
+                sys_from,
+            );
             // Maintain reverse map: entry_id → document_id.
             self.spatial_doc_map.insert(
                 (db_id, tid_id, collection.to_string(), field_name, entry_id),
@@ -181,17 +205,13 @@ impl CoreLoop {
         tid: u64,
         collection: &str,
         entry_id: SpatialEntryId,
+        sys_to: i64,
         undo: &mut Vec<UndoEntry>,
     ) {
-        let removed = self.remove_document_spatial_indexes(database_id, tid, collection, entry_id);
-        for (key, entry_id, bbox, document_id, srid) in removed {
-            undo.push(UndoEntry::SpatialDelete {
-                key,
-                entry_id,
-                bbox,
-                document_id,
-                srid,
-            });
+        let removed =
+            self.remove_document_spatial_indexes(database_id, tid, collection, entry_id, sys_to);
+        for removed in removed {
+            undo.push(removed.into_undo());
         }
     }
 
@@ -203,18 +223,17 @@ impl CoreLoop {
     /// (which must clear a document's prior geometry before re-inserting,
     /// since `RTree::insert` appends rather than replaces).
     ///
-    /// The bbox is read BEFORE the R-tree `delete` (which does not return the
-    /// removed geometry) so a transactional caller can push
-    /// `UndoEntry::SpatialDelete` re-insert reversals — the reverse
-    /// `spatial_doc_map` stores only the doc id. Returns the removed
-    /// `(spatial_index_key, entry_id, bbox, document_id, srid)` tuples, `srid`
-    /// being the tree's; empty when the document had no spatial fields.
+    /// Each removed entry ends at `sys_to`, the removing write's system-time
+    /// ordinal: a read at an earlier cut still finds it (`RTree::end_at`).
+    /// Returns the removed entries for a transactional caller to reverse,
+    /// with each tree's SRID; empty when the document had no spatial fields.
     pub(in crate::data::executor) fn remove_document_spatial_indexes(
         &mut self,
         database_id: u64,
         tid: u64,
         collection: &str,
         entry_id: SpatialEntryId,
+        sys_to: i64,
     ) -> Vec<RemovedSpatialEntry> {
         let mut spatial_deletes = Vec::new();
         let entry_id = entry_id.as_u64();
@@ -228,28 +247,32 @@ impl CoreLoop {
             .collect();
         for field in spatial_fields {
             let skey = (db_id, tid_id, collection.to_string(), field.clone());
-            // Read the bbox BEFORE deleting — the R-tree `delete` does not
-            // return the removed geometry, so a reversible undo must capture
-            // it here (the reverse `spatial_doc_map` stores only the doc id).
-            let found = self.spatial_indexes.get(&skey).and_then(|rtree| {
-                rtree
-                    .entries()
-                    .into_iter()
-                    .find(|e| e.id == entry_id)
-                    .map(|e| (e.bbox, rtree.tree_srid()))
-            });
-            if let Some(rtree) = self.spatial_indexes.get_mut(&skey) {
-                rtree.delete(entry_id);
-            }
-            let removed_doc = self.spatial_doc_map.remove(&(
+            let doc = self.spatial_doc_map.remove(&(
                 db_id,
                 tid_id,
                 collection.to_string(),
                 field,
                 entry_id,
             ));
-            if let (Some((bbox, srid)), Some(doc)) = (found, removed_doc) {
-                spatial_deletes.push((skey, entry_id, bbox, doc, srid));
+            let Some(rtree) = self.spatial_indexes.get_mut(&skey) else {
+                continue;
+            };
+            // An entry with no reverse-map record names no row a read can
+            // resolve: it leaves without history.
+            let Some(doc) = doc else {
+                rtree.forget(entry_id);
+                continue;
+            };
+            let srid = rtree.tree_srid();
+            if let Some(bbox) = rtree.end_at(entry_id, &doc, sys_to) {
+                spatial_deletes.push(RemovedSpatialEntry {
+                    key: skey,
+                    entry_id,
+                    bbox,
+                    document_id: doc,
+                    srid,
+                    sys_to,
+                });
             }
         }
         spatial_deletes
@@ -298,7 +321,7 @@ mod tests {
             wal_lsn: None,
             resolved_now_ms: None,
             commit_hlc: None,
-            entry_version: None,
+            system_ordinal: None,
             admission: crate::bridge::envelope::Admission::Admitted,
         })
     }
@@ -628,5 +651,90 @@ mod tests {
         assert_eq!(restored[0].id, entry_id);
         assert_eq!(restored[0].bbox, old_bbox);
         assert_eq!(core.spatial_doc_map.get(&map_key).cloned(), old_doc);
+        assert_eq!(
+            core.spatial_indexes.get(&key).unwrap().ended_len(),
+            0,
+            "the undo takes the ended entry back out of the history"
+        );
+    }
+
+    /// An overwrite ends the prior entry at the overwrite's ordinal and a
+    /// delete ends the current one at the delete's: a read at each cut
+    /// finds the entry of the version visible there.
+    #[test]
+    fn overwrite_and_delete_keep_the_ended_entries() {
+        use crate::data::executor::handlers::point::apply_put::SpatialEntryId;
+        use crate::engine::document::store::StorageKey;
+        use nodedb_spatial::CutCandidate;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        let coll = "geo_history";
+        let db = DatabaseId::DEFAULT.as_u64();
+        let surrogate = Surrogate::new(1);
+        let storage_key = StorageKey::for_surrogate(surrogate);
+        let key = (
+            DatabaseId::DEFAULT,
+            TenantId::new(1),
+            coll.to_string(),
+            "loc".to_string(),
+        );
+        let put = |core: &mut crate::data::executor::core_loop::CoreLoop, doc: &[u8]| {
+            let task = point_put_task(coll, "d1", doc);
+            let resp = core.execute_point_put(
+                &task,
+                PointPutExec {
+                    tid: 1,
+                    collection: coll,
+                    document_id: "d1",
+                    surrogate,
+                    value: doc,
+                    returning: None,
+                    rls_filters: &[],
+                    resolved_sum_targets: &[],
+                },
+            );
+            assert_eq!(resp.status, Status::Ok);
+            core.sparse
+                .versioned_latest_sys_from(db, 1, coll, &storage_key)
+                .unwrap()
+                .expect("a stored version")
+        };
+        let at_first = put(
+            &mut core,
+            br#"{"loc":{"type":"Point","coordinates":[1.0,2.0]}}"#,
+        );
+        let at_second = put(
+            &mut core,
+            br#"{"loc":{"type":"Point","coordinates":[30.0,40.0]}}"#,
+        );
+        assert!(at_second > at_first);
+
+        let world = nodedb_types::BoundingBox::new(-180.0, -90.0, 180.0, 90.0);
+        let rtree = core.spatial_indexes.get(&key).unwrap();
+        let before = rtree.search_at(&world, at_first);
+        assert!(
+            matches!(before.as_slice(), [CutCandidate::Ended(e)]
+                if e.bbox == nodedb_types::BoundingBox::from_point(1.0, 2.0)
+                    && e.sys_to == at_second),
+            "the first version's entry is visible at its cut: {before:?}"
+        );
+        assert!(rtree.search_at(&world, at_first - 1).is_empty());
+        let after = rtree.search_at(&world, at_second);
+        assert!(matches!(after.as_slice(), [CutCandidate::Live(_)]));
+
+        let removed = core.remove_document_spatial_indexes(
+            db,
+            1,
+            coll,
+            SpatialEntryId::from_storage_key(storage_key),
+            at_second + 1,
+        );
+        assert_eq!(removed.len(), 1);
+        let rtree = core.spatial_indexes.get(&key).unwrap();
+        assert!(rtree.is_empty());
+        assert_eq!(rtree.ended_len(), 2);
+        assert!(rtree.search_at(&world, at_second + 1).is_empty());
+        assert_eq!(rtree.search_at(&world, at_second).len(), 1);
     }
 }

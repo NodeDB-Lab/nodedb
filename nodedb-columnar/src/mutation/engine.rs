@@ -12,6 +12,7 @@ use crate::delete_bitmap::DeleteBitmap;
 use crate::error::ColumnarError;
 use crate::memtable::ColumnarMemtable;
 use crate::pk_index::{PkIndex, RowLocation, encode_pk};
+use crate::versions::{SegmentVersions, VersionChains, VersionCut};
 use crate::wal_record::ColumnarWalRecord;
 
 /// Coordinates all columnar mutations for a single collection.
@@ -41,9 +42,14 @@ pub struct MutationEngine {
     /// Per-row surrogate identities, parallel to the memtable rows.
     ///
     /// Entry `i` is the surrogate assigned to memtable row `i` at insert
-    /// time, or `None` if no surrogate was supplied (test fixtures, legacy
-    /// inserts). The vec is drained alongside the memtable on flush.
+    /// time, or `None` if the insert supplied no surrogate. The vec is
+    /// drained alongside the memtable on flush.
     pub(super) memtable_surrogates: Vec<Option<Surrogate>>,
+    /// System-time stamps per segment, the memtable's virtual segment
+    /// included. Key = segment_id.
+    pub(super) versions: HashMap<u64, SegmentVersions>,
+    /// Per-key chains of the ended versions a purge has not removed.
+    pub(super) chains: VersionChains,
 }
 
 /// Result of a mutation operation, including the WAL record to persist.
@@ -93,6 +99,8 @@ impl MutationEngine {
             memtable_segment_id,
             memtable_row_counter: 0,
             memtable_surrogates: Vec::new(),
+            versions: HashMap::new(),
+            chains: VersionChains::new(),
         }
     }
 
@@ -124,17 +132,10 @@ impl MutationEngine {
         self.closed_index.get(pk_bytes).copied()
     }
 
-    /// Access a segment's delete bitmap.
+    /// Access a segment's delete bitmap: every row a write ended, history
+    /// and purged rows alike. A current read skips every marked row.
     pub fn delete_bitmap(&self, segment_id: u64) -> Option<&DeleteBitmap> {
         self.delete_bitmaps.get(&segment_id)
-    }
-
-    /// Mutable access to a segment's delete bitmap. Creates an empty one
-    /// on first access so callers can `mark_deleted_batch` unconditionally.
-    /// Used by temporal-purge paths that tombstone superseded row positions
-    /// without going through the single-row `insert` / `delete` paths.
-    pub fn delete_bitmap_mut(&mut self, segment_id: u64) -> &mut DeleteBitmap {
-        self.delete_bitmaps.entry(segment_id).or_default()
     }
 
     /// The virtual segment id used for rows still in the memtable.
@@ -170,56 +171,34 @@ impl MutationEngine {
     /// Access the per-row surrogate table for the memtable.
     ///
     /// Index matches memtable row order; `None` entries indicate rows
-    /// inserted without a surrogate (test fixtures, legacy paths).
+    /// inserted without a surrogate.
     pub fn memtable_surrogates(&self) -> &[Option<Surrogate>] {
         &self.memtable_surrogates
     }
 
-    /// Iterate non-deleted rows in the memtable as `Vec<Value>`.
+    /// Iterate the current rows of the memtable as `Vec<Value>`.
     ///
-    /// Skips rows marked as deleted in the memtable's virtual segment
-    /// delete bitmap. For rows in flushed segments, use `SegmentReader`.
-    /// Yields `Err` for a live row with a corrupt cell.
+    /// Skips every row a write ended. For rows in flushed segments, use
+    /// `SegmentReader`. Yields `Err` for a current row with a corrupt cell.
     pub fn scan_memtable_rows(
         &self,
     ) -> impl Iterator<Item = Result<Vec<Value>, ColumnarError>> + '_ {
-        let deletes = self.delete_bitmaps.get(&self.memtable_segment_id);
-        self.memtable
-            .iter_rows()
-            .enumerate()
-            .filter_map(move |(row_idx, row)| {
-                if deletes.is_some_and(|bm| bm.is_deleted(row_idx as u32)) {
-                    None
-                } else {
-                    Some(row.map_err(|e| self.memtable_read_fault(e)))
-                }
-            })
+        self.scan_memtable_versions(VersionCut::Current)
+            .map(|row| row.map(|(_, _, values)| values))
     }
 
-    /// Iterate non-deleted rows paired with their surrogate identity.
+    /// Iterate the current rows of the memtable paired with their surrogate
+    /// identity.
     ///
     /// Yields `(Option<Surrogate>, Vec<Value>)`. The surrogate is `None`
-    /// for rows inserted without one (test fixtures, legacy paths). Deleted
+    /// for rows inserted without one. Ended
     /// rows are filtered out exactly as in [`Self::scan_memtable_rows`].
-    /// Yields `Err` for a live row with a corrupt cell.
+    /// Yields `Err` for a current row with a corrupt cell.
     pub fn scan_memtable_rows_with_surrogates(
         &self,
     ) -> impl Iterator<Item = Result<(Option<Surrogate>, Vec<Value>), ColumnarError>> + '_ {
-        let deletes = self.delete_bitmaps.get(&self.memtable_segment_id);
-        let surrogates = &self.memtable_surrogates;
-        self.memtable
-            .iter_rows()
-            .enumerate()
-            .filter_map(move |(row_idx, row)| {
-                if deletes.is_some_and(|bm| bm.is_deleted(row_idx as u32)) {
-                    return None;
-                }
-                let surrogate = surrogates.get(row_idx).copied().flatten();
-                Some(
-                    row.map(|row| (surrogate, row))
-                        .map_err(|e| self.memtable_read_fault(e)),
-                )
-            })
+        self.scan_memtable_versions(VersionCut::Current)
+            .map(|row| row.map(|(_, surrogate, values)| (surrogate, values)))
     }
 
     /// Get a single row from the memtable by index.
@@ -253,8 +232,8 @@ impl MutationEngine {
     /// Undoes the effect of one or more inserts that appended rows starting
     /// at `row_count_before`. For each inserted row:
     /// - The corresponding PK entry is removed from the PK index.
-    /// - If the insert displaced a prior row (upsert tombstone), that prior
-    ///   row's PK index entry is restored and its tombstone bit cleared.
+    /// - If the insert displaced a prior row, that prior row is reopened
+    ///   (its end and chain entry go) and its PK index entry is restored.
     ///
     /// The memtable is then truncated to `row_count_before`. Used exclusively
     /// by the transaction undo log; never called on the normal write path.
@@ -268,13 +247,10 @@ impl MutationEngine {
         for pk in inserted_pks {
             self.pk_index.remove(pk);
         }
-        // 2. Restore displaced prior-row PK entries and clear tombstones.
+        // 2. Reopen each displaced prior row and bind its PK again.
         for (pk, prior_location) in displaced {
+            self.reopen_row(pk, *prior_location);
             self.pk_index.upsert(pk.clone(), *prior_location);
-            // Clear the tombstone bit that the insert set on the prior row.
-            if let Some(bm) = self.delete_bitmaps.get_mut(&prior_location.segment_id) {
-                bm.unmark_deleted(prior_location.row_index);
-            }
         }
         // 3. Truncate memtable and surrogate list.
         self.cut_memtable_to(row_count_before);
@@ -283,30 +259,35 @@ impl MutationEngine {
     /// Cut the memtable, its surrogate table and its row counter back to
     /// `row_count` rows.
     ///
-    /// A cut row can carry a tombstone: a later row of the same write
-    /// replaced it. Those tombstones are cleared too, so a row appended
+    /// A cut row can be ended: a later row of the same write replaced it.
+    /// Its end, its stamp, and its chain entry go too, so a row appended
     /// later at that index starts live. A close whose tombstone row is cut
     /// loses its `closed_index` entry.
     pub(super) fn cut_memtable_to(&mut self, row_count: usize) {
         if let Some(bm) = self.delete_bitmaps.get_mut(&self.memtable_segment_id) {
             bm.unmark_from(row_count as u32);
         }
+        if let Some(stamps) = self.versions.get_mut(&self.memtable_segment_id) {
+            stamps.truncate(row_count);
+        }
         let memtable_segment_id = self.memtable_segment_id;
+        let keep_below = |row_index: u32| {
+            ((row_index as usize) < row_count).then_some(RowLocation {
+                segment_id: memtable_segment_id,
+                row_index,
+            })
+        };
         self.closed_index
-            .remap_segment(memtable_segment_id, |row_index| {
-                ((row_index as usize) < row_count).then_some(RowLocation {
-                    segment_id: memtable_segment_id,
-                    row_index,
-                })
-            });
+            .remap_segment(memtable_segment_id, keep_below);
+        self.chains.remap_segment(memtable_segment_id, keep_below);
         self.memtable.truncate_to(row_count);
         self.memtable_surrogates.truncate(row_count);
         self.memtable_row_counter = row_count as u32;
     }
 
-    /// Reverse one or more positional deletes: for each `(pk_bytes, location)`
-    /// clear the row's delete-bitmap bit and re-bind the PK index to that
-    /// location.
+    /// Reverse one or more ends: for each `(pk_bytes, location)` reopen the
+    /// row (its delete-bitmap bit, its `sys_to`, and its chain entry go) and
+    /// re-bind the PK index to that location.
     ///
     /// Undoes the effect of [`Self::delete`] (and the delete-half of
     /// [`Self::update`]) so a rolled-back mutation leaves the affected rows
@@ -315,9 +296,7 @@ impl MutationEngine {
     /// displaced-row restore in [`Self::rollback_memtable_inserts`].
     pub fn restore_deleted_rows(&mut self, rows: &[(Vec<u8>, crate::pk_index::RowLocation)]) {
         for (pk_bytes, location) in rows {
-            if let Some(bm) = self.delete_bitmaps.get_mut(&location.segment_id) {
-                bm.unmark_deleted(location.row_index);
-            }
+            self.reopen_row(pk_bytes, *location);
             self.pk_index.upsert(pk_bytes.clone(), *location);
         }
     }
@@ -389,10 +368,14 @@ mod tests {
         let mut engine = MutationEngine::with_flush_threshold("col".to_string(), schema, 2);
         assert!(!engine.should_flush(), "empty engine should not need flush");
 
-        engine.insert(&[Value::Integer(1)]).expect("insert row 1");
+        engine
+            .insert(&[Value::Integer(1)], 1)
+            .expect("insert row 1");
         assert!(!engine.should_flush(), "1 row below threshold of 2");
 
-        engine.insert(&[Value::Integer(2)]).expect("insert row 2");
+        engine
+            .insert(&[Value::Integer(2)], 2)
+            .expect("insert row 2");
         assert!(
             engine.should_flush(),
             "2 rows at threshold of 2 must trigger flush"
@@ -405,7 +388,7 @@ mod tests {
 
         let schema = minimal_schema();
         let mut engine = MutationEngine::with_flush_threshold("col".to_string(), schema, 0);
-        engine.insert(&[Value::Integer(1)]).expect("insert");
+        engine.insert(&[Value::Integer(1)], 1).expect("insert");
         // A zero threshold would be pathological; clamped to 1, so 1 row = flush.
         assert!(
             engine.should_flush(),
@@ -427,11 +410,14 @@ mod tests {
         let mut engine = MutationEngine::new("test".into(), test_schema());
 
         let result = engine
-            .insert(&[
-                Value::Integer(1),
-                Value::String("Alice".into()),
-                Value::Float(0.75),
-            ])
+            .insert(
+                &[
+                    Value::Integer(1),
+                    Value::String("Alice".into()),
+                    Value::Float(0.75),
+                ],
+                1,
+            )
             .expect("insert");
 
         assert_eq!(result.wal_records.len(), 1);
@@ -449,14 +435,17 @@ mod tests {
         let mut engine = MutationEngine::new("test".into(), test_schema());
 
         engine
-            .insert(&[
-                Value::Integer(1),
-                Value::String("Alice".into()),
-                Value::Null,
-            ])
+            .insert(
+                &[
+                    Value::Integer(1),
+                    Value::String("Alice".into()),
+                    Value::Null,
+                ],
+                1,
+            )
             .expect("insert");
 
-        let result = engine.delete(&Value::Integer(1)).expect("delete");
+        let result = engine.delete(&Value::Integer(1), 2).expect("delete");
         assert_eq!(result.wal_records.len(), 1);
         assert!(matches!(
             &result.wal_records[0],
@@ -471,7 +460,7 @@ mod tests {
     fn delete_nonexistent_pk() {
         let mut engine = MutationEngine::new("test".into(), test_schema());
 
-        let err = engine.delete(&Value::Integer(999));
+        let err = engine.delete(&Value::Integer(999), 2);
         assert!(matches!(err, Err(ColumnarError::PrimaryKeyNotFound)));
     }
 
@@ -480,11 +469,14 @@ mod tests {
         let mut engine = MutationEngine::new("test".into(), test_schema());
 
         engine
-            .insert(&[
-                Value::Integer(1),
-                Value::String("Alice".into()),
-                Value::Float(0.5),
-            ])
+            .insert(
+                &[
+                    Value::Integer(1),
+                    Value::String("Alice".into()),
+                    Value::Float(0.5),
+                ],
+                1,
+            )
             .expect("insert");
 
         // Update: change name and score, keep same PK.
@@ -497,6 +489,7 @@ mod tests {
                     Value::Float(0.75),
                 ],
                 None,
+                2,
             )
             .expect("update");
 
@@ -523,11 +516,14 @@ mod tests {
 
         for i in 0..5 {
             engine
-                .insert(&[
-                    Value::Integer(i),
-                    Value::String(format!("u{i}")),
-                    Value::Null,
-                ])
+                .insert(
+                    &[
+                        Value::Integer(i),
+                        Value::String(format!("u{i}")),
+                        Value::Null,
+                    ],
+                    1,
+                )
                 .expect("insert");
         }
 
@@ -556,17 +552,20 @@ mod tests {
 
         for i in 0..10 {
             engine
-                .insert(&[
-                    Value::Integer(i),
-                    Value::String(format!("u{i}")),
-                    Value::Null,
-                ])
+                .insert(
+                    &[
+                        Value::Integer(i),
+                        Value::String(format!("u{i}")),
+                        Value::Null,
+                    ],
+                    1,
+                )
                 .expect("insert");
         }
 
         // Delete odd-numbered rows.
         for i in (1..10).step_by(2) {
-            engine.delete(&Value::Integer(i)).expect("delete");
+            engine.delete(&Value::Integer(i), 2).expect("delete");
         }
 
         assert_eq!(engine.pk_index().len(), 5); // 0, 2, 4, 6, 8.
@@ -589,6 +588,7 @@ mod tests {
                         Value::Null,
                     ],
                     Surrogate(s),
+                    1,
                 )
                 .expect("insert_with_surrogate");
         }
@@ -641,6 +641,7 @@ mod tests {
                         Value::Null,
                     ],
                     Surrogate(*s),
+                    1,
                 )
                 .expect("insert_with_surrogate");
         }
@@ -667,7 +668,10 @@ mod tests {
     fn insert_without_surrogate_stores_none() {
         let mut engine = MutationEngine::new("col".into(), test_schema());
         engine
-            .insert(&[Value::Integer(1), Value::String("x".into()), Value::Null])
+            .insert(
+                &[Value::Integer(1), Value::String("x".into()), Value::Null],
+                1,
+            )
             .expect("insert");
         assert_eq!(engine.memtable_surrogates(), &[None]);
     }
@@ -679,6 +683,7 @@ mod tests {
             .insert_with_surrogate(
                 &[Value::Integer(1), Value::String("x".into()), Value::Null],
                 Surrogate(42),
+                1,
             )
             .expect("insert");
         engine
@@ -686,6 +691,7 @@ mod tests {
                 &Value::Integer(1),
                 &[Value::Integer(2), Value::String("y".into()), Value::Null],
                 Some(Surrogate(7)),
+                2,
             )
             .expect("update");
         let live: Vec<Option<Surrogate>> = engine
@@ -706,6 +712,7 @@ mod tests {
             .insert_with_surrogate(
                 &[Value::Integer(1), Value::String("x".into()), Value::Null],
                 Surrogate(42),
+                1,
             )
             .expect("insert");
         let segment_id = engine.next_segment_id();
@@ -716,6 +723,7 @@ mod tests {
                 &Value::Integer(1),
                 &[Value::Integer(1), Value::String("y".into()), Value::Null],
                 Some(Surrogate(42)),
+                2,
             )
             .expect("update");
         let live: Vec<Option<Surrogate>> = engine
@@ -736,6 +744,7 @@ mod tests {
             .insert_with_surrogate(
                 &[Value::Integer(1), Value::String("x".into()), Value::Null],
                 Surrogate(42),
+                1,
             )
             .expect("insert");
         assert_eq!(engine.memtable_surrogates().len(), 1);
@@ -754,11 +763,14 @@ mod tests {
         for i in 0..10 {
             records.extend(
                 engine
-                    .insert(&[
-                        Value::Integer(i),
-                        Value::String(format!("u{i}")),
-                        Value::Null,
-                    ])
+                    .insert(
+                        &[
+                            Value::Integer(i),
+                            Value::String(format!("u{i}")),
+                            Value::Null,
+                        ],
+                        1,
+                    )
                     .expect("insert")
                     .wal_records,
             );
@@ -767,7 +779,7 @@ mod tests {
         for i in 0..3 {
             records.extend(
                 engine
-                    .delete(&Value::Integer(i))
+                    .delete(&Value::Integer(i), 2)
                     .expect("delete")
                     .wal_records,
             );

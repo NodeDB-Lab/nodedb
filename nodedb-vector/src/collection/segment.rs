@@ -72,4 +72,20 @@ pub struct SealedSegment {
     pub tier: StorageTier,
     /// mmap-backed vector segment for L1 NVMe tier.
     pub mmap_vectors: Option<MmapVectorSegment>,
+    /// Bytes the segment holds in RAM ([`SealedSegment::measure`]), set
+    /// when the segment is built, restored, or compacted. Reading it is
+    /// constant time, so a write can charge its delta at once.
+    pub resident_bytes: usize,
+}
+
+impl SealedSegment {
+    /// Bytes `index` and its SQ8 codes hold in RAM. Walks every node.
+    pub fn measure(index: &HnswIndex, sq8: Option<&(Sq8Codec, Vec<u8>)>) -> usize {
+        index.memory_usage_bytes() + sq8.map_or(0, |(_, data)| data.len())
+    }
+
+    /// Measure the segment again after its index or codes changed.
+    pub fn remeasure(&mut self) {
+        self.resident_bytes = Self::measure(&self.index, self.sq8.as_ref());
+    }
 }

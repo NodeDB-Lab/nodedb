@@ -6,8 +6,8 @@
 //! keyed by the schema name and written in schema order:
 //! `{x: 0, y: 1, nir: 0.8, red: 0.2}`. A SQL query reads the rows as a
 //! relation, so every column resolves by name. An audit-log slice (`AS OF
-//! SYSTEM TIME NULL`) also stamps each row with `_ts_system`, the version's
-//! system time in milliseconds.
+//! SYSTEM TIME NULL`) also stamps each row with `_ts_system`, the
+//! millisecond of the version's system-time ordinal.
 //!
 //! The fixed key order makes two rows of one cell encode to the same bytes,
 //! so a cluster merge that breaks ties by row bytes orders them the same on
@@ -26,7 +26,8 @@ pub(super) const SYSTEM_TIME_FIELD: &str = "_ts_system";
 /// `coords` holds one value per schema dim, in dim order. `attrs` holds the
 /// emitted attrs: the attrs `proj` selects, in its order, or every attr in
 /// schema order when `proj` is `None`. A timestamp dim's millisecond value
-/// becomes a timestamp. `system_time` adds the `_ts_system` field.
+/// becomes a timestamp. `system_time`, a tile version's system-time
+/// ordinal, adds the `_ts_system` field as its millisecond.
 pub(super) fn named_cell_row(
     schema: &ArraySchema,
     coords: Vec<Value>,
@@ -72,9 +73,9 @@ pub(super) fn named_cell_row(
         names.push(&attr.name);
         values.push(value);
     }
-    if let Some(ts) = system_time {
+    if let Some(ordinal) = system_time {
         names.push(SYSTEM_TIME_FIELD);
-        values.push(Value::Integer(ts));
+        values.push(Value::Integer(nodedb_types::ordinal_to_ms(ordinal)));
     }
 
     let fields: Vec<(&str, &Value)> = names.into_iter().zip(values.iter()).collect();
@@ -182,7 +183,7 @@ mod tests {
             vec![Value::Integer(0), Value::Integer(0)],
             vec![Value::Float(0.2)],
             Some(&proj),
-            Some(300),
+            Some(300 * 1_000_000 + 7),
         )
         .expect("row");
         assert_eq!(key_order(&bytes), ["x", "t", "red", SYSTEM_TIME_FIELD]);
