@@ -2,7 +2,7 @@
 
 //! The KV operation enum — the wire shape and nothing else.
 
-use nodedb_types::{QualifiedCollection, RlsWriteCheck, Surrogate};
+use nodedb_types::{QualifiedCollection, RlsWriteCheck, Surrogate, SystemTimeScope};
 
 use super::batch_intent::KvBatchIntent;
 use super::counter_shape::KvCounterShape;
@@ -37,6 +37,11 @@ pub enum KvOp {
         /// leak through a delegated clone `Get`. `None` for normal gets.
         #[serde(default)]
         surrogate_ceiling: Option<u32>,
+        /// The system-time cut the read answers at. `Current` reads the
+        /// newest version. `AsOf` / `Pinned` read the version visible at the
+        /// cut. `AllVersions` reads the newest version.
+        #[serde(default)]
+        system_time: SystemTimeScope,
     },
 
     /// Insert or update (RESP SET / SQL UPSERT semantics). Writes a Binary
@@ -177,6 +182,11 @@ pub enum KvOp {
         /// See `Get::surrogate_ceiling`; drops entries above the ceiling.
         #[serde(default)]
         surrogate_ceiling: Option<u32>,
+        /// The system-time cut the scan reads at. `AsOf` / `Pinned` read
+        /// every row visible at the cut. `AllVersions` reads every version of
+        /// every row, oldest first per key.
+        #[serde(default)]
+        system_time: SystemTimeScope,
     },
 
     /// Set or update TTL on an existing key.
@@ -221,6 +231,9 @@ pub enum KvOp {
         /// same shape `KvOp::Get` and `DocumentOp::PointGet` use.
         #[serde(default)]
         rls_filters: Vec<u8>,
+        /// See `Get::system_time`.
+        #[serde(default)]
+        system_time: SystemTimeScope,
     },
 
     /// Batch put: write multiple key-value pairs atomically, as one request
@@ -289,6 +302,9 @@ pub enum KvOp {
         /// See `BatchGet::rls_filters`.
         #[serde(default)]
         rls_filters: Vec<u8>,
+        /// See `Get::system_time`.
+        #[serde(default)]
+        system_time: SystemTimeScope,
     },
 
     /// Update specific fields in a key's value (HSET): read-modify-write,
@@ -476,25 +492,60 @@ pub enum KvOp {
     SortedIndexRank {
         index_name: String,
         primary_key: Vec<u8>,
+        /// The system-time cut the read answers at. `Current` reads the
+        /// registered tree. `AsOf` / `Pinned` read the index as it stood at
+        /// the cut: built from the rows visible there. `AllVersions` reads
+        /// the newest version, as `Get` does.
+        #[serde(default)]
+        system_time: SystemTimeScope,
     },
 
     /// Get the top K entries from a sorted index.
-    SortedIndexTopK { index_name: String, k: u32 },
+    SortedIndexTopK {
+        index_name: String,
+        k: u32,
+        /// The system-time cut the read answers at. `Current` reads the
+        /// registered tree. `AsOf` / `Pinned` read the index as it stood at
+        /// the cut: built from the rows visible there. `AllVersions` reads
+        /// the newest version, as `Get` does.
+        #[serde(default)]
+        system_time: SystemTimeScope,
+    },
 
     /// Get entries in a score range from a sorted index.
     SortedIndexRange {
         index_name: String,
         score_min: Option<Vec<u8>>,
         score_max: Option<Vec<u8>>,
+        /// The system-time cut the read answers at. `Current` reads the
+        /// registered tree. `AsOf` / `Pinned` read the index as it stood at
+        /// the cut: built from the rows visible there. `AllVersions` reads
+        /// the newest version, as `Get` does.
+        #[serde(default)]
+        system_time: SystemTimeScope,
     },
 
     /// Get total count of entries in a sorted index.
-    SortedIndexCount { index_name: String },
+    SortedIndexCount {
+        index_name: String,
+        /// The system-time cut the read answers at. `Current` reads the
+        /// registered tree. `AsOf` / `Pinned` read the index as it stood at
+        /// the cut: built from the rows visible there. `AllVersions` reads
+        /// the newest version, as `Get` does.
+        #[serde(default)]
+        system_time: SystemTimeScope,
+    },
 
     /// Get the sort key (score) for a key in a sorted index (ZSCORE equivalent).
     SortedIndexScore {
         index_name: String,
         primary_key: Vec<u8>,
+        /// The system-time cut the read answers at. `Current` reads the
+        /// registered tree. `AsOf` / `Pinned` read the index as it stood at
+        /// the cut: built from the rows visible there. `AllVersions` reads
+        /// the newest version, as `Get` does.
+        #[serde(default)]
+        system_time: SystemTimeScope,
     },
 
     /// A sorted-index read inside an explicit transaction block.
@@ -511,6 +562,12 @@ pub enum KvOp {
         /// committed. `None` reads the definition registered on the core.
         pending: Option<SortedIndexSpec>,
         read: SortedIndexRead,
+        /// The base rows the transaction-local tree is built from: `Current`
+        /// for the newest committed version of each key, `TxnSnapshot` for
+        /// the keys visible at the block's snapshot. The transaction's
+        /// staged writes fold in on top at either scope.
+        #[serde(default)]
+        system_time: SystemTimeScope,
     },
 
     /// Cursor-paginated raw scan for the clone materializer.
@@ -519,12 +576,24 @@ pub enum KvOp {
     /// next-cursor in a single payload, so the materializer can drive the
     /// scan to completion in O(N / count) round-trips. The response payload
     /// is msgpack-encoded as a 2-element array:
-    ///   `[ next_cursor: bytes, entries: [[key: bytes, value: bytes], ...] ]`
-    /// `next_cursor` is empty when the scan is complete.
+    ///   `[ next_cursor: bytes, entries: [[key, value, sys_from, expire_at_ms], ...] ]`
+    /// Each entry carries the system-time ordinal of the version read and
+    /// its absolute expiry (`0` for none). `next_cursor` is empty when the
+    /// scan is complete.
     MaterializeScan {
         collection: QualifiedCollection,
         cursor: Vec<u8>,
         count: usize,
+        /// The system-time cut the scan reads at. `Current` scans the live
+        /// rows. `AsOf` / `Pinned` scan every row visible at the cut.
+        /// `AllVersions` scans the newest version of every row. A cursor is
+        /// valid only for the scope it came from.
+        #[serde(default)]
+        system_time: SystemTimeScope,
+        /// The one key to read in place of a page after `cursor`. A clone
+        /// copy-up reads its source key this way.
+        #[serde(default)]
+        only_key: Option<Vec<u8>>,
     },
 
     // ── Resolve-before-propose (governed state-dependent writes) ────────
@@ -577,6 +646,12 @@ pub enum KvOp {
         /// See `Put::rls_filters`.
         #[serde(default)]
         rls_filters: Vec<u8>,
+        /// The rows `filters` matches: `Current` for the newest committed
+        /// version of each key, `TxnSnapshot` inside a transaction block for
+        /// the keys visible at the block's snapshot with its staged writes
+        /// merged on top. Only the match reads at this scope.
+        #[serde(default)]
+        system_time: SystemTimeScope,
     },
 
     /// Delete every row matching `filters`.
@@ -597,5 +672,8 @@ pub enum KvOp {
         /// See `Put::rls_filters`.
         #[serde(default)]
         rls_filters: Vec<u8>,
+        /// See `PredicateUpdate::system_time`.
+        #[serde(default)]
+        system_time: SystemTimeScope,
     },
 }

@@ -494,6 +494,12 @@ pub enum DocumentOp {
         /// See `PointUpdate::declared_primary_key`.
         #[serde(default)]
         declared_primary_key: Option<String>,
+        /// The target rows the join matches: `Current` for the newest
+        /// committed version of each row, `TxnSnapshot` inside a transaction
+        /// block for the rows visible at the block's snapshot with its staged
+        /// writes merged on top. The source carries its own scope.
+        #[serde(default)]
+        target_system_time: SystemTimeScope,
     },
 
     /// Bulk update: scan + apply field updates to all matches.
@@ -526,6 +532,13 @@ pub enum DocumentOp {
         /// See `PointUpdate::declared_primary_key`.
         #[serde(default)]
         declared_primary_key: Option<String>,
+        /// The rows `filters` matches: `Current` for the newest committed
+        /// version of each row, `TxnSnapshot` inside a transaction block for
+        /// the rows visible at the block's snapshot with its staged writes
+        /// merged on top. Only the match reads at this scope. The write
+        /// stages or applies as for a current match.
+        #[serde(default)]
+        system_time: SystemTimeScope,
     },
 
     /// Bulk delete: scan + delete all matches.
@@ -557,6 +570,9 @@ pub enum DocumentOp {
         /// removed row's identity is read from when staged.
         #[serde(default)]
         declared_primary_key: Option<String>,
+        /// See `BulkUpdate::system_time`.
+        #[serde(default)]
+        system_time: SystemTimeScope,
     },
 
     /// MERGE: join-based multi-action DML (INSERT/UPDATE/DELETE per WHEN
@@ -609,13 +625,17 @@ pub enum DocumentOp {
         /// See `PointUpdate::declared_primary_key`.
         #[serde(default)]
         declared_primary_key: Option<String>,
+        /// See `UpdateFromJoin::target_system_time`.
+        #[serde(default)]
+        target_system_time: SystemTimeScope,
     },
 
     /// Cursor-paginated scan for the clone materializer. Returns
-    /// `(document_id, surrogate, value_bytes)` triples plus next-cursor as
-    /// `[next_cursor: bin, entries: [[id, surrogate, value_bytes], ...]]`;
+    /// `[next_cursor: bin, entries: [[id, surrogate, value_bytes, stamp], ...]]`.
     /// `value_bytes` is always MessagePack, transcoded from the source
-    /// encoding. `next_cursor` empty = scan complete.
+    /// encoding. `stamp` is `[sys_from, valid_from_ms, valid_until_ms]` of
+    /// the version read, or nil for a row a transaction overlay supplied.
+    /// `next_cursor` empty = scan complete.
     ///
     /// Honors `system_time` on bitemporal collections; ignored otherwise.
     /// A clone copy reads `AsOf` its `as_of_lsn`, and a paged source read
@@ -633,6 +653,10 @@ pub enum DocumentOp {
         /// refuses a field its schema lacks.
         #[serde(default)]
         raw_bodies: bool,
+        /// The one row to read, by surrogate, in place of a page after
+        /// `cursor`. A clone copy-up reads its source row this way.
+        #[serde(default)]
+        only_row: Option<Surrogate>,
     },
 
     /// Add a signed amount to a materialized-sum balance on a TARGET row.

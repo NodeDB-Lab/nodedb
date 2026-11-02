@@ -21,9 +21,10 @@ pub mod graph;
 pub mod kv;
 pub mod meta;
 pub mod meta_calvin;
-pub mod meta_home;
 pub mod meta_restore;
+pub mod meta_restore_keys;
 pub mod meta_snapshot;
+pub mod meta_version_purge;
 pub mod plan;
 pub mod query;
 pub mod redo_origin;
@@ -72,11 +73,13 @@ pub use kv::{
     SortedIndexSpec, TransferAmount,
 };
 pub use meta::MetaOp;
-pub use meta_home::{HomeAnswer, HomeVersion, HomeVersionProbe};
 pub use meta_restore::{
-    RestoredEdgeVersion, RestoredIdentity, RestoredNodeLabels, RestoredRedo, RestoredRow,
+    RestoredArrayCells, RestoredEdgeVersion, RestoredIdentity, RestoredKvKey, RestoredNodeLabels,
+    RestoredRedo, RestoredRow,
 };
+pub use meta_restore_keys::{RestoredColumnarKey, RestoredVectorRow};
 pub use meta_snapshot::{CutCaptureRequest, DepartedCollection, SnapshotClearTarget};
+pub use meta_version_purge::{PURGE_REMAINING_KEY, RetainedHistory};
 pub use plan::PhysicalPlan;
 pub use query::{AggregateSpec, GroupKeySpec, JoinProjection, QueryOp};
 pub use redo_origin::RedoOrigin;

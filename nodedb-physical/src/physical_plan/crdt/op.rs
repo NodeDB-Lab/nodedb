@@ -52,8 +52,7 @@ pub enum CrdtOp {
         /// construction site does not admit against a catalog record.
         #[serde(default)]
         constraint_version_required: u64,
-        /// Optional preview fence. `None` preserves legacy/replay behavior.
-        #[serde(default)]
+        /// Optional preview fence. `None` applies without a fence.
         expected_frontier_digest: Option<[u8; 32]>,
     },
 

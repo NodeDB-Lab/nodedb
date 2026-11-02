@@ -28,6 +28,10 @@ pub enum GraphSystemCut {
     /// is not a tombstone. The Control Plane pins one ordinal per statement,
     /// so every hop of a walk reads the same graph.
     AtOrdinal(i64),
+    /// The snapshot of a transaction block: the edges `AtOrdinal` selects at
+    /// this ordinal, with the reading transaction's staged edge writes merged
+    /// on top. Every graph read of the block reads at it.
+    TxnSnapshot(i64),
     /// Every system-time version (`AS OF SYSTEM TIME NULL`). Only
     /// `GraphOp::TemporalNeighbors` accepts it.
     AllVersions,
@@ -75,22 +79,36 @@ impl GraphReadScope {
         matches!(self.system, GraphSystemCut::Live) && self.valid_at_ms.is_none()
     }
 
+    /// True when the read merges the reading transaction's staged edge
+    /// writes: a live read and a transaction snapshot, at every valid time.
+    /// A historical read sees committed versions only.
+    pub fn merges_txn_overlay(&self) -> bool {
+        matches!(
+            self.system,
+            GraphSystemCut::Live | GraphSystemCut::TxnSnapshot(_)
+        ) && self.valid_at_ms.is_none()
+    }
+
     /// The system-time ordinal a versioned read caps at: the pinned ordinal,
     /// or `i64::MAX` for the current versions. `None` for `AllVersions`,
     /// which has no single cap.
     pub fn cutoff_ordinal(&self) -> Option<i64> {
         match self.system {
             GraphSystemCut::Live => Some(i64::MAX),
-            GraphSystemCut::AtOrdinal(ordinal) => Some(ordinal),
+            GraphSystemCut::AtOrdinal(ordinal) | GraphSystemCut::TxnSnapshot(ordinal) => {
+                Some(ordinal)
+            }
             GraphSystemCut::AllVersions => None,
         }
     }
 
-    /// The ordinal the Control Plane pinned for a historical read. `None`
-    /// for a live read and for `AllVersions`.
+    /// The ordinal the Control Plane pinned for a historical read or a
+    /// transaction snapshot. `None` for a live read and for `AllVersions`.
     pub fn pinned_ordinal(&self) -> Option<i64> {
         match self.system {
-            GraphSystemCut::AtOrdinal(ordinal) => Some(ordinal),
+            GraphSystemCut::AtOrdinal(ordinal) | GraphSystemCut::TxnSnapshot(ordinal) => {
+                Some(ordinal)
+            }
             GraphSystemCut::Live | GraphSystemCut::AllVersions => None,
         }
     }
@@ -136,6 +154,23 @@ mod tests {
         assert_eq!(at(GraphSystemCut::Live).pinned_ordinal(), None);
         assert_eq!(at(GraphSystemCut::AtOrdinal(7)).pinned_ordinal(), Some(7));
         assert_eq!(at(GraphSystemCut::AllVersions).pinned_ordinal(), None);
+    }
+
+    #[test]
+    fn a_txn_snapshot_reads_its_ordinal_and_merges_the_overlay() {
+        let at = |system, valid_at_ms| GraphReadScope {
+            system,
+            valid_at_ms,
+            cut_marker: 0,
+        };
+        let snapshot = at(GraphSystemCut::TxnSnapshot(7), None);
+        assert!(!snapshot.is_live());
+        assert!(snapshot.merges_txn_overlay());
+        assert_eq!(snapshot.cutoff_ordinal(), Some(7));
+        assert_eq!(snapshot.pinned_ordinal(), Some(7));
+        assert!(at(GraphSystemCut::Live, None).merges_txn_overlay());
+        assert!(!at(GraphSystemCut::AtOrdinal(7), None).merges_txn_overlay());
+        assert!(!at(GraphSystemCut::Live, Some(3)).merges_txn_overlay());
     }
 
     #[test]

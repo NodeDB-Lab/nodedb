@@ -161,9 +161,16 @@ pub enum TimeseriesOp {
     /// The read completes the aggregate's backfill and pending refresh cuts
     /// first, so it never answers from partial buckets. It changes no row,
     /// so it is neither logged nor replicated.
+    ///
+    /// A read at a system-time cut (`TxnSnapshot`, `Pinned`, `AsOf`)
+    /// returns the rows the aggregate held at the cut: a bucket that changed
+    /// after the cut is rebuilt from the raw rows visible at the cut, and a
+    /// read no source answers exactly is refused as a serialization conflict.
     ReadAggregate {
         collection: QualifiedCollection,
         aggregate: String,
+        #[serde(default)]
+        system_time: SystemTimeScope,
     },
 }
 

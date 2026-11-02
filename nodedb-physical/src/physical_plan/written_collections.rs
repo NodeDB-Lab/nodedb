@@ -5,7 +5,7 @@
 //! The Control Plane names them on a transaction's redo record and on its
 //! admission keys. The Data Plane names them when it opens a transaction's
 //! staging for a plan. A collection a plan only reads is harmless here: a
-//! floor on it makes OCC validation stricter, never looser.
+//! write note on it changes no stored version.
 
 use std::collections::BTreeSet;
 
@@ -44,6 +44,9 @@ fn collect_plan(plan: &PhysicalPlan, out: &mut BTreeSet<String>) {
         out.extend(edges.iter().map(|edge| edge.collection.to_string()));
     } else if let PhysicalPlan::Meta(MetaOp::RestoreRedo(batch)) = plan {
         out.extend(batch.collections.iter().cloned());
+        // The Data Plane keys an array's writes by its bare name, as it
+        // keys an array cell write's.
+        out.extend(batch.arrays.iter().map(|cells| cells.array_id.name.clone()));
     } else if let Some(collection) = plan.collection() {
         out.insert(collection.to_string());
     }

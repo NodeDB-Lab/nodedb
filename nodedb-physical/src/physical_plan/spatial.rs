@@ -2,7 +2,9 @@
 
 //! Spatial engine operations dispatched to the Data Plane.
 
-use nodedb_types::{QualifiedCollection, Surrogate, SurrogateBitmap, geometry::SridGeometry};
+use nodedb_types::{
+    QualifiedCollection, Surrogate, SurrogateBitmap, SystemTimeScope, geometry::SridGeometry,
+};
 
 /// Spatial predicate type for R-tree index scan.
 #[derive(
@@ -94,5 +96,9 @@ pub enum SpatialOp {
         /// When present, only candidates whose surrogate is in this bitmap
         /// are returned. `None` = no prefilter; all R-tree candidates pass.
         prefilter: Option<SurrogateBitmap>,
+        /// The system time the scan reads at. A cut admits the index entries
+        /// visible at the cut and refines each against the row body visible
+        /// there. `TxnSnapshot` merges the transaction's staged writes on top.
+        system_time: SystemTimeScope,
     },
 }

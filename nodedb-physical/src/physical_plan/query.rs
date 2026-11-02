@@ -111,6 +111,12 @@ pub enum QueryOp {
         /// SQL DISTINCT: deduplicate on the projected row.
         #[serde(default)]
         distinct: bool,
+        /// The system time a named relation is read at. The coordinator
+        /// reads a continuous aggregate's rows at this cut, so a read inside
+        /// a transaction block sees the block's snapshot. Catalog relations
+        /// and filled rows ignore it.
+        #[serde(default)]
+        system_time: nodedb_types::SystemTimeScope,
     },
 
     /// Relational post-processing over a materialized child plan.
@@ -193,6 +199,13 @@ pub enum QueryOp {
         group_by: Vec<GroupKeySpec>,
         aggregates: Vec<AggregateSpec>,
         filters: Vec<u8>,
+        /// The system-time scope every row the aggregate folds is read at:
+        /// `Current` for the newest committed version, `TxnSnapshot` for a
+        /// transaction block's snapshot with its staged writes, `AsOf` /
+        /// `Pinned` for committed history. Applies to the per-shard scan of
+        /// `collection`. An `input` sub-plan carries its own scope.
+        #[serde(default)]
+        system_time: nodedb_types::SystemTimeScope,
         /// HAVING predicates applied post-aggregation.
         having: Vec<u8>,
         limit: usize,
@@ -224,6 +237,13 @@ pub enum QueryOp {
         group_by: Vec<String>,
         aggregates: Vec<AggregateSpec>,
         filters: Vec<u8>,
+        /// The system-time scope every row the aggregate folds is read at:
+        /// `Current` for the newest committed version, `TxnSnapshot` for a
+        /// transaction block's snapshot with its staged writes, `AsOf` /
+        /// `Pinned` for committed history. Applies to the per-shard scan of
+        /// `collection`. An `input` sub-plan carries its own scope.
+        #[serde(default)]
+        system_time: nodedb_types::SystemTimeScope,
     },
 
     /// Partial aggregate STATE producer (distributed GROUP BY shuffle, map side).
@@ -256,6 +276,13 @@ pub enum QueryOp {
         group_by: Vec<GroupKeySpec>,
         aggregates: Vec<AggregateSpec>,
         filters: Vec<u8>,
+        /// The system-time scope every row the aggregate folds is read at:
+        /// `Current` for the newest committed version, `TxnSnapshot` for a
+        /// transaction block's snapshot with its staged writes, `AsOf` /
+        /// `Pinned` for committed history. Applies to the per-shard scan of
+        /// `collection`. An `input` sub-plan carries its own scope.
+        #[serde(default)]
+        system_time: nodedb_types::SystemTimeScope,
     },
 
     /// Hash join: build hash map on right, probe with left.
@@ -401,6 +428,14 @@ pub enum QueryOp {
         left_input: Option<Box<crate::physical_plan::PhysicalPlan>>,
         /// Resolved rows for the right side. Same semantics as `left_input`.
         right_input: Option<Box<crate::physical_plan::PhysicalPlan>>,
+        /// The system-time scope the by-name side scans read at: `Current`
+        /// for the newest committed version of each row, `TxnSnapshot`
+        /// inside a transaction block, `AsOf` / `Pinned` for committed
+        /// history. A side whose `*_input` is set carries its own scope. The
+        /// Data Plane scans a by-name side at `Current` only. The coordinator
+        /// resolves every by-name side read at another scope to an input.
+        #[serde(default)]
+        system_time: nodedb_types::SystemTimeScope,
     },
 
     /// Sort-merge join: both sides pre-sorted by join key.
@@ -423,6 +458,9 @@ pub enum QueryOp {
         left_input: Option<Box<crate::physical_plan::PhysicalPlan>>,
         /// Resolved rows for the right side. Same semantics as `left_input`.
         right_input: Option<Box<crate::physical_plan::PhysicalPlan>>,
+        /// See `QueryOp::NestedLoopJoin::system_time`.
+        #[serde(default)]
+        system_time: nodedb_types::SystemTimeScope,
     },
 
     /// Multi-facet aggregation: compute facet counts for multiple fields
@@ -435,6 +473,12 @@ pub enum QueryOp {
         fields: Vec<String>,
         /// Maximum number of values to return per facet field (0 = unlimited).
         limit_per_facet: usize,
+        /// The system-time scope the matched rows are read at: `Current` for
+        /// the newest committed version of each row, `TxnSnapshot` inside a
+        /// transaction block with its staged writes merged on top, `AsOf` /
+        /// `Pinned` for committed history.
+        #[serde(default)]
+        system_time: nodedb_types::SystemTimeScope,
     },
 
     /// Recursive CTE: iterative fixed-point execution.
@@ -459,6 +503,10 @@ pub enum QueryOp {
         /// Whether to deduplicate results (UNION vs UNION ALL).
         distinct: bool,
         limit: usize,
+        /// The system-time scope `collection` is read at, once for the base
+        /// and every recursive step. See `QueryOp::FacetCounts::system_time`.
+        #[serde(default)]
+        system_time: nodedb_types::SystemTimeScope,
     },
 
     /// Value-generating recursive CTE: iterative expression evaluation.
@@ -515,6 +563,11 @@ pub enum QueryOp {
         projection: Vec<JoinProjection>,
         /// LEFT join semantics: preserve outer rows when inner is empty.
         left_join: bool,
+        /// The system-time scope every inner scan reads `inner_collection`
+        /// at. `outer_plan` carries its own scope. See
+        /// `QueryOp::FacetCounts::system_time`.
+        #[serde(default)]
+        inner_system_time: nodedb_types::SystemTimeScope,
     },
 
     /// LATERAL nested-loop: for each outer row, re-execute the inner plan
@@ -544,5 +597,8 @@ pub enum QueryOp {
         /// Hard cap on outer rows. Queries that exceed this cap return a
         /// typed `LateralCapExceeded` error instead of silently truncating.
         outer_row_cap: usize,
+        /// See `QueryOp::LateralTopK::inner_system_time`.
+        #[serde(default)]
+        inner_system_time: nodedb_types::SystemTimeScope,
     },
 }

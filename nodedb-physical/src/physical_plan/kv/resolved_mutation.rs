@@ -83,6 +83,16 @@ pub enum KvResolvedMutation {
         key: Vec<u8>,
         precondition: Option<Vec<u8>>,
     },
+    /// Reap `key` because its TTL expired at `expire_at_ms`. The apply checks
+    /// the stored entry's own expiry, blind to any clock: it reaps only an
+    /// entry whose `expire_at_ms` is exactly this one, and ends that version
+    /// at the last ordinal of the expiry millisecond. Any other state is a
+    /// no-op, never an error: a write replaced the TTL before the reap.
+    Reap {
+        collection: QualifiedCollection,
+        key: Vec<u8>,
+        expire_at_ms: u64,
+    },
 }
 
 impl KvResolvedMutation {
@@ -93,7 +103,8 @@ impl KvResolvedMutation {
             | KvResolvedMutation::Rewrite { collection, .. }
             | KvResolvedMutation::Delete { collection, .. }
             | KvResolvedMutation::Expire { collection, .. }
-            | KvResolvedMutation::Persist { collection, .. } => collection,
+            | KvResolvedMutation::Persist { collection, .. }
+            | KvResolvedMutation::Reap { collection, .. } => collection,
         }
     }
 
@@ -104,13 +115,16 @@ impl KvResolvedMutation {
             | KvResolvedMutation::Rewrite { key, .. }
             | KvResolvedMutation::Delete { key, .. }
             | KvResolvedMutation::Expire { key, .. }
-            | KvResolvedMutation::Persist { key, .. } => key.as_slice(),
+            | KvResolvedMutation::Persist { key, .. }
+            | KvResolvedMutation::Reap { key, .. } => key.as_slice(),
         }
     }
 
     /// The state this mutation requires the key to be in before it applies.
+    /// A `Reap` checks the stored expiry instead, so it names none.
     pub fn precondition(&self) -> Option<&[u8]> {
         match self {
+            KvResolvedMutation::Reap { .. } => None,
             KvResolvedMutation::Put { precondition, .. }
             | KvResolvedMutation::Delete { precondition, .. }
             | KvResolvedMutation::Expire { precondition, .. }

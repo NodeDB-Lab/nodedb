@@ -157,7 +157,7 @@ impl PhysicalPlan {
             | PhysicalPlan::ClusterEvent(_) => None,
             // An array is a collection for read-set tracking and the commit
             // validator's own-write exclusion: a same-transaction slice after a
-            // staged put must key on the name the put's write floor records.
+            // staged put must key on the name the put's write note records.
             PhysicalPlan::Array(op) => Some(op.primary_array().name.as_str()),
             PhysicalPlan::ClusterArray(op) => Some(op.array_id().name.as_str()),
         }
@@ -198,6 +198,8 @@ mod tests {
             sum_targets: Vec::new(),
             origin: crate::physical_plan::RedoOrigin::Commit,
             calvin: None,
+            reads: Vec::new(),
+            snapshot_ordinal: None,
         });
         assert_eq!(redo.collection(), None);
         assert_eq!(redo.named_collections(), vec!["a", "b"]);
@@ -210,6 +212,7 @@ mod tests {
             key: Vec::new(),
             rls_filters: Vec::new(),
             surrogate_ceiling: None,
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         assert_eq!(get.named_collections(), vec!["users"]);
         assert!(
