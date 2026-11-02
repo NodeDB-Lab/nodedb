@@ -106,6 +106,7 @@ mod tests {
             apply_key: 0,
             event_source: NO_EVENT_SOURCE,
             commit_hlc: 0,
+            system_ordinal: crate::record::NO_SYSTEM_ORDINAL,
             crc32c: 0,
         };
         header.crc32c = header.compute_checksum(payload);

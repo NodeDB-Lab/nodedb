@@ -251,7 +251,7 @@ impl WalWriter {
     /// flush to disk and make the write durable.
     ///
     /// `database_id` is stored in header bytes 34-41. Pass `0` for the
-    /// default database (backward-compatible with pre-existing records).
+    /// default database.
     ///
     /// The LSN is committed only once the record is in the write buffer. An
     /// append that fails — a full device, an oversized payload — leaves the
@@ -273,6 +273,7 @@ impl WalWriter {
                 database_id,
                 event_source: crate::record::NO_EVENT_SOURCE,
                 commit_hlc: 0,
+                system_ordinal: crate::record::NO_SYSTEM_ORDINAL,
             },
             payload,
             0,
@@ -307,6 +308,7 @@ impl WalWriter {
             database_id,
             event_source,
             commit_hlc,
+            system_ordinal,
         } = target;
         if self.sealed {
             return Err(WalError::Sealed);
@@ -330,6 +332,7 @@ impl WalWriter {
                 apply_key,
                 event_source,
                 commit_hlc,
+                system_ordinal,
             },
         )?;
 

@@ -31,8 +31,8 @@ pub use foreign_version::{is_format_gap, may_be_format_gap};
 #[cfg(not(target_arch = "wasm32"))]
 pub use fts_spatial::{FtsDeletePayload, FtsIndexPayload, SpatialDeletePayload, SpatialPutPayload};
 pub use header::{
-    ENCRYPTED_FLAG, HEADER_SIZE, MAX_WAL_PAYLOAD_SIZE, NO_EVENT_SOURCE, RecordHeader,
-    WAL_FORMAT_VERSION, WAL_MAGIC,
+    ENCRYPTED_FLAG, HEADER_SIZE, MAX_WAL_PAYLOAD_SIZE, NO_EVENT_SOURCE, NO_SYSTEM_ORDINAL,
+    RecordHeader, WAL_FORMAT_VERSION, WAL_MAGIC,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use padding::pad_buffer_to_alignment;

@@ -47,18 +47,25 @@ pub fn write_checkpoint_framed(dir: &Path, name: &str, payload: &[u8]) -> Result
 /// Read a checkpoint file written by [`write_checkpoint_framed`], verify its
 /// CRC32C, and return the unframed payload.
 ///
-/// Transitional migration path: files shorter than the 17-byte header, or
-/// whose first 4 bytes are not the `NCKF` magic, are treated as pre-framing
-/// legacy checkpoints and returned unchanged (best-effort, no CRC). This
-/// branch exists only to bridge the migration — once every checkpoint on
-/// disk is known-framed (each self-heals to framed on its next write), it
-/// should be removed.
+/// A file shorter than the 17-byte header, or one that does not start with
+/// the `NCKF` magic, is refused as [`WalError::CheckpointCorrupt`].
 pub fn read_checkpoint_framed(path: &Path) -> Result<Vec<u8>> {
     let bytes = read_checkpoint_dontneed(path)?;
 
-    if bytes.len() < HEADER_LEN || bytes[0..4] != MAGIC {
-        // Legacy transitional path — see doc comment above.
-        return Ok(bytes);
+    if bytes.len() < HEADER_LEN {
+        return Err(WalError::CheckpointCorrupt {
+            path: path.display().to_string(),
+            detail: format!(
+                "too short for a checkpoint frame: {} bytes, need {HEADER_LEN}",
+                bytes.len()
+            ),
+        });
+    }
+    if bytes[0..4] != MAGIC {
+        return Err(WalError::CheckpointCorrupt {
+            path: path.display().to_string(),
+            detail: "missing checkpoint frame magic".to_string(),
+        });
     }
 
     // Safe: length-checked >= HEADER_LEN (17) above, so all fixed offsets
@@ -154,14 +161,34 @@ mod tests {
     }
 
     #[test]
-    fn legacy_unframed_accepted() {
+    fn unframed_file_refused() {
         let dir = tempfile::tempdir().unwrap();
         let dst = dir.path().join("payload.ckpt");
 
-        // Raw pre-framing bytes: first 4 bytes are NOT the NCKF magic.
-        atomic_write_fsync(dir.path(), "payload.ckpt", b"legacy plaintext checkpoint").unwrap();
+        // First 4 bytes are NOT the NCKF magic.
+        atomic_write_fsync(dir.path(), "payload.ckpt", b"unframed plaintext checkpoint").unwrap();
 
-        let read_back = read_checkpoint_framed(&dst).unwrap();
-        assert_eq!(read_back, b"legacy plaintext checkpoint");
+        let err = read_checkpoint_framed(&dst).unwrap_err();
+        assert!(
+            matches!(err, WalError::CheckpointCorrupt { .. }),
+            "expected CheckpointCorrupt, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn another_frame_version_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let dst = dir.path().join("payload.ckpt");
+
+        write_checkpoint_framed(dir.path(), "payload.ckpt", b"versioned payload").unwrap();
+        let mut bytes = fs::read(&dst).unwrap();
+        bytes[4] = VERSION + 1;
+        fs::write(&dst, &bytes).unwrap();
+
+        let err = read_checkpoint_framed(&dst).unwrap_err();
+        assert!(
+            matches!(err, WalError::CheckpointCorrupt { .. }),
+            "expected CheckpointCorrupt, got {err:?}"
+        );
     }
 }

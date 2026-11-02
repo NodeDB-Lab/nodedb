@@ -158,7 +158,7 @@ impl UringWriter {
     /// The record is NOT durable until `submit_and_sync()` is called.
     ///
     /// `database_id` is stored in header bytes 34-41. Pass `0` for the
-    /// default database (backward-compatible with pre-existing records).
+    /// default database.
     pub fn append(
         &mut self,
         record_type: u32,

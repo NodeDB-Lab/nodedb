@@ -9,7 +9,6 @@
 //! - Automatic segment rollover when the active segment exceeds a target size.
 //! - Truncation of old segments after checkpoint confirmation.
 //! - Transparent multi-segment replay for crash recovery.
-//! - Legacy single-file WAL migration.
 //!
 //! ## Thread safety
 //!
@@ -185,7 +184,7 @@ impl SegmentedWal {
     /// created before appending. The rollover is transparent to the caller.
     ///
     /// `database_id` is stored in header bytes 34-41. Pass `0` for the
-    /// default database (backward-compatible with pre-existing records).
+    /// default database.
     pub fn append(
         &mut self,
         record_type: u32,
@@ -202,6 +201,7 @@ impl SegmentedWal {
                 database_id,
                 event_source: crate::record::NO_EVENT_SOURCE,
                 commit_hlc: 0,
+                system_ordinal: crate::record::NO_SYSTEM_ORDINAL,
             },
             payload,
             0,

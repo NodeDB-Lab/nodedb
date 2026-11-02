@@ -22,9 +22,7 @@
 //! `0` means the key's home binds no row and no id follows, `1` means the id
 //! follows.
 //!
-//! These structs are net-new (no legacy records to stay compatible with).
-//! Field set can be extended when the handler is wired; the length-prefixed
-//! layout is forward-compatible.
+//! The length-prefixed layout is the only layout these records have.
 
 use nodedb_types::decode_bounds::checked_decode_capacity;
 use nodedb_types::sync::wire::SyncProvenance;

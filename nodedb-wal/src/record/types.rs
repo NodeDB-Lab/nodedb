@@ -371,16 +371,6 @@ pub enum RecordType {
     /// Not required: skipping it loses no engine state.
     RestorePoint = 64,
 
-    /// Graph engine: the edge tombstones one document delete's node cascade
-    /// wrote. Payload: the node and every edge it tombstoned, each with its
-    /// tombstone's ordinal (see `wal::redo::NodeCascadeRedo`). It is a
-    /// sub-record of a `WriteGroup` part, never a record of its own. Replay
-    /// writes exactly these tombstones at exactly these ordinals, and the
-    /// document delete it follows cascades nothing on replay.
-    ///
-    /// Required: skipping it leaves every cascaded edge live after replay.
-    GraphNodeCascade = 65 | 0x8000,
-
     /// A Raft snapshot install replaced the state of one data group on this
     /// node with rows no WAL record carries. Payload: the group id, a
     /// little-endian `u64`. A point-in-time restore to any LSN at or after this
@@ -477,7 +467,6 @@ impl RecordType {
             x if x == 62 | 0x8000 => Some(Self::ProposalApplied),
             63 => Some(Self::ChangePosition),
             64 => Some(Self::RestorePoint),
-            x if x == 65 | 0x8000 => Some(Self::GraphNodeCascade),
             x if x == 66 | 0x8000 => Some(Self::SnapshotInstalled),
             x if x == 67 | 0x8000 => Some(Self::WriteGroup),
             x if x == 68 | 0x8000 => Some(Self::GraphEdgeCut),
@@ -570,7 +559,6 @@ mod tests {
             RecordType::ProposalApplied,
             RecordType::ChangePosition,
             RecordType::RestorePoint,
-            RecordType::GraphNodeCascade,
             RecordType::SnapshotInstalled,
             RecordType::WriteGroup,
             RecordType::GraphEdgeCut,
@@ -579,5 +567,7 @@ mod tests {
             assert_eq!(RecordType::from_raw(ty as u32), Some(ty));
         }
         assert_eq!(RecordType::from_raw(0xFFFE), None);
+        // 65 names no record type: no writer emits it.
+        assert_eq!(RecordType::from_raw(65 | 0x8000), None);
     }
 }
