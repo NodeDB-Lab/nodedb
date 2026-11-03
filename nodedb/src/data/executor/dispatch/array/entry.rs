@@ -119,7 +119,13 @@ impl CoreLoop {
             ArrayOp::SurrogateBitmapScan {
                 array_id,
                 slice_msgpack,
-            } => self.dispatch_array_surrogate_bitmap_scan(task, array_id, slice_msgpack),
+                system_time,
+            } => self.dispatch_array_surrogate_bitmap_scan(
+                task,
+                array_id,
+                slice_msgpack,
+                *system_time,
+            ),
             ArrayOp::Aggregate {
                 array_id,
                 attr_idx,

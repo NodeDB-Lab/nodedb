@@ -214,6 +214,7 @@ mod tests {
         let read = PhysicalPlan::Array(ArrayOp::SurrogateBitmapScan {
             array_id: array_id.clone(),
             slice_msgpack: Vec::new(),
+            system_time: nodedb_types::SystemTimeScope::Current,
         });
         let write = PhysicalPlan::Array(ArrayOp::Delete {
             array_id: array_id.clone(),

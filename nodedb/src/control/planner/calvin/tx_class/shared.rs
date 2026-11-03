@@ -59,16 +59,18 @@ pub(crate) fn versioned_read_entries(reads: &[ReadSetEntry]) -> Vec<VersionedRea
 /// An unhomed read participates on its collection's vShard. A homed read
 /// (one vShard of a cross-shard graph read) participates on its home only.
 /// A homed read with no collection name enlists its home and locks nothing.
-pub(super) fn read_set_from(reads: &[ReadSetEntry]) -> ReadWriteSet {
+/// A collection read whole both unhomed and homed participates on its own
+/// vShard and on every home.
+pub(super) fn read_set_from(reads: &[ReadSetEntry]) -> crate::Result<ReadWriteSet> {
     let mut locks = ReadLocks::default();
     for entry in reads {
         match entry.home {
             Some(home) => locks.homed(entry, home.as_u32()),
             None if entry.collection.is_empty() => {}
-            None => locks.unhomed(entry),
+            None => locks.unhomed(entry)?,
         }
     }
-    ReadWriteSet::new(locks.into_key_sets())
+    Ok(ReadWriteSet::new(locks.into_key_sets()))
 }
 
 /// The read lock keys of a session read-set, by engine and collection.
@@ -80,7 +82,8 @@ struct ReadLocks {
     kv: BTreeMap<String, Vec<Vec<u8>>>,
     /// Collection to the vShards its homed reads enlist without a lock key.
     homes: BTreeMap<String, Vec<u32>>,
-    /// Collection to the vShards it is read whole on. Empty: its own vShard.
+    /// Collection to the vShards it is read whole on. An unhomed read adds
+    /// the collection's own vShard, so a homed read never displaces it.
     whole: BTreeMap<String, BTreeSet<u32>>,
 }
 
@@ -103,7 +106,7 @@ impl ReadLocks {
     }
 
     /// A read of a named collection on the collection's own vShard.
-    fn unhomed(&mut self, entry: &ReadSetEntry) {
+    fn unhomed(&mut self, entry: &ReadSetEntry) -> crate::Result<()> {
         let collection = entry.collection.clone();
         match &entry.key {
             ReadKey::Point {
@@ -130,9 +133,16 @@ impl ReadLocks {
                 repr: ReadPoint::KvKey(key),
             } => self.kv.entry(collection).or_default().push(key.to_vec()),
             ReadKey::Predicate | ReadKey::IndexEq { .. } | ReadKey::IndexRange { .. } => {
-                self.whole.entry(collection).or_default();
+                let own = nodedb_types::CollectionKey::from_qualified_str(
+                    entry.database_id,
+                    &collection,
+                )?
+                .vshard()
+                .as_u32();
+                self.whole.entry(collection).or_default().insert(own);
             }
         }
+        Ok(())
     }
 
     /// The key sets, one per engine and collection, ordered by collection.
@@ -566,6 +576,25 @@ mod graph_read_lock_tests {
         }
     }
 
+    /// A collection read whole on its own vShard and again homed on another
+    /// participates on both, so the apply on its own vShard validates it.
+    #[test]
+    fn a_homed_read_keeps_the_collections_own_vshard() {
+        let own = nodedb_types::CollectionKey::from_bare(DatabaseId::DEFAULT, "g").vshard();
+        let other = VShardId::new(own.as_u32() + 1);
+        let read_set =
+            read_set_from(&[graph_read(None), graph_read(Some(other))]).expect("read set");
+        let participants = read_set.participating_vshards().expect("participants");
+        assert!(
+            participants.contains(&own),
+            "own vShard dropped: {participants:?}"
+        );
+        assert!(
+            participants.contains(&other),
+            "home dropped: {participants:?}"
+        );
+    }
+
     #[test]
     fn a_graph_read_conflicts_with_an_edge_write_on_the_observed_vshard() {
         let owner = RecordHomes::edge("a", "b").owner();
@@ -573,7 +602,7 @@ mod graph_read_lock_tests {
         let mut reader_writes = WriteKeys::default();
         reader_writes.rows("other", [1]);
         let reader = sequenced(
-            read_set_from(&[graph_read(None), graph_read(Some(owner))]),
+            read_set_from(&[graph_read(None), graph_read(Some(owner))]).expect("read set"),
             reader_writes,
         );
 

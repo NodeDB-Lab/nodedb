@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! End-to-end test that `NodeDb::graph_shortest_path` returns the
+//! End-to-end test that `NodeDbGraph::graph_shortest_path` returns the
 //! actual path between connected nodes.
 //!
 //! With edges A→B→C in place, `graph_shortest_path("social", A, C)`
@@ -10,7 +10,7 @@
 //! guards against), and not a wire-format mismatch between the client
 //! and the server's `GRAPH PATH` DSL.
 
-use nodedb_client::{NodeDb, NodeDbRemote, NodeId};
+use nodedb_client::{NodeDb, NodeDbGraph, NodeDbRemote, NodeId};
 use nodedb_test_support::pgwire_harness::TestServer;
 
 #[tokio::test]

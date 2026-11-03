@@ -89,36 +89,43 @@ pub async fn try_dispatch(
         // parse refusal answers one class wherever it is raised.
         Some(Err(e)) => return Some(Err(DdlError::from_sql_error(e, identity.tenant_id))),
         None => {
-            // Bulk import: a `COPY … FROM STDIN` whose relation is more than
-            // one name, such as `COPY tenant_restore(1) FROM STDIN` on a
-            // transport with no COPY stream. The file-path form parses into
-            // `MiscStmt::CopyFromFile` and a one-name STDIN form into
-            // `MiscStmt::CopyFromStdin`, both handled by the typed arms, so
-            // neither reaches this arm.
-            let tokens = RouteTokens::new(sql);
-            if is_copy_from(&tokens) {
-                let parts: Vec<&str> = sql.split_whitespace().collect();
-                return Some(bulk::copy_from(state, identity, &parts).await);
-            }
+            // Only a statement that can open with COPY, INSERT, or UPSERT is
+            // tokenized for the routing checks below. A plain query skips the
+            // tokenizer, whose cost grows with the statement's length.
+            if may_lead_with_write_or_copy(&upper) {
+                // Bulk import: a `COPY … FROM STDIN` whose relation is more than
+                // one name, such as `COPY tenant_restore(1) FROM STDIN` on a
+                // transport with no COPY stream. The file-path form parses into
+                // `MiscStmt::CopyFromFile` and a one-name STDIN form into
+                // `MiscStmt::CopyFromStdin`, both handled by the typed arms, so
+                // neither reaches this arm.
+                let tokens = RouteTokens::new(sql);
+                if is_copy_from(&tokens) {
+                    let parts: Vec<&str> = sql.split_whitespace().collect();
+                    return Some(bulk::copy_from(state, identity, &parts).await);
+                }
 
-            // INSERT INTO x { } — object literal syntax; intercept for
-            // trigger/sequence handling. It runs after the typed-AST parse
-            // gate, in the `None` branch.
-            if is_object_literal_write(&tokens, "INSERT")
-                && let Some(result) =
-                    collection::insert_document(state, identity, database_id, sql, txn_ctx).await
-            {
-                return Some(result);
-            }
+                // INSERT INTO x { } — object literal syntax; intercept for
+                // trigger/sequence handling. It runs after the typed-AST parse
+                // gate, in the `None` branch.
+                if is_object_literal_write(&tokens, "INSERT")
+                    && let Some(result) =
+                        collection::insert_document(state, identity, database_id, sql, txn_ctx)
+                            .await
+                {
+                    return Some(result);
+                }
 
-            // UPSERT INTO — same as INSERT but merges into existing document
-            // if it exists. Handles both (cols) VALUES (vals) and { } object
-            // literal forms.
-            if (is_upsert_values(&tokens) || is_object_literal_write(&tokens, "UPSERT"))
-                && let Some(result) =
-                    collection::upsert_document(state, identity, database_id, sql, txn_ctx).await
-            {
-                return Some(result);
+                // UPSERT INTO — same as INSERT but merges into existing document
+                // if it exists. Handles both (cols) VALUES (vals) and { } object
+                // literal forms.
+                if (is_upsert_values(&tokens) || is_object_literal_write(&tokens, "UPSERT"))
+                    && let Some(result) =
+                        collection::upsert_document(state, identity, database_id, sql, txn_ctx)
+                            .await
+                {
+                    return Some(result);
+                }
             }
 
             return query_functions::try_dispatch(state, identity, database_id, sql).await;
@@ -196,6 +203,20 @@ pub async fn try_dispatch(
     None
 }
 
+/// Whether a statement, upper-cased, can open with `COPY`, `INSERT`, or
+/// `UPSERT` once comments are skipped. A leading comment answers `true`: the
+/// routing tokens skip it, so the first word is not known without them.
+fn may_lead_with_write_or_copy(upper: &str) -> bool {
+    let head = upper.trim_start();
+    if head.starts_with("--") || head.starts_with("/*") {
+        return true;
+    }
+    let word_end = head
+        .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .unwrap_or(head.len());
+    matches!(&head[..word_end], "COPY" | "INSERT" | "UPSERT")
+}
+
 /// `COPY <collection> FROM ...`: the clause follows the collection name.
 fn is_copy_from(tokens: &RouteTokens) -> bool {
     tokens.leads_with(&["COPY"]) && tokens.phrase_at(tokens.skip_name(1), &["FROM"])
@@ -214,6 +235,23 @@ fn is_upsert_values(tokens: &RouteTokens) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_possible_write_or_copy_is_tokenized() {
+        assert!(may_lead_with_write_or_copy("INSERT INTO T { ID: 1 }"));
+        assert!(may_lead_with_write_or_copy(
+            "  UPSERT INTO T (A) VALUES (1)"
+        ));
+        assert!(may_lead_with_write_or_copy("COPY T FROM STDIN"));
+        assert!(may_lead_with_write_or_copy(
+            "-- NOTE\nINSERT INTO T { ID: 1 }"
+        ));
+        assert!(may_lead_with_write_or_copy("/* NOTE */ COPY T FROM STDIN"));
+        assert!(!may_lead_with_write_or_copy("SELECT * FROM T"));
+        assert!(!may_lead_with_write_or_copy("INSERTED"));
+        assert!(!may_lead_with_write_or_copy("COPYRIGHT"));
+        assert!(!may_lead_with_write_or_copy(""));
+    }
 
     #[test]
     fn copy_from_is_routed_on_the_clause_after_the_collection() {

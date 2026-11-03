@@ -13,7 +13,7 @@ use crate::types::query::{
     WindowSpec,
 };
 
-use super::super::vector_opts::{ArrayPrefilter, VectorAnnOptions};
+use super::super::vector_opts::{ArrayPrefilter, IndexPrefilter, VectorAnnOptions};
 
 use super::array::{
     AlterArrayPlan, ArrayAggPlan, ArrayElementwisePlan, ArraySlicePlan, CreateArrayPlan,
@@ -233,6 +233,12 @@ pub enum SqlPlan {
         /// `ARRAY_SLICE(...)`. The convert layer lowers this to
         /// `VectorOp::Search { inline_prefilter_plan: Some(ArrayOp::SurrogateBitmapScan) }`.
         array_prefilter: Option<ArrayPrefilter>,
+        /// An equality conjunct on a `Ready` secondary index. The convert
+        /// layer lowers it to `VectorOp::Search::inline_prefilter_plan`
+        /// (an `IndexLookup`), so the search ranks only the rows the index
+        /// returns. The conjunct also stays in `filters`: every returned
+        /// row satisfies it, so the residual test is exact and cheap.
+        index_prefilter: Option<IndexPrefilter>,
         /// ANN knobs parsed from the optional third JSON-string argument
         /// to `vector_distance(field, query, '{...}')`.
         ann_options: VectorAnnOptions,

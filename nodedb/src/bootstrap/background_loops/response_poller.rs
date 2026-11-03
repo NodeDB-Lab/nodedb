@@ -8,12 +8,10 @@ use std::time::Duration;
 use crate::control::shutdown::{ShutdownBus, ShutdownPhase, spawn_loop_no_abort};
 use crate::control::state::SharedState;
 
-/// Idle passes that only yield before the poller starts sleeping.
-const YIELD_IDLE_PASSES: u32 = 256;
-/// Idle passes that sleep `SHORT_IDLE_SLEEP` before the longer sleep.
-const SHORT_SLEEP_IDLE_PASSES: u32 = 1024;
-const SHORT_IDLE_SLEEP: Duration = Duration::from_millis(1);
-const LONG_IDLE_SLEEP: Duration = Duration::from_millis(10);
+/// Idle passes that only yield before the poller waits for an arrival.
+const YIELD_IDLE_PASSES: u32 = 4;
+/// The longest the poller waits for an arrival signal before it polls anyway.
+const IDLE_WAIT: Duration = Duration::from_millis(10);
 
 /// Spawn the response poller loop (routes Data Plane responses to waiting sessions).
 ///
@@ -36,6 +34,11 @@ pub fn spawn_response_poller(shared: &Arc<SharedState>, bus: &ShutdownBus) {
         "response_poller",
         ShutdownPhase::DrainingDataPlane,
         move |_shutdown| async move {
+            let arrivals = shared_poller
+                .dispatcher
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .response_arrivals();
             let mut idle_iters: u32 = 0;
             loop {
                 if shared_poller.data_plane_drain.is_complete() {
@@ -53,10 +56,11 @@ pub fn spawn_response_poller(shared: &Arc<SharedState>, bus: &ShutdownBus) {
                 idle_iters = idle_iters.saturating_add(1);
                 if idle_iters <= YIELD_IDLE_PASSES {
                     tokio::task::yield_now().await;
-                } else if idle_iters <= SHORT_SLEEP_IDLE_PASSES {
-                    tokio::time::sleep(SHORT_IDLE_SLEEP).await;
                 } else {
-                    tokio::time::sleep(LONG_IDLE_SLEEP).await;
+                    // A core wakes the poller when it pushes a response, so
+                    // the wait ends at the arrival. The timeout covers the
+                    // drain latch, which has no wake of its own.
+                    let _ = tokio::time::timeout(IDLE_WAIT, arrivals.notified()).await;
                 }
             }
             drain_guard.report_drained();

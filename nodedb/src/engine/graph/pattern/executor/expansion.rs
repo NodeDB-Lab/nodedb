@@ -411,7 +411,8 @@ fn run_bfs(
     }
 }
 
-/// Collect neighbor (label_id, node_id) pairs from CSR.
+/// Collect neighbor (label_id, node_id) pairs from CSR. A `Both` read
+/// returns each physical edge once, a self-loop included.
 pub(super) fn collect_neighbors(
     csr: &CsrIndex,
     node: u32,
@@ -448,14 +449,14 @@ pub(super) fn collect_neighbors(
         match collection_filter {
             CollectionFilter::Only(cid) => {
                 for (lid, src) in csr.iter_in_edges_raw_in(node, cid) {
-                    if keep(lid) {
+                    if keep(lid) && direction.in_pass_keeps(&src, &node) {
                         neighbors.push((lid, src));
                     }
                 }
             }
             _ => {
                 for (lid, src) in csr.iter_in_edges_raw(node) {
-                    if keep(lid) {
+                    if keep(lid) && direction.in_pass_keeps(&src, &node) {
                         neighbors.push((lid, src));
                     }
                 }

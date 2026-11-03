@@ -203,7 +203,7 @@ async fn handle_surrogate_bitmap(
         })?;
 
     let bitmap_msgpack = executor
-        .exec_surrogate_bitmap_scan(local_vshard_id, &req.array_id_msgpack, &req.slice_msgpack)
+        .exec_surrogate_bitmap_scan(local_vshard_id, &req)
         .await?;
 
     let resp = ArrayShardSurrogateBitmapResp {
@@ -338,8 +338,7 @@ mod tests {
         async fn exec_surrogate_bitmap_scan(
             &self,
             _local_vshard_id: u32,
-            _array_id_msgpack: &[u8],
-            _slice_msgpack: &[u8],
+            _req: &super::super::wire::ArrayShardSurrogateBitmapReq,
         ) -> Result<Vec<u8>> {
             Ok(self.bitmap.clone())
         }
@@ -443,6 +442,8 @@ mod tests {
         let req = super::super::wire::ArrayShardSurrogateBitmapReq {
             array_id_msgpack: vec![],
             slice_msgpack: vec![],
+            system_time: nodedb_types::SystemTimeScope::Current,
+            txn_id: None,
         };
         zerompk::to_msgpack_vec(&req).unwrap()
     }

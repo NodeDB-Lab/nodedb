@@ -288,6 +288,13 @@ impl VectorCollection {
         &mut self.sealed
     }
 
+    /// Whether every vector is searched by a flat scan: no sealed HNSW
+    /// segment and no IVF index. A flat scan ranks all vectors whatever
+    /// `top_k` is, so asking for more candidates costs nothing extra.
+    pub fn scans_flat_only(&self) -> bool {
+        self.sealed.is_empty() && self.ivf.is_none()
+    }
+
     /// Whether the growing segment has no vectors.
     pub fn growing_is_empty(&self) -> bool {
         self.growing.is_empty()
@@ -350,5 +357,25 @@ impl VectorCollection {
             self.payload
                 .add_index(field.as_str(), PayloadIndexKind::Equality);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_collection_with_no_sealed_segment_scans_flat() {
+        let mut coll = VectorCollection::new(2, HnswParams::default());
+        assert!(coll.scans_flat_only());
+        for i in 0..4u32 {
+            coll.insert(vec![i as f32, 0.0]).expect("insert");
+        }
+        assert!(coll.scans_flat_only());
+        assert!(coll.seal("seg").is_some());
+        assert!(
+            coll.scans_flat_only(),
+            "a segment that is still building is searched flat"
+        );
     }
 }

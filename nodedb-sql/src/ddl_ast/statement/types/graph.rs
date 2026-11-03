@@ -2,30 +2,25 @@
 
 //! Graph DDL/DML statements.
 
-use crate::ddl_ast::graph_types::{GraphDirection, GraphProperties};
+use crate::ddl_ast::graph_types::{GraphDirection, GraphEdgeKey, GraphEdgeSpec};
 use crate::temporal::TemporalScope;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum GraphStmt {
     // ── Graph DSL ────────────────────────────────────────────────
+    /// `GRAPH INSERT EDGE IN <c> <edge> [<edge> ...]`: one or more edges
+    /// into one collection, written as one unit.
     GraphInsertEdge {
         collection: String,
-        src: String,
-        dst: String,
-        label: String,
-        properties: GraphProperties,
-        /// `VALID_TIME <from>`: start of the edge's valid time, ms since
-        /// epoch. `None` takes the write's wall time.
-        valid_from_ms: Option<i64>,
-        /// `UNTIL <until>`: exclusive end of the edge's valid time. `None`
-        /// leaves it open.
-        valid_until_ms: Option<i64>,
+        /// Never empty.
+        edges: Vec<GraphEdgeSpec>,
     },
+    /// `GRAPH DELETE EDGE IN <c> <edge> [<edge> ...]`: one or more edges
+    /// out of one collection, deleted as one unit.
     GraphDeleteEdge {
         collection: String,
-        src: String,
-        dst: String,
-        label: String,
+        /// Never empty.
+        edges: Vec<GraphEdgeKey>,
     },
     GraphSetLabels {
         node_id: String,

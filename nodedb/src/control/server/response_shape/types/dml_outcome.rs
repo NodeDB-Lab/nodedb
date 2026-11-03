@@ -172,6 +172,7 @@ pub(crate) fn replaced_write_outcome(plan_kind: super::PlanKind) -> Option<DmlOu
         }),
         PlanKind::Execution
         | PlanKind::ArraySlice
+        | PlanKind::GraphRag
         | PlanKind::ReturningRows
         | PlanKind::SingleDocument
         | PlanKind::MultiRow => None,
@@ -285,6 +286,7 @@ pub(crate) fn payload_to_dml_outcome(
         PlanKind::DmlResult(verb) => dml_outcome_from_payload(payload, verb).map(Some),
         PlanKind::DmlResultByOp => dml_outcome_by_op(payload).map(Some),
         PlanKind::ArraySlice
+        | PlanKind::GraphRag
         | PlanKind::ReturningRows
         | PlanKind::SingleDocument
         | PlanKind::MultiRow => Err(crate::Error::Internal {

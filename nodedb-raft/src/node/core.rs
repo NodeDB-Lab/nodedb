@@ -122,6 +122,9 @@ pub struct RaftNode<S: LogStorage> {
     /// Index of the no-op this node appended when it won its current
     /// leadership term. `None` off the leader path.
     pub(super) term_start_index: Option<u64>,
+    /// The leadership this node holds, published at each role change for
+    /// readers that do not take the lock around the node.
+    pub(super) leader_mark: std::sync::Arc<super::leader_mark::LeaderMark>,
     /// Leader-lease rounds and anchor (see [`super::leader_lease`]).
     pub(super) lease: LeaseState,
     /// Until this instant the node refuses every vote but a transfer vote.
@@ -192,6 +195,7 @@ impl<S: LogStorage> RaftNode<S> {
             quorum_window: Vec::new(),
             leader_since: None,
             term_start_index: None,
+            leader_mark: Default::default(),
             lease: LeaseState::new(),
             boot_vote_fence: now + config.election_timeout_max,
             compaction_ceiling: None,
@@ -215,6 +219,11 @@ impl<S: LogStorage> RaftNode<S> {
         self.log.restore()?;
         self.reset_election_timeout();
         Ok(())
+    }
+
+    /// The mark that publishes this node's leadership.
+    pub fn leader_mark(&self) -> std::sync::Arc<super::leader_mark::LeaderMark> {
+        std::sync::Arc::clone(&self.leader_mark)
     }
 
     pub fn node_id(&self) -> u64 {
@@ -504,6 +513,22 @@ mod tests {
         assert_eq!(node.role(), NodeRole::Leader);
         assert_eq!(node.current_term(), 1);
         assert_eq!(node.leader_id(), 1);
+    }
+
+    #[test]
+    fn the_leader_mark_follows_the_role() {
+        let mut node = RaftNode::new(test_config(1, vec![]), MemStorage::new());
+        let mark = node.leader_mark();
+        assert_eq!(mark.get(), None);
+
+        node.election_deadline = Instant::now() - Duration::from_millis(1);
+        node.tick();
+        let held = mark.get().expect("the winner publishes its term");
+        assert_eq!(held.term, node.current_term());
+        assert_eq!(held.term_start, node.term_start_index());
+
+        node.become_follower(held.term + 1);
+        assert_eq!(mark.get(), None);
     }
 
     #[test]

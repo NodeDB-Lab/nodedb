@@ -55,6 +55,20 @@ GRAPH INSERT EDGE IN 'edges' FROM 'users:alice' TO 'users:bob' TYPE 'KNOWS'
 
 The `IN '<collection>'` clause is **required** — edges are overlays on a named document collection, not a global namespace. Statements without `IN` fail to parse.
 
+#### Several edges in one statement
+
+A clause an edge already has starts the next edge. Each edge takes its own `PROPERTIES`, `VALID_TIME` and `UNTIL`.
+
+```sql
+GRAPH INSERT EDGE IN 'edges'
+  FROM 'users:alice' TO 'users:bob'   TYPE 'KNOWS' PROPERTIES { since: 2020 },
+  FROM 'users:alice' TO 'users:carol' TYPE 'KNOWS' PROPERTIES { since: 2021 };
+```
+
+The statement binds its endpoints in one exchange and writes every edge as one unit. When the edges home on more than one vShard, that unit is one Calvin transaction, so a bulk load costs one commit chain per statement instead of one per edge. The command tag reports the number of edges written. An edge that is missing `FROM`, `TO` or `TYPE` refuses the whole statement.
+
+A row-level-security write policy decides each edge on its own `PROPERTIES`, as for a single edge. One refused edge refuses the whole statement, and no edge lands.
+
 ### Delete Edge
 
 ```sql
@@ -62,6 +76,45 @@ GRAPH DELETE EDGE IN 'edges' FROM 'users:alice' TO 'users:bob' TYPE 'KNOWS';
 ```
 
 Removes both forward and reverse index entries atomically. Cascading delete is available for all edges touching a node.
+
+#### Several edges in one statement
+
+`GRAPH DELETE EDGE` takes a list of edges the same way the insert does. A clause an edge already has starts the next edge.
+
+```sql
+GRAPH DELETE EDGE IN 'edges'
+  FROM 'users:alice' TO 'users:bob'   TYPE 'KNOWS',
+  FROM 'users:alice' TO 'users:carol' TYPE 'KNOWS';
+```
+
+- **One unit** — every edge leaves both of its homes, or none does. When the edges home on more than one vShard, that unit is one Calvin transaction. Inside `BEGIN ... COMMIT` the deletes stage with the transaction.
+- **Command tag** — reports the number of edges that were live and are now deleted. An edge that was never stored is not counted.
+- **Missing clause** — an edge without `FROM`, `TO` or `TYPE` refuses the whole statement.
+- **Row-level security** — a write policy decides each edge against that edge's stored properties, as for a single edge. One refused edge refuses the whole statement, and every edge stays.
+
+To replay a load idempotently, delete the batch, then insert it.
+
+#### Statement limits
+
+Both edge-list statements share these caps. A statement over a cap is refused whole.
+
+| Limit | Value | Error |
+|---|---|---|
+| Edges per statement | 1000 | SQLSTATE `54000`, naming the edge count and the cap |
+| SQL text per statement | 1 MiB (1048576 bytes) | SQLSTATE `42601`, naming the text size and the cap |
+
+Split a larger load into several statements. Both statements need the collection's write grant.
+
+#### Native protocol
+
+Native clients send the same writes without SQL text:
+
+| Opcode | Payload (`payload` field, MessagePack) | Answer |
+|---|---|---|
+| `EdgePutBatch` (`0x9D`) | `EdgePutBatch { edges: [EdgeWrite] }`. Each edge carries `src`, `dst`, `label`, `properties`, `valid_from_ms`, `valid_until_ms`. | `rows_affected`: edges written |
+| `EdgeDeleteBatch` (`0x9E`) | `EdgeDeleteBatch { edges: [EdgeKey] }`. Each edge carries `src`, `dst`, `label`. | `rows_affected`: edges deleted |
+
+The request's `collection` field names the collection. A request runs the same handler as the SQL statement: one unit, the same edge cap, write grant and per-edge write policy. In `nodedb-client`, `NodeDbGraph::graph_insert_edges` and `NodeDbGraph::graph_delete_edges` send one request (native) or one statement (pgwire).
 
 ---
 
@@ -315,7 +368,9 @@ GRAPH RAG FUSION ON entities
 | `RRF_K`           | Weighting constants `(vector_k, graph_k)` for RRF scoring                                                            |
 | `MAX_VISITED`     | Memory budget cap — BFS stops early if exceeded                                                                      |
 
-The response includes a truncation flag if the memory budget forced early termination.
+The statement returns one row per fused hit, in rank order, with the columns `node_id`, `rrf_score`, `vector_rank`, `vector_distance` and `hop_distance`. `vector_rank` and `vector_distance` are NULL for a node found only by expansion. `hop_distance` is 0 for a seed node.
+
+When the memory budget stops the walk early, or the walk reaches nodes with no identity binding, the server sends a pgwire NOTICE that says so.
 
 ### Step-by-Step Pattern (Application-Level)
 

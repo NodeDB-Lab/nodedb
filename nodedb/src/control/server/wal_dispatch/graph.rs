@@ -3,8 +3,9 @@
 //! WAL append dispatch for `PhysicalPlan::Graph(GraphOp)`, plus batched graph
 //! edge writes (`EdgePutBatch`/`EdgeDeleteBatch`) from `CREATE GRAPH INDEX`.
 //!
-//! Each batch edge appends as its own single-edge `Put`/`Delete` record. Batch
-//! `properties` is always empty, matching what `execute_edge_put_batch` applies.
+//! Each batch edge appends as its own single-edge `Put`/`Delete` record. A put
+//! record carries the edge's `properties`, matching what `execute_edge_put_batch`
+//! applies.
 //!
 //! An edge record is an [`EdgePutRedo`] or [`EdgeDeleteRedo`], the same payload
 //! a transaction's redo carries. It carries both endpoint surrogates. A write
@@ -137,7 +138,7 @@ pub(crate) fn wal_append_graph_edge_put_batch(
                 src_id: edge.src_id.clone(),
                 label: edge.label.clone(),
                 dst_id: edge.dst_id.clone(),
-                properties: Vec::new(),
+                properties: edge.properties.clone(),
                 src_surrogate: edge.src_surrogate.as_u32(),
                 dst_surrogate: edge.dst_surrogate.as_u32(),
                 system_from: None,
@@ -243,6 +244,7 @@ mod tests {
             dst_surrogate: Surrogate::new(2),
             valid_from_ms: None,
             valid_until_ms: None,
+            properties: Vec::new(),
         }
     }
 

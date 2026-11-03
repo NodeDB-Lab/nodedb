@@ -89,10 +89,84 @@ mod tests {
     use nodedb_types::text_search::TextSearchParams;
     use nodedb_types::value::Value;
     use std::collections::{HashMap, HashSet};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::traits::core::NodeDbGraph;
+    use nodedb_types::protocol::{EdgeWrite, MAX_EDGES_PER_STATEMENT};
 
     /// Mock implementation to verify the trait is object-safe and
-    /// can be used as `Arc<dyn NodeDb>`.
-    struct MockDb;
+    /// can be used as `Arc<dyn NodeDb>`. It records the size of every
+    /// `graph_insert_edges` call and counts `graph_insert_edge` calls.
+    #[derive(Default)]
+    struct MockDb {
+        insert_batches: Mutex<Vec<usize>>,
+        single_inserts: AtomicUsize,
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    impl NodeDbGraph for MockDb {
+        async fn graph_traverse(
+            &self,
+            _collection: &str,
+            _start: &NodeId,
+            _depth: u8,
+            _direction: nodedb_types::graph::Direction,
+            _edge_filter: Option<&EdgeFilter>,
+        ) -> NodeDbResult<SubGraph> {
+            Ok(SubGraph::empty())
+        }
+
+        async fn graph_insert_edge(
+            &self,
+            _collection: &str,
+            from: &NodeId,
+            to: &NodeId,
+            edge_type: &str,
+            _properties: Option<Document>,
+        ) -> NodeDbResult<EdgeId> {
+            self.single_inserts.fetch_add(1, Ordering::Relaxed);
+            EdgeId::try_first(from.clone(), to.clone(), edge_type)
+                .map_err(|e| NodeDbError::storage(format!("invalid edge label: {e}")))
+        }
+
+        async fn graph_delete_edge(
+            &self,
+            _collection: &str,
+            _edge_id: &EdgeId,
+        ) -> NodeDbResult<()> {
+            Ok(())
+        }
+
+        async fn graph_stats(
+            &self,
+            collection: Option<&str>,
+            _as_of: Option<i64>,
+        ) -> NodeDbResult<Vec<GraphStats>> {
+            Ok(vec![GraphStats::zero(collection.unwrap_or("mock"))])
+        }
+
+        async fn graph_insert_edges(
+            &self,
+            _collection: &str,
+            edges: &[EdgeWrite],
+        ) -> NodeDbResult<u64> {
+            self.insert_batches
+                .lock()
+                .expect("batch log lock")
+                .push(edges.len());
+            Ok(edges.len() as u64)
+        }
+
+        async fn graph_delete_edges(
+            &self,
+            _collection: &str,
+            edges: &[EdgeId],
+        ) -> NodeDbResult<u64> {
+            Ok(edges.len() as u64)
+        }
+    }
 
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -125,45 +199,6 @@ mod tests {
 
         async fn vector_delete(&self, _collection: &str, _id: &str) -> NodeDbResult<()> {
             Ok(())
-        }
-
-        async fn graph_traverse(
-            &self,
-            _collection: &str,
-            _start: &NodeId,
-            _depth: u8,
-            _direction: nodedb_types::graph::Direction,
-            _edge_filter: Option<&EdgeFilter>,
-        ) -> NodeDbResult<SubGraph> {
-            Ok(SubGraph::empty())
-        }
-
-        async fn graph_insert_edge(
-            &self,
-            _collection: &str,
-            from: &NodeId,
-            to: &NodeId,
-            edge_type: &str,
-            _properties: Option<Document>,
-        ) -> NodeDbResult<EdgeId> {
-            EdgeId::try_first(from.clone(), to.clone(), edge_type)
-                .map_err(|e| NodeDbError::storage(format!("invalid edge label: {e}")))
-        }
-
-        async fn graph_delete_edge(
-            &self,
-            _collection: &str,
-            _edge_id: &EdgeId,
-        ) -> NodeDbResult<()> {
-            Ok(())
-        }
-
-        async fn graph_stats(
-            &self,
-            collection: Option<&str>,
-            _as_of: Option<i64>,
-        ) -> NodeDbResult<Vec<GraphStats>> {
-            Ok(vec![GraphStats::zero(collection.unwrap_or("mock"))])
         }
 
         async fn document_get(
@@ -236,20 +271,20 @@ mod tests {
     #[test]
     fn trait_is_object_safe() {
         fn _accepts_dyn(_db: &dyn NodeDb) {}
-        let db = MockDb;
+        let db = MockDb::default();
         _accepts_dyn(&db);
     }
 
     #[test]
     fn trait_works_with_arc() {
         use std::sync::Arc;
-        let db: Arc<dyn NodeDb> = Arc::new(MockDb);
+        let db: Arc<dyn NodeDb> = Arc::new(MockDb::default());
         let _ = db;
     }
 
     #[tokio::test]
     async fn mock_vector_search() {
-        let db = MockDb;
+        let db = MockDb::default();
         let results = db
             .vector_search("embeddings", &[0.1, 0.2, 0.3], 5, None, None)
             .await
@@ -261,7 +296,7 @@ mod tests {
 
     #[tokio::test]
     async fn mock_vector_insert_and_delete() {
-        let db = MockDb;
+        let db = MockDb::default();
         db.vector_insert("coll", "v1", &[1.0, 2.0], None)
             .await
             .unwrap();
@@ -270,7 +305,7 @@ mod tests {
 
     #[tokio::test]
     async fn mock_graph_stats_returns_zero() {
-        let db = MockDb;
+        let db = MockDb::default();
         let result = db.graph_stats(Some("social"), None).await.unwrap();
         assert_eq!(result.len(), 1);
         let stats = &result[0];
@@ -283,7 +318,7 @@ mod tests {
 
     #[tokio::test]
     async fn mock_graph_stats_tenant_wide_uses_mock_key() {
-        let db = MockDb;
+        let db = MockDb::default();
         let result = db.graph_stats(None, None).await.unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].collection, "mock");
@@ -291,7 +326,7 @@ mod tests {
 
     #[tokio::test]
     async fn mock_graph_operations() {
-        let db = MockDb;
+        let db = MockDb::default();
         let start = NodeId::try_new("alice").expect("test fixture");
         let subgraph = db
             .graph_traverse(
@@ -321,7 +356,7 @@ mod tests {
 
     #[tokio::test]
     async fn mock_document_operations() {
-        let db = MockDb;
+        let db = MockDb::default();
         let doc = db.document_get("notes", "n1").await.unwrap().unwrap();
         assert_eq!(doc.id, "n1");
         assert_eq!(doc.get_str("title"), Some("test"));
@@ -335,7 +370,7 @@ mod tests {
 
     #[tokio::test]
     async fn mock_execute_sql() {
-        let db = MockDb;
+        let db = MockDb::default();
         let result = db.execute_sql("SELECT 1", &[]).await.unwrap();
         assert_eq!(result.row_count(), 0);
     }
@@ -347,7 +382,7 @@ mod tests {
     async fn unified_api_pattern() {
         use std::sync::Arc;
 
-        let db: Arc<dyn NodeDb> = Arc::new(MockDb);
+        let db: Arc<dyn NodeDb> = Arc::new(MockDb::default());
 
         let results = db
             .vector_search("knowledge_base", &[0.1, 0.2], 5, None, None)
@@ -373,13 +408,13 @@ mod tests {
 
     #[test]
     fn default_proto_version_is_zero() {
-        let db = MockDb;
+        let db = MockDb::default();
         assert_eq!(db.proto_version(), 0);
     }
 
     #[test]
     fn default_capabilities_is_zero() {
-        let db = MockDb;
+        let db = MockDb::default();
         assert_eq!(db.capabilities(), 0);
         let caps = Capabilities::from_raw(db.capabilities());
         assert!(!caps.supports_streaming());
@@ -388,13 +423,13 @@ mod tests {
 
     #[test]
     fn default_server_version_is_empty() {
-        let db = MockDb;
+        let db = MockDb::default();
         assert!(db.server_version().is_empty());
     }
 
     #[test]
     fn default_limits_all_none() {
-        let db = MockDb;
+        let db = MockDb::default();
         let limits = db.limits();
         assert!(limits.max_vector_dim.is_none());
         assert!(limits.max_top_k.is_none());
@@ -413,5 +448,43 @@ mod tests {
         assert!(caps.supports_fts());
         assert!(!caps.supports_graphrag());
         assert!(!caps.supports_crdt());
+    }
+
+    /// The bulk-load default sends its edges through `graph_insert_edges`
+    /// in chunks at the edge cap, never one `graph_insert_edge` per edge.
+    #[tokio::test]
+    async fn batch_insert_default_sends_cap_sized_batches() {
+        let db = MockDb::default();
+        let names: Vec<(String, String)> = (0..2 * MAX_EDGES_PER_STATEMENT + 7)
+            .map(|i| (format!("a{i}"), format!("b{i}")))
+            .collect();
+        let edges: Vec<(&str, &str, &str)> = names
+            .iter()
+            .map(|(from, to)| (from.as_str(), to.as_str(), "L"))
+            .collect();
+        db.batch_graph_insert_edges("social", &edges).await.unwrap();
+        assert_eq!(
+            *db.insert_batches.lock().expect("batch log lock"),
+            vec![MAX_EDGES_PER_STATEMENT, MAX_EDGES_PER_STATEMENT, 7]
+        );
+        assert_eq!(db.single_inserts.load(Ordering::Relaxed), 0);
+    }
+
+    /// The batch methods are reachable through `dyn NodeDb`.
+    #[tokio::test]
+    async fn batch_edge_methods_through_dyn() {
+        let db: std::sync::Arc<dyn NodeDb> = std::sync::Arc::new(MockDb::default());
+        let from = NodeId::try_new("alice").expect("test fixture");
+        let to = NodeId::try_new("bob").expect("test fixture");
+        let written = db
+            .graph_insert_edges(
+                "social",
+                &[EdgeWrite::new(from.clone(), to.clone(), "KNOWS")],
+            )
+            .await
+            .unwrap();
+        assert_eq!(written, 1);
+        let id = EdgeId::try_first(from, to, "KNOWS").expect("edge id");
+        assert_eq!(db.graph_delete_edges("social", &[id]).await.unwrap(), 1);
     }
 }

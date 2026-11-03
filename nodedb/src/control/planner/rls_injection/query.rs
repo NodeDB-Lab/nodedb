@@ -274,6 +274,7 @@ mod tests {
                 ),
                 path: "$.email".into(),
                 value: "a@b.c".into(),
+                system_time: nodedb_types::SystemTimeScope::Current,
             }))),
             right_bitmap: None,
             left_rls_filters: Vec::new(),

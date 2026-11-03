@@ -7,19 +7,16 @@
 //! this single function, so caps and defaults cannot drift between the
 //! two surfaces.
 
-use serde_json::{Map, Value as JsonValue};
-
 use nodedb_sql::ddl_ast::FusionParams;
 use nodedb_sql::ddl_ast::GraphDirection;
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::control::security::identity::AuthenticatedIdentity;
-use crate::control::server::response_shape::types::ShapedRows;
+use crate::control::server::response_shape::compose::shape_graph_rag;
 use crate::control::server::response_translate::translate_search_response;
 use crate::control::server::shared::ddl::user_dispatch;
 use crate::control::server::shared::session::StatementDeadline;
 use crate::control::state::SharedState;
-use crate::data::executor::response_codec;
 use crate::engine::graph::edge_store::Direction;
 use crate::engine::graph::traversal_options::{GraphTraversalOptions, MAX_GRAPH_TRAVERSAL_DEPTH};
 use crate::types::DatabaseId;
@@ -167,12 +164,14 @@ pub async fn rag_fusion(
     let named = translate_search_response(&payload, &plan, state, database_id, identity.tenant_id)
         .await
         .map_err(|e| DdlError::from_error(&e))?;
-    let json_text = response_codec::decode_payload_to_json(&named);
-    let mut row = Map::new();
-    row.insert("result".to_string(), JsonValue::String(json_text));
+    let shaped = shape_graph_rag(
+        &named,
+        None,
+        None,
+        None,
+        &crate::control::crs_context::crs_set_for(state),
+    )
+    .map_err(|e| DdlError::from_error(&e))?;
 
-    Ok(vec![DdlResult::Rows(ShapedRows::text_rows(
-        vec!["result".to_string()],
-        vec![row],
-    ))])
+    Ok(vec![DdlResult::Rows(shaped)])
 }

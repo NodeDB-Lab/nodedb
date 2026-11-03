@@ -59,6 +59,7 @@ use crate::control::gateway::dispatcher::{DispatchRouteParams, dispatch_route};
 use crate::control::gateway::live_leaders::LiveLeaders;
 use crate::control::gateway::version_set::GatewayVersionSet;
 use crate::control::gateway::{RouteDecision, TaskRoute};
+use crate::control::server::exchange::gather::{CoreFan, gather_cores};
 use crate::control::server::shared::session::StatementDeadline;
 use crate::control::state::SharedState;
 use crate::engine::graph::edge_store::Direction;
@@ -315,7 +316,7 @@ impl ExpandScope<'_> {
     }
 }
 
-/// Expand a locally-owned subset on all local Data-Plane cores. Returns the
+/// Expand a locally-owned subset on the cores that own its nodes. Returns the
 /// crossed edges. The caller notes the frontier's key vShards as read.
 async fn expand_local(
     shared: &SharedState,
@@ -335,16 +336,56 @@ async fn expand_local(
         crate::control::server::shared::session::StatementDeadline::of_statement(shared),
     )
     .await?;
-    let resp = crate::control::server::broadcast::broadcast_to_all_cores_txn(
+    // Every edge of a node lives on the core that owns its key vShard, so the
+    // hop reaches those cores only, each with the nodes it owns.
+    let by_core = frontier_by_owner_core(shared, node_ids);
+    let cores: Vec<usize> = by_core.keys().copied().collect();
+    let outcome = gather_cores(
         shared,
-        scope.tenant_id,
-        scope.database_id,
-        plan,
-        TraceId::ZERO,
-        scope.txn_id,
+        &CoreFan {
+            tenant_id: scope.tenant_id,
+            database_id: scope.database_id,
+            trace_id: TraceId::ZERO,
+            txn_id: scope.txn_id,
+            cores: &cores,
+        },
+        |core| scope.plan(by_core.get(&core).cloned().unwrap_or_default()),
     )
     .await?;
-    decode_neighbor_rows(&resp.payload)
+    decode_neighbor_rows(&outcome.merged_array()?)
+}
+
+/// `nodes` grouped by the core that owns each one's key vShard, when this
+/// node owns every one of them. `None` when another node owns any.
+pub(super) fn local_owner_cores(
+    shared: &SharedState,
+    nodes: &[String],
+) -> crate::Result<Option<BTreeMap<usize, Vec<String>>>> {
+    if shared.cluster_routing.is_some() {
+        let (_, remote) = partition_frontier_by_owner(shared, nodes)?;
+        if !remote.is_empty() {
+            return Ok(None);
+        }
+    }
+    Ok(Some(frontier_by_owner_core(shared, nodes)))
+}
+
+/// `node_ids` grouped by the local core that owns each one's key vShard.
+fn frontier_by_owner_core(
+    shared: &SharedState,
+    node_ids: &[String],
+) -> BTreeMap<usize, Vec<String>> {
+    let num_cores = shared
+        .dispatcher
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .num_cores();
+    let mut by_core: BTreeMap<usize, Vec<String>> = BTreeMap::new();
+    for node in node_ids {
+        let core = crate::types::core_for_vshard(VShardId::from_key(node.as_bytes()), num_cores);
+        by_core.entry(core).or_default().push(node.clone());
+    }
+    by_core
 }
 
 /// Expand the remote-owned subsets concurrently: ship a typed

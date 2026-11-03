@@ -13,6 +13,7 @@ mod native_dml_outcome_conformance;
 mod native_document_identity_update;
 mod native_error_code_classification;
 mod native_gateway_txn_overlay;
+mod native_graph_edge_batch;
 mod native_index_ddl_opcodes;
 mod native_kv_atomic_autocommit_wal;
 mod native_kv_counter_faults;

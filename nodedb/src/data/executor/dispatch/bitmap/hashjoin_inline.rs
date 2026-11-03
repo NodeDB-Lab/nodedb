@@ -28,6 +28,15 @@ pub(crate) fn run_bitmap_subplan(
     task: &ExecutionTask,
     sub_plan: &PhysicalPlan,
 ) -> crate::Result<SurrogateBitmap> {
+    if let PhysicalPlan::Document(DocumentOp::IndexLookup {
+        collection,
+        path,
+        value,
+        system_time,
+    }) = sub_plan
+    {
+        return core.index_lookup_surrogates(task, collection.as_str(), path, value, system_time);
+    }
     let sub_response = core.execute_plan(task, sub_plan);
     if sub_response.status == Status::Error {
         let code = sub_response.error_code.map_or_else(

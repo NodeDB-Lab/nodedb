@@ -4,6 +4,7 @@ use nodedb_types::{
     QualifiedCollection, RlsWriteCheck, Surrogate, SurrogateBitmap, SystemTimeScope,
 };
 
+use super::index_probe::IndexProbe;
 use super::merge_types::MergeClauseOp;
 use super::ollp_edge::OllpPredictedEdge;
 use super::row_source::RowSource;
@@ -307,14 +308,20 @@ pub enum DocumentOp {
         collection: QualifiedCollection,
         path: String,
         value: String,
+        /// The cut the lookup reads: the scope of the read it feeds. A
+        /// prefilter of a search at a cut names the rows the index holds
+        /// there. A current read and a transaction snapshot read merge the
+        /// transaction's staged rows. The handler refuses `AllVersions`.
+        system_time: nodedb_types::SystemTimeScope,
     },
 
     /// Fetch full document rows via a secondary index, for a SELECT with an
     /// equality predicate on an indexed field.
     ///
     /// `filters` is the residual predicate left after the indexed equality,
-    /// applied to every fetched body. Sort / distinct / window functions
-    /// fall back to a full scan upstream — never reach this variant.
+    /// applied to every fetched body. `sort_keys` order the rows that pass it,
+    /// before `offset` and `limit` apply. Window functions fall back to a full
+    /// scan upstream — never reach this variant.
     IndexedFetch {
         collection: QualifiedCollection,
         /// Indexed field path (e.g. `$.email`).
@@ -322,12 +329,18 @@ pub enum DocumentOp {
         /// Equality lookup value. COLLATE NOCASE rewrites normalize to
         /// lowercase before emission, so the handler does not need to.
         value: String,
+        /// Further indexed equalities of the same WHERE. The handler keeps
+        /// the ids every index holds before it decodes a body. Each equality
+        /// also stays in `filters`.
+        also: Vec<IndexProbe>,
         /// Remaining post-filters (serialized `Vec<ScanFilter>`).
         filters: Vec<u8>,
         /// Column names to include in each row (empty = all fields).
         projection: Vec<String>,
         limit: usize,
         offset: usize,
+        /// ORDER BY terms. Empty returns rows in index order.
+        sort_keys: Vec<crate::physical_plan::SortKeySpec>,
         /// System-time scope on a bitemporal collection: `Current` reads the
         /// current state, and a point-in-time scope reads at its cut. The
         /// versioned index answers at the cut and each row is read at its

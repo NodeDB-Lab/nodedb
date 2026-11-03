@@ -33,9 +33,24 @@ impl<'t, 'a> Cursor<'t, 'a> {
         self.statement
     }
 
+    /// The index of the next token that is not a `,`. A comma outside a
+    /// list carries no meaning, so every read but a list item skips it.
+    fn head(&self) -> usize {
+        let mut index = self.pos;
+        while matches!(self.toks.get(index), Some(Tok::Comma)) {
+            index += 1;
+        }
+        index
+    }
+
     fn peek(&self) -> Option<&'t Tok<'a>> {
         let toks: &'t [Tok<'a>] = self.toks;
-        toks.get(self.pos)
+        toks.get(self.head())
+    }
+
+    /// Step past the token `peek` returned.
+    fn advance(&mut self) {
+        self.pos = self.head() + 1;
     }
 
     /// The next clause keyword, upper-cased. `None` at the end of the
@@ -45,7 +60,7 @@ impl<'t, 'a> Cursor<'t, 'a> {
         match self.peek() {
             None => Ok(None),
             Some(Tok::Word(word)) => {
-                self.pos += 1;
+                self.advance();
                 Ok(Some(word.to_ascii_uppercase()))
             }
             Some(other) => Err(self.unexpected(other)),
@@ -70,7 +85,7 @@ impl<'t, 'a> Cursor<'t, 'a> {
         let hit =
             matches!(self.peek(), Some(Tok::Word(word)) if word.eq_ignore_ascii_case(keyword));
         if hit {
-            self.pos += 1;
+            self.advance();
         }
         hit
     }
@@ -88,7 +103,7 @@ impl<'t, 'a> Cursor<'t, 'a> {
                 )));
             }
         };
-        self.pos += 1;
+        self.advance();
         Ok(value)
     }
 
@@ -96,7 +111,7 @@ impl<'t, 'a> Cursor<'t, 'a> {
     pub(super) fn word(&mut self, clause: &str) -> Result<&'a str, SqlError> {
         match self.peek() {
             Some(Tok::Word(word)) => {
-                self.pos += 1;
+                self.advance();
                 Ok(*word)
             }
             other => Err(parse_error(format!(
@@ -136,25 +151,24 @@ impl<'t, 'a> Cursor<'t, 'a> {
                 )));
             }
         };
-        self.pos += 1;
+        self.advance();
         crate::parser::preprocess::temporal::parse_temporal_expr(&expression)
             .map_err(|error| parse_error(format!("{clause}: {}", error.0)))
     }
 
-    /// Consume the next word when it parses as a number.
-    pub(super) fn number_word(&mut self) -> Option<f64> {
-        let Some(Tok::Word(word)) = self.peek() else {
-            return None;
-        };
-        let number = word.parse().ok()?;
-        self.pos += 1;
-        Some(number)
+    /// One or more numbers separated by commas: `60.0, 35.0` or
+    /// `(60.0, 35.0)`. Empty when the next token is no number.
+    pub(super) fn number_list(&mut self, clause: &str) -> Result<Vec<f64>, SqlError> {
+        self.comma_list(clause, |tok| match tok {
+            Tok::Word(word) => word.parse().ok().map(|number| (number, (*word).to_owned())),
+            _ => None,
+        })
     }
 
     fn number_text(&mut self, clause: &str, expected: &str) -> Result<&'a str, SqlError> {
         match self.peek() {
             Some(Tok::Word(word)) => {
-                self.pos += 1;
+                self.advance();
                 Ok(*word)
             }
             other => Err(parse_error(format!(
@@ -164,13 +178,13 @@ impl<'t, 'a> Cursor<'t, 'a> {
         }
     }
 
-    /// One or more quoted strings: `'a', 'b'` or `('a', 'b')`.
+    /// One or more quoted strings separated by commas: `'a', 'b'` or
+    /// `('a', 'b')`.
     pub(super) fn quoted_list(&mut self, clause: &str) -> Result<Vec<String>, SqlError> {
-        let mut out = Vec::new();
-        while let Some(Tok::Quoted(text)) = self.peek() {
-            out.push(text.clone().into_owned());
-            self.pos += 1;
-        }
+        let out = self.comma_list(clause, |tok| match tok {
+            Tok::Quoted(text) => Some((text.clone().into_owned(), format!("'{text}'"))),
+            _ => None,
+        })?;
         if out.is_empty() {
             return Err(parse_error(format!(
                 "{} {clause} needs one or more quoted labels, as {clause} 'a', 'b'",
@@ -180,11 +194,58 @@ impl<'t, 'a> Cursor<'t, 'a> {
         Ok(out)
     }
 
+    /// The items `item` reads, separated by commas. `item` returns the value
+    /// and its source text for an error message. Empty when the next token
+    /// is no item. Two items with no comma between them are refused, and so
+    /// is a comma with no item after it.
+    fn comma_list<T>(
+        &mut self,
+        clause: &str,
+        item: impl Fn(&Tok<'a>) -> Option<(T, String)>,
+    ) -> Result<Vec<T>, SqlError> {
+        let toks: &'t [Tok<'a>] = self.toks;
+        let mut out = Vec::new();
+        let Some((first, mut shown)) = self.peek().and_then(&item) else {
+            return Ok(out);
+        };
+        self.advance();
+        out.push(first);
+        loop {
+            match toks.get(self.pos) {
+                Some(Tok::Comma) => {
+                    self.pos += 1;
+                    let next = toks.get(self.pos);
+                    let Some((value, text)) = next.and_then(&item) else {
+                        return Err(parse_error(format!(
+                            "{} {clause} list ends with a comma — found {}",
+                            self.statement,
+                            describe_opt(next)
+                        )));
+                    };
+                    self.pos += 1;
+                    out.push(value);
+                    shown = text;
+                }
+                Some(tok) => {
+                    if let Some((_, text)) = item(tok) {
+                        return Err(parse_error(format!(
+                            "{} {clause} list items must be separated by commas: {shown} {text} \
+                             — write {shown}, {text}",
+                            self.statement
+                        )));
+                    }
+                    return Ok(out);
+                }
+                None => return Ok(out),
+            }
+        }
+    }
+
     /// A `{...}` object literal, braces included.
     pub(super) fn object(&mut self, clause: &str) -> Result<String, SqlError> {
         match self.peek() {
             Some(Tok::Object(text)) => {
-                self.pos += 1;
+                self.advance();
                 Ok((*text).to_string())
             }
             other => Err(parse_error(format!(
@@ -198,7 +259,7 @@ impl<'t, 'a> Cursor<'t, 'a> {
     pub(super) fn list(&mut self, clause: &str) -> Result<&'a str, SqlError> {
         match self.peek() {
             Some(Tok::List(text)) => {
-                self.pos += 1;
+                self.advance();
                 Ok(*text)
             }
             other => Err(parse_error(format!(
@@ -220,7 +281,7 @@ impl<'t, 'a> Cursor<'t, 'a> {
                 )));
             }
         };
-        self.pos += 1;
+        self.advance();
         Ok(properties)
     }
 
@@ -229,7 +290,7 @@ impl<'t, 'a> Cursor<'t, 'a> {
     pub(super) fn direction(&mut self) -> Result<GraphDirection, SqlError> {
         let word = match self.peek() {
             Some(Tok::Word(word)) => {
-                self.pos += 1;
+                self.advance();
                 *word
             }
             other => {
@@ -286,6 +347,7 @@ fn describe(tok: &Tok<'_>) -> String {
         Tok::Ident(text) => format!("identifier \"{text}\""),
         Tok::Object(_) => "an object literal".to_owned(),
         Tok::List(_) => "a [...] list".to_owned(),
+        Tok::Comma => "','".to_owned(),
     }
 }
 
@@ -295,4 +357,92 @@ fn describe_opt(tok: Option<&Tok<'_>>) -> String {
 
 fn parse_error(detail: String) -> SqlError {
     SqlError::Parse { detail }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::try_parse;
+
+    fn refused(sql: &str) -> String {
+        try_parse(sql)
+            .expect("input is graph DSL")
+            .expect_err("statement must be refused")
+            .to_string()
+    }
+
+    /// Two labels with no comma between them are refused on every statement
+    /// that takes a label list. The error names the input and the fix.
+    #[test]
+    fn label_list_without_a_comma_is_refused() {
+        for (sql, statement, clause) in [
+            (
+                "GRAPH TRAVERSE IN 'c' FROM 'x' DEPTH 2 LABEL 'a' 'b'",
+                "GRAPH TRAVERSE",
+                "LABEL",
+            ),
+            (
+                "GRAPH NEIGHBORS IN 'c' OF 'x' LABEL 'a' 'b' DIRECTION out",
+                "GRAPH NEIGHBORS",
+                "LABEL",
+            ),
+            (
+                "GRAPH PATH IN 'c' FROM 'x' TO 'y' MAX_DEPTH 3 LABEL 'a' 'b'",
+                "GRAPH PATH",
+                "LABEL",
+            ),
+            (
+                "GRAPH NEIGHBORS IN 'c' OF 'x' LABEL ('a' 'b')",
+                "GRAPH NEIGHBORS",
+                "LABEL",
+            ),
+            ("GRAPH LABEL 'alice' AS 'a' 'b'", "GRAPH LABEL", "AS"),
+            ("GRAPH UNLABEL 'alice' AS 'a' 'b'", "GRAPH UNLABEL", "AS"),
+        ] {
+            let error = refused(sql);
+            assert!(
+                error.contains(&format!(
+                    "{statement} {clause} list items must be separated by commas: 'a' 'b'"
+                )),
+                "{sql}: {error}"
+            );
+            assert!(error.contains("write 'a', 'b'"), "{sql}: {error}");
+        }
+    }
+
+    /// A missing comma later in the list is refused too, and names the pair.
+    #[test]
+    fn a_missing_comma_after_the_first_item_is_refused() {
+        let error = refused("GRAPH NEIGHBORS IN 'c' OF 'x' LABEL 'a', 'b' 'c'");
+        assert!(
+            error.contains("LABEL list items must be separated by commas: 'b' 'c'"),
+            "{error}"
+        );
+    }
+
+    /// A comma with no label after it is refused.
+    #[test]
+    fn label_list_ending_with_a_comma_is_refused() {
+        for sql in [
+            "GRAPH NEIGHBORS IN 'c' OF 'x' LABEL 'a', DIRECTION out",
+            "GRAPH TRAVERSE IN 'c' FROM 'x' LABEL 'a',",
+            "GRAPH LABEL 'alice' AS 'a', , 'b'",
+        ] {
+            let error = refused(sql);
+            assert!(error.contains("list ends with a comma"), "{sql}: {error}");
+        }
+    }
+
+    /// A comma outside a list carries no meaning, as before.
+    #[test]
+    fn a_comma_between_clauses_is_skipped() {
+        for sql in [
+            "GRAPH NEIGHBORS IN 'c', OF 'x', LABEL 'a', 'b' DIRECTION out",
+            "GRAPH TRAVERSE IN 'c' FROM 'x', DEPTH 2, LABEL ('a', 'b')",
+        ] {
+            assert!(
+                try_parse(sql).expect("graph DSL").is_ok(),
+                "{sql} must parse"
+            );
+        }
+    }
 }

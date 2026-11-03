@@ -20,7 +20,10 @@ type ServedVShards = Arc<Mutex<BTreeSet<u32>>>;
 /// The vShards this node currently hosts: the union of `vshards_for_group` over
 /// every Raft group whose member set includes this node, read from the live
 /// routing table.
-fn hosted_vshards(routing: &RwLock<nodedb_cluster::RoutingTable>, node_id: u64) -> Vec<u32> {
+pub(crate) fn hosted_vshards(
+    routing: &RwLock<nodedb_cluster::RoutingTable>,
+    node_id: u64,
+) -> Vec<u32> {
     let routing = routing.read().unwrap_or_else(|p| p.into_inner());
     let mut vshards = Vec::new();
     for (group_id, info) in routing.group_members() {

@@ -10,20 +10,12 @@
 
 use crate::harness::TestServer;
 
-/// The `results` array of a fusion answer.
+/// The hits of a fusion answer, one JSON object per row.
 async fn fusion_results(server: &TestServer, sql: &str) -> Vec<serde_json::Value> {
-    let blob = server
-        .query_text(sql)
+    server
+        .fusion_hits(sql)
         .await
         .unwrap_or_else(|e| panic!("{sql}: {e}"))
-        .join("");
-    let parsed: serde_json::Value =
-        serde_json::from_str(&blob).unwrap_or_else(|e| panic!("not JSON: {e}: {blob}"));
-    parsed
-        .get("results")
-        .and_then(|r| r.as_array())
-        .cloned()
-        .unwrap_or_else(|| panic!("no results array: {blob}"))
 }
 
 /// Each result's `node_id`, in rank order.

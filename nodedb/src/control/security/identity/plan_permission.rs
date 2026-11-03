@@ -283,6 +283,7 @@ pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Perm
             | MetaOp::PurgeDepartedVShards { .. }
             | MetaOp::PurgeVersionsBelow { .. }
             | MetaOp::KvDueExpiries { .. }
+            | MetaOp::RefreshGraphCount { .. }
             | MetaOp::UnregisterCollection { .. }
             | MetaOp::UnregisterMaterializedView { .. }
             | MetaOp::QueryCollectionSize { .. }

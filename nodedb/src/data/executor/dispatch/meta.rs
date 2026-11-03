@@ -129,6 +129,10 @@ impl CoreLoop {
 
             MetaOp::KvDueExpiries { limit } => self.execute_kv_due_expiries(task, *limit),
 
+            MetaOp::RefreshGraphCount { hosted_vshards } => {
+                self.execute_refresh_graph_count(task, hosted_vshards)
+            }
+
             MetaOp::ConvertCollection {
                 collection,
                 target_type,

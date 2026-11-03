@@ -16,7 +16,7 @@ pub mod timeseries;
 mod timeseries_native;
 
 pub use bulk_load::{BulkLoadParams, BulkLoadPlan};
-pub(crate) use index_lookup::try_document_index_lookup;
+pub(crate) use index_lookup::{find_indexed_equality, try_document_index_lookup};
 pub use params::{
     AggregateParams, DeleteParams, InsertParams, InsertSelectParams, MergeParams, PointGetParams,
     ScanParams, TimeBucketKey, TruncateParams, UpdateFromParams, UpdateParams, UpsertParams,

@@ -116,8 +116,18 @@ pub struct SystemMetrics {
     pub vector_build_pending: AtomicU64,
 
     pub graph_traversals: AtomicU64,
+    /// Nodes with at least one live edge, counted on the core that hosts
+    /// each node's home vShard. The sum across cores.
     pub graph_nodes: AtomicU64,
+    /// Live edges, counted on the core that hosts each edge's source home.
+    /// The sum across cores.
     pub graph_edges: AtomicU64,
+    /// Edge versions a live write applied on this node: an autocommit write
+    /// or a committed transaction's install. Restart replay adds nothing.
+    pub graph_edges_written: AtomicU64,
+    /// Live edges a live write removed on this node. A delete of an absent
+    /// edge adds nothing.
+    pub graph_edges_deleted: AtomicU64,
 
     pub document_inserts: AtomicU64,
     pub document_reads: AtomicU64,

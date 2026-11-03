@@ -131,6 +131,7 @@ impl MultiRaft {
     /// later mount of the group resumes from it. The group's apply gate stays
     /// too. `None` when the group is not hosted here.
     pub fn unmount_group(&mut self, group_id: u64) -> Option<RaftNode<StagedLogStorage>> {
+        self.leader_board.unmount(group_id);
         self.groups.remove(&group_id)
     }
 }
@@ -148,6 +149,23 @@ mod tests {
         let mut mr = MultiRaft::new(node_id, rt, dir.path().to_path_buf());
         mr.add_group(0, vec![]).unwrap();
         mr
+    }
+
+    #[test]
+    fn the_leader_board_follows_mount_and_leadership() {
+        let mut mr = make_multi_raft_single_node(1);
+        let board = mr.leader_board();
+        assert_eq!(board.leadership(0), None);
+
+        if let Some(node) = mr.groups_mut().get_mut(&0) {
+            node.election_deadline_override(Instant::now() - Duration::from_millis(1));
+            node.tick();
+        }
+        let held = board.leadership(0).expect("the leader is on the board");
+        assert!(held.term >= 1);
+
+        let _node = mr.unmount_group(0);
+        assert_eq!(board.leadership(0), None);
     }
 
     #[test]

@@ -187,18 +187,17 @@ impl Scheduler {
     /// This node's term and term start in the vShard's data group, while it
     /// leads the group.
     fn leadership(&self) -> Option<Leadership> {
-        let mr = self.multi_raft.lock().unwrap_or_else(|p| p.into_inner());
-        let group_id = mr
-            .routing()
+        let group_id = self
+            .routing
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .group_for_vshard(self.vshard_id)
             .ok()?;
-        let term = mr.leader_term(group_id)?;
+        let held = self.leader_board.leadership(group_id)?;
         Some(Leadership {
             group_id,
-            term,
-            term_start: mr.term_start_index(group_id),
+            term: held.term,
+            term_start: held.term_start,
         })
     }
 

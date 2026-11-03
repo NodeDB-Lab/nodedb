@@ -18,7 +18,7 @@ impl HnswIndex {
     }
 
     pub fn tombstone_count(&self) -> usize {
-        self.nodes.iter().filter(|n| n.deleted).count()
+        self.tombstones
     }
 
     /// Tombstone ratio: fraction of nodes that are deleted.
@@ -41,6 +41,7 @@ impl HnswIndex {
                 return false;
             }
             node.deleted = true;
+            self.tombstones += 1;
             true
         } else {
             false
@@ -56,8 +57,66 @@ impl HnswIndex {
             && node.deleted
         {
             node.deleted = false;
+            self.tombstones -= 1;
             return true;
         }
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::distance::DistanceMetric;
+    use crate::hnsw::{HnswIndex, HnswParams};
+
+    fn index_of(n: usize) -> HnswIndex {
+        let mut idx = HnswIndex::with_seed(
+            2,
+            HnswParams {
+                metric: DistanceMetric::L2,
+                ..HnswParams::default()
+            },
+            7,
+        );
+        for i in 0..n {
+            idx.insert(vec![i as f32, 0.0]).unwrap();
+        }
+        idx
+    }
+
+    /// The live count follows every delete and undelete, and a repeated
+    /// delete or undelete changes nothing.
+    #[test]
+    fn live_count_follows_delete_and_undelete() {
+        let mut idx = index_of(10);
+        assert_eq!(idx.live_count(), 10);
+        assert!(idx.delete(3));
+        assert!(!idx.delete(3));
+        assert!(idx.delete(4));
+        assert_eq!(idx.tombstone_count(), 2);
+        assert_eq!(idx.live_count(), 8);
+        assert!(idx.undelete(3));
+        assert!(!idx.undelete(3));
+        assert_eq!(idx.tombstone_count(), 1);
+        assert_eq!(idx.live_count(), 9);
+    }
+
+    /// An index with every node deleted is empty, and compaction leaves no
+    /// tombstone behind.
+    #[test]
+    fn compaction_clears_the_tombstone_count() {
+        let mut idx = index_of(10);
+        for id in 0..5 {
+            idx.delete(id);
+        }
+        let dropped = idx.compact();
+        assert_eq!(dropped, 5);
+        assert_eq!(idx.tombstone_count(), 0);
+        assert_eq!(idx.live_count(), 5);
+        assert!(!idx.is_empty());
+        for id in 0..5 {
+            idx.delete(id);
+        }
+        assert!(idx.is_empty());
     }
 }

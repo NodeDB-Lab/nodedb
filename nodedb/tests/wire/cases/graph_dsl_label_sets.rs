@@ -155,3 +155,49 @@ async fn label_without_quoted_label_is_a_syntax_error() {
         server.expect_error(sql, "LABEL").await;
     }
 }
+
+/// A label list with no comma between its items is a parse error on every
+/// statement that takes one. The comma form keeps working.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn label_list_without_a_comma_is_refused() {
+    let server = TestServer::start().await;
+    seed(&server, "lset_comma").await;
+
+    for (sql, statement, clause) in [
+        (
+            "GRAPH NEIGHBORS IN 'lset_comma' OF 'hub' LABEL 'knows' 'works' DIRECTION out",
+            "GRAPH NEIGHBORS",
+            "LABEL",
+        ),
+        (
+            "GRAPH TRAVERSE IN 'lset_comma' FROM 'hub' DEPTH 2 LABEL 'knows' 'works'",
+            "GRAPH TRAVERSE",
+            "LABEL",
+        ),
+        (
+            "GRAPH PATH IN 'lset_comma' FROM 'hub' TO 'far_node' MAX_DEPTH 3 LABEL 'knows' 'works'",
+            "GRAPH PATH",
+            "LABEL",
+        ),
+        ("GRAPH LABEL 'hub' AS 'knows' 'works'", "GRAPH LABEL", "AS"),
+    ] {
+        server
+            .expect_error(
+                sql,
+                &format!(
+                    "{statement} {clause} list items must be separated by commas: 'knows' 'works'"
+                ),
+            )
+            .await;
+    }
+
+    let got = blob(
+        &server,
+        "GRAPH NEIGHBORS IN 'lset_comma' OF 'hub' LABEL 'knows', 'works' DIRECTION out",
+    )
+    .await;
+    for node in ["kn_node", "wk_node"] {
+        assert!(got.contains(node), "{node} is listed: {got}");
+    }
+    assert!(!got.contains("lk_node"), "'likes' is not listed: {got}");
+}

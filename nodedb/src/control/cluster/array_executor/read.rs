@@ -5,7 +5,7 @@
 
 use nodedb_array::types::ArrayId;
 use nodedb_cluster::distributed_array::merge::ArrayAggPartial;
-use nodedb_cluster::distributed_array::wire::ArrayShardAggReq;
+use nodedb_cluster::distributed_array::wire::{ArrayShardAggReq, ArrayShardSurrogateBitmapReq};
 use nodedb_cluster::distributed_array::{ArrayAggExec, ArraySliceExec};
 use nodedb_cluster::error::{ClusterError, Result};
 use nodedb_query::msgpack_scan;
@@ -164,24 +164,33 @@ impl DataPlaneArrayExecutor {
         })
     }
 
+    /// The shard's surrogates for the slice at `req.system_time`. The plan
+    /// carries the scope, so `dispatch_and_await` waits for a marked cut
+    /// before the read, and every shard reads one cut. `req.txn_id` merges
+    /// the transaction's staged cells on this shard.
     pub(super) async fn surrogate_bitmap_scan(
         &self,
         local_vshard_id: u32,
-        array_id_msgpack: &[u8],
-        slice_msgpack: &[u8],
+        req: &ArrayShardSurrogateBitmapReq,
     ) -> Result<Vec<u8>> {
         let array_id: ArrayId =
-            zerompk::from_msgpack(array_id_msgpack).map_err(|e| ClusterError::Codec {
+            zerompk::from_msgpack(&req.array_id_msgpack).map_err(|e| ClusterError::Codec {
                 detail: format!("array_id decode in exec_surrogate_bitmap_scan: {e}"),
             })?;
 
         let plan = PhysicalPlan::Array(ArrayOp::SurrogateBitmapScan {
             array_id: array_id.clone(),
-            slice_msgpack: slice_msgpack.to_vec(),
+            slice_msgpack: req.slice_msgpack.clone(),
+            system_time: req.system_time,
         });
 
         let resp = self
-            .dispatch_and_await(&array_id, VShardId::new(local_vshard_id), plan, None)
+            .dispatch_and_await(
+                &array_id,
+                VShardId::new(local_vshard_id),
+                plan,
+                req.txn_id.map(TxnId::new),
+            )
             .await?;
 
         if resp.status == crate::bridge::envelope::Status::Error {

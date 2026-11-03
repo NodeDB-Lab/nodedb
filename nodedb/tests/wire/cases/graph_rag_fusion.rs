@@ -130,7 +130,7 @@ async fn graph_rag_fusion_returns_structured_result() {
         .unwrap();
 
     let rows = server
-        .query_text(
+        .query_named_rows(
             "GRAPH RAG FUSION ON ragf_shape \
              QUERY ARRAY[1.0, 0.0, 0.0] \
              VECTOR_FIELD 'embedding' \
@@ -143,19 +143,21 @@ async fn graph_rag_fusion_returns_structured_result() {
         .await
         .expect("GRAPH RAG FUSION must succeed and return a structured result");
 
-    let blob = rows.join("");
-    assert!(
-        blob.contains("rrf_score"),
-        "result must contain 'rrf_score' field; got: {blob}"
-    );
-    assert!(
-        blob.contains("node_id"),
-        "result must contain 'node_id' field; got: {blob}"
-    );
-    assert!(
-        blob.contains("metadata"),
-        "result must contain 'metadata' field; got: {blob}"
-    );
+    assert!(!rows.is_empty(), "the fusion must return a row per hit");
+    for row in &rows {
+        for column in [
+            "node_id",
+            "rrf_score",
+            "vector_rank",
+            "vector_distance",
+            "hop_distance",
+        ] {
+            assert!(
+                row.contains_key(column),
+                "each hit must carry the '{column}' column; got: {row:?}"
+            );
+        }
+    }
 }
 
 // ── 5. Different RRF_K graph_k values produce different scores ───────────────
@@ -195,7 +197,7 @@ async fn graph_rag_fusion_graph_k_affects_expanded_node_score() {
 
     // graph_k = 1.0 — graph hop rank strongly influences final score.
     let rows_low_k = server
-        .query_text(
+        .fusion_hits(
             "GRAPH RAG FUSION ON ragf_rrfk_score \
              QUERY ARRAY[1.0, 0.0] \
              VECTOR_FIELD 'embedding' \
@@ -210,7 +212,7 @@ async fn graph_rag_fusion_graph_k_affects_expanded_node_score() {
 
     // graph_k = 10000.0 — graph hop rank is nearly irrelevant.
     let rows_high_k = server
-        .query_text(
+        .fusion_hits(
             "GRAPH RAG FUSION ON ragf_rrfk_score \
              QUERY ARRAY[1.0, 0.0] \
              VECTOR_FIELD 'embedding' \
@@ -228,8 +230,7 @@ async fn graph_rag_fusion_graph_k_affects_expanded_node_score() {
     // Regression guard: if both blobs are identical, the user's RRF_K is being silently
     // discarded in favour of a hard-coded constant.
     assert_ne!(
-        rows_low_k.join(""),
-        rows_high_k.join(""),
+        rows_low_k, rows_high_k,
         "rrf_score for graph-expanded node n2 must differ between \
          RRF_K (60.0, 1.0) and RRF_K (60.0, 10000.0); identical output \
          means the graph_k value is being ignored"
@@ -328,7 +329,7 @@ async fn expansion_reaches_neighbours_of_vector_hits() {
         .join("");
 
     assert!(
-        blob.contains("\"far\""),
+        blob.contains("far"),
         "the seed's neighbour must be reached by expansion; got: {blob}"
     );
 }
@@ -387,8 +388,8 @@ async fn vector_and_text_hits_on_one_row_fuse_into_a_single_entry() {
         .await
         .unwrap();
 
-    let blob = server
-        .query_text(
+    let results = server
+        .fusion_hits(
             "GRAPH RAG FUSION ON ragf_crossleg \
              QUERY ARRAY[1.0, 0.0] \
              VECTOR_FIELD 'embedding' \
@@ -399,15 +400,8 @@ async fn vector_and_text_hits_on_one_row_fuse_into_a_single_entry() {
              RRF_K (60.0, 1.0, 60.0)",
         )
         .await
-        .expect("three-source fusion must succeed")
-        .join("");
-
-    let parsed: serde_json::Value =
-        serde_json::from_str(&blob).unwrap_or_else(|e| panic!("response is not JSON: {e}: {blob}"));
-    let results = parsed
-        .get("results")
-        .and_then(|r| r.as_array())
-        .unwrap_or_else(|| panic!("response carries no results array: {blob}"));
+        .expect("three-source fusion must succeed");
+    let blob = format!("{results:?}");
 
     let scores: Vec<f64> = results
         .iter()

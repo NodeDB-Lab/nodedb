@@ -110,7 +110,7 @@ impl CoreLoop {
                     &edge.dst_id,
                 )
                 .with_surrogates(edge.src_surrogate, edge.dst_surrogate),
-                &[],
+                &edge.properties,
                 stamp,
                 valid_from_ms,
                 valid_until_ms,
@@ -145,7 +145,7 @@ impl CoreLoop {
                             src_id: edge.src_id.clone(),
                             label: edge.label.clone(),
                             dst_id: edge.dst_id.clone(),
-                            properties: Vec::new(),
+                            properties: edge.properties.clone(),
                             src_surrogate: edge.src_surrogate.as_u32(),
                             dst_surrogate: edge.dst_surrogate.as_u32(),
                             system_from: Some(ord),
@@ -157,6 +157,7 @@ impl CoreLoop {
                     let partition = self.csr_partition_mut(database_id, tid);
                     partition.set_node_surrogate(&edge.src_id, edge.src_surrogate);
                     partition.set_node_surrogate(&edge.dst_id, edge.dst_surrogate);
+                    self.count_edge_written(task, &edge.src_id);
                 }
                 Err(e) => {
                     let code = refusal_after_rows(write_set.len() as u64, e);
@@ -177,9 +178,7 @@ impl CoreLoop {
                 &edge.label,
                 &edge.dst_id,
             );
-            // CDC: batch edges are applied with empty properties (see
-            // `execute_edge_put_batch`'s hardcoded `&[]`), so `new_value` is an
-            // empty payload — a faithful pre-image of what was applied.
+            // CDC: `new_value` is the properties image the edge was applied with.
             self.emit_graph_edge_event(
                 task,
                 crate::data::executor::core_loop::event_emit::GraphEdgeEvent {
@@ -190,7 +189,7 @@ impl CoreLoop {
                     src_surrogate: edge.src_surrogate,
                     dst_surrogate: edge.dst_surrogate,
                     op: crate::event::WriteOp::Insert,
-                    properties: Some(&[]),
+                    properties: Some(&edge.properties),
                 },
             );
         }
@@ -219,6 +218,7 @@ mod tests {
             dst_surrogate: Surrogate::new(2),
             valid_from_ms: None,
             valid_until_ms: None,
+            properties: Vec::new(),
         }
     }
 

@@ -46,6 +46,7 @@ async fn seed_star(server: &TestServer, collection: &str, leaf_prefix: &str, cou
                     ),
                     valid_from_ms: None,
                     valid_until_ms: None,
+                    properties: Vec::new(),
                 })
                 .collect(),
         }),

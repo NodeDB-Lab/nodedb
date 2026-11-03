@@ -2,6 +2,7 @@
 
 //! Background loop and subsystem spawning after SharedState is ready.
 
+pub mod graph_count;
 pub mod kv_expiry;
 pub mod maintenance;
 pub mod mirror;

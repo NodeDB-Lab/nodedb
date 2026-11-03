@@ -10,7 +10,7 @@ use crate::control::state::SharedState;
 use crate::types::DatabaseId;
 
 use super::super::super::result::{DdlError, DdlResult};
-use super::{algo, edge, rag_fusion, stats, traverse};
+use super::{algo, edge, edge_delete, edge_insert, rag_fusion, stats, traverse};
 
 /// Dispatch a parsed graph-overlay variant to its handler.
 ///
@@ -29,50 +29,23 @@ pub async fn dispatch_graph(
     // read (see `DmlTxnCtx::linearizable_reads` for the default).
     let linearizable = txn_ctx.linearizable_reads();
     match stmt {
-        NodedbStatement::Graph(GraphStmt::GraphInsertEdge {
-            collection,
-            src,
-            dst,
-            label,
-            properties,
-            valid_from_ms,
-            valid_until_ms,
-        }) => Some(
-            edge::insert_edge(
-                state,
-                identity,
-                database_id,
-                edge::EdgeRef {
-                    collection,
-                    src,
-                    dst,
-                    label,
-                },
-                edge::EdgeInsert {
-                    properties,
-                    valid_from_ms,
-                    valid_until_ms,
-                },
-                txn_ctx,
+        NodedbStatement::Graph(GraphStmt::GraphInsertEdge { collection, edges }) => {
+            let edges = match edge_insert::edge_inserts_from_specs(edges) {
+                Ok(edges) => edges,
+                Err(e) => return Some(Err(e)),
+            };
+            Some(
+                edge_insert::insert_edges(state, identity, database_id, collection, edges, txn_ctx)
+                    .await,
             )
-            .await,
-        ),
-        NodedbStatement::Graph(GraphStmt::GraphDeleteEdge {
-            collection,
-            src,
-            dst,
-            label,
-        }) => Some(
-            edge::delete_edge(
+        }
+        NodedbStatement::Graph(GraphStmt::GraphDeleteEdge { collection, edges }) => Some(
+            edge_delete::delete_edges(
                 state,
                 identity,
                 database_id,
-                edge::EdgeRef {
-                    collection,
-                    src,
-                    dst,
-                    label,
-                },
+                collection,
+                edges.into_iter().map(Into::into).collect(),
                 txn_ctx,
             )
             .await,

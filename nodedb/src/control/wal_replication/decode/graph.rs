@@ -88,6 +88,7 @@ fn batch_edges(edges: &[super::super::types::ReplicatedBatchEdge]) -> Vec<BatchE
             dst_surrogate: nodedb_types::Surrogate::new(e.dst_surrogate),
             valid_from_ms: e.valid_from_ms,
             valid_until_ms: e.valid_until_ms,
+            properties: e.properties.clone(),
         })
         .collect()
 }
@@ -211,6 +212,7 @@ mod tests {
             dst_surrogate: nodedb_types::Surrogate::new(22),
             valid_from_ms: None,
             valid_until_ms: None,
+            properties: vec![0x81, 0xa1, b'w', 0x01],
         };
         for plan in [
             PhysicalPlan::Graph(GraphOp::EdgePutBatch {

@@ -34,9 +34,11 @@ impl CoreLoop {
     /// a delete the policy rejects must leave the edge in place.
     ///
     /// The bitemporal edge store always appends a tombstone version on
-    /// success, whether or not a live edge existed — so the affected count is
-    /// never assumed and is always read from the pre-image lookup: 1 when a
-    /// live edge existed to remove, 0 when the edge was already absent.
+    /// success, whether or not a live edge existed. The affected count is 1
+    /// when the tombstone ended a live edge, as the edge store judges it
+    /// without the tombstone's own key, and 0 when the edge was already
+    /// absent. A cross-shard edge's second home on one core re-applies the
+    /// same tombstone and reports the same answer.
     pub(in crate::data::executor) fn execute_edge_delete_with_undo(
         &mut self,
         task: &ExecutionTask,
@@ -67,10 +69,8 @@ impl CoreLoop {
         }
 
         // The pre-image is always read: the RLS write gate needs it for any
-        // non-admit-all policy, and the response needs it to report a
-        // truthful affected count.
-        // A pre-image read error refuses the delete: read as absent, it would
-        // admit the delete without the policy and report nothing removed.
+        // non-admit-all policy. A pre-image read error refuses the delete:
+        // read as absent, it would admit the delete without the policy.
         let old_properties = match self.edge_store.get_edge(
             database_id,
             TenantId::new(tid),
@@ -82,7 +82,6 @@ impl CoreLoop {
             Ok(properties) => properties,
             Err(e) => return self.response_error(task, ErrorCode::from(e)),
         };
-        let existed = old_properties.is_some();
 
         if let Err(error) = crate::data::executor::handlers::rls_write_gate::admit_edge_properties(
             rls_write_check,
@@ -131,6 +130,7 @@ impl CoreLoop {
                     ord,
                 );
                 let current = tombstone.current.clone();
+                let removed_live = tombstone.ended_live_edge();
                 let edge_undo = target.undo(tombstone, csr_prior);
                 // The CSR follows what the edge resolves to: a tombstone a
                 // TRUNCATE hides, or one below a newer version, leaves the
@@ -152,6 +152,9 @@ impl CoreLoop {
                     undo.push(UndoEntry::EdgeWrite(Box::new(edge_undo)));
                 }
                 self.checkpoint_coordinator.mark_dirty("sparse", 1);
+                if removed_live {
+                    self.count_edge_removed(task, src_id);
+                }
                 self.note_edge_write(task, tid, collection, src_id, label, dst_id);
                 // CDC: emit after `note_edge_write` so the event LSN matches
                 // this edge's WAL LSN (the WAL-replay reconstruction key).
@@ -168,7 +171,7 @@ impl CoreLoop {
                         properties: None,
                     },
                 );
-                let mut response = self.response_affected(task, u64::from(existed));
+                let mut response = self.response_affected(task, u64::from(removed_live));
                 // The tombstone's ordinal was decided here, so the tombstone is
                 // journalled after apply at exactly that ordinal.
                 response.write_set = vec![WriteSetEntry::edge(EdgeImage::Delete(

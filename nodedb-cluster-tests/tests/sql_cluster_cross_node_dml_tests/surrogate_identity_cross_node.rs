@@ -72,27 +72,37 @@ fn bindings(cluster: &TestCluster, pk: &str) -> Vec<(usize, u32)> {
         .collect()
 }
 
+/// The hits of a fusion, as `{"results": [one object per row]}`. A NULL
+/// column is `null`, and a column that reads as a number is a number, except
+/// `node_id`.
 async fn fusion_result(client: &tokio_postgres::Client, sql: &str) -> serde_json::Value {
     let msgs = client
         .simple_query(sql)
         .await
         .unwrap_or_else(|e| panic!("{sql}: {e}"));
-    let cell = msgs
-        .iter()
-        .find_map(|m| match m {
-            tokio_postgres::SimpleQueryMessage::Row(row) => row.get(0).map(str::to_owned),
-            _ => None,
-        })
-        .unwrap_or_else(|| panic!("{sql}: no result row"));
-    let mut value: serde_json::Value =
-        sonic_rs::from_str(&cell).unwrap_or_else(|e| panic!("{sql}: result is not JSON: {e}"));
-    if let Some(metadata) = value
-        .get_mut("metadata")
-        .and_then(serde_json::Value::as_object_mut)
-    {
-        metadata.remove("watermark_lsn");
+    let mut hits = Vec::new();
+    for msg in &msgs {
+        let tokio_postgres::SimpleQueryMessage::Row(row) = msg else {
+            continue;
+        };
+        let mut hit = serde_json::Map::new();
+        for (i, column) in row.columns().iter().enumerate() {
+            let name = column.name();
+            let value = match row.get(i) {
+                None => serde_json::Value::Null,
+                Some(text) if name == "node_id" => serde_json::Value::from(text),
+                Some(text) => text
+                    .parse::<i64>()
+                    .map(serde_json::Value::from)
+                    .or_else(|_| text.parse::<f64>().map(serde_json::Value::from))
+                    .unwrap_or_else(|_| serde_json::Value::from(text)),
+            };
+            hit.insert(name.to_string(), value);
+        }
+        hits.push(serde_json::Value::Object(hit));
     }
-    value
+    assert!(!hits.is_empty(), "{sql}: no result row");
+    serde_json::json!({ "results": hits })
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]

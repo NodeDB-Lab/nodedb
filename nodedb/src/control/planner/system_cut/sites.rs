@@ -68,13 +68,13 @@ macro_rules! cut_site_walk {
                 PhysicalPlan::Array(op) => match op {
                     ArrayOp::Slice { system_time, .. }
                     | ArrayOp::Aggregate { system_time, .. }
-                    | ArrayOp::Elementwise { system_time, .. } => visit(system_time),
+                    | ArrayOp::Elementwise { system_time, .. }
+                    | ArrayOp::SurrogateBitmapScan { system_time, .. } => visit(system_time),
                     ArrayOp::OpenArray { .. }
                     | ArrayOp::Put { .. }
                     | ArrayOp::Delete { .. }
                     | ArrayOp::Flush { .. }
                     | ArrayOp::Compact { .. }
-                    | ArrayOp::SurrogateBitmapScan { .. }
                     | ArrayOp::DropArray { .. }
                     | ArrayOp::RekeyArray { .. }
                     | ArrayOp::PurgeArrayDrop { .. } => {}
@@ -158,6 +158,7 @@ macro_rules! cut_site_walk {
                 DocumentOp::PointGet { system_time, .. }
                 | DocumentOp::Scan { system_time, .. }
                 | DocumentOp::IndexedFetch { system_time, .. }
+                | DocumentOp::IndexLookup { system_time, .. }
                 | DocumentOp::MaterializeScan { system_time, .. }
                 | DocumentOp::BulkUpdate { system_time, .. }
                 | DocumentOp::BulkDelete { system_time, .. } => visit(system_time),
@@ -189,7 +190,6 @@ macro_rules! cut_site_walk {
                 | DocumentOp::BatchInsert { .. }
                 | DocumentOp::RangeScan { .. }
                 | DocumentOp::Register { .. }
-                | DocumentOp::IndexLookup { .. }
                 | DocumentOp::DropIndex { .. }
                 | DocumentOp::BackfillIndex { .. }
                 | DocumentOp::Truncate { .. }

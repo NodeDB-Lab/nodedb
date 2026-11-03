@@ -19,12 +19,18 @@ pub(crate) fn try_document_index_lookup(
     params: &ScanParams,
     engine: EngineType,
 ) -> Option<SqlPlan> {
-    // Sort / window functions still force a full scan because the
-    // IndexedFetch handler does not yet order rows or evaluate window
-    // aggregates. DISTINCT is safe on the index path: the handler
+    // Window functions still force a full scan because the IndexedFetch
+    // handler does not evaluate window aggregates. The handler orders the
+    // matched rows itself. DISTINCT is safe on the index path: the handler
     // emits each matched doc exactly once and any further dedup is a
     // cheap Control-Plane pass on the scan-shaped response.
-    if !params.sort_keys.is_empty() || !params.window_functions.is_empty() {
+    if !params.window_functions.is_empty() {
+        return None;
+    }
+    // A computed SELECT item runs in a tail over the fetched rows, so a sort
+    // key can name a value only the tail holds. The handler orders by stored
+    // fields, so that shape scans.
+    if !params.sort_keys.is_empty() && computed_tail::needs_computed_tail(&params.projection) {
         return None;
     }
     // The versioned index answers the current state and a system-time
@@ -39,27 +45,97 @@ pub(crate) fn try_document_index_lookup(
         return None;
     }
 
-    // Iterate filters to find the first equality candidate that lines up
-    // with a Ready index. Keep the remaining filters as post-filters.
-    // Predicates appear in three shapes:
-    //   - `FilterExpr::Comparison { field, Eq, value }` — resolver path.
-    //   - `FilterExpr::Expr(BinaryOp { Column, Eq, Literal })` — generic.
-    //   - `FilterExpr::Expr(BinaryOp { left AND right })` — the
-    //     top-level AND the `convert_where_to_filters` path produces
-    //     for compound WHERE clauses like `a = 1 AND b > 2`. Descend
-    //     into AND conjuncts so an equality nested in a conjunction
-    //     still picks up the index, and the non-equality siblings
-    //     survive as a residual conjunction carried on the
-    //     IndexedFetch node (not as a wrapping Filter plan node —
-    //     that wrapping is the Control-Plane post-filter anti-pattern
-    //     the handler's `filters` payload exists to eliminate).
-    // Pre-collect the query's top-level conjuncts once. Used for
-    // partial-index entailment: every conjunct of the index predicate
-    // must appear as a conjunct of the query WHERE for the rewrite to
-    // be sound, otherwise the index would silently omit rows the
-    // query expects to see.
-    let query_conjuncts: Vec<SqlExpr> = params
-        .filters
+    // Take the first equality that lines up with a Ready index. The
+    // remaining filters stay as post-filters.
+    let IndexedEquality {
+        filter_index: i,
+        index: idx,
+        value,
+        residual,
+        others,
+    } = find_indexed_equality(&params.filters, &params.indexes)?;
+    let mut remaining = params.filters.clone();
+    match residual {
+        Some(expr) => {
+            remaining[i] = Filter {
+                expr: FilterExpr::Expr(expr),
+            };
+        }
+        None => {
+            remaining.remove(i);
+        }
+    }
+
+    // The indexed fetch evaluates no expression. A computed SELECT item
+    // runs in a tail over the fetched rows, and the tail takes the
+    // DISTINCT and row bound, which apply to the computed output.
+    let tail = computed_tail::needs_computed_tail(&params.projection);
+    let bounds = computed_tail::TailBounds {
+        distinct: params.distinct,
+        limit: params.limit,
+        offset: params.offset,
+    };
+    let lookup = SqlPlan::DocumentIndexLookup(DocumentIndexLookupPlan {
+        collection: params.collection.clone(),
+        alias: params.alias.clone(),
+        engine,
+        field: idx.field.clone(),
+        value,
+        also: others,
+        filters: remaining,
+        projection: computed_tail::body_projection(&params.projection),
+        sort_keys: params.sort_keys.clone(),
+        limit: if tail { None } else { params.limit },
+        offset: if tail { 0 } else { params.offset },
+        distinct: !tail && params.distinct,
+        window_functions: params.window_functions.clone(),
+        case_insensitive: idx.case_insensitive,
+        temporal: params.temporal,
+    });
+    Some(computed_tail::with_computed_tail(
+        lookup,
+        &params.projection,
+        bounds,
+    ))
+}
+
+/// An equality conjunct that a `Ready` secondary index answers.
+pub(crate) struct IndexedEquality<'a> {
+    /// Position of the filter holding the equality.
+    pub filter_index: usize,
+    pub index: &'a IndexSpec,
+    /// The literal to look up, lowercased for a case-insensitive index.
+    pub value: SqlValue,
+    /// The filter's other conjuncts. `None` when the filter was a bare
+    /// equality.
+    pub residual: Option<SqlExpr>,
+    /// Equalities on the other `Ready` indexes. Each stays in the filters
+    /// as well, so the executor can narrow by them and the filters still
+    /// decide a row.
+    pub others: Vec<IndexProbe>,
+}
+
+/// The first equality in `filters` that lines up with a `Ready` index whose
+/// partial-index predicate the query entails, plus the equalities on the
+/// other such indexes. No statistics say which index is narrowest, so the
+/// executor reads the ids of every one and keeps the shared ones.
+///
+/// Predicates appear in three shapes:
+///   - `FilterExpr::Comparison { field, Eq, value }` — resolver path.
+///   - `FilterExpr::Expr(BinaryOp { Column, Eq, Literal })` — generic.
+///   - `FilterExpr::Expr(BinaryOp { left AND right })` — the top-level AND
+///     of a compound WHERE. An equality nested in a conjunction still
+///     picks up the index.
+///
+/// Every equality conjunct is a candidate, so a leading equality on an
+/// unindexed column does not hide an indexed one. Every conjunct of a
+/// partial index's predicate must appear as a conjunct of the query WHERE,
+/// otherwise the index omits rows the query expects.
+pub(crate) fn find_indexed_equality<'a>(
+    filters: &[Filter],
+    indexes: &'a [IndexSpec],
+) -> Option<IndexedEquality<'a>> {
+    let query_conjuncts: Vec<SqlExpr> = filters
         .iter()
         .flat_map(|f| match &f.expr {
             FilterExpr::Expr(e) => {
@@ -71,117 +147,95 @@ pub(crate) fn try_document_index_lookup(
         })
         .collect();
 
-    for (i, f) in params.filters.iter().enumerate() {
-        let Some((field, value, residual)) = extract_equality_with_residual(&f.expr) else {
-            continue;
-        };
+    let candidates = filters.iter().enumerate().flat_map(|(i, f)| {
+        equality_candidates(&f.expr)
+            .into_iter()
+            .map(move |(field, value, residual)| (i, field, value, residual))
+    });
+    let mut matched: Vec<(usize, &IndexSpec, SqlValue, Option<SqlExpr>)> = Vec::new();
+    for (filter_index, field, value, residual) in candidates {
         let canonical = canonical_index_field(&field);
-        let Some(idx) = params.indexes.iter().find(|i| {
+        let Some(index) = indexes.iter().find(|i| {
             i.state == IndexState::Ready
                 && i.field == canonical
                 && partial_index_entailed(i.predicate.as_deref(), &query_conjuncts)
         }) else {
             continue;
         };
-
-        let mut remaining = params.filters.clone();
-        match residual {
-            Some(expr) => {
-                remaining[i] = Filter {
-                    expr: FilterExpr::Expr(expr),
-                };
-            }
-            None => {
-                remaining.remove(i);
-            }
-        }
-
-        let lookup_value = if idx.case_insensitive {
+        let value = if index.case_insensitive {
             lowercase_string_value(&value)
         } else {
             value
         };
-
-        // The indexed fetch evaluates no expression. A computed SELECT item
-        // runs in a tail over the fetched rows, and the tail takes the
-        // DISTINCT and row bound, which apply to the computed output.
-        let tail = computed_tail::needs_computed_tail(&params.projection);
-        let bounds = computed_tail::TailBounds {
-            distinct: params.distinct,
-            limit: params.limit,
-            offset: params.offset,
-        };
-        let lookup = SqlPlan::DocumentIndexLookup(DocumentIndexLookupPlan {
-            collection: params.collection.clone(),
-            alias: params.alias.clone(),
-            engine,
-            field: idx.field.clone(),
-            value: lookup_value,
-            filters: remaining,
-            projection: computed_tail::body_projection(&params.projection),
-            sort_keys: params.sort_keys.clone(),
-            limit: if tail { None } else { params.limit },
-            offset: if tail { 0 } else { params.offset },
-            distinct: !tail && params.distinct,
-            window_functions: params.window_functions.clone(),
-            case_insensitive: idx.case_insensitive,
-            temporal: params.temporal,
-        });
-        return Some(computed_tail::with_computed_tail(
-            lookup,
-            &params.projection,
-            bounds,
-        ));
+        matched.push((filter_index, index, value, residual));
     }
-    None
+    let mut matched = matched.into_iter();
+    let (filter_index, index, value, residual) = matched.next()?;
+    let mut others: Vec<IndexProbe> = Vec::new();
+    for (_, other, other_value, _) in matched {
+        if other.field != index.field && others.iter().all(|p| p.field != other.field) {
+            others.push(IndexProbe {
+                field: other.field.clone(),
+                value: other_value,
+            });
+        }
+    }
+    Some(IndexedEquality {
+        filter_index,
+        index,
+        value,
+        residual,
+        others,
+    })
 }
 
-/// Pull `(column_name, equality_value, residual_expr)` out of a filter
-/// expression if it contains a column-equals-literal predicate that can
-/// drive an index lookup. Returns `None` if no usable equality is
-/// present. The returned residual is the rest of the conjunction with
-/// the equality removed — `None` when the filter was a bare equality.
-fn extract_equality_with_residual(
-    expr: &FilterExpr,
-) -> Option<(String, SqlValue, Option<SqlExpr>)> {
+/// Every `(column_name, equality_value, residual_expr)` a filter offers as an
+/// index lookup: one per column-equals-literal conjunct. The residual is the
+/// rest of the conjunction with that equality removed, in the original order
+/// — `None` when the filter was a bare equality. Empty when the filter holds
+/// no usable equality.
+fn equality_candidates(expr: &FilterExpr) -> Vec<(String, SqlValue, Option<SqlExpr>)> {
     match expr {
         FilterExpr::Comparison {
             field,
             op: CompareOp::Eq,
             value,
-        } => Some((field.clone(), value.clone(), None)),
-        FilterExpr::Expr(sql_expr) => {
-            let (col, lit, residual) = split_equality_from_expr(sql_expr)?;
-            Some((col, lit, residual))
-        }
-        _ => None,
+        } => vec![(field.clone(), value.clone(), None)],
+        FilterExpr::Expr(sql_expr) => equalities_from_expr(sql_expr),
+        _ => Vec::new(),
     }
 }
 
-/// Return `(column, literal, residual_expr)` for an equality found
-/// anywhere in a right-leaning AND conjunction tree, or `None` if no
-/// bare column-equals-literal predicate exists. The residual preserves
-/// every sibling conjunct in their original order; `None` means the
-/// expression was a bare equality with nothing left behind.
-fn split_equality_from_expr(expr: &SqlExpr) -> Option<(String, SqlValue, Option<SqlExpr>)> {
-    // Gather the conjuncts of a top-level AND chain left-to-right.
+/// The equalities of an `AND` conjunction tree, each with the residual of its
+/// sibling conjuncts. Non-equality conjuncts offer none.
+fn equalities_from_expr(expr: &SqlExpr) -> Vec<(String, SqlValue, Option<SqlExpr>)> {
     let mut conjuncts: Vec<SqlExpr> = Vec::new();
     flatten_and(expr, &mut conjuncts);
 
-    // Find the first conjunct that is a bare column-equals-literal.
-    let eq_idx = conjuncts.iter().position(is_column_eq_literal)?;
-    let eq = conjuncts.remove(eq_idx);
-    let (col, lit) = match eq {
-        SqlExpr::BinaryOp { left, op, right } => match (*left, op, *right) {
-            (SqlExpr::Column { name, .. }, BinaryOp::Eq, SqlExpr::Literal(v)) => (name, v),
-            (SqlExpr::Literal(v), BinaryOp::Eq, SqlExpr::Column { name, .. }) => (name, v),
-            _ => return None,
-        },
-        _ => return None,
-    };
-
-    let residual = rebuild_and(conjuncts);
-    Some((col, lit, residual))
+    (0..conjuncts.len())
+        .filter(|&i| is_column_eq_literal(&conjuncts[i]))
+        .filter_map(|i| {
+            let (col, lit) = match &conjuncts[i] {
+                SqlExpr::BinaryOp { left, op, right } => {
+                    match (left.as_ref(), op, right.as_ref()) {
+                        (SqlExpr::Column { name, .. }, BinaryOp::Eq, SqlExpr::Literal(v))
+                        | (SqlExpr::Literal(v), BinaryOp::Eq, SqlExpr::Column { name, .. }) => {
+                            (name.clone(), v.clone())
+                        }
+                        _ => return None,
+                    }
+                }
+                _ => return None,
+            };
+            let siblings = conjuncts
+                .iter()
+                .enumerate()
+                .filter(|&(j, _)| j != i)
+                .map(|(_, c)| c.clone())
+                .collect();
+            Some((col, lit, rebuild_and(siblings)))
+        })
+        .collect()
 }
 
 /// Append every leaf of a right-leaning `AND` tree to `out`. Non-AND

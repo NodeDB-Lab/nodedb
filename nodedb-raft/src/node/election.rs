@@ -82,6 +82,7 @@ impl<S: LogStorage> RaftNode<S> {
         self.pre_vote = None;
         self.hard_state.current_term += 1;
         self.role = NodeRole::Candidate;
+        self.publish_leadership();
         self.hard_state.voted_for = self.config.node_id;
         self.votes_received.clear();
         self.leader_id = 0;

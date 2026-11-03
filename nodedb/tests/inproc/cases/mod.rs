@@ -9,6 +9,7 @@ mod snapshot_rt_common;
 #[path = "../../support/mod.rs"]
 mod support;
 
+mod agent_memory_reads;
 mod alert_rule_replication_apply;
 mod array_auto_flush_visibility;
 mod array_cluster_sync;
@@ -131,6 +132,7 @@ mod http_support;
 mod http_ws;
 mod http_ws_authorization;
 mod http_ws_support;
+mod index_intersection;
 mod intake_throttle;
 mod kv_atomic_autocommit_wal;
 mod kv_atomic_surrogate_identity;
@@ -223,6 +225,7 @@ mod transaction_batch_cross_shard;
 mod trigger_batching;
 mod trigger_execution;
 mod vector_index_post_apply_dispatch;
+mod vector_index_prefilter;
 mod vector_metadata_replication_apply;
 mod wal_catchup;
 mod warm_storage_object_store;

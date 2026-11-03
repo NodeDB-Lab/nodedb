@@ -44,6 +44,41 @@ pub struct ScanFilter {
     pub expr: Option<SqlExpr>,
 }
 
+impl ScanFilter {
+    /// The stored fields `filters` read, each once. A dotted path names its
+    /// top-level field as well as the path, so a row that keeps only these
+    /// fields still answers the filters.
+    pub fn referenced_fields(filters: &[ScanFilter]) -> Vec<String> {
+        let mut fields = Vec::new();
+        for filter in filters {
+            filter.collect_fields(&mut fields);
+        }
+        fields
+    }
+
+    fn collect_fields(&self, fields: &mut Vec<String>) {
+        let mut add = |name: &str| {
+            if !name.is_empty() && !fields.iter().any(|f| f == name) {
+                fields.push(name.to_owned());
+            }
+        };
+        add(&self.field);
+        if let Some((top, _)) = self.field.split_once('.') {
+            add(top);
+        }
+        if let Some(expr) = &self.expr {
+            for column in crate::expr_parse::referenced_columns(expr) {
+                add(&column);
+            }
+        }
+        for group in &self.clauses {
+            for clause in group {
+                clause.collect_fields(fields);
+            }
+        }
+    }
+}
+
 impl zerompk::ToMessagePack for ScanFilter {
     fn write<W: zerompk::Write>(&self, writer: &mut W) -> zerompk::Result<()> {
         writer.write_array_len(5)?;

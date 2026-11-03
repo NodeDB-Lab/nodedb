@@ -693,4 +693,12 @@ pub enum MetaOp {
     /// answers one msgpack array of `DueExpiry` and reaps nothing: the data
     /// group's leader proposes each reap through write admission.
     KvDueExpiries { limit: u32 },
+
+    /// Count this core's share of the graph node and edge gauges, and move
+    /// the gauges by the change since the core's last count.
+    ///
+    /// `hosted_vshards` names every vShard this node hosts. The core counts a
+    /// CSR node only when its home vShard is in the set and routes to this
+    /// core, plus that node's live out-edges. The core answers no payload.
+    RefreshGraphCount { hosted_vshards: Vec<u32> },
 }

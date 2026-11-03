@@ -12,9 +12,14 @@ use nodedb_types::StorageKey;
 use tracing::{debug, warn};
 
 use crate::bridge::envelope::{ErrorCode, Response};
+use nodedb_physical::physical_plan::{IndexProbe, SortKeySpec};
+
+use super::index_fetch_narrow::NarrowSort;
+use super::sort;
 use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::filter_match::matches_with_resolved_schema;
+use crate::data::executor::row_shape::inject_row_identity;
 use crate::data::executor::task::ExecutionTask;
 
 /// Parameters for `execute_document_indexed_fetch`.
@@ -33,10 +38,16 @@ pub(in crate::data::executor) struct IndexedFetchParams<'a> {
     pub collection: &'a str,
     pub path: &'a str,
     pub value: &'a str,
+    /// Further indexed equalities. A row stays only when every index holds
+    /// it, so a wide index never costs a body decode per row.
+    pub also: &'a [IndexProbe],
     pub filters: &'a [u8],
     pub projection: &'a [String],
     pub limit: usize,
     pub offset: usize,
+    /// ORDER BY terms over the rows that pass the residual. `offset` and
+    /// `limit` count rows after the sort.
+    pub sort_keys: &'a [SortKeySpec],
     /// System-time ordinal cut of the read. `None` for the current state.
     pub system_as_of: Option<i64>,
     /// True for a current read and a transaction snapshot read: the
@@ -47,9 +58,7 @@ pub(in crate::data::executor) struct IndexedFetchParams<'a> {
 impl CoreLoop {
     /// Execute a secondary index lookup: find all doc IDs where `path = value`.
     ///
-    /// Delegates to `DocumentEngine::index_lookup`, which reads the
-    /// versioned index at the current state. Returns a JSON array of
-    /// document IDs as the payload.
+    /// Returns a JSON array of document IDs as the payload.
     pub(in crate::data::executor) fn execute_document_index_lookup(
         &mut self,
         task: &ExecutionTask,
@@ -57,7 +66,66 @@ impl CoreLoop {
         collection: &str,
         path: &str,
         value: &str,
+        system_time: &nodedb_types::SystemTimeScope,
     ) -> Response {
+        match self.index_lookup_keys(task, tid, collection, path, value, system_time) {
+            Ok(doc_ids) => {
+                let doc_ids: Vec<String> = doc_ids.iter().map(|k| k.to_string()).collect();
+                let payload = serde_json::json!(doc_ids);
+                match sonic_rs::to_vec(&payload) {
+                    Ok(bytes) => self.response_with_payload(task, bytes),
+                    Err(e) => self.response_error(
+                        task,
+                        ErrorCode::Internal {
+                            detail: format!("index lookup encode: {e}"),
+                        },
+                    ),
+                }
+            }
+            Err(e) => self.response_error(task, e),
+        }
+    }
+
+    /// The rows whose indexed `path` equals `value`, as a surrogate bitmap.
+    /// The rows are the ones `execute_document_index_lookup` names, without
+    /// the encoded id list between the index and the bitmap.
+    pub(in crate::data::executor) fn index_lookup_surrogates(
+        &mut self,
+        task: &ExecutionTask,
+        collection: &str,
+        path: &str,
+        value: &str,
+        system_time: &nodedb_types::SystemTimeScope,
+    ) -> crate::Result<nodedb_types::SurrogateBitmap> {
+        let tid = task.request.tenant_id.as_u64();
+        let keys = self.index_lookup_keys(task, tid, collection, path, value, system_time)?;
+        let mut bitmap = nodedb_types::SurrogateBitmap::new();
+        for key in &keys {
+            bitmap.insert(key.surrogate());
+        }
+        Ok(bitmap)
+    }
+
+    /// Doc IDs where `path = value` at the cut of `system_time`. A current
+    /// read and a transaction snapshot read merge the rows the transaction
+    /// staged. A historical read sees committed rows only. `AllVersions`
+    /// has no single cut and is refused.
+    fn index_lookup_keys(
+        &mut self,
+        task: &ExecutionTask,
+        tid: u64,
+        collection: &str,
+        path: &str,
+        value: &str,
+        system_time: &nodedb_types::SystemTimeScope,
+    ) -> crate::Result<Vec<StorageKey>> {
+        if matches!(system_time, nodedb_types::SystemTimeScope::AllVersions) {
+            return Err(crate::Error::DataPlane(ErrorCode::Unsupported {
+                detail: "AS OF SYSTEM TIME NULL (all-versions) is not supported on index \
+                         lookups; use a table scan"
+                    .into(),
+            }));
+        }
         debug!(
             core = self.core_id,
             %collection,
@@ -71,58 +139,39 @@ impl CoreLoop {
             task.request.database_id.as_u64(),
             tid,
         );
-        match doc_engine.index_lookup(collection, path, value, None) {
-            Ok(mut doc_ids) => {
-                if let Some(txn_id) = task.request.txn_id {
-                    let config_key = (
-                        task.request.database_id,
-                        crate::types::TenantId::new(tid),
-                        collection.to_string(),
-                    );
-                    let (is_array, case_insensitive) = self.index_path_flags(&config_key, path);
-                    let coll_key = (
-                        task.request.database_id,
-                        crate::types::TenantId::new(tid),
-                        collection.to_string(),
-                    );
-                    if let Err(e) = self.merge_overlay_into_index_lookup(
-                        super::super::transaction::overlay::IndexOverlayMergeParams {
-                            txn_id,
-                            coll_key: &coll_key,
-                            path,
-                            value,
-                            is_array,
-                            case_insensitive,
-                            // `DocumentOp::IndexLookup` carries no residual
-                            // filters at all (it returns bare doc IDs, used by
-                            // bitmap-producer callers) — the empty slice makes
-                            // the merge's residual re-check a no-op, so this
-                            // call site can never actually observe `Err` —
-                            // handled uniformly with the other call site
-                            // anyway rather than assuming that invariant.
-                            residual: &[],
-                            strict_schema: None,
-                        },
-                        &mut doc_ids,
-                        &|body| self.decode_indexed_body(&config_key, body),
-                    ) {
-                        return self.response_error(task, e);
-                    }
-                }
-                let doc_ids: Vec<String> = doc_ids.iter().map(|k| k.to_string()).collect();
-                let payload = serde_json::json!(doc_ids);
-                match sonic_rs::to_vec(&payload) {
-                    Ok(bytes) => self.response_with_payload(task, bytes),
-                    Err(e) => self.response_error(
-                        task,
-                        ErrorCode::Internal {
-                            detail: format!("index lookup encode: {e}"),
-                        },
-                    ),
-                }
-            }
-            Err(e) => self.response_error(task, ErrorCode::from(e)),
+        let mut doc_ids =
+            doc_engine.index_lookup(collection, path, value, system_time.as_of_ordinal())?;
+        let overlay_txn = task
+            .request
+            .txn_id
+            .filter(|_| system_time.merges_txn_overlay());
+        if let Some(txn_id) = overlay_txn {
+            let coll_key = (
+                task.request.database_id,
+                crate::types::TenantId::new(tid),
+                collection.to_string(),
+            );
+            let (is_array, case_insensitive) = self.index_path_flags(&coll_key, path);
+            self.merge_overlay_into_index_lookup(
+                super::super::transaction::overlay::IndexOverlayMergeParams {
+                    txn_id,
+                    coll_key: &coll_key,
+                    path,
+                    value,
+                    is_array,
+                    case_insensitive,
+                    // `DocumentOp::IndexLookup` carries no residual
+                    // filters at all (it returns bare doc IDs, used by
+                    // bitmap-producer callers) — the empty slice makes
+                    // the merge's residual re-check a no-op.
+                    residual: &[],
+                    strict_schema: None,
+                },
+                &mut doc_ids,
+                &|body| self.decode_indexed_body(&coll_key, body),
+            )?;
         }
+        Ok(doc_ids)
     }
 
     /// Execute a SELECT rewritten as a secondary-index fetch.
@@ -140,7 +189,11 @@ impl CoreLoop {
     /// body — committed or staged — so a row matching the indexed term but
     /// failing the leftover conjuncts is excluded like a base scan would.
     /// Projection is not yet applied here; the planner falls back to a full
-    /// scan for cases this handler doesn't cover (sort/distinct/window).
+    /// scan for cases this handler doesn't cover (window functions).
+    ///
+    /// With `sort_keys`, every row that passes the residual is gathered and
+    /// ordered, and `offset` and `limit` then cut the ordered rows. Each row
+    /// carries its identity, as a scan row does, so a key can name it.
     pub(in crate::data::executor) fn execute_document_indexed_fetch(
         &mut self,
         task: &ExecutionTask,
@@ -151,10 +204,12 @@ impl CoreLoop {
             collection,
             path,
             value,
+            also,
             filters,
             projection: _projection,
             limit,
             offset,
+            sort_keys,
             system_as_of,
             merge_overlay,
         } = params;
@@ -172,17 +227,17 @@ impl CoreLoop {
         // A read at a cut answers from the versioned index at that cut: a row
         // matches when its newest entry at or before the cut is live.
         let as_of = system_as_of;
-        let looked_up = self.sparse.versioned_index_lookup_as_of(
+        let mut doc_ids = match self.probe_index_ids(&super::index_probe::IndexProbes {
             database_id,
             tid,
             collection,
             path,
             value,
+            also,
             as_of,
-        );
-        let mut doc_ids: Vec<StorageKey> = match looked_up {
+        }) {
             Ok(ids) => ids,
-            Err(e) => return self.response_error(task, ErrorCode::from(e)),
+            Err(e) => return self.response_error(task, e),
         };
 
         // Strict collections store Binary Tuple bytes; the response codec
@@ -271,13 +326,20 @@ impl CoreLoop {
         // residual runs on every candidate before either applies. A no-LIMIT
         // fetch (`limit == usize::MAX`) is bounded by the per-query byte
         // budget below, never by a row cap.
-        let unbounded = limit == usize::MAX;
+        let sorted = !sort_keys.is_empty();
+        let unbounded = limit == usize::MAX || sorted;
         let mut skipped = 0usize;
         let mut total_bytes = 0usize;
         let mut rows: Vec<(String, Vec<u8>)> = Vec::new();
+        // A sorted fetch over a strict collection sorts narrow rows and
+        // converts only the rows it keeps (see `NarrowSort`).
+        let mut narrow = match (&strict_schema, sorted) {
+            (Some(schema), true) => Some(NarrowSort::new(schema, collection, sort_keys)),
+            _ => None,
+        };
         let crs = self.crs_context();
         for doc_id in doc_ids.iter() {
-            if rows.len() >= limit {
+            if !sorted && rows.len() >= limit {
                 break;
             }
             // A doc ID the overlay merge added or superseded above has no
@@ -323,11 +385,16 @@ impl CoreLoop {
                             return self.response_error(task, ErrorCode::from(e));
                         }
                     }
-                    if skipped < offset {
+                    if !sorted && skipped < offset {
                         skipped += 1;
                         continue;
                     }
-                    let payload = if let Some(ref schema) = strict_schema {
+                    let payload = if let Some(narrow) = narrow.as_mut() {
+                        match narrow.narrow_row(doc_id, bytes, &identity_column) {
+                            Ok(row) => row,
+                            Err(code) => return self.response_error(task, code),
+                        }
+                    } else if let Some(ref schema) = strict_schema {
                         // A body that does not decode under its schema is an
                         // error, never passed on as if it were msgpack.
                         match super::super::super::strict_format::binary_tuple_to_msgpack(
@@ -348,6 +415,11 @@ impl CoreLoop {
                         }
                     } else {
                         bytes
+                    };
+                    let payload = if sorted && narrow.is_none() {
+                        inject_row_identity(&payload, doc_id, &identity_column).into_owned()
+                    } else {
+                        payload
                     };
                     let doc_id = doc_id.to_string();
                     total_bytes = total_bytes
@@ -371,6 +443,28 @@ impl CoreLoop {
                     return self.response_error(task, ErrorCode::from(e));
                 }
             }
+        }
+
+        if sorted {
+            let decimal_keys = sort::decimal_sort_keys(sort_keys, strict_schema.as_ref());
+            let ordered = match self.sort_document_rows(
+                rows,
+                sort_keys,
+                &decimal_keys,
+                limit.saturating_add(offset),
+            ) {
+                Ok(ordered) => ordered,
+                Err(e) => return self.response_error(task, ErrorCode::from(e)),
+            };
+            let kept: Vec<(String, Vec<u8>)> =
+                ordered.into_iter().skip(offset).take(limit).collect();
+            rows = match narrow {
+                Some(narrow) => match narrow.full_rows(kept, &identity_column) {
+                    Ok(full) => full,
+                    Err(code) => return self.response_error(task, code),
+                },
+                None => kept,
+            };
         }
 
         match super::super::super::response_codec::encode_raw_document_rows(&rows) {

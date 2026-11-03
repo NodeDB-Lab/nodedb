@@ -10,7 +10,7 @@
 use async_trait::async_trait;
 use nodedb_cluster::distributed_array::wire::{
     ArrayShardAggReq, ArrayShardDeleteReq, ArrayShardElementwiseReq, ArrayShardMaintReq,
-    ArrayShardPutReq,
+    ArrayShardPutReq, ArrayShardSurrogateBitmapReq,
 };
 use nodedb_cluster::distributed_array::{
     ArrayAggExec, ArrayElementwiseExec, ArrayLocalExecutor, ArrayShardWriteOutcome, ArraySliceExec,
@@ -64,10 +64,8 @@ impl ArrayLocalExecutor for DataPlaneArrayExecutor {
     async fn exec_surrogate_bitmap_scan(
         &self,
         local_vshard_id: u32,
-        array_id_msgpack: &[u8],
-        slice_msgpack: &[u8],
+        req: &ArrayShardSurrogateBitmapReq,
     ) -> Result<Vec<u8>> {
-        self.surrogate_bitmap_scan(local_vshard_id, array_id_msgpack, slice_msgpack)
-            .await
+        self.surrogate_bitmap_scan(local_vshard_id, req).await
     }
 }

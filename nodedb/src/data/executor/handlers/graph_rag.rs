@@ -146,8 +146,7 @@ impl CoreLoop {
             Ok(expansion) => expansion,
             Err(e) => return self.response_error(task, e),
         };
-        let (expanded_nodes, hop_distances, bfs_truncated, unaddressable) = (
-            expansion.names,
+        let (hop_distances, bfs_truncated, unaddressable) = (
             expansion.distances,
             expansion.truncated,
             expansion.unaddressable,
@@ -157,8 +156,8 @@ impl CoreLoop {
 
         let vector_list = vector_ranked_list(&vector_scores);
 
-        let graph_expanded_count = expanded_nodes.len();
-        let graph_list = graph_nodes_to_ranked_results(expanded_nodes, &hop_distances);
+        let graph_expanded_count = hop_distances.len();
+        let graph_list = graph_nodes_to_ranked_results(&hop_distances);
 
         let fused = reciprocal_rank_fusion_weighted(
             &[vector_list, graph_list],
@@ -365,28 +364,23 @@ pub(crate) fn vector_ranked_list(
 /// Sort expanded graph nodes by hop distance and convert to `RankedResult` list.
 ///
 /// A graph node name is the row's client key, so the list keys on
-/// [`RagKey::Node`]. Used by 2-source GraphRAG, 3-source GraphRAG triple, and
-/// the cluster coordinator.
+/// [`RagKey::Node`]. `hop_distances` holds every expanded node once, so the
+/// list is built from it directly. Used by 2-source GraphRAG, 3-source
+/// GraphRAG triple, and the cluster coordinator.
 pub(crate) fn graph_nodes_to_ranked_results(
-    expanded_nodes: Vec<String>,
     hop_distances: &HashMap<String, usize>,
 ) -> Vec<RankedResult<RagKey>> {
-    // Takes `expanded_nodes` by value so the name moves straight into the
-    // key below instead of being copied from a borrow.
-    let mut sorted: Vec<(String, usize)> = expanded_nodes
-        .into_iter()
-        .map(|node| {
-            let dist = hop_distances.get(&node).copied().unwrap_or(usize::MAX);
-            (node, dist)
-        })
+    let mut sorted: Vec<(&String, usize)> = hop_distances
+        .iter()
+        .map(|(node, dist)| (node, *dist))
         .collect();
-    sorted.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    sorted.sort_unstable_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(b.0)));
 
     sorted
         .into_iter()
         .enumerate()
         .map(|(rank, (node_id, hop_dist))| RankedResult {
-            document_id: RagKey::Node(node_id),
+            document_id: RagKey::Node(node_id.clone()),
             rank,
             score: hop_dist as f32,
             source: "graph",

@@ -76,6 +76,7 @@ fn to_replicated_batch_edges(edges: &[BatchEdge]) -> Vec<ReplicatedBatchEdge> {
             dst_surrogate: e.dst_surrogate.as_u32(),
             valid_from_ms: e.valid_from_ms,
             valid_until_ms: e.valid_until_ms,
+            properties: e.properties.clone(),
         })
         .collect()
 }

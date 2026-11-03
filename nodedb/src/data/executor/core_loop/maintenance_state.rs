@@ -54,6 +54,10 @@ pub(in crate::data::executor) struct MaintenanceState {
     /// The history purge below the cleanup horizon, and the commit snapshot
     /// window every replica checks.
     pub(in crate::data::executor) version_purge: super::version_purge::VersionPurgeState,
+
+    /// The share of the graph node and edge gauges this core last reported.
+    /// The next `MetaOp::RefreshGraphCount` moves the gauges by the change.
+    pub(in crate::data::executor) graph_count: crate::control::metrics::GraphCount,
 }
 
 impl MaintenanceState {
@@ -69,6 +73,7 @@ impl MaintenanceState {
             cagg_refresh_waiters: Vec::new(),
             cagg_read_waiters: Vec::new(),
             version_purge: super::version_purge::VersionPurgeState::new(),
+            graph_count: crate::control::metrics::GraphCount::default(),
         }
     }
 }

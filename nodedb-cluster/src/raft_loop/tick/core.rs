@@ -72,6 +72,56 @@ const ORPHAN_PARTIAL_GC_TICK_INTERVAL: u64 = 6000;
 const LEASE_GC_TICK_INTERVAL: u64 = 200;
 
 impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
+    /// Drive every group without advancing its clock: count the entries the
+    /// disks made durable, dispatch the messages that produces, and apply the
+    /// entries that commit. Runs when a disk finishes a batch, so a commit
+    /// does not wait for the next tick.
+    pub(in crate::raft_loop) async fn do_drive(&self) {
+        let ready = {
+            let mut mr = self.multi_raft.lock().unwrap_or_else(|p| p.into_inner());
+            match mr.drive() {
+                Ok(ready) => ready,
+                Err(e) => {
+                    error!(
+                        error = %e,
+                        "raft drive failed to stage hard state; \
+                         skipping message/vote dispatch"
+                    );
+                    return;
+                }
+            }
+        };
+        self.handle_ready(ready);
+    }
+
+    /// Route one collection of group output: the leader hints, the outbound
+    /// messages, the committed entries and the snapshot requests.
+    fn handle_ready(&self, ready: crate::multi_raft::MultiRaftReady) {
+        // Every leader change this node's Raft saw since the last collection,
+        // including its own election and a leader learned from an
+        // AppendEntries or heartbeat, reaches the routing table's leader hint.
+        self.sync_leader_hints();
+
+        if ready.is_empty() {
+            return;
+        }
+        self.dispatch_outbound_messages(&ready.groups);
+
+        // Apply committed entries and conf-changes, then dispatch any needed
+        // install-snapshot RPCs, per group.
+        for (group_id, group_ready) in ready.groups {
+            if let Some(err) = &group_ready.committed_read_error {
+                self.surface_committed_read_error(group_id, err);
+            }
+            if !group_ready.committed_entries.is_empty() {
+                self.apply_group_commits(group_id, &group_ready);
+            }
+            if !group_ready.snapshots_needed.is_empty() {
+                self.dispatch_group_snapshots(group_id, group_ready.snapshots_needed);
+            }
+        }
+    }
+
     /// Execute a single tick: drive Raft, dispatch outbound messages,
     /// apply commits, promote caught-up learners.
     pub(in crate::raft_loop) async fn do_tick(&self) {
@@ -96,31 +146,10 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
             }
         };
 
-        // Every leader change this node's Raft saw since the last tick,
-        // including its own election and a leader learned from an
-        // AppendEntries or heartbeat, reaches the routing table's leader hint.
-        self.sync_leader_hints();
-
         // Dispatch outgoing messages and persist log/HardState first (even if
         // ready looks "empty" we still want to run the learner-promotion step
         // each tick so a just-caught-up learner is promoted promptly).
-        if !ready.is_empty() {
-            self.dispatch_outbound_messages(&ready.groups);
-
-            // Apply committed entries and conf-changes, then dispatch any
-            // needed install-snapshot RPCs, per group.
-            for (group_id, group_ready) in ready.groups {
-                if let Some(err) = &group_ready.committed_read_error {
-                    self.surface_committed_read_error(group_id, err);
-                }
-                if !group_ready.committed_entries.is_empty() {
-                    self.apply_group_commits(group_id, &group_ready);
-                }
-                if !group_ready.snapshots_needed.is_empty() {
-                    self.dispatch_group_snapshots(group_id, group_ready.snapshots_needed);
-                }
-            }
-        }
+        self.handle_ready(ready);
 
         // Mount a local replica for any group this node should host (per the
         // replicated placement set) but does not yet — the recovery path for a

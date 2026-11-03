@@ -154,6 +154,20 @@ impl FtsBackend for RedbFtsBackend {
         super::postings::read(self, database_id, tid, index, term)
     }
 
+    fn read_postings_with_lengths(
+        &self,
+        database_id: u64,
+        tid: u64,
+        index: IndexScope<'_>,
+        term: &str,
+    ) -> crate::Result<Vec<(Posting, Option<u32>)>> {
+        let rows = super::postings::read_with_lengths(self, database_id, tid, index, term)?;
+        Ok(rows
+            .into_iter()
+            .map(|(posting, length)| (posting, Some(length)))
+            .collect())
+    }
+
     fn write_postings(
         &self,
         database_id: u64,

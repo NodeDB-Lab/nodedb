@@ -17,7 +17,7 @@ use super::super::stream_select;
 use super::super::timeseries;
 use super::super::topic;
 use super::super::topic_subscribe;
-use super::route_tokens::RouteTokens;
+use super::route_tokens::{RouteTokens, mentions};
 
 pub(super) async fn try_string(
     state: &SharedState,
@@ -202,6 +202,9 @@ pub(super) async fn try_string(
 /// `SELECT * FROM <kind> <name> CONSUMER GROUP <group> ...`, where `kind` is
 /// `STREAM` or `TOPIC`. The consumer-group clause follows the name.
 fn is_consumer_group_read(sql: &str, kind: &str) -> bool {
+    if !mentions(sql, "CONSUMER") {
+        return false;
+    }
     let tokens = RouteTokens::new(sql);
     tokens.leads_with(&["SELECT", "*", "FROM", kind])
         && tokens.phrase_at(tokens.skip_name(4), &["CONSUMER", "GROUP"])

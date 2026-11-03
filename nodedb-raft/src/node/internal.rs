@@ -52,6 +52,7 @@ impl<S: LogStorage> RaftNode<S> {
         self.quorum_window.clear();
         self.leader_since = None;
         self.term_start_index = None;
+        self.publish_leadership();
         self.persist_hard_state();
         self.reset_election_timeout();
 
@@ -63,6 +64,15 @@ impl<S: LogStorage> RaftNode<S> {
                 "stepped down from leader"
             );
         }
+    }
+
+    /// Publish the leadership this node holds now.
+    pub(super) fn publish_leadership(&self) {
+        let held = (self.role == NodeRole::Leader).then_some(super::leader_mark::Leadership {
+            term: self.hard_state.current_term,
+            term_start: self.term_start_index,
+        });
+        self.leader_mark.set(held);
     }
 
     pub(super) fn become_leader(&mut self) {
@@ -105,6 +115,7 @@ impl<S: LogStorage> RaftNode<S> {
         let noop_index = noop.index;
         let _ = self.log.append(noop);
         self.term_start_index = Some(noop_index);
+        self.publish_leadership();
 
         // Single-voter cluster: the no-op commits once it is durable here.
         if self.config.cluster_size() == 1 {

@@ -103,7 +103,7 @@ mod tests {
     fn idle_disk() -> (tempfile::TempDir, Arc<GroupDisk>) {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("group-3.redb");
-        let disk = Arc::new(GroupDisk::open(3, &path).expect("open"));
+        let disk = Arc::new(GroupDisk::open(3, &path, Arc::default()).expect("open"));
         (dir, disk)
     }
 

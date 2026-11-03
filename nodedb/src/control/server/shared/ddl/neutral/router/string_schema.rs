@@ -14,7 +14,7 @@ use super::super::period_lock;
 use super::super::permission_tree;
 use super::super::procedure;
 use super::super::typeguard;
-use super::route_tokens::RouteTokens;
+use super::route_tokens::{RouteTokens, mentions};
 
 pub(super) async fn try_string(
     state: &SharedState,
@@ -170,6 +170,9 @@ enum AlterCollectionArm {
 /// follows the name. A keyword inside the name, a literal, or a parenthesized
 /// predicate never selects an arm.
 fn alter_collection_arm(sql: &str) -> Option<AlterCollectionArm> {
+    if !mentions(sql, "ALTER") {
+        return None;
+    }
     let tokens = RouteTokens::new(sql);
     if !tokens.leads_with(&["ALTER", "COLLECTION"]) {
         return None;
@@ -215,7 +218,7 @@ fn alter_collection_arm(sql: &str) -> Option<AlterCollectionArm> {
 /// Whether a `CREATE FUNCTION` declares `LANGUAGE WASM` in its header, before
 /// its `AS` body.
 fn is_wasm_function(sql: &str) -> bool {
-    RouteTokens::new(sql).has_phrase_before(&["LANGUAGE", "WASM"], "AS")
+    mentions(sql, "WASM") && RouteTokens::new(sql).has_phrase_before(&["LANGUAGE", "WASM"], "AS")
 }
 
 #[cfg(test)]

@@ -246,6 +246,37 @@ mod tests {
         assert_eq!(n[0].1, "a");
     }
 
+    /// A self-loop is one edge. A `Both` read lists it once, in the
+    /// unscoped and the collection-scoped read, buffered and compacted.
+    #[test]
+    fn both_lists_a_self_loop_once() {
+        let mut csr = CsrIndex::new(test_memory());
+        csr.add_edge_in_collection("a", "l", "b", "g").unwrap();
+        csr.add_edge_in_collection("a", "l", "a", "g").unwrap();
+        csr.add_edge_in_collection("c", "l", "d", "g").unwrap();
+        csr.add_edge_in_collection("d", "l", "c", "g").unwrap();
+        let pair = |l: &str, n: &str| (l.to_string(), n.to_string());
+        for compacted in [false, true] {
+            if compacted {
+                csr.compact().unwrap();
+            }
+            let mut both = csr.neighbors("a", &[], Direction::Both);
+            both.sort();
+            assert_eq!(both, vec![pair("l", "a"), pair("l", "b")], "{compacted}");
+            let mut scoped = csr.neighbors_in_collection("a", &["l"], Direction::Both, "g");
+            scoped.sort();
+            assert_eq!(scoped, vec![pair("l", "a"), pair("l", "b")], "{compacted}");
+            assert_eq!(csr.neighbors("a", &[], Direction::Out).len(), 2);
+            assert_eq!(csr.neighbors("a", &[], Direction::In), vec![pair("l", "a")]);
+            assert_eq!(
+                csr.neighbors_in_collection("a", &[], Direction::In, "g"),
+                vec![pair("l", "a")]
+            );
+            // Two distinct edges between one pair stay two entries.
+            assert_eq!(csr.neighbors("c", &[], Direction::Both).len(), 2);
+        }
+    }
+
     #[test]
     fn incremental_remove() {
         let mut csr = make_csr();

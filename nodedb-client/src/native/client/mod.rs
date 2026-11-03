@@ -4,6 +4,7 @@ mod array;
 pub mod core;
 mod crdt_list;
 mod dispatch;
+mod dispatch_graph;
 mod document;
 mod graph;
 mod identity;

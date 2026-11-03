@@ -175,6 +175,7 @@ impl CoreLoop {
                         partition.set_node_surrogate(src_id, src_surrogate);
                         partition.set_node_surrogate(dst_id, dst_surrogate);
                         self.checkpoint_coordinator.mark_dirty("sparse", 1);
+                        self.count_edge_written(task, src_id);
                         self.note_edge_write(task, tid, collection, src_id, label, dst_id);
                         // CDC: emit after `note_edge_write` so the core
                         // watermark (the event's LSN) already reflects this

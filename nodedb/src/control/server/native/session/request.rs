@@ -454,6 +454,11 @@ async fn route_opcode(
         // Array bulk load: the shared array bulk-load core.
         OpCode::ArrayPutBatch => dispatch::handle_array_put_batch(&ctx, seq, fields).await,
 
+        // Edge batches: the edge-list handlers `GRAPH INSERT EDGE` and
+        // `GRAPH DELETE EDGE` run.
+        OpCode::EdgePutBatch => dispatch::handle_edge_put_batch(&ctx, seq, fields).await,
+        OpCode::EdgeDeleteBatch => dispatch::handle_edge_delete_batch(&ctx, seq, fields).await,
+
         // Copy from file.
         OpCode::CopyFrom => {
             let sql = match &fields.sql {

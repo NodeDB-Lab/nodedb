@@ -454,6 +454,7 @@ mod tests {
             metric: nodedb_sql::types::DistanceMetric::L2,
             filters: Vec::new(),
             array_prefilter: None,
+            index_prefilter: None,
             ann_options: nodedb_sql::types::VectorAnnOptions::default(),
             skip_payload_fetch: false,
             payload_filters: Vec::new(),

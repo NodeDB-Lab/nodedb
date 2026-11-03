@@ -66,7 +66,7 @@ pub async fn resolve_and_materialize(
 ) -> crate::Result<Resolved> {
     // Pass 1: fill empty ProviderScan rows (identity-scoped, per-request).
     let mut plan = materialize_providers(state, identity, scope.database_id, plan).await?;
-    resolve_array_prefilters(state, &mut plan).await?;
+    resolve_array_prefilters(state, scope.txn_id, &mut plan).await?;
 
     // Pass 2: resolve Exchange nodes. The captures accumulator is filled at every
     // base-collection gather point beneath the plan root and consumed (taken)
@@ -90,7 +90,7 @@ pub async fn resolve_exchange_in_plan(
     mut plan: PhysicalPlan,
     scope: ReadScope,
 ) -> crate::Result<Resolved> {
-    resolve_array_prefilters(state, &mut plan).await?;
+    resolve_array_prefilters(state, scope.txn_id, &mut plan).await?;
     let mut captures = Vec::new();
     resolve_exchange(state, scope, plan, &mut captures).await
 }

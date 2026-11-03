@@ -274,6 +274,14 @@ pub struct ArrayShardSurrogateBitmapReq {
     pub array_id_msgpack: Vec<u8>,
     /// Zerompk encoding of `nodedb_array::query::Slice`.
     pub slice_msgpack: Vec<u8>,
+    /// The cut every shard reads, forwarded from
+    /// `ArrayOp::SurrogateBitmapScan::system_time`: the scope of the vector
+    /// search the scan prefilters. A `Pinned` or marked `TxnSnapshot` scope
+    /// names the cut marker the shard waits for before it reads.
+    pub system_time: nodedb_types::SystemTimeScope,
+    /// The reading transaction's id, for read-your-own-writes against the
+    /// shard's staging overlay (see [`ArrayShardSliceReq::txn_id`]).
+    pub txn_id: Option<u64>,
 }
 
 /// Response: shard returns a surrogate bitmap for matching cells.

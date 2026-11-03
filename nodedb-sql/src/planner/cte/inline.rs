@@ -460,6 +460,7 @@ mod tests {
             metric: crate::types::DistanceMetric::L2,
             filters: Vec::new(),
             array_prefilter: None,
+            index_prefilter: None,
             ann_options: crate::types::VectorAnnOptions::default(),
             skip_payload_fetch: false,
             payload_filters: Vec::new(),

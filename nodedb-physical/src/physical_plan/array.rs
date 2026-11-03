@@ -308,6 +308,11 @@ pub enum ArrayOp {
     SurrogateBitmapScan {
         array_id: ArrayId,
         slice_msgpack: Vec<u8>,
+        /// The cut the scan reads: the scope of the search it prefilters.
+        /// The candidates and the ranked rows then read one cut. A current
+        /// read and a transaction snapshot read merge the transaction's
+        /// staged cells. The handler refuses `AllVersions`.
+        system_time: SystemTimeScope,
     },
 
     /// Reversibly stage a per-core array drop. The store is closed and its

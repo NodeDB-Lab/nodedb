@@ -296,6 +296,7 @@ fn build_node_delete_tasks(
                 dst_surrogate: surrogate_of(dst)?,
                 valid_from_ms: None,
                 valid_until_ms: None,
+                properties: Vec::new(),
             });
         }
         guards.push(PhysicalTask {

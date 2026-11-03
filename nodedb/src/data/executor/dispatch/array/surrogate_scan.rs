@@ -2,31 +2,51 @@
 
 //! `ArrayOp::SurrogateBitmapScan` handler.
 //!
-//! Reads each live cell of this core once at its newest version, applies
-//! the slice predicate, and emits one row per matching cell where `id` is
-//! the cell's bound `Surrogate` formatted as 8-char zero-padded lowercase
-//! hex (substrate row-key format). The cluster coordinator unions the shard
-//! answers into the prefilter bitmap of a vector search. A vector search
-//! that still carries this scan as its `inline_prefilter_plan` reads it
-//! through `collect_surrogates`.
+//! Reads each live cell of this core once at the scan's system-time cut,
+//! applies the slice predicate, and emits one row per matching cell where
+//! `id` is the cell's bound `Surrogate` formatted as 8-char zero-padded
+//! lowercase hex (substrate row-key format). The cut is the scope of the
+//! vector search the scan prefilters, so the candidates and the ranked rows
+//! read one cut. The cluster coordinator unions the shard answers into the
+//! prefilter bitmap of a vector search. A vector search that still carries
+//! this scan as its `inline_prefilter_plan` reads it through
+//! `collect_surrogates`.
 
 use nodedb_array::query::region::ArrayRegion;
 use nodedb_array::query::slice::{Slice, slice_sparse, tile_overlaps_slice};
 use nodedb_array::types::ArrayId;
+use nodedb_types::SystemTimeScope;
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::handlers::transaction::overlay::ArrayOverlayMergeParams;
 use crate::data::executor::response_codec::encode_raw_document_rows;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::document::store::StorageKey;
 
 impl CoreLoop {
+    /// The surrogates of the cells inside `slice_msgpack` at the cut of
+    /// `system_time`. A current read and a transaction snapshot read merge
+    /// the transaction's staged cells, as `ARRAY_SLICE` does at the same
+    /// scope. A historical read sees committed cells only. `AllVersions`
+    /// has no single cut and is refused.
     pub(in crate::data::executor) fn dispatch_array_surrogate_bitmap_scan(
         &mut self,
         task: &ExecutionTask,
         array_id: &ArrayId,
         slice_msgpack: &[u8],
+        system_time: SystemTimeScope,
     ) -> Response {
+        if matches!(system_time, SystemTimeScope::AllVersions) {
+            return self.response_error(
+                task,
+                ErrorCode::Unsupported {
+                    detail: "AS OF SYSTEM TIME NULL (all-versions) is not supported on an \
+                             array prefilter; use AS OF SYSTEM TIME <ms>"
+                        .into(),
+                },
+            );
+        }
         if let Err(resp) = self.ensure_array_open(task, array_id) {
             return resp;
         }
@@ -41,24 +61,17 @@ impl CoreLoop {
                 );
             }
         };
-        let schema = match self.array_engine.store(array_id) {
-            Ok(store) => store.schema().clone(),
-            Err(e) => {
-                return self.response_error(
-                    task,
-                    ErrorCode::Unsupported {
-                        detail: format!("array '{}' not open: {e}", array_id.name),
-                    },
-                );
-            }
-        };
 
-        // Each cell once at its newest version: a deleted or overwritten
-        // cell's older version admits no surrogate. The slice prunes whole
-        // prefixes by footer MBR before decode.
+        // Each cell once at its version as of the cut: a cell deleted or
+        // overwritten before the cut admits no older surrogate. The slice
+        // prunes whole prefixes by footer MBR before decode.
+        let cutoff = system_time.as_of_ordinal().unwrap_or(i64::MAX);
         let region = ArrayRegion::new(slice.clone(), None);
-        let scanned = match self.array_engine.store(array_id) {
-            Ok(store) => store.scan_shard_tiles_at(i64::MAX, None, None, Some(&region)),
+        let (schema, scanned) = match self.array_engine.store(array_id) {
+            Ok(store) => (
+                store.schema().clone(),
+                store.scan_shard_tiles_at(cutoff, None, None, Some(&region)),
+            ),
             Err(e) => {
                 return self.response_error(
                     task,
@@ -68,7 +81,7 @@ impl CoreLoop {
                 );
             }
         };
-        let tiles = match scanned {
+        let mut tiles = match scanned {
             Ok((tiles, _)) => tiles,
             Err(e) => {
                 return self.response_error(
@@ -79,6 +92,27 @@ impl CoreLoop {
                 );
             }
         };
+        // Read-your-own-writes: a current read and a transaction snapshot
+        // read see the transaction's staged cells. `AsOf` and `Pinned` read
+        // committed history and skip the overlay.
+        if system_time.merges_txn_overlay()
+            && let Err(e) = self.merge_array_overlay_tiles(
+                ArrayOverlayMergeParams {
+                    txn_id: task.request.txn_id,
+                    array_id,
+                    schema: &schema,
+                    valid_at_ms: None,
+                },
+                &mut tiles,
+            )
+        {
+            return self.response_error(
+                task,
+                ErrorCode::Internal {
+                    detail: format!("array surrogate-scan overlay merge: {e}"),
+                },
+            );
+        }
 
         let mut rows: Vec<(String, Vec<u8>)> = Vec::new();
         for (_, sparse) in tiles {
@@ -364,6 +398,7 @@ mod tests {
                 ArrayOp::SurrogateBitmapScan {
                     array_id: aid.clone(),
                     slice_msgpack,
+                    system_time: nodedb_types::SystemTimeScope::Current,
                 },
             ))),
             ann_options: Default::default(),
@@ -390,5 +425,83 @@ mod tests {
                 "hit surrogate {id} outside slice prefilter range 1..=5"
             );
         }
+    }
+
+    /// The response of a scan of the whole array at `system_time`.
+    fn scan_at(
+        h: &mut Harness,
+        aid: &ArrayId,
+        system_time: nodedb_types::SystemTimeScope,
+    ) -> crate::bridge::envelope::Response {
+        let slice = ArraySlice::new(vec![None, None]);
+        h.send(ArrayOp::SurrogateBitmapScan {
+            array_id: aid.clone(),
+            slice_msgpack: zerompk::to_msgpack_vec(&slice).unwrap(),
+            system_time,
+        })
+    }
+
+    fn surrogate_ids(resp: &crate::bridge::envelope::Response) -> Vec<u32> {
+        assert_eq!(resp.status, Status::Ok, "surrogate scan failed: {resp:?}");
+        let json = nodedb_types::msgpack_to_json_string(resp.payload.as_ref())
+            .expect("rows msgpack to json");
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&json).expect("rows json");
+        let mut ids: Vec<u32> = rows
+            .iter()
+            .map(|row| {
+                let key = row["id"].as_str().expect("row id");
+                nodedb_types::StorageKey::parse(key)
+                    .expect("row id is a storage key")
+                    .surrogate()
+                    .as_u32()
+            })
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// The scan reads each cell at its version as of the cut. A cell
+    /// overwritten after the cut admits the surrogate it held at the cut.
+    #[test]
+    fn the_scan_reads_at_its_cut() {
+        use nodedb_types::SystemTimeScope;
+
+        let mut h = Harness::new();
+        let s = schema_2d_f64("sbs_cut");
+        let aid = ArrayId::new(TenantId::new(1), "sbs_cut");
+        h.open(&aid, &s, 0xC2);
+        let at = |x: i64, sur: u32, sys: i64| ArrayPutCell {
+            system_from_ms: sys,
+            ..cell_sur(x, 0, 0.0, sur)
+        };
+        h.put(&aid, vec![at(0, 1, 100), at(1, 2, 100)], 1);
+        h.flush(&aid);
+        h.put(&aid, vec![at(0, 3, 200)], 2);
+        h.flush(&aid);
+
+        let current = scan_at(&mut h, &aid, SystemTimeScope::Current);
+        assert_eq!(surrogate_ids(&current), vec![2, 3]);
+        let before = scan_at(&mut h, &aid, SystemTimeScope::AsOf(150));
+        assert_eq!(surrogate_ids(&before), vec![1, 2]);
+        let pinned = scan_at(
+            &mut h,
+            &aid,
+            SystemTimeScope::Pinned {
+                ordinal: 150 * nodedb_types::NANOS_PER_MS,
+                cut_marker: 0,
+            },
+        );
+        assert_eq!(surrogate_ids(&pinned), vec![1, 2]);
+    }
+
+    /// Every version has no single cut, so the scan refuses it.
+    #[test]
+    fn the_scan_refuses_all_versions() {
+        let mut h = Harness::new();
+        let s = schema_2d_f64("sbs_all");
+        let aid = ArrayId::new(TenantId::new(1), "sbs_all");
+        h.open(&aid, &s, 0xC3);
+        let resp = scan_at(&mut h, &aid, nodedb_types::SystemTimeScope::AllVersions);
+        assert_eq!(resp.status, Status::Error, "all-versions must be refused");
     }
 }

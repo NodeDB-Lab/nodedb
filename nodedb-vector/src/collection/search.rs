@@ -10,6 +10,8 @@
 //! path and lets the caller apply post-filtering — the un-indexed predicate is
 //! never silently dropped.
 
+use roaring::RoaringBitmap;
+
 use crate::distance::{DistanceMetric, distance};
 use crate::error::{VectorError, check_dim};
 use crate::hnsw::SearchResult;
@@ -142,6 +144,59 @@ fn search_sealed(
         }
         Err(e) => Err(e),
     }
+}
+
+/// Search one sealed segment under a filter that holds global ids.
+///
+/// A sparse filter is answered by scoring its members in the segment
+/// exactly. A beam search of width `ef` under a filter holds `ef` matches
+/// only after it visits about `ef * len / members` nodes, and it scores up to
+/// `m0` neighbours of each. Scoring the members once costs less whenever
+/// `members^2 <= ef * len * m0`. Distances are in `metric`.
+fn search_sealed_filtered(
+    seg: &SealedSegment,
+    query: &[f32],
+    top_k: usize,
+    ef: usize,
+    filter: &RoaringBitmap,
+    metric: DistanceMetric,
+) -> Result<Vec<SearchResult>, VectorError> {
+    let len = seg.index.len();
+    let lo = seg.base_id;
+    let hi = lo.saturating_add(u32::try_from(len).unwrap_or(u32::MAX));
+    let members = usize::try_from(filter.range_cardinality(lo..hi)).unwrap_or(usize::MAX);
+    let beam_cost = ef.saturating_mul(len).saturating_mul(seg.index.params.m0);
+    if members.saturating_mul(members) > beam_cost {
+        let mut results =
+            seg.index
+                .search_filtered_offset(query, top_k, ef, filter, seg.base_id)?;
+        // Rerank with the requested metric using the stored FP32 vector.
+        for r in &mut results {
+            if let Some(v) = seg.index.get_vector(r.id) {
+                r.distance = distance(query, v, metric);
+            }
+        }
+        return Ok(results);
+    }
+    let mut scored: Vec<SearchResult> = Vec::with_capacity(members);
+    for global in filter.range(lo..hi) {
+        let id = global - lo;
+        if seg.index.is_deleted(id) {
+            continue;
+        }
+        if let Some(v) = seg.index.get_vector_or_backing(id) {
+            scored.push(SearchResult {
+                id,
+                distance: distance(query, &v, metric),
+            });
+        }
+    }
+    if top_k > 0 && scored.len() > top_k {
+        scored.select_nth_unstable_by(top_k - 1, |a, b| a.distance.total_cmp(&b.distance));
+        scored.truncate(top_k);
+    }
+    scored.sort_unstable_by(|a, b| a.distance.total_cmp(&b.distance));
+    Ok(scored)
 }
 
 /// Shift segment-local result ids to global ids and append them.
@@ -277,9 +332,9 @@ impl VectorCollection {
     ) -> Result<Vec<SearchResult>, VectorError> {
         check_dim(self.dim, query.len())?;
         let mut all: Vec<SearchResult> = Vec::new();
+        let filter = decode_filter_bitmap(bitmap)?;
 
         if let Some(ivf) = &self.ivf {
-            let filter = decode_filter_bitmap(bitmap)?;
             all.extend(ivf.search_with(query, top_k, metric, Some(&filter))?);
         }
         push_shifted(
@@ -295,15 +350,7 @@ impl VectorCollection {
         );
 
         for seg in &self.sealed {
-            let mut results =
-                seg.index
-                    .search_with_bitmap_bytes_offset(query, top_k, ef, bitmap, seg.base_id)?;
-            // Rerank with the requested metric using the stored FP32 vector.
-            for r in &mut results {
-                if let Some(v) = seg.index.get_vector(r.id) {
-                    r.distance = distance(query, v, metric);
-                }
-            }
+            let results = search_sealed_filtered(seg, query, top_k, ef, &filter, metric)?;
             push_shifted(&mut all, results, seg.base_id);
         }
 
@@ -336,9 +383,9 @@ impl VectorCollection {
     ) -> Result<Vec<SearchResult>, VectorError> {
         check_dim(self.dim, query.len())?;
         let mut all: Vec<SearchResult> = Vec::new();
+        let filter = decode_filter_bitmap(bitmap)?;
 
         if let Some(ivf) = &self.ivf {
-            let filter = decode_filter_bitmap(bitmap)?;
             all.extend(ivf.search_with(query, top_k, self.params.metric, Some(&filter))?);
         }
         push_shifted(
@@ -348,12 +395,9 @@ impl VectorCollection {
             self.growing_base_id,
         );
         for seg in &self.sealed {
-            push_shifted(
-                &mut all,
-                seg.index
-                    .search_with_bitmap_bytes_offset(query, top_k, ef, bitmap, seg.base_id)?,
-                seg.base_id,
-            );
+            let results =
+                search_sealed_filtered(seg, query, top_k, ef, &filter, self.params.metric)?;
+            push_shifted(&mut all, results, seg.base_id);
         }
         for seg in &self.building {
             push_shifted(
@@ -746,5 +790,64 @@ mod tests {
             "nearest neighbor of [1000,0] should be id=1000, got id={}",
             results[0].id
         );
+    }
+
+    fn bitmap_bytes(ids: impl IntoIterator<Item = u32>) -> Vec<u8> {
+        let bitmap: roaring::RoaringBitmap = ids.into_iter().collect();
+        let mut out = Vec::new();
+        bitmap.serialize_into(&mut out).unwrap();
+        out
+    }
+
+    fn ids(results: &[crate::hnsw::SearchResult]) -> Vec<u32> {
+        results.iter().map(|r| r.id).collect()
+    }
+
+    /// A filter with few members ranks exactly those members, nearest first,
+    /// and never returns an id outside the filter.
+    #[test]
+    fn sparse_filter_on_sealed_segment_ranks_members_exactly() {
+        let coll = make_sealed_collection(2000);
+        let bitmap = bitmap_bytes([10, 700, 701, 1500, 1999]);
+        let results = coll
+            .search_with_bitmap_bytes_and_metric(&[705.0, 0.0], 3, 64, &bitmap, DistanceMetric::L2)
+            .unwrap();
+        assert_eq!(ids(&results), vec![701, 700, 10]);
+        assert_eq!(results[0].distance, 16.0);
+    }
+
+    /// A deleted member of a sparse filter is not returned.
+    #[test]
+    fn sparse_filter_on_sealed_segment_skips_deleted_members() {
+        let mut coll = make_sealed_collection(2000);
+        assert!(coll.delete(701));
+        let bitmap = bitmap_bytes([700, 701, 1500]);
+        let results = coll
+            .search_with_bitmap_bytes_and_metric(&[705.0, 0.0], 2, 64, &bitmap, DistanceMetric::L2)
+            .unwrap();
+        assert_eq!(ids(&results), vec![700, 1500]);
+    }
+
+    /// A filter holding half the segment, searched with a narrow beam, still
+    /// returns the nearest member.
+    #[test]
+    fn dense_filter_on_sealed_segment_returns_nearest_member() {
+        let coll = make_sealed_collection(2000);
+        let bitmap = bitmap_bytes((0..2000).step_by(2));
+        let results = coll
+            .search_with_bitmap_bytes_and_metric(&[1001.0, 0.0], 1, 1, &bitmap, DistanceMetric::L2)
+            .unwrap();
+        assert!(results[0].id == 1000 || results[0].id == 1002);
+    }
+
+    /// The index-metric variant answers a sparse filter the same way.
+    #[test]
+    fn sparse_filter_without_metric_ranks_members_exactly() {
+        let coll = make_sealed_collection(2000);
+        let bitmap = bitmap_bytes([10, 700, 701, 1500, 1999]);
+        let results = coll
+            .search_with_bitmap_bytes(&[705.0, 0.0], 3, 64, &bitmap)
+            .unwrap();
+        assert_eq!(ids(&results), vec![701, 700, 10]);
     }
 }

@@ -99,9 +99,55 @@ pub(crate) fn eager_dispatch_to_all_cores_until(
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .num_cores();
+    let cores: Vec<usize> = (0..num_cores).collect();
+    eager_dispatch_to_cores(
+        state,
+        &CoreFan {
+            tenant_id,
+            database_id,
+            trace_id,
+            txn_id,
+            cores: &cores,
+        },
+        deadline,
+        plan_for_core,
+    )
+}
 
-    let mut receivers = Vec::with_capacity(num_cores);
-    for core_id in 0..num_cores {
+/// The statement a fan-out serves and the cores it reaches.
+#[derive(Clone, Copy)]
+pub(crate) struct CoreFan<'a> {
+    pub tenant_id: TenantId,
+    pub database_id: DatabaseId,
+    pub trace_id: TraceId,
+    pub txn_id: Option<TxnId>,
+    /// A core outside the list receives nothing and is not woken.
+    pub cores: &'a [usize],
+}
+
+/// [`eager_dispatch_to_all_cores_until`], reaching only `fan.cores`. Returns
+/// the receivers in the order of `fan.cores`.
+pub(crate) fn eager_dispatch_to_cores(
+    state: &SharedState,
+    fan: &CoreFan<'_>,
+    deadline: std::time::Instant,
+    plan_for_core: impl Fn(usize) -> PhysicalPlan,
+) -> crate::Result<
+    Vec<(
+        usize,
+        crate::types::RequestId,
+        crate::control::ResponseReceiver,
+    )>,
+> {
+    let CoreFan {
+        tenant_id,
+        database_id,
+        trace_id,
+        txn_id,
+        cores,
+    } = *fan;
+    let mut receivers = Vec::with_capacity(cores.len());
+    for &core_id in cores {
         let request_id = state.next_request_id();
         let vshard_id = VShardId::new(core_id as u32);
         let request = Request {
@@ -155,6 +201,33 @@ pub(crate) async fn gather_all_cores(
     trace_id: TraceId,
     txn_id: Option<TxnId>,
 ) -> crate::Result<GatherOutcome> {
+    let num_cores = state
+        .dispatcher
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .num_cores();
+    let cores: Vec<usize> = (0..num_cores).collect();
+    gather_cores(
+        state,
+        &CoreFan {
+            tenant_id,
+            database_id,
+            trace_id,
+            txn_id,
+            cores: &cores,
+        },
+        |_| plan.clone(),
+    )
+    .await
+}
+
+/// [`gather_all_cores`], reaching only `fan.cores`. `plan_for_core` produces
+/// each core's plan. Every core named must answer.
+pub(crate) async fn gather_cores(
+    state: &SharedState,
+    fan: &CoreFan<'_>,
+    plan_for_core: impl Fn(usize) -> PhysicalPlan,
+) -> crate::Result<GatherOutcome> {
     // Track broadcast calls for observability (shared counter with broadcast.rs).
     crate::control::server::broadcast::broadcast_call_count_increment();
 
@@ -163,10 +236,7 @@ pub(crate) async fn gather_all_cores(
     // Issue all per-core sends and collect receiver channels before awaiting.
     // This ensures every core has the request in flight before we block on any
     // of them, matching true parallelism semantics.
-    let receivers =
-        eager_dispatch_to_all_cores(state, tenant_id, database_id, trace_id, txn_id, |_| {
-            plan.clone()
-        })?;
+    let receivers = eager_dispatch_to_cores(state, fan, deadline, plan_for_core)?;
 
     // Await all responses in parallel using join_all. Each core's scan result
     // can stream as several `Partial` frames before its terminal frame, so drain

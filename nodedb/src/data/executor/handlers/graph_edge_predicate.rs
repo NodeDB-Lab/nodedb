@@ -199,6 +199,21 @@ impl Orientation {
         }
     }
 
+    /// Whether this pass of a `direction` read keeps the row `(frontier,
+    /// neighbour)`. The incoming pass of a `Both` read skips a self-loop,
+    /// because the outgoing pass already returned it.
+    pub(in crate::data::executor) fn keeps_row(
+        self,
+        direction: Direction,
+        frontier: &str,
+        neighbour: &str,
+    ) -> bool {
+        match self {
+            Self::Out => true,
+            Self::In => direction.in_pass_keeps(neighbour, frontier),
+        }
+    }
+
     /// The physical `(src, dst)` of a row `(frontier, neighbour)` crossed in
     /// this pass.
     pub(in crate::data::executor) fn endpoints<'s>(

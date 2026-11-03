@@ -29,6 +29,8 @@ pub struct MultiRaft {
     /// Each group's storage stages its writes. The group's own writer thread
     /// makes them durable, never under this struct's lock.
     pub(super) groups: HashMap<u64, RaftNode<StagedLogStorage>>,
+    /// Each mounted group's leadership, readable without this struct's lock.
+    pub(super) leader_board: super::leader_board::LeaderBoard,
     /// Routing table (vShard → group mapping).
     ///
     /// This is the SAME `Arc<RwLock<RoutingTable>>` held by
@@ -76,6 +78,10 @@ pub struct MultiRaft {
     /// node appended to its sequencer log. `0` for none. See
     /// [`super::sequencer_cut_floor`].
     pub(super) sequencer_cut_floor_ms: i64,
+    /// Notified when any group's disk makes a batch durable. The Raft loop
+    /// drives the groups on it, so a commit the disk completed does not wait
+    /// for the next tick.
+    pub(super) drive_signal: Arc<tokio::sync::Notify>,
 }
 
 /// What this node's replica of a data group needs before it takes log
@@ -130,6 +136,7 @@ impl MultiRaft {
         Self {
             node_id,
             groups: HashMap::new(),
+            leader_board: Default::default(),
             routing,
             election_timeout_min: Duration::from_secs(2),
             election_timeout_max: Duration::from_secs(5),
@@ -145,7 +152,19 @@ impl MultiRaft {
             applied_watchers: None,
             snapshot_requirement: None,
             sequencer_cut_floor_ms: 0,
+            drive_signal: Arc::new(tokio::sync::Notify::new()),
         }
+    }
+
+    /// Each mounted group's leadership. A reader holds this handle and reads
+    /// it without taking this struct's lock.
+    pub fn leader_board(&self) -> super::leader_board::LeaderBoard {
+        self.leader_board.clone()
+    }
+
+    /// The signal the groups' disks notify when a batch becomes durable.
+    pub fn drive_signal(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.drive_signal)
     }
 
     /// Install the snapshot requirement for data groups, and apply it to
@@ -276,13 +295,25 @@ impl MultiRaft {
     /// `Ready` carries, so no vote request leaves for a term that is not
     /// durable. A staging error aborts the tick.
     pub fn tick(&mut self) -> Result<MultiRaftReady> {
+        self.collect_ready(true)
+    }
+
+    /// Collect the output every group has ready, without advancing any
+    /// group's election or heartbeat clock. A leader counts the entries its
+    /// disk made durable since the last call, so a commit the disk completed
+    /// lands in this Ready.
+    pub fn drive(&mut self) -> Result<MultiRaftReady> {
+        self.collect_ready(false)
+    }
+
+    fn collect_ready(&mut self, advance_clock: bool) -> Result<MultiRaftReady> {
         let mut ready = MultiRaftReady::default();
 
         for (&group_id, node) in &mut self.groups {
-            // A leader counts the entries its disk made durable since the
-            // last tick, so a commit the disk completed lands in this Ready.
             node.on_storage_progress();
-            node.tick();
+            if advance_clock {
+                node.tick();
+            }
             node.persist_hard_state_if_dirty()?;
             let r = node.take_ready();
             if !r.is_empty() {
@@ -393,6 +424,77 @@ mod tests {
         mr.wait_all_durable_blocking();
         let ready = mr.tick().unwrap();
         assert_eq!(ready.groups.len(), 5);
+    }
+
+    /// Drive a single-node group to a leader that holds and has delivered its
+    /// election no-op.
+    fn single_node_leader(dir: &std::path::Path) -> MultiRaft {
+        let rt = RoutingTable::uniform(1, &[1], 1);
+        let mut mr = MultiRaft::new(1, rt, dir.to_path_buf());
+        mr.add_group(0, vec![]).unwrap();
+        for node in mr.groups.values_mut() {
+            node.election_deadline_override(Instant::now() - Duration::from_millis(1));
+        }
+        mr.tick().unwrap();
+        mr.wait_all_durable_blocking();
+        for (gid, ready) in mr.tick().unwrap().groups {
+            if let Some(last) = ready.committed_entries.last() {
+                mr.advance_applied(gid, last.index).unwrap();
+            }
+        }
+        mr
+    }
+
+    #[tokio::test]
+    async fn a_durable_proposal_commits_on_drive_without_a_tick() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mr = single_node_leader(dir.path());
+        let signal = mr.drive_signal();
+
+        mr.propose_to_group(0, b"payload".to_vec()).unwrap();
+
+        // The disk wakes the signal once the entry is durable. A permit left
+        // by an earlier write can wake it first, so drive until it commits.
+        let committed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                signal.notified().await;
+                let ready = mr.drive().unwrap();
+                if ready.groups.iter().any(|(_, r)| {
+                    r.committed_entries
+                        .iter()
+                        .any(|entry| entry.data == b"payload")
+                }) {
+                    return;
+                }
+            }
+        })
+        .await;
+        assert!(
+            committed.is_ok(),
+            "a durable proposal must commit without waiting for a tick"
+        );
+    }
+
+    #[test]
+    fn drive_does_not_advance_the_election_clock() {
+        use nodedb_raft::NodeRole;
+        let dir = tempfile::tempdir().unwrap();
+        let rt = RoutingTable::uniform(1, &[1], 1);
+        let mut mr = MultiRaft::new(1, rt, dir.path().to_path_buf());
+        mr.add_group(0, vec![]).unwrap();
+        for node in mr.groups.values_mut() {
+            node.election_deadline_override(Instant::now() - Duration::from_millis(1));
+        }
+
+        mr.drive().unwrap();
+        assert_ne!(
+            mr.groups[&0].role(),
+            NodeRole::Leader,
+            "drive must not run the election timer"
+        );
+
+        mr.tick().unwrap();
+        assert_eq!(mr.groups[&0].role(), NodeRole::Leader);
     }
 
     #[test]

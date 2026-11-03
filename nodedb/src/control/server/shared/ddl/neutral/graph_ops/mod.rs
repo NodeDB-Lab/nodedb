@@ -12,9 +12,12 @@
 pub mod algo;
 pub mod dispatch;
 pub mod edge;
+pub mod edge_delete;
+pub mod edge_insert;
 mod edge_parse;
 mod edge_rls;
 mod edge_stage;
+mod edge_unit;
 pub mod rag_fusion;
 pub mod response;
 pub mod stats;

@@ -136,10 +136,10 @@ impl FusionParams {
                         detail: format!("{k} given more than once in {stmt}"),
                     });
                 }
-                match (c.number_word(), c.number_word(), c.number_word()) {
-                    (Some(vector_k), Some(graph_k), None) => p.rrf_k = Some((vector_k, graph_k)),
-                    (Some(vector_k), Some(text_k), Some(graph_k)) => {
-                        p.rrf_k_triple = Some((vector_k, text_k, graph_k));
+                match c.number_list(k)?.as_slice() {
+                    [vector_k, graph_k] => p.rrf_k = Some((*vector_k, *graph_k)),
+                    [vector_k, text_k, graph_k] => {
+                        p.rrf_k_triple = Some((*vector_k, *text_k, *graph_k));
                     }
                     _ => {
                         return Err(SqlError::Parse {
@@ -311,5 +311,22 @@ mod tests {
     fn search_fusion_refuses_repeated_parameter() {
         let error = search_error("SEARCH c USING FUSION(ARRAY[0.1] TOP 3 TOP 4)");
         assert!(error.contains("TOP given more than once"), "{error}");
+    }
+
+    /// `RRF_K` numbers need commas between them, as label lists do.
+    #[test]
+    fn search_fusion_refuses_rrf_k_numbers_without_a_comma() {
+        let error = search_error("SEARCH c USING FUSION(ARRAY[0.1] RRF_K (60.0 35.0))");
+        assert!(
+            error.contains("RRF_K list items must be separated by commas: 60.0 35.0"),
+            "{error}"
+        );
+        let error = search_error("SEARCH c USING FUSION(ARRAY[0.1] RRF_K (60.0, 35.0,) TOP 3)");
+        assert!(error.contains("RRF_K list ends with a comma"), "{error}");
+        let error = search_error("SEARCH c USING FUSION(ARRAY[0.1] RRF_K (60.0) TOP 3)");
+        assert!(
+            error.contains("RRF_K needs two or three numbers"),
+            "{error}"
+        );
     }
 }

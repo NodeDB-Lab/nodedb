@@ -5,8 +5,9 @@
 //!
 //! A group's Raft node stages every storage write here and returns at once,
 //! so no disk write runs under the `MultiRaft` lock or on an async thread.
-//! The writer thread drains the queue and applies each write to redb, one
-//! fsync per batch of contiguous appends. It then publishes:
+//! The writer thread drains the queue and applies the whole drained run to
+//! redb in one transaction, so one commit makes it durable. It then
+//! publishes:
 //! - the highest staged sequence number that is durable, for callers that
 //!   hold a [`super::DurabilityTicket`];
 //! - the last log entry the disk holds durably, which the node's leader
@@ -18,16 +19,16 @@
 
 use std::collections::VecDeque;
 use std::path::Path;
-use std::sync::{Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use nodedb_raft::message::LogEntry;
 use nodedb_raft::state::HardState;
-use nodedb_raft::storage::LogStorage;
-use tokio::sync::watch;
-use tracing::{error, warn};
+use tokio::sync::{Notify, watch};
+use tracing::{debug, error, warn};
 
 use crate::raft_storage::RedbLogStorage;
+use crate::raft_storage_ops::LogOp;
 
 /// The wait before a failed write is tried again.
 const RETRY_DELAY: Duration = Duration::from_millis(50);
@@ -40,6 +41,31 @@ pub(super) enum StorageOp {
     Compact { index: u64, term: u64 },
     HardState(HardState),
     AppliedIndex(u64),
+}
+
+impl StorageOp {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Append(_) => "append",
+            Self::Truncate(_) => "truncate",
+            Self::Compact { .. } => "compact",
+            Self::HardState(_) => "hard_state",
+            Self::AppliedIndex(_) => "applied_index",
+        }
+    }
+
+    fn as_log_op(&self) -> LogOp<'_> {
+        match self {
+            Self::Append(entries) => LogOp::Append(entries),
+            Self::Truncate(index) => LogOp::Truncate(*index),
+            Self::Compact { index, term } => LogOp::Compact {
+                index: *index,
+                term: *term,
+            },
+            Self::HardState(state) => LogOp::HardState(state),
+            Self::AppliedIndex(index) => LogOp::AppliedIndex(*index),
+        }
+    }
 }
 
 /// How far the disk has come.
@@ -75,12 +101,16 @@ pub struct GroupDisk {
     progress: Mutex<DiskProgress>,
     progressed: Condvar,
     progress_tx: watch::Sender<DiskProgress>,
+    /// Woken after each batch the writer makes durable, so the Raft loop
+    /// counts the new durable entries at once instead of at its next tick.
+    wake: Arc<Notify>,
 }
 
 impl GroupDisk {
-    /// Open `group_id`'s redb log at `path`. Blocks on disk: call it off the
-    /// async threads.
-    pub(super) fn open(group_id: u64, path: &Path) -> crate::Result<Self> {
+    /// Open `group_id`'s redb log at `path`. `wake` is notified after each
+    /// batch the writer makes durable. Blocks on disk: call it off the async
+    /// threads.
+    pub(super) fn open(group_id: u64, path: &Path, wake: Arc<Notify>) -> crate::Result<Self> {
         let storage = RedbLogStorage::open(path)?;
         Ok(Self {
             group_id,
@@ -90,6 +120,7 @@ impl GroupDisk {
             progress: Mutex::new(DiskProgress::default()),
             progressed: Condvar::new(),
             progress_tx: watch::Sender::new(DiskProgress::default()),
+            wake,
         })
     }
 
@@ -201,44 +232,41 @@ impl GroupDisk {
             return;
         };
         let mut stable = self.progress().stable;
-        for op in merge_appends(batch) {
-            stable = next_stable(stable, &op);
-            let mut attempt = 0u32;
-            while let Err(e) = self.apply(&op) {
-                attempt += 1;
-                if closed {
-                    error!(
-                        group_id = self.group_id,
-                        error = %e,
-                        "raft disk: a write failed while the disk closes; it is abandoned"
-                    );
-                    break;
-                }
-                warn!(
+        let ops = merge_appends(batch);
+        for op in &ops {
+            stable = next_stable(stable, op);
+        }
+        let log_ops: Vec<LogOp<'_>> = ops.iter().map(StorageOp::as_log_op).collect();
+        debug!(
+            group_id = self.group_id,
+            ops = ?ops.iter().map(StorageOp::kind).collect::<Vec<_>>(),
+            "raft disk: commit"
+        );
+        let mut attempt = 0u32;
+        while let Err(e) = self.storage().commit_ops(&log_ops) {
+            attempt += 1;
+            if closed {
+                error!(
                     group_id = self.group_id,
-                    attempt,
                     error = %e,
-                    "raft disk: a write failed; it is retried"
+                    "raft disk: a write failed while the disk closes; it is abandoned"
                 );
-                std::thread::sleep(RETRY_DELAY);
+                break;
             }
+            warn!(
+                group_id = self.group_id,
+                attempt,
+                error = %e,
+                "raft disk: a write failed; it is retried"
+            );
+            std::thread::sleep(RETRY_DELAY);
         }
         let mut progress = self.progress.lock().unwrap_or_else(|p| p.into_inner());
         progress.durable_seq = progress.durable_seq.max(through);
         progress.stable = stable;
         self.progress_tx.send_replace(*progress);
         self.progressed.notify_all();
-    }
-
-    fn apply(&self, op: &StorageOp) -> nodedb_raft::error::Result<()> {
-        let mut storage = self.storage();
-        match op {
-            StorageOp::Append(entries) => storage.append(entries),
-            StorageOp::Truncate(index) => storage.truncate(*index),
-            StorageOp::Compact { index, term } => storage.compact(*index, *term),
-            StorageOp::HardState(state) => storage.save_hard_state(state),
-            StorageOp::AppliedIndex(index) => storage.save_applied_index(*index),
-        }
+        self.wake.notify_one();
     }
 }
 

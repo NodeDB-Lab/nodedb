@@ -29,7 +29,6 @@ impl SqlPlan {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::temporal::TemporalScope;
     use crate::types::*;
 
@@ -61,6 +60,7 @@ mod tests {
                 metric: DistanceMetric::Cosine,
                 filters: Vec::new(),
                 array_prefilter: None,
+                index_prefilter: None,
                 ann_options: VectorAnnOptions::default(),
                 skip_payload_fetch: false,
                 payload_filters: Vec::new(),

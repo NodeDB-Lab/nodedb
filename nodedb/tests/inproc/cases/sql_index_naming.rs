@@ -21,3 +21,6 @@ mod partial;
 
 #[path = "sql_index/update_reindex.rs"]
 mod update_reindex;
+
+#[path = "sql_index/sorted.rs"]
+mod sorted;

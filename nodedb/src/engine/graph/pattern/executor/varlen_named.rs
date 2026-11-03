@@ -233,13 +233,15 @@ fn run_bfs_named(
 /// Merge a source node's durable CSR neighbours with the transaction's staged
 /// edges for one hop, as `(label_name, neighbour_name)` pairs.
 ///
-/// Durable neighbours whose backing edge is staged-tombstoned are dropped;
-/// staged edges matching the direction and label are added (deduplicated
-/// against the durable set). `src_id` is `Some` for a durable source (its CSR
-/// adjacency is walked) and `None` for a staged-only source (only its staged
-/// edges exist). Out- and in-edges are collected under a single direction each
-/// so the tombstone lookup always knows the edge's orientation, even for a
-/// `Both` triple.
+/// Durable neighbours whose backing edge is staged-tombstoned are dropped.
+/// Staged edges matching the direction and label are added. A staged edge
+/// joins unless the durable list of the same orientation already holds it,
+/// so a staged reverse edge stays a second physical edge. `src_id` is `Some`
+/// for a durable source (its CSR adjacency is walked) and `None` for a
+/// staged-only source (only its staged edges exist). Out- and in-edges are
+/// collected under a single direction each so the tombstone lookup always
+/// knows the edge's orientation, even for a `Both` triple. The incoming pass
+/// of a `Both` triple skips a self-loop, so each physical edge appears once.
 ///
 /// This is the single neighbour-merge implementation shared by the fixed-hop
 /// path ([`super::overlay_expand`]) and the variable-length path here.
@@ -252,57 +254,56 @@ pub(super) fn merge_neighbors_named(
     collection_filter: CollectionFilter,
     overlay: &GraphOverlayDelta,
 ) -> Vec<(String, String)> {
-    let mut out: Vec<(String, String)> = Vec::new();
     let want_out = matches!(direction, Direction::Out | Direction::Both);
     let want_in = matches!(direction, Direction::In | Direction::Both);
+    let durable_of = |pass: Direction| match src_id {
+        Some(id) => durable_named(
+            csr,
+            id,
+            label_filter,
+            pass,
+            collection_filter,
+            src_name,
+            overlay,
+        ),
+        None => Vec::new(),
+    };
 
-    if let Some(id) = src_id {
-        // Durable adjacency, collected per-direction so tombstone orientation
-        // is unambiguous even for a `Both` triple.
-        if want_out {
-            out.extend(durable_named(
-                csr,
-                id,
-                label_filter,
-                Direction::Out,
-                collection_filter,
-                src_name,
-                overlay,
-            ));
-        }
-        if want_in {
-            out.extend(durable_named(
-                csr,
-                id,
-                label_filter,
-                Direction::In,
-                collection_filter,
-                src_name,
-                overlay,
-            ));
-        }
-    }
+    let durable_out = if want_out {
+        durable_of(Direction::Out)
+    } else {
+        Vec::new()
+    };
+    let mut durable_in = if want_in {
+        durable_of(Direction::In)
+    } else {
+        Vec::new()
+    };
+    durable_in.retain(|(_, other)| direction.in_pass_keeps(other.as_str(), src_name));
 
+    let has = |rows: &[(String, String)], label: &str, other: &str| {
+        rows.iter()
+            .any(|(l, n)| l.as_str() == label && n.as_str() == other)
+    };
+    let mut staged: Vec<(String, String)> = Vec::new();
     if want_out {
         for (label, dst) in overlay.out_neighbors(src_name, label_filter.as_slice()) {
-            if !out
-                .iter()
-                .any(|(l, n)| l.as_str() == label && n.as_str() == dst)
-            {
-                out.push((label.to_string(), dst.to_string()));
+            if !has(&durable_out, label, dst) {
+                staged.push((label.to_string(), dst.to_string()));
             }
         }
     }
     if want_in {
         for (label, src) in overlay.in_neighbors(src_name, label_filter.as_slice()) {
-            if !out
-                .iter()
-                .any(|(l, n)| l.as_str() == label && n.as_str() == src)
-            {
-                out.push((label.to_string(), src.to_string()));
+            if direction.in_pass_keeps(src, src_name) && !has(&durable_in, label, src) {
+                staged.push((label.to_string(), src.to_string()));
             }
         }
     }
+
+    let mut out = durable_out;
+    out.extend(durable_in);
+    out.extend(staged);
     out
 }
 
@@ -593,5 +594,70 @@ mod tests {
                 .collect::<HashSet<String>>(),
             "anchor p reaches only its own tail"
         );
+    }
+
+    fn merged(
+        csr: &CsrIndex,
+        ov: &GraphOverlayDelta,
+        node: &str,
+        direction: Direction,
+    ) -> Vec<(String, String)> {
+        let mut rows = merge_neighbors_named(
+            csr,
+            node,
+            csr.node_id_raw(node),
+            Some("R"),
+            direction,
+            CollectionFilter::Unscoped,
+            ov,
+        );
+        rows.sort();
+        rows
+    }
+
+    fn row(node: &str) -> (String, String) {
+        ("R".to_string(), node.to_string())
+    }
+
+    /// A self-loop is one edge. An undirected hop returns a durable and a
+    /// staged self-loop once each. A staged reverse edge beside a durable
+    /// forward edge is a second physical edge and stays a second row.
+    #[test]
+    fn both_merges_a_self_loop_once_and_keeps_a_staged_reverse_edge() {
+        let mut csr = CsrIndex::new(test_scoped_memory());
+        csr.add_edge("a", "R", "a").unwrap();
+        csr.add_edge("a", "R", "b").unwrap();
+        let mut ov = GraphOverlayDelta::new();
+        ov.stage_edge("s", "R", "s");
+        ov.stage_edge("b", "R", "a");
+        ov.stage_edge("a", "R", "a");
+
+        assert_eq!(
+            merged(&csr, &ov, "a", Direction::Both),
+            vec![row("a"), row("b"), row("b")]
+        );
+        assert_eq!(merged(&csr, &ov, "s", Direction::Both), vec![row("s")]);
+        assert_eq!(
+            merged(&csr, &ov, "a", Direction::In),
+            vec![row("a"), row("b")]
+        );
+
+        let a = csr.node_id_raw("a").unwrap();
+        let mut durable: Vec<u32> = expansion::collect_neighbors(
+            &csr,
+            a,
+            Some("R"),
+            Direction::Both,
+            CollectionFilter::Unscoped,
+        )
+        .into_iter()
+        .map(|(_, other)| other)
+        .collect();
+        durable.sort_unstable();
+        assert_eq!(durable, vec![a, csr.node_id_raw("b").unwrap()]);
+
+        let mut gone = GraphOverlayDelta::new();
+        gone.stage_tombstone("a", "R", "a");
+        assert_eq!(merged(&csr, &gone, "a", Direction::Both), vec![row("b")]);
     }
 }

@@ -28,6 +28,13 @@ struct Token {
     depth: u32,
 }
 
+/// Whether `sql` holds `word` in any case. A route keyed on a word cannot
+/// match a statement without it, and checking this first skips the tokenizer,
+/// whose cost grows with the statement's length.
+pub(super) fn mentions(sql: &str, word: &str) -> bool {
+    nodedb_types::ascii::find_ascii_case_insensitive_from(sql, word, 0).is_some()
+}
+
 /// The routing tokens of one statement.
 pub(super) struct RouteTokens {
     tokens: Vec<Token>,
@@ -173,6 +180,14 @@ fn lex_text(text: &str, depth: &mut u32, out: &mut Vec<Token>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mentions_finds_a_word_in_any_case_and_nothing_else() {
+        assert!(mentions("select * from d at Version 'c'", "VERSION"));
+        assert!(mentions("RESTORE d", "RESTORE"));
+        assert!(!mentions("SELECT id FROM turns WHERE a = 1", "VERSION"));
+        assert!(!mentions("", "VERSION"));
+    }
 
     #[test]
     fn leading_words_ignore_case_spacing_and_comments() {

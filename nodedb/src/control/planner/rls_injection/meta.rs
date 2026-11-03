@@ -93,6 +93,7 @@ pub(super) fn inject_meta(ctx: &RlsCtx<'_>, op: &mut MetaOp) -> crate::Result<()
         | MetaOp::PurgeDepartedVShards { .. }
         | MetaOp::PurgeVersionsBelow { .. }
         | MetaOp::KvDueExpiries { .. }
+        | MetaOp::RefreshGraphCount { .. }
         | MetaOp::PurgeTenant { .. }
         | MetaOp::UnregisterCollection { .. }
         | MetaOp::UnregisterMaterializedView { .. }
@@ -138,6 +139,7 @@ mod tests {
                 ),
                 path: "$.email".into(),
                 value: "a@b.c".into(),
+                system_time: nodedb_types::SystemTimeScope::Current,
             })],
             txn_id: None,
         });

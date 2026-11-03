@@ -111,7 +111,7 @@ impl FtsRebuildTicket {
         for row in scan::posting_rows(&postings_table, db, t, &self.collection)
             .map_err(|e| inverted_err("rebuild postings range", e))?
         {
-            let posting = posting_rows::decode(row.surrogate, &row.value)?;
+            let (posting, _) = posting_rows::decode(row.surrogate, &row.value)?;
             let lists = &mut scope_entry(&mut scopes, row.field).postings;
             match lists.last_mut() {
                 Some((term, list)) if *term == row.term => list.push(posting),

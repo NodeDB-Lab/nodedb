@@ -2,6 +2,7 @@
 
 //! SELECT-body search triggers and post-processing order.
 
+use super::index_prefilter::apply_vector_index_prefilter;
 use super::payload::apply_vector_payload;
 use super::pk_prefilter::apply_vector_pk_prefilter;
 use crate::error::Result;
@@ -115,6 +116,7 @@ pub(super) fn plan_select_query(
         };
     }
     apply_vector_pk_prefilter(&mut plan, catalog)?;
+    apply_vector_index_prefilter(&mut plan, catalog)?;
     apply_vector_payload(
         &mut plan,
         catalog,

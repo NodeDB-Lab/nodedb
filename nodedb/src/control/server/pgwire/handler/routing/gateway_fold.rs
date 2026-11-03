@@ -188,6 +188,7 @@ pub(super) fn plan_produces_rows(kind: PlanKind) -> bool {
         PlanKind::SingleDocument
         | PlanKind::MultiRow
         | PlanKind::ArraySlice
+        | PlanKind::GraphRag
         | PlanKind::ReturningRows => true,
         PlanKind::Execution | PlanKind::DmlResult(_) | PlanKind::DmlResultByOp => false,
     }

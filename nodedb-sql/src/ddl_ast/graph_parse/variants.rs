@@ -8,7 +8,7 @@
 //! clause keyword, or a stray token is a parse error that names the fault.
 
 use super::{
-    super::graph_types::{GraphDirection, GraphProperties},
+    super::graph_types::GraphDirection,
     super::statement::{GraphStmt, NodedbStatement},
     cursor::{Cursor, missing_clause, set_once},
     fusion_params::{FusionParams, RAG_FUSION_KEYWORDS},
@@ -17,82 +17,6 @@ use super::{
 use crate::error::SqlError;
 use crate::temporal::TemporalScope;
 use nodedb_types::filter::MetadataFilter;
-
-/// Parse `GRAPH INSERT EDGE IN <c> FROM <a> TO <b> TYPE <l> [PROPERTIES ...]
-/// [VALID_TIME <from> [UNTIL <until>]]`.
-pub(super) fn parse_insert_edge(toks: &[Tok<'_>]) -> Result<NodedbStatement, SqlError> {
-    const STMT: &str = "GRAPH INSERT EDGE";
-    let mut c = Cursor::new(toks, STMT, 3);
-    let (mut collection, mut src, mut dst, mut label, mut properties) =
-        (None, None, None, None, None);
-    let (mut valid_from_ms, mut valid_until_ms) = (None, None);
-    while let Some(clause) = c.next_clause()? {
-        match clause.as_str() {
-            "IN" => set_once(&mut collection, c.value("IN")?, "IN", STMT)?,
-            "FROM" => set_once(&mut src, c.value("FROM")?, "FROM", STMT)?,
-            "TO" => set_once(&mut dst, c.value("TO")?, "TO", STMT)?,
-            "TYPE" => set_once(&mut label, c.value("TYPE")?, "TYPE", STMT)?,
-            "PROPERTIES" => set_once(&mut properties, c.properties()?, "PROPERTIES", STMT)?,
-            "VALID_TIME" => set_once(
-                &mut valid_from_ms,
-                c.timestamp("VALID_TIME")?,
-                "VALID_TIME",
-                STMT,
-            )?,
-            "UNTIL" => set_once(&mut valid_until_ms, c.timestamp("UNTIL")?, "UNTIL", STMT)?,
-            _ => return Err(c.unknown_clause()),
-        }
-    }
-    check_valid_interval(valid_from_ms, valid_until_ms)?;
-    Ok(NodedbStatement::Graph(GraphStmt::GraphInsertEdge {
-        collection: collection.ok_or_else(|| missing_clause(STMT, "IN <collection>"))?,
-        src: src.ok_or_else(|| missing_clause(STMT, "FROM <node>"))?,
-        dst: dst.ok_or_else(|| missing_clause(STMT, "TO <node>"))?,
-        label: label.ok_or_else(|| missing_clause(STMT, "TYPE <label>"))?,
-        properties: properties.unwrap_or(GraphProperties::None),
-        valid_from_ms,
-        valid_until_ms,
-    }))
-}
-
-/// `UNTIL` needs `VALID_TIME`, and the interval `[from, until)` must not be
-/// empty.
-fn check_valid_interval(from: Option<i64>, until: Option<i64>) -> Result<(), SqlError> {
-    match (from, until) {
-        (None, Some(_)) => Err(SqlError::Parse {
-            detail: "GRAPH INSERT EDGE: UNTIL needs VALID_TIME <from>".to_owned(),
-        }),
-        (Some(from), Some(until)) if until <= from => Err(SqlError::Parse {
-            detail: format!(
-                "GRAPH INSERT EDGE: VALID_TIME {from} UNTIL {until} is empty; UNTIL must be \
-                 after VALID_TIME"
-            ),
-        }),
-        _ => Ok(()),
-    }
-}
-
-/// Parse `GRAPH DELETE EDGE IN <c> FROM <a> TO <b> TYPE <l>`.
-pub(super) fn parse_delete_edge(toks: &[Tok<'_>]) -> Result<NodedbStatement, SqlError> {
-    const STMT: &str = "GRAPH DELETE EDGE";
-    let mut c = Cursor::new(toks, STMT, 3);
-    let (mut collection, mut src, mut dst, mut label) = (None, None, None, None);
-    while let Some(clause) = c.next_clause()? {
-        match clause.as_str() {
-            "IN" => set_once(&mut collection, c.value("IN")?, "IN", STMT)?,
-            "FROM" => set_once(&mut src, c.value("FROM")?, "FROM", STMT)?,
-            "TO" => set_once(&mut dst, c.value("TO")?, "TO", STMT)?,
-            "TYPE" => set_once(&mut label, c.value("TYPE")?, "TYPE", STMT)?,
-            _ => return Err(c.unknown_clause()),
-        }
-    }
-    Ok(NodedbStatement::Graph(GraphStmt::GraphDeleteEdge {
-        collection: collection.ok_or_else(|| missing_clause(STMT, "IN <collection>"))?,
-        src: src.ok_or_else(|| missing_clause(STMT, "FROM <node>"))?,
-        dst: dst.ok_or_else(|| missing_clause(STMT, "TO <node>"))?,
-        label: label.ok_or_else(|| missing_clause(STMT, "TYPE <label>"))?,
-    }))
-}
 
 /// Parse `GRAPH LABEL <node> [AS 'a', 'b']` or `GRAPH UNLABEL ...`.
 pub(super) fn parse_set_labels(

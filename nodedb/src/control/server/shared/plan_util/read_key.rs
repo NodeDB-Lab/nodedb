@@ -313,6 +313,7 @@ fn meta_read_key(op: &MetaOp) -> ReadKey {
         | MetaOp::PurgeDepartedVShards { .. }
         | MetaOp::PurgeVersionsBelow { .. }
         | MetaOp::KvDueExpiries { .. }
+        | MetaOp::RefreshGraphCount { .. }
         | MetaOp::PurgeTenant { .. }
         | MetaOp::UnregisterCollection { .. }
         | MetaOp::UnregisterMaterializedView { .. }

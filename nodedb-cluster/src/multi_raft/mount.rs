@@ -30,6 +30,8 @@ pub struct GroupMountSpec {
     config: RaftConfig,
     storage_path: PathBuf,
     compaction_ceiling: Option<Arc<AtomicU64>>,
+    /// Notified when the group's disk makes a batch durable.
+    drive_signal: Arc<tokio::sync::Notify>,
 }
 
 /// A group opened and restored from its disk, ready to mount.
@@ -48,11 +50,10 @@ impl GroupMountSpec {
     /// disk: call it off the async threads.
     pub fn open(self) -> Result<OpenedGroup> {
         let group_id = self.config.group_id;
-        let storage = StagedLogStorage::open(group_id, &self.storage_path).map_err(|e| {
-            ClusterError::Transport {
+        let storage = StagedLogStorage::open(group_id, &self.storage_path, self.drive_signal)
+            .map_err(|e| ClusterError::Transport {
                 detail: format!("failed to open raft storage for group {group_id}: {e}"),
-            }
-        })?;
+            })?;
         let mut node = RaftNode::new(self.config, storage);
         if let Some(ceiling) = self.compaction_ceiling {
             node.set_compaction_ceiling(ceiling);
@@ -100,6 +101,7 @@ impl MultiRaft {
             },
             storage_path: crate::raft_bootstrap::group_log_path(&self.data_dir, group_id),
             compaction_ceiling: self.compaction_ceilings.get(&group_id).map(Arc::clone),
+            drive_signal: Arc::clone(&self.drive_signal),
         }
     }
 
@@ -123,6 +125,7 @@ impl MultiRaft {
         {
             node.set_replica_state(requirement(group_id, self.sequencer_first_available()));
         }
+        self.leader_board.mount(group_id, node.leader_mark());
         self.groups.insert(group_id, node);
         self.apply_gates.mount(group_id);
         info!(

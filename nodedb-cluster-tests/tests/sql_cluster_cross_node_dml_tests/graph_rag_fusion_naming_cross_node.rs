@@ -46,19 +46,17 @@ fn collection_writes() -> Vec<String> {
     ]
 }
 
-/// A fusion answer's `node_id`s, parsed from its JSON text cell.
-fn fusion_node_ids(cell: &str) -> Vec<String> {
-    let parsed: serde_json::Value =
-        sonic_rs::from_str(cell).unwrap_or_else(|e| panic!("fusion cell is not JSON: {e}: {cell}"));
-    parsed["results"]
-        .as_array()
-        .unwrap_or_else(|| panic!("no results array: {cell}"))
+/// The first column of every row a native SQL answer returns: each hit's
+/// `node_id`.
+fn native_node_ids(response: &nodedb_types::QueryResult) -> Vec<String> {
+    response
+        .rows
         .iter()
-        .map(|r| {
-            r["node_id"]
+        .filter_map(|row| row.first())
+        .filter_map(|cell| {
+            serde_json::Value::from(cell.clone())
                 .as_str()
-                .unwrap_or_else(|| panic!("a result carries no node_id: {r}"))
-                .to_string()
+                .map(str::to_owned)
         })
         .collect()
 }
@@ -228,30 +226,21 @@ async fn hit_in_no_edge_returns_its_primary_key_on_every_node() {
 
     for (idx, node) in cluster.nodes.iter().enumerate() {
         for (sql, expected) in [(two_source(), "lonely"), (three_source(), "wordy")] {
-            let cells = first_column(&node.client, &sql).await;
-            let cell = cells
-                .first()
-                .unwrap_or_else(|| panic!("node {idx}: `{sql}` returned no row"));
-            assert_named(
-                &fusion_node_ids(cell),
-                &KEYS,
-                expected,
-                &format!("node {idx} pgwire `{sql}`"),
-            );
+            let ids = first_column(&node.client, &sql).await;
+            assert!(!ids.is_empty(), "node {idx}: `{sql}` returned no row");
+            assert_named(&ids, &KEYS, expected, &format!("node {idx} pgwire `{sql}`"));
             let native = node
                 .native_client()
                 .query(&sql)
                 .await
                 .unwrap_or_else(|e| panic!("node {idx}: native `{sql}`: {e}"));
-            let native_cell = native
-                .rows
-                .first()
-                .and_then(|row| row.first())
-                .map(|cell| serde_json::Value::from(cell.clone()))
-                .and_then(|value| value.as_str().map(str::to_owned))
-                .unwrap_or_else(|| panic!("node {idx}: native `{sql}` returned no text cell"));
+            let native_ids = native_node_ids(&native);
+            assert!(
+                !native_ids.is_empty(),
+                "node {idx}: native `{sql}` returned no row"
+            );
             assert_named(
-                &fusion_node_ids(&native_cell),
+                &native_ids,
                 &KEYS,
                 expected,
                 &format!("node {idx} native `{sql}`"),
@@ -334,12 +323,10 @@ async fn strict_collection_hit_returns_its_declared_key_on_every_node() {
          VECTOR_TOP_K 2 EXPANSION_DEPTH 1 FINAL_TOP_K 10"
     );
     for (idx, node) in cluster.nodes.iter().enumerate() {
-        let cells = first_column(&node.client, &sql).await;
-        let cell = cells
-            .first()
-            .unwrap_or_else(|| panic!("node {idx}: `{sql}` returned no row"));
+        let ids = first_column(&node.client, &sql).await;
+        assert!(!ids.is_empty(), "node {idx}: `{sql}` returned no row");
         assert_named(
-            &fusion_node_ids(cell),
+            &ids,
             &["lonely", "far"],
             "lonely",
             &format!("node {idx} strict fusion"),

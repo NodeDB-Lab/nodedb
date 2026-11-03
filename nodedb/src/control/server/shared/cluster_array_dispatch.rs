@@ -161,6 +161,7 @@ pub(crate) async fn execute_cluster_array(
             PlanKind::DmlResultByOp
             | PlanKind::Execution
             | PlanKind::ArraySlice
+            | PlanKind::GraphRag
             | PlanKind::ReturningRows
             | PlanKind::SingleDocument
             | PlanKind::MultiRow => Err(crate::Error::Internal {

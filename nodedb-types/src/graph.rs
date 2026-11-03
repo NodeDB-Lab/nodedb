@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 /// Aggregate stats for a single graph collection (or the full edge store
 /// when no collection is specified).
 ///
-/// Returned by [`NodeDb::graph_stats`]. Wire-safe: serializes to/from
+/// Returned by `NodeDbGraph::graph_stats`. Wire-safe: serializes to/from
 /// MessagePack so the value can cross the Data-Plane boundary unchanged.
 ///
 /// The `node_count` field counts distinct node IDs observed as edge
@@ -68,6 +68,14 @@ impl Direction {
             Self::In => "in",
             Self::Both => "both",
         }
+    }
+
+    /// Whether the incoming pass of a read in this direction keeps the edge
+    /// `src -> node`. A self-loop sits in both the outgoing and the incoming
+    /// list of its node. A `Both` read takes it from the outgoing pass only,
+    /// so each physical edge appears once.
+    pub fn in_pass_keeps<T: PartialEq + ?Sized>(self, src: &T, node: &T) -> bool {
+        self != Self::Both || src != node
     }
 }
 
@@ -266,6 +274,14 @@ mod tests {
             let parsed: Direction = s.parse().unwrap();
             assert_eq!(dir, parsed);
         }
+    }
+
+    #[test]
+    fn both_in_pass_skips_only_a_self_loop() {
+        assert!(!Direction::Both.in_pass_keeps("a", "a"));
+        assert!(Direction::Both.in_pass_keeps("b", "a"));
+        assert!(Direction::In.in_pass_keeps("a", "a"));
+        assert!(Direction::Out.in_pass_keeps(&1u32, &1u32));
     }
 
     #[test]

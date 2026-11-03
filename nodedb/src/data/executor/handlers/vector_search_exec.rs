@@ -15,72 +15,6 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
 
 impl CoreLoop {
-    /// Fetch the document body via the sparse engine (keyed by
-    /// surrogate-hex) and attach it to the hit. Used both by the RLS path
-    /// (the Control Plane evaluates the predicate against `body`) and by
-    /// the slow-path SELECT (the Control Plane response translator flattens
-    /// the body's fields into the hit JSON so payload columns surface to
-    /// the client). When `attach == false`, or the hit carries no surrogate
-    /// binding, the hit is returned unchanged. A storage read error fails
-    /// the call: a hit without its body would skip the RLS predicate check.
-    ///
-    /// The bytes are normalized to a standard msgpack map through the shared
-    /// sparse-body normalizer, resolved from the collection's registered kind.
-    /// A vector-primary collection's rows are `zerompk` TAGGED sidecars and a
-    /// classic collection's are ordinary document bodies; the two are
-    /// indistinguishable byte-wise, and both the RLS filter evaluator and the
-    /// Control-Plane flatten read the attached body as one shape.
-    ///
-    /// `at` is the system-time ordinal a search at a cut reads: the body is
-    /// the row's version visible there. `None` attaches the current version.
-    #[inline]
-    pub(in crate::data::executor) fn attach_body(
-        &self,
-        database_id: u64,
-        tid: u64,
-        collection: &str,
-        attach: bool,
-        at: Option<i64>,
-        mut hit: super::super::response_codec::VectorSearchHit,
-    ) -> crate::Result<super::super::response_codec::VectorSearchHit> {
-        if !attach {
-            return Ok(hit);
-        }
-        let Some(key) = hit.id.storage_key() else {
-            return Ok(hit);
-        };
-        let body = match at {
-            // The row at its current version, so a bitemporal collection
-            // attaches.
-            None => self.current_row_body(database_id, tid, collection, &key)?,
-            Some(ordinal) => self.sparse.versioned_get_as_of(
-                database_id,
-                tid,
-                collection,
-                &key,
-                Some(ordinal),
-                None,
-            )?,
-        };
-        if let Some(bytes) = body {
-            let format = self.sparse_body_format(
-                crate::types::DatabaseId::new(database_id),
-                crate::types::TenantId::new(tid),
-                collection,
-            );
-            // Owned: the hit outlives `bytes`, which is the storage read's
-            // local buffer.
-            hit.body = Some(
-                crate::data::executor::scan_normalize::sparse_body_to_msgpack(
-                    &bytes,
-                    format.as_format_ref(),
-                )
-                .into_owned(),
-            );
-        }
-        Ok(hit)
-    }
-
     pub(in crate::data::executor) fn execute_vector_search(
         &mut self,
         params: VectorSearchParams<'_>,
@@ -347,10 +281,9 @@ impl CoreLoop {
             None => None,
         };
 
-        // The residual filter is evaluated at the Control-Plane response
-        // boundary (`response_translate::vector`): the Data Plane attaches
-        // each body so the Control Plane runs the predicate without a second
-        // round-trip, then truncates to `top_k`. The slow path (no
+        // The residual filter runs over each attached body. The Control Plane
+        // applies it again to the merged hits at the response boundary
+        // (`response_translate::vector`), the security boundary. The slow path (no
         // `skip_payload_fetch`) also attaches bodies: the response translator
         // flattens their fields into the hit for column projection. The
         // pure-vector fast path fetches no body.
@@ -361,6 +294,11 @@ impl CoreLoop {
             } else {
                 std::borrow::Cow::Owned(residual.iter().chain(&cut_payload).cloned().collect())
             };
+        // Outside a transaction the filter drops candidates here, so they
+        // carry only the fields it reads. A transaction's hits keep whole
+        // bodies for the Control Plane to filter after the staged merge.
+        let filter_columns = (attach && !window_residual.is_empty() && overlay_txn.is_none())
+            .then(|| nodedb_query::scan_filter::ScanFilter::referenced_fields(&window_residual));
         let window = self.rank_window(
             &SearchWindow {
                 collection: collection_ref,
@@ -376,6 +314,7 @@ impl CoreLoop {
                 collection,
                 attach: attach || !cut_payload.is_empty(),
                 at: cut.at,
+                filter_columns: filter_columns.as_deref(),
             },
             &window_residual,
             top_k,
@@ -408,9 +347,40 @@ impl CoreLoop {
                 }
             }
         }
-        // With a residual filter the Control Plane makes the top-k cut, so
-        // the whole window travels.
-        let truncate_to = if residual.is_empty() { top_k } else { fetch_k };
+        // A residual filter keeps its passing hits and the nearest `top_k` of
+        // them here, outside a transaction. Inside one, the staged rows merge
+        // in first and the Control Plane applies the filter to the union.
+        let truncate_to = if residual.is_empty() || overlay_txn.is_some() {
+            if residual.is_empty() { top_k } else { fetch_k }
+        } else {
+            super::vector_search_window::keep_passing(
+                &mut hits,
+                &residual,
+                &self.crs_context(),
+                top_k,
+            );
+            top_k
+        };
+        // The hits that passed the filter carry whole bodies.
+        if filter_columns.is_some() {
+            hits = match hits
+                .into_iter()
+                .map(|hit| {
+                    self.attach_body(
+                        task.request.database_id.as_u64(),
+                        tid,
+                        collection,
+                        true,
+                        cut.at,
+                        hit,
+                    )
+                })
+                .collect::<crate::Result<Vec<_>>>()
+            {
+                Ok(whole) => whole,
+                Err(e) => return self.response_error(task, e),
+            };
+        }
         // Read-your-own-writes for vector search: fold this transaction's
         // staged vector inserts into the base HNSW/IVF result before
         // truncation, so a vector inserted earlier in the same transaction

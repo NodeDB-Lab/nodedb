@@ -136,7 +136,7 @@ fn build_predicted_tx_class_impl(
     // Populate the routing/identity read_set from the session read-set (a txn
     // that writes shard A but reads shard B enumerates B as a participant). An
     // empty `reads` slice yields an empty read_set.
-    let read_set = read_set_from(reads);
+    let read_set = read_set_from(reads)?;
 
     let plans: Vec<&PhysicalPlan> = tasks.iter().map(|t| &t.plan).collect();
     let plans_bytes = zerompk::to_msgpack_vec(&plans).map_err(|e| Error::Serialization {

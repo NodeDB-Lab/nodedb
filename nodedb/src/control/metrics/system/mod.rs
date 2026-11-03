@@ -2,10 +2,12 @@
 
 pub mod core_fail_stop;
 mod fields;
+mod graph_count;
 mod heartbeat;
 mod record;
 mod render;
 
 pub use core_fail_stop::{CoreFailStopReport, CoreFailStops};
 pub use fields::SystemMetrics;
+pub use graph_count::GraphCount;
 pub use heartbeat::CoreHeartbeats;

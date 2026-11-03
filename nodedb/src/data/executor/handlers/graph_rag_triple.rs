@@ -130,8 +130,7 @@ impl CoreLoop {
             Ok(expansion) => expansion,
             Err(e) => return self.response_error(task, e),
         };
-        let (expanded_nodes, hop_distances, bfs_truncated, unaddressable) = (
-            expansion.names,
+        let (hop_distances, bfs_truncated, unaddressable) = (
             expansion.distances,
             expansion.truncated,
             expansion.unaddressable,
@@ -153,8 +152,8 @@ impl CoreLoop {
             csr.and_then(|c| c.node_id_for_surrogate(s))
         });
 
-        let graph_expanded_count = expanded_nodes.len();
-        let graph_list = graph_nodes_to_ranked_results(expanded_nodes, &hop_distances);
+        let graph_expanded_count = hop_distances.len();
+        let graph_list = graph_nodes_to_ranked_results(&hop_distances);
 
         let fused = reciprocal_rank_fusion_weighted(
             &[vector_list, text_list, graph_list],

@@ -61,6 +61,14 @@ impl ClosedLsns {
 
     /// Drop every LSN at or below `floor`: the floor refuses those itself.
     pub(super) fn prune_through(&mut self, floor: u64) {
+        // No range starts at or below the floor: nothing to drop.
+        if self
+            .ranges
+            .first_key_value()
+            .is_none_or(|(&start, _)| start > floor)
+        {
+            return;
+        }
         let above = floor.saturating_add(1);
         let straddling = self
             .ranges
