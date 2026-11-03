@@ -90,25 +90,27 @@ impl Budget {
     pub fn try_reserve(&self, size: usize) -> bool {
         let limit = self.limit.load(Ordering::Relaxed);
 
-        // CAS loop to atomically check and increment.
+        // CAS loop to atomically check and increment. The headroom
+        // saturates at zero, so the check cannot wrap.
+        let mut current = self.allocated.load(Ordering::Relaxed);
         loop {
-            let current = self.allocated.load(Ordering::Relaxed);
-            if current + size > limit {
+            if size > limit.saturating_sub(current) {
                 self.rejection_count.fetch_add(1, Ordering::Relaxed);
                 return false;
             }
+            let new_val = current + size;
 
             match self.allocated.compare_exchange_weak(
                 current,
-                current + size,
+                new_val,
                 Ordering::AcqRel,
                 Ordering::Relaxed,
             ) {
                 Ok(_) => {
-                    self.raise_peak(current + size);
+                    self.raise_peak(new_val);
                     return true;
                 }
-                Err(_) => continue, // Retry CAS.
+                Err(actual) => current = actual,
             }
         }
     }
@@ -131,7 +133,10 @@ impl Budget {
     /// hide it from the budget, not free it. Returns the shared `Arc` so
     /// the caller can release it on drop, same as `try_reserve_arc`.
     pub(crate) fn credit_arc(&self, size: usize) -> Arc<AtomicUsize> {
-        let new_allocated = self.allocated.fetch_add(size, Ordering::AcqRel) + size;
+        let new_allocated = self
+            .allocated
+            .fetch_add(size, Ordering::AcqRel)
+            .saturating_add(size);
         self.raise_peak(new_allocated);
         Arc::clone(&self.allocated)
     }
@@ -206,6 +211,16 @@ impl Budget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn try_reserve_rejects_when_sum_overflows_usize() {
+        let budget = Budget::new(usize::MAX);
+        budget.allocated.store(usize::MAX - 1, Ordering::Relaxed);
+
+        assert!(!budget.try_reserve(2));
+        assert_eq!(budget.allocated(), usize::MAX - 1);
+        assert_eq!(budget.rejections(), 1);
+    }
 
     #[test]
     fn utilization_and_available_never_panic_on_corrupted_allocated() {
