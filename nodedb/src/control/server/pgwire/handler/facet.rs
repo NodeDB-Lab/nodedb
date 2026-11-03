@@ -74,7 +74,7 @@ pub(super) async fn execute_facet_counts_sql(
             )))
         })?;
 
-    Ok(vec![multirow_payload_to_response(&resp.payload).response])
+    Ok(vec![multirow_payload_to_response(&resp.payload)?.response])
 }
 
 /// Execute `SELECT SEARCH_WITH_FACETS(query => '...', facets => [...])`.
@@ -159,7 +159,7 @@ pub(super) async fn execute_search_with_facets_sql(
     });
 
     let payload = sonic_rs::to_vec(&combined).unwrap_or_default();
-    Ok(vec![multirow_payload_to_response(&payload).response])
+    Ok(vec![multirow_payload_to_response(&payload)?.response])
 }
 
 // ── Parsing helpers ───────────────────────────────────────────────────

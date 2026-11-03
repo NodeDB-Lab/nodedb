@@ -60,7 +60,7 @@ pub(super) fn apply_set_ops(
                 shape_encode::shaped_query_response(shaped, result_formats)
             }
             ShapeOutcome::Passthrough => {
-                let shaped = multirow_payload_to_response(&merged);
+                let shaped = multirow_payload_to_response(&merged)?;
                 (shaped.response, shaped.notice)
             }
         },

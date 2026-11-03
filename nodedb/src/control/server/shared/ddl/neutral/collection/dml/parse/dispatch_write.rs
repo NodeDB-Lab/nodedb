@@ -11,7 +11,7 @@ use crate::control::security::audit::ArcAuditEmitter;
 use crate::control::security::identity::{AuthenticatedIdentity, Permission};
 use crate::control::sequence::SessionSequenceAccess;
 use crate::control::server::pgwire::types::error_to_sqlstate;
-use crate::control::server::response_shape::compose::{ShapeOutcome, shape_returning_materialized};
+use crate::control::server::response_shape::compose::shape_returning_materialized;
 use crate::control::server::response_shape::redaction::QueryRedaction;
 use crate::control::server::response_shape::request::MaterializedShapeRequest;
 use crate::control::server::response_shape::schema::OutputSchema;
@@ -241,7 +241,7 @@ impl ReturningShape<'_> {
             self.database_id,
             tenant_id,
         );
-        let outcome = shape_returning_materialized(MaterializedShapeRequest {
+        let shaped = shape_returning_materialized(MaterializedShapeRequest {
             payload,
             plan,
             plan_kind: PlanKind::ReturningRows,
@@ -253,11 +253,9 @@ impl ReturningShape<'_> {
             sequences: Some(&sequences),
         })
         .map_err(|error| DdlError::from_error(&crate::Error::from(error)))?;
-        if let ShapeOutcome::Rows(shaped) = outcome {
-            match rows {
-                Some(accumulated) => accumulated.append(shaped),
-                None => *rows = Some(shaped),
-            }
+        match rows {
+            Some(accumulated) => accumulated.append(shaped),
+            None => *rows = Some(shaped),
         }
         Ok(())
     }

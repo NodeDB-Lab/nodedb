@@ -18,6 +18,7 @@ use crate::control::server::response_shape::request::MaterializedShapeRequest;
 use nodedb_types::NodeDbError;
 
 use super::super::auth::ApiError;
+use super::ndjson_error::shape_error_line;
 
 /// Map a shaping error to the HTTP error the client reads, keeping its
 /// numeric code. The status follows the SQLSTATE the code renders on
@@ -106,8 +107,9 @@ pub(super) fn passthrough_to_ndjson(payload: &[u8], ndjson: &mut String) {
 }
 
 /// Shape one payload and append it to an NDJSON buffer: one line per row, a
-/// passthrough payload as [`passthrough_to_ndjson`] writes it, or one error
-/// line when shaping fails. Returns the rows it counts for metering.
+/// passthrough payload as [`passthrough_to_ndjson`] writes it, or one
+/// `{"error": "...", "code": "NDB-<n>"}` line when shaping fails. Returns
+/// the rows it counts for metering.
 pub(super) async fn append_ndjson_payload(
     ndjson: &mut String,
     request: MaterializedShapeRequest<'_>,
@@ -127,8 +129,7 @@ pub(super) async fn append_ndjson_payload(
             1
         }
         Err(e) => {
-            ndjson.push_str(&serde_json::json!({"error": e.message()}).to_string());
-            ndjson.push('\n');
+            ndjson.push_str(&shape_error_line(&e));
             0
         }
     }

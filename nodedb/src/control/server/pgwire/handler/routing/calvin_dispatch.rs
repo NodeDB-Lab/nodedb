@@ -15,6 +15,7 @@ use crate::control::planner::calvin::{
 };
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::security::request_scope::RequestAuthScope;
+use crate::control::sequence::SessionSequenceAccess;
 use crate::control::server::response_shape::calvin_fold::{
     CalvinFoldCtx, CalvinFoldError, fold_calvin_batch,
 };
@@ -180,6 +181,7 @@ impl NodeDbPgHandler {
                     projection,
                     tenant_id,
                     database_id,
+                    session_id,
                 },
             );
         }
@@ -238,6 +240,7 @@ impl NodeDbPgHandler {
                 projection,
                 tenant_id,
                 database_id,
+                session_id,
             },
         )
     }
@@ -259,7 +262,16 @@ impl NodeDbPgHandler {
             projection,
             tenant_id,
             database_id,
+            session_id,
         } = shaping;
+        // A RETURNING expression resolves `nextval`/`currval` against this
+        // session, as the single-shard dispatch loop does.
+        let sequences = SessionSequenceAccess::for_session(
+            &self.state,
+            self.sessions.sequence_values(session_id),
+            database_id,
+            tenant_id,
+        );
         let plans: Vec<&crate::bridge::envelope::PhysicalPlan> =
             tasks.iter().map(|task| &task.plan).collect();
         let fold = fold_calvin_batch(
@@ -271,6 +283,7 @@ impl NodeDbPgHandler {
                 tenant_id,
                 database_id,
                 auth,
+                sequences: Some(&sequences),
             },
         )
         .map_err(|e| match e {
@@ -301,4 +314,6 @@ struct CalvinBatchShaping<'a> {
     projection: Option<&'a crate::control::server::response_shape::schema::OutputSchema>,
     tenant_id: TenantId,
     database_id: DatabaseId,
+    /// The session whose sequence values a RETURNING expression reads.
+    session_id: SessionId,
 }

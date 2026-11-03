@@ -129,13 +129,10 @@ fn check_rectangular(column: &str, items: &[Value]) -> PgWireResult<()> {
     if lists.all(|len| len == first) {
         return Ok(());
     }
-    Err(shape_error_to_pg(&NodeDbError::serialization(
-        "cell",
-        format!(
-            "column \"{column}\" holds a ragged array: every list of one dimension must hold \
-             the same number of elements"
-        ),
-    )))
+    Err(shape_error_to_pg(&NodeDbError::data_exception(format!(
+        "column \"{column}\" holds a ragged array: every list of one dimension must hold \
+         the same number of elements"
+    ))))
 }
 
 /// The PostgreSQL text of one float element. A non-finite float is `NaN`,

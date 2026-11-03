@@ -8,11 +8,13 @@
 
 use nodedb_types::protocol::NativeResponse;
 
+use crate::control::server::response_shape::calvin_fold::CalvinFoldCtx;
 use crate::control::server::shared::authorization::AuthorizedTaskSet;
 use crate::control::server::shared::session::TransactionState;
 use crate::control::server::shared::statement_exec::{EdgeRecon, try_edge_recon};
 use nodedb_physical::physical_task::PhysicalTask;
 
+use super::sql_loop::session_sequences;
 use super::{DispatchCtx, SqlOutcome, error_to_native};
 
 /// Route `tasks` through the implicit-edge OLLP/Calvin path when the shared
@@ -32,14 +34,19 @@ pub(super) async fn try_edge_recon_dispatch(
         // A RETURNING dependent write surfaces its deleted or updated rows. A
         // plain write reports the count its own mutation returned.
         Ok(EdgeRecon::Applied(applied)) => {
+            let sequences = session_sequences(ctx, applied.database_id);
             EdgeReconResult::Outcome(resp(super::conversion::calvin_native_response(
                 seq,
                 applied.apply_result,
                 &applied.plans,
-                ctx.state,
-                applied.database_id,
-                ctx.tenant_id(),
-                ctx.auth_context(),
+                &CalvinFoldCtx {
+                    projection: None,
+                    state: ctx.state,
+                    tenant_id: ctx.tenant_id(),
+                    database_id: applied.database_id,
+                    auth: ctx.auth_context(),
+                    sequences: Some(&sequences),
+                },
             )))
         }
         Err(error) => EdgeReconResult::Outcome(resp(error_to_native(seq, &error))),

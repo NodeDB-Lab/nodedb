@@ -298,8 +298,11 @@ pub(crate) fn ddl_result_to_native(
 /// tag as `(rows_affected, command)`.
 ///
 /// `apply_result` is the applied Data-Plane response drained from the sidecar
-/// and `plans` is the completed batch's plans, in dispatch order. The fold is
-/// the protocol-neutral `response_shape::calvin_fold` pgwire renders too, so
+/// and `plans` is the completed batch's plans, in dispatch order. `fold_ctx`
+/// carries the requester, the statement's output schema and session sequence
+/// access. The schema evaluates a RETURNING list's computed columns. A native
+/// direct operation has no RETURNING list, so its projection is `None`. The
+/// fold is the protocol-neutral `response_shape::calvin_fold` pgwire renders too, so
 /// a three-row implicit-edge insert answers `(3, INSERT)` here and
 /// `INSERT 0 3` there.
 ///
@@ -312,28 +315,12 @@ pub(crate) fn calvin_native_response(
     seq: u64,
     apply_result: Option<crate::bridge::envelope::Response>,
     plans: &[crate::bridge::envelope::PhysicalPlan],
-    state: &crate::control::state::SharedState,
-    database_id: nodedb_types::DatabaseId,
-    tenant_id: nodedb_types::TenantId,
-    auth: &crate::control::security::auth_context::AuthContext,
+    fold_ctx: &crate::control::server::response_shape::calvin_fold::CalvinFoldCtx<'_>,
 ) -> NativeResponse {
-    use crate::control::server::response_shape::calvin_fold::{
-        CalvinFoldCtx, CalvinFoldError, fold_calvin_batch,
-    };
+    use crate::control::server::response_shape::calvin_fold::{CalvinFoldError, fold_calvin_batch};
 
     let plan_refs: Vec<&crate::bridge::envelope::PhysicalPlan> = plans.iter().collect();
-    let fold = match fold_calvin_batch(
-        &plan_refs,
-        apply_result.as_ref(),
-        &CalvinFoldCtx {
-            // The native protocol announces no output columns ahead of the rows.
-            projection: None,
-            state,
-            tenant_id,
-            database_id,
-            auth,
-        },
-    ) {
+    let fold = match fold_calvin_batch(&plan_refs, apply_result.as_ref(), fold_ctx) {
         Ok(fold) => fold,
         Err(CalvinFoldError::Verb(e)) => return dml_fold_error_to_native(seq, &e),
         Err(CalvinFoldError::Shape(e)) => return error_to_native(seq, &e),

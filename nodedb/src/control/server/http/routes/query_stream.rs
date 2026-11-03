@@ -9,8 +9,8 @@
 //! [`ResultStream`], instead of being materialized into a `String` first.
 //!
 //! A mid-stream error is surfaced **in band** as a final
-//! `{"error": "..."}\n` line and the body then ends cleanly: NDJSON clients
-//! parse line-by-line, so an in-band error line is the correct UX and matches
+//! `{"error": "...", "code": "NDB-<n>"}\n` line and the body then ends
+//! cleanly: NDJSON clients parse line-by-line, so an in-band error line is the correct UX and matches
 //! the shape the materialized path emits for a dispatch failure. The HTTP body
 //! itself never errors, so the response stays `Content-Type:
 //! application/x-ndjson` and 200.
@@ -20,7 +20,6 @@ use std::sync::Arc;
 use bytes::Bytes;
 use futures::StreamExt;
 
-use crate::control::gateway::GatewayErrorMap;
 use crate::control::gateway::core::QueryContext;
 use crate::control::security::audit::ArcAuditEmitter;
 use crate::control::security::identity::AuthenticatedIdentity;
@@ -35,6 +34,7 @@ use crate::data::executor::response_codec::decode_payload_value;
 use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 
 use super::super::auth::AppState;
+use super::ndjson_error::{error_line, error_line_in_context};
 
 /// Decide whether the single-task list is an eligible streamable SELECT and,
 /// if so, open the row stream.
@@ -132,8 +132,8 @@ pub(super) struct NdjsonBody {
 /// Each [`RowBatch`] payload is a standalone msgpack array; it is decoded to a
 /// JSON array and each element is emitted as its own `<json>\n` line, with a
 /// global take-N enforced at `limit`. A mid-stream `Err` is emitted as a final
-/// `{"error": "..."}\n` line and the stream then ends — see the module docs for
-/// why the HTTP body never errors.
+/// `{"error": "...", "code": "NDB-<n>"}\n` line and the stream then ends —
+/// see the module docs for why the HTTP body never errors.
 ///
 /// [`RowBatch`]: crate::control::server::result_stream::RowBatch
 pub(super) fn ndjson_body_stream(
@@ -172,9 +172,7 @@ pub(super) fn ndjson_body_stream(
                 None => break,
                 Some(Ok(b)) => b,
                 Some(Err(e)) => {
-                    let (_status, msg) = GatewayErrorMap::to_http(&e);
-                    let line = format!("{}\n", serde_json::json!({ "error": msg }));
-                    yield Ok(Bytes::from(line));
+                    yield Ok(Bytes::from(error_line(&e)));
                     return;
                 }
             };
@@ -185,11 +183,7 @@ pub(super) fn ndjson_body_stream(
                     // A malformed batch payload is surfaced as an in-band error
                     // line (matching the mid-stream dispatch-error path above)
                     // rather than silently dropping the batch.
-                    let line = format!(
-                        "{}\n",
-                        serde_json::json!({ "error": format!("malformed response batch: {e}") })
-                    );
-                    yield Ok(Bytes::from(line));
+                    yield Ok(Bytes::from(error_line_in_context("malformed response batch", &e)));
                     return;
                 }
             };
@@ -210,8 +204,7 @@ pub(super) fn ndjson_body_stream(
                 Err(e) => {
                     // In-band error line, matching the malformed-batch path
                     // above: the HTTP body itself never errors.
-                    let line = format!("{}\n", serde_json::json!({ "error": format!("{e}") }));
-                    yield Ok(Bytes::from(line));
+                    yield Ok(Bytes::from(error_line(&e)));
                     return;
                 }
             };
@@ -348,6 +341,11 @@ mod tests {
         let last: serde_json::Value =
             sonic_rs::from_str(lines.last().expect("error line")).expect("json error line");
         assert!(last.get("error").is_some(), "final line is an error object");
+        // `Error::Dispatch` classifies as `ErrorCode::DISPATCH`.
+        assert_eq!(
+            last["code"], "NDB-9002",
+            "the error line carries the public code"
+        );
     }
 
     /// The streaming metering contract: a client that disconnects mid-stream

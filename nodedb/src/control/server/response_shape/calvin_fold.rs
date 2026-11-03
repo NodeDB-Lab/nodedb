@@ -5,12 +5,13 @@
 //!
 //! Calvin deposits ONE applied response for the whole transaction (a second
 //! RETURNING-bearing participant fails the statement upstream), and every
-//! task reads that same payload: a RETURNING task yields the rows, taken once;
-//! every other task folds its count into the tag.
+//! task reads that same payload. The first RETURNING task shapes it into the
+//! rows. Later RETURNING tasks shape nothing, because shaping evaluates
+//! `nextval` once per row. Every other task folds its count into the tag.
 
 use nodedb_physical::physical_plan::{DocumentOp, KvOp, PhysicalPlan};
 
-use super::compose::{ShapeOutcome, shape_returning_materialized};
+use super::compose::shape_returning_materialized;
 use super::redaction::QueryRedaction;
 use super::request::MaterializedShapeRequest;
 use super::schema::OutputSchema;
@@ -20,6 +21,7 @@ use super::types::{
 };
 use crate::bridge::envelope::Response;
 use crate::control::security::auth_context::AuthContext;
+use crate::control::sequence::SequenceAccess;
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TenantId};
 
@@ -36,6 +38,9 @@ pub struct CalvinFoldCtx<'a> {
     /// The requester's resolved context; its roles drive column-level
     /// redaction of any RETURNING rows this batch surfaces.
     pub auth: &'a AuthContext,
+    /// The session's sequence access, so a RETURNING list can call
+    /// `nextval`/`currval` as it does on the direct path.
+    pub sequences: Option<&'a (dyn SequenceAccess + Sync)>,
 }
 
 /// One Calvin task's contribution to the statement's response.
@@ -67,9 +72,9 @@ pub struct CalvinBatchFold {
 /// Fold every task of a completed batch, in dispatch order.
 ///
 /// A derived implicit-edge write beside the user's own never answers the
-/// statement: it folds as opaque, as it never deposits. The rows are taken
-/// once rather than accumulated, which will repeat the identical payload per
-/// task.
+/// statement: it folds as opaque, as it never deposits. Every RETURNING task
+/// reads the one deposited payload, so the payload is shaped at most once
+/// per batch. A RETURNING task folds nothing into the tag.
 pub fn fold_calvin_batch(
     plans: &[&PhysicalPlan],
     apply_resp: Option<&Response>,
@@ -81,6 +86,13 @@ pub fn fold_calvin_batch(
         let role = tag.role_of(plan);
         if role == TaskTagRole::Opaque {
             tag.fold_opaque();
+            continue;
+        }
+        // The payload is already shaped: shaping it again advances every
+        // sequence its RETURNING list calls.
+        let returns_rows =
+            apply_resp.is_some() && matches!(describe_plan(plan), PlanKind::ReturningRows);
+        if returns_rows && rows.is_some() {
             continue;
         }
         match calvin_task_outcome(plan, apply_resp, ctx).map_err(CalvinFoldError::Shape)? {
@@ -102,10 +114,10 @@ pub fn fold_calvin_batch(
 /// Shape one task of a completed batch.
 ///
 /// A plan carrying RETURNING yields its rows as protocol-neutral
-/// [`ShapedRows`] when the deposited payload shapes; a write the statement
-/// planned as several tasks has the caller fold every such task's rows into
-/// ONE result set. Every other task (and a RETURNING task with no shaped payload)
-/// contributes to the statement's one command tag.
+/// [`ShapedRows`]. A write the statement planned as several tasks has the
+/// caller fold every such task's rows into ONE result set. A RETURNING
+/// payload that fails to shape fails the statement with its own error
+/// class. Every other task contributes to the statement's one command tag.
 pub fn calvin_task_outcome(
     plan: &PhysicalPlan,
     apply_resp: Option<&Response>,
@@ -113,22 +125,18 @@ pub fn calvin_task_outcome(
 ) -> crate::Result<CalvinTaskOutcome> {
     let plan_kind = describe_plan(plan);
     let redaction = QueryRedaction::for_plan(ctx.tenant_id, ctx.database_id, ctx.auth, plan);
-    if let (PlanKind::ReturningRows, Some(resp)) = (plan_kind, apply_resp)
-        && let Ok(ShapeOutcome::Rows(shaped)) =
-            shape_returning_materialized(MaterializedShapeRequest {
-                payload: resp.payload.as_bytes(),
-                plan,
-                plan_kind: PlanKind::ReturningRows,
-                projection: ctx.projection,
-                state: ctx.state,
-                database_id: ctx.database_id,
-                tenant_id: ctx.tenant_id,
-                redaction: Some(redaction.ctx(&ctx.state.redaction)),
-                // A RETURNING list names stored columns only, never a
-                // Control-Plane computed column.
-                sequences: None,
-            })
-    {
+    if let (PlanKind::ReturningRows, Some(resp)) = (plan_kind, apply_resp) {
+        let shaped = shape_returning_materialized(MaterializedShapeRequest {
+            payload: resp.payload.as_bytes(),
+            plan,
+            plan_kind: PlanKind::ReturningRows,
+            projection: ctx.projection,
+            state: ctx.state,
+            database_id: ctx.database_id,
+            tenant_id: ctx.tenant_id,
+            redaction: Some(redaction.ctx(&ctx.state.redaction)),
+            sequences: ctx.sequences,
+        })?;
         return Ok(CalvinTaskOutcome::Rows(shaped));
     }
 
@@ -281,5 +289,136 @@ mod tests {
             resolved_sum_targets: Vec::new(),
         });
         assert!(calvin_tag_for_plan(&point_delete).is_none());
+    }
+
+    /// Counts every `nextval` call and answers the running count.
+    struct CountingAccess(std::sync::atomic::AtomicI64);
+
+    impl SequenceAccess for CountingAccess {
+        fn nextval(&self, _name: &str) -> crate::Result<i64> {
+            Ok(self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1)
+        }
+        fn currval(&self, _name: &str) -> crate::Result<i64> {
+            Ok(self.0.load(std::sync::atomic::Ordering::SeqCst))
+        }
+        fn setval(&self, _name: &str, value: i64) -> crate::Result<i64> {
+            Ok(value)
+        }
+    }
+
+    fn returning_insert(id: &str) -> PhysicalPlan {
+        use nodedb_physical::physical_plan::{ReturningColumns, ReturningSpec};
+        PhysicalPlan::Document(DocumentOp::PointInsert {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "items"),
+            document_id: id.into(),
+            value: Vec::new(),
+            if_absent: false,
+            surrogate: nodedb_types::Surrogate::new(1),
+            returning: Some(ReturningSpec {
+                columns: ReturningColumns::Star,
+            }),
+            rls_filters: Vec::new(),
+            resolved_sum_targets: Vec::new(),
+            deferred_sum_targets: Vec::new(),
+        })
+    }
+
+    /// `RETURNING id, nextval('s') AS n`.
+    fn id_and_nextval() -> OutputSchema {
+        use super::super::schema::{CpComputedColumn, OutputColumn};
+        use super::super::types::DdlColType;
+        use crate::bridge::expr_eval::SqlExpr;
+        let column = |name: &str, ty| OutputColumn {
+            display_name: name.to_string(),
+            lookup_key: name.to_string(),
+            ty,
+        };
+        OutputSchema {
+            columns: vec![
+                column("id", DdlColType::Text),
+                column("n", DdlColType::Int8),
+            ],
+            is_star: false,
+            cp_computed: vec![CpComputedColumn {
+                alias: "n".to_string(),
+                expr: SqlExpr::Function {
+                    name: "nextval".to_string(),
+                    args: vec![SqlExpr::Literal(nodedb_types::Value::String(
+                        "s".to_string(),
+                    ))],
+                },
+            }],
+            declared_key: None,
+        }
+    }
+
+    /// Two RETURNING tasks over the one deposited payload shape it once:
+    /// `nextval` runs once per row, never once per task.
+    #[tokio::test]
+    async fn returning_tasks_shape_the_payload_once() {
+        use crate::control::security::identity::{AuthenticatedIdentity, Role};
+        use crate::data::executor::response_codec::RowsPayload;
+        use nodedb_types::{NativeCell, Value};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal = std::sync::Arc::new(
+            crate::wal::WalManager::open_for_testing(&dir.path().join("calvin.wal")).expect("wal"),
+        );
+        let (dispatcher, _sides) = crate::bridge::dispatch::Dispatcher::new(1, 64);
+        let state = SharedState::new(dispatcher, wal).expect("shared state");
+        let identity = AuthenticatedIdentity::new_internal_service(
+            1,
+            "root",
+            TenantId::new(1),
+            vec![Role::Superuser],
+            true,
+            None,
+            AuthenticatedIdentity::default_database_set(true),
+        );
+        let auth = AuthContext::from_identity(&identity, "test".into());
+        let payload = zerompk::to_msgpack_vec(&RowsPayload {
+            columns: vec!["id".to_string()],
+            rows: vec![
+                vec![NativeCell(Value::String("a".into()))],
+                vec![NativeCell(Value::String("b".into()))],
+            ],
+        })
+        .expect("encode rows");
+        let resp = Response {
+            request_id: crate::types::RequestId::new(0),
+            status: crate::bridge::envelope::Status::Ok,
+            attempt: 1,
+            partial: false,
+            payload: crate::bridge::envelope::Payload::from_vec(payload),
+            watermark_lsn: crate::types::Lsn::ZERO,
+            error_code: None,
+            stage_vote: None,
+            read_vshards: crate::types::ReadShards::new(),
+            write_set: Vec::new(),
+        };
+        let projection = id_and_nextval();
+        let access = CountingAccess(std::sync::atomic::AtomicI64::new(0));
+        let ctx = CalvinFoldCtx {
+            projection: Some(&projection),
+            state: &state,
+            tenant_id: TenantId::new(1),
+            database_id: DatabaseId::DEFAULT,
+            auth: &auth,
+            sequences: Some(&access),
+        };
+        let (first, second) = (returning_insert("a"), returning_insert("b"));
+
+        let fold = fold_calvin_batch(&[&first, &second], Some(&resp), &ctx)
+            .unwrap_or_else(|e| panic!("fold: {e:?}"));
+
+        assert_eq!(
+            access.0.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "one nextval per row"
+        );
+        let rows = fold.rows.expect("RETURNING rows");
+        assert_eq!(rows.rows.len(), 2);
+        assert_eq!(rows.rows[0]["n"], Value::Integer(1));
+        assert_eq!(rows.rows[1]["n"], Value::Integer(2));
     }
 }

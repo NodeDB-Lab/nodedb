@@ -10,6 +10,7 @@ pub mod crdt;
 pub mod document;
 pub mod health;
 pub mod metrics;
+mod ndjson_error;
 pub mod promql;
 pub mod query;
 pub mod query_stream;

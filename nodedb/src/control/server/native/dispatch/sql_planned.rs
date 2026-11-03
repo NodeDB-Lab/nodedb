@@ -9,6 +9,7 @@ use nodedb_types::protocol::NativeResponse;
 use std::sync::Arc;
 
 use crate::control::server::native::sqlstate_code::sqlstate_error;
+use crate::control::server::response_shape::calvin_fold::CalvinFoldCtx;
 use crate::control::server::shared::check_constraint::{
     enforce_statement_checks, enforce_statement_enum_labels,
 };
@@ -180,10 +181,14 @@ pub(super) async fn execute_planned(
                 seq,
                 applied.apply_result,
                 &applied.plans,
-                ctx.state,
-                applied.database_id,
-                ctx.tenant_id(),
-                ctx.auth_context(),
+                &CalvinFoldCtx {
+                    projection: Some(&output_schema),
+                    state: ctx.state,
+                    tenant_id: ctx.tenant_id(),
+                    database_id: applied.database_id,
+                    auth: ctx.auth_context(),
+                    sequences: Some(&sequences),
+                },
             ));
         }
         Ok(AtomicRoute::PerTask(statement)) => statement,

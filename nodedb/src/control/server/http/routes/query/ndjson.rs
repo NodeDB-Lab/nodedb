@@ -6,7 +6,6 @@ use axum::extract::{Query as QueryParams, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 
-use crate::control::gateway::GatewayErrorMap;
 use crate::control::gateway::core::QueryContext;
 use crate::control::security::audit::ArcAuditEmitter;
 use crate::control::sequence::SessionSequenceAccess;
@@ -31,6 +30,7 @@ use super::super::super::auth::{ApiError, AppState, build_request_scope, resolve
 use super::super::super::peer::PeerAddr;
 use super::super::super::transport::ClientTransport;
 use super::super::atomic_statement::{RoutedStatement, route_http_statement};
+use super::super::ndjson_error::{error_line, error_value};
 use super::super::query_stream::{NdjsonBody, ndjson_body_stream, try_open_stream};
 use super::super::result_shape::append_ndjson_payload;
 use super::{DatabaseQueryParam, resolve_database_id};
@@ -39,6 +39,7 @@ use super::{DatabaseQueryParam, resolve_database_id};
 ///
 /// Each row is a separate JSON line (`\n`-terminated), Content-Type
 /// `application/x-ndjson`, so clients can process large result sets unbuffered.
+/// An error is an in-band `{"error": "...", "code": "NDB-<n>"}` line.
 pub async fn query_ndjson(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -73,7 +74,7 @@ pub async fn query_ndjson(
 
     // Quota enforcement — reject before any planning or dispatch.
     if let Err(e) = state.shared.check_tenant_quota(tenant_id) {
-        let body = serde_json::json!({ "error": e.to_string() });
+        let body = error_value(&e);
         return Response::builder()
             .status(StatusCode::TOO_MANY_REQUESTS)
             .header("Retry-After", "1")
@@ -169,11 +170,7 @@ pub async fn query_ndjson(
         }
         // A statement that stopped answers one error line, as a task that
         // stopped in the loop below does.
-        Err(error) => {
-            let (_status, message) = GatewayErrorMap::to_http(&error);
-            let line = format!("{}\n", serde_json::json!({ "error": message }));
-            return ndjson_response(line, rate_limit_headers);
-        }
+        Err(error) => return ndjson_response(error_line(&error), rate_limit_headers),
     };
     let mut lease_scope = Some(lease_scope);
 
@@ -252,8 +249,7 @@ pub async fn query_ndjson(
         // A lease this node lost ends the body with a retryable error line
         // before the next task dispatches.
         if let Err(revoked) = lease_scope.check_not_revoked() {
-            ndjson.push_str(&serde_json::json!({"error": revoked.to_string()}).to_string());
-            ndjson.push('\n');
+            ndjson.push_str(&error_line(&revoked));
             break;
         }
         // A spent hard quota refuses the task before it runs; reported as an error
@@ -262,8 +258,7 @@ pub async fn query_ndjson(
         if let Some(info) = &plan_metering_info
             && let Err(e) = admit_quota_for_dispatch(&state.shared, &scope, info)
         {
-            ndjson.push_str(&serde_json::json!({"error": e.to_string()}).to_string());
-            ndjson.push('\n');
+            ndjson.push_str(&error_line(&e));
             continue;
         }
 
@@ -463,11 +458,7 @@ pub async fn query_ndjson(
                     meter_dispatch(&state.shared, &scope, info, Some(task_rows));
                 }
             }
-            Err(e) => {
-                let (_status, msg) = GatewayErrorMap::to_http(&e);
-                ndjson.push_str(&serde_json::json!({"error": msg}).to_string());
-                ndjson.push('\n');
-            }
+            Err(e) => ndjson.push_str(&error_line(&e)),
         }
     }
 

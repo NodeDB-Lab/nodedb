@@ -100,10 +100,10 @@ pub async fn shape_response_materialized(
 
 /// Shape a write's `RETURNING` payload. Synchronous: a `RETURNING` payload
 /// holds stored rows, never search hits, so it has no surrogate to name.
-/// Any other plan kind is refused, since it can carry search hits.
+/// Any other plan kind is an internal error, since it can carry search hits.
 pub fn shape_returning_materialized(
     request: MaterializedShapeRequest<'_>,
-) -> Result<ShapeOutcome, NodeDbError> {
+) -> Result<ShapedRows, NodeDbError> {
     let MaterializedShapeRequest {
         payload,
         plan,
@@ -123,9 +123,8 @@ pub fn shape_returning_materialized(
         .into());
     }
     let wrapped = apply_walk_wrap(plan, &apply_kv_wrap(plan, payload))?;
-    shape_translated(
+    shape_returning_rows(
         &wrapped,
-        plan_kind,
         projection,
         redaction,
         sequences.map(|s| s as &dyn SequenceAccess),

@@ -9,6 +9,7 @@ use crate::control::planner::calvin::{
     CrossShardTxnMode, DispatchClass, TxnDispatchPosition, classify_dispatch,
     dispatch_authorized_tasks_to_calvin,
 };
+use crate::control::server::response_shape::calvin_fold::CalvinFoldCtx;
 use crate::control::server::shared::metering::{PlanMeteringInfo, meter_dispatch};
 use crate::control::server::shared::quota_admission::admit_quota_for_dispatch;
 use crate::control::server::shared::session::TransactionState;
@@ -18,6 +19,7 @@ use crate::types::TraceId;
 use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 
 use super::single_task::dispatch_single_task;
+use super::sql_loop::session_sequences;
 use super::{DispatchCtx, error_to_native, error_to_native_with_sqlstate};
 use crate::control::server::native::sqlstate_code::sqlstate_error;
 
@@ -382,15 +384,23 @@ pub(crate) async fn handle_direct_op(
                 // The count and verb come from the applied response the
                 // batch's count-bearing plan reported, never from the task
                 // count: an implicit-edge cleanup task is not a row.
-                Ok(apply) => super::conversion::calvin_native_response(
-                    seq,
-                    apply,
-                    &plans,
-                    ctx.state,
-                    ctx.database_id(),
-                    tenant_id,
-                    ctx.auth_context(),
-                ),
+                Ok(apply) => {
+                    let database_id = ctx.database_id();
+                    let sequences = session_sequences(ctx, database_id);
+                    super::conversion::calvin_native_response(
+                        seq,
+                        apply,
+                        &plans,
+                        &CalvinFoldCtx {
+                            projection: None,
+                            state: ctx.state,
+                            tenant_id,
+                            database_id,
+                            auth: ctx.auth_context(),
+                            sequences: Some(&sequences),
+                        },
+                    )
+                }
                 Err(e) => error_to_native(seq, &e),
             }
         } else {

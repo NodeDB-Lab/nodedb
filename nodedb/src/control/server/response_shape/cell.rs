@@ -98,10 +98,9 @@ pub fn instant_of(v: &Value, column: &str) -> Result<NdbDateTime, NodeDbError> {
     match v {
         Value::DateTime(at) | Value::NaiveDateTime(at) => Ok(*at),
         Value::String(s) => NdbDateTime::parse(s).ok_or_else(|| {
-            NodeDbError::serialization(
-                "cell",
-                format!("column \"{column}\" holds text that is not a timestamp: {s:?}"),
-            )
+            NodeDbError::data_exception(format!(
+                "column \"{column}\" holds text that is not a timestamp: {s:?}"
+            ))
         }),
         other => Err(shape_mismatch(column, "a timestamp", other)),
     }
@@ -109,14 +108,14 @@ pub fn instant_of(v: &Value, column: &str) -> Result<NdbDateTime, NodeDbError> {
 
 /// The error for a cell whose shape is not the one its column requires:
 /// `column "ts" holds an integer where a timestamp is required`.
+///
+/// The stored value is the fault, so the error is a data exception
+/// (SQLSTATE `22000`).
 pub fn shape_mismatch(column: &str, expected: &str, found: &Value) -> NodeDbError {
-    NodeDbError::serialization(
-        "cell",
-        format!(
-            "column \"{column}\" holds {} where {expected} is required",
-            shape_name(found)
-        ),
-    )
+    NodeDbError::data_exception(format!(
+        "column \"{column}\" holds {} where {expected} is required",
+        shape_name(found)
+    ))
 }
 
 /// The article-prefixed shape name an error names a cell by.
@@ -149,6 +148,8 @@ fn shape_name(v: &Value) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use nodedb_types::error::ErrorCode;
+
     use super::*;
 
     /// The one instant these tests use: 2020-03-05T10:00:00Z.
@@ -269,6 +270,7 @@ mod tests {
     fn instant_of_refuses_an_integer() {
         let err = instant_of(&Value::Integer(EARLY_MICROS), "created_at")
             .expect_err("an integer carries no unit");
+        assert_eq!(err.code(), ErrorCode::DATA_EXCEPTION);
         assert!(
             err.message()
                 .contains("column \"created_at\" holds an integer where a timestamp is required"),
@@ -282,6 +284,7 @@ mod tests {
     fn instant_of_refuses_text_that_does_not_parse() {
         let err = instant_of(&Value::String("yesterday".into()), "ts")
             .expect_err("free text is not an instant");
+        assert_eq!(err.code(), ErrorCode::DATA_EXCEPTION);
         assert!(
             err.message()
                 .contains("column \"ts\" holds text that is not a timestamp"),
