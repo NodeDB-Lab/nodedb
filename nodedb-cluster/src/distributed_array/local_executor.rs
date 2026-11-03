@@ -15,7 +15,7 @@
 use crate::distributed_array::merge::ArrayAggPartial;
 use crate::distributed_array::wire::{
     ArrayShardAggReq, ArrayShardDeleteReq, ArrayShardElementwiseReq, ArrayShardMaintReq,
-    ArrayShardPutReq, ArrayShardSliceReq,
+    ArrayShardPutReq, ArrayShardSliceReq, ArrayShardSurrogateBitmapReq,
 };
 use crate::error::Result;
 
@@ -102,13 +102,13 @@ pub trait ArrayLocalExecutor: Send + Sync + 'static {
     /// Execute a surrogate-bitmap scan and return the zerompk-encoded
     /// `SurrogateBitmap` bytes for matching cells.
     ///
-    /// `array_id_msgpack` — zerompk encoding of `nodedb_array::types::ArrayId`.
-    /// `slice_msgpack` — zerompk encoding of `nodedb_array::query::Slice`.
+    /// The scan reads at `req.system_time`. `req.txn_id` is stamped on the
+    /// Data Plane request so a current or transaction snapshot read folds in
+    /// that transaction's staged cells on this shard.
     async fn exec_surrogate_bitmap_scan(
         &self,
         local_vshard_id: u32,
-        array_id_msgpack: &[u8],
-        slice_msgpack: &[u8],
+        req: &ArrayShardSurrogateBitmapReq,
     ) -> Result<Vec<u8>>;
 
     /// Execute a partial aggregate on this shard and return the partial states.

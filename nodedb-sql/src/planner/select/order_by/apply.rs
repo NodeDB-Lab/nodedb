@@ -204,8 +204,8 @@ pub(in crate::planner::select) fn apply_order_by(
             temporal: *temporal,
         }),
         // An index lookup carries its own sort keys: its handler orders the
-        // matched rows before the row bound cuts them. Wrapping it in a tail
-        // would sort and cut a second time.
+        // matched rows before the row bound cuts them, so it takes no tail
+        // that sorts and cuts a second time.
         SqlPlan::DocumentIndexLookup(lookup) => {
             Ok(SqlPlan::DocumentIndexLookup(DocumentIndexLookupPlan {
                 sort_keys,

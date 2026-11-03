@@ -120,6 +120,7 @@ impl EdgeStore {
     }
 
     /// All neighbors (both directions) within the caller's tenant and collection.
+    /// `Both` lists each physical edge once, a self-loop included.
     pub fn neighbors(
         &self,
         db: u64,
@@ -135,7 +136,11 @@ impl EdgeStore {
             Direction::Both => {
                 let mut out = self.neighbors_out(db, tid, collection, node, label_filter)?;
                 let inbound = self.neighbors_in(db, tid, collection, node, label_filter)?;
-                out.extend(inbound);
+                out.extend(
+                    inbound
+                        .into_iter()
+                        .filter(|edge| direction.in_pass_keeps(edge.src_id.as_str(), node)),
+                );
                 Ok(out)
             }
         }
@@ -167,5 +172,49 @@ impl EdgeStore {
         Ok(self
             .neighbors_in(db, tid, collection, dst, label_filter)?
             .len())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nodedb_types::OrdinalClock;
+
+    const T: TenantId = TenantId::new(1);
+    const COLL: &str = "people";
+
+    /// A self-loop is one edge. `Both` lists it once, beside the node's
+    /// other edges.
+    #[test]
+    fn both_lists_a_self_loop_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = EdgeStore::open(&dir.path().join("graph.redb")).unwrap();
+        let clock = OrdinalClock::new();
+        for (src, dst) in [("a", "b"), ("a", "a")] {
+            let ord = clock.next_ordinal();
+            store
+                .put_edge_versioned(
+                    EdgeRef::new(DatabaseId::DEFAULT, T, COLL, src, "L", dst),
+                    b"",
+                    ord,
+                    ord,
+                    i64::MAX,
+                )
+                .unwrap();
+        }
+        let db = DatabaseId::DEFAULT.as_u64();
+        let mut both: Vec<(String, String)> = store
+            .neighbors(db, T, COLL, "a", None, Direction::Both)
+            .unwrap()
+            .into_iter()
+            .map(|edge| (edge.src_id, edge.dst_id))
+            .collect();
+        both.sort();
+        let pair = |s: &str, d: &str| (s.to_string(), d.to_string());
+        assert_eq!(both, vec![pair("a", "a"), pair("a", "b")]);
+        let inbound = store
+            .neighbors(db, T, COLL, "a", None, Direction::In)
+            .unwrap();
+        assert_eq!(inbound.len(), 1);
     }
 }

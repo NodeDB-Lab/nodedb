@@ -66,8 +66,9 @@ impl CoreLoop {
         collection: &str,
         path: &str,
         value: &str,
+        system_time: &nodedb_types::SystemTimeScope,
     ) -> Response {
-        match self.index_lookup_keys(task, tid, collection, path, value) {
+        match self.index_lookup_keys(task, tid, collection, path, value, system_time) {
             Ok(doc_ids) => {
                 let doc_ids: Vec<String> = doc_ids.iter().map(|k| k.to_string()).collect();
                 let payload = serde_json::json!(doc_ids);
@@ -94,9 +95,10 @@ impl CoreLoop {
         collection: &str,
         path: &str,
         value: &str,
+        system_time: &nodedb_types::SystemTimeScope,
     ) -> crate::Result<nodedb_types::SurrogateBitmap> {
         let tid = task.request.tenant_id.as_u64();
-        let keys = self.index_lookup_keys(task, tid, collection, path, value)?;
+        let keys = self.index_lookup_keys(task, tid, collection, path, value, system_time)?;
         let mut bitmap = nodedb_types::SurrogateBitmap::new();
         for key in &keys {
             bitmap.insert(key.surrogate());
@@ -104,11 +106,10 @@ impl CoreLoop {
         Ok(bitmap)
     }
 
-    /// Doc IDs where `path = value`, with the rows a transaction staged
-    /// merged in.
-    ///
-    /// Delegates to `DocumentEngine::index_lookup`, which reads the
-    /// versioned index at the current state.
+    /// Doc IDs where `path = value` at the cut of `system_time`. A current
+    /// read and a transaction snapshot read merge the rows the transaction
+    /// staged. A historical read sees committed rows only. `AllVersions`
+    /// has no single cut and is refused.
     fn index_lookup_keys(
         &mut self,
         task: &ExecutionTask,
@@ -116,7 +117,15 @@ impl CoreLoop {
         collection: &str,
         path: &str,
         value: &str,
+        system_time: &nodedb_types::SystemTimeScope,
     ) -> crate::Result<Vec<StorageKey>> {
+        if matches!(system_time, nodedb_types::SystemTimeScope::AllVersions) {
+            return Err(crate::Error::DataPlane(ErrorCode::Unsupported {
+                detail: "AS OF SYSTEM TIME NULL (all-versions) is not supported on index \
+                         lookups; use a table scan"
+                    .into(),
+            }));
+        }
         debug!(
             core = self.core_id,
             %collection,
@@ -130,8 +139,13 @@ impl CoreLoop {
             task.request.database_id.as_u64(),
             tid,
         );
-        let mut doc_ids = doc_engine.index_lookup(collection, path, value, None)?;
-        if let Some(txn_id) = task.request.txn_id {
+        let mut doc_ids =
+            doc_engine.index_lookup(collection, path, value, system_time.as_of_ordinal())?;
+        let overlay_txn = task
+            .request
+            .txn_id
+            .filter(|_| system_time.merges_txn_overlay());
+        if let Some(txn_id) = overlay_txn {
             let coll_key = (
                 task.request.database_id,
                 crate::types::TenantId::new(tid),

@@ -21,7 +21,7 @@ use crate::control::state::SharedState;
 use crate::types::{ReadShards, TenantId};
 
 use super::connection::SessionId;
-use super::read_set::{ReadCapture, record_read_set};
+use super::read_set::{ReadCapture, record_nested_read_set, record_read_set};
 use super::store::SessionStore;
 
 /// The observed reads produced by one dispatched response.
@@ -42,7 +42,8 @@ pub struct ResponseReads<'a> {
 ///
 /// Protocol-neutral: pgwire and native direct-ops both call this after a read
 /// returns. With distributed captures present, records one entry per capture
-/// from its own scan plan; otherwise records the single plain entry. Delegates
+/// from its own scan plan, plus the reads nested in the executed plan.
+/// Otherwise records the executed plan and every read nested in it. Delegates
 /// every entry to [`record_read_set`], which drops the entry outside a
 /// transaction block.
 pub async fn record_reads_for_response(
@@ -67,6 +68,16 @@ pub async fn record_reads_for_response(
             )
             .await;
         }
+        record_nested_read_set(
+            sessions,
+            session_id,
+            tenant_id,
+            ReadCapture {
+                plan: reads.plan,
+                read_vshards: reads.read_vshards,
+                found: false,
+            },
+        );
     } else {
         record_read_set(
             state,

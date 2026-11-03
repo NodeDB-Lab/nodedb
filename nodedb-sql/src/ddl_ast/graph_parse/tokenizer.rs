@@ -14,6 +14,9 @@ pub(super) enum Tok<'a> {
     Object(&'a str),
     /// Bracket-balanced `[...]` content, brackets excluded.
     List(&'a str),
+    /// A `,`. It separates the items of a list. The clause reader skips it
+    /// everywhere else.
+    Comma,
 }
 
 /// `sql` with every comment replaced by one space, so no comment becomes a
@@ -42,20 +45,25 @@ pub(super) fn blank_comments(sql: &str) -> Cow<'_, str> {
 
 /// Split graph DSL text into tokens.
 ///
-/// `,`, `;`, `(` and `)` separate tokens and produce none, so `LABEL 'a', 'b'`
-/// and `LABEL ('a', 'b')` read the same. A stray `]` is a word token, so the
-/// clause parser reports it.
+/// `;`, `(` and `)` separate tokens and produce none, so `LABEL 'a', 'b'`
+/// and `LABEL ('a', 'b')` read the same. A `,` is a [`Tok::Comma`], so a
+/// list reader can tell `'a', 'b'` from `'a' 'b'`. A stray `]` is a word
+/// token, so the clause parser reports it.
 pub(super) fn tokenize(sql: &str) -> Vec<Tok<'_>> {
     let bytes = sql.as_bytes();
     let mut out = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
         let b = bytes[i];
-        if b.is_ascii_whitespace() || b == b',' || b == b';' || b == b'(' || b == b')' {
+        if b.is_ascii_whitespace() || b == b';' || b == b'(' || b == b')' {
             i += 1;
             continue;
         }
         match b {
+            b',' => {
+                out.push(Tok::Comma);
+                i += 1;
+            }
             b'\'' => {
                 let (content, next) = consume_delimited(sql, bytes, i, b'\'');
                 out.push(Tok::Quoted(content));

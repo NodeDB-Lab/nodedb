@@ -322,7 +322,8 @@ impl CoreLoop {
 
     /// The rows of one `NeighborsMulti` hop. A row counts against
     /// `max_results` only once the edge predicate admits it. A hop with more
-    /// rows than `max_results` is an `ExecutionLimitExceeded` error.
+    /// rows than `max_results` is an `ExecutionLimitExceeded` error. A `Both`
+    /// hop returns a self-loop once.
     ///
     /// A request with a `txn_id` merges that transaction's staged edge
     /// writes on this core: a staged tombstone drops an edge, a staged put
@@ -410,6 +411,9 @@ impl CoreLoop {
                         .collect(),
                 };
                 for (label, node, staged) in neighbors {
+                    if !pass.keeps_row(args.direction, raw_src, &node) {
+                        continue;
+                    }
                     let properties = match edge_properties.as_mut() {
                         None => None,
                         Some(hop) => {

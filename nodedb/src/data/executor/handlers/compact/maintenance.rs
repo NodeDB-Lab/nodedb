@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! Idle maintenance loop: checkpoint coordinator, KV expiry wheel, idle
-//! flush of timeseries memtables, and the periodic compaction trigger.
+//! flush of timeseries memtables, the graph size gauges, and the periodic
+//! compaction trigger.
 //!
 //! Driven by the runtime event loop on every idle wake; rate-limited via
 //! `compaction_interval` so the heavy `run_compaction` path runs at most

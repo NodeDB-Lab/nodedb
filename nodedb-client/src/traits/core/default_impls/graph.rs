@@ -5,7 +5,7 @@ use nodedb_types::filter::EdgeFilter;
 use nodedb_types::id::NodeId;
 use std::collections::HashMap;
 
-use super::super::trait_def::NodeDb;
+use super::super::graph_def::NodeDbGraph;
 
 pub(in crate::traits::core) fn graph_pagerank_default(
     collection: &str,
@@ -21,9 +21,9 @@ pub(in crate::traits::core) fn graph_pagerank_default(
 
 /// Default forward-BFS shortest-path search built on `graph_traverse`.
 ///
-/// See [`crate::traits::core::NodeDb::graph_shortest_path`] for the
+/// See [`crate::traits::core::NodeDbGraph::graph_shortest_path`] for the
 /// full contract.
-pub(in crate::traits::core) async fn graph_shortest_path_default<T: NodeDb + ?Sized>(
+pub(in crate::traits::core) async fn graph_shortest_path_default<T: NodeDbGraph + ?Sized>(
     this: &T,
     collection: &str,
     from: &NodeId,

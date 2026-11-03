@@ -49,6 +49,9 @@ pub struct EdgeVersionWrite {
     /// is not live. The CSR mirrors it: a version below the newest one, or
     /// one a TRUNCATE hides, leaves the edge as it was.
     pub current: Option<Vec<u8>>,
+    /// Whether the edge was live before the write, judged without the
+    /// written version's own key.
+    pub was_live: bool,
 }
 
 impl EdgeVersionWrite {
@@ -63,7 +66,13 @@ impl EdgeVersionWrite {
             summary_created: false,
             prior_bindings: Vec::new(),
             current: None,
+            was_live: false,
         }
+    }
+
+    /// Whether the write ended a live edge.
+    pub fn ended_live_edge(&self) -> bool {
+        self.was_live && self.current.is_none()
     }
 }
 

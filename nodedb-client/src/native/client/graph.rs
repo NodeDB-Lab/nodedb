@@ -7,7 +7,9 @@ use nodedb_types::error::{NodeDbError, NodeDbResult};
 use nodedb_types::filter::EdgeFilter;
 use nodedb_types::graph::GraphStats;
 use nodedb_types::id::{EdgeId, NodeId};
-use nodedb_types::protocol::{OpCode, TextFields};
+use nodedb_types::protocol::{
+    EdgeDeleteBatch, EdgeKey, EdgePutBatch, EdgeWrite, OpCode, TextFields,
+};
 use nodedb_types::result::SubGraph;
 
 use super::core::NativeClient;
@@ -112,6 +114,72 @@ impl NativeClient {
             )
             .await?;
         check_error(&resp)
+    }
+
+    /// One `EdgePutBatch` request. An empty slice writes nothing and sends
+    /// nothing.
+    pub(super) async fn graph_insert_edges_impl(
+        &self,
+        collection: &str,
+        edges: &[EdgeWrite],
+    ) -> NodeDbResult<u64> {
+        if edges.is_empty() {
+            return Ok(0);
+        }
+        let payload = zerompk::to_msgpack_vec(&EdgePutBatch {
+            edges: edges.to_vec(),
+        })
+        .map_err(|e| NodeDbError::serialization("msgpack", format!("EdgePutBatch: {e}")))?;
+        self.send_edge_batch(OpCode::EdgePutBatch, collection, payload)
+            .await
+    }
+
+    /// One `EdgeDeleteBatch` request. An empty slice deletes nothing and
+    /// sends nothing.
+    pub(super) async fn graph_delete_edges_impl(
+        &self,
+        collection: &str,
+        edges: &[EdgeId],
+    ) -> NodeDbResult<u64> {
+        if edges.is_empty() {
+            return Ok(0);
+        }
+        let keys = edges
+            .iter()
+            .map(|id| EdgeKey {
+                src: id.src.clone(),
+                dst: id.dst.clone(),
+                label: id.label.clone(),
+            })
+            .collect();
+        let payload = zerompk::to_msgpack_vec(&EdgeDeleteBatch { edges: keys })
+            .map_err(|e| NodeDbError::serialization("msgpack", format!("EdgeDeleteBatch: {e}")))?;
+        self.send_edge_batch(OpCode::EdgeDeleteBatch, collection, payload)
+            .await
+    }
+
+    /// Send one edge-batch request and read back its edge count.
+    async fn send_edge_batch(
+        &self,
+        op: OpCode,
+        collection: &str,
+        payload: Vec<u8>,
+    ) -> NodeDbResult<u64> {
+        let mut conn = self.pool.acquire().await?;
+        let resp = conn
+            .send(
+                op,
+                TextFields {
+                    collection: Some(collection.to_string()),
+                    payload: Some(payload),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        check_error(&resp)?;
+        resp.rows_affected.ok_or_else(|| {
+            NodeDbError::internal(format!("{op:?}: the server answered with no edge count"))
+        })
     }
 
     pub(super) async fn graph_stats_impl(

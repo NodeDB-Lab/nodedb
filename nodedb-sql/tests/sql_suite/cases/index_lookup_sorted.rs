@@ -91,7 +91,7 @@ fn order_by_with_limit_and_offset_plans_the_bare_index_lookup() {
     let plan = plan_one(
         "SELECT id FROM turns WHERE session_id = 's1' ORDER BY created_at DESC LIMIT 3 OFFSET 2",
     );
-    // No tail above the lookup: a second sort and cut would apply the OFFSET twice.
+    // No tail above the lookup: a second sort and cut applies the OFFSET twice.
     let SqlPlan::DocumentIndexLookup(lookup) = plan else {
         panic!("expected the bare index lookup, got {plan:?}");
     };

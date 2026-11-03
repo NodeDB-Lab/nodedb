@@ -308,6 +308,11 @@ pub enum DocumentOp {
         collection: QualifiedCollection,
         path: String,
         value: String,
+        /// The cut the lookup reads: the scope of the read it feeds. A
+        /// prefilter of a search at a cut names the rows the index holds
+        /// there. A current read and a transaction snapshot read merge the
+        /// transaction's staged rows. The handler refuses `AllVersions`.
+        system_time: nodedb_types::SystemTimeScope,
     },
 
     /// Fetch full document rows via a secondary index, for a SELECT with an

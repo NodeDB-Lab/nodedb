@@ -157,6 +157,7 @@ impl CoreLoop {
                     let partition = self.csr_partition_mut(database_id, tid);
                     partition.set_node_surrogate(&edge.src_id, edge.src_surrogate);
                     partition.set_node_surrogate(&edge.dst_id, edge.dst_surrogate);
+                    self.count_edge_written(task, &edge.src_id);
                 }
                 Err(e) => {
                     let code = refusal_after_rows(write_set.len() as u64, e);

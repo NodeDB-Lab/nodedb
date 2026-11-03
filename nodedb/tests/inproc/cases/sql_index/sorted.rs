@@ -2,11 +2,10 @@
 
 //! `WHERE indexed = value ORDER BY ...` reads through the index.
 //!
-//! The planner used to refuse the index for any ORDER BY, so a lookup of the
-//! newest rows of one session scanned the whole collection. The index lookup
-//! now carries the sort keys. These tests check the plan shape and that the
-//! rows come back ordered, cut by OFFSET and LIMIT after the sort, and
-//! filtered by the residual predicate.
+//! The index lookup carries the ORDER BY sort keys, so a lookup of the newest
+//! rows of one session reads the index, not the whole collection. These tests
+//! check the plan shape and that the rows come back ordered, cut by OFFSET and
+//! LIMIT after the sort, and filtered by the residual predicate.
 
 use super::helpers::explain_lower;
 use nodedb_test_support::pgwire_harness::TestServer;

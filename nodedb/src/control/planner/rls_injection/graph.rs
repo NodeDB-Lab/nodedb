@@ -16,8 +16,9 @@ use super::context::RlsCtx;
 const TRAVERSAL_REASON: &str =
     "a traversal returns graph topology, which the row filter cannot be evaluated against";
 
-const EDGE_BATCH_REASON: &str = "a batched edge write is applied with empty properties, so it carries no row image for the \
-     policy to be evaluated against";
+const EDGE_BATCH_REASON: &str = "a batched edge write carries no per-edge write check, so the policy cannot be decided for \
+     each edge; write the edges with GRAPH INSERT EDGE or GRAPH DELETE EDGE, which decide it \
+     per edge";
 
 const ALGORITHM_REASON: &str = "an algorithm returns per-node scalars computed over every edge, which the row filter cannot \
      be evaluated against";
@@ -110,8 +111,9 @@ pub(super) fn inject_graph(ctx: &RlsCtx<'_>, op: &mut GraphOp) -> crate::Result<
         // Recurse: the wrapped delete's own slot is the one the policy fills.
         GraphOp::ResolveEdgeDelete(inner) => inject_graph(ctx, inner),
 
-        // Refuse: every edge in a batch applies with empty properties, so
-        // there's no image to evaluate even though each names its collection.
+        // Refuse: a batch carries no per-edge check slot. The edge-list
+        // statements and native edge batches decide the policy per edge on
+        // `EdgePut` / `EdgeDelete` before they build a batch.
         GraphOp::EdgePutBatch { .. } | GraphOp::EdgeDeleteBatch { .. } => {
             ctx.refuse_if_any_write_policy(EDGE_BATCH_REASON)
         }

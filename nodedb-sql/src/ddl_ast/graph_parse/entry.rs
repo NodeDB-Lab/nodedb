@@ -3,10 +3,11 @@
 //! Graph DSL entry point.
 
 use super::super::statement::{GraphStmt, NodedbStatement};
-use super::{edge_predicate, tokenizer, variants};
+use super::{edge_list, edge_predicate, tokenizer, variants};
 use crate::error::SqlError;
 use crate::parser::preprocess::temporal::{ExprBoundary, extract_bounded};
 use crate::temporal::{TemporalScope, ValidTime};
+use nodedb_types::protocol::MAX_EDGE_STATEMENT_SQL_BYTES;
 
 /// Parse a graph DSL statement.
 ///
@@ -71,6 +72,7 @@ fn parse_graph(sql: &str) -> Result<NodedbStatement, SqlError> {
     let trimmed = text.trim();
     let upper = trimmed.to_ascii_uppercase();
     let upper = upper.as_str();
+    refuse_oversized_edge_write(upper, sql.len())?;
     if temporal.is_temporal() && is_graph_write(upper) {
         return Err(SqlError::Parse {
             detail: format!(
@@ -103,9 +105,9 @@ fn parse_graph(sql: &str) -> Result<NodedbStatement, SqlError> {
     }
 
     if upper.starts_with("GRAPH INSERT EDGE ") {
-        variants::parse_insert_edge(&toks)
+        edge_list::parse_insert_edge(&toks)
     } else if upper.starts_with("GRAPH DELETE EDGE ") {
-        variants::parse_delete_edge(&toks)
+        edge_list::parse_delete_edge(&toks)
     } else if upper.starts_with("GRAPH LABEL ") {
         variants::parse_set_labels(&toks, false)
     } else if upper.starts_with("GRAPH UNLABEL ") {
@@ -123,6 +125,22 @@ fn parse_graph(sql: &str) -> Result<NodedbStatement, SqlError> {
             detail: "unrecognised GRAPH command".to_owned(),
         })
     }
+}
+
+/// Refuse a `GRAPH INSERT EDGE` or `GRAPH DELETE EDGE` statement whose text
+/// is longer than [`MAX_EDGE_STATEMENT_SQL_BYTES`], before it is tokenized.
+fn refuse_oversized_edge_write(upper: &str, sql_bytes: usize) -> Result<(), SqlError> {
+    let command = graph_command(upper);
+    let edge_list = command == "GRAPH INSERT EDGE" || command == "GRAPH DELETE EDGE";
+    if !edge_list || sql_bytes <= MAX_EDGE_STATEMENT_SQL_BYTES {
+        return Ok(());
+    }
+    Err(SqlError::Parse {
+        detail: format!(
+            "{command} text is {sql_bytes} bytes; the cap is {MAX_EDGE_STATEMENT_SQL_BYTES} \
+             bytes per statement; split the batch into smaller statements"
+        ),
+    })
 }
 
 /// A graph statement that writes: edges or node labels.
@@ -186,16 +204,16 @@ mod tests {
     fn parse_graph_delete_edge_with_collection() {
         let stmt = parsed("GRAPH DELETE EDGE IN 'myedges' FROM 'a' TO 'b' TYPE 'l'");
         match stmt {
-            NodedbStatement::Graph(GraphStmt::GraphDeleteEdge {
-                collection,
-                src,
-                dst,
-                label,
-            }) => {
+            NodedbStatement::Graph(GraphStmt::GraphDeleteEdge { collection, edges }) => {
                 assert_eq!(collection, "myedges");
-                assert_eq!(src, "a");
-                assert_eq!(dst, "b");
-                assert_eq!(label, "l");
+                assert_eq!(
+                    edges,
+                    vec![crate::ddl_ast::GraphEdgeKey {
+                        src: "a".into(),
+                        dst: "b".into(),
+                        label: "l".into(),
+                    }]
+                );
             }
             other => panic!("expected GraphDeleteEdge, got {other:?}"),
         }
@@ -886,5 +904,78 @@ mod tests {
              VALID_TIME 5 UNTIL 5",
         );
         assert!(error.contains("UNTIL must be after VALID_TIME"), "{error}");
+    }
+
+    #[test]
+    fn delete_edge_takes_several_edges_in_one_statement() {
+        match parsed(
+            "GRAPH DELETE EDGE IN 'e' FROM 'a' TO 'b' TYPE 'l1', \
+             FROM 'c' TO 'd' TYPE 'l2' TYPE 'l3' TO 'f' FROM 'e'",
+        ) {
+            NodedbStatement::Graph(GraphStmt::GraphDeleteEdge { collection, edges }) => {
+                assert_eq!(collection, "e");
+                let got: Vec<(&str, &str, &str)> = edges
+                    .iter()
+                    .map(|e| (e.src.as_str(), e.dst.as_str(), e.label.as_str()))
+                    .collect();
+                assert_eq!(
+                    got,
+                    vec![("a", "b", "l1"), ("c", "d", "l2"), ("e", "f", "l3")]
+                );
+            }
+            other => panic!("expected GraphDeleteEdge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delete_edge_refuses_an_incomplete_edge() {
+        let error =
+            parse_error("GRAPH DELETE EDGE IN 'e' FROM 'a' TO 'b' TYPE 'l' FROM 'c' TYPE 'l'");
+        assert!(
+            error.contains("GRAPH DELETE EDGE requires TO <node>"),
+            "{error}"
+        );
+        let error = parse_error("GRAPH DELETE EDGE IN 'e' FROM 'a' TO 'b' TYPE 'l' TYPE 'm'");
+        assert!(error.contains("requires FROM <node>"), "{error}");
+        let error = parse_error("GRAPH DELETE EDGE IN 'e' FROM 'a' TO 'b'");
+        assert!(error.contains("requires TYPE <label>"), "{error}");
+    }
+
+    #[test]
+    fn delete_edge_refuses_insert_only_clauses() {
+        let error =
+            parse_error("GRAPH DELETE EDGE IN 'e' FROM 'a' TO 'b' TYPE 'l' PROPERTIES { w: 1 }");
+        assert!(
+            error.contains("unexpected token 'PROPERTIES' in GRAPH DELETE EDGE"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_edge_statement_over_the_text_cap_is_refused() {
+        for command in ["GRAPH INSERT EDGE", "GRAPH DELETE EDGE"] {
+            let padding = " ".repeat(MAX_EDGE_STATEMENT_SQL_BYTES);
+            let sql = format!("{command} IN 'e' {padding}FROM 'a' TO 'b' TYPE 'l'");
+            let error = parse_error(&sql);
+            assert!(error.contains(command), "{error}");
+            assert!(
+                error.contains(&format!("cap is {MAX_EDGE_STATEMENT_SQL_BYTES} bytes")),
+                "{error}"
+            );
+            assert!(error.contains("split the batch"), "{error}");
+        }
+    }
+
+    #[test]
+    fn an_edge_statement_at_the_text_cap_parses() {
+        let head = "GRAPH INSERT EDGE IN 'e' ";
+        let tail = "FROM 'a' TO 'b' TYPE 'l'";
+        let padding = " ".repeat(MAX_EDGE_STATEMENT_SQL_BYTES - head.len() - tail.len());
+        let sql = format!("{head}{padding}{tail}");
+        assert_eq!(sql.len(), MAX_EDGE_STATEMENT_SQL_BYTES);
+        assert!(matches!(
+            parsed(&sql),
+            NodedbStatement::Graph(GraphStmt::GraphInsertEdge { .. })
+        ));
     }
 }

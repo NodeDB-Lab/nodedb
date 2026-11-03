@@ -2,7 +2,7 @@
 
 //! Graph DDL/DML statements.
 
-use crate::ddl_ast::graph_types::{GraphDirection, GraphEdgeSpec};
+use crate::ddl_ast::graph_types::{GraphDirection, GraphEdgeKey, GraphEdgeSpec};
 use crate::temporal::TemporalScope;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -15,11 +15,12 @@ pub enum GraphStmt {
         /// Never empty.
         edges: Vec<GraphEdgeSpec>,
     },
+    /// `GRAPH DELETE EDGE IN <c> <edge> [<edge> ...]`: one or more edges
+    /// out of one collection, deleted as one unit.
     GraphDeleteEdge {
         collection: String,
-        src: String,
-        dst: String,
-        label: String,
+        /// Never empty.
+        edges: Vec<GraphEdgeKey>,
     },
     GraphSetLabels {
         node_id: String,

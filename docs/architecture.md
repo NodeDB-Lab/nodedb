@@ -345,6 +345,15 @@ Counters are incremented at the sites where resources are consumed:
 
 All metrics are dimensionalized by database and tenant to enable per-customer tracking and alerting.
 
+**Graph Write Metrics** (unlabelled, per node):
+
+- `nodedb_graph_edges_written_total` — Edge versions that writes applied. A loader compares its rate with its own send rate to pace itself.
+- `nodedb_graph_edges_deleted_total` — Live edges that deletes removed. A delete of an absent edge adds nothing.
+- `nodedb_graph_edges` — Live edges this node stores.
+- `nodedb_graph_nodes` — Nodes with at least one live edge that this node stores.
+
+The two counters count an autocommit write when the Data Plane applies it. They count a committed transaction once its install settles, and a rolled-back install adds nothing. A dual-homed edge counts once, on its source home. Restart replay adds nothing. `TRUNCATE` cuts the edge collection without counting edges. The two gauges refresh every 10 seconds per core.
+
 ## Cross-Engine Identity
 
 All engines use a unified, distributed identity space called **surrogate identity**. Each row, cell, node, and document has a surrogate ID (u64) that is globally unique within a database. Surrogates enable fused queries that combine filtering across all engines in a single bitmap.

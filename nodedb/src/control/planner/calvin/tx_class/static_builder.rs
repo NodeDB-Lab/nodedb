@@ -106,7 +106,7 @@ fn build_static_tx_class_impl(
     // Populate the routing/identity read_set from the session read-set so a
     // txn that writes shard A but reads shard B enumerates B as a participant.
     // An empty read set (autocommit / pure-write) yields an empty read_set.
-    let read_set = read_set_from(reads);
+    let read_set = read_set_from(reads)?;
 
     // Encode all plans as msgpack bytes.
     let plans: Vec<&PhysicalPlan> = tasks.iter().map(|t| &t.plan).collect();

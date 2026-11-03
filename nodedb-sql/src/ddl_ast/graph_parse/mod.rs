@@ -11,7 +11,9 @@
 //!
 //! Numeric *ranges* and engine-level caps stay unvalidated here and are
 //! enforced at the pgwire boundary, which keeps this module free of
-//! `pgwire` dependencies and out of the `nodedb` → `nodedb-sql` edge.
+//! `pgwire` dependencies and out of the `nodedb` → `nodedb-sql` edge. One
+//! cap is enforced here: the text size of an edge-list statement, which
+//! only the parser sees.
 //!
 //! Structure is validated here, because the boundary cannot see it: a
 //! required clause that is absent, or a clause value outside its own
@@ -19,6 +21,7 @@
 //! reported as a parse error naming what is wrong.
 
 mod cursor;
+mod edge_list;
 mod edge_predicate;
 mod entry;
 pub mod fusion_params;

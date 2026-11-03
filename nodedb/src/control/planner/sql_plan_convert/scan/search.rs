@@ -27,12 +27,14 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_vector_search(
             pref,
             p.tenant_id,
             p.ctx,
+            p.system_time,
         )?)),
         None => p.index_prefilter.map(|pref| {
             Box::new(build_index_prefilter_plan(
                 pref,
                 p.ctx.database_id,
                 p.collection,
+                p.system_time,
             ))
         }),
     };
@@ -136,26 +138,31 @@ fn sql_atom_to_value_atom(a: &nodedb_sql::types::SqlPayloadAtom) -> nodedb_types
 
 /// Lower an `IndexPrefilter` into the `DocumentOp::IndexLookup` sub-plan
 /// that the vector search handler runs as its `inline_prefilter_plan`. The
-/// lookup returns the rows whose indexed field equals the literal.
+/// lookup returns the rows whose indexed field equals the literal at the
+/// search's cut, so the candidates and the ranked rows read one cut.
 fn build_index_prefilter_plan(
     prefilter: &nodedb_sql::types::IndexPrefilter,
     database_id: crate::types::DatabaseId,
     collection: &str,
+    system_time: nodedb_types::SystemTimeScope,
 ) -> PhysicalPlan {
     PhysicalPlan::Document(DocumentOp::IndexLookup {
         collection: nodedb_types::QualifiedCollection::new(database_id, collection),
         path: prefilter.field.clone(),
         value: super::super::value::sql_value_to_string(&prefilter.value),
+        system_time,
     })
 }
 
 /// Lower an `ArrayPrefilter` (array name + slice AST) into the
 /// `ArrayOp::SurrogateBitmapScan` sub-plan that the vector search handler
-/// runs as its `inline_prefilter_plan`.
+/// runs as its `inline_prefilter_plan`. The scan reads the array at the
+/// search's cut, so the candidates and the ranked rows read one cut.
 fn build_array_prefilter_plan(
     prefilter: &nodedb_sql::types::ArrayPrefilter,
     tenant_id: TenantId,
     ctx: &super::super::convert::ConvertContext,
+    system_time: nodedb_types::SystemTimeScope,
 ) -> crate::Result<PhysicalPlan> {
     use nodedb_array::schema::ArraySchema;
     use nodedb_array::types::ArrayId;
@@ -201,6 +208,7 @@ fn build_array_prefilter_plan(
         nodedb_physical::physical_plan::ArrayOp::SurrogateBitmapScan {
             array_id: aid,
             slice_msgpack,
+            system_time,
         },
     ))
 }

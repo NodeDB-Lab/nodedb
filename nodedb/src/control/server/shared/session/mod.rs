@@ -34,6 +34,7 @@ pub mod pending_shard_reads;
 mod predicted_stage;
 pub mod read_consistency;
 pub mod read_set;
+mod read_tree;
 pub mod record_reads;
 mod reservation_release;
 pub mod savepoint_ops;

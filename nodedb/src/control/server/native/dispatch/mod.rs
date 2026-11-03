@@ -11,6 +11,7 @@ mod ctx;
 mod direct_ops;
 mod direct_orchestrated;
 mod direct_txn;
+mod edge_batch;
 mod edge_recon_gate;
 mod graph_match;
 mod graph_owner;
@@ -43,6 +44,7 @@ pub(crate) use conversion::{
 };
 pub(crate) use ctx::DispatchCtx;
 pub(crate) use direct_ops::handle_direct_op;
+pub(crate) use edge_batch::{handle_edge_delete_batch, handle_edge_put_batch};
 pub(crate) use graph_match::handle_graph_match;
 pub(crate) use index_ddl_op::handle_index_ddl_op;
 pub(crate) use session_ops::{handle_reset, handle_set, handle_show, show_all};

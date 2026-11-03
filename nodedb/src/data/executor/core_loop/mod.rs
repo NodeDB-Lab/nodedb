@@ -21,6 +21,7 @@ pub(in crate::data::executor) mod event_outlet;
 pub(in crate::data::executor) use event_emit_engines::KvWriteEvent;
 pub(in crate::data::executor) mod fail_stop;
 pub(in crate::data::executor) mod filter_match;
+pub(in crate::data::executor) mod graph_metrics;
 mod graph_partition;
 mod graph_view;
 pub(in crate::data::executor) mod hash_chain_state;

@@ -42,3 +42,11 @@ pub struct GraphEdgeSpec {
     /// leaves it open.
     pub valid_until_ms: Option<i64>,
 }
+
+/// One edge of a `GRAPH DELETE EDGE` statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphEdgeKey {
+    pub src: String,
+    pub dst: String,
+    pub label: String,
+}

@@ -89,7 +89,15 @@ impl CoreLoop {
                 collection,
                 path,
                 value,
-            } => self.execute_document_index_lookup(task, tid, collection.as_str(), path, value),
+                system_time,
+            } => self.execute_document_index_lookup(
+                task,
+                tid,
+                collection.as_str(),
+                path,
+                value,
+                system_time,
+            ),
 
             DocumentOp::IndexedFetch {
                 collection,

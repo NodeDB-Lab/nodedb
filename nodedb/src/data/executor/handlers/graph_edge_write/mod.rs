@@ -12,4 +12,6 @@ mod put;
 mod put_batch;
 mod shared;
 
-pub(in crate::data::executor) use shared::{EdgeDeleteParams, EdgePutParams};
+pub(in crate::data::executor) use shared::{
+    EdgeDeleteParams, EdgePutParams, owns_logical_edge_stats,
+};

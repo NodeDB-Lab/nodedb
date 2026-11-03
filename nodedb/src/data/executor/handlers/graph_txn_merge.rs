@@ -61,6 +61,8 @@ pub(in crate::data::executor) fn build_graph_overlay_delta(
 /// A `Both` read is an outgoing pass, then an incoming pass. Each row then
 /// resolves to its physical edge, so a staged tombstone removes only that
 /// edge, and a staged put joins unless that same edge is already present.
+/// The incoming pass of a `Both` read skips a self-loop, durable or staged,
+/// so each physical edge appears once.
 pub(in crate::data::executor) fn merge_graph_txn_overlay_neighbors(
     overlay: &GraphTxnOverlay,
     scope: &StagedHopScope<'_>,
@@ -74,6 +76,7 @@ pub(in crate::data::executor) fn merge_graph_txn_overlay_neighbors(
         merged.extend(
             merge_staged_hop_pass(overlay, scope, node_id, pass, durable)
                 .into_iter()
+                .filter(|(_, node, _)| pass.keeps_row(direction, node_id, node))
                 .map(|(label, node, _)| (label, node)),
         );
     }
@@ -342,6 +345,28 @@ mod tests {
         assert_eq!(out, vec![pair("knows", "b"), pair("knows", "b")]);
         let out = neighbors(&overlay, None, &[], "a", Direction::Both, &durable);
         assert_eq!(out, vec![pair("knows", "b"), pair("knows", "b")]);
+    }
+
+    /// A self-loop is one edge. `Both` lists a durable self-loop and a
+    /// staged self-loop once each, and a tombstoned one not at all.
+    #[test]
+    fn both_lists_a_self_loop_once() {
+        let mut overlay = GraphTxnOverlay::new();
+        overlay.stage_edge_put(coll_key("g"), "x", "l", "x", Vec::new());
+        let durable = [("a", "l", "b"), ("a", "l", "a")];
+        for collection in [Some("g"), None] {
+            let out = neighbors(&overlay, collection, &[], "a", Direction::Both, &durable);
+            assert_eq!(out, vec![pair("l", "a"), pair("l", "b")], "{collection:?}");
+            let out = neighbors(&overlay, collection, &[], "x", Direction::Both, &[]);
+            assert_eq!(out, vec![pair("l", "x")], "{collection:?}");
+            let out = neighbors(&overlay, collection, &["l"], "x", Direction::In, &[]);
+            assert_eq!(out, vec![pair("l", "x")], "{collection:?}");
+        }
+
+        let mut overlay = GraphTxnOverlay::new();
+        overlay.stage_edge_delete(coll_key("g"), "a", "l", "a");
+        let out = neighbors(&overlay, Some("g"), &[], "a", Direction::Both, &durable);
+        assert_eq!(out, vec![pair("l", "b")]);
     }
 
     #[test]

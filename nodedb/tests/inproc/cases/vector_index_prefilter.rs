@@ -108,3 +108,41 @@ async fn a_row_updated_out_of_the_value_is_not_returned() {
     let ids = server.query_text(QUERY).await.unwrap();
     assert_eq!(ids, vec!["a2".to_string(), "a3".to_string()]);
 }
+
+/// Inside a block, the indexed equality selects its rows at the block's
+/// snapshot. A row another session moves off the value after the snapshot
+/// still ranks, and a row it moves onto the value does not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_block_selects_the_rows_of_its_snapshot() {
+    const PASSWORD: &str = "prefilter-writer-7";
+    let server = TestServer::start().await;
+    seed(&server, true).await;
+    server
+        .exec(&format!(
+            "CREATE USER prefilter_writer WITH PASSWORD '{PASSWORD}' ROLE readwrite"
+        ))
+        .await
+        .unwrap();
+    let (writer, _connection) = server
+        .connect_as("prefilter_writer", PASSWORD)
+        .await
+        .unwrap();
+
+    server.exec("BEGIN").await.unwrap();
+    let before = server.query_text(QUERY).await.unwrap();
+    assert_eq!(before, vec!["a1".to_string(), "a2".to_string()]);
+    writer
+        .simple_query("UPDATE memo SET agent_id = 'b' WHERE id = 'a1'")
+        .await
+        .unwrap();
+    writer
+        .simple_query("UPDATE memo SET agent_id = 'a' WHERE id = 'b1'")
+        .await
+        .unwrap();
+    let inside = server.query_text(QUERY).await.unwrap();
+    assert_eq!(inside, before, "the block reads its snapshot");
+    server.exec("COMMIT").await.unwrap();
+
+    let after = server.query_text(QUERY).await.unwrap();
+    assert_eq!(after, vec!["b1".to_string(), "a2".to_string()]);
+}

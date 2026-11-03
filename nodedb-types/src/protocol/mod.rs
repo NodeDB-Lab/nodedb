@@ -3,6 +3,7 @@
 pub mod array_batch;
 pub mod auth;
 pub mod batch;
+pub mod edge_batch;
 pub mod error_cause;
 pub mod frames;
 pub mod handshake;
@@ -13,6 +14,10 @@ pub mod text_fields;
 pub use array_batch::{ArrayCellWrite, ArrayPutBatch};
 pub use auth::{AuthMethod, AuthResponse};
 pub use batch::{BatchDocument, BatchVector};
+pub use edge_batch::{
+    EdgeDeleteBatch, EdgeKey, EdgePutBatch, EdgeWrite, MAX_EDGE_STATEMENT_SQL_BYTES,
+    MAX_EDGES_PER_STATEMENT, edge_batch_over_cap,
+};
 pub use error_cause::ErrorCausePayload;
 pub use frames::{ErrorPayload, NativeRequest, NativeResponse};
 pub use handshake::{

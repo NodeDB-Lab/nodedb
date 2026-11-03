@@ -90,6 +90,7 @@ pub fn spawn_background_loops(
     maintenance::spawn_clone_materializer_sweep(shared, config);
     maintenance::spawn_version_cleanup(shared, config);
     super::kv_expiry::spawn_kv_expiry_reaper(shared, config);
+    super::graph_count::spawn_graph_count_sampler(shared);
 
     // CRDT constraint reconcile (one node cluster-wide). That node
     // re-derives each collection's constraint set from the catalog and

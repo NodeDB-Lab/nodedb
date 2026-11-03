@@ -166,6 +166,11 @@ pub(crate) async fn execute_plan_all_local_cores(
                          every core itself"
                     .into(),
             }),
+            MetaOp::RefreshGraphCount { .. } => Err(crate::Error::Internal {
+                detail: "RefreshGraphCount reached the all-core fan; the graph count sampler \
+                         sends it to every core itself"
+                    .into(),
+            }),
             // One image per core, kept apart by core id. A merged payload
             // loses which core each image belongs to.
             MetaOp::CreateSnapshot => Err(crate::Error::Internal {

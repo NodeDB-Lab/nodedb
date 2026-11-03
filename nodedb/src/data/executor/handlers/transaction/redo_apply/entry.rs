@@ -304,6 +304,9 @@ impl CoreLoop {
             );
             self.send_write_event(event);
         }
+        // Edge writes count only once the record settled: a rolled-back
+        // install applied none.
+        self.publish_edge_writes(scope.edge_writes);
 
         let tenant = TenantId::new(tid);
         // The arms noted every document and KV row by key, which folded

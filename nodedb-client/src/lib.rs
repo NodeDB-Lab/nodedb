@@ -52,7 +52,7 @@ mod remote_parse;
 pub mod native;
 
 pub use capabilities::Capabilities;
-pub use traits::NodeDb;
+pub use traits::{NodeDb, NodeDbGraph};
 
 #[cfg(feature = "remote")]
 pub use remote::NodeDbRemote;

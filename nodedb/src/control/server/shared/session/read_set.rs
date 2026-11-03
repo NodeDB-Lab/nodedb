@@ -35,11 +35,12 @@ use nodedb_cluster::calvin::types::LockKeyWire;
 use crate::bridge::envelope::PhysicalPlan;
 use crate::control::cluster::calvin::scheduler::lock::LockKey;
 use crate::control::planner::calvin::reservation::submit_reserve_read;
-use crate::control::server::shared::plan_util::{extract_collection, plan_engine, read_key_of};
+use crate::control::server::shared::plan_util::{extract_collection, read_key_of};
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, KeyRepr, ReadShards, TenantId, VShardId};
 
 use super::connection::SessionId;
+use super::read_tree::ReadTree;
 use super::store::SessionStore;
 
 /// Which peer engine served a read. Mirrors the top-level [`PhysicalPlan`]
@@ -187,6 +188,10 @@ pub struct ReadCapture<'a> {
 /// A read that names no collection observed every collection on each vShard
 /// it reported. It records one entry per reported vShard, homed there.
 ///
+/// Every read plan nested in `plan` records too, homed the same way: a
+/// vector search's prefilter, a join's inputs and bitmap producers. Each
+/// keys on its own collection with the read key it records alone.
+///
 /// Guarded on the connection being inside a transaction block (the session
 /// write path drops the entries otherwise), so autocommit reads never touch
 /// the read-set. Absent-key / empty-result reads are recorded too — a "not
@@ -208,7 +213,6 @@ pub async fn record_read_set(
         found,
     } = capture;
 
-    let engine = plan_engine(plan);
     let key = read_key_of(plan, found);
     let collection = extract_collection(plan)
         .map(String::from)
@@ -220,34 +224,14 @@ pub async fn record_read_set(
         .get_current_database(session_id)
         .unwrap_or(DatabaseId::DEFAULT);
 
-    let entry = |home: Option<VShardId>| ReadSetEntry {
-        engine,
+    let entries = ReadTree {
+        plan,
+        read_vshards,
+        found,
         database_id,
         tenant_id,
-        collection: collection.clone(),
-        key: key.clone(),
-        // The read ran at the block's snapshot.
-        observed_at: None,
-        home,
-    };
-    let entries: Vec<ReadSetEntry> =
-        match nodedb_types::CollectionKey::from_qualified_str(database_id, &collection) {
-            Ok(collection_key) if !collection.is_empty() => {
-                let validation = collection_key.vshard();
-                let mut entries = vec![entry(None)];
-                entries.extend(
-                    read_vshards
-                        .iter()
-                        .filter(|vshard| *vshard != validation)
-                        .map(|vshard| entry(Some(vshard))),
-                );
-                entries
-            }
-            _ => read_vshards
-                .iter()
-                .map(|vshard| entry(Some(vshard)))
-                .collect(),
-        };
+    }
+    .entries();
     if entries.is_empty() {
         return;
     }
@@ -308,6 +292,33 @@ pub async fn record_read_set(
             tracing::debug!(error = %e, "hot-key read reservation failed; proceeding under OCC");
         }
     }
+}
+
+/// Record the reads nested in `capture.plan`, without the plan's own read.
+///
+/// A distributed read that the coordinator gathered records each gathered
+/// collection from its own capture. The plan's nested reads (a vector
+/// search's prefilter, a join's bitmap producers) still ran on every
+/// responding core, so they record here, homed on the reported vShards.
+/// Outside a transaction block the entries are dropped.
+pub fn record_nested_read_set(
+    sessions: &SessionStore,
+    session_id: SessionId,
+    tenant_id: TenantId,
+    capture: ReadCapture<'_>,
+) {
+    let database_id = sessions
+        .get_current_database(session_id)
+        .unwrap_or(DatabaseId::DEFAULT);
+    let entries = ReadTree {
+        plan: capture.plan,
+        read_vshards: capture.read_vshards,
+        found: capture.found,
+        database_id,
+        tenant_id,
+    }
+    .nested_entries();
+    sessions.record_read_entries(session_id, entries);
 }
 
 /// Map a completed point read (`ReadKey` + collection) to the deterministic CP
@@ -378,6 +389,7 @@ fn lock_key_to_wire(key: &LockKey) -> LockKeyWire {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::control::server::shared::plan_util::plan_engine;
     use nodedb_physical::physical_plan::{DocumentOp, KvOp};
     use nodedb_types::QualifiedCollection;
 
@@ -740,6 +752,116 @@ mod tests {
         assert_eq!(rs[0].home, Some(VShardId::new(3)));
         assert_eq!(rs[1].home, Some(VShardId::new(8)));
         assert!(rs.iter().all(|entry| entry.collection.is_empty()));
+    }
+
+    /// A vector search prefiltered by an index lookup on another collection.
+    fn prefiltered_search() -> PhysicalPlan {
+        PhysicalPlan::Vector(nodedb_physical::physical_plan::VectorOp::Search {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "memo"),
+            query_vector: vec![1.0, 0.0],
+            top_k: 2,
+            ef_search: 0,
+            metric: nodedb_types::vector_distance::DistanceMetric::L2,
+            filter_bitmap: None,
+            field_name: String::new(),
+            rls_filters: Vec::new(),
+            inline_prefilter_plan: Some(Box::new(PhysicalPlan::Document(
+                DocumentOp::IndexLookup {
+                    collection: QualifiedCollection::new(DatabaseId::DEFAULT, "agents"),
+                    path: "agent_id".to_string(),
+                    value: "a".to_string(),
+                    system_time: nodedb_types::SystemTimeScope::Current,
+                },
+            ))),
+            ann_options: Default::default(),
+            skip_payload_fetch: false,
+            payload_filters: Vec::new(),
+            system_time: nodedb_types::SystemTimeScope::Current,
+        })
+    }
+
+    fn agents_index_read() -> ReadKey {
+        ReadKey::IndexEq {
+            field: "agent_id".to_string(),
+            value: "a".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_read_records_the_reads_nested_in_it() {
+        let (state, _dir) = test_state();
+        let (sessions, a) = begun_session();
+        record_read_set(
+            &state,
+            &sessions,
+            a,
+            TenantId::new(1),
+            ReadCapture {
+                plan: &prefiltered_search(),
+                read_vshards: &observed("memo"),
+                found: true,
+            },
+        )
+        .await;
+        let rs = sessions.take_read_set(a);
+        assert!(
+            rs.iter()
+                .any(|e| e.collection == "memo" && e.key == ReadKey::Predicate)
+        );
+        assert!(
+            rs.iter().any(|e| e.collection == "agents"
+                && e.key == agents_index_read()
+                && e.home.is_none())
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_recording_skips_the_root_read() {
+        let (sessions, a) = begun_session();
+        record_nested_read_set(
+            &sessions,
+            a,
+            TenantId::new(1),
+            ReadCapture {
+                plan: &prefiltered_search(),
+                read_vshards: &observed("memo"),
+                found: true,
+            },
+        );
+        let rs = sessions.take_read_set(a);
+        assert!(!rs.is_empty());
+        assert!(rs.iter().all(|e| e.collection == "agents"));
+    }
+
+    #[tokio::test]
+    async fn autocommit_nested_reads_are_not_recorded() {
+        let (state, _dir) = test_state();
+        let sessions = SessionStore::new();
+        let a = session_id();
+        sessions.ensure_session(std::net::SocketAddr::from(([127, 0, 0, 1], 5599)));
+        record_read_set(
+            &state,
+            &sessions,
+            a,
+            TenantId::new(1),
+            ReadCapture {
+                plan: &prefiltered_search(),
+                read_vshards: &observed("memo"),
+                found: true,
+            },
+        )
+        .await;
+        record_nested_read_set(
+            &sessions,
+            a,
+            TenantId::new(1),
+            ReadCapture {
+                plan: &prefiltered_search(),
+                read_vshards: &observed("memo"),
+                found: true,
+            },
+        );
+        assert!(sessions.take_read_set(a).is_empty());
     }
 
     #[test]

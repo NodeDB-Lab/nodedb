@@ -17,9 +17,9 @@ impl CoreLoop {
     /// Apply a batched edge delete in a single SPSC round-trip.
     ///
     /// The bitemporal edge store always appends a tombstone version on
-    /// success, whether or not a live edge existed, so each edge's pre-image
-    /// is read before its tombstone is written and the affected count is the
-    /// number that were actually live — never the batch length.
+    /// success, whether or not a live edge existed. The affected count is the
+    /// number of tombstones that ended a live edge, as the edge store judges
+    /// it without the tombstone's own key, never the batch length.
     pub(in crate::data::executor) fn execute_edge_delete_batch(
         &mut self,
         task: &ExecutionTask,
@@ -53,22 +53,6 @@ impl CoreLoop {
         // batch with the landed tombstones, which stay.
         let mut write_set: Vec<WriteSetEntry> = Vec::with_capacity(edges.len());
         for edge in edges {
-            // A pre-image read error refuses the batch: read as absent, the
-            // count would leave out an edge the tombstone removes.
-            let existed = match self.edge_store.get_edge(
-                database_id,
-                TenantId::new(tid),
-                edge.collection.as_str(),
-                &edge.src_id,
-                &edge.label,
-                &edge.dst_id,
-            ) {
-                Ok(properties) => properties.is_some(),
-                Err(e) => {
-                    let code = refusal_after_rows(write_set.len() as u64, e);
-                    return self.refusal_with_landed_rows(task, code, write_set);
-                }
-            };
             let target = EdgeTarget {
                 database_id,
                 tid,
@@ -115,6 +99,7 @@ impl CoreLoop {
                 ord,
             );
             let current = tombstone.current.clone();
+            let removed_live = tombstone.ended_live_edge();
             // The CSR follows what the edge resolves to after the tombstone.
             // A CSR refusal takes this tombstone back out; the edges before it
             // stand and are journalled.
@@ -129,8 +114,9 @@ impl CoreLoop {
                 let code = refusal_after_rows(write_set.len() as u64, reversed);
                 return self.refusal_with_landed_rows(task, code, write_set);
             }
-            if existed {
+            if removed_live {
                 removed += 1;
+                self.count_edge_removed(task, &edge.src_id);
             }
             write_set.push(WriteSetEntry::edge(EdgeImage::Delete(
                 crate::wal::EdgeDeleteRedo {

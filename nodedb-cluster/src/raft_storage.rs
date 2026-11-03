@@ -606,6 +606,7 @@ mod tests {
         let hard_state = HardState {
             current_term: 3,
             voted_for: 2,
+            ordinal_floor: 0,
         };
         s.commit_ops(&[
             LogOp::Append(&entries),

@@ -273,6 +273,43 @@ fn a_walk_hop_tests_and_returns_a_staged_property_change() {
     assert_eq!(outside, vec![bare("a", "b")]);
 }
 
+/// A self-loop is one edge. A `Both` walk hop returns a committed and a
+/// staged self-loop once each, with and without the staged merge, and with
+/// an edge predicate.
+#[test]
+fn a_both_walk_hop_returns_a_self_loop_once() {
+    let score = || properties(serde_json::json!({"score": 9}));
+    let mut core = core_with(&[("a", "L", "a", score()), ("a", "L", "b", score())]);
+    let txn_id = TxnId::new(15);
+    stage(&mut core, txn_id, stage_edge_put(COLLECTION, "s", "L", "s"));
+
+    let committed = vec![bare("a", "a"), bare("a", "b")];
+    assert_eq!(
+        read_rows(&mut core, None, plain_hop("a", Direction::Both)),
+        committed
+    );
+    assert_eq!(
+        read_rows(&mut core, Some(txn_id), plain_hop("a", Direction::Both)),
+        committed
+    );
+    assert_eq!(
+        read_rows(
+            &mut core,
+            None,
+            walk_hop("a", Direction::Both, score_above(5), false)
+        ),
+        committed
+    );
+    assert_eq!(
+        read_rows(&mut core, Some(txn_id), plain_hop("s", Direction::Both)),
+        vec![bare("s", "s")]
+    );
+    assert_eq!(
+        read_rows(&mut core, Some(txn_id), plain_hop("s", Direction::In)),
+        vec![bare("s", "s")]
+    );
+}
+
 /// A label-only walk hop folds a transaction's writes in every collection.
 #[test]
 fn a_label_only_walk_hop_reads_staged_edges() {

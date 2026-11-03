@@ -10,6 +10,11 @@
 //! array coordinator, intersects them into the search's `filter_bitmap`,
 //! and clears the inline plan. A search with no prefilter, and a node with
 //! no cluster transport, keeps its plan as it is.
+//!
+//! Every shard reads at the scan's system-time scope, the scope of the
+//! search, so the candidates and the ranked rows read one cut. The reading
+//! transaction's id rides along so a shard merges the cells the
+//! transaction staged there.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -19,17 +24,20 @@ use nodedb_physical::physical_plan::{ArrayOp, ExchangeOp, PhysicalPlan, QueryOp,
 
 use crate::control::cluster::ClusterArrayExecutor;
 use crate::control::state::SharedState;
+use crate::types::TxnId;
 
 /// Replace every array prefilter of a vector search in `plan` with the
 /// cross-shard surrogate bitmap of its slice. Walks the coordinator-local
-/// wrappers a search can sit under.
+/// wrappers a search can sit under. `txn_id` is the reading transaction,
+/// `None` for an autocommit read.
 pub(super) fn resolve_array_prefilters<'a>(
     state: &'a SharedState,
+    txn_id: Option<TxnId>,
     plan: &'a mut PhysicalPlan,
 ) -> Pin<Box<dyn Future<Output = crate::Result<()>> + Send + 'a>> {
     Box::pin(async move {
         match plan {
-            PhysicalPlan::Vector(op) => resolve_search(state, op).await?,
+            PhysicalPlan::Vector(op) => resolve_search(state, txn_id, op).await?,
             PhysicalPlan::Query(QueryOp::Exchange(ExchangeOp { child, .. }))
             | PhysicalPlan::Query(QueryOp::PostProcess { input: child, .. })
             | PhysicalPlan::Query(QueryOp::LateralTopK {
@@ -37,12 +45,12 @@ pub(super) fn resolve_array_prefilters<'a>(
             })
             | PhysicalPlan::Query(QueryOp::LateralLoop {
                 outer_plan: child, ..
-            }) => resolve_array_prefilters(state, child).await?,
+            }) => resolve_array_prefilters(state, txn_id, child).await?,
             PhysicalPlan::Query(
                 QueryOp::Aggregate { input, .. } | QueryOp::PartialAggregateState { input, .. },
             ) => {
                 if let Some(child) = input.as_deref_mut() {
-                    resolve_array_prefilters(state, child).await?;
+                    resolve_array_prefilters(state, txn_id, child).await?;
                 }
             }
             PhysicalPlan::Query(QueryOp::HashJoin {
@@ -54,7 +62,7 @@ pub(super) fn resolve_array_prefilters<'a>(
             }) => {
                 for side in [left_input, right_input, left_bitmap, right_bitmap] {
                     if let Some(child) = side.as_deref_mut() {
-                        resolve_array_prefilters(state, child).await?;
+                        resolve_array_prefilters(state, txn_id, child).await?;
                     }
                 }
             }
@@ -72,13 +80,13 @@ pub(super) fn resolve_array_prefilters<'a>(
             ) => {
                 for side in [left_input, right_input] {
                     if let Some(child) = side.as_deref_mut() {
-                        resolve_array_prefilters(state, child).await?;
+                        resolve_array_prefilters(state, txn_id, child).await?;
                     }
                 }
             }
             PhysicalPlan::Query(QueryOp::SetOp { inputs, .. }) => {
                 for child in inputs.iter_mut() {
-                    resolve_array_prefilters(state, child).await?;
+                    resolve_array_prefilters(state, txn_id, child).await?;
                 }
             }
             // No child plan and no vector search.
@@ -110,7 +118,11 @@ pub(super) fn resolve_array_prefilters<'a>(
 
 /// Replace the array prefilter of a vector search with the cross-shard
 /// bitmap. Every other vector op has no prefilter.
-async fn resolve_search(state: &SharedState, op: &mut VectorOp) -> crate::Result<()> {
+async fn resolve_search(
+    state: &SharedState,
+    txn_id: Option<TxnId>,
+    op: &mut VectorOp,
+) -> crate::Result<()> {
     let VectorOp::Search {
         inline_prefilter_plan,
         filter_bitmap,
@@ -122,11 +134,18 @@ async fn resolve_search(state: &SharedState, op: &mut VectorOp) -> crate::Result
     let Some(PhysicalPlan::Array(ArrayOp::SurrogateBitmapScan {
         array_id,
         slice_msgpack,
+        system_time,
     })) = inline_prefilter_plan.as_deref()
     else {
         return Ok(());
     };
-    let Some(bitmap) = cluster_bitmap(state, array_id, slice_msgpack).await? else {
+    let scan = PrefilterScan {
+        array_id,
+        slice_msgpack,
+        system_time: *system_time,
+        txn_id,
+    };
+    let Some(bitmap) = cluster_bitmap(state, scan).await? else {
         return Ok(());
     };
     *filter_bitmap = Some(match filter_bitmap.take() {
@@ -137,13 +156,28 @@ async fn resolve_search(state: &SharedState, op: &mut VectorOp) -> crate::Result
     Ok(())
 }
 
-/// The cross-shard surrogate bitmap of `array_id` inside `slice_msgpack`,
-/// or `None` on a node with no cluster transport.
+/// One array prefilter scan to read across every shard.
+struct PrefilterScan<'a> {
+    array_id: &'a nodedb_array::types::ArrayId,
+    slice_msgpack: &'a [u8],
+    /// The cut every shard reads: the scope of the search.
+    system_time: nodedb_types::SystemTimeScope,
+    /// The reading transaction, `None` for an autocommit read.
+    txn_id: Option<TxnId>,
+}
+
+/// The cross-shard surrogate bitmap of the scan's array inside its slice at
+/// its cut, or `None` on a node with no cluster transport.
 async fn cluster_bitmap(
     state: &SharedState,
-    array_id: &nodedb_array::types::ArrayId,
-    slice_msgpack: &[u8],
+    scan: PrefilterScan<'_>,
 ) -> crate::Result<Option<nodedb_types::SurrogateBitmap>> {
+    let PrefilterScan {
+        array_id,
+        slice_msgpack,
+        system_time,
+        txn_id,
+    } = scan;
     let (Some(transport), Some(routing)) = (
         state.cluster_transport.as_ref(),
         state.cluster_routing.as_ref(),
@@ -171,7 +205,7 @@ async fn cluster_bitmap(
         state.self_arc()?,
     );
     executor
-        .surrogate_bitmap(array_id, slice_msgpack, prefix_bits)
+        .surrogate_bitmap(array_id, slice_msgpack, prefix_bits, system_time, txn_id)
         .await
         .map(Some)
 }

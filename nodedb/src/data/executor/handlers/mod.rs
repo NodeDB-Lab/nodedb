@@ -119,6 +119,7 @@ pub mod vector_params;
 pub mod vector_row_column;
 pub mod vector_search;
 mod vector_search_ann;
+mod vector_search_body;
 mod vector_search_exec;
 mod vector_search_window;
 pub mod vector_settle;

@@ -49,7 +49,7 @@ impl CsrIndex {
         }
         if matches!(direction, Direction::In | Direction::Both) {
             for (lid, src) in self.iter_in_edges_raw_in(node_id, collection_id) {
-                if keep(lid) {
+                if keep(lid) && direction.in_pass_keeps(&src, &node_id) {
                     result.push((
                         self.id_to_label[lid as usize].clone(),
                         self.id_to_node[src as usize].clone(),

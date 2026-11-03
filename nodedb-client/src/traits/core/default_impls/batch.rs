@@ -2,8 +2,9 @@
 
 use nodedb_types::error::{NodeDbError, NodeDbResult};
 use nodedb_types::id::NodeId;
-use nodedb_types::protocol::ArrayCellWrite;
+use nodedb_types::protocol::{ArrayCellWrite, EdgeWrite, MAX_EDGES_PER_STATEMENT};
 
+use super::super::graph_def::NodeDbGraph;
 use super::super::trait_def::NodeDb;
 
 pub(in crate::traits::core) fn array_put_cells_default(
@@ -28,18 +29,23 @@ pub(in crate::traits::core) async fn batch_vector_insert_default<T: NodeDb + ?Si
     Ok(())
 }
 
-pub(in crate::traits::core) async fn batch_graph_insert_edges_default<T: NodeDb + ?Sized>(
+pub(in crate::traits::core) async fn batch_graph_insert_edges_default<T: NodeDbGraph + ?Sized>(
     this: &T,
     collection: &str,
     edges: &[(&str, &str, &str)],
 ) -> NodeDbResult<()> {
-    for &(from, to, label) in edges {
-        let src = NodeId::try_new(from)
-            .map_err(|e| NodeDbError::storage(format!("invalid node id: {e}")))?;
-        let dst = NodeId::try_new(to)
-            .map_err(|e| NodeDbError::storage(format!("invalid node id: {e}")))?;
-        this.graph_insert_edge(collection, &src, &dst, label, None)
-            .await?;
+    let writes = edges
+        .iter()
+        .map(|&(from, to, label)| {
+            let src = NodeId::try_new(from)
+                .map_err(|e| NodeDbError::storage(format!("invalid node id: {e}")))?;
+            let dst = NodeId::try_new(to)
+                .map_err(|e| NodeDbError::storage(format!("invalid node id: {e}")))?;
+            Ok::<_, NodeDbError>(EdgeWrite::new(src, dst, label))
+        })
+        .collect::<NodeDbResult<Vec<_>>>()?;
+    for chunk in writes.chunks(MAX_EDGES_PER_STATEMENT) {
+        this.graph_insert_edges(collection, chunk).await?;
     }
     Ok(())
 }

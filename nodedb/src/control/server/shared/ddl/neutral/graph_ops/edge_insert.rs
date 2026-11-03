@@ -1,68 +1,108 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! `GRAPH INSERT EDGE`: one or more edges into one collection.
+//! `GRAPH INSERT EDGE` and the native `EdgePutBatch`: one or more edges into
+//! one collection, written as one unit (see `edge_unit`).
 //!
-//! A statement binds its distinct endpoints in one surrogate exchange and
-//! writes all its edges as one unit. A single edge is an `EdgePut`. Several
-//! edges are one `EdgePutBatch`, so the statement costs one commit chain
-//! however many edges it carries. When the edges' homes span more than one
-//! vShard, that unit is one Calvin transaction, and the sequencer slices the
-//! batch by home pair.
+//! The collection's write policy decides every edge on its own `PROPERTIES`
+//! image, exactly as for a single edge. One refused edge refuses the whole
+//! write before anything is written.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
-
-use nodedb_physical::physical_plan::{BatchEdge, GraphOp};
-use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
+use nodedb_physical::physical_plan::GraphOp;
 use nodedb_sql::ddl_ast::GraphEdgeSpec;
-use nodedb_types::{CollectionKey, QualifiedCollection, Surrogate};
+use nodedb_types::protocol::EdgeWrite;
+use nodedb_types::{QualifiedCollection, Surrogate};
 
-use crate::bridge::envelope::PhysicalPlan;
-use crate::control::planner::calvin::{build_static_tx_class, submit_calvin_routed_write};
 use crate::control::security::identity::AuthenticatedIdentity;
-use crate::control::server::shared::session::{DmlTxnCtx, TransactionState};
-use crate::control::server::surrogate_exchange::assign_surrogates_routed;
+use crate::control::server::shared::session::DmlTxnCtx;
 use crate::control::state::SharedState;
-use crate::types::{DatabaseId, RecordHomes, TenantId, TraceId, VShardId};
+use crate::types::{DatabaseId, RecordHomes};
 
 use super::super::super::result::{DdlError, DdlResult};
-use super::edge::{EdgeHomes, response_affected};
 use super::edge_parse::{properties_to_msgpack, validate_edge_label};
-use super::support::{data_plane_verdict, ddl_err};
+use super::edge_unit::{
+    EdgeWriteKind, PreparedEdge, admit_edge_write, bound_surrogate, endpoint_surrogates,
+    in_transaction_block, stage_edges, write_edge_unit,
+};
+use super::support::ddl_err;
 
-/// An edge ready to write: its `EdgePut`, after write policy, and its homes.
-struct PreparedEdge {
-    op: GraphOp,
-    homes: RecordHomes,
+/// One edge to insert, its `PROPERTIES` already encoded as the plain
+/// MessagePack map the edge store holds. Empty bytes store no properties.
+pub struct EdgeInsert {
+    pub src: String,
+    pub dst: String,
+    pub label: String,
+    pub properties: Vec<u8>,
+    pub valid_from_ms: Option<i64>,
+    pub valid_until_ms: Option<i64>,
 }
 
-/// `GRAPH INSERT EDGE IN '<collection>' FROM '<src>' TO '<dst>' TYPE '<label>'`
-/// `[PROPERTIES '<json object>' | { ... }] [VALID_TIME <from> [UNTIL <until>]]`
-/// followed by any number of further edges.
+/// The edges of a parsed `GRAPH INSERT EDGE`, their `PROPERTIES` encoded.
+pub fn edge_inserts_from_specs(specs: Vec<GraphEdgeSpec>) -> Result<Vec<EdgeInsert>, DdlError> {
+    specs
+        .into_iter()
+        .map(|spec| {
+            Ok(EdgeInsert {
+                src: spec.src,
+                dst: spec.dst,
+                label: spec.label,
+                properties: properties_to_msgpack(spec.properties)?,
+                valid_from_ms: spec.valid_from_ms,
+                valid_until_ms: spec.valid_until_ms,
+            })
+        })
+        .collect()
+}
+
+/// The edges of a native `EdgePutBatch`, their properties encoded. An empty
+/// property map stores no properties, as an absent `PROPERTIES` clause does.
+pub fn edge_inserts_from_writes(writes: Vec<EdgeWrite>) -> Result<Vec<EdgeInsert>, DdlError> {
+    writes
+        .into_iter()
+        .map(|write| {
+            let properties = if write.properties.is_empty() {
+                Vec::new()
+            } else {
+                nodedb_types::json_msgpack::value_to_msgpack(&nodedb_types::Value::Object(
+                    write.properties,
+                ))
+                .map_err(|e| DdlError::internal(format!("edge properties encode error: {e}")))?
+            };
+            Ok(EdgeInsert {
+                src: write.src.as_str().to_owned(),
+                dst: write.dst.as_str().to_owned(),
+                label: write.label,
+                properties,
+                valid_from_ms: write.valid_from_ms,
+                valid_until_ms: write.valid_until_ms,
+            })
+        })
+        .collect()
+}
+
+/// Insert `edges` into `collection` as one unit. The command tag counts the
+/// edges written.
 pub async fn insert_edges(
     state: &SharedState,
     identity: &AuthenticatedIdentity,
     database_id: DatabaseId,
     collection: String,
-    edges: Vec<GraphEdgeSpec>,
+    edges: Vec<EdgeInsert>,
     txn_ctx: &DmlTxnCtx<'_>,
 ) -> Result<Vec<DdlResult>, DdlError> {
-    if collection.is_empty() {
-        return Err(ddl_err(
-            "42601",
-            "GRAPH INSERT EDGE requires IN <collection>",
-        ));
-    }
-    if edges.is_empty() {
-        return Err(ddl_err(
-            "42601",
-            "GRAPH INSERT EDGE requires FROM, TO and TYPE",
-        ));
-    }
+    admit_edge_write(
+        state,
+        identity,
+        database_id,
+        EdgeWriteKind::Insert,
+        &collection,
+        edges.len(),
+    )?;
     for edge in &edges {
         if edge.src.is_empty() || edge.dst.is_empty() {
             return Err(ddl_err("42601", "GRAPH INSERT EDGE requires FROM and TO"));
         }
         validate_edge_label(&edge.label)?;
+        check_valid_interval(edge)?;
     }
     let tenant_id = identity.tenant_id;
 
@@ -77,41 +117,36 @@ pub async fn insert_edges(
     .await
     .map_err(|e| DdlError::from_error(&e))?;
 
-    let surrogates =
-        endpoint_surrogates(state, database_id, tenant_id, &collection, &edges).await?;
-    let prepared = prepare_edges(
+    let surrogates = endpoint_surrogates(
         state,
-        identity,
         database_id,
+        tenant_id,
         &collection,
-        edges,
-        &surrogates,
-    )?;
+        &edges
+            .iter()
+            .flat_map(|edge| [edge.src.as_str(), edge.dst.as_str()])
+            .collect::<Vec<_>>(),
+    )
+    .await?;
+    let prepared = edges
+        .into_iter()
+        .map(|edge| prepare_edge(state, identity, database_id, &collection, edge, &surrogates))
+        .collect::<Result<Vec<_>, _>>()?;
 
     // In a transaction, an insert stages into `GraphTxnOverlay` instead of applying now
     // (COMMIT replays, ROLLBACK discards); a cross-shard edge stages into both endpoints.
-    let affected =
-        if txn_ctx.sessions.transaction_state(txn_ctx.session_id) == TransactionState::InBlock {
-            let mut staged = 0u64;
-            for PreparedEdge { op, homes } in prepared {
-                staged += super::edge_stage::stage_edge_dual_home(
-                    state,
-                    tenant_id,
-                    database_id,
-                    EdgeHomes {
-                        vsrc: homes.owner(),
-                        vdst: homes.second(),
-                        single_home: homes.is_single(),
-                    },
-                    op,
-                    txn_ctx,
-                )
-                .await?;
-            }
-            staged
-        } else {
-            write_edges(state, tenant_id, database_id, prepared).await?
-        };
+    let affected = if in_transaction_block(txn_ctx) {
+        stage_edges(state, tenant_id, database_id, prepared, txn_ctx).await?
+    } else {
+        write_edge_unit(
+            state,
+            tenant_id,
+            database_id,
+            EdgeWriteKind::Insert,
+            prepared,
+        )
+        .await?
+    };
 
     Ok(vec![DdlResult::Status {
         command: "INSERT EDGE".to_string(),
@@ -119,198 +154,65 @@ pub async fn insert_edges(
     }])
 }
 
-/// Bind every distinct endpoint of `edges` in one surrogate exchange.
-async fn endpoint_surrogates(
-    state: &SharedState,
-    database_id: DatabaseId,
-    tenant_id: TenantId,
-    collection: &str,
-    edges: &[GraphEdgeSpec],
-) -> Result<HashMap<String, Surrogate>, DdlError> {
-    let mut ids: Vec<&str> = Vec::with_capacity(edges.len() * 2);
-    let mut seen: HashSet<&str> = HashSet::with_capacity(edges.len() * 2);
-    for edge in edges {
-        for id in [edge.src.as_str(), edge.dst.as_str()] {
-            if seen.insert(id) {
-                ids.push(id);
-            }
-        }
+/// `UNTIL` needs `VALID_TIME`, and the interval must not be empty. The SQL
+/// parser refuses both. A native batch reaches here unparsed.
+fn check_valid_interval(edge: &EdgeInsert) -> Result<(), DdlError> {
+    match (edge.valid_from_ms, edge.valid_until_ms) {
+        (None, Some(_)) => Err(ddl_err(
+            "42601",
+            "GRAPH INSERT EDGE: UNTIL needs VALID_TIME <from>",
+        )),
+        (Some(from), Some(until)) if until <= from => Err(ddl_err(
+            "42601",
+            format!(
+                "GRAPH INSERT EDGE: VALID_TIME {from} UNTIL {until} is empty; UNTIL must be \
+                 after VALID_TIME"
+            ),
+        )),
+        _ => Ok(()),
     }
-    let keys: Vec<&[u8]> = ids.iter().map(|id| id.as_bytes()).collect();
-    let bound = assign_surrogates_routed(
-        state,
-        CollectionKey::from_bare(database_id, collection),
-        tenant_id,
-        &keys,
-        TraceId::ZERO,
-    )
-    .await
-    .map_err(|e| DdlError::from_error(&e))?;
-    if bound.len() != ids.len() {
-        return Err(DdlError::internal(format!(
-            "surrogate exchange bound {} of {} edge endpoints in '{collection}'",
-            bound.len(),
-            ids.len()
-        )));
-    }
-    Ok(ids.into_iter().map(str::to_owned).zip(bound).collect())
 }
 
-fn bound_surrogate(
-    surrogates: &HashMap<String, Surrogate>,
-    node: &str,
-) -> Result<Surrogate, DdlError> {
-    surrogates
-        .get(node)
-        .copied()
-        .ok_or_else(|| DdlError::internal(format!("edge endpoint '{node}' has no bound surrogate")))
-}
-
-/// Build each edge's `EdgePut` and run it through the collection's write
+/// Build one edge's `EdgePut` and run it through the collection's write
 /// policy. This handler dispatches as trusted internal work, so nothing
 /// downstream resolves a policy: the policy decides the `PROPERTIES` image
-/// here, before staging.
-fn prepare_edges(
+/// here, per edge, before staging.
+fn prepare_edge(
     state: &SharedState,
     identity: &AuthenticatedIdentity,
     database_id: DatabaseId,
     collection: &str,
-    edges: Vec<GraphEdgeSpec>,
-    surrogates: &HashMap<String, Surrogate>,
-) -> Result<Vec<PreparedEdge>, DdlError> {
-    edges
-        .into_iter()
-        .map(|edge| {
-            let GraphEdgeSpec {
-                src,
-                dst,
-                label,
-                properties,
-                valid_from_ms,
-                valid_until_ms,
-            } = edge;
-            // Dual-home: a cross-shard edge must be written on the home vShard of
-            // both src and dst, or reverse/IN traversal never finds it.
-            let homes = RecordHomes::edge(&src, &dst);
-            let src_surrogate = bound_surrogate(surrogates, &src)?;
-            let dst_surrogate = bound_surrogate(surrogates, &dst)?;
-            let op = super::edge_rls::resolve_edge_write_rls(
-                state,
-                identity,
-                database_id,
-                GraphOp::EdgePut {
-                    collection: QualifiedCollection::new(database_id, collection),
-                    src_id: src,
-                    label,
-                    dst_id: dst,
-                    properties: properties_to_msgpack(properties)?,
-                    src_surrogate,
-                    dst_surrogate,
-                    valid_from_ms,
-                    valid_until_ms,
-                },
-            )?;
-            Ok(PreparedEdge { op, homes })
-        })
-        .collect()
-}
-
-/// Write `prepared` as one unit: a direct write when every edge homes on one
-/// vShard, otherwise one Calvin transaction over the union of the homes.
-async fn write_edges(
-    state: &SharedState,
-    tenant_id: TenantId,
-    database_id: DatabaseId,
-    mut prepared: Vec<PreparedEdge>,
-) -> Result<u64, DdlError> {
-    let mut vshards: Vec<VShardId> = Vec::new();
-    let mut seen: BTreeSet<u32> = BTreeSet::new();
-    for edge in &prepared {
-        for vshard in edge.homes.iter() {
-            if seen.insert(vshard.as_u32()) {
-                vshards.push(vshard);
-            }
-        }
-    }
-    let Some(&first_home) = vshards.first() else {
-        return Err(DdlError::internal("an edge insert has no home vShard"));
-    };
-
-    let op = if prepared.len() == 1 {
-        let Some(edge) = prepared.pop() else {
-            return Err(DdlError::internal("an edge insert lost its only edge"));
-        };
-        edge.op
-    } else {
-        let edges = prepared
-            .into_iter()
-            .map(|edge| batch_edge(edge.op))
-            .collect::<Result<Vec<_>, _>>()?;
-        GraphOp::EdgePutBatch { edges }
-    };
-    let plan = PhysicalPlan::Graph(op);
-
-    let response = if let [only_home] = vshards.as_slice() {
-        // Every endpoint shares one home, so one write there stores the edges.
-        crate::control::server::sync::raft_dispatch::dispatch_trusted_internal_sync_response(
-            state,
-            tenant_id,
-            database_id,
-            *only_home,
-            plan,
-            crate::event::EventSource::User,
-        )
-        .await
-        .map_err(|e| DdlError::from_error(&e))?
-    } else {
-        // Cross-shard: every home commits atomically through Calvin, each
-        // running the edges it holds with identical surrogates.
-        let task = PhysicalTask {
-            tenant_id,
-            vshard_id: first_home,
-            database_id,
-            plan,
-            post_set_op: PostSetOp::None,
-            txn_id: None,
-        };
-        let tx_class =
-            build_static_tx_class(&[task], tenant_id, &[]).map_err(|e| DdlError::from_error(&e))?;
-        // Every participant of this graph-only transaction reports its
-        // answer in its completion ack, so the count arrives on any node.
-        submit_calvin_routed_write(state, tx_class)
-            .await
-            .map_err(|e| DdlError::from_error(&e))?
-    };
-    data_plane_verdict(&response)?;
-    response_affected(&response)
-}
-
-/// The batch form of a resolved `EdgePut`.
-fn batch_edge(op: GraphOp) -> Result<BatchEdge, DdlError> {
-    match op {
+    edge: EdgeInsert,
+    surrogates: &std::collections::HashMap<String, Surrogate>,
+) -> Result<PreparedEdge, DdlError> {
+    let EdgeInsert {
+        src,
+        dst,
+        label,
+        properties,
+        valid_from_ms,
+        valid_until_ms,
+    } = edge;
+    // Dual-home: a cross-shard edge must be written on the home vShard of
+    // both src and dst, or reverse/IN traversal never finds it.
+    let homes = RecordHomes::edge(&src, &dst);
+    let src_surrogate = bound_surrogate(surrogates, &src)?;
+    let dst_surrogate = bound_surrogate(surrogates, &dst)?;
+    let op = super::edge_rls::resolve_edge_write_rls(
+        state,
+        identity,
+        database_id,
         GraphOp::EdgePut {
-            collection,
-            src_id,
+            collection: QualifiedCollection::new(database_id, collection),
+            src_id: src,
             label,
-            dst_id,
+            dst_id: dst,
             properties,
             src_surrogate,
             dst_surrogate,
             valid_from_ms,
             valid_until_ms,
-        } => Ok(BatchEdge {
-            collection,
-            src_id,
-            label,
-            dst_id,
-            src_surrogate,
-            dst_surrogate,
-            valid_from_ms,
-            valid_until_ms,
-            properties,
-        }),
-        other => Err(DdlError::internal(format!(
-            "edge insert resolved to a non-insert plan: {other:?}"
-        ))),
-    }
+        },
+    )?;
+    Ok(PreparedEdge { op, homes })
 }

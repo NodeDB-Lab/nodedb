@@ -314,6 +314,7 @@ mod tests {
                 ),
                 path: "$.email".into(),
                 value: "a@b.c".into(),
+                system_time: nodedb_types::SystemTimeScope::Current,
             })),
         );
         assert_refused(inject(&mut plan, &store), "users");

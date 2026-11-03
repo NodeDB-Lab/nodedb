@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! End-to-end test that `NodeDb::graph_traverse` returns the subgraph
+//! End-to-end test that `NodeDbGraph::graph_traverse` returns the subgraph
 //! reachable from edges inserted in the same session.
 //!
 //! After three `graph_insert_edge` calls fanning from a seed
@@ -13,7 +13,7 @@
 //! The test also checks In/Out/Both direction, edge orientation, reciprocal
 //! edges, a self-loop and discovery depths.
 
-use nodedb_client::{NodeDb, NodeDbRemote, NodeId};
+use nodedb_client::{NodeDb, NodeDbGraph, NodeDbRemote, NodeId};
 use nodedb_test_support::pgwire_harness::TestServer;
 
 #[tokio::test]

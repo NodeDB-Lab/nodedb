@@ -379,12 +379,19 @@ pub(in crate::engine::graph::edge_store) fn write_version_in(
             .open_table(EDGES)
             .map_err(|e| redb_err("open edges", e))?;
         let mut visibility = write_visibility(write_txn)?;
+        // The state before this version leaves its own key out. A key that
+        // already holds the version is a second apply of it: a cross-shard
+        // edge's other home on this core, or a replay. The home that accounts
+        // the edge can apply second, and it must still see the change.
+        written.prior_forward = edges
+            .remove((d, t, fwd.as_str()))
+            .map_err(|e| redb_err("take edge version", e))?
+            .map(|prior| prior.value().to_vec());
         let was_live =
             live_properties(visible_version(&edges, &mut visibility, &edge, i64::MAX)?)?.is_some();
-        written.prior_forward = edges
+        edges
             .insert((d, t, fwd.as_str()), value)
-            .map_err(|e| redb_err("insert edge version", e))?
-            .map(|prior| prior.value().to_vec());
+            .map_err(|e| redb_err("insert edge version", e))?;
         let prior_applied = if stamp.applied == system_from {
             visibility.applied.remove((d, t, fwd.as_str()))
         } else {
@@ -397,6 +404,7 @@ pub(in crate::engine::graph::edge_store) fn write_version_in(
             .map(|prior| prior.value());
         written.current =
             live_properties(visible_version(&edges, &mut visibility, &edge, i64::MAX)?)?;
+        written.was_live = was_live;
         was_live
     };
 
@@ -451,6 +459,58 @@ mod tests {
 
     fn e<'a>(src: &'a str, label: &'a str, dst: &'a str) -> EdgeRef<'a> {
         EdgeRef::new(DB, T, COLL, src, label, dst)
+    }
+
+    /// A cross-shard edge's two homes can share one core and one store. The
+    /// home that does not account the edge applies the version first, and
+    /// the accounting home's second apply of the same version still counts
+    /// the change it makes.
+    #[test]
+    fn a_second_apply_of_one_version_counts_its_change() {
+        let (store, _dir) = make_store();
+        let first = store
+            .put_edge_version_recorded(
+                e("a", "L", "b"),
+                b"v1",
+                VersionStamp::at(100),
+                0,
+                i64::MAX,
+                false,
+            )
+            .unwrap();
+        assert_eq!(first.counted, None, "the other home accounts nothing");
+        let second = store
+            .put_edge_version_recorded(
+                e("a", "L", "b"),
+                b"v1",
+                VersionStamp::at(100),
+                0,
+                i64::MAX,
+                true,
+            )
+            .unwrap();
+        assert_eq!(second.counted, Some(EdgeCountChange::Added));
+        assert!(!second.was_live);
+        assert!(second.prior_forward.is_some(), "the key held the version");
+
+        let first = store
+            .soft_delete_edge_recorded(e("a", "L", "b"), VersionStamp::at(200), false)
+            .unwrap();
+        assert!(first.ended_live_edge());
+        let second = store
+            .soft_delete_edge_recorded(e("a", "L", "b"), VersionStamp::at(200), true)
+            .unwrap();
+        assert_eq!(second.counted, Some(EdgeCountChange::Removed));
+        assert!(second.ended_live_edge());
+
+        let again = store
+            .soft_delete_edge_recorded(e("a", "L", "b"), VersionStamp::at(300), true)
+            .unwrap();
+        assert_eq!(
+            again.counted, None,
+            "a tombstone over a tombstone ends nothing"
+        );
+        assert!(!again.ended_live_edge());
     }
 
     #[test]

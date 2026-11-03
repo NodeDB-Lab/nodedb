@@ -2,9 +2,19 @@
 
 //! `SystemMetrics` record/update methods.
 
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::fields::SystemMetrics;
+use super::graph_count::GraphCount;
+
+/// Move a cross-core gauge by one core's change from `before` to `after`.
+fn move_gauge(gauge: &AtomicU64, before: u64, after: u64) {
+    if after > before {
+        gauge.fetch_add(after - before, Ordering::Relaxed);
+    } else if before > after {
+        gauge.fetch_sub(before - after, Ordering::Relaxed);
+    }
+}
 
 impl SystemMetrics {
     // ── WAL ──
@@ -191,13 +201,7 @@ impl SystemMetrics {
     /// Move the cross-core pending-build gauge from one core's previous
     /// count `before` to its current count `after`.
     pub fn move_vector_build_pending(&self, before: u64, after: u64) {
-        if after > before {
-            self.vector_build_pending
-                .fetch_add(after - before, Ordering::Relaxed);
-        } else if before > after {
-            self.vector_build_pending
-                .fetch_sub(before - after, Ordering::Relaxed);
-        }
+        move_gauge(&self.vector_build_pending, before, after);
     }
 
     pub fn update_vector_stats(&self, collections: u64, vectors: u64) {
@@ -212,9 +216,21 @@ impl SystemMetrics {
         self.graph_traversals.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn update_graph_stats(&self, nodes: u64, edges: u64) {
-        self.graph_nodes.store(nodes, Ordering::Relaxed);
-        self.graph_edges.store(edges, Ordering::Relaxed);
+    /// Move the cross-core node and edge gauges from one core's previous
+    /// count `before` to its current count `after`. Each core reports only
+    /// its own share, so the gauge moves by the change and never takes a
+    /// stored value.
+    pub fn update_graph_stats(&self, before: GraphCount, after: GraphCount) {
+        move_gauge(&self.graph_nodes, before.nodes, after.nodes);
+        move_gauge(&self.graph_edges, before.edges, after.edges);
+    }
+
+    pub fn record_graph_edges_written(&self, count: u64) {
+        self.graph_edges_written.fetch_add(count, Ordering::Relaxed);
+    }
+
+    pub fn record_graph_edges_deleted(&self, count: u64) {
+        self.graph_edges_deleted.fetch_add(count, Ordering::Relaxed);
     }
 
     // ── Document engine ──
@@ -399,5 +415,61 @@ impl SystemMetrics {
             .write()
             .unwrap_or_else(|p| p.into_inner());
         *m.entry(engine.to_string()).or_insert(0) += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn metric_line(out: &str, name: &str) -> Option<u64> {
+        out.lines().find_map(|line| {
+            line.strip_prefix(name)
+                .and_then(|rest| rest.strip_prefix(' '))
+                .and_then(|value| value.trim().parse().ok())
+        })
+    }
+
+    #[test]
+    fn edge_write_counters_add_their_counts_and_render_as_counters() {
+        let metrics = SystemMetrics::new();
+        metrics.record_graph_edges_written(3);
+        metrics.record_graph_edges_written(1);
+        metrics.record_graph_edges_deleted(2);
+
+        let out = metrics.to_prometheus();
+        assert_eq!(
+            metric_line(&out, "nodedb_graph_edges_written_total"),
+            Some(4)
+        );
+        assert_eq!(
+            metric_line(&out, "nodedb_graph_edges_deleted_total"),
+            Some(2)
+        );
+        assert!(out.contains("# TYPE nodedb_graph_edges_written_total counter"));
+        assert!(out.contains("# TYPE nodedb_graph_edges_deleted_total counter"));
+    }
+
+    /// Each core moves the gauges by its own change, so two cores' shares
+    /// add up and a shrinking share subtracts only its own difference.
+    #[test]
+    fn graph_stats_gauges_sum_every_cores_share() {
+        let metrics = SystemMetrics::new();
+        let zero = GraphCount::default();
+        let core_a = GraphCount { nodes: 3, edges: 5 };
+        let core_b = GraphCount { nodes: 2, edges: 1 };
+        metrics.update_graph_stats(zero, core_a);
+        metrics.update_graph_stats(zero, core_b);
+        assert_eq!(metrics.graph_nodes.load(Ordering::Relaxed), 5);
+        assert_eq!(metrics.graph_edges.load(Ordering::Relaxed), 6);
+
+        let core_a_after = GraphCount { nodes: 1, edges: 2 };
+        metrics.update_graph_stats(core_a, core_a_after);
+        assert_eq!(metrics.graph_nodes.load(Ordering::Relaxed), 3);
+        assert_eq!(metrics.graph_edges.load(Ordering::Relaxed), 3);
+
+        let out = metrics.to_prometheus();
+        assert_eq!(metric_line(&out, "nodedb_graph_nodes"), Some(3));
+        assert_eq!(metric_line(&out, "nodedb_graph_edges"), Some(3));
     }
 }

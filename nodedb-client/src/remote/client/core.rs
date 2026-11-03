@@ -156,6 +156,28 @@ impl NodeDbRemote {
         }
         Ok((columns, rows))
     }
+
+    /// Run a parameterless statement via the simple-query protocol and
+    /// return the row count of its first command tag. A response with no
+    /// command tag is an error, never a zero count.
+    pub(super) async fn simple_command_count(&self, sql: &str) -> NodeDbResult<u64> {
+        use tokio_postgres::SimpleQueryMessage;
+
+        let client = self.client.lock().await;
+        let messages = client.simple_query(sql).await.map_err(|e| {
+            NodeDbError::storage(format!(
+                "pgwire simple_query failed: {}",
+                pg_error_detail(&e)
+            ))
+        })?;
+        messages
+            .into_iter()
+            .find_map(|message| match message {
+                SimpleQueryMessage::CommandComplete(count) => Some(count),
+                _ => None,
+            })
+            .ok_or_else(|| NodeDbError::internal("the server answered with no command tag"))
+    }
 }
 
 #[cfg(test)]

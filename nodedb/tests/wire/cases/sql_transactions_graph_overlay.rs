@@ -223,3 +223,73 @@ async fn staged_edge_on_one_node_does_not_affect_unrelated_node_neighbors() {
 
     server.client.simple_query("ROLLBACK").await.unwrap();
 }
+
+/// Run `GRAPH NEIGHBORS IN 'g_tx' OF '<node>' DIRECTION both` and return the
+/// `(label, node)` entries, sorted.
+async fn neighbors_both(server: &TestServer, node: &str) -> Vec<(String, String)> {
+    let rows = server
+        .query_text(&format!(
+            "GRAPH NEIGHBORS IN 'g_tx' OF '{node}' DIRECTION both"
+        ))
+        .await
+        .unwrap();
+    let mut out = Vec::new();
+    for row in rows {
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&row).unwrap_or_default();
+        for entry in parsed {
+            let field = |key: &str| {
+                entry
+                    .get(key)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string()
+            };
+            out.push((field("label"), field("node")));
+        }
+    }
+    out.sort();
+    out
+}
+
+fn pair(label: &str, node: &str) -> (String, String) {
+    (label.to_string(), node.to_string())
+}
+
+/// A self-loop is one edge. `DIRECTION both` lists a committed self-loop
+/// once, and a self-loop staged inside a transaction once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn direction_both_lists_a_self_loop_once() {
+    let server = TestServer::start().await;
+    create_collection(&server).await;
+    for sql in [
+        "GRAPH INSERT EDGE IN 'g_tx' FROM 'a' TO 'b' TYPE 'l'",
+        "GRAPH INSERT EDGE IN 'g_tx' FROM 'a' TO 'a' TYPE 'l'",
+        "GRAPH INSERT EDGE IN 'g_tx' FROM 'c' TO 'd' TYPE 'l'",
+        "GRAPH INSERT EDGE IN 'g_tx' FROM 'd' TO 'c' TYPE 'l'",
+    ] {
+        server.exec(sql).await.unwrap();
+    }
+
+    assert_eq!(
+        neighbors_both(&server, "a").await,
+        vec![pair("l", "a"), pair("l", "b")]
+    );
+    // Two distinct edges between one pair of nodes stay two entries.
+    assert_eq!(
+        neighbors_both(&server, "c").await,
+        vec![pair("l", "d"), pair("l", "d")]
+    );
+
+    server.exec("BEGIN").await.unwrap();
+    insert_self_loop(&server, "staged_loop", "l").await.unwrap();
+    assert_eq!(
+        neighbors_both(&server, "staged_loop").await,
+        vec![pair("l", "staged_loop")]
+    );
+    assert_eq!(
+        neighbors_both(&server, "a").await,
+        vec![pair("l", "a"), pair("l", "b")],
+        "a committed self-loop read inside a transaction"
+    );
+    server.client.simple_query("ROLLBACK").await.unwrap();
+}

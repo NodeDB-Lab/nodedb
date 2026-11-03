@@ -159,6 +159,15 @@ pub enum OpCode {
     /// Load cells into an array: `collection` names it, and `payload` holds a
     /// zerompk [`ArrayPutBatch`](super::array_batch::ArrayPutBatch).
     ArrayPutBatch = 0x9C,
+
+    // ── Graph edge batches ───────────────────────────────────────
+    /// Insert edges as one unit: `collection` names the collection, and
+    /// `payload` holds a zerompk [`EdgePutBatch`](super::edge_batch::EdgePutBatch).
+    EdgePutBatch = 0x9D,
+    /// Delete edges as one unit: `collection` names the collection, and
+    /// `payload` holds a zerompk
+    /// [`EdgeDeleteBatch`](super::edge_batch::EdgeDeleteBatch).
+    EdgeDeleteBatch = 0x9E,
 }
 
 impl OpCode {
@@ -204,6 +213,8 @@ impl OpCode {
                 | OpCode::CrdtListDelete
                 | OpCode::CrdtListMove
                 | OpCode::ArrayPutBatch
+                | OpCode::EdgePutBatch
+                | OpCode::EdgeDeleteBatch
         )
     }
 }
@@ -304,6 +315,8 @@ impl TryFrom<u8> for OpCode {
             0x9A => Ok(OpCode::CrdtListDelete),
             0x9B => Ok(OpCode::CrdtListMove),
             0x9C => Ok(OpCode::ArrayPutBatch),
+            0x9D => Ok(OpCode::EdgePutBatch),
+            0x9E => Ok(OpCode::EdgeDeleteBatch),
             other => Err(UnknownOpCode(other)),
         }
     }
@@ -387,6 +400,16 @@ mod tests {
         assert_eq!(OpCode::try_from(0x9C), Ok(OpCode::ArrayPutBatch));
         assert_eq!(u8::from(OpCode::ArrayPutBatch), 0x9C);
         assert!(OpCode::ArrayPutBatch.is_write());
+    }
+
+    #[test]
+    fn edge_batch_opcodes_roundtrip_and_are_writes() {
+        assert_eq!(OpCode::try_from(0x9D), Ok(OpCode::EdgePutBatch));
+        assert_eq!(OpCode::try_from(0x9E), Ok(OpCode::EdgeDeleteBatch));
+        assert_eq!(u8::from(OpCode::EdgePutBatch), 0x9D);
+        assert_eq!(u8::from(OpCode::EdgeDeleteBatch), 0x9E);
+        assert!(OpCode::EdgePutBatch.is_write());
+        assert!(OpCode::EdgeDeleteBatch.is_write());
     }
 
     #[test]

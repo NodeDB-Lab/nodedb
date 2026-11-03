@@ -99,6 +99,9 @@ pub(in crate::data::executor) struct RedoApplyScope {
     pub(in crate::data::executor) ts_installs: Vec<TsInstalled>,
     /// Events the install's writes raised, sent once it succeeded.
     pub(in crate::data::executor) pending_events: Vec<crate::event::WriteEvent>,
+    /// Graph edge writes the install applied, counted once it settled.
+    pub(in crate::data::executor) edge_writes:
+        crate::data::executor::core_loop::graph_metrics::EdgeWriteTally,
     /// Write notes the install's writes produced, published once the record
     /// settled.
     pub(in crate::data::executor) deferred_notes: Vec<DeferredNote>,
@@ -157,6 +160,7 @@ impl RedoApplyScope {
             timeseries_written: Vec::new(),
             ts_installs: Vec::new(),
             pending_events: Vec::new(),
+            edge_writes: Default::default(),
             deferred_notes: Vec::new(),
             origin: nodedb_physical::physical_plan::RedoOrigin::Commit,
         }

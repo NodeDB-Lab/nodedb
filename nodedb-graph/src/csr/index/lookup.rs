@@ -41,6 +41,7 @@ impl CsrIndex {
 
     /// Get immediate neighbors by string name. An empty `label_filter` keeps
     /// every edge. Otherwise an edge whose label is any listed label passes.
+    /// A `Both` read lists each physical edge once, a self-loop included.
     pub fn neighbors(
         &self,
         node: &str,
@@ -67,7 +68,7 @@ impl CsrIndex {
         }
         if matches!(direction, Direction::In | Direction::Both) {
             for (lid, src) in self.dense_iter_in(node_id) {
-                if labels.keeps(lid) {
+                if labels.keeps(lid) && direction.in_pass_keeps(&src, &node_id) {
                     result.push((
                         self.id_to_label[lid as usize].clone(),
                         self.id_to_node[src as usize].clone(),

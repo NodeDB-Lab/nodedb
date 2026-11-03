@@ -345,6 +345,7 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             | MetaOp::PurgeDepartedVShards { .. }
             | MetaOp::PurgeVersionsBelow { .. }
             | MetaOp::KvDueExpiries { .. }
+            | MetaOp::RefreshGraphCount { .. }
             | MetaOp::PurgeTenant { .. }
             | MetaOp::UnregisterCollection { .. }
             | MetaOp::UnregisterMaterializedView { .. }
@@ -661,6 +662,7 @@ mod tests {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 path: "$.f".into(),
                 value: "v".into(),
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Document(DocumentOp::IndexedFetch {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
@@ -2195,6 +2197,7 @@ mod tests {
             PhysicalPlan::Array(ArrayOp::SurrogateBitmapScan {
                 array_id: array_id.clone(),
                 slice_msgpack: Vec::new(),
+                system_time: nodedb_types::SystemTimeScope::Current,
             }),
             PhysicalPlan::Array(ArrayOp::DropArray {
                 array_id: array_id.clone(),
