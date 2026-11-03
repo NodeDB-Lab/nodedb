@@ -120,6 +120,7 @@ pub(super) fn resolve_primary_engine(
                     }
                 }
             }
+            check_codec_shape(&vp_cfg)?;
             Ok((nodedb_types::PrimaryEngine::Vector, Some(vp_cfg)))
         }
         Ok(None) => Ok((
@@ -128,4 +129,25 @@ pub(super) fn resolve_primary_engine(
         )),
         Err(e) => Err(err("42601", e.to_string())),
     }
+}
+
+/// Refuse a quantization the codec cannot build at the collection's dim. PQ
+/// and OPQ must train at the default `pq_m`, with which a vector-primary
+/// collection builds its codec. A graph codec stores the dimension as `u16`.
+fn check_codec_shape(cfg: &nodedb_types::VectorPrimaryConfig) -> Result<(), DdlError> {
+    use nodedb_types::VectorQuantization;
+    use nodedb_vector::collection::check_graph_codec_shape;
+    let dim = cfg.dim as usize;
+    let pq_m = nodedb_vector::index_config::DEFAULT_PQ_M;
+    let shape = match cfg.quantization {
+        VectorQuantization::Pq => nodedb_vector::quantize::pq::check_pq_shape(dim, pq_m),
+        VectorQuantization::Opq => check_graph_codec_shape(dim)
+            .and_then(|()| nodedb_vector::quantize::pq::check_opq_shape(dim, pq_m)),
+        VectorQuantization::RaBitQ
+        | VectorQuantization::Bbq
+        | VectorQuantization::Binary
+        | VectorQuantization::Ternary => check_graph_codec_shape(dim),
+        VectorQuantization::None | VectorQuantization::Sq8 => Ok(()),
+    };
+    shape.map_err(|e| err("22023", e.to_string()))
 }

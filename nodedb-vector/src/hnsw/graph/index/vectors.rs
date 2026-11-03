@@ -129,6 +129,33 @@ impl HnswIndex {
         Ok(vector)
     }
 
+    /// Whether [`Self::vector_f32`] borrows node `id`'s vector: the node
+    /// stores a full f32 vector itself.
+    pub fn borrows_f32(&self, id: u32) -> bool {
+        self.nodes
+            .get(id as usize)
+            .and_then(|n| n.storage.as_f32_slice())
+            .is_some_and(|v| v.len() == self.dim)
+    }
+
+    /// Node `id`'s vector as f32. It is borrowed when the node stores a
+    /// full f32 vector, and materialized otherwise.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::materialize_vector`].
+    pub fn vector_f32(&self, id: u32) -> Result<std::borrow::Cow<'_, [f32]>, VectorError> {
+        use std::borrow::Cow;
+        match self
+            .nodes
+            .get(id as usize)
+            .and_then(|n| n.storage.as_f32_slice())
+        {
+            Some(v) if v.len() == self.dim => Ok(Cow::Borrowed(v)),
+            Some(_) | None => self.materialize_vector(id).map(Cow::Owned),
+        }
+    }
+
     /// Extract all node vectors as owned F32 vecs for segment serialization.
     ///
     /// The second tuple element is always empty — `HnswIndex` has no surrogate

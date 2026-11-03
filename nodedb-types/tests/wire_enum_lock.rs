@@ -1,11 +1,12 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0
 
 //! Wire-enum stability snapshot tests.
 //!
 //! Each test asserts the exact JSON form for every known variant.
-//! Because all enums here are `#[non_exhaustive]`, a `_ => panic!` wildcard
-//! arm ensures a new variant causes a test failure at runtime until a
-//! rename attribute and snapshot are added here.
+//! For a `#[non_exhaustive]` enum, a `_ => panic!` wildcard arm ensures a
+//! new variant causes a test failure at runtime until a rename attribute and
+//! snapshot are added here. An exhaustive enum needs no wildcard: the
+//! compiler flags a new variant.
 //!
 //! These tests cover Category B enums: types that cross the SPSC bridge as
 //! MessagePack but also have serde JSON impls used for introspection,
@@ -330,7 +331,6 @@ fn vector_quantization_wire_forms() {
             VectorQuantization::Binary => {}
             VectorQuantization::Ternary => {}
             VectorQuantization::Opq => {}
-            _ => panic!("unrecognized VectorQuantization — update wire_enum_lock.rs"),
         }
         let v = serde_json::to_value(vq).expect("serialize");
         assert_eq!(

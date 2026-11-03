@@ -193,6 +193,7 @@ pub(crate) fn calvin_answer(
             tenant_id: exec.tenant_id(),
             database_id,
             auth: exec.scope.auth(),
+            sequences: Some(exec.sequences),
         },
     )
     .map_err(|error| match error {

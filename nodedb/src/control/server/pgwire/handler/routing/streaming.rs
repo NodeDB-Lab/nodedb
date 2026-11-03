@@ -166,7 +166,7 @@ impl NodeDbPgHandler {
                                 response
                             }
                             ShapeOutcome::Passthrough => {
-                                multirow_payload_to_response(payload).response
+                                multirow_payload_to_response(payload)?.response
                             }
                         }
                     };

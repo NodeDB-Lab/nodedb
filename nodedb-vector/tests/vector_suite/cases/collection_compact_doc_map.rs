@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0
 
 //! `compact()` must keep `surrogate_map` / `multi_doc_map` consistent with
 //! the renumbered HNSW local IDs.
@@ -15,9 +15,9 @@
 use nodedb_vector::DistanceMetric;
 use nodedb_vector::Surrogate;
 use nodedb_vector::collection::VectorCollection;
-use nodedb_vector::hnsw::{HnswIndex, HnswParams};
+use nodedb_vector::hnsw::HnswParams;
 
-use crate::support::test_memory;
+use crate::support::{build_now, test_memory};
 
 fn params() -> HnswParams {
     HnswParams {
@@ -33,12 +33,11 @@ fn build_collection_with_docs() -> VectorCollection {
         coll.insert_with_surrogate(vec![i as f32, 0.0], Surrogate::new(i + 1))
             .unwrap();
     }
-    let req = coll.seal("k").expect("seal produced request");
-    let mut idx = HnswIndex::new(req.dim, req.params.clone());
-    for v in &req.vectors {
-        idx.insert(v.clone()).unwrap();
-    }
-    coll.complete_build(req.segment_id, idx, test_memory());
+    let req = coll
+        .seal("k", test_memory())
+        .expect("seal produced request");
+    let segment_id = req.segment_id;
+    assert!(coll.complete_build(segment_id, build_now(req)).installed());
     coll
 }
 
@@ -90,12 +89,11 @@ fn multi_doc_map_stays_correct_after_compact() {
     let b_ids = coll.insert_multi_vector(&b_refs, doc_b).unwrap();
     assert_eq!(b_ids, vec![3, 4, 5]);
 
-    let req = coll.seal("k").expect("seal produced request");
-    let mut idx = HnswIndex::new(req.dim, req.params.clone());
-    for v in &req.vectors {
-        idx.insert(v.clone()).unwrap();
-    }
-    coll.complete_build(req.segment_id, idx, test_memory());
+    let req = coll
+        .seal("k", test_memory())
+        .expect("seal produced request");
+    let segment_id = req.segment_id;
+    assert!(coll.complete_build(segment_id, build_now(req)).installed());
 
     assert!(coll.delete(1));
     assert!(coll.delete(4));

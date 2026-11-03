@@ -31,8 +31,8 @@ pub use recording::{
     strict_row_undecodable, synonym_group_not_applied, timeseries_flush_not_installed,
     timeseries_idle_flush_failed, timeseries_partition_unreadable,
     timeseries_row_image_undecodable, vector_build_failed, vector_builder_disconnected,
-    vector_builder_spawn_failed, vector_index_not_applied, vector_payload_undecodable,
-    vector_rebuild_unreadable, version_cleanup_failed, vshard_departure_purge_failed,
-    wal_archival_failed_truncation_held, write_acked_without_durability, write_window_held,
-    write_window_leaked,
+    vector_builder_spawn_failed, vector_codec_not_built, vector_index_not_applied,
+    vector_payload_undecodable, vector_rebuild_unreadable, version_cleanup_failed,
+    vshard_departure_purge_failed, wal_archival_failed_truncation_held,
+    write_acked_without_durability, write_window_held, write_window_leaked,
 };

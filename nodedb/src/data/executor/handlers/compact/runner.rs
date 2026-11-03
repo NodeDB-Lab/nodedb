@@ -133,6 +133,8 @@ impl CoreLoop {
                 );
                 stats.vectors_compacted += removed;
                 stats.collections_compacted += 1;
+                // A graph codec the compaction dropped is rebuilt off the core.
+                self.queue_missing_codecs(&key);
             }
             // `_lease` drops here, recording elapsed wall-clock into the budget window.
         }

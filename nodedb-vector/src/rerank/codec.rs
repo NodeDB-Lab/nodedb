@@ -13,6 +13,8 @@ pub enum CodecName {
     Binary,
     RaBitQ,
     Bbq,
+    Ternary,
+    Opq,
 }
 
 impl CodecName {
@@ -23,6 +25,8 @@ impl CodecName {
             CodecName::Binary => "binary",
             CodecName::RaBitQ => "rabitq",
             CodecName::Bbq => "bbq",
+            CodecName::Ternary => "ternary",
+            CodecName::Opq => "opq",
         }
     }
 }
@@ -69,7 +73,7 @@ pub trait RerankCodec: Send + Sync {
     }
 
     /// Serialize trained state to bytes. Each codec uses its own magic header
-    /// (NDSQ / NDBIN / NDPQ / NDRBQ / NDBBQ). The bytes are codec-specific;
+    /// (NDSQ / NDBIN / NDPQ / NDRBQ / NDBBQ / NDTRN / NDOPQ). The bytes are codec-specific;
     /// `rerank_codec_from_bytes` is used for restore, paired with `name()`.
     fn to_bytes(&self) -> Result<Vec<u8>, RerankError>;
 }
@@ -83,8 +87,11 @@ pub fn rerank_codec_from_bytes(
 ) -> Result<Arc<dyn RerankCodec>, RerankError> {
     use crate::quantize::pq::PqCodec;
     use crate::quantize::sq8::Sq8Codec;
-    use crate::rerank::codecs::{BbqRerank, BinaryRerank, PqRerank, RaBitQRerank, Sq8Rerank};
+    use crate::rerank::codecs::{
+        BbqRerank, BinaryRerank, OpqRerank, PqRerank, RaBitQRerank, Sq8Rerank, TernaryRerank,
+    };
     use nodedb_codec::vector_quant::bbq::BbqCodec;
+    use nodedb_codec::vector_quant::opq::OpqCodec;
     use nodedb_codec::vector_quant::rabitq::RaBitQCodec;
 
     match name {
@@ -119,6 +126,12 @@ pub fn rerank_codec_from_bytes(
             let inner = BbqCodec::from_bytes(bytes)
                 .map_err(|e| RerankError::BadInput(format!("bbq from_bytes: {e}")))?;
             Ok(Arc::new(BbqRerank::from_codec(inner)))
+        }
+        CodecName::Ternary => Ok(Arc::new(TernaryRerank::from_bytes(bytes)?)),
+        CodecName::Opq => {
+            let inner = OpqCodec::from_bytes(bytes)
+                .map_err(|e| RerankError::BadInput(format!("opq from_bytes: {e}")))?;
+            Ok(Arc::new(OpqRerank::from_codec(inner)))
         }
     }
 }

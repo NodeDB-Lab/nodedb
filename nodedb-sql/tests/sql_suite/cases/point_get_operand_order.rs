@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0
 
 //! Primary-key equality must be rewritten to a point-lookup regardless of
 //! operand order.

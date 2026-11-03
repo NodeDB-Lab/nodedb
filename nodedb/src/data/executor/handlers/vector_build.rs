@@ -72,6 +72,37 @@ impl CoreLoop {
         base_ids.len()
     }
 
+    /// Queue a codec rebuild for every sealed segment of `key` whose codec
+    /// differs from its collection's plan: a compaction dropped a graph
+    /// codec whose stale nodes outnumbered the rest. Returns the number of
+    /// segments queued.
+    pub(in crate::data::executor) fn queue_missing_codecs(
+        &mut self,
+        key: &VectorIndexKey,
+    ) -> usize {
+        let Some(coll) = self.vector_collections.get(key) else {
+            return 0;
+        };
+        // A segment waiting out a budget backoff keeps its delayed job.
+        let jobs: Vec<BuildJob> = coll
+            .sealed_ids_missing_codec()
+            .into_iter()
+            .map(|base_id| BuildJob {
+                key: key.clone(),
+                kind: BuildJobKind::Rebuild { base_id },
+            })
+            .filter(|job| !self.vector_builds.delayed.iter().any(|d| &d.job == job))
+            .collect();
+        let queued = jobs.len();
+        for job in jobs {
+            self.vector_builds.push(job);
+        }
+        if queued > 0 {
+            self.dispatch_vector_builds();
+        }
+        queued
+    }
+
     /// Queue a build for every building segment of every collection. Boot
     /// runs it after replay, so a segment sealed before a restart gets its
     /// graph; a builder respawn runs it for the builds the dead thread held.
@@ -82,19 +113,44 @@ impl CoreLoop {
         self.dispatch_vector_builds();
     }
 
-    /// A seal job for every building segment of every collection.
+    /// A seal job for every building segment of every collection, and a
+    /// rebuild job for every sealed segment whose codec differs from its
+    /// collection's plan. A checkpoint stores no graph codec, so a restored
+    /// segment rebuilds its graph codec here, off the core.
     fn unbuilt_segment_jobs(&self) -> Vec<BuildJob> {
         self.vector_collections
             .iter()
             .flat_map(|(key, coll)| {
-                coll.building_segment_ids()
+                let seals = coll
+                    .building_segment_ids()
                     .into_iter()
                     .map(|segment_id| BuildJob {
                         key: key.clone(),
                         kind: BuildJobKind::Seal { segment_id },
-                    })
+                    });
+                let rebuilds =
+                    coll.sealed_ids_missing_codec()
+                        .into_iter()
+                        .map(|base_id| BuildJob {
+                            key: key.clone(),
+                            kind: BuildJobKind::Rebuild { base_id },
+                        });
+                seals.chain(rebuilds).collect::<Vec<_>>()
             })
             .collect()
+    }
+
+    /// The memory scope a vector build of `key` charges its codec training to.
+    pub(in crate::data::executor) fn vector_build_memory(
+        &self,
+        key: &VectorIndexKey,
+    ) -> nodedb_mem::ScopedMemory {
+        nodedb_mem::ScopedMemory::new(
+            self.governor.clone(),
+            key.0,
+            key.1,
+            nodedb_mem::EngineId::Vector,
+        )
     }
 
     /// Send backlog jobs, oldest first, until the builder queue is full.
@@ -160,11 +216,14 @@ impl CoreLoop {
     /// gone or a rebuild's vectors cannot be read.
     fn read_build_request(&mut self, job: &BuildJob) -> Option<BuildRequest> {
         let build_key = CoreLoop::vector_build_key(&job.key);
+        let memory = self.vector_build_memory(&job.key);
         let coll = self.vector_collections.get_mut(&job.key)?;
         match job.kind {
-            BuildJobKind::Seal { segment_id } => coll.build_request_for(&build_key, segment_id),
+            BuildJobKind::Seal { segment_id } => {
+                coll.build_request_for(&build_key, segment_id, memory)
+            }
             BuildJobKind::Rebuild { base_id } => {
-                match coll.rebuild_request_for(&build_key, base_id) {
+                match coll.rebuild_request_for(&build_key, base_id, memory) {
                     Ok(req) => req,
                     Err(e) => {
                         coll.note_build_failed();
@@ -221,7 +280,7 @@ mod tests {
 
     /// A collection holding `SEGMENTS` sealed-but-unbuilt segments, as a
     /// restart leaves one whose builds had not finished.
-    fn unbuilt_collection() -> VectorCollection {
+    fn unbuilt_collection(memory: &nodedb_mem::ScopedMemory) -> VectorCollection {
         let params = HnswParams {
             metric: DistanceMetric::L2,
             ..HnswParams::default()
@@ -233,7 +292,7 @@ mod tests {
                 coll.insert(vec![n, (i % 3) as f32]).unwrap();
             }
             // The request is dropped: the build never reached a builder.
-            coll.seal("lost").unwrap();
+            coll.seal("lost", memory.clone()).unwrap();
         }
         coll
     }
@@ -243,8 +302,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
         let key: VectorIndexKey = (DatabaseId::DEFAULT, TenantId::new(1), "docs:emb".into());
+        let memory = core.vector_build_memory(&key);
         core.vector_collections
-            .insert(key.clone(), unbuilt_collection());
+            .insert(key.clone(), unbuilt_collection(&memory));
 
         core.queue_unbuilt_segments();
         assert_eq!(core.vector_builds.pending_for(&key), SEGMENTS);
@@ -275,8 +335,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
         let key: VectorIndexKey = (DatabaseId::DEFAULT, TenantId::new(1), "docs:emb".into());
+        let memory = core.vector_build_memory(&key);
         core.vector_collections
-            .insert(key.clone(), unbuilt_collection());
+            .insert(key.clone(), unbuilt_collection(&memory));
         core.queue_unbuilt_segments();
         let deadline = Instant::now() + Duration::from_secs(20);
         while core.vector_builds.pending_total() > 0 {
@@ -301,5 +362,50 @@ mod tests {
         assert_eq!(coll.len(), SEGMENTS * PER_SEGMENT, "no node added or lost");
         let hit = &coll.search(&[40.0, 0.0], 1, 64).unwrap()[0];
         assert_eq!(hit.id, 40);
+    }
+
+    /// Install every queued build, failing the test past `deadline`.
+    fn drain_builds(core: &mut CoreLoop, deadline: Instant) {
+        while core.vector_builds.pending_total() > 0 {
+            assert!(Instant::now() < deadline, "builds did not finish");
+            std::thread::sleep(Duration::from_millis(10));
+            core.poll_build_completions();
+        }
+    }
+
+    #[test]
+    fn a_restored_graph_codec_rebuilds_through_the_builder() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        let key: VectorIndexKey = (DatabaseId::DEFAULT, TenantId::new(1), "docs:emb".into());
+        let memory = core.vector_build_memory(&key);
+        let mut coll = unbuilt_collection(&memory);
+        coll.set_quantization(nodedb_types::VectorQuantization::Binary);
+        core.vector_collections.insert(key.clone(), coll);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        core.queue_unbuilt_segments();
+        drain_builds(&mut core, deadline);
+
+        // A checkpoint stores no graph codec: every restored segment lacks it.
+        let bytes = core
+            .vector_collections
+            .get(&key)
+            .expect("collection")
+            .checkpoint_to_bytes(None)
+            .expect("checkpoint");
+        let restored = VectorCollection::from_checkpoint(&bytes, None, memory).expect("restore");
+        assert_eq!(restored.sealed_ids_missing_codec().len(), SEGMENTS);
+        core.vector_collections.insert(key.clone(), restored);
+
+        core.queue_unbuilt_segments();
+        drain_builds(&mut core, deadline);
+
+        let coll = core.vector_collections.get(&key).expect("collection");
+        assert!(coll.sealed_ids_missing_codec().is_empty());
+        assert_eq!(
+            coll.stats().quantization,
+            nodedb_types::VectorIndexQuantization::Binary
+        );
+        assert_eq!(coll.len(), SEGMENTS * PER_SEGMENT, "no node added or lost");
     }
 }

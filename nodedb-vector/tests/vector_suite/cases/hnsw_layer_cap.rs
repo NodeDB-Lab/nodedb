@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0
 
 //! HNSW `random_layer` must be capped at a reasonable maximum.
 //!

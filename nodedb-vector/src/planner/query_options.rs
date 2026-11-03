@@ -60,10 +60,9 @@ pub struct VectorQueryOptions {
     /// candidates.  `None` means use the full embedding dimension.
     pub query_dim: Option<u32>,
 
-    /// BBQ / RaBitQ rerank oversample multiplier.
-    ///
-    /// The actual rerank candidate count is `oversample * ef_search`.
-    /// Ignored when `quantization == None`.
+    /// Rerank candidates kept per requested row: the rerank set is
+    /// `k × oversample` (`rerank::rerank_pool`). Ignored when
+    /// `quantization == None`.
     pub oversample: u8,
 
     /// MetaEmbed Meta Token budget for budgeted MaxSim.
@@ -89,7 +88,7 @@ impl Default for VectorQueryOptions {
             index_type: IndexType::Hnsw,
             quantization: QuantizationKind::Sq8,
             query_dim: None,
-            oversample: 3,
+            oversample: crate::rerank::DEFAULT_OVERSAMPLE,
             meta_token_budget: None,
             ef_search: 64,
             k: 10,

@@ -88,11 +88,12 @@ impl CoreLoop {
     /// holds its training threshold.
     pub(in crate::data::executor) fn settle_vector_collection(&mut self, key: &VectorIndexKey) {
         let seal_key = CoreLoop::vector_build_key(key);
+        let memory = self.vector_build_memory(key);
         let Some(coll) = self.vector_collections.get_mut(key) else {
             return;
         };
         if coll.needs_seal()
-            && let Some(req) = coll.seal(&seal_key)
+            && let Some(req) = coll.seal(&seal_key, memory)
         {
             self.queue_sealed_build(key, req);
         }

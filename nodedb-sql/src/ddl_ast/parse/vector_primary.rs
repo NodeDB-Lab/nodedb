@@ -562,6 +562,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn quantization_omitted_defaults_to_sq8() {
+        let sql = "CREATE COLLECTION c (id BIGINT PRIMARY KEY, v VECTOR(64)) \
+            WITH (primary='vector', vector_field='v', dim=64)";
+        let cfg = parse_vector_primary_options(sql)
+            .expect("parse ok")
+            .expect("vector-primary config");
+        assert_eq!(cfg.quantization, VectorQuantization::Sq8);
+    }
+
     // ── All valid quantization strings ───────────────────────────────────
 
     #[test]

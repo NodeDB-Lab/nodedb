@@ -26,6 +26,8 @@ pub(super) struct SearchWindow<'a> {
     pub collection: &'a VectorCollection,
     pub query_vector: &'a [f32],
     pub ef_search: usize,
+    /// Rerank candidates a codec stage keeps per requested row.
+    pub oversample: u8,
     pub metric: DistanceMetric,
     /// Serialized candidate bitmap in the index's node-id space. A current
     /// search reads it.
@@ -61,6 +63,27 @@ pub(super) struct WindowHits {
 /// costs only the bodies it attaches, and one pass covers a filter that
 /// passes one candidate in this many.
 const FLAT_WINDOW_PER_HIT: usize = 20;
+
+/// Candidates a first window asks for per wanted hit when a residual filter
+/// runs over the bodies.
+pub(super) const RESIDUAL_WINDOW_PER_HIT: usize = 2;
+
+/// Smallest first window of a search with a residual filter.
+pub(super) const MIN_RESIDUAL_WINDOW: usize = 20;
+
+/// The first window of a search for `top_k` hits. A residual filter starts
+/// it wider, and `rank_window` widens it until `top_k` candidates pass.
+/// Rerank breadth is the collection's concern, so the window ignores
+/// `oversample`.
+pub(super) fn first_window(top_k: usize, has_residual: bool) -> usize {
+    if has_residual {
+        top_k
+            .saturating_mul(RESIDUAL_WINDOW_PER_HIT)
+            .max(MIN_RESIDUAL_WINDOW)
+    } else {
+        top_k
+    }
+}
 
 impl CoreLoop {
     /// Rank `fetch_k` candidates and attach their bodies.
@@ -98,12 +121,15 @@ impl CoreLoop {
         }
         let mut ranked_before: HashMap<u32, VectorSearchHit> = HashMap::new();
         loop {
-            let ef = effective_ef(window.ef_search, fetch_k);
+            let breadth = nodedb_vector::rerank::SearchBreadth {
+                ef_search: effective_ef(window.ef_search, fetch_k),
+                oversample: window.oversample,
+            };
             let ranked = match (window.cut, window.bitmap) {
                 (Some((at, allow)), _) => window.collection.search_at(
                     window.query_vector,
                     fetch_k,
-                    ef,
+                    breadth,
                     window.metric,
                     allow,
                     at,
@@ -111,14 +137,14 @@ impl CoreLoop {
                 (None, Some(bitmap)) => window.collection.search_with_bitmap_bytes_and_metric(
                     window.query_vector,
                     fetch_k,
-                    ef,
+                    breadth,
                     bitmap,
                     window.metric,
                 ),
                 (None, None) => window.collection.search_with_metric(
                     window.query_vector,
                     fetch_k,
-                    ef,
+                    breadth,
                     window.metric,
                 ),
             }

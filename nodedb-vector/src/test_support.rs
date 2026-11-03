@@ -121,3 +121,23 @@ pub(crate) fn graph_only_restore_with_backing(
         .expect("a complete backing attaches");
     restored
 }
+
+/// Build a copy of `req` on the calling thread.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn build_now(req: &crate::collection::BuildRequest) -> crate::collection::BuiltSegment {
+    let copy = crate::collection::BuildRequest {
+        key: req.key.clone(),
+        segment_id: req.segment_id,
+        kind: req.kind,
+        vectors: req.vectors.clone(),
+        dim: req.dim,
+        params: req.params.clone(),
+        codec: req.codec,
+        memory: req.memory.clone(),
+    };
+    let built = crate::builder::build_segment(7, copy).expect("test segment build");
+    if let Err(e) = &built.codec {
+        panic!("test codec build: {e}");
+    }
+    built
+}

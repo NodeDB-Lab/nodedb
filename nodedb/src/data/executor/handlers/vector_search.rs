@@ -237,37 +237,19 @@ mod tests {
         coll
     }
 
-    /// Verify the oversample-based fetch_k arithmetic in isolation.
-    /// oversample=3, top_k=10, no RLS → fetch_k = 30.
-    /// oversample=3, top_k=10, RLS active → fetch_k = max(10*2*3, 20) = 60.
+    /// The first window holds `top_k` without a residual filter, and
+    /// `top_k × RESIDUAL_WINDOW_PER_HIT` floored at `MIN_RESIDUAL_WINDOW`
+    /// with one. Rerank oversample never widens it.
     #[test]
-    fn oversample_fetch_k_arithmetic() {
-        let top_k: usize = 10;
-
-        // No RLS, oversample=3.
-        let oversample: usize = 3;
-        let fetch_k_no_rls = top_k.saturating_mul(oversample);
-        assert_eq!(
-            fetch_k_no_rls, 30,
-            "no-RLS oversample=3 fetch_k should be 30"
-        );
-
-        // RLS active, oversample=3.
-        let rls_active = true;
-        let fetch_k_rls = if rls_active {
-            top_k.saturating_mul(2).saturating_mul(oversample).max(20)
-        } else {
-            top_k.saturating_mul(oversample)
+    fn fetch_window_ignores_oversample() {
+        use super::super::vector_search_window::{
+            MIN_RESIDUAL_WINDOW, RESIDUAL_WINDOW_PER_HIT, first_window,
         };
-        assert_eq!(fetch_k_rls, 60, "RLS oversample=3 fetch_k should be 60");
-
-        // oversample=1 (default) → no change from baseline.
-        let oversample_default: usize = 1;
-        let fetch_k_default = top_k.saturating_mul(oversample_default);
-        assert_eq!(
-            fetch_k_default, 10,
-            "oversample=1 fetch_k should equal top_k"
-        );
+        assert_eq!(first_window(10, false), 10);
+        assert_eq!(first_window(10, true), 10 * RESIDUAL_WINDOW_PER_HIT);
+        assert_eq!(first_window(10, true), MIN_RESIDUAL_WINDOW);
+        assert_eq!(first_window(3, true), MIN_RESIDUAL_WINDOW);
+        assert_eq!(first_window(50, true), 100);
     }
 
     #[test]

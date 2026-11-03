@@ -40,6 +40,8 @@ impl VectorCollection {
             hnsw: self.params.clone(),
             ..config
         };
+        // A new plan gets a fresh codec build on every segment.
+        self.codec_refused.clear();
     }
 
     /// Live vectors an `IvfPq` collection needs before it trains.

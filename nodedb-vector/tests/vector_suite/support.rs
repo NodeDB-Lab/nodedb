@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0
 
 //! Shared test fixtures for the `vector_suite` integration test binary.
 //!
@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use nodedb_mem::{EngineId, EngineLimits, GovernorConfig, MemoryGovernor, ScopedMemory};
 use nodedb_types::{DatabaseId, TenantId};
+use nodedb_vector::{BuildRequest, BuiltSegment, build_segment};
 
 /// A scope backed by a governor whose ceiling covers every engine's limit.
 pub fn test_memory() -> ScopedMemory {
@@ -27,4 +28,14 @@ pub fn test_memory() -> ScopedMemory {
         TenantId::new(0),
         EngineId::Vector,
     )
+}
+
+/// Build `req` on the calling thread with a fixed seed. A codec error fails
+/// the test: a fixture build carries the codec its plan names.
+pub fn build_now(req: BuildRequest) -> BuiltSegment {
+    let built = build_segment(7, req).expect("test segment build");
+    if let Err(e) = &built.codec {
+        panic!("test codec build: {e}");
+    }
+    built
 }

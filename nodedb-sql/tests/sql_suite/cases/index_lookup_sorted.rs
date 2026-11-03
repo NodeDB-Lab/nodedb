@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0
 
 //! An indexed equality with an ORDER BY, or beside an unindexed equality.
 //!

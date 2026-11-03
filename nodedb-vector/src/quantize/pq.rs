@@ -32,6 +32,52 @@ const MAX_PQ_CODEBOOK_BYTES: usize = 64 * 1024 * 1024;
 // complete decoded allocation (floats plus Vec headers) fits the 64 MiB cap.
 const MAX_PQ_SERIALIZED_BYTES: usize = 96 * 1024 * 1024;
 
+/// Centroids per PQ subspace: one byte per code.
+pub const PQ_CENTROIDS: usize = 256;
+
+/// Largest OPQ rotation matrix, in bytes (`dim × dim` f32): dim 4096.
+const MAX_OPQ_ROTATION_BYTES: usize = 64 * 1024 * 1024;
+
+/// Check that a PQ codec of `m` subspaces over `dim` components fits the
+/// codec limits at `PQ_CENTROIDS` centroids. CREATE and ALTER VECTOR INDEX
+/// call this, so a shape the codec cannot train is refused at DDL.
+pub fn check_pq_shape(dim: usize, m: usize) -> Result<(), VectorError> {
+    let invalid = |detail: String| Err(VectorError::InvalidInput { detail });
+    if dim == 0 || dim > MAX_PQ_DECODE_DIM {
+        return invalid(format!(
+            "PQ dimension {dim} is outside 1..={MAX_PQ_DECODE_DIM}"
+        ));
+    }
+    if m == 0 || !dim.is_multiple_of(m) {
+        return invalid(format!("pq_m ({m}) must divide dim ({dim}) evenly"));
+    }
+    let sub_dim = dim / m;
+    if pq_codebook_allocation_bytes(m, PQ_CENTROIDS, sub_dim)
+        .is_none_or(|bytes| bytes > MAX_PQ_CODEBOOK_BYTES)
+    {
+        return invalid(format!(
+            "PQ codebook for pq_m={m}, sub-dimension {sub_dim} exceeds \
+             {MAX_PQ_CODEBOOK_BYTES} bytes"
+        ));
+    }
+    Ok(())
+}
+
+/// [`check_pq_shape`] plus the `dim × dim` rotation an OPQ codec holds.
+pub fn check_opq_shape(dim: usize, m: usize) -> Result<(), VectorError> {
+    check_pq_shape(dim, m)?;
+    if dim
+        .checked_mul(dim)
+        .and_then(|n| n.checked_mul(size_of::<f32>()))
+        .is_none_or(|bytes| bytes > MAX_OPQ_ROTATION_BYTES)
+    {
+        return Err(VectorError::InvalidInput {
+            detail: format!("OPQ rotation for dim {dim} exceeds {MAX_OPQ_ROTATION_BYTES} bytes"),
+        });
+    }
+    Ok(())
+}
+
 fn pq_codebook_allocation_bytes(m: usize, k: usize, sub_dim: usize) -> Option<usize> {
     let outer_headers = m.checked_mul(size_of::<Vec<Vec<f32>>>())?;
     let centroid_count = m.checked_mul(k)?;
@@ -670,5 +716,31 @@ mod tests {
             matches!(err, VectorError::InvalidMagic),
             "expected InvalidMagic, got: {err:?}"
         );
+    }
+
+    #[test]
+    fn pq_shape_check_refuses_what_the_codec_cannot_train() {
+        assert!(check_pq_shape(128, 8).is_ok());
+        for (dim, m) in [(0, 1), (12, 8), (16, 0), (MAX_PQ_DECODE_DIM + 1, 1)] {
+            assert!(
+                matches!(
+                    check_pq_shape(dim, m),
+                    Err(VectorError::InvalidInput { .. })
+                ),
+                "dim {dim}, m {m}"
+            );
+        }
+        // 256 centroids of 65536 / 8 floats each overflow the codebook cap.
+        assert!(check_pq_shape(65_536, 8).is_err());
+    }
+
+    #[test]
+    fn opq_shape_check_adds_the_rotation_limit() {
+        assert!(check_opq_shape(1024, 8).is_ok());
+        assert!(
+            check_opq_shape(8192, 8).is_err(),
+            "8192² f32 exceeds 64 MiB"
+        );
+        assert!(check_opq_shape(12, 8).is_err());
     }
 }

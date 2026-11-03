@@ -31,8 +31,7 @@ pub enum IndexShape {
 /// search-time override.
 ///
 /// - If `opts.quantization` is `None`: honor `collection_quant` — map it to a
-///   `CodecName` via `codec_name_for_quant`. Ternary / OPQ collection configs
-///   still surface as `BadInput` because they have no HNSW-integration path.
+///   `CodecName` via `codec_name_for_quant`.
 /// - If `opts.quantization` is `Some(q)` and `q == collection_quant`: proceed
 ///   (same as old behavior — the caller is being explicit about what the index
 ///   already uses).
@@ -72,11 +71,8 @@ fn validate_meta_token_budget(
     }
 }
 
-/// Map a `VectorQuantization` variant to its `CodecName`, returning `None`
-/// for variants that have no codec path (i.e. `None` / `VectorQuantization::None`).
-/// Variants that are not yet routable (Ternary, Opq, unknown) return `None`
-/// because their error is surfaced by `validate_quantization` — callers that
-/// need error surfacing should use `validate_options` instead.
+/// Map a `VectorQuantization` variant to its `CodecName`. `None` means the
+/// FP32 path: `VectorQuantization::None` carries no codec.
 pub(crate) fn codec_name_for_quant(q: VectorQuantization) -> Option<CodecName> {
     match q {
         VectorQuantization::None => None,
@@ -85,8 +81,8 @@ pub(crate) fn codec_name_for_quant(q: VectorQuantization) -> Option<CodecName> {
         VectorQuantization::Binary => Some(CodecName::Binary),
         VectorQuantization::RaBitQ => Some(CodecName::RaBitQ),
         VectorQuantization::Bbq => Some(CodecName::Bbq),
-        // Not yet routable — validate_options surfaces a precise error.
-        _ => None,
+        VectorQuantization::Ternary => Some(CodecName::Ternary),
+        VectorQuantization::Opq => Some(CodecName::Opq),
     }
 }
 
@@ -98,8 +94,8 @@ fn validate_quantization_with_collection(
 ) -> Result<Option<CodecName>, RerankError> {
     match opts.quantization {
         // Caller did not specify a codec: honor whatever the collection was
-        // built with. Ternary / OPQ are still unroutable even at this level.
-        None => map_collection_quant(collection_quant),
+        // built with.
+        None => Ok(codec_name_for_quant(collection_quant)),
 
         // Caller explicitly requested "no quantization" (FP32 path).
         Some(VectorQuantization::None) => {
@@ -122,41 +118,8 @@ fn validate_quantization_with_collection(
                      collection-creation time"
                 )));
             }
-            // The requested codec matches the collection config — validate it is routable.
-            map_collection_quant(collection_quant)
+            Ok(codec_name_for_quant(collection_quant))
         }
-    }
-}
-
-/// Map a `VectorQuantization` that matches (or defaults from) the collection's
-/// config to a `CodecName`. Returns `BadInput` for unroutable variants.
-fn map_collection_quant(q: VectorQuantization) -> Result<Option<CodecName>, RerankError> {
-    match q {
-        VectorQuantization::None => Ok(None),
-        VectorQuantization::Sq8 => Ok(Some(CodecName::Sq8)),
-        VectorQuantization::Pq => Ok(Some(CodecName::Pq)),
-        VectorQuantization::Binary => Ok(Some(CodecName::Binary)),
-        VectorQuantization::RaBitQ => Ok(Some(CodecName::RaBitQ)),
-        VectorQuantization::Bbq => Ok(Some(CodecName::Bbq)),
-        VectorQuantization::Ternary => Err(RerankError::BadInput(
-            "quantization=ternary: codec exists in nodedb-codec but has no HNSW-integration \
-             path in nodedb-vector; cannot serve a search request with ternary quantization \
-             until the index-side wiring lands."
-                .to_owned(),
-        )),
-        VectorQuantization::Opq => Err(RerankError::BadInput(
-            "quantization=opq: codec exists in nodedb-codec but has no HNSW-integration \
-             path in nodedb-vector; cannot serve a search request with opq quantization \
-             until the index-side wiring lands."
-                .to_owned(),
-        )),
-        // Safety net for future non_exhaustive variants added to VectorQuantization
-        // before nodedb-vector is updated. Treat as unroutable until wired.
-        _ => Err(RerankError::BadInput(
-            "quantization variant is not yet routable in nodedb-vector; \
-             update gating.rs when the HNSW-integration path lands."
-                .to_owned(),
-        )),
     }
 }
 
@@ -252,29 +215,23 @@ mod tests {
     }
 
     #[test]
-    fn ternary_returns_bad_input() {
-        let err = validate_options(
+    fn ternary_returns_codec() {
+        let result = validate_options(
             &opts_with_quant(Some(VectorQuantization::Ternary)),
             IndexShape::SingleVector,
             VectorQuantization::Ternary,
-        )
-        .unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("ternary"), "expected 'ternary' in: {msg}");
-        assert!(matches!(err, RerankError::BadInput(_)));
+        );
+        assert_eq!(result.unwrap(), Some(CodecName::Ternary));
     }
 
     #[test]
-    fn opq_returns_bad_input() {
-        let err = validate_options(
+    fn opq_returns_codec() {
+        let result = validate_options(
             &opts_with_quant(Some(VectorQuantization::Opq)),
             IndexShape::SingleVector,
             VectorQuantization::Opq,
-        )
-        .unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("opq"), "expected 'opq' in: {msg}");
-        assert!(matches!(err, RerankError::BadInput(_)));
+        );
+        assert_eq!(result.unwrap(), Some(CodecName::Opq));
     }
 
     #[test]

@@ -30,6 +30,34 @@ pub fn vector_rebuild_unreadable(err: &nodedb_vector::VectorError, target: &Vect
     record_not_installed("rebuild_read", err, target);
 }
 
+/// Report a segment whose graph installed without its codec. `retried` is
+/// whether the core queues a retry. Called from the completion arm that
+/// installs the graph.
+pub fn vector_codec_not_built(
+    err: &nodedb_vector::VectorError,
+    target: &VectorBuildTarget<'_>,
+    retried: bool,
+) {
+    let class = error_class(err);
+    let ctx = context::VectorCodecNotBuilt {
+        kind: target.kind,
+        database_id: target.database_id,
+        tenant_id: target.tenant_id,
+        index: target.index,
+        segment: target.segment,
+        retried,
+        error_class: &class,
+    };
+    let _ = Capture::new(
+        EventKind::Error,
+        "HNSW graph installed without its codec; the segment answers exactly",
+    )
+    .error_chain(error_chain_of(err))
+    .domain(&ctx)
+    .with_backtrace()
+    .emit();
+}
+
 /// Shared emit for the two not-installed causes. Private so the only entry
 /// points are the one-per-cause functions above.
 fn record_not_installed(

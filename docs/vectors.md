@@ -15,8 +15,8 @@ NodeDB's vector engine is built for production semantic search — not vectors s
 - **Quantization frontier**:
   - **SQ8** — Scalar quantization to 8-bit. ~4× memory reduction, minimal recall loss.
   - **PQ** — Classic product quantization codec. ~4-8× / ~16 bytes/vector for very large indexes.
-  - **OPQ** — PQ + learned random rotation; minor accuracy bump over plain PQ.
-  - **Binary** — Sign-bit Hamming for ultra-cold tiers (no rerank).
+  - **OPQ** — PQ after a learned (Procrustes-fitted) rotation; higher recall than PQ at the same code size.
+  - **Binary** — Sign-bit Hamming candidates, reranked by exact distance.
   - **Ternary** — BitNet 1.58 trit-pack `{-1, 0, +1}` with cold/hot pack and AVX-512 popcnt.
   - **RaBitQ** — 1-bit quantization with `O(1/√D)` error bound (SIGMOD 2024). Frontier 1-bit primary path.
   - **BBQ** — Centroid-asymmetric 1-bit + 14-byte corrective factors + oversample rerank.
@@ -75,13 +75,15 @@ LIMIT 10;
 | Argument            | Type   | Notes                                                                                       |
 | ------------------- | ------ | ------------------------------------------------------------------------------------------- |
 | `quantization`      | string | `none`, `sq8`, `pq`, `binary`, `ternary`, `rabitq`, `bbq`, `opq`                            |
-| `oversample`        | u8     | Candidates fetched before rerank. Default `3`. Final rerank set = `oversample × ef_search`. |
+| `oversample`        | u8     | Rerank candidates kept per requested row. Default `3`. Rerank set = `top_k × oversample`; the HNSW beam widens to at least that set. |
 | `query_dim`         | u32    | Coarse-to-fine on first-N dims of Matryoshka embeddings.                                    |
 | `meta_token_budget` | u8     | MetaEmbed multivec MaxSim / PLAID budget.                                                   |
-| `ef_search`         | u32    | HNSW / Vamana beam width. Default `64`.                                                     |
-| `target_recall`     | f32    | Adaptive recall target — cost-model planner picks `oversample` and `ef_search` to hit it.   |
+| `ef_search`         | u32    | HNSW beam width. Default `2 × LIMIT`.                                                       |
+| `target_recall`     | f32    | Recall target in `(0.0, 1.0]`. Above `0.80` it scales `ef_search` up to 5× and `oversample` up to √5×. |
 
-Set `target_recall` and let the planner do the rest unless you need a hard latency ceiling.
+Set `target_recall` to widen a search toward a recall target. Set `ef_search` and `oversample` for a hard latency ceiling.
+
+The `quantization` argument names the codec the index was created with. A value that names another codec is refused with a data exception. The codec is fixed at `CREATE`.
 
 ## Sparse Vectors
 
@@ -146,15 +148,15 @@ Default `primary='document'` is unchanged: classic `CREATE VECTOR INDEX ON ...` 
 | `none`    | 32       | 100%          | Small index (< 1M vectors), latency not critical         |
 | `sq8`     | 8        | ~99%          | Balanced default for medium index sizes                  |
 | `pq`      | ~2       | ~95%          | Large memory-bound indexes; classic Product Quantization |
-| `opq`     | ~2       | ~96%          | PQ + learned random rotation                             |
+| `opq`     | ~2       | ~96%          | PQ after a learned rotation                              |
 | `rabitq`  | 1        | ~97%          | Frontier 1-bit with `O(1/√D)` error bound                |
 | `bbq`     | 1        | ~98%          | Centroid-asymmetric 1-bit + 14-byte corrective           |
-| `binary`  | 1        | ~85%          | Hamming-only, ultra-cold tiers                           |
+| `binary`  | 1        | ~85%          | Hamming candidates + exact rerank                        |
 | `ternary` | 1.58     | ~96%          | BitNet `{-1, 0, +1}` cold/hot pack                       |
 
 ## How It Works
 
-Vectors are indexed in the HNSW graph at full precision to maintain structural integrity. During search, the engine traverses quantized copies of the graph for speed, then re-ranks the top candidates against full-precision vectors for accuracy.
+Vectors are indexed in the HNSW graph at full precision to maintain structural integrity. Each sealed segment carries one codec. SQ8 and PQ read a beam of `ef_search` HNSW candidates and keep the `top_k × oversample` nearest by code. RaBitQ, BBQ, Binary, Ternary, and OPQ search their own quantized graph. Every codec path reranks `top_k × oversample` candidates by exact distance. Filtered and point-in-time searches rank exact vectors. `none` stores no codec. An omitted `quantization` selects `sq8`. A codec that fails to build leaves the segment's HNSW graph installed without it: the segment answers exactly and `builds_failed` counts the error. A codec build the memory budget refuses retries with backoff. An IVF-PQ index searches by PQ codes, so it accepts the `pq` search hint.
 
 When a query includes metadata filters (e.g., `WHERE category = 'ml'`), the engine builds a Roaring Bitmap of matching document IDs and selects the optimal filtering strategy automatically — if the filter is highly selective, it pre-filters before HNSW traversal; if broad, it post-filters after.
 

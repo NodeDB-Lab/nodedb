@@ -2,6 +2,10 @@
 
 //! Background HNSW builder thread.
 //!
+//! A build makes the segment's HNSW graph and then its codec, so codec
+//! training runs here and never on the core. A codec error never discards
+//! the graph: the build carries the error beside the graph.
+//!
 //! Each Data Plane core owns one builder thread. The core sends build
 //! requests with `try_send` and drains finished builds with `try_recv` once
 //! per tick, so a build never blocks the core's reactor. Both channels are
@@ -21,7 +25,7 @@ use std::thread::JoinHandle;
 
 use tracing::{debug, info, warn};
 
-use crate::collection::{BuildComplete, BuildRequest};
+use crate::collection::{BuildComplete, BuildRequest, BuiltSegment, CodecCharge, SegmentCodec};
 use crate::error::VectorError;
 use crate::hnsw::HnswIndex;
 
@@ -74,14 +78,24 @@ fn builder_loop(
         let (key, segment_id, kind) = (req.key.clone(), req.segment_id, req.kind);
         let result = build(core_id, req);
         match &result {
-            Ok(index) => info!(
-                core_id,
-                key = %key,
-                segment_id,
-                vectors = index.len(),
-                elapsed_ms = start.elapsed().as_millis() as u64,
-                "HNSW index built"
-            ),
+            Ok(built) => match &built.codec {
+                Ok(_) => info!(
+                    core_id,
+                    key = %key,
+                    segment_id,
+                    vectors = built.index.len(),
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    "HNSW index built"
+                ),
+                Err(e) => warn!(
+                    core_id,
+                    key = %key,
+                    segment_id,
+                    vectors = built.index.len(),
+                    error = %e,
+                    "HNSW index built; its codec build failed"
+                ),
+            },
             Err(e) => warn!(core_id, key = %key, segment_id, error = %e, "HNSW build failed"),
         }
         let complete = BuildComplete {
@@ -97,23 +111,39 @@ fn builder_loop(
     }
 }
 
-/// Build one graph, inserting every vector in local-id order so node `i` of
-/// the graph is vector `i` of the request. The first insert error fails the
-/// build: a skipped vector would shift every later id.
-fn build(core_id: usize, req: BuildRequest) -> Result<HnswIndex, VectorError> {
-    let seed = (core_id as u64 + 1) * 1000 + u64::from(req.segment_id);
+/// Build one segment: the HNSW graph, inserting every vector in local-id
+/// order so node `i` of the graph is vector `i` of the request, then the
+/// codec the request names. A graph error fails the build: a skipped vector
+/// shifts every later id. A codec error keeps the graph and is carried in
+/// [`BuiltSegment::codec`], so the segment still answers exactly.
+pub fn build_segment(seed: u64, req: BuildRequest) -> Result<BuiltSegment, VectorError> {
     let mut index = HnswIndex::with_seed(req.dim, req.params, seed);
     for vector in req.vectors {
         index.insert(vector)?;
     }
-    Ok(index)
+    let (codec, charge) = match SegmentCodec::build(req.codec, &index, req.memory.clone(), seed) {
+        Ok((codec, charge)) => (Ok(codec), charge),
+        Err(e) => (Err(e), CodecCharge::default()),
+    };
+    Ok(BuiltSegment {
+        index,
+        codec,
+        charge,
+        memory: req.memory,
+    })
+}
+
+fn build(core_id: usize, req: BuildRequest) -> Result<BuiltSegment, VectorError> {
+    let seed = (core_id as u64 + 1) * 1000 + u64::from(req.segment_id);
+    build_segment(seed, req)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::collection::BuildKind;
+    use crate::collection::{BuildKind, CodecPlan};
     use crate::hnsw::HnswParams;
+    use crate::test_support::test_memory;
 
     fn request(segment_id: u32, vectors: Vec<Vec<f32>>) -> BuildRequest {
         BuildRequest {
@@ -123,6 +153,8 @@ mod tests {
             vectors,
             dim: 2,
             params: HnswParams::default(),
+            codec: CodecPlan::Sq8,
+            memory: test_memory(),
         }
     }
 
@@ -136,7 +168,9 @@ mod tests {
 
         let first = rx.recv().unwrap();
         assert_eq!(first.segment_id, 1);
-        assert_eq!(first.result.unwrap().len(), 2);
+        let built = first.result.unwrap();
+        assert_eq!(built.index.len(), 2);
+        assert!(matches!(built.codec, Ok(SegmentCodec::Sq8 { .. })));
         let second = rx.recv().unwrap();
         assert!(matches!(
             second.result,

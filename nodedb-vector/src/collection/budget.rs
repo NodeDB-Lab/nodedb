@@ -79,9 +79,22 @@ impl VectorCollection {
         let seg_path = dir.join(&seg_name);
         let count = index.len();
 
-        let refs: Vec<Vec<f32>> = (0..count)
-            .filter_map(|i| index.get_vector(i as u32).map(|v| v.to_vec()))
-            .collect();
+        // One row per local node id, in any storage dtype: the mmap tier is
+        // read by local id.
+        let refs: Vec<Vec<f32>> = match (0..count as u32)
+            .map(|i| index.materialize_vector(i))
+            .collect::<Result<_, _>>()
+        {
+            Ok(refs) => refs,
+            Err(e) => {
+                tracing::warn!(
+                    segment_id,
+                    error = %e,
+                    "mmap spill failed to read the segment vectors, keeping vectors in RAM"
+                );
+                return (StorageTier::L0Ram, None);
+            }
+        };
         let ref_slices: Vec<&[f32]> = refs.iter().map(|v| v.as_slice()).collect();
 
         // Build the parallel surrogate ID array (u64 per row).

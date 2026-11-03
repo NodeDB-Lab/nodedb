@@ -39,11 +39,11 @@
 
 use nodedb_types::{NativeCell, NdbDateTime, NodeDbError, Value};
 
-use crate::data::executor::response_codec::{ReturningRowsReply, decode_payload_to_json};
+use crate::data::executor::response_codec::ReturningRowsReply;
 
 use crate::control::sequence::SequenceAccess;
 
-use super::compose::kernel::{project_row, redact_rows, single_result_row, stamp_computed_columns};
+use super::compose::kernel::{project_row, redact_rows, stamp_computed_columns};
 use super::project::cell_keys;
 use super::redaction::RedactionCtx;
 use super::schema::OutputSchema;
@@ -72,31 +72,18 @@ pub fn shape_returning_rows(
         });
     }
 
-    let rp = match zerompk::from_msgpack::<ReturningRowsReply>(payload) {
-        Ok(rp) => rp,
-        Err(e) => {
-            // Bytes that are not a `RowsPayload` yield no column list at all,
-            // so there is none that honours what was announced: a substitute
-            // single-column row will be unparseable to the client that holds
-            // the RowDescription, which is the very failure this module
-            // exists to prevent. Fail the statement instead.
-            if announced.is_some() {
-                return Err(NodeDbError::serialization(
-                    "msgpack",
-                    format!(
-                        "RETURNING response is not a RowsPayload ({} bytes): {e}",
-                        payload.len()
-                    ),
-                ));
-            }
-            tracing::warn!(
-                error = %e,
-                payload_len = payload.len(),
-                "ReturningRows msgpack decode failed; falling back to single-column JSON"
-            );
-            return Ok(single_result_row(decode_payload_to_json(payload)));
-        }
-    };
+    // Bytes that are not a `RowsPayload` yield no column list at all, so no
+    // row shape can honour them. The statement fails, announced columns or
+    // not.
+    let rp = zerompk::from_msgpack::<ReturningRowsReply>(payload).map_err(|e| {
+        NodeDbError::serialization(
+            "msgpack",
+            format!(
+                "RETURNING response is not a RowsPayload ({} bytes): {e}",
+                payload.len()
+            ),
+        )
+    })?;
 
     let ReturningRowsReply {
         columns,
@@ -651,18 +638,18 @@ mod tests {
         );
     }
 
-    /// With nothing announced there is no contract to violate, so the legacy
-    /// single-column fallback still applies.
+    /// Bytes that are not a `RowsPayload` fail the statement with nothing
+    /// announced too: no substitute column stands in for the rows.
     #[test]
-    fn a_malformed_payload_falls_back_when_nothing_was_announced() {
-        let shaped = shape_returning_rows(
+    fn a_malformed_payload_fails_when_nothing_was_announced() {
+        let err = shape_returning_rows(
             &[0xFF, 0xFE],
             None,
             None,
             None,
             nodedb_crs::CustomCrsSet::empty(),
         )
-        .expect("fallback");
-        assert_eq!(shaped.columns, ["result"]);
+        .expect_err("a malformed payload is refused");
+        assert!(err.to_string().contains("RowsPayload"), "got: {err}");
     }
 }

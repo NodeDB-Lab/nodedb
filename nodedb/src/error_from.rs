@@ -126,7 +126,11 @@ impl From<nodedb_vector::error::VectorError> for Error {
             Ve::DimensionMismatch { .. } | Ve::InvalidInput { .. } => {
                 Self::DataException { detail }
             }
-            Ve::InvalidFilterBitmap { .. } => Self::Internal { detail },
+            // A codec that refuses to train or encode fails one build or
+            // search. The stored data is intact, so the core keeps serving.
+            Ve::InvalidFilterBitmap { .. } | Ve::Codec(_) | Ve::RerankCodec { .. } => {
+                Self::Internal { detail }
+            }
             Ve::BudgetExhausted(_) => Self::MemoryExhausted {
                 engine: "vector".to_string(),
             },

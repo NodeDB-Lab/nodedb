@@ -247,7 +247,7 @@ mod tests {
         let mark = coll.write_mark(&[Surrogate::new(1)], &[]);
         coll.insert_with_surrogate(vec![0.1, 0.2], Surrogate::new(1))
             .unwrap();
-        assert!(coll.seal("k").is_some());
+        assert!(coll.seal("k", crate::test_support::test_memory()).is_some());
         assert!(!coll.roll_back_to(mark));
     }
 

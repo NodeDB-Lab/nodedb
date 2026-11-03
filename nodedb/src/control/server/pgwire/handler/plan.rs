@@ -5,7 +5,8 @@
 use std::sync::Arc;
 
 use futures::stream;
-use pgwire::api::results::{DataRowEncoder, QueryResponse, Response, Tag};
+use pgwire::api::results::{DataRowEncoder, QueryResponse, Response};
+use pgwire::error::PgWireResult;
 use sonic_rs;
 
 use crate::data::executor::response_codec::decode_payload_to_json;
@@ -33,10 +34,12 @@ impl From<Response> for ShapedResponse {
     }
 }
 
-pub(super) fn multirow_payload_to_response(payload: &[u8]) -> ShapedResponse {
+/// Render a payload as rows of one `result` text column. A row that fails
+/// to encode fails the statement with the encoder's own error.
+pub(super) fn multirow_payload_to_response(payload: &[u8]) -> PgWireResult<ShapedResponse> {
     let schema = Arc::new(vec![text_field("result")]);
     if payload.is_empty() {
-        return Response::Query(QueryResponse::new(schema, stream::empty())).into();
+        return Ok(Response::Query(QueryResponse::new(schema, stream::empty())).into());
     }
     let text = decode_payload_to_json(payload);
 
@@ -44,26 +47,20 @@ pub(super) fn multirow_payload_to_response(payload: &[u8]) -> ShapedResponse {
     // element as a separate pgwire row. This avoids materializing
     // a single giant row for large result sets.
     if let Ok(serde_json::Value::Array(items)) = sonic_rs::from_str::<serde_json::Value>(&text) {
-        let row_schema = schema.clone();
-        let rows: Vec<_> = items
-            .iter()
-            .map(|item| {
-                let mut encoder = DataRowEncoder::new(row_schema.clone());
-                let _ = encoder.encode_field(&item.to_string());
-                Ok(encoder.take_row())
-            })
-            .collect();
-        return Response::Query(QueryResponse::new(schema, stream::iter(rows))).into();
+        let mut rows = Vec::with_capacity(items.len());
+        for item in &items {
+            let mut encoder = DataRowEncoder::new(schema.clone());
+            encoder.encode_field(&item.to_string())?;
+            rows.push(Ok(encoder.take_row()));
+        }
+        return Ok(Response::Query(QueryResponse::new(schema, stream::iter(rows))).into());
     }
 
     // Single document or non-array: send as one row.
     let mut encoder = DataRowEncoder::new(schema.clone());
-    if let Err(error) = encoder.encode_field(&text) {
-        tracing::error!(%error, "failed to encode field");
-        return Response::Execution(Tag::new("ERROR")).into();
-    }
+    encoder.encode_field(&text)?;
     let row = encoder.take_row();
-    Response::Query(QueryResponse::new(schema, stream::iter(vec![Ok(row)]))).into()
+    Ok(Response::Query(QueryResponse::new(schema, stream::iter(vec![Ok(row)]))).into())
 }
 
 #[cfg(test)]
@@ -79,8 +76,8 @@ mod tests {
     use nodedb_types::{DatabaseId, QualifiedCollection};
 
     #[test]
-    fn multirow_helper_remains_infallible() {
-        let shaped = multirow_payload_to_response(&[]);
+    fn an_empty_payload_is_an_empty_result_set() {
+        let shaped = multirow_payload_to_response(&[]).expect("an empty payload encodes");
         assert!(matches!(shaped.response, Response::Query(_)));
     }
 

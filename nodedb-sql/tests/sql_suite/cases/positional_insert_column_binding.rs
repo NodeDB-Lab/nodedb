@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0
 
 //! Integration tests: a positional `INSERT`/`UPSERT` `VALUES` clause (no
 //! explicit column list) must bind each value to the collection's

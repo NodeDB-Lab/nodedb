@@ -84,7 +84,9 @@ pub(in crate::diag) use redo_stream::{
 };
 pub(in crate::diag) use retention::RetentionAutowireOrphaned;
 pub(in crate::diag) use vector::VectorIndexNotApplied;
-pub(in crate::diag) use vector_build::{VectorBuildNotInstalled, VectorBuilderUnavailable};
+pub(in crate::diag) use vector_build::{
+    VectorBuildNotInstalled, VectorBuilderUnavailable, VectorCodecNotBuilt,
+};
 pub(in crate::diag) use version_cleanup::{HistoryChargeStale, VersionCleanupFailed};
 pub(in crate::diag) use vshard_departure::VShardDeparturePurgeFailed;
 pub(in crate::diag) use write_path::{

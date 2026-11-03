@@ -30,6 +30,10 @@ pub enum CodecError {
         limit: usize,
     },
 
+    /// A codec was asked to train or encode on input it cannot accept.
+    #[error("invalid codec input: {detail}")]
+    InvalidInput { detail: String },
+
     /// The codec stored in metadata doesn't match the expected codec.
     #[error("codec mismatch: expected {expected}, found {found}")]
     CodecMismatch { expected: String, found: String },

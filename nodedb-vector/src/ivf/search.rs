@@ -8,13 +8,9 @@ use roaring::RoaringBitmap;
 use crate::distance::{DistanceMetric, distance};
 use crate::error::{VectorError, check_dim};
 use crate::hnsw::SearchResult;
+use crate::rerank::rerank_pool;
 
 use super::index::{IvfPqIndex, residual};
-
-/// PQ-ranked candidates reranked exactly, per result asked for.
-const RERANK_PER_RESULT: usize = 3;
-/// Fewest PQ-ranked candidates reranked exactly.
-const MIN_RERANK: usize = 20;
 
 /// One PQ-ranked entry: id, PQ distance, cell, position in the cell.
 struct Candidate {
@@ -26,12 +22,19 @@ struct Candidate {
 
 impl IvfPqIndex {
     /// The `top_k` live entries nearest to `query` under the index metric.
+    /// The `top_k × oversample` nearest by PQ distance are reranked exactly
+    /// ([`rerank_pool`]).
     ///
     /// A query without the index dimension fails with
     /// [`VectorError::DimensionMismatch`]. A distance table over the memory
     /// budget fails the search: skipping its cell would drop results.
-    pub fn search(&self, query: &[f32], top_k: usize) -> Result<Vec<SearchResult>, VectorError> {
-        self.search_with(query, top_k, self.params.metric, None)
+    pub fn search(
+        &self,
+        query: &[f32],
+        top_k: usize,
+        oversample: u8,
+    ) -> Result<Vec<SearchResult>, VectorError> {
+        self.search_with(query, top_k, oversample, self.params.metric, None)
     }
 
     /// The `top_k` live entries nearest to `query` under `metric`, keeping
@@ -40,12 +43,17 @@ impl IvfPqIndex {
         &self,
         query: &[f32],
         top_k: usize,
+        oversample: u8,
         metric: DistanceMetric,
         filter: Option<&RoaringBitmap>,
     ) -> Result<Vec<SearchResult>, VectorError> {
-        self.search_admit(query, top_k, metric, &|id: u32, deleted: bool| {
-            !deleted && filter.is_none_or(|f| f.contains(id))
-        })
+        self.search_admit(
+            query,
+            top_k,
+            oversample,
+            metric,
+            &|id: u32, deleted: bool| !deleted && filter.is_none_or(|f| f.contains(id)),
+        )
     }
 
     /// The `top_k` entries `filter` admits nearest to `query` under
@@ -55,12 +63,17 @@ impl IvfPqIndex {
         &self,
         query: &[f32],
         top_k: usize,
+        oversample: u8,
         metric: DistanceMetric,
         filter: &crate::visibility::NodeFilter<'_>,
     ) -> Result<Vec<SearchResult>, VectorError> {
-        self.search_admit(query, top_k, metric, &|id: u32, deleted: bool| {
-            filter.admits(id, deleted)
-        })
+        self.search_admit(
+            query,
+            top_k,
+            oversample,
+            metric,
+            &|id: u32, deleted: bool| filter.admits(id, deleted),
+        )
     }
 
     /// The `top_k` entries `admit` accepts nearest to `query` under
@@ -69,6 +82,7 @@ impl IvfPqIndex {
         &self,
         query: &[f32],
         top_k: usize,
+        oversample: u8,
         metric: DistanceMetric,
         admit: &A,
     ) -> Result<Vec<SearchResult>, VectorError> {
@@ -111,7 +125,7 @@ impl IvfPqIndex {
             }
         }
 
-        let pool = top_k.saturating_mul(RERANK_PER_RESULT).max(MIN_RERANK);
+        let pool = rerank_pool(top_k, oversample);
         if candidates.len() > pool {
             candidates.select_nth_unstable_by(pool, |a, b| a.pq_distance.total_cmp(&b.pq_distance));
             candidates.truncate(pool);
@@ -169,7 +183,7 @@ mod tests {
             },
         );
         assert_eq!(idx.len(), 1000);
-        let results = idx.search(&vecs[500], 5).unwrap();
+        let results = idx.search(&vecs[500], 5, 3).unwrap();
         assert_eq!(results.len(), 5);
         assert_eq!(results[0].id, 500, "the exact rerank puts the match first");
         assert_eq!(results[0].distance, 0.0);
@@ -190,7 +204,7 @@ mod tests {
         );
         idx.delete(7);
         let mut ids: Vec<u32> = idx
-            .search(&vecs[0], 100)
+            .search(&vecs[0], 100, 3)
             .unwrap()
             .iter()
             .map(|r| r.id)
@@ -215,7 +229,7 @@ mod tests {
         );
         let filter: RoaringBitmap = [3u32, 40, 41].into_iter().collect();
         let mut ids: Vec<u32> = idx
-            .search_with(&vecs[0], 10, DistanceMetric::L2, Some(&filter))
+            .search_with(&vecs[0], 10, 3, DistanceMetric::L2, Some(&filter))
             .unwrap()
             .iter()
             .map(|r| r.id)
@@ -227,6 +241,42 @@ mod tests {
     #[test]
     fn an_untrained_index_finds_nothing() {
         let idx = IvfPqIndex::new(8, IvfPqParams::default());
-        assert!(idx.search(&[0.0; 8], 5).unwrap().is_empty());
+        assert!(idx.search(&[0.0; 8], 5, 3).unwrap().is_empty());
+    }
+
+    /// A pool of `top_k × oversample` covering every entry reranks them all
+    /// exactly, so the result is the exact ranking.
+    #[test]
+    fn pool_follows_oversample() {
+        let vecs = make_vectors(64, 8);
+        let idx = index_with(
+            &vecs,
+            IvfPqParams {
+                n_cells: 4,
+                pq_m: 2,
+                pq_k: 4,
+                nprobe: 4,
+                metric: DistanceMetric::L2,
+            },
+        );
+        let query = &vecs[30];
+        let mut exact: Vec<(u32, f32)> = vecs
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (i as u32, distance(query, v, DistanceMetric::L2)))
+            .collect();
+        exact.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+        // Neighbours sit in equidistant pairs, so five holds two whole pairs.
+        let want: Vec<u32> = exact.iter().take(5).map(|e| e.0).collect();
+        let mut got: Vec<u32> = idx
+            .search(query, 5, 13)
+            .unwrap()
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        let mut want_sorted = want.clone();
+        want_sorted.sort_unstable();
+        got.sort_unstable();
+        assert_eq!(got, want_sorted, "a 65-entry pool reranks every entry");
     }
 }

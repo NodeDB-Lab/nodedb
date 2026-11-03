@@ -329,17 +329,15 @@ fn validate(options: &ParsedOptions) -> Result<VectorIndexParams, DdlError> {
         ));
     }
 
-    // An omitted PQ_M takes the engine default, which must divide dim too.
+    // An omitted PQ_M takes the engine default, which must fit the PQ limits too.
     let effective_pq_m = if pq_m > 0 {
         pq_m
     } else {
         nodedb_vector::index_config::DEFAULT_PQ_M
     };
-    if uses_pq && !dim.is_multiple_of(effective_pq_m) {
-        return Err(ddl_err(
-            "22023",
-            format!("{CONTEXT}: pq_m ({effective_pq_m}) must divide dim ({dim}) evenly"),
-        ));
+    if uses_pq {
+        nodedb_vector::quantize::pq::check_pq_shape(dim, effective_pq_m)
+            .map_err(|e| ddl_err("22023", format!("{CONTEXT}: {e}")))?;
     }
 
     if index_type == "ivf_pq" && ivf_nprobe > 0 && ivf_cells > 0 && ivf_nprobe > ivf_cells {

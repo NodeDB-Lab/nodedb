@@ -79,6 +79,7 @@ impl CoreLoop {
         let index_key = CoreLoop::vector_index_key(database_id, tid, collection, field_name);
         debug!(core = self.core_id, key = &index_key.2, "vector seal");
 
+        let memory = self.vector_build_memory(&index_key);
         let Some(coll) = self.vector_collections.get_mut(&index_key) else {
             return self.response_error(task, ErrorCode::NotFound);
         };
@@ -93,7 +94,7 @@ impl CoreLoop {
         }
 
         let seal_key = CoreLoop::vector_build_key(&index_key);
-        match coll.seal(&seal_key) {
+        match coll.seal(&seal_key, memory) {
             Some(req) => {
                 self.queue_sealed_build(&index_key, req);
                 info!(core = self.core_id, key = %seal_key, "growing segment sealed, HNSW build queued");
@@ -133,6 +134,8 @@ impl CoreLoop {
         );
         if removed > 0 {
             self.checkpoint_coordinator.mark_dirty("vector", removed);
+            // A graph codec the compaction dropped is rebuilt off the core.
+            self.queue_missing_codecs(&index_key);
         }
 
         match super::super::response_codec::encode_count("compacted", removed) {

@@ -408,7 +408,7 @@ mod tests {
         idx.add_batch(&refs[..40]).unwrap();
         let mark = idx.len() as u32;
         let before: Vec<u32> = idx
-            .search(&vecs[5], 40)
+            .search(&vecs[5], 40, 3)
             .unwrap()
             .iter()
             .map(|r| r.id)
@@ -420,7 +420,7 @@ mod tests {
         assert_eq!(idx.len(), 40);
         assert!(idx.is_trained(), "the training the index held stays");
         let after_ids: Vec<u32> = idx
-            .search(&vecs[5], 64)
+            .search(&vecs[5], 64, 3)
             .unwrap()
             .iter()
             .map(|r| r.id)
@@ -482,7 +482,7 @@ mod tests {
         idx.train(&refs, test_memory()).unwrap();
         idx.add_batch(&refs).unwrap();
         assert!(matches!(
-            idx.search(&[0.0; 3], 5),
+            idx.search(&[0.0; 3], 5, 3),
             Err(VectorError::DimensionMismatch {
                 expected: 8,
                 got: 3

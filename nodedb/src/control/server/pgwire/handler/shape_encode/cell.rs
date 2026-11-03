@@ -614,7 +614,12 @@ mod tests {
         ] {
             let err = encode_one(ct, FieldFormat::Binary, &text)
                 .expect_err("text under a binary scalar column must be refused");
-            let (_, message) = error_of(err);
+            let (code, message) = error_of(err);
+            assert_eq!(
+                code,
+                nodedb_types::error::sqlstate::DATA_EXCEPTION,
+                "{ct:?}"
+            );
             assert!(
                 message.contains(&format!("holds text where {expected} is required")),
                 "{ct:?}: {message}"

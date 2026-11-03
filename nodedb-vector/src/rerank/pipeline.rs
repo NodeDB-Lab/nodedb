@@ -9,9 +9,10 @@ use super::gating::codec_name_for_quant;
 use super::sidecar::CodecSidecar;
 use super::types::{Candidate, Ranked, RerankError};
 
-/// Shared rerank pipeline. Both Origin and Lite call this after their index-level coarse search.
+/// Shared rerank pipeline. Lite calls this after its index-level coarse search.
 ///
-/// Callers use `opts.oversample` to compute `fetch_k` before pre-fetching from HNSW;
+/// Callers size the candidate set with [`super::rerank_pool`]`(k, opts.oversample)` before
+/// pre-fetching from HNSW;
 /// this function receives whatever candidates were fetched and reranks by exact distance.
 ///
 /// When `opts.quantization` is `None` (or `VectorQuantization::None`), the FP32 path is used:

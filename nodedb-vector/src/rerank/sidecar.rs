@@ -153,6 +153,8 @@ fn codec_name_to_u8(name: CodecName) -> u8 {
         CodecName::Binary => 2,
         CodecName::RaBitQ => 3,
         CodecName::Bbq => 4,
+        CodecName::Ternary => 5,
+        CodecName::Opq => 6,
     }
 }
 
@@ -163,6 +165,8 @@ fn codec_name_from_u8(b: u8) -> Option<CodecName> {
         2 => Some(CodecName::Binary),
         3 => Some(CodecName::RaBitQ),
         4 => Some(CodecName::Bbq),
+        5 => Some(CodecName::Ternary),
+        6 => Some(CodecName::Opq),
         _ => None,
     }
 }

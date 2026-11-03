@@ -395,3 +395,61 @@ async fn a_non_datetime_literal_into_a_timestamp_column_is_refused() {
         "a refused INSERT must store nothing: {rows:?}"
     );
 }
+
+/// A set operation announces the strict side's `TIMESTAMP` column. A
+/// schemaless row that holds an integer under that column cannot render as
+/// an instant. The stored value is the fault, so the statement fails as a
+/// data exception (SQLSTATE `22000`), never as an internal error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_set_operation_cell_of_the_wrong_shape_is_a_data_exception() {
+    let server = TestServer::start().await;
+    server
+        .exec(
+            "CREATE COLLECTION union_ts_typed \
+             (id INT PRIMARY KEY, ts TIMESTAMP) \
+             WITH (engine='document_strict')",
+        )
+        .await
+        .expect("create union_ts_typed");
+    server
+        .exec(&format!(
+            "INSERT INTO union_ts_typed (id, ts) VALUES (1, '{EARLY}')"
+        ))
+        .await
+        .expect("insert into union_ts_typed");
+    server
+        .exec("CREATE COLLECTION union_ts_loose WITH (engine='document_schemaless')")
+        .await
+        .expect("create union_ts_loose");
+    server
+        .exec("INSERT INTO union_ts_loose (id, ts) VALUES (2, 42)")
+        .await
+        .expect("insert into union_ts_loose");
+
+    for op in ["UNION ALL", "UNION"] {
+        let sql =
+            format!("SELECT id, ts FROM union_ts_typed {op} SELECT id, ts FROM union_ts_loose");
+        let error = server
+            .client
+            .simple_query(&sql)
+            .await
+            .expect_err("an integer under a TIMESTAMP column must fail the statement");
+        let db_err = error
+            .as_db_error()
+            .unwrap_or_else(|| panic!("expected a DbError from {op}, got: {error}"));
+        assert_eq!(
+            db_err.code().code(),
+            "22000",
+            "{op}: expected data_exception, got {}: {}",
+            db_err.code().code(),
+            db_err.message()
+        );
+        assert!(
+            db_err
+                .message()
+                .contains("holds an integer where a timestamp is required"),
+            "{op}: the message must name the shape, got: {}",
+            db_err.message()
+        );
+    }
+}
