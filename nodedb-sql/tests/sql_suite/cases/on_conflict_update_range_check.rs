@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0
 
 //! Integration tests: `INSERT ... ON CONFLICT (...) DO UPDATE SET col =
 //! <literal>` must range-check the assignment literals against the

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0
 
 mod aggregate_filter_planning;
 mod ddl_constraint_rejection;

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0
 
 //! `FILTER (WHERE ...)` is folded into the aggregate argument at plan time.
 //!

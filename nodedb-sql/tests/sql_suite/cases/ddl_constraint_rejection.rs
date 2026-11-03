@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0
 
 //! Integration tests: SQL constraint keywords in CREATE TABLE / CREATE COLLECTION
 //! are rejected with `SqlError::UnsupportedConstraint` (SQLSTATE 0A000).

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0
 
 //! A row bound the planner cannot resolve must be rejected, never dropped.
 //!

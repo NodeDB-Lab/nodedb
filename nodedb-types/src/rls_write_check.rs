@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0
 
 //! The compiled row-level-security WRITE predicate carried on a write plan.
 //!
