@@ -134,21 +134,23 @@ fn open_array_sync_db(
 }
 
 /// In-memory security and metering stores.
-pub(super) struct SecurityStores {
-    pub(super) orgs: OrgStore,
-    pub(super) scope_defs: ScopeStore,
-    pub(super) usage_counter: Arc<UsageCounter>,
-    pub(super) usage_store: Arc<UsageStore>,
-    pub(super) auth_api_keys: AuthApiKeyStore,
-    pub(super) impersonation: ImpersonationStore,
-    pub(super) emergency: EmergencyState,
-    pub(super) auth_metrics: AuthMetrics,
-    pub(super) ceilings: CeilingStore,
+pub(in crate::control::state) struct SecurityStores {
+    pub(in crate::control::state) orgs: OrgStore,
+    pub(in crate::control::state) scope_defs: ScopeStore,
+    pub(in crate::control::state) usage_counter: Arc<UsageCounter>,
+    pub(in crate::control::state) usage_store: Arc<UsageStore>,
+    pub(in crate::control::state) auth_api_keys: AuthApiKeyStore,
+    pub(in crate::control::state) impersonation: ImpersonationStore,
+    pub(in crate::control::state) emergency: EmergencyState,
+    pub(in crate::control::state) auth_metrics: AuthMetrics,
+    pub(in crate::control::state) ceilings: CeilingStore,
 }
 
 /// Build the security stores. The usage store takes its bounds from the
 /// metering config.
-pub(super) fn security_stores(metering_config: &MeteringConfig) -> SecurityStores {
+pub(in crate::control::state) fn security_stores(
+    metering_config: &MeteringConfig,
+) -> SecurityStores {
     SecurityStores {
         orgs: OrgStore::new(),
         scope_defs: ScopeStore::new(),

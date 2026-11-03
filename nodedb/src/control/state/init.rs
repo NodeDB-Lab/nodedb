@@ -3,439 +3,229 @@
 //! The shared test constructor of `SharedState`. The public test
 //! constructors built on it live in [`super::init_variants`].
 
-use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
 use nodedb_types::config::TuningConfig;
 
 use crate::bridge::dispatch::Dispatcher;
-use crate::control::request_tracker::RequestTracker;
 use crate::control::security::apikey::ApiKeyStore;
 use crate::control::security::audit::AuditLog;
 use crate::control::security::credential::CredentialStore;
 use crate::control::security::metering::config::MeteringConfig;
 use crate::control::security::metering::quota::QuotaManager;
-use crate::control::security::metering::store::UsageStore;
 use crate::control::security::permission::PermissionStore;
 use crate::control::security::ratelimit::config::RateLimitConfig;
 use crate::control::security::ratelimit::limiter::RateLimiter;
 use crate::control::security::rls::RlsPolicyStore;
 use crate::control::security::role::RoleStore;
-use crate::control::security::tenant::{TenantIsolation, TenantQuota};
-use crate::control::server::sync::dlq::{DlqConfig, SyncDlq};
 use crate::wal::WalManager;
 
 use super::SharedState;
+use super::init_assemble_parts::{
+    AssembleParts, AuthInputs, BusParts, CoreParts, RegistryParts, StoreParts,
+};
+use super::init_prod::stores::{SecurityStores, security_stores};
 
 impl SharedState {
-    /// Monotonic counter for unique test temp dirs (prevents redb lock collisions).
-    fn unique_test_id() -> u64 {
-        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    }
-
     /// Construct the test state every constructor in [`super::init_variants`]
     /// builds on.
     pub(super) fn new_inner(
-        mut dispatcher: Dispatcher,
+        dispatcher: Dispatcher,
         wal: Arc<WalManager>,
     ) -> crate::Result<Arc<Self>> {
-        let shutdown = Arc::new(crate::control::shutdown::ShutdownWatch::new());
-        let loop_registry = Arc::new(crate::control::shutdown::LoopRegistry::new());
-        // Test helpers get a pre-fired gate so listeners start accepting
-        // immediately. Production code (main.rs) replaces this with a real
-        // StartupSequencer after calling `SharedState::open`.
-        let startup_gate = crate::control::startup::StartupGate::pre_fired();
-        let test_id = Self::unique_test_id();
-        // One auto-cleaning temp directory that roots the test constructor's
-        // on-disk stores (CDC offsets, job history, MV persistence). Held in the
-        // `_test_state_dir` field below so it — and every store under it — is
-        // removed when the state drops, instead of leaking `/tmp/nodedb-test-*`.
-        let test_state_dir =
-            tempfile::tempdir().expect("failed to create test state temp directory");
-        let test_credentials = Arc::new(CredentialStore::new()?);
-        let test_surrogate_registry: crate::control::surrogate::SurrogateRegistryHandle = Arc::new(
-            std::sync::RwLock::new(crate::control::surrogate::SurrogateRegistry::new()),
-        );
-        let test_surrogate_assigner = Arc::new(crate::control::surrogate::SurrogateAssigner::new(
-            Arc::clone(&test_surrogate_registry),
-            Arc::clone(&test_credentials),
-            Arc::new(crate::control::surrogate::NoopWalAppender),
-        ));
-        let permission_cache = crate::control::security::permission_tree::PermissionCache::new();
-        let authorization_fence = Arc::new(
-            crate::control::security::auth_fence::AuthorizationFence::new(
-                permission_cache.sources(),
-            ),
-        );
-        // The strict egress policy: a test state reaches no private address.
-        let remote_sources = crate::control::security::egress::RemoteSources::new(Arc::new(
-            crate::control::security::egress::EgressPolicy::strict(),
-        ))
-        .map_err(|e| crate::Error::Config {
-            detail: format!("outbound HTTP client: {e}"),
+        // One auto-cleaning temp directory roots the on-disk stores, the
+        // shuffle staging directory, and the reported data directory. The
+        // state owns it, so dropping the state removes everything under it.
+        let test_state_dir = tempfile::tempdir().map_err(|e| crate::Error::Storage {
+            engine: "test_state".into(),
+            detail: format!("create test state temp directory: {e}"),
         })?;
-        let siem = Arc::new(crate::control::security::siem::SiemExporter::with_client(
-            crate::control::security::siem::SiemConfig::default(),
-            Arc::clone(remote_sources.http()),
-            Arc::clone(remote_sources.egress()),
-        ));
-        let shared_audit = {
-            let mut log = AuditLog::new(crate::control::security::audit::DEFAULT_FLUSH_BOUND);
-            log.set_wal_sink(
-                Arc::clone(&wal) as Arc<dyn crate::control::security::audit::AuditWalSink>
-            );
-            log.set_export_sink(
-                Arc::clone(&siem) as Arc<dyn crate::control::security::audit::AuditExportSink>
-            );
-            Arc::new(Mutex::new(log))
-        };
-        let test_session_registry =
-            Arc::new(crate::control::security::sessions::SessionRegistry::new());
-        let (si_bus, uc_bus, bus_consumer_task) = super::buses_init::init_security_buses(
-            Arc::clone(&shared_audit),
-            Arc::clone(&test_session_registry),
-        );
-        let bus_consumer_handle = bus_consumer_task;
-        // Wire buses into the credential store so test mutations publish events.
-        test_credentials.set_buses(
-            Arc::new(
-                crate::control::security::buses::SessionInvalidationBus::from_existing(
-                    si_bus.sender(),
-                ),
-            ),
-            Arc::new(
-                crate::control::security::buses::UserChangeBus::from_existing(uc_bus.sender()),
-            ),
-        );
-
-        // No `AuthConfig` is available to this test/in-memory constructor —
-        // use `MeteringConfig::default()` explicitly (rather than the
-        // `UsageStore`/`QuotaManager` `Default` impls) so the effective
-        // bounds are pinned to the same config type the production
-        // constructor reads, and can't silently diverge from it.
-        let metering_config = MeteringConfig::default();
-
-        // No `AuthConfig` is available to this test/in-memory constructor —
-        // use `RateLimitConfig::default()` explicitly (rather than the
-        // `RateLimiter::default()` impl) so the limiter's config is pinned
-        // to the same config type the production constructor reads, and
-        // can't silently diverge from it.
-        let rate_limit_config = RateLimitConfig::default();
-
-        // The CDC router matches events against the registry DDL writes to,
-        // as the production constructor wires it.
-        let stream_registry = Arc::new(crate::event::cdc::StreamRegistry::new());
-
-        let redo_chunks = Arc::new(
-            crate::control::wal_replication::transaction_redo::RedoChunkStore::new(
-                Arc::clone(&wal),
-                crate::control::wal_replication::transaction_redo::chunks::RedoChunkLimits::from_tuning(
-                    &TuningConfig::default().calvin,
-                ),
-            ),
-        );
-        let hlc_clock = wal.hlc_clock();
-        let system_metrics = Arc::new(crate::control::metrics::SystemMetrics::new());
-        dispatcher.adopt_capacity_metrics(Arc::clone(&system_metrics.dispatch_capacity));
-        let state = Arc::new(Self {
-            outcome_floor: dispatcher.outcome_floor(),
-            dispatcher: Mutex::new(dispatcher),
-            tracker: RequestTracker::new(),
+        let credentials = Arc::new(CredentialStore::new()?);
+        let registries = test_registries(&credentials);
+        let (auth, buses) = test_auth_and_buses(&wal)?;
+        let stores = test_stores(test_state_dir.path(), &auth.metering_config)?;
+        let core = CoreParts {
+            dispatcher,
             wal,
             quiesce: crate::bridge::quiesce::CollectionQuiesce::new(),
-            credentials: Arc::clone(&test_credentials),
-            audit: shared_audit,
-            audit_recorder: std::sync::OnceLock::new(),
-            api_keys: ApiKeyStore::new(),
-            roles: RoleStore::new(),
-            permissions: PermissionStore::new(),
-            tenants: Mutex::new(TenantIsolation::new(TenantQuota::default())),
-            cluster_topology: None,
-            cluster_routing: None,
-            cluster_transport: None,
-            node_id: 0,
-            metadata_cache: Arc::new(std::sync::RwLock::new(nodedb_cluster::MetadataCache::new())),
-            catalog_change_tx: tokio::sync::broadcast::channel(
-                crate::control::cluster::metadata_applier::CATALOG_CHANNEL_CAPACITY,
-            )
-            .0,
-            group_watchers: Arc::new(nodedb_cluster::GroupAppliedWatchers::new()),
-            metadata_ddl: super::MetadataDdlState::new(),
-            pending_ddl: crate::control::pending_ddl::PendingDdlTable::new(),
-            metadata_apply_wedge: std::sync::Arc::default(),
-            sequencer_halt: std::sync::Arc::default(),
-            core_stall: std::sync::Arc::default(),
-            metadata_raft: std::sync::OnceLock::new(),
-            propose_tracker: std::sync::OnceLock::new(),
-            raft_proposer: std::sync::OnceLock::new(),
-            async_raft_proposer_pair: std::sync::OnceLock::new(),
-            vshard_admission_sequencer: Arc::new(
-                crate::control::vshard_admission::VShardAdmissionSequencer::new(),
-            ),
-            raft_compactor: std::sync::OnceLock::new(),
-            raft_applied_index_sink: std::sync::OnceLock::new(),
-            raft_apply_gates: std::sync::OnceLock::new(),
-            raft_read_gate: std::sync::OnceLock::new(),
-            multi_raft: std::sync::OnceLock::new(),
-            cluster_epoch: std::sync::OnceLock::new(),
-            raft_status_fn: std::sync::OnceLock::new(),
-            data_groups_replayed: std::sync::atomic::AtomicBool::new(false),
-            cluster_observer: std::sync::OnceLock::new(),
-            loop_metrics_registry: nodedb_cluster::LoopMetricsRegistry::new(),
-            per_vshard_metrics: crate::control::metrics::PerVShardMetricsRegistry::new(),
-            health_monitor: std::sync::OnceLock::new(),
-            trace_exporter: crate::control::trace_export::TraceExporter::disabled(),
-            debug_endpoints_enabled: false,
-            migration_tracker: None,
-            rls: RlsPolicyStore::new(),
-            blacklist: crate::control::security::blacklist::store::BlacklistStore::new(),
-            auth_users: crate::control::security::jit::auth_user::AuthUserStore::new(),
-            orgs: crate::control::security::org::store::OrgStore::new(),
-            scope_defs: crate::control::security::scope::store::ScopeStore::new(),
-            scope_grants: crate::control::security::scope::grant::ScopeGrantStore::new(),
-            rate_limiter: RateLimiter::new(rate_limit_config),
-            session_handles: crate::control::security::session_handle::SessionHandleStore::default(
-            ),
-            session_registry: test_session_registry,
-            escalation: crate::control::security::escalation::EscalationEngine::default(),
-            usage_counter: Arc::new(
-                crate::control::security::metering::counter::UsageCounter::new(),
-            ),
-            usage_store: Arc::new(UsageStore::with_bounds(
-                metering_config.max_usage_events,
-                metering_config.max_tracked_scopes,
-            )),
-            quota_manager: QuotaManager::with_bounds(metering_config.max_tracked_quota_grantees),
-            metering_config,
-            auth_api_keys: crate::control::security::auth_apikey::AuthApiKeyStore::new(),
-            impersonation: crate::control::security::impersonation::ImpersonationStore::default(),
-            emergency: crate::control::security::emergency::EmergencyState::default(),
-            auth_metrics: crate::control::security::observability::AuthMetrics::new(),
-            ceilings: crate::control::security::ceiling::CeilingStore::new(),
-            redaction: crate::control::security::redaction::RedactionStore::new(),
-            risk_scorer: crate::control::security::risk::RiskScorer::default(),
-            tls_policy: crate::control::security::tls_policy::TlsPolicy::default(),
-            siem,
-            jwks_registry: None,
-            sync_dlq: Mutex::new(SyncDlq::new(DlqConfig::default())),
-            audit_retention_days: 0,
-            audit_max_entries: 0,
-            idle_timeout_secs: 0,
-            session_absolute_timeout_secs: 0,
-            shape_registry: Arc::new(crate::control::server::sync::shape::ShapeRegistry::new()),
-            change_stream: crate::control::change_stream::ChangeStream::new(4096),
-            notify_bus: crate::control::notify_bus::NotifyBus::default(),
-            trigger_registry: crate::control::trigger::TriggerRegistry::new(),
             array_catalog: crate::control::array_catalog::ArrayCatalog::handle(),
-            array_sync_op_log: {
-                std::sync::Arc::new(
-                    crate::control::array_sync::OriginOpLog::open_in_memory()
-                        .expect("failed to open test array op-log"),
-                )
-            },
-            array_ack_registry: {
-                crate::control::array_sync::ArrayAckRegistry::open_in_memory()
-                    .expect("failed to open test ack registry")
-            },
-            array_snapshot_store: {
-                crate::control::array_sync::OriginSnapshotStore::open_in_memory()
-                    .expect("failed to open test snapshot store")
-            },
-            array_snapshot_hlcs: std::sync::Arc::new(std::sync::RwLock::new(
-                std::collections::HashMap::<
-                    (nodedb_types::DatabaseId, u64, String),
-                    nodedb_array::sync::hlc::Hlc,
-                >::new(),
-            )),
-            array_gc_handle: None,
-            session_invalidation_bus: si_bus,
-            user_change_bus: uc_bus,
-            bus_consumer_handle,
-            array_sync_schemas: {
-                let db = std::sync::Arc::new(
-                    redb::Database::builder()
-                        .create_with_backend(redb::backends::InMemoryBackend::new())
-                        .expect("failed to create test schema_registry db"),
-                );
-                let replica_id = nodedb_array::sync::ReplicaId::new(0);
-                let hlc_gen =
-                    std::sync::Arc::new(nodedb_array::sync::HlcGenerator::new(replica_id));
-                std::sync::Arc::new(
-                    crate::control::array_sync::OriginSchemaRegistry::open(db, replica_id, hlc_gen)
-                        .expect("failed to open test array schema registry"),
-                )
-            },
-            array_delivery: std::sync::Arc::new(
-                crate::control::array_sync::ArrayDeliveryRegistry::new(),
-            ),
-            array_subscriber_cursors: {
-                let store = crate::control::array_sync::SubscriberStore::in_memory()
-                    .expect("failed to open test subscriber store");
-                std::sync::Arc::new(crate::control::array_sync::SubscriberMap::new(store))
-            },
-            array_merger_registry: std::sync::Arc::new(
-                crate::control::array_sync::MergerRegistry::new(),
-            ),
-            mirror_link_registry: Arc::new(crate::control::mirror::MirrorLinkRegistry::new()),
-            database_registry: crate::control::database::DatabaseRegistry::new(),
-            surrogate_registry: Arc::clone(&test_surrogate_registry),
-            surrogate_assigner: Arc::clone(&test_surrogate_assigner),
-            block_cache: crate::control::planner::procedural::executor::ProcedureBlockCache::new(
-                4096,
-            ),
-            stream_registry: Arc::clone(&stream_registry),
-            cdc_router: Arc::new(crate::event::cdc::CdcRouter::new(stream_registry)),
-            group_registry: crate::event::cdc::GroupRegistry::new(),
-            offset_store: {
-                let dir = test_state_dir.path().join("offsets");
-                Arc::new(
-                    crate::event::cdc::OffsetStore::open(&dir)
-                        .expect("failed to open test offset store"),
-                )
-            },
-            retention_policy_registry: Arc::new(
-                crate::engine::timeseries::retention_policy::RetentionPolicyRegistry::new(),
-            ),
-            bitemporal_retention_registry: Arc::new(
-                crate::engine::bitemporal::BitemporalRetentionRegistry::new(),
-            ),
-            alert_registry: Arc::new(crate::event::alert::AlertRegistry::new()),
-            alert_hysteresis: Arc::new(crate::event::alert::hysteresis::HysteresisManager::new()),
-            schedule_registry: Arc::new(crate::event::scheduler::ScheduleRegistry::new()),
-            synonym_registry: Arc::new(crate::control::synonym::SynonymRegistry::new()),
-            custom_type_registry: Arc::new(crate::control::custom_type::CustomTypeRegistry::new()),
-            job_history: {
-                let dir = test_state_dir.path().join("history");
-                Arc::new(
-                    crate::event::scheduler::JobHistoryStore::open(&dir)
-                        .expect("failed to open test job history"),
-                )
-            },
-            ep_topic_registry: crate::event::topic::EpTopicRegistry::new(),
-            webhook_manager: crate::event::webhook::WebhookManager::new(shutdown.raw_receiver()),
-            mv_registry: Arc::new(crate::event::streaming_mv::MvRegistry::new()),
-            consumer_assignments: crate::event::cdc::consumer_group::ConsumerAssignments::new(),
-            watermark_tracker: Arc::new(crate::event::watermark_tracker::WatermarkTracker::new()),
-            event_plane_budget: Arc::new(crate::event::budget::EventPlaneBudget::new()),
-            cross_shard_dispatcher: None,
-            cross_shard_dlq: None,
-            cross_shard_metrics: None,
-            cross_shard_dedup: std::sync::OnceLock::new(),
-            redo_chunks,
-            departure_fence: Default::default(),
-            kafka_manager: crate::event::kafka::KafkaManager::new(shutdown.raw_receiver()),
-            definition_sync_fanout: std::sync::Arc::new(
-                crate::control::server::sync::definition_fanout::DefinitionSyncFanout::new(),
-            ),
-            crdt_sync_delivery: Arc::new(crate::event::crdt_sync::CrdtSyncDelivery::new()),
-            delta_packager: Arc::new(crate::event::crdt_sync::DeltaPackager::new()),
-            mv_persistence: {
-                let dir = test_state_dir.path().join("mvstate");
-                Arc::new(
-                    crate::event::streaming_mv::MvPersistence::open(&dir)
-                        .expect("failed to open test MV persistence"),
-                )
-            },
-            // Owns the temp dir the three stores above live under; dropping the
-            // state removes it (and them) instead of leaking under `/tmp`.
-            _test_state_dir: Some(test_state_dir),
-            connections_rejected: AtomicU64::new(0),
-            connections_accepted: AtomicU64::new(0),
-            raft_propose_leader_change_retries: AtomicU64::new(0),
-            request_id_counter: AtomicU64::new(1),
-            shuffle_id_counter: AtomicU64::new(1),
-            system_metrics: Some(system_metrics),
-            database_metrics: Arc::new(crate::control::metrics::DatabaseMetricsRegistry::new()),
-            quota_ceiling: Arc::new(std::sync::RwLock::new(
-                crate::control::security::catalog::GlobalQuotaCeiling::default(),
-            )),
-            retention_settings: Arc::new(std::sync::RwLock::new(
-                crate::config::server::RetentionSettings::default(),
-            )),
+            system_metrics: Arc::new(crate::control::metrics::SystemMetrics::new()),
             governor: crate::data::executor::core_loop::test_governor(),
-            maintenance_budget: Arc::new(
-                crate::control::maintenance::MaintenanceBudgetTracker::new(),
-            ),
-            producer_registry: None,
-            cold_storage: None,
-            snapshot_storage: Arc::new(object_store::memory::InMemory::new()),
-            pitr: Default::default(),
-            hlc_clock,
-            tenant_write_hlc: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-            tenant_marks: super::tenant_marks::TenantMarks::load(test_credentials.catalog())?,
-            lease_admission_gate: Mutex::new(()),
-            lease_grant_gate: Arc::new(tokio::sync::Mutex::new(())),
-            lease_drain: Arc::new(crate::control::lease::DescriptorDrainTracker::new()),
-            lease_refcount: Arc::new(crate::control::lease::LeaseRefCount::new()),
-            lease_runtime: crate::control::lease::LeaseRuntime::new(),
-            sequencer_inbox: std::sync::OnceLock::new(),
-            reservation_inbox: std::sync::OnceLock::new(),
-            sequencer_metrics: std::sync::OnceLock::new(),
-            calvin_completion_registry: std::sync::OnceLock::new(),
-            ollp_orchestrator: std::sync::OnceLock::new(),
-            limits: nodedb_types::protocol::Limits::default(),
             tuning: TuningConfig::default(),
-            scheduler_config: crate::config::server::SchedulerConfig::default(),
-            data_dir: std::path::PathBuf::new(),
-            trigger_dlq: std::sync::OnceLock::new(),
-            action_requeue: std::sync::OnceLock::new(),
-            sink_ledgers: std::sync::OnceLock::new(),
-            schema_version: crate::control::server::shared::session::plan_cache::SchemaVersion::new(
-            ),
-            materialized_sum_index:
-                crate::control::planner::materialized_sum::MaterializedSumIndex::default(),
-            sequence_registry: Arc::new(crate::control::sequence::SequenceRegistry::new()),
-            dml_counter:
-                crate::control::server::shared::ddl::neutral::maintenance::auto_analyze::DmlCounter::new(),
-            wal_catchup_lsn: AtomicU64::new(0),
-            calvin: super::calvin_local::CalvinLocalState::new(),
-            read_cut: crate::control::read_cut::ReadCutState::new(),
-            write_order_locks: Arc::new(
-                crate::control::server::shared::write_admission::KeyedWriteOrderLock::new(),
-            ),
-            write_order_fence:
-                crate::control::server::shared::write_admission::WriteOrderFence::new(),
-            presence: Arc::new(tokio::sync::RwLock::new(
-                crate::control::server::sync::presence::PresenceManager::new(
-                    crate::control::server::sync::presence::PresenceConfig::default(),
-                ),
-            )),
-            permission_cache: Arc::new(tokio::sync::RwLock::new(permission_cache)),
-            authorization_fence,
-            gateway_invalidator: std::sync::OnceLock::new(),
-            gateway: std::sync::OnceLock::new(),
-            backup_kek: None,
-            backup_storage: None,
-            remote_sources,
-            cut_captures: Arc::new(crate::control::backup::cut_capture::CutCaptures::new()),
-            backup_schedules: Vec::new(),
-            quarantine_registry: Arc::new(crate::storage::quarantine::QuarantineRegistry::new()),
-            admission_registry: Arc::new(
-                crate::control::server::admission::AdmissionRegistry::new(),
-            ),
-            audit_dml_cache: Arc::new(crate::control::state::audit_dml_cache::AuditDmlCache::new()),
-            idle_timeout_cache: Arc::new(
-                crate::control::state::idle_timeout_cache::IdleTimeoutCache::new(),
-            ),
-            collection_to_database: Arc::new(
-                crate::control::state::collection_to_database::CollectionToDatabase::new(),
-            ),
-            shuffle_registry: Arc::new(
-                // Test path: no catalog data dir, so stage under a process- and
-                // test-unique temp subdir to keep concurrent test inboxes
-                // isolated.
-                crate::control::server::shuffle::ShuffleReceiverRegistry::new(
-                    std::env::temp_dir()
-                        .join(format!("nodedb-shuffle-{}-{test_id}", std::process::id(),)),
-                ),
-            ),
-            shutdown: Arc::clone(&shutdown),
-            loop_registry: Arc::clone(&loop_registry),
-            data_plane_drain: crate::control::shutdown::DataPlaneDrain::new(),
-            startup: Arc::clone(&startup_gate),
-        });
+            credentials,
+            shutdown: Arc::new(crate::control::shutdown::ShutdownWatch::new()),
+            loop_registry: Arc::new(crate::control::shutdown::LoopRegistry::new()),
+            // Test helpers get a pre-fired gate so listeners start accepting
+            // immediately. Production replaces it with a real sequencer.
+            startup_gate: crate::control::startup::StartupGate::pre_fired(),
+            data_dir: test_state_dir.path().to_path_buf(),
+            shuffle_dir: test_state_dir.path().join("shuffle"),
+            test_state_dir: Some(test_state_dir),
+        };
+        let state = Self::assemble(AssembleParts {
+            core,
+            registries,
+            buses,
+            auth,
+            stores,
+        })?;
         Self::wire_session_handle_audit(&state);
         Ok(state)
     }
+}
+
+/// In-memory registries, with a surrogate assigner on `credentials`.
+fn test_registries(credentials: &Arc<CredentialStore>) -> RegistryParts {
+    let surrogate_registry: crate::control::surrogate::SurrogateRegistryHandle = Arc::new(
+        std::sync::RwLock::new(crate::control::surrogate::SurrogateRegistry::new()),
+    );
+    let surrogate_assigner = Arc::new(crate::control::surrogate::SurrogateAssigner::new(
+        Arc::clone(&surrogate_registry),
+        Arc::clone(credentials),
+        Arc::new(crate::control::surrogate::NoopWalAppender),
+    ));
+    RegistryParts {
+        api_keys: ApiKeyStore::new(),
+        roles: RoleStore::new(),
+        permissions: PermissionStore::new(),
+        blacklist: crate::control::security::blacklist::store::BlacklistStore::new(),
+        rls: RlsPolicyStore::new(),
+        redaction: crate::control::security::redaction::RedactionStore::new(),
+        trigger_registry: crate::control::trigger::TriggerRegistry::new(),
+        stream_registry: Arc::new(crate::event::cdc::StreamRegistry::new()),
+        group_registry: crate::event::cdc::GroupRegistry::new(),
+        schedule_registry: Arc::new(crate::event::scheduler::ScheduleRegistry::new()),
+        synonym_registry: Arc::new(crate::control::synonym::SynonymRegistry::new()),
+        custom_type_registry: Arc::new(crate::control::custom_type::CustomTypeRegistry::new()),
+        retention_policy_registry: Arc::new(
+            crate::engine::timeseries::retention_policy::RetentionPolicyRegistry::new(),
+        ),
+        alert_registry: Arc::new(crate::event::alert::AlertRegistry::new()),
+        alert_hysteresis: Arc::new(crate::event::alert::hysteresis::HysteresisManager::new()),
+        ep_topic_registry: crate::event::topic::EpTopicRegistry::new(),
+        mv_registry: Arc::new(crate::event::streaming_mv::MvRegistry::new()),
+        sequence_registry: Arc::new(crate::control::sequence::SequenceRegistry::new()),
+        database_registry: crate::control::database::DatabaseRegistry::new(),
+        surrogate_registry,
+        surrogate_assigner,
+        producer_registry: None,
+    }
+}
+
+/// The auth inputs and security buses of a state with no `AuthConfig`.
+fn test_auth_and_buses(wal: &Arc<WalManager>) -> crate::Result<(AuthInputs, BusParts)> {
+    let permission_cache = crate::control::security::permission_tree::PermissionCache::new();
+    // The strict egress policy: a test state reaches no private address.
+    let remote_sources = crate::control::security::egress::RemoteSources::new(Arc::new(
+        crate::control::security::egress::EgressPolicy::strict(),
+    ))
+    .map_err(|e| crate::Error::Config {
+        detail: format!("outbound HTTP client: {e}"),
+    })?;
+    let siem = Arc::new(crate::control::security::siem::SiemExporter::with_client(
+        crate::control::security::siem::SiemConfig::default(),
+        Arc::clone(remote_sources.http()),
+        Arc::clone(remote_sources.egress()),
+    ));
+    let audit = {
+        let mut log = AuditLog::new(crate::control::security::audit::DEFAULT_FLUSH_BOUND);
+        log.set_wal_sink(Arc::clone(wal) as Arc<dyn crate::control::security::audit::AuditWalSink>);
+        log.set_export_sink(
+            Arc::clone(&siem) as Arc<dyn crate::control::security::audit::AuditExportSink>
+        );
+        Arc::new(Mutex::new(log))
+    };
+    let session_registry = Arc::new(crate::control::security::sessions::SessionRegistry::new());
+    let (si_bus, uc_bus, bus_consumer_handle) =
+        super::buses_init::init_security_buses(Arc::clone(&audit), Arc::clone(&session_registry));
+    // The default configs pin the effective bounds to the config types the
+    // production constructor reads.
+    let metering_config = MeteringConfig::default();
+    let rate_limit_config = RateLimitConfig::default();
+    let quota_manager = QuotaManager::with_bounds(metering_config.max_tracked_quota_grantees);
+    let auth = AuthInputs {
+        metering_config,
+        siem,
+        risk_scorer: crate::control::security::risk::RiskScorer::default(),
+        escalation: crate::control::security::escalation::EscalationEngine::default(),
+        tls_policy: crate::control::security::tls_policy::TlsPolicy::default(),
+        auth_users: crate::control::security::jit::auth_user::AuthUserStore::new(),
+        scope_grants: crate::control::security::scope::grant::ScopeGrantStore::new(),
+        quota_manager,
+        rate_limiter: RateLimiter::new(rate_limit_config),
+        session_handles: crate::control::security::session_handle::SessionHandleStore::default(),
+        remote_sources,
+        audit_retention_days: 0,
+        audit_max_entries: 0,
+        idle_timeout_secs: 0,
+        session_absolute_timeout_secs: 0,
+    };
+    let buses = BusParts {
+        audit,
+        session_registry,
+        si_bus,
+        uc_bus,
+        bus_consumer_handle,
+        permission_cache,
+    };
+    Ok((auth, buses))
+}
+
+/// In-memory array stores and event stores rooted under `state_dir`.
+fn test_stores(
+    state_dir: &std::path::Path,
+    metering_config: &MeteringConfig,
+) -> crate::Result<StoreParts> {
+    let schema_db = Arc::new(
+        redb::Database::builder()
+            .create_with_backend(redb::backends::InMemoryBackend::new())
+            .map_err(|e| crate::Error::Storage {
+                engine: "array_sync".into(),
+                detail: format!("create test schema_registry db: {e}"),
+            })?,
+    );
+    let replica_id = nodedb_array::sync::ReplicaId::new(0);
+    let hlc_gen = Arc::new(nodedb_array::sync::HlcGenerator::new(replica_id));
+    let array_sync_schemas = Arc::new(crate::control::array_sync::OriginSchemaRegistry::open(
+        schema_db, replica_id, hlc_gen,
+    )?);
+    let array_subscriber_cursors = Arc::new(crate::control::array_sync::SubscriberMap::new(
+        crate::control::array_sync::SubscriberStore::in_memory()?,
+    ));
+    let SecurityStores {
+        orgs,
+        scope_defs,
+        usage_counter,
+        usage_store,
+        auth_api_keys,
+        impersonation,
+        emergency,
+        auth_metrics,
+        ceilings,
+    } = security_stores(metering_config);
+    Ok(StoreParts {
+        orgs,
+        scope_defs,
+        usage_counter,
+        usage_store,
+        auth_api_keys,
+        impersonation,
+        emergency,
+        auth_metrics,
+        ceilings,
+        array_sync_op_log: Arc::new(crate::control::array_sync::OriginOpLog::open_in_memory()?),
+        array_ack_registry: crate::control::array_sync::ArrayAckRegistry::open_in_memory()?,
+        array_snapshot_store: crate::control::array_sync::OriginSnapshotStore::open_in_memory()?,
+        array_sync_schemas,
+        array_subscriber_cursors,
+        offset_store: Arc::new(crate::event::cdc::OffsetStore::open(
+            &state_dir.join("offsets"),
+        )?),
+        job_history: Arc::new(crate::event::scheduler::JobHistoryStore::open(
+            &state_dir.join("history"),
+        )?),
+        mv_persistence: Arc::new(crate::event::streaming_mv::MvPersistence::open(
+            &state_dir.join("mvstate"),
+        )?),
+    })
 }
