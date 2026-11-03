@@ -178,10 +178,10 @@ pub fn parse_ann_options(func_args: &[ast::FunctionArg]) -> Result<VectorAnnOpti
                 }
                 seen[5] = true;
                 let f = extract_f64(value_expr, "target_recall")?;
-                if !(0.0..=1.0).contains(&f) {
+                if f.is_nan() || f <= 0.0 || f > 1.0 {
                     return Err(SqlError::Unsupported {
                         detail: format!(
-                            "ANN option 'target_recall' must be in [0.0, 1.0]; got {f}"
+                            "ANN option 'target_recall' must be in (0.0, 1.0]; got {f}"
                         ),
                     });
                 }
@@ -495,6 +495,17 @@ mod tests {
         );
         assert!(
             matches!(err, crate::error::SqlError::Unsupported { ref detail } if detail.contains("target_recall")),
+            "expected Unsupported target_recall range message, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn target_recall_zero_is_rejected() {
+        let err = plan_ann_err(
+            "SELECT id FROM embeddings ORDER BY vector_distance(embedding, [1.0, 0.0], target_recall => 0.0) LIMIT 5",
+        );
+        assert!(
+            matches!(err, crate::error::SqlError::Unsupported { ref detail } if detail.contains("(0.0, 1.0]")),
             "expected Unsupported target_recall range message, got: {err:?}"
         );
     }

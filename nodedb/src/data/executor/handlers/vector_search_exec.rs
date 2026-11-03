@@ -3,12 +3,12 @@
 //! CoreLoop methods for vector search execution.
 
 use roaring::RoaringBitmap;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use super::vector_search::{
     VectorSearchParams, encode_hits_response, surrogate_bitmap_to_global_ids,
 };
-use super::vector_search_ann::{ResolvedAnnOptions, apply_ann_options, quantization_matches};
+use super::vector_search_ann::{ResolvedAnnOptions, apply_ann_options};
 use super::vector_search_window::{BodySource, SearchWindow, WindowHits};
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
@@ -54,10 +54,12 @@ impl CoreLoop {
             skip_payload_fetch
         };
 
-        let ResolvedAnnOptions {
-            ef_search,
-            oversample,
-        } = apply_ann_options(self.core_id, collection, ef_search, ann_options);
+        let ResolvedAnnOptions { breadth } =
+            match apply_ann_options(self.core_id, collection, ef_search, ann_options) {
+                Ok(resolved) => resolved,
+                Err(e) => return self.response_error(task, e),
+            };
+        let ef_search = breadth.ef_search;
 
         // Materialize cross-engine prefilter sub-plan (e.g. ARRAY_SLICE
         // → surrogate bitmap) and intersect with any pre-existing
@@ -146,31 +148,28 @@ impl CoreLoop {
             return super::vector_search::empty_hits_response(self, task);
         }
 
-        // Quantization mismatch: if the SQL caller requested a specific
-        // quantization that differs from what the index actually uses, warn
-        // once per query and proceed with the collection's actual quantization.
-        // Per-collection codec dispatch will honor the hint when that lands.
-        if let Some(requested_q) = ann_options.quantization {
-            let index_q = collection_ref.stats().quantization;
-            if !quantization_matches(requested_q, index_q) {
-                warn!(
-                    core = self.core_id,
-                    %collection,
-                    requested = ?requested_q,
-                    actual = %index_q,
-                    "ann_options: quantization hint does not match index; proceeding with index quantization"
+        // The codec is fixed when the index is created. A search hint that
+        // names another codec is refused, never substituted.
+        if let Some(requested) = ann_options.quantization {
+            let configured = collection_ref.codec_plan().quantization();
+            if requested != configured {
+                return self.response_error(
+                    task,
+                    crate::Error::DataException {
+                        detail: format!(
+                            "search-time quantization '{requested:?}' does not match the index \
+                             quantization '{configured:?}'; the codec is fixed when the index \
+                             is created"
+                        ),
+                    },
                 );
             }
         }
 
-        // Over-fetch for oversample re-rank headroom. A residual filter
-        // starts from a wider window, and `rank_window` widens it until
-        // `top_k` candidates pass the filter.
-        let fetch_k = if rls_filters.is_empty() {
-            top_k.saturating_mul(oversample)
-        } else {
-            top_k.saturating_mul(2).saturating_mul(oversample).max(20)
-        };
+        // A residual filter starts from a wider window, and `rank_window`
+        // widens it until `top_k` candidates pass the filter. Rerank breadth
+        // is the collection's concern: `breadth.oversample` reaches it.
+        let fetch_k = super::vector_search_window::first_window(top_k, !rls_filters.is_empty());
         // The Control Plane encoded these bytes. Bytes that do not decode
         // fail the search: ranking without the filter cannot size the window.
         let residual: Vec<nodedb_query::scan_filter::ScanFilter> = if rls_filters.is_empty() {
@@ -304,6 +303,7 @@ impl CoreLoop {
                 collection: collection_ref,
                 query_vector,
                 ef_search,
+                oversample: breadth.oversample,
                 metric,
                 bitmap: bitmap_bytes.as_deref(),
                 cut: cut.at.map(|at| (at, cut_allow.as_ref())),

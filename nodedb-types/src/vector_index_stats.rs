@@ -20,7 +20,6 @@ use serde::{Deserialize, Serialize};
     zerompk::FromMessagePack,
 )]
 #[msgpack(c_enum)]
-#[non_exhaustive]
 pub enum VectorIndexQuantization {
     None = 0,
     Sq8 = 1,
@@ -28,6 +27,8 @@ pub enum VectorIndexQuantization {
     Binary = 3,
     RaBitQ = 4,
     Bbq = 5,
+    Ternary = 6,
+    Opq = 7,
 }
 
 impl std::fmt::Display for VectorIndexQuantization {
@@ -39,6 +40,8 @@ impl std::fmt::Display for VectorIndexQuantization {
             Self::Binary => write!(f, "binary"),
             Self::RaBitQ => write!(f, "rabitq"),
             Self::Bbq => write!(f, "bbq"),
+            Self::Ternary => write!(f, "ternary"),
+            Self::Opq => write!(f, "opq"),
         }
     }
 }

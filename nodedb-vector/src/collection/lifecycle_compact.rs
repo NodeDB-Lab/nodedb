@@ -36,8 +36,8 @@ impl VectorCollection {
         dropped
     }
 
-    /// Empty the growing segment and drop every sealed segment, in-flight
-    /// build and codec-dispatch index. The next insert keeps the id counter.
+    /// Empty the growing segment and drop every sealed segment and in-flight
+    /// build. The next insert keeps the id counter.
     /// The mmap file of each dropped sealed segment is removed from disk.
     pub(super) fn clear_segments(&mut self) {
         self.growing = FlatIndex::new(self.dim, self.params.metric);
@@ -57,8 +57,8 @@ impl VectorCollection {
             }
         }
         self.building.clear();
+        self.codec_refused.clear();
         self.mmap_segment_count = 0;
-        self.codec_dispatch = None;
     }
 
     /// Tombstoned nodes that [`Self::compact`] removes: every tombstone of
@@ -92,6 +92,8 @@ impl VectorCollection {
     /// Rewrites `surrogate_map`, `multi_doc_map` and the node spans for every
     /// sealed segment so that global ids continue to resolve to the correct
     /// surrogate after local-id renumbering. IVF-PQ entries keep their ids.
+    /// A graph codec whose stale nodes outnumber the rest is dropped; the
+    /// owning core queues the rebuilds `sealed_ids_missing_codec` names.
     pub fn compact(&mut self) -> usize {
         let mut total_removed = match self.ivf.as_mut() {
             Some(ivf) => {
@@ -108,7 +110,30 @@ impl VectorCollection {
             if removed == 0 {
                 continue;
             }
+            // A dropped graph codec leaves the segment answering exactly;
+            // `sealed_ids_missing_codec` names it for a rebuild.
+            if seg.codec.remap(&id_map, seg.index.len()) {
+                tracing::debug!(
+                    base_id,
+                    "vector compaction: stale nodes outnumber the graph codec; codec dropped"
+                );
+            }
             seg.remeasure();
+            // The mmap copy is laid out by the old local ids. The HNSW nodes
+            // still hold every vector, so the segment reads them instead.
+            if let Some(mmap) = seg.mmap_vectors.take() {
+                let path = mmap.path().to_path_buf();
+                drop(mmap);
+                seg.tier = super::tier::StorageTier::L0Ram;
+                self.mmap_segment_count = self.mmap_segment_count.saturating_sub(1);
+                if let Err(e) = std::fs::remove_file(&path) {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %e,
+                        "vector compaction: stale mmap segment file not removed"
+                    );
+                }
+            }
 
             let segment_end = base_id as u64 + id_map.len() as u64;
             self.versions.remap(|old| {
@@ -254,7 +279,7 @@ mod tests {
             coll.payload.insert_row(id, &fields);
         }
         assert!(
-            coll.seal("k").is_some(),
+            coll.seal("k", crate::test_support::test_memory()).is_some(),
             "threshold reached, growing sealed"
         );
         assert_eq!(coll.live_count(), 3);

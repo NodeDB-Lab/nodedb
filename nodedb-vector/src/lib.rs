@@ -75,9 +75,12 @@ pub use adaptive_filter::{
     FilterStrategy, FilterThresholds, adaptive_search, estimate_selectivity, select_strategy,
 };
 #[cfg(not(target_arch = "wasm32"))]
-pub use builder::{BuildSender, CompleteReceiver};
+pub use builder::{BuildSender, CompleteReceiver, build_segment};
 #[cfg(not(target_arch = "wasm32"))]
-pub use collection::{BuildComplete, BuildKind, BuildRequest, StorageTier, VectorCollection};
+pub use collection::{
+    BuildComplete, BuildKind, BuildRequest, BuiltSegment, CodecPlan, InstallOutcome, SegmentCodec,
+    StorageTier, VectorCollection,
+};
 pub use flat::FlatIndex;
 pub use index_config::{IndexConfig, IndexType};
 pub use ivf::{IvfPqIndex, IvfPqParams};

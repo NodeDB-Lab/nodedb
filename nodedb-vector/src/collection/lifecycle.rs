@@ -18,6 +18,7 @@
 
 use std::collections::HashMap;
 
+use nodedb_mem::ScopedMemory;
 use nodedb_types::{Surrogate, VectorQuantization};
 
 use crate::flat::FlatIndex;
@@ -25,7 +26,6 @@ use crate::hnsw::HnswParams;
 use crate::index_config::IndexConfig;
 use crate::ivf::IvfPqIndex;
 
-use super::codec_dispatch::CollectionCodec;
 use super::payload_index::PayloadIndexSet;
 use super::segment::{
     BuildKind, BuildRequest, BuildingSegment, DEFAULT_SEAL_THRESHOLD, SealedSegment,
@@ -70,22 +70,14 @@ pub struct VectorCollection {
     pub(crate) seal_threshold: usize,
     /// Full index configuration (index type, PQ params, IVF params).
     pub(crate) index_config: IndexConfig,
-    /// Optional collection-level codec-dispatch index (RaBitQ or BBQ).
-    /// Present only when the collection was built with a non-Sq8 quantization.
-    /// Coexists with sealed segments — for codec-dispatched collections the
-    /// per-segment Sq8 builder is skipped and this index is used instead.
-    pub codec_dispatch: Option<CollectionCodec>,
     /// Trained IVF-PQ index of an `IvfPq` collection. `None` until the
     /// collection holds the training threshold of vectors: until then its
     /// vectors wait in the growing segment, searched exactly. Training moves
     /// every vector into this index under its global id, and later inserts
     /// land here.
     pub(crate) ivf: Option<IvfPqIndex>,
-    /// Quantization mode requested at collection-creation time.
-    ///
-    /// When `!= None && != Sq8`, each call to `complete_build` additionally
-    /// rebuilds `codec_dispatch` over all vectors so the codec-dispatch path
-    /// is always up-to-date after a segment seals.
+    /// Quantization requested when the collection was created. `codec_plan`
+    /// maps it to the codec each sealed segment carries.
     pub(crate) quantization: VectorQuantization,
     /// In-memory payload bitmap indexes for vector-primary collections.
     ///
@@ -124,6 +116,10 @@ pub struct VectorCollection {
     pub(crate) builds_completed: u64,
     /// HNSW builds that failed since the collection was opened.
     pub(crate) builds_failed: u64,
+    /// Base ids of sealed segments whose codec build failed with an error a
+    /// retry does not fix. [`Self::sealed_ids_missing_codec`] skips them, so
+    /// the error is reported once. A plan change or a restart clears it.
+    pub(crate) codec_refused: Vec<u32>,
     /// System-time spans of the nodes: which node of each row a search at a
     /// past cut reads (see `versions`).
     pub(crate) versions: super::versions::VectorVersions,
@@ -174,7 +170,6 @@ impl VectorCollection {
             multi_doc_map: HashMap::new(),
             seal_threshold,
             index_config: config,
-            codec_dispatch: None,
             ivf: None,
             quantization: VectorQuantization::default(),
             payload: PayloadIndexSet::default(),
@@ -183,6 +178,7 @@ impl VectorCollection {
             applied_wal_lsn: 0,
             builds_completed: 0,
             builds_failed: 0,
+            codec_refused: Vec::new(),
             versions: super::versions::VectorVersions::default(),
         }
     }
@@ -235,9 +231,10 @@ impl VectorCollection {
         !self.is_ivf() && self.growing.len() >= self.seal_threshold
     }
 
-    /// Seal the growing segment and return a build request. `None` for an
-    /// empty growing segment or an `IvfPq` collection.
-    pub fn seal(&mut self, key: &str) -> Option<BuildRequest> {
+    /// Seal the growing segment and return a build request whose codec
+    /// training is charged to `memory`. `None` for an empty growing segment
+    /// or an `IvfPq` collection.
+    pub fn seal(&mut self, key: &str, memory: ScopedMemory) -> Option<BuildRequest> {
         if self.growing.is_empty() || self.is_ivf() {
             return None;
         }
@@ -275,6 +272,8 @@ impl VectorCollection {
             vectors,
             dim: self.dim,
             params: self.params.clone(),
+            codec: self.codec_plan(),
+            memory,
         })
     }
 
@@ -343,6 +342,8 @@ impl VectorCollection {
     /// Set the collection-level quantization.
     pub fn set_quantization(&mut self, q: VectorQuantization) {
         self.quantization = q;
+        // A new plan gets a fresh codec build on every segment.
+        self.codec_refused.clear();
     }
 
     /// Return the configured quantization mode.
@@ -372,7 +373,10 @@ mod tests {
             coll.insert(vec![i as f32, 0.0]).expect("insert");
         }
         assert!(coll.scans_flat_only());
-        assert!(coll.seal("seg").is_some());
+        assert!(
+            coll.seal("seg", crate::test_support::test_memory())
+                .is_some()
+        );
         assert!(
             coll.scans_flat_only(),
             "a segment that is still building is searched flat"

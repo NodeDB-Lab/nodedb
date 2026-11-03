@@ -11,6 +11,7 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::vector::SetVectorParamsInput;
 use crate::engine::vector::distance::DistanceMetric;
 use crate::engine::vector::hnsw::HnswParams;
+use crate::engine::vector::index_config;
 
 impl CoreLoop {
     pub(in crate::data::executor) fn execute_set_vector_params(
@@ -131,17 +132,23 @@ impl CoreLoop {
         let resolved_pq_m = if pq_m > 0 {
             pq_m
         } else {
-            existing.as_ref().map(|c| c.pq_m).unwrap_or(8)
+            existing
+                .as_ref()
+                .map_or(index_config::DEFAULT_PQ_M, |c| c.pq_m)
         };
         let resolved_ivf_cells = if ivf_cells > 0 {
             ivf_cells
         } else {
-            existing.as_ref().map(|c| c.ivf_cells).unwrap_or(256)
+            existing
+                .as_ref()
+                .map_or(index_config::DEFAULT_IVF_CELLS, |c| c.ivf_cells)
         };
         let resolved_ivf_nprobe = if ivf_nprobe > 0 {
             ivf_nprobe
         } else {
-            existing.as_ref().map(|c| c.ivf_nprobe).unwrap_or(16)
+            existing
+                .as_ref()
+                .map_or(index_config::DEFAULT_IVF_NPROBE, |c| c.ivf_nprobe)
         };
 
         let params = HnswParams {

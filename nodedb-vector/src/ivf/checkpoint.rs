@@ -150,8 +150,8 @@ mod tests {
         assert_eq!(restored.trained_at_ms(), 1_700_000_000_000);
         assert_eq!(restored.get_vector(20), Some(vecs[10].as_slice()));
         assert_eq!(
-            restored.search(&vecs[5], 3).unwrap()[0].id,
-            idx.search(&vecs[5], 3).unwrap()[0].id
+            restored.search(&vecs[5], 3, 3).unwrap()[0].id,
+            idx.search(&vecs[5], 3, 3).unwrap()[0].id
         );
     }
 

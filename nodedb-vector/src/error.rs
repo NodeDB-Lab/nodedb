@@ -73,6 +73,36 @@ pub enum VectorError {
     /// I/O error from segment file operations (open, mmap, metadata).
     #[error("vector segment I/O error: {0}")]
     SegmentIo(#[from] std::io::Error),
+    /// A quantization codec refused to train or encode.
+    #[error("vector codec error: {0}")]
+    Codec(#[from] nodedb_codec::CodecError),
+    /// A rerank codec is untrained or failed to train. The engine reached
+    /// this state; the caller's input did not cause it.
+    #[error("vector rerank codec error: {detail}")]
+    RerankCodec { detail: String },
+}
+
+impl VectorError {
+    /// Whether a retry of the same operation can succeed: the memory budget
+    /// refused it, and a later attempt can find room.
+    pub fn is_transient(&self) -> bool {
+        matches!(self, Self::BudgetExhausted(_))
+    }
+}
+
+impl From<crate::rerank::RerankError> for VectorError {
+    /// Only `BadInput` is the caller's data error. An untrained or failed
+    /// rerank codec is the engine's own error.
+    fn from(e: crate::rerank::RerankError) -> Self {
+        use crate::rerank::RerankError;
+        let detail = e.to_string();
+        match e {
+            RerankError::BadInput(_) => VectorError::InvalidInput { detail },
+            RerankError::NotTrained(_) | RerankError::Train(_) => {
+                VectorError::RerankCodec { detail }
+            }
+        }
+    }
 }
 
 /// Check that an input vector of length `got` fits an index of dimension
@@ -82,5 +112,27 @@ pub fn check_dim(expected: usize, got: usize) -> Result<(), VectorError> {
         Ok(())
     } else {
         Err(VectorError::DimensionMismatch { expected, got })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rerank::RerankError;
+
+    #[test]
+    fn only_bad_rerank_input_is_invalid_input() {
+        assert!(matches!(
+            VectorError::from(RerankError::BadInput("k".into())),
+            VectorError::InvalidInput { .. }
+        ));
+        assert!(matches!(
+            VectorError::from(RerankError::NotTrained("sq8".into())),
+            VectorError::RerankCodec { .. }
+        ));
+        assert!(matches!(
+            VectorError::from(RerankError::Train("pq".into())),
+            VectorError::RerankCodec { .. }
+        ));
     }
 }

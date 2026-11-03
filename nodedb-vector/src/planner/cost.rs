@@ -126,11 +126,10 @@ pub fn estimate_cost(inputs: &CostModelInputs) -> VectorCost {
     let codec_decode_ns = codec_decode_ns_for(inputs.quantization);
 
     // Rerank cost.
-    const DEFAULT_OVERSAMPLE: u8 = 3;
     let rerank_us = if inputs.quantization == QuantizationKind::None {
         0.0
     } else {
-        DEFAULT_OVERSAMPLE as f32 * inputs.ef_search as f32 * 0.01
+        f32::from(crate::rerank::DEFAULT_OVERSAMPLE) * inputs.ef_search as f32 * 0.01
     };
 
     let predicted_recall = predicted_recall_for(inputs.index_type, inputs.quantization);

@@ -1,21 +1,16 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0
 
-//! `index_type='hnsw_pq'` must produce PQ-compressed segments.
-//!
-//! Spec: when a collection is configured for HNSW+PQ (advertised via the
-//! SQL DDL `CREATE INDEX ... WITH (index_type='hnsw_pq', pq_m=...)`),
-//! `complete_build` MUST train a `PqCodec` on the finished segment and
-//! surface `VectorIndexQuantization::Pq` in `stats()`. Today, the config
-//! is accepted at the DDL layer, stored, and then ignored —
-//! `complete_build` unconditionally calls `build_sq8_for_index`, so
-//! operators who asked for 8-16× memory reduction silently receive 4×
-//! SQ8 and have no signal from `stats()` that the request was dropped.
+//! `INDEX_TYPE hnsw_pq` makes every sealed segment carry PQ codes and report
+//! `VectorIndexQuantization::Pq`. A PQ shape the codec cannot train fails
+//! the build.
 
-use nodedb_vector::DistanceMetric;
+use nodedb_types::VectorIndexQuantization;
+use nodedb_types::vector_dtype::VectorStorageDtype;
 use nodedb_vector::collection::VectorCollection;
-use nodedb_vector::hnsw::{HnswIndex, HnswParams};
+use nodedb_vector::hnsw::HnswParams;
+use nodedb_vector::{DistanceMetric, VectorError, build_segment};
 
-use crate::support::test_memory;
+use crate::support::{build_now, test_memory};
 
 fn params() -> HnswParams {
     HnswParams {
@@ -27,27 +22,31 @@ fn params() -> HnswParams {
     }
 }
 
-/// Build a collection with 1024 vectors of dim=8 and complete one segment
-/// build. The `>= 1000` vector threshold in `build_sq8_for_index` means a
-/// quantizer WILL be attached — so `stats().quantization` is either `Sq8`
-/// (buggy fallback) or `Pq` (spec-correct for a HnswPq-configured index).
-fn make_built_collection_with_pq_config() -> VectorCollection {
-    // Uses the convenience constructor `with_seal_threshold_and_pq_config` so
-    // callers don't have to hand-build a full `IndexConfig` just to request PQ.
-    let mut coll = VectorCollection::with_seal_threshold_and_pq_config(8, params(), 2, 1024);
+/// Vector `i` of dim 8.
+fn vector(i: u32) -> Vec<f32> {
+    (0..8)
+        .map(|d| ((i as f32) * 0.01 + (d as f32) * 0.1).sin())
+        .collect()
+}
+
+/// A PQ collection (`pq_m` 2) of 1024 vectors of dim 8 under `params`,
+/// sealed. Returns the collection and the seal's build request.
+fn sealed_pq_collection(params: HnswParams) -> (VectorCollection, nodedb_vector::BuildRequest) {
+    let mut coll = VectorCollection::with_seal_threshold_and_pq_config(8, params, 2, 1024);
     for i in 0..1024u32 {
-        let mut v = vec![0.0f32; 8];
-        for (d, slot) in v.iter_mut().enumerate() {
-            *slot = ((i as f32) * 0.01 + (d as f32) * 0.1).sin();
-        }
-        coll.insert(v).unwrap();
+        coll.insert(vector(i)).unwrap();
     }
-    let req = coll.seal("pq").expect("seal produced request");
-    let mut idx = HnswIndex::new(req.dim, req.params.clone());
-    for v in &req.vectors {
-        idx.insert(v.clone()).unwrap();
-    }
-    coll.complete_build(req.segment_id, idx, test_memory());
+    let req = coll
+        .seal("pq", test_memory())
+        .expect("seal produced request");
+    (coll, req)
+}
+
+/// [`sealed_pq_collection`] with its build installed.
+fn make_built_collection_with_pq_config() -> VectorCollection {
+    let (mut coll, req) = sealed_pq_collection(params());
+    let segment_id = req.segment_id;
+    assert!(coll.complete_build(segment_id, build_now(req)).installed());
     coll
 }
 
@@ -88,4 +87,50 @@ fn hnsw_pq_config_survives_checkpoint_roundtrip() {
         "PQ codec must survive checkpoint roundtrip; got {:?}",
         stats.quantization
     );
+}
+
+#[test]
+fn hnsw_pq_with_pq_m_not_dividing_dim_installs_the_graph_without_codes() {
+    let mut coll = VectorCollection::with_seal_threshold_and_pq_config(8, params(), 3, 16);
+    for i in 0..16u32 {
+        coll.insert(vector(i)).unwrap();
+    }
+    let req = coll.seal("pq", test_memory()).expect("seal");
+    let segment_id = req.segment_id;
+    let built = build_segment(7, req).expect("the graph builds");
+    let Err(err) = &built.codec else {
+        panic!("pq_m 3 does not divide dim 8");
+    };
+    assert!(matches!(err, VectorError::InvalidInput { .. }), "{err}");
+    assert!(coll.complete_build(segment_id, built).installed());
+    assert_eq!(coll.stats().quantization, VectorIndexQuantization::None);
+    assert_eq!(coll.stats().building_count, 0, "the graph is installed");
+    assert_eq!(coll.search(&vector(5), 1, 64).unwrap()[0].id, 5);
+}
+
+#[test]
+fn hnsw_pq_segment_with_every_node_deleted_carries_codes() {
+    let (mut coll, req) = sealed_pq_collection(params());
+    for id in 0..1024u32 {
+        assert!(coll.delete(id));
+    }
+    let segment_id = req.segment_id;
+    assert!(coll.complete_build(segment_id, build_now(req)).installed());
+    assert_eq!(coll.stats().quantization, VectorIndexQuantization::Pq);
+    assert!(coll.search(&vector(3), 5, 64).unwrap().is_empty());
+}
+
+#[test]
+fn hnsw_pq_bf16_segment_carries_codes() {
+    let bf16 = HnswParams {
+        dtype: VectorStorageDtype::BF16,
+        ..params()
+    };
+    let (mut coll, req) = sealed_pq_collection(bf16);
+    let segment_id = req.segment_id;
+    assert!(coll.complete_build(segment_id, build_now(req)).installed());
+    assert_eq!(coll.stats().quantization, VectorIndexQuantization::Pq);
+    // BF16 rounding can make neighbours equal, so the check is the distance.
+    let hits = coll.search(&vector(500), 1, 64).unwrap();
+    assert!(hits[0].distance < 1e-3, "{hits:?}");
 }

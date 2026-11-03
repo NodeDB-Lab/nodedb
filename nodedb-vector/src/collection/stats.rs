@@ -34,18 +34,14 @@ impl VectorCollection {
             0.0
         };
 
-        let quantization = if let Some(ref dispatch) = self.codec_dispatch {
-            match dispatch.quantization() {
-                "rabitq" => nodedb_types::VectorIndexQuantization::RaBitQ,
-                "bbq" => nodedb_types::VectorIndexQuantization::Bbq,
-                _ => nodedb_types::VectorIndexQuantization::None,
-            }
-        } else if self.ivf.is_some() || self.sealed.iter().any(|s| s.pq.is_some()) {
-            nodedb_types::VectorIndexQuantization::Pq
-        } else if self.sealed.iter().any(|s| s.sq8.is_some()) {
-            nodedb_types::VectorIndexQuantization::Sq8
-        } else {
-            nodedb_types::VectorIndexQuantization::None
+        let quantization = match &self.ivf {
+            Some(_) => nodedb_types::VectorIndexQuantization::Pq,
+            None => self
+                .sealed
+                .iter()
+                .map(|s| s.codec.quantization())
+                .find(|q| *q != nodedb_types::VectorIndexQuantization::None)
+                .unwrap_or(nodedb_types::VectorIndexQuantization::None),
         };
 
         let index_type = match self.index_config.index_type {
@@ -107,8 +103,8 @@ impl VectorCollection {
 }
 
 impl VectorCollection {
-    /// Bytes the index holds in RAM: sealed HNSW graphs, SQ8 codes, the
-    /// growing and building segments, and the IVF-PQ index.
+    /// Bytes the index holds in RAM: sealed HNSW graphs and their codecs,
+    /// the growing and building segments, and the IVF-PQ index.
     fn index_memory_bytes(&self) -> usize {
         let sealed_mem: usize = self.sealed.iter().map(|s| s.resident_bytes).sum();
         let growing_vectors = self.growing.len();

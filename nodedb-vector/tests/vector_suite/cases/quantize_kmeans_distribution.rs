@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0
 
 //! PQ and IVF-PQ codebook training must distribute centroids across the
 //! data even when many input vectors are near-duplicates.
@@ -129,7 +129,13 @@ fn ivf_pq_training_does_not_collapse_on_duplicate_heavy_data() {
     // Query at the origin. Correct training assigns near-duplicates to
     // one cell and outliers to another; the nearest result must come
     // from the duplicate cluster (original indices 0..190).
-    let results = idx.search(&[0.0, 0.0, 0.0, 0.0], 5).unwrap();
+    let results = idx
+        .search(
+            &[0.0, 0.0, 0.0, 0.0],
+            5,
+            nodedb_vector::rerank::DEFAULT_OVERSAMPLE,
+        )
+        .unwrap();
     assert!(!results.is_empty(), "IVF-PQ returned no results");
     for r in &results {
         assert!(

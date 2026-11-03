@@ -54,11 +54,7 @@ impl CoreLoop {
 
         // Over-fetch when RLS is active so the CP-side post-filter has
         // headroom to still return `top_k` after rejecting candidates.
-        let fetch_k = if rls_filters.is_empty() {
-            top_k
-        } else {
-            top_k.saturating_mul(2).max(20)
-        };
+        let fetch_k = super::vector_search_window::first_window(top_k, !rls_filters.is_empty());
 
         // Each searched field: its name, its collection, and its hits.
         let mut fields: Vec<FieldHits<'_>> = Vec::new();

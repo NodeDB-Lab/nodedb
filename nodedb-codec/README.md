@@ -2,7 +2,7 @@
 
 > Compression codecs: ALP, FastLanes, FSST, Gorilla, LZ4, vector quantization
 
-Per-column codec implementations used by the columnar / timeseries / spatial engines, plus the vector quantization frontier (SQ8, PQ, OPQ, RaBitQ, BBQ, Ternary BitNet 1.58, Binary). Each codec is a free-standing module — pick what you need.
+Per-column codec implementations used by the columnar / timeseries / spatial engines, plus the vector quantization codecs OPQ, RaBitQ, BBQ, and Ternary (BitNet 1.58), with the shared quantized-vector layout and Hamming kernel. SQ8, PQ, and Binary live in `nodedb-vector`. Each codec is a free-standing module — pick what you need.
 
 ## Status
 

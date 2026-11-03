@@ -20,7 +20,9 @@
 
 use crate::engine::vector::distance::DistanceMetric;
 use crate::engine::vector::hnsw::HnswParams;
-use crate::engine::vector::index_config::{IndexConfig, IndexType};
+use crate::engine::vector::index_config::{
+    DEFAULT_IVF_CELLS, DEFAULT_IVF_NPROBE, DEFAULT_PQ_M, IndexConfig, IndexType,
+};
 
 use super::state::CoreLoop;
 
@@ -91,9 +93,17 @@ fn build_index_config_from_stored(
     } else {
         200
     };
-    let resolved_pq_m = if e.pq_m > 0 { e.pq_m } else { 8 };
-    let resolved_ivf_cells = if e.ivf_cells > 0 { e.ivf_cells } else { 256 };
-    let resolved_ivf_nprobe = if e.ivf_nprobe > 0 { e.ivf_nprobe } else { 16 };
+    let resolved_pq_m = if e.pq_m > 0 { e.pq_m } else { DEFAULT_PQ_M };
+    let resolved_ivf_cells = if e.ivf_cells > 0 {
+        e.ivf_cells
+    } else {
+        DEFAULT_IVF_CELLS
+    };
+    let resolved_ivf_nprobe = if e.ivf_nprobe > 0 {
+        e.ivf_nprobe
+    } else {
+        DEFAULT_IVF_NPROBE
+    };
 
     let params = HnswParams {
         m: resolved_m,

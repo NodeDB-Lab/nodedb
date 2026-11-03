@@ -30,8 +30,6 @@ use crate::error::VectorError;
 use crate::flat::FlatIndex;
 use crate::hnsw::{HnswIndex, HnswParams};
 use crate::ivf::IvfPqIndex;
-use crate::quantize::pq::PqCodec;
-use crate::quantize::sq8::Sq8Codec;
 
 use super::lifecycle::VectorCollection;
 
@@ -80,9 +78,7 @@ pub(crate) struct CollectionSnapshot {
     pub surrogate_map: Vec<(u32, u32)>,
     /// `(document_surrogate_u32, [global_vector_ids])` pairs.
     pub multi_doc_map: Vec<(u32, Vec<u32>)>,
-    /// Quantization mode for the collection-level codec-dispatch index.
-    /// Serialised as a u8 matching `VectorQuantization` discriminants.
-    /// 0 = None.
+    /// Quantization requested at creation, as a `quantization_to_tag` tag.
     pub quantization_tag: u8,
     /// Serialised `PayloadIndexSetSnapshot` (msgpack bytes).
     /// Empty vec = no payload indexes.
@@ -93,7 +89,7 @@ pub(crate) struct CollectionSnapshot {
     /// `0` means no write is recorded, and it gates nothing.
     pub checkpoint_wal_lsn: u64,
     /// Index type and PQ/IVF parameters. Its HNSW parameters are the
-    /// `params_*` fields above.
+    /// collection's current ones: the restore reads the storage dtype there.
     pub index_config: crate::index_config::IndexConfig,
     /// Encoded trained IVF-PQ index. `None` for a non-IVF collection or one
     /// still buffering toward its training threshold.
@@ -107,15 +103,15 @@ pub(crate) struct CollectionSnapshot {
 pub(crate) struct SealedSnapshot {
     pub base_id: u32,
     pub hnsw_bytes: Vec<u8>,
+    /// Serialized [`PqCodec`](crate::quantize::pq::PqCodec) bytes of a PQ segment.
     pub pq_bytes: Option<Vec<u8>>,
+    /// PQ codes of a PQ segment, `m` bytes per node.
     pub pq_codes: Option<Vec<u8>>,
-    /// Serialized [`Sq8Codec`] bytes (magic + version + msgpack).
-    /// Present when SQ8 quantization is active and PQ is absent.
-    /// `None` means no SQ8 quantization for this segment.
+    /// Serialized [`Sq8Codec`](crate::quantize::sq8::Sq8Codec) bytes (magic +
+    /// version + msgpack) of an SQ8 segment.
     pub sq8_bytes: Option<Vec<u8>>,
-    /// Pre-quantized SQ8 codes for all vectors in this segment.
+    /// SQ8 codes of an SQ8 segment.
     /// Layout: `[v0_d0, v0_d1, ..., v1_d0, ...]` (dim bytes per vector).
-    /// `None` when SQ8 is not configured.
     pub sq8_codes: Option<Vec<u8>>,
 }
 
@@ -156,36 +152,7 @@ impl VectorCollection {
             sealed_segments: self
                 .sealed
                 .iter()
-                .map(|s| {
-                    let (pq_bytes, pq_codes) = match &s.pq {
-                        Some((codec, codes)) => (
-                            Some(codec.to_bytes().map_err(|e| {
-                                VectorError::CheckpointSerializationError {
-                                    detail: format!("PQ codec encode: {e}"),
-                                }
-                            })?),
-                            Some(codes.clone()),
-                        ),
-                        None => (None, None),
-                    };
-                    // Only serialize SQ8 when PQ is absent — a segment never carries both.
-                    let (sq8_bytes, sq8_codes) = if pq_bytes.is_none() {
-                        match &s.sq8 {
-                            Some((codec, codes)) => (Some(codec.to_bytes()), Some(codes.clone())),
-                            None => (None, None),
-                        }
-                    } else {
-                        (None, None)
-                    };
-                    Ok(SealedSnapshot {
-                        base_id: s.base_id,
-                        hnsw_bytes: s.index.checkpoint_to_bytes()?,
-                        pq_bytes,
-                        pq_codes,
-                        sq8_bytes,
-                        sq8_codes,
-                    })
-                })
+                .map(super::checkpoint_codec::sealed_snapshot)
                 .collect::<Result<Vec<_>, VectorError>>()?,
             building_segments: self
                 .building
@@ -223,7 +190,11 @@ impl VectorCollection {
                 }
             },
             checkpoint_wal_lsn: self.checkpoint_wal_lsn.max(self.applied_wal_lsn),
-            index_config: self.index_config.clone(),
+            // The HNSW params carry the storage dtype the restore reads.
+            index_config: crate::index_config::IndexConfig {
+                hnsw: self.params.clone(),
+                ..self.index_config.clone()
+            },
             ivf_bytes: self.ivf.as_ref().map(IvfPqIndex::to_bytes).transpose()?,
             versions: self.versions.to_entries(),
         };
@@ -294,7 +265,7 @@ impl VectorCollection {
             m0: snap.params_m0,
             ef_construction: snap.params_ef_construction,
             metric,
-            dtype: nodedb_types::vector_dtype::VectorStorageDtype::F32,
+            dtype: snap.index_config.hnsw.dtype,
         };
 
         let mut growing = FlatIndex::new(snap.dim, metric);
@@ -322,40 +293,12 @@ impl VectorCollection {
                     detail: "sealed segment hnsw bytes missing RKHNS magic".into(),
                 }
             })?;
-            let pq = match (&ss.pq_bytes, &ss.pq_codes) {
-                (Some(bytes), Some(codes)) => Some((
-                    PqCodec::from_bytes(bytes, memory.clone()).map_err(|e| {
-                        VectorError::CheckpointDeserializationError {
-                            detail: format!("PQ codec decode: {e}"),
-                        }
-                    })?,
-                    codes.clone(),
-                )),
-                _ => None,
-            };
-            // Restore SQ8 from persisted bytes — never recompute on load.
-            // A segment never carries both PQ and SQ8.
-            let sq8 = if pq.is_some() {
-                None
-            } else {
-                match (&ss.sq8_bytes, &ss.sq8_codes) {
-                    (Some(codec_bytes), Some(codes)) => Some((
-                        Sq8Codec::from_bytes(codec_bytes).map_err(|e| {
-                            VectorError::CheckpointDeserializationError {
-                                detail: format!("SQ8 codec decode: {e}"),
-                            }
-                        })?,
-                        codes.clone(),
-                    )),
-                    _ => None,
-                }
-            };
-            let resident_bytes = SealedSegment::measure(&index, sq8.as_ref());
+            let codec = super::checkpoint_codec::restore_codec(ss, index.len(), &memory)?;
+            let resident_bytes = SealedSegment::measure(&index, &codec);
             sealed.push(SealedSegment {
                 index,
                 base_id: ss.base_id,
-                sq8,
-                pq,
+                codec,
                 tier: StorageTier::L0Ram,
                 mmap_vectors: None,
                 resident_bytes,
@@ -425,21 +368,23 @@ impl VectorCollection {
                 .collect::<HashMap<_, _>>(),
             seal_threshold: DEFAULT_SEAL_THRESHOLD,
             index_config,
-            codec_dispatch: None,
             ivf,
-            quantization: quantization_from_tag(snap.quantization_tag),
+            quantization: quantization_from_tag(snap.quantization_tag)?,
             payload: if snap.payload_index_bytes.is_empty() {
                 super::payload_index::PayloadIndexSet::default()
             } else {
                 zerompk::from_msgpack::<PayloadIndexSetSnapshot>(&snap.payload_index_bytes)
                     .map(super::payload_index::PayloadIndexSet::from_snapshot)
-                    .unwrap_or_default()
+                    .map_err(|e| VectorError::CheckpointDeserializationError {
+                        detail: format!("payload index decode: {e}"),
+                    })?
             },
             arena_index: None,
             checkpoint_wal_lsn: snap.checkpoint_wal_lsn,
             applied_wal_lsn: snap.checkpoint_wal_lsn,
             builds_completed: 0,
             builds_failed: 0,
+            codec_refused: Vec::new(),
             versions: super::versions::VectorVersions::from_entries(snap.versions),
         })
     }
@@ -456,13 +401,13 @@ fn quantization_to_tag(q: VectorQuantization) -> u8 {
         VectorQuantization::Binary => 5,
         VectorQuantization::Ternary => 6,
         VectorQuantization::Opq => 7,
-        _ => 0,
     }
 }
 
-/// Decode a u8 tag back to `VectorQuantization`.
-fn quantization_from_tag(tag: u8) -> VectorQuantization {
-    match tag {
+/// Decode a u8 tag back to `VectorQuantization`. An unknown tag means a
+/// corrupt checkpoint.
+fn quantization_from_tag(tag: u8) -> Result<VectorQuantization, VectorError> {
+    Ok(match tag {
         0 => VectorQuantization::None,
         1 => VectorQuantization::Sq8,
         2 => VectorQuantization::Pq,
@@ -471,33 +416,31 @@ fn quantization_from_tag(tag: u8) -> VectorQuantization {
         5 => VectorQuantization::Binary,
         6 => VectorQuantization::Ternary,
         7 => VectorQuantization::Opq,
-        _ => VectorQuantization::None,
-    }
+        _ => {
+            return Err(VectorError::CheckpointDeserializationError {
+                detail: format!("unknown quantization tag {tag}"),
+            });
+        }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use crate::collection::lifecycle::VectorCollection;
+    use crate::collection::segment_codec::SegmentCodec;
     use crate::distance::DistanceMetric;
     use crate::hnsw::HnswParams;
     use crate::test_support::test_memory;
 
-    /// SQ8 calibration data must survive a checkpoint round-trip without
-    /// being recomputed. Verifies that the O(N*dim) rebuild-on-restart bug
-    /// is eliminated: `sq8` on the restored sealed segment is `Some` and
-    /// its `inv_scales` match the original exactly.
+    /// SQ8 calibration data survives a checkpoint round-trip without being
+    /// recomputed: the restored segment carries the same codec bytes.
     #[test]
     fn checkpoint_roundtrip_preserves_sq8() {
-        use crate::collection::lifecycle::VectorCollection;
-        use crate::hnsw::{HnswIndex, HnswParams};
-
         let params = HnswParams {
             metric: crate::distance::DistanceMetric::L2,
             ..HnswParams::default()
         };
-        // 1024 vectors of dim=8 — enough to pass the ≥1000 threshold in
-        // `build_sq8_for_index`, so sq8 will be Some after complete_build.
-        // Uses plain HNSW (default IndexType::Hnsw) so SQ8 is selected.
+        // The default quantization seals SQ8 segments.
         let mut coll = VectorCollection::with_seal_threshold(8, params, 1024);
         for i in 0..1024u32 {
             let mut v = vec![0.0f32; 8];
@@ -506,37 +449,43 @@ mod tests {
             }
             coll.insert(v).unwrap();
         }
-        let req = coll.seal("sq8_test").expect("seal produced request");
-        let mut idx = HnswIndex::new(req.dim, req.params.clone());
-        for v in &req.vectors {
-            idx.insert(v.clone()).unwrap();
-        }
-        coll.complete_build(req.segment_id, idx, test_memory());
+        let req = coll
+            .seal("sq8_test", test_memory())
+            .expect("seal produced request");
+        assert!(
+            coll.complete_build(req.segment_id, crate::test_support::build_now(&req))
+                .installed()
+        );
 
         let sealed = coll.sealed_segments();
         assert!(!sealed.is_empty(), "expected at least one sealed segment");
-        let orig_sq8 = sealed[0]
-            .sq8
-            .as_ref()
-            .expect("sq8 must be Some after complete_build with ≥1000 vectors");
-        let orig_dim = orig_sq8.0.dim();
+        let SegmentCodec::Sq8 {
+            codec: orig_sq8, ..
+        } = &sealed[0].codec
+        else {
+            panic!("an SQ8 collection seals SQ8 segments");
+        };
+        let orig_dim = orig_sq8.dim();
         // Capture serialized form as ground truth.
-        let orig_bytes = orig_sq8.0.to_bytes();
+        let orig_bytes = orig_sq8.to_bytes();
 
         let checkpoint = coll.checkpoint_to_bytes(None).unwrap();
         let restored = VectorCollection::from_checkpoint(&checkpoint, None, test_memory()).unwrap();
 
         let restored_sealed = restored.sealed_segments();
         assert!(!restored_sealed.is_empty());
-        let restored_sq8 = restored_sealed[0]
-            .sq8
-            .as_ref()
-            .expect("sq8 must be Some after restoring checkpoint — never recomputed");
+        let SegmentCodec::Sq8 {
+            codec: restored_sq8,
+            ..
+        } = &restored_sealed[0].codec
+        else {
+            panic!("the restored segment carries its SQ8 codec");
+        };
 
-        assert_eq!(restored_sq8.0.dim(), orig_dim, "dim mismatch after restore");
+        assert_eq!(restored_sq8.dim(), orig_dim, "dim mismatch after restore");
         // Byte-level equality guarantees calibration data is persisted, not recomputed.
         assert_eq!(
-            restored_sq8.0.to_bytes(),
+            restored_sq8.to_bytes(),
             orig_bytes,
             "sq8 codec bytes differ — calibration data was recomputed rather than persisted"
         );

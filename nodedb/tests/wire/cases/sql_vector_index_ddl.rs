@@ -59,6 +59,49 @@ async fn create_vector_index_hnsw_pq_pq_m_must_divide_dim() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn create_vector_index_hnsw_pq_rejects_codebook_over_limit() {
+    let server = TestServer::start().await;
+    server
+        .exec("CREATE COLLECTION vi_big_pq TYPE document")
+        .await
+        .unwrap();
+
+    // PQ_M 8 divides DIM 65536, but 8 × 256 centroids of 8192 floats
+    // exceed the codebook cap. DDL refuses the shape the codec cannot train.
+    let err = server
+        .exec(
+            "CREATE VECTOR INDEX idx_vi_big_pq ON vi_big_pq \
+             METRIC cosine DIM 65536 INDEX_TYPE hnsw_pq PQ_M 8",
+        )
+        .await
+        .expect_err("a codebook over the cap is refused");
+    assert!(err.contains("SQLSTATE 22023"), "got: {err}");
+    assert!(err.to_lowercase().contains("codebook"), "got: {err}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn alter_vector_index_to_hnsw_pq_checks_default_pq_m() {
+    let server = TestServer::start().await;
+    server
+        .exec("CREATE COLLECTION vi_alter_pqm TYPE document")
+        .await
+        .unwrap();
+    server
+        .exec("CREATE VECTOR INDEX idx_vi_alter_pqm ON vi_alter_pqm METRIC cosine DIM 12")
+        .await
+        .unwrap();
+
+    // No pq_m in the SET list: the engine default 8 applies, and 8 does
+    // not divide 12.
+    let err = server
+        .exec("ALTER VECTOR INDEX ON vi_alter_pqm SET (index_type = 'hnsw_pq')")
+        .await
+        .expect_err("the default pq_m does not divide dim 12");
+    assert!(err.contains("SQLSTATE 22023"), "got: {err}");
+    assert!(err.contains("pq_m"), "got: {err}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn create_vector_index_accepts_valid_hnsw_pq() {
     let server = TestServer::start().await;
     server

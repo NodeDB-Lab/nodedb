@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0
 
 //! Soft-deletes in growing / building segments must survive checkpoint restore.
 //!
@@ -71,7 +71,9 @@ fn building_segment_tombstones_survive_checkpoint_roundtrip() {
     for i in 0..20u32 {
         coll.insert(vec![i as f32, 0.0]).unwrap();
     }
-    let _req = coll.seal("k").expect("seal produced request");
+    let _req = coll
+        .seal("k", test_memory())
+        .expect("seal produced request");
     // Intentionally do NOT complete the build — vectors now sit in the
     // building segment as a FlatIndex.
     assert!(coll.delete(5), "delete on building vector must succeed");

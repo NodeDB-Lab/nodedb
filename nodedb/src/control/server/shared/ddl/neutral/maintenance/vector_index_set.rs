@@ -162,11 +162,16 @@ fn validate(row: &StoredVectorIndexParams, overlay: &ParamOverlay) -> Result<(),
         ));
     }
 
-    if uses_pq && row.pq_m > 0 && !row.dim.is_multiple_of(row.pq_m) {
-        return Err(ddl_err(
-            "22023",
-            format!("pq_m ({}) must divide dim ({}) evenly", row.pq_m, row.dim),
-        ));
+    // An unset pq_m takes the engine default, which must fit the PQ limits
+    // too. A row of unspecified dim (0) fixes its width at the first vector.
+    if uses_pq && row.dim > 0 {
+        let pq_m = if row.pq_m > 0 {
+            row.pq_m
+        } else {
+            nodedb_vector::index_config::DEFAULT_PQ_M
+        };
+        nodedb_vector::quantize::pq::check_pq_shape(row.dim, pq_m)
+            .map_err(|e| ddl_err("22023", e.to_string()))?;
     }
 
     if row.index_type == "ivf_pq"

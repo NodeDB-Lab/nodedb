@@ -87,7 +87,7 @@ pub use shared::entry_kind;
 pub use vector::vector_index_not_applied;
 pub use vector_build::{
     VectorBuildTarget, vector_build_failed, vector_builder_disconnected,
-    vector_builder_spawn_failed, vector_rebuild_unreadable,
+    vector_builder_spawn_failed, vector_codec_not_built, vector_rebuild_unreadable,
 };
 pub use version_cleanup::{history_charge_stale, version_cleanup_failed};
 pub use vshard_departure::vshard_departure_purge_failed;

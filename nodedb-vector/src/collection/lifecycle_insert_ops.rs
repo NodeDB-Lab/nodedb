@@ -177,7 +177,11 @@ impl VectorCollection {
             if id >= seg.base_id {
                 let local = id - seg.base_id;
                 if (local as usize) < seg.index.len() {
-                    return seg.index.delete(local);
+                    let deleted = seg.index.delete(local);
+                    if deleted {
+                        seg.codec.set_deleted(local, true);
+                    }
+                    return deleted;
                 }
             }
         }
@@ -274,7 +278,11 @@ impl VectorCollection {
             if id >= seg.base_id {
                 let local = id - seg.base_id;
                 if (local as usize) < seg.index.len() {
-                    return seg.index.undelete(local);
+                    let revived = seg.index.undelete(local);
+                    if revived {
+                        seg.codec.set_deleted(local, false);
+                    }
+                    return revived;
                 }
             }
         }
@@ -309,20 +317,20 @@ impl VectorCollection {
 /// The FP32 vector at `local` in a sealed segment: the mmap tier when the
 /// segment lives there, else the HNSW node (decoded from a narrow dtype or
 /// fetched from the segment backing when the node holds no local copy).
-pub(super) fn sealed_vector(seg: &super::segment::SealedSegment, local: u32) -> Option<Vec<f32>> {
+/// Borrowed when stored as F32, decoded when stored as F16/BF16.
+pub(super) fn sealed_vector_ref(
+    seg: &super::segment::SealedSegment,
+    local: u32,
+) -> Option<std::borrow::Cow<'_, [f32]>> {
     if let Some(mmap) = &seg.mmap_vectors {
-        return mmap.get_vector(local).map(<[f32]>::to_vec);
+        return mmap.get_vector(local).map(std::borrow::Cow::Borrowed);
     }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        seg.index
-            .get_vector_or_backing(local)
-            .map(std::borrow::Cow::into_owned)
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        seg.index.get_vector(local).map(<[f32]>::to_vec)
-    }
+    seg.index.get_vector_or_backing(local)
+}
+
+/// [`sealed_vector_ref`] as an owned vector.
+pub(super) fn sealed_vector(seg: &super::segment::SealedSegment, local: u32) -> Option<Vec<f32>> {
+    sealed_vector_ref(seg, local).map(std::borrow::Cow::into_owned)
 }
 
 #[cfg(test)]

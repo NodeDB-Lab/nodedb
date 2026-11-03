@@ -38,7 +38,9 @@
 
 use nalgebra::{DMatrix, SVD};
 
+use crate::error::CodecError;
 use crate::vector_quant::codec::{AdcLut, VectorCodec};
+use crate::vector_quant::codec_envelope;
 use crate::vector_quant::layout::{QuantHeader, QuantMode, UnifiedQuantizedVector};
 use crate::vector_quant::opq_kmeans::l2_sq;
 use crate::vector_quant::opq_kmeans::lloyd;
@@ -49,11 +51,13 @@ use crate::vector_quant::opq_kmeans::lloyd;
 ///
 /// Stores a learned rotation matrix `R` (dim × dim, row-major) and PQ
 /// codebooks trained on the rotated training set via Non-Para OPQ iterations.
+#[derive(zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub struct OpqCodec {
     pub dim: usize,
     /// Number of PQ subspaces.
     pub m: usize,
-    /// Centroids per subspace (256 for u8 codes).
+    /// Centroids per subspace: at most 256 for u8 codes, and at most the
+    /// training set size.
     pub k: usize,
     pub sub_dim: usize,
     /// Learned rotation matrix R (dim × dim, row-major).
@@ -71,6 +75,10 @@ impl OpqCodec {
     ///
     /// - `opq_iters`: number of alternating Procrustes+codebook iterations.
     /// - `kmeans_iters`: Lloyd's k-means iterations per subspace per OPQ iter.
+    ///
+    /// `k` is clamped to the training set size, so every code has a centroid.
+    /// Returns `InvalidInput` for an empty training set, a zero or oversized
+    /// shape, an `m` that does not divide `dim`, or a vector of another length.
     pub fn train(
         vectors: &[&[f32]],
         dim: usize,
@@ -78,13 +86,29 @@ impl OpqCodec {
         k: usize,
         opq_iters: usize,
         kmeans_iters: usize,
-    ) -> Self {
-        assert!(!vectors.is_empty(), "training set must be non-empty");
-        assert!(dim > 0 && m > 0 && k > 0, "dim/m/k must be positive");
-        assert!(
-            dim.is_multiple_of(m),
-            "dim ({dim}) must be divisible by m ({m})"
-        );
+    ) -> Result<Self, CodecError> {
+        let invalid = |detail: String| Err(CodecError::InvalidInput { detail });
+        if vectors.is_empty() {
+            return invalid("OPQ training set is empty".into());
+        }
+        if dim == 0 || m == 0 || k == 0 {
+            return invalid(format!(
+                "OPQ dim ({dim}), m ({m}) and k ({k}) must be positive"
+            ));
+        }
+        if k > MAX_CENTROIDS {
+            return invalid(format!("OPQ k ({k}) exceeds {MAX_CENTROIDS} centroids"));
+        }
+        if !dim.is_multiple_of(m) {
+            return invalid(format!("OPQ m ({m}) must divide dim ({dim}) evenly"));
+        }
+        if let Some(bad) = vectors.iter().find(|v| v.len() != dim) {
+            return invalid(format!(
+                "OPQ training vector has {} components, expected {dim}",
+                bad.len()
+            ));
+        }
+        let k = k.min(vectors.len());
         let sub_dim = dim / m;
         let seed = dim as u64 ^ ((m as u64) << 16) ^ ((k as u64) << 32);
 
@@ -149,13 +173,60 @@ impl OpqCodec {
             }
         }
 
-        Self {
+        Ok(Self {
             dim,
             m,
             k,
             sub_dim,
             rotation,
             codebooks,
+        })
+    }
+
+    /// On-disk magic for OPQ codec envelopes.
+    pub const ENVELOPE_MAGIC: &'static [u8; codec_envelope::MAGIC_LEN] = b"NDOPQ";
+
+    /// Current on-disk envelope version for OPQ codecs.
+    pub const ENVELOPE_VERSION: u8 = 1;
+
+    /// Serialize this codec to a self-describing byte buffer.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, CodecError> {
+        codec_envelope::encode(Self::ENVELOPE_MAGIC, Self::ENVELOPE_VERSION, self)
+    }
+
+    /// Deserialize a codec from a byte buffer produced by [`Self::to_bytes`].
+    /// Returns `Corrupt` when the rotation or codebooks do not match the
+    /// stored shape.
+    pub fn from_bytes(buf: &[u8]) -> Result<Self, CodecError> {
+        let codec: Self =
+            codec_envelope::decode(Self::ENVELOPE_MAGIC, Self::ENVELOPE_VERSION, buf)?;
+        codec.check_shape()?;
+        Ok(codec)
+    }
+
+    /// Check that the rotation and codebooks match `dim`, `m`, `k` and
+    /// `sub_dim`, so encode and query preparation index in bounds.
+    fn check_shape(&self) -> Result<(), CodecError> {
+        let shape_ok = self.dim > 0
+            && self.m > 0
+            && self.k > 0
+            && self.k <= MAX_CENTROIDS
+            && self.m.checked_mul(self.sub_dim) == Some(self.dim)
+            && self.dim.checked_mul(self.dim) == Some(self.rotation.len())
+            && self.codebooks.len() == self.m
+            && self
+                .codebooks
+                .iter()
+                .all(|book| book.len() == self.k && book.iter().all(|c| c.len() == self.sub_dim));
+        if shape_ok {
+            Ok(())
+        } else {
+            Err(CodecError::Corrupt {
+                detail: format!(
+                    "OPQ codec shape does not match dim {}, m {}, k {}, sub_dim {}",
+                    self.dim, self.m, self.k, self.sub_dim
+                ),
+            })
         }
     }
 
@@ -177,6 +248,9 @@ impl OpqCodec {
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
+
+/// Most centroids a subspace holds: one byte per code.
+const MAX_CENTROIDS: usize = 256;
 
 /// Return a dim×dim row-major identity matrix.
 fn identity(dim: usize) -> Vec<f32> {
@@ -367,7 +441,7 @@ mod tests {
     fn train_tiny() -> OpqCodec {
         let vecs = tiny_dataset();
         let refs: Vec<&[f32]> = vecs.iter().map(|v| v.as_slice()).collect();
-        OpqCodec::train(&refs, 8, 2, 4, 10, 30)
+        OpqCodec::train(&refs, 8, 2, 4, 10, 30).expect("train tiny OPQ")
     }
 
     #[test]
@@ -442,8 +516,8 @@ mod tests {
         let vecs = tiny_dataset();
         let refs: Vec<&[f32]> = vecs.iter().map(|v| v.as_slice()).collect();
 
-        let codec_1 = OpqCodec::train(&refs, 8, 2, 4, 1, 10);
-        let codec_5 = OpqCodec::train(&refs, 8, 2, 4, 5, 10);
+        let codec_1 = OpqCodec::train(&refs, 8, 2, 4, 1, 10).expect("train 1-iter OPQ");
+        let codec_5 = OpqCodec::train(&refs, 8, 2, 4, 5, 10).expect("train 5-iter OPQ");
 
         let mean_recon_error = |codec: &OpqCodec| -> f32 {
             refs.iter()
@@ -464,5 +538,61 @@ mod tests {
             err_5 <= err_1 * 1.05,
             "5-iter OPQ (err={err_5:.4}) should have ≤ reconstruction error than 1-iter (err={err_1:.4})"
         );
+    }
+
+    #[test]
+    fn train_with_fewer_vectors_than_centroids_prepares_queries() {
+        let vecs = tiny_dataset();
+        let refs: Vec<&[f32]> = vecs.iter().map(|v| v.as_slice()).collect();
+        let codec = OpqCodec::train(&refs, 8, 2, 256, 2, 5).expect("train OPQ");
+        assert_eq!(codec.k, vecs.len());
+        for v in &refs {
+            let query = codec.prepare_query(v);
+            assert_eq!(query.distance_table.len(), codec.m * codec.k);
+            let encoded = codec.encode(v);
+            assert!(codec.exact_asymmetric_distance(&query, &encoded) >= 0.0);
+        }
+    }
+
+    #[test]
+    fn train_rejects_m_not_dividing_dim() {
+        let vecs = tiny_dataset();
+        let refs: Vec<&[f32]> = vecs.iter().map(|v| v.as_slice()).collect();
+        let err = OpqCodec::train(&refs, 8, 3, 4, 2, 5)
+            .err()
+            .expect("m=3 does not divide dim=8");
+        assert!(matches!(err, CodecError::InvalidInput { .. }), "{err}");
+    }
+
+    #[test]
+    fn train_rejects_empty_and_mismatched_input() {
+        assert!(matches!(
+            OpqCodec::train(&[], 8, 2, 4, 2, 5),
+            Err(CodecError::InvalidInput { .. })
+        ));
+        let short = [1.0f32; 4];
+        assert!(matches!(
+            OpqCodec::train(&[&short[..]], 8, 2, 4, 2, 5),
+            Err(CodecError::InvalidInput { .. })
+        ));
+    }
+
+    #[test]
+    fn to_bytes_from_bytes_roundtrip() {
+        let codec = train_tiny();
+        let bytes = codec.to_bytes().expect("to_bytes");
+        let restored = OpqCodec::from_bytes(&bytes).expect("from_bytes");
+        assert_eq!(restored.dim, codec.dim);
+        assert_eq!(restored.m, codec.m);
+        assert_eq!(restored.k, codec.k);
+        let v = tiny_dataset().remove(3);
+        assert_eq!(codec.encode(&v).codes, restored.encode(&v).codes);
+    }
+
+    #[test]
+    fn from_bytes_rejects_bad_magic() {
+        let mut bytes = train_tiny().to_bytes().expect("to_bytes");
+        bytes[0] = b'X';
+        assert!(OpqCodec::from_bytes(&bytes).is_err());
     }
 }

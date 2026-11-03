@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0
 
 //! Roaring bitmap pre-filter must use the same ID space across segments.
 //!
@@ -12,10 +12,10 @@
 
 use nodedb_vector::DistanceMetric;
 use nodedb_vector::collection::VectorCollection;
-use nodedb_vector::hnsw::{HnswIndex, HnswParams};
+use nodedb_vector::hnsw::HnswParams;
 use roaring::RoaringBitmap;
 
-use crate::support::test_memory;
+use crate::support::{build_now, test_memory};
 
 fn params() -> HnswParams {
     HnswParams {
@@ -30,12 +30,11 @@ fn seal_one(coll: &mut VectorCollection, count: usize) {
     for i in 0..count {
         coll.insert(vec![i as f32, 0.0]).unwrap();
     }
-    let req = coll.seal("k").expect("seal produced request");
-    let mut idx = HnswIndex::new(req.dim, req.params.clone());
-    for v in &req.vectors {
-        idx.insert(v.clone()).unwrap();
-    }
-    coll.complete_build(req.segment_id, idx, test_memory());
+    let req = coll
+        .seal("k", test_memory())
+        .expect("seal produced request");
+    let segment_id = req.segment_id;
+    assert!(coll.complete_build(segment_id, build_now(req)).installed());
 }
 
 fn bitmap_bytes(ids: impl IntoIterator<Item = u32>) -> Vec<u8> {

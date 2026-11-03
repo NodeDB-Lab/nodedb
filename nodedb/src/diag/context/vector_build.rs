@@ -65,6 +65,57 @@ impl DomainContext for VectorBuildNotInstalled<'_> {
     }
 }
 
+/// A segment whose graph installed but whose codec build failed.
+pub(in crate::diag) struct VectorCodecNotBuilt<'a> {
+    /// `seal` for a first build, `rebuild` for a rebuild.
+    pub kind: &'static str,
+    pub database_id: u64,
+    pub tenant_id: u64,
+    /// Index key: `collection` or `collection:field`.
+    pub index: &'a str,
+    /// Base id of the sealed segment.
+    pub segment: u32,
+    /// Whether the core queues a retry: the memory budget refused the build.
+    pub retried: bool,
+    /// What failed, without the per-occurrence detail.
+    pub error_class: &'a str,
+}
+
+impl DomainContext for VectorCodecNotBuilt<'_> {
+    fn domain_kind(&self) -> &'static str {
+        "nodedb.vector_codec_not_built"
+    }
+
+    fn grouping_key(&self) -> String {
+        // Kind, retry and error class name the bug. The index and segment
+        // are the occurrence, so a retry loop files one report.
+        format!(
+            "kind={};retried={};cause={}",
+            self.kind, self.retried, self.error_class
+        )
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "kind": self.kind,
+            "database_id": self.database_id,
+            "tenant_id": self.tenant_id,
+            "index": self.index,
+            "segment": self.segment,
+            "retried": self.retried,
+            "error_class": self.error_class,
+            "why_reported": "the segment's HNSW graph installed, but the quantization codec \
+                             the index names did not build. The segment answers from its \
+                             stored vectors: results stay exact, and the codec's memory \
+                             saving and speed are missing",
+            "operator_action": "a budget refusal retries with backoff: raise the vector \
+                                 memory budget if it keeps failing. Any other error repeats \
+                                 on every attempt: check the index's quantization, pq_m and \
+                                 dimension against the codec's limits",
+        })
+    }
+}
+
 /// The core's builder thread could not be started, or died.
 pub(in crate::diag) struct VectorBuilderUnavailable<'a> {
     /// `spawn_failed` or `disconnected`.

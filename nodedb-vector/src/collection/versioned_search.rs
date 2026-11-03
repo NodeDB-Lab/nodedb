@@ -11,28 +11,31 @@ use nodedb_types::Surrogate;
 use roaring::RoaringBitmap;
 
 use super::lifecycle::VectorCollection;
-use super::lifecycle_insert_ops::sealed_vector;
+use super::lifecycle_insert_ops::sealed_vector_ref;
 use super::search::{finish, push_shifted};
 use crate::distance::{DistanceMetric, distance};
 use crate::error::{VectorError, check_dim};
 use crate::hnsw::SearchResult;
+use crate::rerank::SearchBreadth;
 use crate::visibility::NodeFilter;
 
 impl VectorCollection {
     /// The `top_k` nodes nearest to `query` among those visible at ordinal
     /// `at`, scored under `metric`. `allow`, when given, restricts the search
     /// to these global node ids ([`Self::nodes_at`] translates a row
-    /// prefilter). A query without the collection dimension fails with
-    /// [`VectorError::DimensionMismatch`].
+    /// prefilter). Sealed segments are searched at beam `breadth.ef_search`
+    /// and rank exact vectors. A query without the collection dimension
+    /// fails with [`VectorError::DimensionMismatch`].
     pub fn search_at(
         &self,
         query: &[f32],
         top_k: usize,
-        ef: usize,
+        breadth: impl Into<SearchBreadth>,
         metric: DistanceMetric,
         allow: Option<&RoaringBitmap>,
         at: i64,
     ) -> Result<Vec<SearchResult>, VectorError> {
+        let breadth = breadth.into();
         check_dim(self.dim, query.len())?;
         let sets = self.versions.cut_sets(at);
         let filter = NodeFilter {
@@ -42,7 +45,7 @@ impl VectorCollection {
         };
         let mut all: Vec<SearchResult> = Vec::new();
         if let Some(ivf) = &self.ivf {
-            all.extend(ivf.search_admitting(query, top_k, metric, &filter)?);
+            all.extend(ivf.search_admitting(query, top_k, breadth.oversample, metric, &filter)?);
         }
         push_shifted(
             &mut all,
@@ -51,13 +54,17 @@ impl VectorCollection {
             self.growing_base_id,
         );
         for seg in &self.sealed {
-            let mut results = seg
-                .index
-                .search_admitting(query, top_k, ef, &filter, seg.base_id)?;
+            let mut results = seg.index.search_admitting(
+                query,
+                top_k,
+                breadth.ef_search,
+                &filter,
+                seg.base_id,
+            )?;
             // The graph ranks by its build metric. Rescore with the
             // requested one from the stored FP32 vector.
             for r in &mut results {
-                if let Some(v) = sealed_vector(seg, r.id) {
+                if let Some(v) = sealed_vector_ref(seg, r.id) {
                     r.distance = distance(query, &v, metric);
                 }
             }
@@ -133,7 +140,7 @@ impl VectorCollection {
             if id >= seg.base_id {
                 let local = id - seg.base_id;
                 if (local as usize) < seg.index.len() {
-                    return sealed_vector(seg, local);
+                    return sealed_vector_ref(seg, local).map(std::borrow::Cow::into_owned);
                 }
             }
         }
@@ -227,12 +234,13 @@ mod tests {
         coll.insert_at(vec![1.0, 0.0], s, 10).unwrap();
         coll.insert_at(vec![0.0, 1.0], Surrogate::new(2), 10)
             .unwrap();
-        let req = coll.seal("k").expect("seal");
-        let mut index = crate::hnsw::HnswIndex::with_seed(req.dim, req.params.clone(), 7);
-        for v in &req.vectors {
-            index.insert(v.clone()).unwrap();
-        }
-        assert!(coll.complete_build(req.segment_id, index, crate::test_support::test_memory()));
+        let req = coll
+            .seal("k", crate::test_support::test_memory())
+            .expect("seal");
+        assert!(
+            coll.complete_build(req.segment_id, crate::test_support::build_now(&req))
+                .installed()
+        );
         coll.insert_at(vec![0.9, 0.1], s, 20).unwrap();
 
         coll.compact();
@@ -281,12 +289,13 @@ mod tests {
             coll.insert_at(vector(i), Surrogate::new(i + 1), 10)
                 .unwrap();
         }
-        let req = coll.seal("k").expect("seal");
-        let mut index = crate::hnsw::HnswIndex::with_seed(req.dim, req.params.clone(), 7);
-        for v in &req.vectors {
-            index.insert(v.clone()).unwrap();
-        }
-        assert!(coll.complete_build(req.segment_id, index, crate::test_support::test_memory()));
+        let req = coll
+            .seal("k", crate::test_support::test_memory())
+            .expect("seal");
+        assert!(
+            coll.complete_build(req.segment_id, crate::test_support::build_now(&req))
+                .installed()
+        );
         // Half the rows move: their sealed nodes end at 20.
         for i in (0..ROWS).step_by(2) {
             coll.insert_at(vector(i + ROWS), Surrogate::new(i + 1), 20)

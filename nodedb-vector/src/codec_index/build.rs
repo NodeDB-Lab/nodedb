@@ -55,6 +55,7 @@ impl<C: VectorCodec> HnswCodecIndex<C> {
         // Build empty neighbor lists: one per layer 0..=node_layer.
         let neighbors = vec![Vec::new(); node_layer + 1];
 
+        self.by_id.insert(id, new_idx);
         self.nodes.push(NodeC {
             id,
             deleted: false,
