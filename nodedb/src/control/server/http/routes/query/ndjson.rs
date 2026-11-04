@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use axum::extract::{Query as QueryParams, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 
 use crate::control::gateway::core::QueryContext;
 use crate::control::security::audit::ArcAuditEmitter;
@@ -30,9 +30,10 @@ use super::super::super::auth::{ApiError, AppState, build_request_scope, resolve
 use super::super::super::peer::PeerAddr;
 use super::super::super::transport::ClientTransport;
 use super::super::atomic_statement::{RoutedStatement, route_http_statement};
-use super::super::ndjson_error::{error_line, error_value};
+use super::super::ndjson_error::error_line;
 use super::super::query_stream::{NdjsonBody, ndjson_body_stream, try_open_stream};
 use super::super::result_shape::append_ndjson_payload;
+use super::ndjson_response::{ndjson_response, quota_rejection};
 use super::{DatabaseQueryParam, resolve_database_id};
 
 /// POST /v1/query/stream — execute SQL, return results as NDJSON.
@@ -48,8 +49,6 @@ pub async fn query_ndjson(
     QueryParams(db_param): QueryParams<DatabaseQueryParam>,
     axum::Json(body): axum::Json<crate::control::server::http::types::HttpQueryStreamRequest>,
 ) -> impl IntoResponse {
-    use axum::response::Response;
-
     let (identity, verified_jwt) =
         match resolve_auth_parts(&headers, &state, peer.as_str(), transport.security()).await {
             Ok(auth) => auth,
@@ -74,15 +73,7 @@ pub async fn query_ndjson(
 
     // Quota enforcement — reject before any planning or dispatch.
     if let Err(e) = state.shared.check_tenant_quota(tenant_id) {
-        let body = error_value(&e);
-        return Response::builder()
-            .status(StatusCode::TOO_MANY_REQUESTS)
-            .header("Retry-After", "1")
-            .header("Content-Type", "application/json")
-            .body(axum::body::Body::from(body.to_string()))
-            .unwrap_or_else(|_| {
-                (StatusCode::INTERNAL_SERVER_ERROR, "encoding error").into_response()
-            });
+        return quota_rejection(&e);
     }
 
     let query_ctx = &state.query_ctx;
@@ -170,7 +161,10 @@ pub async fn query_ndjson(
         }
         // A statement that stopped answers one error line, as a task that
         // stopped in the loop below does.
-        Err(error) => return ndjson_response(error_line(&error), rate_limit_headers),
+        Err(error) => {
+            state.shared.database_metrics.record_error(database_id);
+            return ndjson_response(error_line(&error), rate_limit_headers);
+        }
     };
     let mut lease_scope = Some(lease_scope);
 
@@ -221,6 +215,7 @@ pub async fn query_ndjson(
                         }),
                         state: Arc::clone(&state.shared),
                         lease_scope,
+                        database_id,
                         meter_guard: stream_meter_guard,
                     },
                 )))
@@ -242,6 +237,7 @@ pub async fn query_ndjson(
         .into_response();
     };
     let mut ndjson = String::new();
+    let mut failed = false;
     // Checked once, not per task: keeps per-task extraction a no-op when metering is
     // disabled. This fallback fully materializes the body, so it meters like `/v1/query`.
     let metering_enabled = state.shared.metering_config.enabled;
@@ -250,6 +246,7 @@ pub async fn query_ndjson(
         // before the next task dispatches.
         if let Err(revoked) = lease_scope.check_not_revoked() {
             ndjson.push_str(&error_line(&revoked));
+            failed = true;
             break;
         }
         // A spent hard quota refuses the task before it runs; reported as an error
@@ -259,6 +256,7 @@ pub async fn query_ndjson(
             && let Err(e) = admit_quota_for_dispatch(&state.shared, &scope, info)
         {
             ndjson.push_str(&error_line(&e));
+            failed = true;
             continue;
         }
 
@@ -458,22 +456,15 @@ pub async fn query_ndjson(
                     meter_dispatch(&state.shared, &scope, info, Some(task_rows));
                 }
             }
-            Err(e) => ndjson.push_str(&error_line(&e)),
+            Err(e) => {
+                ndjson.push_str(&error_line(&e));
+                failed = true;
+            }
         }
+    }
+    if failed {
+        state.shared.database_metrics.record_error(database_id);
     }
 
     ndjson_response(ndjson, rate_limit_headers)
-}
-
-/// A materialized NDJSON body with the request's rate-limit headers.
-fn ndjson_response(
-    ndjson: String,
-    rate_limit_headers: axum::http::HeaderMap,
-) -> axum::response::Response {
-    let mut response = axum::response::Response::builder()
-        .header("Content-Type", "application/x-ndjson")
-        .body(axum::body::Body::from(ndjson))
-        .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "encoding error").into_response());
-    response.headers_mut().extend(rate_limit_headers);
-    response
 }

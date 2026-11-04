@@ -211,6 +211,12 @@ async fn run_inner(
             _ => message.is_extended_query(),
         };
 
+        let in_session = matches!(
+            socket.state(),
+            PgWireConnectionState::ReadyForQuery
+                | PgWireConnectionState::QueryInProgress
+                | PgWireConnectionState::CopyInProgress(_)
+        );
         let dispatch = AssertUnwindSafe(process_message(
             message,
             &mut socket,
@@ -230,6 +236,10 @@ async fn run_inner(
                 break;
             }
         };
+
+        if in_session {
+            handlers.query.record_request_error();
+        }
 
         // An error in any extended-query message (Parse, Bind, Describe,
         // Execute) inside a transaction block aborts the block, the same

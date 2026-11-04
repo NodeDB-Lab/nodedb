@@ -182,6 +182,10 @@ pub(super) fn build_router(state: AppState) -> Router {
             state.clone(),
             super::startup_gate::startup_gate_middleware,
         ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            super::failure_count::count_failed_requests,
+        ))
         .with_state(state)
 }
 

@@ -168,3 +168,69 @@ async fn tenant_quota_metrics_non_zero_under_load() {
         "at least one tenant should have tracked requests: {body}"
     );
 }
+
+/// POST `sql` to `/v1/query` against `database`. Returns the HTTP status.
+async fn http_query(http_port: u16, database: &str, sql: &str) -> reqwest::StatusCode {
+    reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{http_port}/v1/query"))
+        .header("X-NodeDB-Database", database)
+        .json(&serde_json::json!({ "sql": sql }))
+        .send()
+        .await
+        .expect("POST /v1/query")
+        .status()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn http_query_increments_database_qps_counter() {
+    let (server, db) = TestServer::with_database("metrics_http").await;
+    let label = format!("database=\"{db}\"");
+
+    let before = labeled_metric(
+        &fetch_metrics_body(server.http_port).await,
+        "nodedb_database_qps_total",
+        &label,
+    );
+    let status = http_query(server.http_port, &db, "SELECT 1").await;
+    assert!(status.is_success(), "HTTP query must succeed: {status}");
+    let after = labeled_metric(
+        &fetch_metrics_body(server.http_port).await,
+        "nodedb_database_qps_total",
+        &label,
+    );
+
+    assert_eq!(
+        after,
+        before + 1,
+        "one HTTP query counts exactly once (before={before}, after={after})"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn failing_statement_increments_database_errors_counter() {
+    let (server, db) = TestServer::with_database("metrics_errors").await;
+    let label = format!("database=\"{db}\"");
+
+    let before = labeled_metric(
+        &fetch_metrics_body(server.http_port).await,
+        "nodedb_database_errors_total",
+        &label,
+    );
+    server
+        .expect_error(
+            "SELECT id FROM no_such_collection_for_metrics",
+            "does not exist",
+        )
+        .await;
+    let after = labeled_metric(
+        &fetch_metrics_body(server.http_port).await,
+        "nodedb_database_errors_total",
+        &label,
+    );
+
+    assert_eq!(
+        after,
+        before + 1,
+        "one failed statement counts exactly once (before={before}, after={after})"
+    );
+}

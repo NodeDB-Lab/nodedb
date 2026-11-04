@@ -407,9 +407,6 @@ impl NodeDbPgHandler {
             .get_current_database(session_id)
             .unwrap_or(crate::types::DatabaseId::DEFAULT);
 
-        // Count the request. The registry ignores ids without an entry.
-        self.state.database_metrics.record_qps(database_id);
-
         // Request-admission gate: internal-service exemption, blacklist,
         // account status, then rate limit — run exactly once per statement,
         // right here, before it can branch to `shared::ddl::dispatch` below

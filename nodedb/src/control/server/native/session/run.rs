@@ -13,7 +13,7 @@ use tokio::sync::Notify;
 
 use tracing::{debug, instrument};
 
-use nodedb_types::protocol::{MAX_FRAME_SIZE, NativeResponse};
+use nodedb_types::protocol::{MAX_FRAME_SIZE, NativeResponse, ResponseStatus};
 
 use super::NativeSession;
 use super::codec::{self, FrameFormat};
@@ -310,8 +310,16 @@ impl NativeSession {
                 self.peer_addr.into(),
             );
 
+            let database_id = self
+                .sessions
+                .get_current_database(self.peer_addr)
+                .unwrap_or(crate::types::DatabaseId::DEFAULT);
             match outcome {
                 dispatch::SqlOutcome::Response(mut response) => {
+                    // An authenticated request that fails counts once, here.
+                    if self.identity.is_some() && response.status == ResponseStatus::Error {
+                        self.state.database_metrics.record_error(database_id);
+                    }
                     // Notices raised below the response shaper during this
                     // request (`session::statement_notice`).
                     response
@@ -335,6 +343,7 @@ impl NativeSession {
                         *sql_stream,
                         format,
                         self.state.as_ref(),
+                        database_id,
                     )
                     .await?;
                 }

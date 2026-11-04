@@ -75,6 +75,7 @@ pub(super) async fn emit_sql_stream(
     sql_stream: SqlStream,
     format: FrameFormat,
     state: &crate::control::state::SharedState,
+    database_id: crate::types::DatabaseId,
 ) -> crate::Result<()> {
     let SqlStream {
         seq,
@@ -105,6 +106,7 @@ pub(super) async fn emit_sql_stream(
             Some(Ok(b)) => b,
             Some(Err(e)) => {
                 // Terminal error frame — surfaced in band, not a silent stop.
+                state.database_metrics.record_error(database_id);
                 let err = dispatch::error_to_native(seq, &e);
                 let bytes = codec::encode_response(&err, format)?;
                 codec::write_frame(stream, &bytes).await?;
@@ -277,6 +279,7 @@ mod tests {
                 sql_stream,
                 FrameFormat::MessagePack,
                 state.as_ref(),
+                crate::types::DatabaseId::DEFAULT,
             )
             .await
             .expect("emit");

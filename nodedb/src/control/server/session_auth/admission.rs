@@ -64,11 +64,12 @@ pub fn check_request_admission(
         return Ok(None);
     }
 
+    let database_id: DatabaseId = scope.database_id();
+    super::admitted_database::note(database_id);
     check_blacklist(state, scope.identity(), peer_addr)?;
     scope.auth().check_status()?;
     check_risk(state, scope.identity(), scope.auth(), peer_addr)?;
 
-    let database_id: DatabaseId = scope.database_id();
     let result = check_rate_limit(
         state,
         scope.identity(),
@@ -77,6 +78,7 @@ pub fn check_request_admission(
         database_id,
     )?;
 
+    state.database_metrics.record_qps(database_id);
     Ok(Some(result))
 }
 
@@ -108,9 +110,13 @@ pub fn check_blacklist_and_status(
         return Ok(());
     }
 
+    super::admitted_database::note(scope.database_id());
     check_blacklist(state, scope.identity(), peer_addr)?;
     scope.auth().check_status()?;
-    check_risk(state, scope.identity(), scope.auth(), peer_addr)
+    check_risk(state, scope.identity(), scope.auth(), peer_addr)?;
+
+    state.database_metrics.record_qps(scope.database_id());
+    Ok(())
 }
 
 #[cfg(test)]
@@ -598,5 +604,95 @@ mod tests {
             result.is_ok(),
             "a non-blacklisted, active identity must be admitted with no rate limit involved"
         );
+    }
+
+    // ── Per-database request counting. ────────────────────────────────────
+
+    fn qps(state: &SharedState) -> u64 {
+        state.database_metrics.ensure_database(DatabaseId::DEFAULT);
+        state.database_metrics.qps_total(DatabaseId::DEFAULT)
+    }
+
+    #[tokio::test]
+    async fn admitted_request_counts_once() {
+        let (state, _dir) = test_state().await;
+        let identity = regular_identity(9301, AuthMethod::ScramSha256);
+        let request = scoped(&state, &identity, "127.0.0.1:5432");
+        let before = qps(&state);
+
+        check_request_admission(&state, &request, "point_get").expect("request is admitted");
+
+        assert_eq!(qps(&state), before + 1);
+    }
+
+    #[tokio::test]
+    async fn internal_service_request_is_not_counted() {
+        let (state, _dir) = test_state().await;
+        let identity = internal_service_identity(9302);
+        let request = scoped(&state, &identity, "127.0.0.1:5432");
+        let before = qps(&state);
+
+        check_request_admission(&state, &request, "point_get").expect("exempt request passes");
+        check_blacklist_and_status(&state, &request).expect("exempt request passes");
+
+        assert_eq!(qps(&state), before);
+    }
+
+    #[tokio::test]
+    async fn rate_limited_request_is_not_counted() {
+        let dir = tempfile::tempdir().expect("create test directory");
+        let wal = Arc::new(
+            WalManager::open_for_testing(&dir.path().join("test.wal")).expect("open test WAL"),
+        );
+        let (dispatcher, _data_sides) = Dispatcher::new(1, 64);
+        let state = SharedState::new_with_rate_limit_config(
+            dispatcher,
+            wal,
+            crate::control::security::ratelimit::config::RateLimitConfig {
+                enabled: true,
+                default_qps: 1,
+                default_burst: 1,
+                ..Default::default()
+            },
+        )
+        .expect("construct shared state");
+        let identity = regular_identity(9303, AuthMethod::ScramSha256);
+        let request = scoped(&state, &identity, "127.0.0.1:5432");
+        let before = qps(&state);
+
+        check_request_admission(&state, &request, "point_get").expect("first request is admitted");
+        let refused = check_request_admission(&state, &request, "point_get");
+
+        assert!(refused.is_err(), "second request exceeds the burst of one");
+        assert_eq!(qps(&state), before + 1, "only the admitted request counts");
+    }
+
+    #[tokio::test]
+    async fn blacklist_and_status_door_counts_an_admitted_request_once() {
+        let (state, _dir) = test_state().await;
+        let identity = regular_identity(9304, AuthMethod::ApiKey);
+        let request = scoped(&state, &identity, "127.0.0.1:5432");
+        let before = qps(&state);
+
+        check_blacklist_and_status(&state, &request).expect("request is admitted");
+
+        assert_eq!(qps(&state), before + 1);
+    }
+
+    #[tokio::test]
+    async fn refused_request_is_not_counted_at_either_door() {
+        let (state, _dir) = test_state().await;
+        let identity = regular_identity(9305, AuthMethod::ApiKey);
+        state
+            .blacklist
+            .blacklist_user(&identity.user_id.to_string(), "test ban", "admin", 0)
+            .expect("blacklist user");
+        let request = scoped(&state, &identity, "127.0.0.1:5432");
+        let before = qps(&state);
+
+        assert!(check_request_admission(&state, &request, "point_get").is_err());
+        assert!(check_blacklist_and_status(&state, &request).is_err());
+
+        assert_eq!(qps(&state), before);
     }
 }

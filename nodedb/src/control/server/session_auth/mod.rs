@@ -16,6 +16,7 @@
 //!   exemption, blacklist, account status, and rate limit, in order.
 
 pub mod admission;
+pub mod admitted_database;
 pub mod bearer_jwt;
 pub mod context;
 pub mod guards;
