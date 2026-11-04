@@ -217,6 +217,10 @@ pub(crate) fn details_for_code(code: ErrorCode, message: &str) -> ErrorDetails {
         ErrorCode::DATABASE_QUOTA_EXCEEDED => ErrorDetails::QuotaExceeded {
             scope: String::new(),
         },
+        // Shares `TENANT_QUOTA_EXCEEDED`'s shape; not itself canonical.
+        ErrorCode::STORAGE_QUOTA_EXCEEDED => ErrorDetails::QuotaExceeded {
+            scope: String::new(),
+        },
         // No dedicated variant: a pre-code-field peer sends `0`, and some
         // SQLSTATE-only conditions never reach the wire as a numeric code.
         _ => ErrorDetails::Internal {

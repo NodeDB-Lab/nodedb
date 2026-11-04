@@ -373,6 +373,21 @@ impl NodeDbError {
         }
     }
 
+    /// Write refused because `scope` (a database or tenant) stores `used`
+    /// bytes against a `max_storage_bytes` limit of `limit`.
+    pub fn storage_quota_exceeded(scope: impl Into<String>, used: u64, limit: u64) -> Self {
+        let scope = scope.into();
+        Self {
+            code: ErrorCode::STORAGE_QUOTA_EXCEEDED,
+            message: format!(
+                "storage quota exceeded for {scope}: {used} bytes stored, limit {limit} bytes. \
+                 Delete data or raise max_storage_bytes"
+            ),
+            details: ErrorDetails::QuotaExceeded { scope },
+            cause: None,
+        }
+    }
+
     /// Global resource pressure; server cannot accept the request.
     pub fn server_overload(detail: impl fmt::Display) -> Self {
         Self {

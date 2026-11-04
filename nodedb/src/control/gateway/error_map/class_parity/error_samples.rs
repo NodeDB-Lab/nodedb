@@ -387,6 +387,11 @@ pub(crate) fn error_samples() -> Vec<crate::Error> {
             depth: 20,
             limit: 10,
         },
+        E::StorageQuotaExceeded {
+            scope: "database 1".into(),
+            used: 2048,
+            limit: 1024,
+        },
         E::RoleInheritanceCycle {
             child: "a".into(),
             parent: "b".into(),

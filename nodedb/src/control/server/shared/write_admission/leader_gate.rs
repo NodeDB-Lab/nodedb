@@ -41,10 +41,12 @@ use crate::types::VShardId;
 use nodedb_types::QualifiedCollection;
 
 use super::admission_keys::collection_admission_keys;
+use super::entry_storage::entry_adds_storage;
 use super::gate::{
     WriteAdmission, WriteAdmissionGuard, WriteTarget, admit_request, admit_routed, lock_manager_of,
 };
 use super::route::calvin_route_keeps;
+use super::storage_quota::check_storage_quota;
 use super::tickets::AdmissionTicket;
 
 /// The host side of [`DataProposeGate`]. Weak: `SharedState` outlives the
@@ -80,6 +82,15 @@ impl DataProposeGate for LeaderWriteGate {
             return Ok(Admitted::default());
         };
         admit_redo_stream(&state, &entry, deadline).map_err(gate_error)?;
+        // Before the reroute to the sequencer and before any key is held.
+        check_storage_quota(
+            &state,
+            crate::types::DatabaseId::new(entry.database_id),
+            crate::types::TenantId::new(entry.tenant_id),
+            crate::event::EventSource::from(entry.event_source),
+            || entry_adds_storage(&entry),
+        )
+        .map_err(gate_error)?;
         let hold: Option<Box<dyn ProposeHold>> =
             match admit_entry(&state, vshard, &entry).map_err(gate_error)? {
                 WriteAdmission::ExemptRead | WriteAdmission::FastPath { guard: None } => None,
@@ -221,7 +232,7 @@ impl ProposeHold for UnscheduledLanding {
 }
 
 /// What the gate locks for one replicated entry.
-enum EntryScope {
+pub(super) enum EntryScope {
     /// The entry writes no row, or its Calvin scheduler holds its locks.
     Exempt,
     /// The entry writes these collections whole.
@@ -290,7 +301,7 @@ pub(crate) fn admit_entry(
 
 /// The lock scope of `write`, an entry of `database_id` that names
 /// `incarnations`.
-fn entry_scope(
+pub(super) fn entry_scope(
     write: &ReplicatedWrite,
     incarnations: &[crate::control::wal_replication::CollectionIncarnation],
     database_id: crate::types::DatabaseId,

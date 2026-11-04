@@ -358,6 +358,9 @@ pub(crate) fn classify(e: &Error) -> NodeDbError {
         Error::TenantGraphDepthExceeded { depth, limit } => {
             NodeDbError::tenant_graph_depth_exceeded(*depth, *limit)
         }
+        Error::StorageQuotaExceeded { scope, used, limit } => {
+            NodeDbError::storage_quota_exceeded(scope.clone(), *used, *limit)
+        }
         Error::RoleInheritanceCycle { child, parent } => NodeDbError::bad_request(format!(
             "role inheritance cycle: granting '{parent}' as parent of '{child}' would create a cycle"
         )),

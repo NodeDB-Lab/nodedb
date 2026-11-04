@@ -469,6 +469,7 @@ impl From<Error> for nodedb_cluster::rpc_codec::TypedClusterError {
             | Error::OidcNoDefaultDatabase { .. }
             | Error::TenantVectorDimExceeded { .. }
             | Error::TenantGraphDepthExceeded { .. }
+            | Error::StorageQuotaExceeded { .. }
             | Error::RoleInheritanceCycle { .. }
             | Error::RoleInheritanceDepthExceeded { .. }
             | Error::OllpExhausted { .. }

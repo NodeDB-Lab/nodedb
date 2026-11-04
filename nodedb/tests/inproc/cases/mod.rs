@@ -207,6 +207,7 @@ mod startup_gate_pgwire;
 mod startup_gate_resp;
 mod startup_ordering;
 mod storage_bytes_sampler;
+mod storage_quota_admission;
 mod surrogate_pk;
 mod surrogate_round_trip;
 mod surrogate_wal_recovery;

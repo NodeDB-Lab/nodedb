@@ -208,6 +208,7 @@ pub(crate) async fn enqueue_write(
         vshard_id,
         plan: &plan,
         may_route: calvin_route_keeps(&plan, event_source, 0),
+        event_source,
     };
     let admitted = match admit_write(shared, target, ordering, deadline).await {
         Ok(admitted) => admitted,

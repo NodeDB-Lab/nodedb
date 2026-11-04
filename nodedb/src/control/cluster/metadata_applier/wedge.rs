@@ -181,6 +181,7 @@ pub fn classify(error: &crate::Error) -> ApplyFailureClass {
         | crate::Error::OidcNoDefaultDatabase { .. }
         | crate::Error::TenantVectorDimExceeded { .. }
         | crate::Error::TenantGraphDepthExceeded { .. }
+        | crate::Error::StorageQuotaExceeded { .. }
         | crate::Error::RoleInheritanceCycle { .. }
         | crate::Error::RoleInheritanceDepthExceeded { .. }
         | crate::Error::OllpExhausted { .. }

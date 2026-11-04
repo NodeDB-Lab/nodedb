@@ -80,6 +80,8 @@ pub(crate) fn numeric_code_to_sqlstate(code: nodedb_types::error::ErrorCode) -> 
         Ec::TENANT_VECTOR_DIM_EXCEEDED | Ec::TENANT_GRAPH_DEPTH_EXCEEDED => {
             sqlstate::QUOTA_EXCEEDED
         }
+        // Mirrors the `StorageQuotaExceeded` arm.
+        Ec::STORAGE_QUOTA_EXCEEDED => sqlstate::DISK_FULL,
         // Mirrors the `MirrorReadOnly` arm.
         Ec::MIRROR_READ_ONLY => sqlstate::READ_ONLY_SQL_TRANSACTION,
         // Mirrors the `StaleReadNotLeader` arm.

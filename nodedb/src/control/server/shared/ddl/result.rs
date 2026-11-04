@@ -300,6 +300,7 @@ pub fn code_for_sqlstate(sqlstate_str: &str) -> ErrorCode {
         sqlstate::READ_ONLY_SQL_TRANSACTION => ErrorCode::MIRROR_READ_ONLY,
         sqlstate::DEPENDENT_OBJECTS_STILL_EXIST => ErrorCode::DEPENDENT_OBJECTS_EXIST,
         sqlstate::TOO_MANY_CONNECTIONS => ErrorCode::RATE_EXCEEDED,
+        sqlstate::DISK_FULL => ErrorCode::STORAGE_QUOTA_EXCEEDED,
         sqlstate::OUT_OF_MEMORY => ErrorCode::MEMORY_EXHAUSTED,
         sqlstate::SERVER_OVERLOAD => ErrorCode::SERVER_OVERLOAD,
         sqlstate::DATABASE_DROPPED => ErrorCode::NOT_LEADER,

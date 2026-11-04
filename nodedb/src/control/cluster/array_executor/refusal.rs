@@ -175,6 +175,7 @@ pub(super) fn execution_error(context: &str, error: crate::Error) -> ClusterErro
         | crate::Error::OidcNoDefaultDatabase { .. }
         | crate::Error::TenantVectorDimExceeded { .. }
         | crate::Error::TenantGraphDepthExceeded { .. }
+        | crate::Error::StorageQuotaExceeded { .. }
         | crate::Error::RoleInheritanceCycle { .. }
         | crate::Error::RoleInheritanceDepthExceeded { .. }
         | crate::Error::OllpExhausted { .. }

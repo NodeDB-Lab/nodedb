@@ -911,6 +911,10 @@ pub enum ReplicatedWrite {
         /// and the written keys at, before it installs. `None` for a
         /// transaction with no snapshot and no read.
         snapshot_ordinal: Option<i64>,
+        /// Whether the transaction can add stored bytes, decided by its
+        /// proposer from the buffered write plans. The leader's storage-quota
+        /// gate reads it, so a delete-only transaction passes at any size.
+        adds_storage: bool,
     },
     /// A backup's consistent cut through this group's log. It writes no
     /// data. Every entry before it applies before the backup snapshots, and

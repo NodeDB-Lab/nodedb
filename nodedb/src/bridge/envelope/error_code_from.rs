@@ -246,7 +246,8 @@ impl From<crate::Error> for ErrorCode {
             // Class `53`: a configured resource ceiling.
             crate::Error::QuotaOvercommit { .. }
             | crate::Error::TenantVectorDimExceeded { .. }
-            | crate::Error::TenantGraphDepthExceeded { .. } => Self::ResourcesExhausted,
+            | crate::Error::TenantGraphDepthExceeded { .. }
+            | crate::Error::StorageQuotaExceeded { .. } => Self::ResourcesExhausted,
             // Class `28` has no Data-Plane code. The nearest is the access
             // refusal, which keeps it a client error the client cannot retry.
             e @ (crate::Error::BackupKeyMismatch | crate::Error::SessionTokenExpired) => {

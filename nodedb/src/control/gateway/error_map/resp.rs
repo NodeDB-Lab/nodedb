@@ -158,6 +158,7 @@ impl GatewayErrorMap {
             | Error::OidcNoDefaultDatabase { .. }
             | Error::TenantVectorDimExceeded { .. }
             | Error::TenantGraphDepthExceeded { .. }
+            | Error::StorageQuotaExceeded { .. }
             | Error::RoleInheritanceCycle { .. }
             | Error::RoleInheritanceDepthExceeded { .. }
             | Error::OllpExhausted { .. }

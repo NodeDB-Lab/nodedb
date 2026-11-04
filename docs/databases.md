@@ -137,6 +137,17 @@ Quota fields:
 - `priority_class` — `'critical'`, `'standard'`, `'bulk'` (affects WAL group commit order and SPSC scheduling fairness)
 - `maintenance_cpu_pct` — max CPU percentage for background tasks like compaction (default 25%)
 
+### Storage Limit Enforcement
+
+NodeDB checks `max_storage_bytes` at write admission, against the cluster total of the database's stored bytes. The total refreshes once per storage sample period.
+
+- A write that can add bytes fails with SQLSTATE `53100` (HTTP 507) when the total is at or over the limit. INSERT, UPSERT, and UPDATE are refused.
+- DELETE, TRUNCATE, DROP, purge, compaction, retention, and internal maintenance writes stay allowed, so an over-limit database can shrink.
+- A burst can overshoot the limit by one period's writes, because the total lags the stored bytes.
+- Before the first complete total after boot, writes pass.
+- A tenant `max_storage_bytes` limit applies the same way to the tenant's total over all databases. Each limit is checked on its own.
+- To recover, delete data or raise `max_storage_bytes`. Writes resume after the next sample period.
+
 ### Tenant Quotas
 
 Tenants can have their own sub-quotas within a database:
