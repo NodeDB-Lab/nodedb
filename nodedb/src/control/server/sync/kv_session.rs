@@ -48,11 +48,11 @@ impl SyncSession {
     ) -> Option<SyncFrame> {
         self.last_activity = std::time::Instant::now();
 
-        if !self.authenticated {
+        if let Some(reason) = self.entry_refusal(&msg.collection) {
             return kv_ack(
                 msg,
                 KvPushOutcome::Refused {
-                    reason: "unauthenticated".to_string(),
+                    reason,
                     mark_moved: false,
                 },
             );

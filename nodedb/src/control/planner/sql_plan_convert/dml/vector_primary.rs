@@ -85,13 +85,13 @@ fn task(tenant_id: TenantId, r: &Routing<'_>, ctx: &ConvertContext, op: VectorOp
 /// carries no declaration.
 fn declared_pk(
     ctx: &ConvertContext,
-    collection: &str,
+    key: CollectionKey<'_>,
     primary_key: &str,
 ) -> crate::Result<Option<String>> {
     if is_auto_rowid_pk(primary_key) {
         Ok(None)
     } else {
-        declared_primary_key_name(ctx, collection)
+        declared_primary_key_name(ctx, key)
     }
 }
 
@@ -126,7 +126,7 @@ pub(in super::super) fn convert_vector_primary_insert(
     } = args;
     let r = routing(ctx, collection);
     let collection = r.collection.as_str();
-    let declared = declared_pk(ctx, collection, primary_key)?;
+    let declared = declared_pk(ctx, r.key, primary_key)?;
     let update_values = if on_conflict_updates.is_empty() {
         Vec::new()
     } else {

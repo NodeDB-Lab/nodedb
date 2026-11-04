@@ -236,7 +236,10 @@ impl CoreLoop {
                 self.checkpoint_coordinator.mark_dirty("vector", 1);
                 // Record this write, so the newest-ordinal cache commit
                 // validation reads holds this insert.
-                self.note_surrogate_write(task, tid, collection, surrogate.as_u32());
+                if let Err(e) = self.note_surrogate_write(task, tid, collection, surrogate.as_u32())
+                {
+                    return self.response_error(task, e);
+                }
                 self.response_ok(task)
             }
             Err(err) => self.response_error(task, err),
@@ -366,7 +369,11 @@ impl CoreLoop {
                     // surrogate (a superset of `execute_vector_delete`'s
                     // node-id-scoped floor-only record below — correct and
                     // more precise since the surrogate identity is known here).
-                    self.note_surrogate_write(task, tid, collection, surrogate.as_u32());
+                    if let Err(e) =
+                        self.note_surrogate_write(task, tid, collection, surrogate.as_u32())
+                    {
+                        return self.response_error(task, e);
+                    }
                 }
                 response
             }

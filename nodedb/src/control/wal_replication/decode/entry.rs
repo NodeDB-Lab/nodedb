@@ -122,7 +122,7 @@ fn to_physical_plan(
         | ReplicatedWrite::DocumentResolvedWrite { .. }
         | ReplicatedWrite::MergeApply { .. }
         | ReplicatedWrite::UpdateFromJoinApply { .. } => {
-            Ok((entry_document::decode_arm(write)?, None))
+            Ok((entry_document::decode_arm(ctx, write)?, None))
         }
         // The full `Vector*` variant family dispatches to one helper — see
         // `vector::decode_arm`'s doc.
@@ -141,7 +141,7 @@ fn to_physical_plan(
         | ReplicatedWrite::VectorDirectTruncate { .. }
         | ReplicatedWrite::VectorDirectUpdate { .. }
         | ReplicatedWrite::VectorResolvedDirectWrite { .. } => {
-            Ok((vector::decode_arm(write)?, None))
+            Ok((vector::decode_arm(ctx, write)?, None))
         }
         // CRDT family (`PhysicalPlan::Crdt`).
         ReplicatedWrite::CrdtApply { .. }
@@ -153,14 +153,18 @@ fn to_physical_plan(
         | ReplicatedWrite::CrdtListMove { .. }
         | ReplicatedWrite::CrdtDocUpsert { .. }
         | ReplicatedWrite::CrdtDocDelete { .. }
-        | ReplicatedWrite::ConstraintChange { .. } => Ok((entry_crdt::decode_arm(write)?, None)),
+        | ReplicatedWrite::ConstraintChange { .. } => {
+            Ok((entry_crdt::decode_arm(ctx, write)?, None))
+        }
         // Graph family (`PhysicalPlan::Graph`).
         ReplicatedWrite::EdgePut { .. }
         | ReplicatedWrite::EdgeDelete { .. }
         | ReplicatedWrite::SetNodeLabels { .. }
         | ReplicatedWrite::RemoveNodeLabels { .. }
         | ReplicatedWrite::EdgePutBatch { .. }
-        | ReplicatedWrite::EdgeDeleteBatch { .. } => Ok((entry_graph::decode_arm(write)?, None)),
+        | ReplicatedWrite::EdgeDeleteBatch { .. } => {
+            Ok((entry_graph::decode_arm(ctx.database_id, write)?, None))
+        }
         // KV family: a TTL-bearing write carries `resolved_now_ms`.
         ReplicatedWrite::KvTruncate { .. }
         | ReplicatedWrite::KvPut { .. }
@@ -181,14 +185,14 @@ fn to_physical_plan(
         | ReplicatedWrite::KvFieldSet { .. }
         | ReplicatedWrite::KvTransfer { .. }
         | ReplicatedWrite::KvTransferItem { .. }
-        | ReplicatedWrite::KvResolvedWrite { .. } => entry_kv::decode_arm(write),
+        | ReplicatedWrite::KvResolvedWrite { .. } => entry_kv::decode_arm(ctx, write),
         // A timeseries ingest carries the proposer's instant for its untimed
         // rows, installed on every replica as `resolved_now_ms`.
         ReplicatedWrite::TimeseriesIngest {
             default_timestamp_ms,
             ..
         } => Ok((
-            entry_columnar_family::decode_arm(write)?,
+            entry_columnar_family::decode_arm(ctx, write)?,
             u64::try_from(*default_timestamp_ms).ok(),
         )),
         // Columnar-storage family + overlay sync engines.
@@ -202,7 +206,7 @@ fn to_physical_plan(
         | ReplicatedWrite::ColumnarTruncate { .. }
         | ReplicatedWrite::TimeseriesTruncate { .. }
         | ReplicatedWrite::TimeseriesAggregateRefresh { .. } => {
-            Ok((entry_columnar_family::decode_arm(write)?, None))
+            Ok((entry_columnar_family::decode_arm(ctx, write)?, None))
         }
         // Raft-native array cell writes — the cluster SQL DML array path.
         // Distinct from the Lite-sync `ArrayOp` CRDT variant, intercepted below.

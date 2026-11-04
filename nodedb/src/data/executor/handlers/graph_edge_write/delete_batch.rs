@@ -136,14 +136,17 @@ impl CoreLoop {
                 .mark_dirty("sparse", edges.len());
         }
         for edge in edges {
-            self.note_edge_write(
+            if let Err(e) = self.note_edge_write(
                 task,
                 tid,
                 edge.collection.as_str(),
                 &edge.src_id,
                 &edge.label,
                 &edge.dst_id,
-            );
+            ) {
+                let code = refusal_after_rows(write_set.len() as u64, e);
+                return self.refusal_with_landed_rows(task, code, write_set);
+            }
             // CDC: one Delete event per edge on the edge's own collection.
             self.emit_graph_edge_event(
                 task,

@@ -7,6 +7,7 @@
 
 use nodedb_physical::kv_atomic::compute;
 use nodedb_physical::physical_plan::{KvCounterShape, KvResolveOutcome};
+use nodedb_types::DatabaseId;
 
 use super::context::{ResolveResult, ResolvedPut, expiry_from_ttl, one, put_mutation};
 use crate::bridge::envelope::ErrorCode;
@@ -72,15 +73,18 @@ impl CoreLoop {
         let response_payload =
             response_codec::encode_json_as_msgpack(&serde_json::json!({ "value": new_value }))?;
         Ok(one(
-            put_mutation(ResolvedPut {
-                collection,
-                key,
-                value: new_bytes,
-                ttl_ms,
-                expire_at_ms,
-                surrogate,
-                precondition: current,
-            }),
+            put_mutation(
+                DatabaseId::new(did),
+                ResolvedPut {
+                    collection,
+                    key,
+                    value: new_bytes,
+                    ttl_ms,
+                    expire_at_ms,
+                    surrogate,
+                    precondition: current,
+                },
+            )?,
             response_payload,
         ))
     }
@@ -131,15 +135,18 @@ impl CoreLoop {
         let response_payload =
             response_codec::encode_json_as_msgpack(&incr_float_reply(new_value, &new_bytes))?;
         Ok(one(
-            put_mutation(ResolvedPut {
-                collection,
-                key,
-                value: new_bytes,
-                ttl_ms: 0,
-                expire_at_ms: self.kv_resolve_preserved_expiry(did, tid, collection, key),
-                surrogate,
-                precondition: current,
-            }),
+            put_mutation(
+                DatabaseId::new(did),
+                ResolvedPut {
+                    collection,
+                    key,
+                    value: new_bytes,
+                    ttl_ms: 0,
+                    expire_at_ms: self.kv_resolve_preserved_expiry(did, tid, collection, key),
+                    surrogate,
+                    precondition: current,
+                },
+            )?,
             response_payload,
         ))
     }
@@ -200,15 +207,18 @@ impl CoreLoop {
             });
         }
         Ok(one(
-            put_mutation(ResolvedPut {
-                collection,
-                key,
-                value: write_bytes,
-                ttl_ms: 0,
-                expire_at_ms: self.kv_resolve_preserved_expiry(did, tid, collection, key),
-                surrogate,
-                precondition: current,
-            }),
+            put_mutation(
+                DatabaseId::new(did),
+                ResolvedPut {
+                    collection,
+                    key,
+                    value: write_bytes,
+                    ttl_ms: 0,
+                    expire_at_ms: self.kv_resolve_preserved_expiry(did, tid, collection, key),
+                    surrogate,
+                    precondition: current,
+                },
+            )?,
             response_payload,
         ))
     }
@@ -265,15 +275,18 @@ impl CoreLoop {
         )?;
 
         Ok(one(
-            put_mutation(ResolvedPut {
-                collection,
-                key,
-                value: write_bytes,
-                ttl_ms: 0,
-                expire_at_ms: self.kv_resolve_preserved_expiry(did, tid, collection, key),
-                surrogate,
-                precondition: old,
-            }),
+            put_mutation(
+                DatabaseId::new(did),
+                ResolvedPut {
+                    collection,
+                    key,
+                    value: write_bytes,
+                    ttl_ms: 0,
+                    expire_at_ms: self.kv_resolve_preserved_expiry(did, tid, collection, key),
+                    surrogate,
+                    precondition: old,
+                },
+            )?,
             response_payload,
         ))
     }

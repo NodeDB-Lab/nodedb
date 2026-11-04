@@ -8,8 +8,8 @@
 use nodedb_physical::physical_plan::{
     DocumentResolveOutcome, DocumentResolvedMutation, ResolvedSumTarget, ReturningSpec, StorageMode,
 };
-use nodedb_types::Surrogate;
 use nodedb_types::columnar::StrictSchema;
+use nodedb_types::{DatabaseId, Surrogate};
 
 use crate::bridge::envelope::ErrorCode;
 use crate::data::executor::core_loop::CoreLoop;
@@ -91,34 +91,44 @@ pub(super) struct ResolvedPut<'a> {
 }
 
 /// One decided row write.
-pub(super) fn put_mutation(put: ResolvedPut<'_>) -> DocumentResolvedMutation {
-    DocumentResolvedMutation::Put {
-        collection: nodedb_types::QualifiedCollection::from_stored(put.collection.to_owned()),
+pub(super) fn put_mutation(
+    database_id: DatabaseId,
+    put: ResolvedPut<'_>,
+) -> Result<DocumentResolvedMutation, ErrorCode> {
+    let collection =
+        nodedb_types::QualifiedCollection::from_stored(database_id, put.collection.to_owned())
+            .map_err(|e| ErrorCode::from(crate::Error::from(e)))?;
+    Ok(DocumentResolvedMutation::Put {
+        collection,
         document_id: put.document_id.to_owned(),
         surrogate: put.surrogate,
         pk_bytes: put.document_id.as_bytes().to_vec(),
         value: put.value,
         precondition: put.precondition,
         resolved_sum_targets: put.resolved_sum_targets.to_vec(),
-    }
+    })
 }
 
 /// One decided row removal.
 pub(super) fn delete_mutation(
+    database_id: DatabaseId,
     collection: &str,
     document_id: &str,
     surrogate: Surrogate,
     precondition: Option<Vec<u8>>,
     resolved_sum_targets: &[ResolvedSumTarget],
-) -> DocumentResolvedMutation {
-    DocumentResolvedMutation::Delete {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+) -> Result<DocumentResolvedMutation, ErrorCode> {
+    let collection =
+        nodedb_types::QualifiedCollection::from_stored(database_id, collection.to_owned())
+            .map_err(|e| ErrorCode::from(crate::Error::from(e)))?;
+    Ok(DocumentResolvedMutation::Delete {
+        collection,
         document_id: document_id.to_owned(),
         surrogate,
         pk_bytes: document_id.as_bytes().to_vec(),
         precondition,
         resolved_sum_targets: resolved_sum_targets.to_vec(),
-    }
+    })
 }
 
 /// The storage key for a row identity — the form every document reader uses.

@@ -174,12 +174,16 @@ impl CoreLoop {
                 detail: format!("restore resolve: '{collection}' names no collection key"),
             });
         };
+        let qualified = nodedb_types::QualifiedCollection::from_stored(
+            scope.database_id,
+            collection.to_string(),
+        )?;
         let task = Self::replay_task(
             tid,
             scope.database_id,
             vshard,
             PhysicalPlan::Timeseries(TimeseriesOp::Ingest {
-                collection: nodedb_types::QualifiedCollection::from_stored(collection.to_string()),
+                collection: qualified,
                 payload: Vec::new(),
                 format: RESOLVED_INGEST_FORMAT.into(),
                 wal_lsn: None,

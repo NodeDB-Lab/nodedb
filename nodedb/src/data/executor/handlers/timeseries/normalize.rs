@@ -339,6 +339,7 @@ mod tests {
         use crate::engine::timeseries::ilp_ingest::{
             ensure_system_column, line_row, row_series_key,
         };
+        use nodedb_types::DatabaseId;
         use nodedb_types::timeseries::SeriesKey;
 
         let rows = vec![vec![
@@ -371,7 +372,13 @@ mod tests {
                 .iter()
                 .map(|line| {
                     let (_, values) = line_row(&schema, line, 0, None);
-                    row_series_key(line.measurement.as_ref(), &schema, &values)
+                    row_series_key(
+                        DatabaseId::DEFAULT,
+                        line.measurement.as_ref(),
+                        &schema,
+                        &values,
+                    )
+                    .expect("bare measurement")
                 })
                 .collect();
             assert_eq!(keys.len(), 3);

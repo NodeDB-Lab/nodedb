@@ -75,7 +75,9 @@ impl CoreLoop {
         ) {
             Ok(()) => {
                 // Note this committed FTS write.
-                self.note_collection_write(task, collection);
+                if let Err(e) = self.note_collection_write(task, collection) {
+                    return self.response_error(task, e);
+                }
                 if let Some(prov) = provenance {
                     self.sync_commit(prov);
                     return self.sync_ack_response(task, AckStatus::Applied, prov.seq);
@@ -144,7 +146,9 @@ impl CoreLoop {
         ) {
             Ok(()) => {
                 // Note this committed FTS delete.
-                self.note_collection_write(task, collection);
+                if let Err(e) = self.note_collection_write(task, collection) {
+                    return self.response_error(task, e);
+                }
                 if let Some(prov) = provenance {
                     self.sync_commit(prov);
                     return self.sync_ack_response(task, AckStatus::Applied, prov.seq);

@@ -402,7 +402,10 @@ async fn scan_source_page(
     system_as_of_ms: Option<i64>,
 ) -> crate::Result<ScanPage> {
     let plan = PhysicalPlan::Columnar(ColumnarOp::MaterializeScan {
-        collection: nodedb_types::QualifiedCollection::from_stored(source_qualified.to_string()),
+        collection: nodedb_types::QualifiedCollection::from_stored(
+            source_db_id,
+            source_qualified.to_string(),
+        )?,
         cursor: cursor.to_vec(),
         count: SCAN_PAGE,
         system_as_of_ms,

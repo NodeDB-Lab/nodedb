@@ -105,12 +105,13 @@ impl NewestOrdinals {
     }
 }
 
-/// The vShard `collection` of database `db` lives on. A name without its
-/// database's qualifier is a bare name.
-pub(in crate::data::executor) fn collection_vshard(db: DatabaseId, collection: &str) -> VShardId {
-    nodedb_types::CollectionKey::from_qualified_str(db, collection)
-        .unwrap_or_else(|_| nodedb_types::CollectionKey::from_bare(db, collection))
-        .vshard()
+/// The vShard `collection` of database `db` lives on. `collection` is the
+/// stored name; a name that does not match `db` is an error.
+pub(in crate::data::executor) fn collection_vshard(
+    db: DatabaseId,
+    collection: &str,
+) -> crate::Result<VShardId> {
+    Ok(nodedb_types::CollectionKey::from_qualified_str(db, collection)?.vshard())
 }
 
 #[cfg(test)]
@@ -167,7 +168,7 @@ mod tests {
     #[test]
     fn a_qualified_name_names_its_database() {
         assert_eq!(
-            collection_vshard(DatabaseId::new(7), "7/orders"),
+            collection_vshard(DatabaseId::new(7), "7/orders").unwrap(),
             nodedb_types::CollectionKey::from_bare(DatabaseId::new(7), "orders").vshard()
         );
     }

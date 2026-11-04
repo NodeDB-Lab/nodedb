@@ -85,7 +85,10 @@ pub async fn append_implicit_edge_tasks(
     for edge in &edges {
         if !marked.contains(&edge.collection.as_str()) {
             marked.push(edge.collection.as_str());
-            mark_collection_edge_bearing(state, database_id, tenant_id, &edge.collection).await?;
+            // `edge.collection` is the plan's database-qualified name.
+            let key =
+                nodedb_types::CollectionKey::from_qualified_str(database_id, &edge.collection)?;
+            mark_collection_edge_bearing(state, key, tenant_id).await?;
         }
     }
 
@@ -155,7 +158,10 @@ pub async fn append_implicit_edge_tasks(
             vshard_id: vsrc,
             database_id,
             plan: PhysicalPlan::Graph(GraphOp::EdgePut {
-                collection: nodedb_types::QualifiedCollection::from_stored(edge.collection),
+                collection: nodedb_types::QualifiedCollection::from_stored(
+                    database_id,
+                    edge.collection,
+                )?,
                 src_id: edge.src,
                 label: edge.label,
                 dst_id: edge.dst,

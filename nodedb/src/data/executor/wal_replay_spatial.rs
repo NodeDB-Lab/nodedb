@@ -244,14 +244,21 @@ impl CoreLoop {
                     skipped += 1;
                     continue;
                 };
+                let Some(qualified) = self.replay_qualified(
+                    "spatial",
+                    record_lsn,
+                    database_id,
+                    payload.collection.clone(),
+                ) else {
+                    skipped += 1;
+                    continue;
+                };
                 let task = Self::replay_spatial_task(
                     nodedb_types::TenantId::new(tenant_id),
                     database_id,
                     vshard,
                     PhysicalPlan::Spatial(SpatialOp::Insert {
-                        collection: nodedb_types::QualifiedCollection::from_stored(
-                            payload.collection.clone(),
-                        ),
+                        collection: qualified,
                         field: payload.field.clone(),
                         surrogate,
                         geometry: geometry.clone(),
@@ -350,14 +357,21 @@ impl CoreLoop {
                     skipped += 1;
                     continue;
                 };
+                let Some(qualified) = self.replay_qualified(
+                    "spatial",
+                    record_lsn,
+                    database_id,
+                    payload.collection.clone(),
+                ) else {
+                    skipped += 1;
+                    continue;
+                };
                 let task = Self::replay_spatial_task(
                     nodedb_types::TenantId::new(tenant_id),
                     database_id,
                     vshard,
                     PhysicalPlan::Spatial(SpatialOp::Delete {
-                        collection: nodedb_types::QualifiedCollection::from_stored(
-                            payload.collection.clone(),
-                        ),
+                        collection: qualified,
                         field: payload.field.clone(),
                         surrogate,
                         provenance: Some(prov.clone()),

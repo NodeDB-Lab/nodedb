@@ -235,8 +235,10 @@ impl CoreLoop {
             .mark_dirty("columnar", accepted as usize);
 
         // Note this committed columnar write.
-        if accepted > 0 {
-            self.note_collection_write(task, collection);
+        if accepted > 0
+            && let Err(e) = self.note_collection_write(task, collection)
+        {
+            return self.response_error(task, e);
         }
 
         // On the sync path, advance the HWM and return SyncAckResult payload.

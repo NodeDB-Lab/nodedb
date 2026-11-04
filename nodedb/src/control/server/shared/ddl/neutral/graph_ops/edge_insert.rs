@@ -10,7 +10,7 @@
 use nodedb_physical::physical_plan::GraphOp;
 use nodedb_sql::ddl_ast::GraphEdgeSpec;
 use nodedb_types::protocol::EdgeWrite;
-use nodedb_types::{QualifiedCollection, Surrogate};
+use nodedb_types::{CollectionKey, QualifiedCollection, Surrogate};
 
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::shared::session::DmlTxnCtx;
@@ -110,9 +110,8 @@ pub async fn insert_edges(
     // OLLP instead of the fast path. Idempotent.
     crate::control::planner::implicit_edges::mark_collection_edge_bearing(
         state,
-        database_id,
+        CollectionKey::from_bare(database_id, &collection),
         tenant_id,
-        &collection,
     )
     .await
     .map_err(|e| DdlError::from_error(&e))?;

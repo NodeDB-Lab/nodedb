@@ -48,7 +48,7 @@ use nodedb_physical::physical_plan::{DocumentOp, PhysicalPlan, ResolvedSumTarget
 use nodedb_physical::physical_task::PhysicalTask;
 
 use super::gate::{period_lock_gated_collection, push_resolved};
-use super::lookup::{PeriodLockScope, lookup_period_surrogate, strip_db_prefix};
+use super::lookup::{PeriodLockScope, lookup_period_surrogate};
 use super::point_update::resolve_update_period_values;
 use super::predicate::{PeriodLockEffect, resolve_predicate_period_values};
 use super::singular::{resolve_batch_period_values, singular_period_value};
@@ -90,7 +90,9 @@ pub async fn resolve_period_lock_targets(
             continue;
         };
         let collection = collection.to_string();
-        let source = strip_db_prefix(database_id, &collection).to_string();
+        let source = nodedb_types::CollectionKey::from_qualified_str(database_id, &collection)?
+            .name()
+            .to_owned();
         let Some(def) = catalog
             .get_collection(database_id, tenant_id.as_u64(), &source)?
             .and_then(|coll| coll.period_lock)
@@ -239,7 +241,8 @@ pub async fn resolve_period_lock_targets_for_bodies(
     trace_id: TraceId,
 ) -> crate::Result<Vec<ResolvedSumTarget>> {
     let catalog = state.credentials.catalog();
-    let source = strip_db_prefix(database_id, target_collection);
+    let source =
+        nodedb_types::CollectionKey::from_qualified_str(database_id, target_collection)?.name();
     let Some(def) = catalog
         .get_collection(database_id, tenant_id.as_u64(), source)?
         .and_then(|coll| coll.period_lock)
@@ -262,7 +265,8 @@ pub fn target_declares_period_lock(
     database_id: DatabaseId,
 ) -> crate::Result<bool> {
     let catalog = state.credentials.catalog();
-    let source = strip_db_prefix(database_id, target_collection);
+    let source =
+        nodedb_types::CollectionKey::from_qualified_str(database_id, target_collection)?.name();
     Ok(catalog
         .get_collection(database_id, tenant_id.as_u64(), source)?
         .and_then(|coll| coll.period_lock)

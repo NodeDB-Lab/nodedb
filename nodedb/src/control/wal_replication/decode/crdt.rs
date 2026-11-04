@@ -9,7 +9,9 @@
 use super::super::decode_sync_engines;
 use super::super::types::ConstraintChangeOp;
 use crate::bridge::envelope::PhysicalPlan;
+use crate::types::DatabaseId;
 use nodedb_physical::physical_plan::{CrdtOp, ReturningSpec};
+use nodedb_types::QualifiedCollection;
 
 pub(super) struct ApplyArgs<'a> {
     pub(super) collection: &'a str,
@@ -29,7 +31,7 @@ pub(super) struct ApplyArgs<'a> {
     pub(super) carried_surrogate: u32,
 }
 
-pub(super) fn apply(args: ApplyArgs<'_>) -> crate::Result<PhysicalPlan> {
+pub(super) fn apply(database_id: DatabaseId, args: ApplyArgs<'_>) -> crate::Result<PhysicalPlan> {
     let ApplyArgs {
         collection,
         document_id,
@@ -54,7 +56,7 @@ pub(super) fn apply(args: ApplyArgs<'_>) -> crate::Result<PhysicalPlan> {
             detail: "authenticated CRDT replay is missing sync provenance".into(),
         })?;
         Ok(PhysicalPlan::Crdt(CrdtOp::ApplyAuthenticated {
-            collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+            collection: QualifiedCollection::from_stored(database_id, collection.to_owned())?,
             document_id: document_id.to_owned(),
             delta: delta.to_vec(),
             peer_id,
@@ -71,7 +73,7 @@ pub(super) fn apply(args: ApplyArgs<'_>) -> crate::Result<PhysicalPlan> {
         }))
     } else {
         Ok(PhysicalPlan::Crdt(CrdtOp::Apply {
-            collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+            collection: QualifiedCollection::from_stored(database_id, collection.to_owned())?,
             document_id: document_id.to_owned(),
             delta: delta.to_vec(),
             peer_id,
@@ -87,12 +89,17 @@ pub(super) fn apply(args: ApplyArgs<'_>) -> crate::Result<PhysicalPlan> {
 /// Per-collection Loro doc import — no surrogate, no provenance. Every
 /// replica applies the same snapshot via the same idempotent Loro merge,
 /// converging deterministically.
-pub(super) fn import_collection(tenant_id: u64, collection: &str, bytes: &[u8]) -> PhysicalPlan {
-    PhysicalPlan::Crdt(CrdtOp::ImportSnapshot {
+pub(super) fn import_collection(
+    database_id: DatabaseId,
+    tenant_id: u64,
+    collection: &str,
+    bytes: &[u8],
+) -> crate::Result<PhysicalPlan> {
+    Ok(PhysicalPlan::Crdt(CrdtOp::ImportSnapshot {
         tenant_id,
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+        collection: QualifiedCollection::from_stored(database_id, collection.to_owned())?,
         bytes: bytes.to_vec(),
-    })
+    }))
 }
 
 /// Narrow a wire `u64` list position/index to the `usize` the live
@@ -110,6 +117,7 @@ fn list_index(field: &str, value: u64) -> crate::Result<usize> {
 /// Reconstruct `CrdtOp::ListInsert` from its wire intent. `surrogate` is the
 /// parent document's identity, carried verbatim.
 pub(super) fn list_insert(
+    database_id: DatabaseId,
     collection: &str,
     document_id: &str,
     list_path: &str,
@@ -119,7 +127,7 @@ pub(super) fn list_insert(
 ) -> crate::Result<PhysicalPlan> {
     let surrogate = nodedb_types::Surrogate::new(surrogate);
     Ok(PhysicalPlan::Crdt(CrdtOp::ListInsert {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+        collection: QualifiedCollection::from_stored(database_id, collection.to_owned())?,
         document_id: document_id.to_owned(),
         list_path: list_path.to_owned(),
         index: list_index("index", index)?,
@@ -131,6 +139,7 @@ pub(super) fn list_insert(
 /// Reconstruct `CrdtOp::ListDelete` from its wire intent. See
 /// [`list_insert`] for the surrogate note.
 pub(super) fn list_delete(
+    database_id: DatabaseId,
     collection: &str,
     document_id: &str,
     list_path: &str,
@@ -139,7 +148,7 @@ pub(super) fn list_delete(
 ) -> crate::Result<PhysicalPlan> {
     let surrogate = nodedb_types::Surrogate::new(surrogate);
     Ok(PhysicalPlan::Crdt(CrdtOp::ListDelete {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+        collection: QualifiedCollection::from_stored(database_id, collection.to_owned())?,
         document_id: document_id.to_owned(),
         list_path: list_path.to_owned(),
         index: list_index("index", index)?,
@@ -152,6 +161,7 @@ pub(super) fn list_delete(
 /// the other still surfaces as a typed decode error rather than silently
 /// substituting. See [`list_insert`] for the surrogate note.
 pub(super) fn list_move(
+    database_id: DatabaseId,
     collection: &str,
     document_id: &str,
     list_path: &str,
@@ -161,7 +171,7 @@ pub(super) fn list_move(
 ) -> crate::Result<PhysicalPlan> {
     let surrogate = nodedb_types::Surrogate::new(surrogate);
     Ok(PhysicalPlan::Crdt(CrdtOp::ListMove {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+        collection: QualifiedCollection::from_stored(database_id, collection.to_owned())?,
         document_id: document_id.to_owned(),
         list_path: list_path.to_owned(),
         from_index: list_index("from_index", from_index)?,
@@ -174,40 +184,43 @@ pub(super) fn list_move(
 /// top-level `surrogate` is carried across the wire and rebuilt via
 /// `Surrogate::new`. `None`: the key is unbound, so no row matches.
 pub(super) fn doc_delete(
+    database_id: DatabaseId,
     collection: &str,
     document_id: &str,
     surrogate: Option<u32>,
     returning: Option<ReturningSpec>,
     rls_filters: &[u8],
-) -> PhysicalPlan {
-    PhysicalPlan::Crdt(CrdtOp::DocDelete {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+) -> crate::Result<PhysicalPlan> {
+    Ok(PhysicalPlan::Crdt(CrdtOp::DocDelete {
+        collection: QualifiedCollection::from_stored(database_id, collection.to_owned())?,
         document_id: document_id.to_owned(),
         surrogate: surrogate.map(nodedb_types::Surrogate::new),
         // Carried on the record — a replay re-executes this write for the
         // originating request, not only for the follower's own state.
         returning,
         rls_filters: rls_filters.to_vec(),
-    })
+    }))
 }
 
 pub(super) fn constraint_change(
+    database_id: DatabaseId,
     collection: &str,
     op: &ConstraintChangeOp,
     constraint_version: u64,
     constraints: &[Vec<u8>],
-) -> PhysicalPlan {
-    match op {
+) -> crate::Result<PhysicalPlan> {
+    let collection = QualifiedCollection::from_stored(database_id, collection.to_owned())?;
+    Ok(match op {
         ConstraintChangeOp::Set => PhysicalPlan::Crdt(CrdtOp::SetConstraints {
-            collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+            collection,
             constraint_version,
             constraints: constraints.to_vec(),
         }),
         ConstraintChangeOp::Drop => PhysicalPlan::Crdt(CrdtOp::DropConstraints {
-            collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+            collection,
             constraint_version,
         }),
-    }
+    })
 }
 
 #[cfg(test)]

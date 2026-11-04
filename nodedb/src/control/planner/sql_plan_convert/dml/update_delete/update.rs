@@ -59,7 +59,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_update(
 
     // A declared PRIMARY KEY implies NOT NULL. Check before any engine
     // dispatch so every engine is covered by one gate.
-    let declared_primary_key = super::super::declared_primary_key_name(ctx, collection)?;
+    let declared_primary_key = super::super::declared_primary_key_name(ctx, collection_key)?;
     if let Some(declared) = declared_primary_key.as_deref()
         && assignments.iter().any(|(field, expr)| {
             field == declared && matches!(expr, SqlExpr::Literal(SqlValue::Null))
@@ -186,7 +186,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_update(
     }
 
     // CRDT UPDATE never falls through to `DocumentOp`, which will bypass convergence.
-    let is_crdt = super::super::crdt_gate::document_collection_is_crdt(ctx, collection)?;
+    let is_crdt = super::super::crdt_gate::document_collection_is_crdt(ctx, collection_key)?;
     if is_crdt && target_keys.is_empty() {
         return Err(crate::Error::BadRequest {
             detail: format!(

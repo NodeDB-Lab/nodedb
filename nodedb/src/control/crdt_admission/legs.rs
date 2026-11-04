@@ -33,8 +33,9 @@ pub(super) async fn preview(
             )?,
             PhysicalPlan::Crdt(CrdtOp::PreviewApply {
                 collection: nodedb_types::QualifiedCollection::from_stored(
+                    workflow.database_id,
                     workflow.collection.to_owned(),
-                ),
+                )?,
                 document_id: document_id.to_owned(),
                 delta: delta.to_vec(),
             }),
@@ -70,8 +71,9 @@ pub(super) async fn generate_restore_delta(
             )?,
             PhysicalPlan::Crdt(CrdtOp::RestoreToVersion {
                 collection: nodedb_types::QualifiedCollection::from_stored(
+                    workflow.database_id,
                     workflow.collection.to_owned(),
-                ),
+                )?,
                 document_id: document_id.to_owned(),
                 target_version_json: target_version_json.to_owned(),
                 surrogate,

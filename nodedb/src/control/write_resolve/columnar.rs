@@ -19,7 +19,7 @@ use super::resolver::{EngineWriteResolver, WriteResolveContext};
 
 /// A governed columnar predicate `UPDATE`/`DELETE`, extracted at interception.
 pub struct ColumnarWriteResolver {
-    collection: String,
+    collection: nodedb_types::QualifiedCollection,
     /// Serialized `Vec<ScanFilter>` — the statement's `WHERE` clause.
     filters: Vec<u8>,
     /// Field assignments for an `UPDATE`. Empty for a `DELETE`.
@@ -62,7 +62,7 @@ pub(super) fn resolver_for_columnar_op(op: &ColumnarOp) -> Option<Box<dyn Engine
         return None;
     }
     Some(Box::new(ColumnarWriteResolver {
-        collection: collection.as_str().to_owned(),
+        collection: collection.clone(),
         filters: filters.clone(),
         updates: updates.cloned().unwrap_or_default(),
         is_update,
@@ -73,12 +73,12 @@ pub(super) fn resolver_for_columnar_op(op: &ColumnarOp) -> Option<Box<dyn Engine
 #[async_trait]
 impl EngineWriteResolver for ColumnarWriteResolver {
     fn collection(&self) -> &str {
-        &self.collection
+        self.collection.as_str()
     }
 
     fn build_resolve_op(&self) -> PhysicalPlan {
         PhysicalPlan::Columnar(ColumnarOp::ResolveDml {
-            collection: nodedb_types::QualifiedCollection::from_stored(self.collection.clone()),
+            collection: self.collection.clone(),
             filters: self.filters.clone(),
             updates: self.updates.clone(),
             is_update: self.is_update,
@@ -94,7 +94,7 @@ impl EngineWriteResolver for ColumnarWriteResolver {
         ctx: WriteResolveContext,
         op: PhysicalPlan,
     ) -> crate::Result<ResolvedRows> {
-        let collection = &self.collection;
+        let collection = self.collection.as_str();
         let resp =
             dispatch_resolve_pass(state, ctx.tenant_id, ctx.database_id, collection, op, None)
                 .await?;
@@ -135,13 +135,13 @@ impl EngineWriteResolver for ColumnarWriteResolver {
     fn apply(&self, resolved: ResolvedRows) -> crate::Result<PhysicalPlan> {
         Ok(PhysicalPlan::Columnar(match resolved {
             ResolvedRows::Update(rows) => ColumnarOp::ResolvedUpdate {
-                collection: nodedb_types::QualifiedCollection::from_stored(self.collection.clone()),
+                collection: self.collection.clone(),
                 rows,
                 system_from: None,
                 rls_write_check: RlsWriteCheck::decided_earlier_in_request(),
             },
             ResolvedRows::Delete(pks) => ColumnarOp::ResolvedDelete {
-                collection: nodedb_types::QualifiedCollection::from_stored(self.collection.clone()),
+                collection: self.collection.clone(),
                 pks,
                 system_from: None,
                 rls_write_check: RlsWriteCheck::decided_earlier_in_request(),

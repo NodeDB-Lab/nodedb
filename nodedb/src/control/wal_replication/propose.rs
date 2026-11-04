@@ -50,7 +50,7 @@ pub(crate) fn stamp_collection_incarnations(
                 catalog.incarnation_of(database_id, entry.tenant_id, &named.collection)?
             }
             IncarnationKind::Array => {
-                array_incarnation_of(&mirror, tenant_id, database_id, &named.collection)
+                array_incarnation_of(&mirror, tenant_id, database_id, &named.collection)?
             }
         };
     }

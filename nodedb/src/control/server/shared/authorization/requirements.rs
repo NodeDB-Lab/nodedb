@@ -11,16 +11,19 @@ mod collect;
 mod gathered;
 mod order;
 mod query;
+mod relation;
 
 pub use collect::plan_requirements;
 pub use gathered::gathered_sources;
+pub use relation::relation_grant_name;
 
 /// A protected resource and the permission needed to use it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum AuthorizationRequirement {
-    /// A collection-scoped operation. The name is the physical-plan name and
-    /// may be database-qualified; the authorization service normalizes it to
-    /// the grant-store name before looking up grants.
+    /// A collection-scoped operation. The name is the physical-plan name: a
+    /// database-qualified collection or a bare provider relation. The
+    /// authorization service resolves it to the grant-store name with
+    /// [`relation_grant_name`] before looking up grants.
     Collection {
         collection: String,
         permission: Permission,

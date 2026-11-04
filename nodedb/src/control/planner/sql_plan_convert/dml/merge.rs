@@ -46,9 +46,7 @@ pub(in super::super) fn convert_merge(
         ctx,
     } = args;
     let target_key = ctx.collection_key(target);
-    let target_qualified = super::super::convert::db_qualified(ctx.database_id, target);
     let qualified_target = nodedb_types::QualifiedCollection::new(ctx.database_id, target);
-    let target = target_qualified.as_str();
     // The source is any SELECT: its WHERE, LIMIT and the rest of the
     // subquery hold, and its read policy applies. The whole source is read
     // before the first write, so no collection is written while it is read.
@@ -68,7 +66,7 @@ pub(in super::super) fn convert_merge(
     let vshard = target_key.vshard();
     // A declared PRIMARY KEY implies NOT NULL; the Data Plane checks a MATCHED
     // or NOT-MATCHED-BY-SOURCE UPDATE arm's post-image against this name.
-    let declared_primary_key = super::declared_primary_key_name(ctx, target)?;
+    let declared_primary_key = super::declared_primary_key_name(ctx, target_key)?;
 
     Ok(vec![PhysicalTask {
         tenant_id,

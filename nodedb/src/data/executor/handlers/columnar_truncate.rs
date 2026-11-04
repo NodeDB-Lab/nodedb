@@ -124,7 +124,9 @@ impl CoreLoop {
             .mark_dirty("columnar", truncated);
         // No wipe: columnar and spatial reads record only `Predicate` keys,
         // which the collection version bounds.
-        self.note_collection_write(task, collection);
+        if let Err(e) = self.note_collection_write(task, collection) {
+            return self.response_error(task, e);
+        }
         self.invalidate_aggregate_cache_for_collection(db.as_u64(), tid.as_u64(), collection);
 
         debug!(core = self.core_id, %collection, truncated, "columnar truncate complete");
@@ -178,7 +180,9 @@ impl CoreLoop {
             log.push(outcome.undo_entry(key.clone()));
         }
         self.checkpoint_coordinator.mark_dirty("columnar", closed);
-        self.note_collection_write(task, collection);
+        if let Err(e) = self.note_collection_write(task, collection) {
+            return self.response_error(task, e);
+        }
         self.invalidate_aggregate_cache_for_collection(key.0.as_u64(), key.1.as_u64(), collection);
         debug!(core = self.core_id, %collection, closed, "versioned columnar truncate complete");
         self.truncate_response(task, closed)

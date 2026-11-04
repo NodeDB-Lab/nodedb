@@ -138,6 +138,7 @@ fn entry_for(
             audit_retain_ms,
             minimum_audit_retain_ms,
         }) => {
+            crate::control::relation_name::check_relation_name("array", &array_id.name)?;
             if committed(&array_id.name)?.is_some() {
                 return Err(crate::Error::PlanError {
                     detail: format!("CREATE ARRAY {}: already exists", array_id.name),

@@ -2,7 +2,7 @@
 
 //! Shared helpers for LATERAL join handlers.
 
-use crate::bridge::envelope::PhysicalPlan;
+use crate::bridge::envelope::{ErrorCode, PhysicalPlan};
 use crate::bridge::scan_filter::{FilterOp, ScanFilter};
 use crate::data::executor::handlers::join::{binary_row_project, merge_join_docs_binary};
 use nodedb_physical::physical_plan::{DocumentOp, JoinProjection};
@@ -185,14 +185,18 @@ pub(super) fn bind_filter_outer(
 /// at `system_time`: the LATERAL join's inner scope. The scan runs under the
 /// join's task, so a transaction snapshot merges the task's staged writes.
 pub(super) fn build_scan_plan(
+    database_id: nodedb_types::DatabaseId,
     collection: &str,
     filter_bytes: Vec<u8>,
     order_by: &[nodedb_physical::physical_plan::SortKeySpec],
     limit: usize,
     system_time: nodedb_types::SystemTimeScope,
-) -> PhysicalPlan {
-    PhysicalPlan::Document(DocumentOp::Scan {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_string()),
+) -> Result<PhysicalPlan, ErrorCode> {
+    let collection =
+        nodedb_types::QualifiedCollection::from_stored(database_id, collection.to_string())
+            .map_err(|e| ErrorCode::from(crate::Error::from(e)))?;
+    Ok(PhysicalPlan::Document(DocumentOp::Scan {
+        collection,
         // One row past the result cap, so an inner result the cap cuts
         // overflows it and errors instead of being cut silently.
         limit: limit.min(MAX_RESULT_ROWS + 1),
@@ -206,7 +210,7 @@ pub(super) fn build_scan_plan(
         system_time,
         valid_at_ms: None,
         prefilter: None,
-    })
+    }))
 }
 
 /// Build and optionally project a merged row.

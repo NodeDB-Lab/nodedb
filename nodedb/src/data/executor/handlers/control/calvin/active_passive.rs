@@ -268,7 +268,9 @@ mod tests {
 
         assert_eq!(resp.status, Status::Ok);
         assert_eq!(resp.stage_vote, Some(StageVote::Commit));
-        let collection = nodedb_types::QualifiedCollection::from_stored("items".to_owned());
+        let collection =
+            nodedb_types::QualifiedCollection::from_stored(DatabaseId::DEFAULT, "items".to_owned())
+                .unwrap();
         let reads: BTreeMap<PassiveReadKeyId, Value> = decode_reads(&resp).into_iter().collect();
         assert_eq!(
             reads.get(&PassiveReadKeyId::kv(
@@ -314,7 +316,11 @@ mod tests {
             decode_reads(&resp),
             vec![(
                 PassiveReadKeyId::surrogate(
-                    nodedb_types::QualifiedCollection::from_stored("orders".to_owned()),
+                    nodedb_types::QualifiedCollection::from_stored(
+                        DatabaseId::DEFAULT,
+                        "orders".to_owned()
+                    )
+                    .unwrap(),
                     11
                 ),
                 Value::Bytes(stored)

@@ -299,7 +299,7 @@ impl CoreLoop {
         tid: u64,
         collection: &str,
         surrogates: &[Surrogate],
-    ) {
+    ) -> Result<(), ErrorCode> {
         // A committed-redo install seals once the whole record landed, so a
         // rollback finds its inserts in the growing segment.
         if !self.recording_redo_undo() {
@@ -307,8 +307,10 @@ impl CoreLoop {
         }
         self.checkpoint_coordinator.mark_dirty("vector", 1);
         for surrogate in surrogates {
-            self.note_surrogate_write(task, tid, collection, surrogate.as_u32());
+            self.note_surrogate_write(task, tid, collection, surrogate.as_u32())
+                .map_err(ErrorCode::from)?;
         }
+        Ok(())
     }
 }
 

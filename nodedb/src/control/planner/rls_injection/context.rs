@@ -166,7 +166,8 @@ impl RlsCtx<'_> {
         &self,
         collection: &nodedb_types::QualifiedCollection,
     ) -> crate::Result<String> {
-        let name = collection.collection_name(self.database_id);
+        let name =
+            nodedb_types::CollectionKey::from_qualified(self.database_id, collection)?.name();
         let declared_key = self
             .catalog
             .get_collection(self.database_id, self.tenant_id, name)?

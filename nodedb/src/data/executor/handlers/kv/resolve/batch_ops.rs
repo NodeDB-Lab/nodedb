@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use nodedb_physical::physical_plan::{
     KvBatchIntent, KvResolveOutcome, KvResolvedMutation, ReturningSpec,
 };
-use nodedb_types::Surrogate;
+use nodedb_types::{DatabaseId, Surrogate};
 
 use super::context::{ResolveResult, ResolvedPut, expiry_from_ttl, put_mutation};
 use crate::bridge::envelope::ErrorCode;
@@ -182,15 +182,18 @@ impl CoreLoop {
                 }
             })?;
             let precondition = stored_before.get(row.key).cloned().flatten();
-            let mutation = put_mutation(ResolvedPut {
-                collection,
-                key: row.key,
-                value: row.stored.to_vec(),
-                ttl_ms,
-                expire_at_ms,
-                surrogate,
-                precondition,
-            });
+            let mutation = put_mutation(
+                DatabaseId::new(did),
+                ResolvedPut {
+                    collection,
+                    key: row.key,
+                    value: row.stored.to_vec(),
+                    ttl_ms,
+                    expire_at_ms,
+                    surrogate,
+                    precondition,
+                },
+            )?;
             match slot_of.get(row.key) {
                 Some(&slot) => {
                     if let Some(earlier) = mutations.get_mut(slot) {

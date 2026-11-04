@@ -34,5 +34,6 @@ pub use recording::{
     vector_builder_spawn_failed, vector_codec_not_built, vector_index_not_applied,
     vector_payload_undecodable, vector_rebuild_unreadable, version_cleanup_failed,
     vshard_departure_purge_failed, wal_archival_failed_truncation_held,
-    write_acked_without_durability, write_window_held, write_window_leaked,
+    wal_catchup_record_misnamed, write_acked_without_durability, write_window_held,
+    write_window_leaked,
 };

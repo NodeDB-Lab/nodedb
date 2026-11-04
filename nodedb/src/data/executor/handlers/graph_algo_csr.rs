@@ -42,9 +42,10 @@ pub(in crate::data::executor) fn algo_view_collection(
     database: DatabaseId,
     params: &AlgoParams,
     scope: &GraphReadScope,
-) -> Option<String> {
+) -> crate::Result<Option<String>> {
     (params.edge_label.is_none() && !scope.is_live())
         .then(|| algo_collection(database, &params.collection))
+        .transpose()
 }
 
 impl CoreLoop {
@@ -56,7 +57,7 @@ impl CoreLoop {
         params: &AlgoParams,
         scope: &GraphReadScope,
     ) -> crate::Result<AlgoCsr<'_>> {
-        if let Some(collection) = algo_view_collection(database, params, scope)
+        if let Some(collection) = algo_view_collection(database, params, scope)?
             && let Some(csr) = self.csr_view(database.as_u64(), tid, Some(&collection), scope)?
         {
             return Ok(AlgoCsr::View(csr));

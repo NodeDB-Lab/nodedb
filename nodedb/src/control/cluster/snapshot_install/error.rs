@@ -75,6 +75,13 @@ pub enum SnapshotInstallError {
     #[error("snapshot install of group {group_id}: vShard {vshard} routes to no local core")]
     NoCoreForVShard { group_id: u64, vshard: u32 },
 
+    #[error("snapshot install of group {group_id}: {source}")]
+    CollectionName {
+        group_id: u64,
+        #[source]
+        source: nodedb_types::CollectionKeyError,
+    },
+
     #[error(
         "snapshot install of group {group_id}: the snapshot carries no Calvin cut, so this \
          node cannot tell which Calvin transactions its storage holds; the leader resends a \
@@ -138,6 +145,7 @@ impl SnapshotInstallError {
             | Self::Decode { .. }
             | Self::UnroutableKey { .. }
             | Self::NoCoreForVShard { .. }
+            | Self::CollectionName { .. }
             | Self::NoCalvinCut { .. }
             | Self::Encode { .. } => false,
         }
@@ -158,6 +166,7 @@ impl From<SnapshotInstallError> for crate::Error {
             },
             other @ (SnapshotInstallError::Decode { .. }
             | SnapshotInstallError::UnroutableKey { .. }
+            | SnapshotInstallError::CollectionName { .. }
             | SnapshotInstallError::NoCalvinCut { .. }
             | SnapshotInstallError::Encode { .. }) => crate::Error::Codec {
                 detail: other.to_string(),

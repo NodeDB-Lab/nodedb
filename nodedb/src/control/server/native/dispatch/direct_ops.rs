@@ -30,11 +30,13 @@ pub(crate) async fn handle_direct_op(
     op: OpCode,
     fields: &TextFields,
 ) -> NativeResponse {
-    let collection = fields
-        .collection
-        .as_deref()
-        .unwrap_or("default")
-        .to_lowercase();
+    let collection = match crate::control::server::shared::request_collection::request_collection(
+        ctx.database_id(),
+        fields.collection.as_deref().unwrap_or("default"),
+    ) {
+        Ok(collection) => collection,
+        Err(error) => return error_to_native(seq, &error),
+    };
     let tenant_id = ctx.tenant_id();
 
     // CRDT Apply allocates a surrogate while planning, and a KV counter plans
@@ -313,7 +315,11 @@ pub(crate) async fn handle_direct_op(
         // and stages each write into the block or refuses it with 25001. The
         // loop clone-checks, authorizes and meters each task itself.
         let block_write = in_txn_block && tasks.iter().any(|task| plan_is_write(&task.plan));
-        if block_write || statement_needs_implicit_txn(ctx.state, &tasks) {
+        let needs_implicit_txn = match statement_needs_implicit_txn(ctx.state, &tasks) {
+            Ok(needs) => needs,
+            Err(error) => return error_to_native(seq, &error),
+        };
+        if block_write || needs_implicit_txn {
             let _request = ctx.state.tenant_request_guard(tenant_id);
             needs_top_level_metering = false;
             return super::direct_txn::dispatch_direct_in_txn(

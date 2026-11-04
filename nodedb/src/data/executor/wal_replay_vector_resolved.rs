@@ -79,13 +79,21 @@ impl CoreLoop {
         ) else {
             return false;
         };
+        let Some(qualified) = self.replay_qualified(
+            "vector",
+            record_lsn,
+            DatabaseId::new(database_id),
+            collection.clone(),
+        ) else {
+            return false;
+        };
         let rls_write_check = nodedb_types::RlsWriteCheck::already_decided_elsewhere();
         let task = Self::replay_vector_task(
             nodedb_types::TenantId::new(tenant_id),
             DatabaseId::new(database_id),
             vshard,
             PhysicalPlan::Vector(VectorOp::ResolvedDirectWrite {
-                collection: nodedb_types::QualifiedCollection::from_stored(collection.clone()),
+                collection: qualified,
                 field: field.clone(),
                 quantization,
                 storage_dtype,
@@ -121,8 +129,17 @@ impl CoreLoop {
                 return false;
             }
         };
-        if !touched.is_empty() {
-            self.finish_vector_direct_write(&task, &index_key, tenant_id, &collection, &touched);
+        if !touched.is_empty()
+            && let Err(e) =
+                self.finish_vector_direct_write(&task, &index_key, tenant_id, &collection, &touched)
+        {
+            self.replay_record_rejected(
+                "vector",
+                record_lsn,
+                Some(Box::new(e)),
+                &format!("vector resolved direct write on '{collection}' could not be noted"),
+            );
+            return false;
         }
         true
     }

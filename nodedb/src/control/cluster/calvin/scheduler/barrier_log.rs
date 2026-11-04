@@ -179,7 +179,11 @@ mod tests {
             passive_vshard,
             values: vec![(
                 PassiveReadKeyId::surrogate(
-                    QualifiedCollection::from_stored(format!("c{passive_vshard}")),
+                    QualifiedCollection::from_stored(
+                        nodedb_types::DatabaseId::DEFAULT,
+                        format!("c{passive_vshard}"),
+                    )
+                    .expect("bare name"),
                     1,
                 ),
                 Value::Integer(value),

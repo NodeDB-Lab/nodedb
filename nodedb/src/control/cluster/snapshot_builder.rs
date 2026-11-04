@@ -31,12 +31,12 @@ use nodedb_types::id::DatabaseId;
 
 use crate::Error;
 use crate::control::backup::snapshot_keys::{
-    StoredRecord, extract_db_scoped_collection, extract_db_tenant_scoped_collection,
-    homes_of_stored,
+    extract_db_scoped_collection, extract_db_tenant_scoped_collection,
 };
 use crate::control::cluster::calvin_snapshot::{await_calvin_cut, capture_calvin_cut};
 use crate::control::cluster::snapshot_builder_filter::{
     bind_in_group, push_group_edges, push_group_index_sections, push_group_node_labels,
+    stored_row_in_group,
 };
 use crate::control::cluster::snapshot_cut::settled_cut;
 use crate::control::security::catalog::SystemCatalog;
@@ -171,8 +171,10 @@ impl DataPlaneSnapshotBuilder {
             })?;
         // Every section names its collection as the Data Plane stores it in
         // `database_id`.
+        // A name not in that stored form fails the build after the walk.
+        let name_error = std::cell::RefCell::new(None);
         let in_group = |collection: &str| {
-            homes_of_stored(database_id, StoredRecord::Row { collection }).intersects(group_vshards)
+            stored_row_in_group(database_id, collection, group_vshards, &name_error)
         };
 
         // db-tenant-scoped sections: key shape "{db}:{tid}:{collection}[:suffix]"
@@ -299,7 +301,7 @@ impl DataPlaneSnapshotBuilder {
                 .filter(|blob| group_vshards.contains(&blob.vshard)),
         );
 
-        Ok(())
+        name_error.into_inner().map_or(Ok(()), |e| Err(e.into()))
     }
 }
 

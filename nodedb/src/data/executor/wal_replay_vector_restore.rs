@@ -181,15 +181,16 @@ impl CoreLoop {
             .mark_dirty("vector", written.max(1));
         let database = DatabaseId::new(database_id);
         let tid = TenantId::new(tenant_id);
+        let qualified =
+            nodedb_types::QualifiedCollection::from_stored(database, collection.to_string())
+                .map_err(|e| ErrorCode::from(crate::Error::from(e)))?;
         if let Some(vshard) = self.replay_vshard("vector", record_lsn, database, collection) {
             let task = Self::replay_task(
                 tid,
                 database,
                 vshard,
                 PhysicalPlan::Vector(VectorOp::Insert {
-                    collection: nodedb_types::QualifiedCollection::from_stored(
-                        collection.to_string(),
-                    ),
+                    collection: qualified,
                     vector: Vec::new(),
                     dim,
                     field_name: redo.field_name.clone(),
@@ -200,7 +201,8 @@ impl CoreLoop {
                 Some(crate::types::Lsn::new(record_lsn)),
             );
             // The write's version, so a cross-shard read-set check sees it.
-            self.note_surrogate_write(&task, tenant_id, collection, surrogate.as_u32());
+            self.note_surrogate_write(&task, tenant_id, collection, surrogate.as_u32())
+                .map_err(ErrorCode::from)?;
         }
         Ok(())
     }

@@ -105,13 +105,17 @@ impl CoreLoop {
 
             let inner_plan = if satisfiable {
                 match encode_inner_filters(&corr_filters) {
-                    Ok(filter_bytes) => Some(build_scan_plan(
+                    Ok(filter_bytes) => match build_scan_plan(
+                        p.task.request.database_id,
                         p.inner_collection,
                         filter_bytes,
                         &[],
                         usize::MAX,
                         p.inner_system_time,
-                    )),
+                    ) {
+                        Ok(plan) => Some(plan),
+                        Err(code) => return self.response_error(p.task, code),
+                    },
                     Err(code) => return self.response_error(p.task, code),
                 }
             } else {

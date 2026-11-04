@@ -66,7 +66,7 @@ impl CoreLoop {
         if args.surrogates.is_empty() {
             return Ok((batch.rows.len(), rejected));
         }
-        let images = resolved_row_images(&batch)?;
+        let images = resolved_row_images(args.task.request.database_id, &batch)?;
         for (row, image) in batch.rows.iter().zip(&images) {
             let surrogate = usize::try_from(row.line)
                 .ok()
@@ -393,7 +393,10 @@ impl StagePreview {
 /// reads as that image. Otherwise the rows land in a scratch memtable of the
 /// batch's schema and read back through the raw-scan row emitter, the
 /// emitter a base scan uses, so a staged row reads like a stored one.
-fn resolved_row_images(batch: &ResolvedTsBatch) -> Result<Vec<rmpv::Value>, ErrorCode> {
+fn resolved_row_images(
+    database_id: nodedb_types::DatabaseId,
+    batch: &ResolvedTsBatch,
+) -> Result<Vec<rmpv::Value>, ErrorCode> {
     if batch.rows.iter().all(|row| !row.image.is_empty()) {
         return batch
             .rows
@@ -422,8 +425,13 @@ fn resolved_row_images(batch: &ResolvedTsBatch) -> Result<Vec<rmpv::Value>, Erro
     let mut scratch = ColumnarMemtable::new(schema, config);
     let mut catalog = SeriesCatalog::default();
     for row in &batch.rows {
-        let series_key =
-            ilp_ingest::row_series_key(batch.measurement.as_str(), scratch.schema(), &row.values);
+        let series_key = ilp_ingest::row_series_key(
+            database_id,
+            batch.measurement.as_str(),
+            scratch.schema(),
+            &row.values,
+        )
+        .map_err(|e| ErrorCode::from(crate::Error::from(e)))?;
         let series_id = ilp_ingest::resolve_series(&mut catalog, &series_key);
         scratch
             .ingest_row(series_id, &row.values)

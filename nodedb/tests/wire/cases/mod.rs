@@ -72,6 +72,7 @@ mod clone_write_in_transaction;
 mod clone_write_isolation;
 mod clone_write_isolation_fuzz;
 mod clone_write_suppresses_source_row;
+mod collection_name_separator;
 mod columnar_predicate_dml_flushed;
 mod columnar_read_row_level_security;
 mod columnar_truncate_history_restart;

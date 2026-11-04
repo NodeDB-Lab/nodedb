@@ -323,7 +323,10 @@ impl CoreLoop {
             // Note the committed row's write against its surrogate +
             // collection.
             let surrogate = storage_key.surrogate();
-            self.note_surrogate_write(task, tid, collection, surrogate.as_u32());
+            if let Err(e) = self.note_surrogate_write(task, tid, collection, surrogate.as_u32()) {
+                let code = refusal_after_partial_apply(ErrorCode::from(e));
+                return self.refusal_with_landed_rows(task, code, write_set);
+            }
             // Re-index the row's dense vectors and sparse-vector postings
             // from the new body, keyed by the stable surrogate, as the point
             // update does. Each half is a no-op when the collection declares

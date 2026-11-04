@@ -124,7 +124,7 @@ impl CoreLoop {
         tid: u64,
         mutation: &KvResolvedMutation,
         now_ms: u64,
-    ) -> Result<(), crate::engine::kv::UnboundKvWrite> {
+    ) -> Result<(), ErrorCode> {
         match mutation {
             KvResolvedMutation::Put {
                 collection,
@@ -163,7 +163,8 @@ impl CoreLoop {
                     Some(value),
                     precondition.as_deref(),
                 );
-                self.note_kv_write(task, did, tid, collection.as_str(), key);
+                self.note_kv_write(task, did, tid, collection.as_str(), key)
+                    .map_err(ErrorCode::from)?;
             }
             // The drift check confirmed the row holds `precondition`, so it is
             // present and keeps its bound identity.
@@ -198,7 +199,8 @@ impl CoreLoop {
                     Some(value),
                     Some(precondition.as_slice()),
                 );
-                self.note_kv_write(task, did, tid, collection.as_str(), key);
+                self.note_kv_write(task, did, tid, collection.as_str(), key)
+                    .map_err(ErrorCode::from)?;
             }
             KvResolvedMutation::Delete {
                 collection,
@@ -218,7 +220,8 @@ impl CoreLoop {
                     None,
                     precondition.as_deref(),
                 );
-                self.note_kv_write(task, did, tid, collection.as_str(), key);
+                self.note_kv_write(task, did, tid, collection.as_str(), key)
+                    .map_err(ErrorCode::from)?;
             }
             // No body change, so no event — matches the live handlers.
             KvResolvedMutation::Expire {
@@ -235,7 +238,8 @@ impl CoreLoop {
                     key,
                     resolved_now_ms.saturating_add(*ttl_ms),
                 );
-                self.note_kv_write(task, did, tid, collection.as_str(), key);
+                self.note_kv_write(task, did, tid, collection.as_str(), key)
+                    .map_err(ErrorCode::from)?;
             }
             KvResolvedMutation::Persist {
                 collection,
@@ -243,7 +247,8 @@ impl CoreLoop {
                 precondition: _,
             } => {
                 self.kv_engine.persist(did, tid, collection.as_str(), key);
-                self.note_kv_write(task, did, tid, collection.as_str(), key);
+                self.note_kv_write(task, did, tid, collection.as_str(), key)
+                    .map_err(ErrorCode::from)?;
             }
             // An expiry is no row change event, as the local reap never was.
             // The reaped version ends at its expiry instant on every replica.
@@ -257,7 +262,8 @@ impl CoreLoop {
                     .reap_due(did, tid, collection.as_str(), key, *expire_at_ms)
                     .is_some()
                 {
-                    self.note_kv_write(task, did, tid, collection.as_str(), key);
+                    self.note_kv_write(task, did, tid, collection.as_str(), key)
+                        .map_err(ErrorCode::from)?;
                 }
             }
         }

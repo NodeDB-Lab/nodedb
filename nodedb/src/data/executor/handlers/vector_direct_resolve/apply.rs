@@ -107,7 +107,11 @@ impl CoreLoop {
         if !touched.is_empty() {
             let index_key =
                 CoreLoop::vector_index_key(database_id, tid, index.collection, index.field);
-            self.finish_vector_direct_write(task, &index_key, tid, index.collection, &touched);
+            if let Err(e) =
+                self.finish_vector_direct_write(task, &index_key, tid, index.collection, &touched)
+            {
+                return self.response_error(task, e);
+            }
         }
         self.response_with_payload(task, response_payload.to_vec())
     }

@@ -20,9 +20,7 @@ use crate::bridge::envelope::PhysicalPlan;
 use crate::control::maintenance::clone_materializer::dispatch_local;
 use crate::control::server::shared::response_payload::payload_or_typed_error;
 use crate::control::server::shared::sql::staging_predicates::StagedTagKind;
-use crate::control::target_identity::{
-    TargetPk, bare_collection_name, derive_document_id, resolve_target_pk,
-};
+use crate::control::target_identity::{TargetPk, derive_document_id, resolve_target_pk};
 use crate::control::trigger::TriggerScope;
 use crate::control::trigger::statement_txn::fires_joined_body;
 
@@ -63,12 +61,12 @@ pub(super) async fn expand_predicate_write(
     if matched.is_empty() {
         return Ok(Some((Vec::new(), kind)));
     }
-    let bare = bare_collection_name(task.database_id, collection.as_str());
+    let bare = nodedb_types::CollectionKey::from_qualified(task.database_id, collection)?.name();
     let entry = ctx
         .state
         .credentials
         .catalog()
-        .get_collection(task.database_id, task.tenant_id.as_u64(), &bare)?
+        .get_collection(task.database_id, task.tenant_id.as_u64(), bare)?
         .ok_or_else(|| crate::Error::CollectionNotFound {
             tenant_id: task.tenant_id,
             collection: collection.to_string(),

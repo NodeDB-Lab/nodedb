@@ -48,9 +48,13 @@ pub(super) enum CollectionRoute {
     Superseded,
 }
 
-fn key_of<'a>(database_id: DatabaseId, named: &'a str) -> CollectionKey<'a> {
-    CollectionKey::from_qualified_str(database_id, named)
-        .unwrap_or_else(|_| CollectionKey::from_bare(database_id, named))
+/// The gate key `named` stands for in `database_id`: a plan's qualified
+/// name or a bare name. Any other form is an error.
+fn key_of<'a>(
+    database_id: DatabaseId,
+    named: &'a str,
+) -> Result<CollectionKey<'a>, nodedb_types::CollectionKeyError> {
+    CollectionKey::from_relation_name(database_id, named)
 }
 
 /// Route a write of `tenant_id` in `database_id` that names `named`. A
@@ -71,7 +75,7 @@ pub(super) async fn route(
         for entry in named {
             match entry.kind {
                 IncarnationKind::Collection => {
-                    let key = key_of(database_id, &entry.collection);
+                    let key = key_of(database_id, &entry.collection)?;
                     keys.push(GateKey::Collection {
                         database_id: key.database_id().as_u64(),
                         tenant_id,
@@ -84,7 +88,7 @@ pub(super) async fn route(
                     database_id,
                     &entry.collection,
                     entry.incarnation,
-                ) {
+                )? {
                     Some(key) => keys.push(key),
                     // An unstamped write of an array this replica does not
                     // hold has nothing to write into.
@@ -128,7 +132,7 @@ pub(super) fn applies(
                 database_id,
                 &entry.collection,
                 entry.incarnation,
-            ),
+            )?,
             IncarnationKind::Collection if entry.incarnation == Hlc::ZERO => true,
             // Refusing a moved collection's write is correct: the cutover
             // drained the source and re-issued every row into the target.

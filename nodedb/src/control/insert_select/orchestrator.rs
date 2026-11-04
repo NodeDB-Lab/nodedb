@@ -138,8 +138,9 @@ async fn run_insert_select(
 
         let plan = PhysicalPlan::Document(DocumentOp::BatchInsert {
             collection: nodedb_types::QualifiedCollection::from_stored(
+                database_id,
                 target_collection.to_string(),
-            ),
+            )?,
             documents,
             // A copied row whose key the target already holds is refused,
             // as a VALUES row is.

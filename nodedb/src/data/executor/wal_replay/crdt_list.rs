@@ -150,8 +150,13 @@ impl CoreLoop {
                     }
                 };
                 let document_id = RowIdentity::from_user_key(document_id);
+                let Some(qualified) =
+                    self.replay_qualified("crdt", record_lsn, database_id, collection.clone())
+                else {
+                    return Some(0);
+                };
                 let plan = PhysicalPlan::Crdt(CrdtOp::ListInsert {
-                    collection: nodedb_types::QualifiedCollection::from_stored(collection.clone()),
+                    collection: qualified,
                     document_id: document_id.clone().into_string(),
                     list_path: list_path.clone(),
                     index,
@@ -190,8 +195,13 @@ impl CoreLoop {
                     }
                 };
                 let document_id = RowIdentity::from_user_key(document_id);
+                let Some(qualified) =
+                    self.replay_qualified("crdt", record_lsn, database_id, collection.clone())
+                else {
+                    return Some(0);
+                };
                 let plan = PhysicalPlan::Crdt(CrdtOp::ListDelete {
-                    collection: nodedb_types::QualifiedCollection::from_stored(collection.clone()),
+                    collection: qualified,
                     document_id: document_id.clone().into_string(),
                     list_path: list_path.clone(),
                     index,
@@ -231,8 +241,13 @@ impl CoreLoop {
                     }
                 };
                 let document_id = RowIdentity::from_user_key(document_id);
+                let Some(qualified) =
+                    self.replay_qualified("crdt", record_lsn, database_id, collection.clone())
+                else {
+                    return Some(0);
+                };
                 let plan = PhysicalPlan::Crdt(CrdtOp::ListMove {
-                    collection: nodedb_types::QualifiedCollection::from_stored(collection.clone()),
+                    collection: qualified,
                     document_id: document_id.clone().into_string(),
                     list_path: list_path.clone(),
                     from_index,

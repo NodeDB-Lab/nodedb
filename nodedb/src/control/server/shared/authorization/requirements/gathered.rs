@@ -5,7 +5,6 @@ use nodedb_types::{DatabaseId, QualifiedCollection};
 
 use crate::bridge::envelope::PhysicalPlan;
 use crate::control::security::identity::Permission;
-use crate::control::target_identity::bare_collection_name;
 
 use super::AuthorizationRequirement;
 use super::collect::plan_requirements;
@@ -35,7 +34,7 @@ pub fn gathered_sources(
             } => Ok(GatheredSource::Collection(
                 QualifiedCollection::new(
                     database_id,
-                    &bare_collection_name(database_id, &collection),
+                    super::relation::relation_grant_name(database_id, &collection)?,
                 )
                 .as_str()
                 .to_owned(),

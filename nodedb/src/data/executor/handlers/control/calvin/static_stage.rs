@@ -431,7 +431,8 @@ mod tests {
             crate::data::executor::core_loop::newest_ordinals::collection_vshard(
                 DatabaseId::DEFAULT,
                 collection,
-            ),
+            )
+            .unwrap(),
         );
         let reads = [predicate_read(collection)];
         let resp = core.execute_calvin_execute_static(
@@ -526,7 +527,8 @@ mod tests {
             crate::data::executor::core_loop::newest_ordinals::collection_vshard(
                 DatabaseId::DEFAULT,
                 "orders",
-            ),
+            )
+            .unwrap(),
         );
         let reads = [predicate_read("orders")];
         core.execute_calvin_execute_static(

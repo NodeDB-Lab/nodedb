@@ -148,8 +148,10 @@ impl CoreLoop {
         // UPDATE that mutated rows without raising the floor would sit above
         // a checkpoint stamp that already contains it, and replay would
         // duplicate the row.
-        if affected > 0 {
-            self.note_collection_write(task, collection);
+        if affected > 0
+            && let Err(e) = self.note_collection_write(task, collection)
+        {
+            return self.response_error(task, e);
         }
 
         debug!(core = self.core_id, %collection, affected, "columnar resolved update complete");
@@ -231,8 +233,10 @@ impl CoreLoop {
             log.push(outcome.undo_entry(key));
         }
 
-        if affected > 0 {
-            self.note_collection_write(task, collection);
+        if affected > 0
+            && let Err(e) = self.note_collection_write(task, collection)
+        {
+            return self.response_error(task, e);
         }
 
         debug!(core = self.core_id, %collection, affected, "columnar resolved delete complete");

@@ -254,7 +254,11 @@ mod tests {
             passive_vshard,
             values: vec![(
                 PassiveReadKeyId::kv(
-                    QualifiedCollection::from_stored("items".to_owned()),
+                    QualifiedCollection::from_stored(
+                        nodedb_types::DatabaseId::DEFAULT,
+                        "items".to_owned(),
+                    )
+                    .expect("bare name"),
                     b"k".to_vec(),
                 ),
                 Value::Integer(value),

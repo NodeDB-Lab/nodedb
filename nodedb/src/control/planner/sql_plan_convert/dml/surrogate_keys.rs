@@ -171,7 +171,8 @@ fn plan_key_batch<'p>(
             // reads the binding. A document UPDATE naming several keys
             // converts to one predicate write, which resolves no key.
             _ => {
-                let crdt = !target_keys.is_empty() && document_collection_is_crdt(ctx, collection)?;
+                let crdt = !target_keys.is_empty()
+                    && document_collection_is_crdt(ctx, ctx.collection_key(collection))?;
                 if !crdt && target_keys.len() > 1 {
                     return Ok(None);
                 }
@@ -275,7 +276,7 @@ fn row_identity_batch<'p>(
     let declared = if is_auto_rowid_pk(primary_key) {
         None
     } else {
-        declared_primary_key_name(ctx, collection)?
+        declared_primary_key_name(ctx, ctx.collection_key(collection))?
     };
     Ok(KeyBatch {
         collection,

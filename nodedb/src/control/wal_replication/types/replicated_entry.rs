@@ -298,7 +298,7 @@ mod tests {
         let vshard = VShardId::new(0);
 
         let plan = PhysicalPlan::Document(DocumentOp::PointPut {
-            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
+            collection: QualifiedCollection::new(database, "c"),
             document_id: "d".into(),
             value: vec![1, 2, 3],
             surrogate: Surrogate::new(1),
@@ -326,7 +326,7 @@ mod tests {
             .expect("decode_replicated_entry returned None");
         match decoded_plan {
             PhysicalPlan::Document(DocumentOp::PointPut { collection, .. }) => {
-                assert_eq!(collection.as_str(), "c");
+                assert_eq!(collection.as_str(), "1024/c");
             }
             other => panic!("expected Document(PointPut), got {other:?}"),
         }

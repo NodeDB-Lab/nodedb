@@ -75,15 +75,21 @@ impl CoreLoop {
             ) else {
                 return false;
             };
+            let Some(qualified) = self.replay_qualified(
+                "vector",
+                record_lsn,
+                DatabaseId::new(database_id),
+                collection.clone(),
+            ) else {
+                return false;
+            };
             let task = Self::replay_vector_task(
                 nodedb_types::TenantId::new(tenant_id),
                 DatabaseId::new(database_id),
                 vshard,
                 PhysicalPlan::Vector(
                     nodedb_physical::physical_plan::VectorOp::DeleteBySurrogate {
-                        collection: nodedb_types::QualifiedCollection::from_stored(
-                            collection.clone(),
-                        ),
+                        collection: qualified,
                         surrogate,
                         field_name: field_name.clone(),
                         provenance: provenance.clone(),

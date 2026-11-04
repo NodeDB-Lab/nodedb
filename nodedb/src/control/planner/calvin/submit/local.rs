@@ -95,7 +95,7 @@ pub(crate) fn stamp_incarnations(
                     tx_class.tenant_id,
                     tx_class.database_id,
                     &collection,
-                )
+                )?
             }
         };
         incarnations.push(CalvinIncarnation {

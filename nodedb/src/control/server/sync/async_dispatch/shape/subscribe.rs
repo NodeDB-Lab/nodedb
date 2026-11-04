@@ -16,13 +16,46 @@ use super::super::super::wire::{SyncFrame, SyncMessageType};
 use super::authorize::{ShapeAuthorizationFailure, authorize_shape_subscription};
 use super::snapshot::{SnapshotRequest, take_shape_snapshot};
 
+/// Rewrite the collection a document or vector shape names to its bare
+/// name in `database_id`. A foreign or malformed name is an error.
+fn normalize_shape_collection(
+    database_id: DatabaseId,
+    shape: &mut nodedb_types::sync::shape::ShapeDefinition,
+) -> crate::Result<()> {
+    use nodedb_types::sync::shape::ShapeType;
+
+    match &mut shape.shape_type {
+        ShapeType::Document { collection, .. } | ShapeType::Vector { collection, .. } => {
+            *collection = crate::control::server::shared::request_collection::request_collection(
+                database_id,
+                collection,
+            )?;
+            Ok(())
+        }
+        ShapeType::Graph { .. } | ShapeType::Array { .. } => Ok(()),
+        // A shape type this build does not know names no checked collection.
+        _ => Err(crate::Error::BadRequest {
+            detail: "sync: unsupported shape type".into(),
+        }),
+    }
+}
+
 /// Handle ShapeSubscribe with real WAL LSN and Data Plane snapshot.
 pub(in crate::control::server::sync) async fn handle_shape_subscribe_async(
     shared: &SharedState,
     session: &SyncSession,
     frame: &SyncFrame,
 ) -> Option<SyncFrame> {
-    let msg: super::super::super::shape::handler::ShapeSubscribeMsg = frame.decode_body()?;
+    let mut msg: super::super::super::shape::handler::ShapeSubscribeMsg = frame.decode_body()?;
+    if let Err(error) = normalize_shape_collection(session.database_id(), &mut msg.shape) {
+        warn!(
+            session = %session.session_id,
+            shape_id = %msg.shape.shape_id,
+            error = %error,
+            "sync: shape subscribe refused, the collection name is not valid in the session database"
+        );
+        return None;
+    }
 
     // Authorize before the registry records anything and before any tenant
     // accounting: a subscription the session may not read must leave no trace,

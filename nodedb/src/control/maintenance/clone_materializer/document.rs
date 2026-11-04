@@ -142,7 +142,10 @@ pub(crate) async fn read_source_row(
     system_time: SystemTimeScope,
 ) -> crate::Result<Option<SourceRow>> {
     let plan = PhysicalPlan::Document(DocumentOp::MaterializeScan {
-        collection: nodedb_types::QualifiedCollection::from_stored(source_qualified.to_string()),
+        collection: nodedb_types::QualifiedCollection::from_stored(
+            source_db_id,
+            source_qualified.to_string(),
+        )?,
         cursor: Vec::new(),
         count: 1,
         system_time,
@@ -189,7 +192,10 @@ pub(super) async fn scan_page(
         raw_bodies,
     } = page;
     let plan = PhysicalPlan::Document(DocumentOp::MaterializeScan {
-        collection: nodedb_types::QualifiedCollection::from_stored(source_qualified.to_string()),
+        collection: nodedb_types::QualifiedCollection::from_stored(
+            source_db_id,
+            source_qualified.to_string(),
+        )?,
         cursor: cursor.to_vec(),
         count: SCAN_PAGE,
         system_time,

@@ -72,12 +72,15 @@ impl CoreLoop {
         let docs = match input {
             Some(sub_plan) => self.input_docs(task, sub_plan),
             None if !system_time.is_current() => {
-                let scan = self.scoped_aggregate_scan(
+                let scan = match self.scoped_aggregate_scan(
                     task.request.database_id.as_u64(),
                     tid,
                     collection,
                     system_time,
-                );
+                ) {
+                    Ok(plan) => plan,
+                    Err(e) => return self.response_error(task, ErrorCode::from(e)),
+                };
                 self.input_docs(task, &scan)
             }
             None => self.scan_for_aggregate(task, tid, collection),

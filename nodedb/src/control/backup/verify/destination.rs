@@ -360,7 +360,7 @@ fn truncated_after_cut(
                 .is_some_and(|end| end > cut)
         });
         if ended_after_cut {
-            truncated.insert(walk.bare(walk.scoped_rest(&blob.collection_key)?));
+            truncated.insert(walk.bare(walk.scoped_rest(&blob.collection_key)?)?);
         }
     }
     Ok(truncated)

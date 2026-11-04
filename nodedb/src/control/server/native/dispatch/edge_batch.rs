@@ -118,7 +118,12 @@ where
             format!("{op}: payload is not an {op} payload: {e}"),
         ))
     })?;
-    Ok((collection.to_lowercase(), batch))
+    let collection = crate::control::server::shared::request_collection::request_collection(
+        ctx.database_id(),
+        collection,
+    )
+    .map_err(|e| Box::new(error_to_native(seq, &e)))?;
+    Ok((collection, batch))
 }
 
 /// The refusal for a request of `count` edges over the configured

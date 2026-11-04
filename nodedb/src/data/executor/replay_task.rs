@@ -51,6 +51,31 @@ impl CoreLoop {
         }
     }
 
+    /// The `QualifiedCollection` a replayed record names.
+    ///
+    /// A stored name that does not match `database_id` is reported as a
+    /// record that cannot be applied, and the caller skips the record.
+    pub(in crate::data::executor) fn replay_qualified(
+        &mut self,
+        engine: &str,
+        record_lsn: u64,
+        database_id: DatabaseId,
+        stored_collection: String,
+    ) -> Option<nodedb_types::QualifiedCollection> {
+        match nodedb_types::QualifiedCollection::from_stored(database_id, stored_collection) {
+            Ok(collection) => Some(collection),
+            Err(error) => {
+                self.replay_record_unapplied(
+                    engine,
+                    "collection key",
+                    record_lsn,
+                    &error.to_string(),
+                );
+                None
+            }
+        }
+    }
+
     /// The vShard a replayed record's collection homes to.
     ///
     /// A replay record carries the stored, database-qualified collection

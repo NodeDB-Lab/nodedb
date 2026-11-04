@@ -193,16 +193,19 @@ impl CoreLoop {
             mutations: keys
                 .into_iter()
                 .map(|key| {
-                    put_mutation(ResolvedPut {
-                        collection,
-                        document_id: key.document_id,
-                        surrogate: key.surrogate,
-                        value: key.body,
-                        precondition: key.precondition,
-                        resolved_sum_targets,
-                    })
+                    put_mutation(
+                        task.request.database_id,
+                        ResolvedPut {
+                            collection,
+                            document_id: key.document_id,
+                            surrogate: key.surrogate,
+                            value: key.body,
+                            precondition: key.precondition,
+                            resolved_sum_targets,
+                        },
+                    )
                 })
-                .collect(),
+                .collect::<Result<Vec<_>, ErrorCode>>()?,
             response_payload,
         })
     }

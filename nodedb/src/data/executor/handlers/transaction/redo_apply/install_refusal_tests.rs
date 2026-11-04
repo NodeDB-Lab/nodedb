@@ -539,7 +539,7 @@ fn a_refused_install_publishes_no_watermark() {
 fn a_refused_install_leaves_the_newest_ordinal_cache_unchanged() {
     use crate::data::executor::core_loop::newest_ordinals::{SliceKey, collection_vshard};
     let key = SliceKey {
-        vshard: collection_vshard(DatabaseId::DEFAULT, "notes"),
+        vshard: collection_vshard(DatabaseId::DEFAULT, "notes").unwrap(),
         db: DatabaseId::DEFAULT,
         tenant: TenantId::new(TID),
         collection: Box::from("notes"),

@@ -66,12 +66,15 @@ pub(crate) fn run_bitmap_subplan(
 /// pushing the filter into the document engine before any msgpack decode. An
 /// empty `bitmap` scans no row.
 pub(crate) fn prefiltered_scan_plan(
+    database_id: nodedb_types::DatabaseId,
     collection: &str,
     limit: usize,
     bitmap: SurrogateBitmap,
-) -> PhysicalPlan {
-    PhysicalPlan::Document(DocumentOp::Scan {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_string()),
+) -> crate::Result<PhysicalPlan> {
+    let collection =
+        nodedb_types::QualifiedCollection::from_stored(database_id, collection.to_string())?;
+    Ok(PhysicalPlan::Document(DocumentOp::Scan {
+        collection,
         limit,
         offset: 0,
         sort_keys: Vec::new(),
@@ -83,7 +86,7 @@ pub(crate) fn prefiltered_scan_plan(
         system_time: nodedb_types::SystemTimeScope::Current,
         valid_at_ms: None,
         prefilter: Some(bitmap),
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -190,7 +193,7 @@ mod tests {
         let task = task_for(sub_plan.clone());
         let bitmap = run_bitmap_subplan(&mut harness.core, &task, &sub_plan).expect("bitmap");
         assert!(bitmap.is_empty());
-        match prefiltered_scan_plan("cells", 10, bitmap) {
+        match prefiltered_scan_plan(DatabaseId::DEFAULT, "cells", 10, bitmap).unwrap() {
             PhysicalPlan::Document(DocumentOp::Scan { prefilter, .. }) => {
                 assert!(prefilter.is_some_and(|bm| bm.is_empty()));
             }

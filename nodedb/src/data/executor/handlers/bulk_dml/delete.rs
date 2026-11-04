@@ -371,7 +371,7 @@ impl CoreLoop {
             // as it stood before the delete.
             write_set.extend(write_hook::target_write_set(&target_writes));
             if let Some(bytes) = deleted_bytes.as_deref() {
-                self.bulk_delete_row_cascade(
+                let cascaded = self.bulk_delete_row_cascade(
                     BulkDeleteRowCascade {
                         task,
                         database_id,
@@ -391,6 +391,17 @@ impl CoreLoop {
                 );
                 affected += 1;
                 pending_text.push(storage_key.surrogate());
+                if let Err(e) = cascaded {
+                    let code = refusal_after_rows(affected, e);
+                    return self.bulk_delete_refusal(
+                        task,
+                        tid,
+                        collection,
+                        code,
+                        &mut pending_text,
+                        write_set,
+                    );
+                }
                 let flush = TextFlush::full_batch(tid, collection, affected);
                 if let Err(code) = self.flush_deleted_text_at(task, flush, &mut pending_text) {
                     return self.refusal_with_landed_rows(task, code, write_set);

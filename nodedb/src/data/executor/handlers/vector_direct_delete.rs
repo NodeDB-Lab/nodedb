@@ -123,7 +123,11 @@ impl CoreLoop {
                     Err(e) => {
                         // The rows before this one are removed.
                         let before = &surrogates[..at];
-                        self.finish_vector_direct_write(task, &index_key, tid, collection, before);
+                        if let Err(note_error) = self
+                            .finish_vector_direct_write(task, &index_key, tid, collection, before)
+                        {
+                            return self.response_error(task, note_error);
+                        }
                         return self.response_error(task, e);
                     }
                 },
@@ -137,13 +141,20 @@ impl CoreLoop {
                 Err(e) => {
                     // The failed row stays whole. The rows before it are removed.
                     let before = &surrogates[..at];
-                    self.finish_vector_direct_write(task, &index_key, tid, collection, before);
+                    if let Err(note_error) =
+                        self.finish_vector_direct_write(task, &index_key, tid, collection, before)
+                    {
+                        return self.response_error(task, note_error);
+                    }
                     return self.response_error(task, e);
                 }
             }
         }
-        if !removed.is_empty() {
-            self.finish_vector_direct_write(task, &index_key, tid, collection, &surrogates);
+        if !removed.is_empty()
+            && let Err(e) =
+                self.finish_vector_direct_write(task, &index_key, tid, collection, &surrogates)
+        {
+            return self.response_error(task, e);
         }
 
         if let Some(spec) = returning {

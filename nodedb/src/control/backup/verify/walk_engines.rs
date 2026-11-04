@@ -50,7 +50,7 @@ impl Walk<'_> {
         sink: &mut dyn FnMut(Row),
     ) -> Result<(), Error> {
         for (table_key, bytes) in tables {
-            let bare = self.bare(self.scoped_rest(table_key)?);
+            let bare = self.bare(self.scoped_rest(table_key)?)?;
             let table: KvTable =
                 zerompk::from_msgpack(bytes).map_err(|e| decode_error("KV table", &bare, e))?;
             // Every version of a key hashes under the key and its start
@@ -119,7 +119,7 @@ impl Walk<'_> {
     ) -> Result<(), Error> {
         for (index_key, bytes) in indexes {
             let (stored, field) = split_vector_coll_key(self.scoped_rest(index_key)?);
-            let bare = self.bare(stored);
+            let bare = self.bare(stored)?;
             let rows: VectorRows =
                 zerompk::from_msgpack(bytes).map_err(|e| decode_error("vector index", &bare, e))?;
             let starts: HashMap<u32, i64> = match history.iter().find(|(k, _)| k == index_key) {
@@ -179,7 +179,7 @@ impl Walk<'_> {
         }
         let empty = TsFlushedCollectionBlob::default();
         for (key, (memtable, flushed)) in by_key {
-            let bare = self.bare(self.scoped_rest(key)?);
+            let bare = self.bare(self.scoped_rest(key)?)?;
             let rows =
                 decode_timeseries_live_rows(&bare, memtable, flushed.unwrap_or(&empty), self.kek)?;
             for row in rows {
@@ -197,7 +197,7 @@ impl Walk<'_> {
         sink: &mut dyn FnMut(Row),
     ) -> Result<(), Error> {
         for (key, bytes) in engines {
-            let bare = self.bare(self.scoped_rest(key)?);
+            let bare = self.bare(self.scoped_rest(key)?)?;
             let snap: nodedb_columnar::ColumnarEngineSnapshot = zerompk::from_msgpack(bytes)
                 .map_err(|e| decode_error("columnar snapshot", &bare, e))?;
             let decoded = decode_snapshot_versions(&bare, snap, self.kek)?;
@@ -256,7 +256,7 @@ impl Walk<'_> {
         sink: &mut dyn FnMut(Row),
     ) -> Result<(), Error> {
         for (_database_id, _tenant_id, stored, bytes) in states {
-            let bare = self.bare(stored);
+            let bare = self.bare(stored)?;
             let doc = LoroDoc::new();
             doc.import(bytes)
                 .map_err(|e| decode_error("CRDT state", &bare, e))?;

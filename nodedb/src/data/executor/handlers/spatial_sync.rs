@@ -247,7 +247,9 @@ impl CoreLoop {
         }
 
         // Note this committed spatial write.
-        self.note_collection_write(task, collection);
+        if let Err(e) = self.note_collection_write(task, collection) {
+            return self.response_error(task, e);
+        }
 
         // Advance HWM and return gate result payload when provenance is present.
         if let Some(prov) = provenance {
@@ -360,7 +362,9 @@ impl CoreLoop {
         }
 
         // Note this committed spatial delete.
-        self.note_collection_write(task, collection);
+        if let Err(e) = self.note_collection_write(task, collection) {
+            return self.response_error(task, e);
+        }
 
         if let Some(prov) = provenance {
             self.sync_commit(prov);

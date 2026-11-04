@@ -6,6 +6,7 @@
 //! and reports the mutations instead of applying them.
 
 use super::context::{ResolveResult, ResolvedRewrite, delete_mutation, rewrite_mutation};
+use crate::bridge::envelope::ErrorCode;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::kv::field_compute::merge_field_updates;
 use crate::data::executor::handlers::kv::predicate::KvPredicateCtx;
@@ -14,6 +15,7 @@ use crate::data::executor::handlers::returning_rows::kv_stored_rows_payload;
 use crate::data::executor::response_codec;
 use crate::engine::kv::current_ms;
 use nodedb_physical::physical_plan::KvResolveOutcome;
+use nodedb_types::DatabaseId;
 
 impl CoreLoop {
     /// Resolve a predicate `UPDATE`. Each matched row's stored body becomes
@@ -66,18 +68,21 @@ impl CoreLoop {
             .into_iter()
             .map(|(key, body, new_value)| {
                 // The row exists and keeps its bound surrogate through the merge.
-                rewrite_mutation(ResolvedRewrite {
-                    collection,
-                    key: &key,
-                    value: new_value,
-                    // The keyed field merge writes with `ttl_ms: 0`, so the
-                    // resolved rewrite does too.
-                    ttl_ms: 0,
-                    expire_at_ms: 0,
-                    precondition: body,
-                })
+                rewrite_mutation(
+                    DatabaseId::new(did),
+                    ResolvedRewrite {
+                        collection,
+                        key: &key,
+                        value: new_value,
+                        // The keyed field merge writes with `ttl_ms: 0`, so the
+                        // resolved rewrite does too.
+                        ttl_ms: 0,
+                        expire_at_ms: 0,
+                        precondition: body,
+                    },
+                )
             })
-            .collect();
+            .collect::<Result<Vec<_>, ErrorCode>>()?;
         Ok(KvResolveOutcome {
             mutations,
             response_payload,
@@ -122,8 +127,8 @@ impl CoreLoop {
         };
         let mutations = matched
             .into_iter()
-            .map(|(key, body)| delete_mutation(collection, &key, Some(body)))
-            .collect();
+            .map(|(key, body)| delete_mutation(DatabaseId::new(did), collection, &key, Some(body)))
+            .collect::<Result<Vec<_>, ErrorCode>>()?;
         Ok(KvResolveOutcome {
             mutations,
             response_payload,

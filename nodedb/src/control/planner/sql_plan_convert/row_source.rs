@@ -141,7 +141,7 @@ pub(super) fn convert_insert_select(
 
     // A declared PRIMARY KEY implies NOT NULL. A literal `SELECT NULL` into
     // the pk column is knowable at plan time, before any row is scanned.
-    if let Some(declared) = super::dml::declared_primary_key_name(ctx, target)?
+    if let Some(declared) = super::dml::declared_primary_key_name(ctx, target_key)?
         && maps.stored.iter().any(|(field, expr)| {
             field == &declared && matches!(expr, SqlExpr::Literal(SqlValue::Null))
         })
@@ -155,7 +155,7 @@ pub(super) fn convert_insert_select(
 
     // A target column the engine computes on every write cannot take a
     // selected value.
-    let gates = super::dml::document_collection_write_gates(ctx, target)?;
+    let gates = super::dml::document_collection_write_gates(ctx, target_key)?;
     crate::control::security::catalog::collection_generated::refuse_generated_write(
         target,
         &gates.generated,

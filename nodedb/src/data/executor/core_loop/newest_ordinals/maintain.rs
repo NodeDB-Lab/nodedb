@@ -31,8 +31,8 @@ impl CoreLoop {
         collection: &str,
         key: Option<&KeyRepr>,
         vshard: VShardId,
-    ) {
-        let home = collection_vshard(db, collection);
+    ) -> crate::Result<()> {
+        let home = collection_vshard(db, collection)?;
         let raised = match key {
             None => None,
             Some(KeyRepr::Surrogate(surrogate)) => self
@@ -68,7 +68,7 @@ impl CoreLoop {
             self.newest_ordinals
                 .forget_collection(db, tenant, collection, home);
             self.newest_ordinals.forget_vshard(vshard);
-            return;
+            return Ok(());
         };
         for (vshard, newest) in raised {
             self.newest_ordinals.raise(
@@ -81,6 +81,7 @@ impl CoreLoop {
                 newest,
             );
         }
+        Ok(())
     }
 
     /// Forget every cached newest ordinal: the stores changed in a way no

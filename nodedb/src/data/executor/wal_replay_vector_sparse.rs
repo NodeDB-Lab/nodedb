@@ -90,12 +90,20 @@ impl CoreLoop {
         ) else {
             return false;
         };
+        let Some(qualified) = self.replay_qualified(
+            "sparse_vector",
+            record_lsn,
+            DatabaseId::new(database_id),
+            collection.clone(),
+        ) else {
+            return false;
+        };
         let task = Self::replay_vector_task(
             nodedb_types::TenantId::new(tenant_id),
             DatabaseId::new(database_id),
             vshard,
             PhysicalPlan::Vector(VectorOp::SparseInsert {
-                collection: nodedb_types::QualifiedCollection::from_stored(collection.clone()),
+                collection: qualified,
                 field_name: field_name.clone(),
                 doc_id: doc_id.clone(),
                 entries: entries.clone(),
@@ -162,12 +170,20 @@ impl CoreLoop {
         ) else {
             return false;
         };
+        let Some(qualified) = self.replay_qualified(
+            "sparse_vector",
+            record_lsn,
+            DatabaseId::new(database_id),
+            collection.clone(),
+        ) else {
+            return false;
+        };
         let task = Self::replay_vector_task(
             nodedb_types::TenantId::new(tenant_id),
             DatabaseId::new(database_id),
             vshard,
             PhysicalPlan::Vector(VectorOp::SparseDelete {
-                collection: nodedb_types::QualifiedCollection::from_stored(collection.clone()),
+                collection: qualified,
                 field_name: field_name.clone(),
                 doc_id: doc_id.clone(),
             }),

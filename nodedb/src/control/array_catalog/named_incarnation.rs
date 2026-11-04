@@ -10,17 +10,17 @@
 
 use std::sync::RwLockReadGuard;
 
-use nodedb_types::{CollectionKey, Hlc};
+use nodedb_types::{CollectionKey, CollectionKeyError, Hlc};
 
 use super::cell_route::{CellRoute, gate_incarnation, route};
 use super::registry::{ArrayCatalog, ArrayCatalogHandle};
 use crate::control::write_gate::GateKey;
 use crate::types::{DatabaseId, TenantId};
 
-/// The `(database, name)` key `named` stands for in `database_id`.
-fn key_of(database_id: DatabaseId, named: &str) -> CollectionKey<'_> {
+/// The `(database, name)` key `named` stands for in `database_id`. A name
+/// that is not this database's qualified form is an error.
+fn key_of(database_id: DatabaseId, named: &str) -> Result<CollectionKey<'_>, CollectionKeyError> {
     CollectionKey::from_qualified_str(database_id, named)
-        .unwrap_or_else(|_| CollectionKey::from_bare(database_id, named))
 }
 
 /// Read `handle`'s mirror. A poisoned lock still holds a whole mirror: every
@@ -39,11 +39,11 @@ pub(crate) fn array_incarnation_of(
     tenant_id: TenantId,
     database_id: DatabaseId,
     named: &str,
-) -> Hlc {
-    let key = key_of(database_id, named);
-    mirror
+) -> Result<Hlc, CollectionKeyError> {
+    let key = key_of(database_id, named)?;
+    Ok(mirror
         .lookup_by_name_in_database(tenant_id, key.database_id(), key.name())
-        .map_or(Hlc::ZERO, |entry| entry.incarnation)
+        .map_or(Hlc::ZERO, |entry| entry.incarnation))
 }
 
 /// The gate a write of the array `named` at `incarnation` holds shared.
@@ -54,16 +54,16 @@ pub(crate) fn array_gate_key(
     database_id: DatabaseId,
     named: &str,
     incarnation: Hlc,
-) -> Option<GateKey> {
-    let key = key_of(database_id, named);
-    gate_incarnation(
+) -> Result<Option<GateKey>, CollectionKeyError> {
+    let key = key_of(database_id, named)?;
+    Ok(gate_incarnation(
         mirror,
         tenant_id,
         key.database_id(),
         key.name(),
         incarnation,
     )
-    .map(GateKey::Array)
+    .map(GateKey::Array))
 }
 
 /// Whether the array `named` in `database_id` still holds `incarnation`
@@ -75,15 +75,15 @@ pub(crate) fn array_holds_incarnation(
     database_id: DatabaseId,
     named: &str,
     incarnation: Hlc,
-) -> bool {
-    let key = key_of(database_id, named);
-    route(
+) -> Result<bool, CollectionKeyError> {
+    let key = key_of(database_id, named)?;
+    Ok(route(
         mirror,
         tenant_id,
         key.database_id(),
         key.name(),
         incarnation,
-    ) == CellRoute::Here
+    ) == CellRoute::Here)
 }
 
 #[cfg(test)]
@@ -123,11 +123,13 @@ mod tests {
                 TenantId::new(1),
                 DatabaseId::new(5),
                 named.as_str()
-            ),
+            )
+            .expect("qualified name"),
             incarnation
         );
         assert_eq!(
-            array_incarnation_of(&mirror, TenantId::new(1), DatabaseId::DEFAULT, "other"),
+            array_incarnation_of(&mirror, TenantId::new(1), DatabaseId::DEFAULT, "other")
+                .expect("bare name"),
             Hlc::ZERO
         );
     }
@@ -144,7 +146,8 @@ mod tests {
                 DatabaseId::DEFAULT,
                 "grid",
                 incarnation
-            ),
+            )
+            .expect("bare name"),
             Some(GateKey::Array(incarnation))
         );
     }
@@ -153,19 +156,25 @@ mod tests {
     #[test]
     fn a_recreated_array_no_longer_holds_the_planned_incarnation() {
         let mirror = mirror_with(0, "grid", Hlc::new(73, 0));
-        assert!(array_holds_incarnation(
-            &mirror,
-            TenantId::new(1),
-            DatabaseId::DEFAULT,
-            "grid",
-            Hlc::new(73, 0)
-        ));
-        assert!(!array_holds_incarnation(
-            &mirror,
-            TenantId::new(1),
-            DatabaseId::DEFAULT,
-            "grid",
-            Hlc::new(72, 0)
-        ));
+        assert!(
+            array_holds_incarnation(
+                &mirror,
+                TenantId::new(1),
+                DatabaseId::DEFAULT,
+                "grid",
+                Hlc::new(73, 0)
+            )
+            .expect("bare name")
+        );
+        assert!(
+            !array_holds_incarnation(
+                &mirror,
+                TenantId::new(1),
+                DatabaseId::DEFAULT,
+                "grid",
+                Hlc::new(72, 0)
+            )
+            .expect("bare name")
+        );
     }
 }

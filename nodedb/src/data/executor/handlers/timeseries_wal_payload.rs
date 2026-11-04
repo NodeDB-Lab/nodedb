@@ -57,12 +57,17 @@ impl CoreLoop {
         let Some(vshard) = self.replay_vshard("timeseries", record_lsn, db_id, collection) else {
             return 0;
         };
+        let Some(qualified) =
+            self.replay_qualified("timeseries", record_lsn, db_id, collection.to_string())
+        else {
+            return 0;
+        };
         let mut task = Self::replay_task(
             tid,
             db_id,
             vshard,
             PhysicalPlan::Timeseries(TimeseriesOp::Ingest {
-                collection: nodedb_types::QualifiedCollection::from_stored(collection.to_string()),
+                collection: qualified,
                 payload: payload.to_vec(),
                 format: format.to_string(),
                 wal_lsn: Some(record_lsn),
@@ -181,12 +186,17 @@ impl CoreLoop {
         let Some(vshard) = self.replay_vshard("columnar", record_lsn, db_id, collection) else {
             return 0;
         };
+        let Some(qualified) =
+            self.replay_qualified("columnar", record_lsn, db_id, collection.to_string())
+        else {
+            return 0;
+        };
         let task = Self::replay_task(
             tid,
             db_id,
             vshard,
             PhysicalPlan::Columnar(ColumnarOp::Insert {
-                collection: nodedb_types::QualifiedCollection::from_stored(collection.to_string()),
+                collection: qualified,
                 payload: payload.to_vec(),
                 format: "msgpack".into(),
                 intent: conflict_policy.intent,

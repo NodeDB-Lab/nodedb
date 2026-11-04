@@ -155,7 +155,9 @@ impl CoreLoop {
                 if removed_live {
                     self.count_edge_removed(task, src_id);
                 }
-                self.note_edge_write(task, tid, collection, src_id, label, dst_id);
+                if let Err(e) = self.note_edge_write(task, tid, collection, src_id, label, dst_id) {
+                    return self.response_error(task, e);
+                }
                 // CDC: emit after `note_edge_write` so the event LSN matches
                 // this edge's WAL LSN (the WAL-replay reconstruction key).
                 self.emit_graph_edge_event(

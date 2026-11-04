@@ -180,8 +180,9 @@ pub(crate) async fn run_update_from_join(
 
         let plan = PhysicalPlan::Document(DocumentOp::UpdateFromJoin {
             target_collection: nodedb_types::QualifiedCollection::from_stored(
+                args.database_id,
                 args.target_collection.to_string(),
-            ),
+            )?,
             source: args.source.clone(),
             source_alias: args.source_alias.to_string(),
             target_join_col: args.target_join_col.to_string(),
@@ -242,8 +243,9 @@ async fn resolve_matched_rows(
     let resolve_plan = PhysicalPlan::Document(DocumentOp::ResolveWrite(Box::new(
         DocumentOp::UpdateFromJoin {
             target_collection: nodedb_types::QualifiedCollection::from_stored(
+                args.database_id,
                 args.target_collection.to_string(),
-            ),
+            )?,
             source: args.source.clone(),
             source_alias: args.source_alias.to_string(),
             target_join_col: args.target_join_col.to_string(),

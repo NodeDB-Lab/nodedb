@@ -9,6 +9,7 @@
 use super::document::{ReturningFields, plan_targets};
 use crate::bridge::envelope::PhysicalPlan;
 use crate::control::wal_replication::types::ReplicatedSumTarget;
+use crate::types::DatabaseId;
 use nodedb_physical::physical_plan::document::MergeClauseOp;
 use nodedb_physical::physical_plan::{DocumentOp, RowSource, UpdateValue};
 
@@ -32,14 +33,16 @@ pub(super) struct MergeFields<'a> {
 }
 
 pub(super) fn merge_apply(
+    database_id: DatabaseId,
     join: JoinFields<'_>,
     merge: MergeFields<'_>,
     returning: ReturningFields<'_>,
-) -> PhysicalPlan {
-    PhysicalPlan::Document(DocumentOp::Merge {
+) -> crate::Result<PhysicalPlan> {
+    Ok(PhysicalPlan::Document(DocumentOp::Merge {
         target_collection: nodedb_types::QualifiedCollection::from_stored(
+            database_id,
             join.target_collection.to_owned(),
-        ),
+        )?,
         source: join.source.clone(),
         source_alias: join.source_alias.to_owned(),
         target_join_col: join.target_join_col.to_owned(),
@@ -56,19 +59,21 @@ pub(super) fn merge_apply(
         // A replicated apply is an autocommit write: it matches the current
         // target rows.
         target_system_time: nodedb_types::SystemTimeScope::Current,
-    })
+    }))
 }
 
 pub(super) fn update_from_join_apply(
+    database_id: DatabaseId,
     join: JoinFields<'_>,
     updates: &[(String, UpdateValue)],
     target_filters: &[u8],
     returning: ReturningFields<'_>,
-) -> PhysicalPlan {
-    PhysicalPlan::Document(DocumentOp::UpdateFromJoin {
+) -> crate::Result<PhysicalPlan> {
+    Ok(PhysicalPlan::Document(DocumentOp::UpdateFromJoin {
         target_collection: nodedb_types::QualifiedCollection::from_stored(
+            database_id,
             join.target_collection.to_owned(),
-        ),
+        )?,
         source: join.source.clone(),
         source_alias: join.source_alias.to_owned(),
         target_join_col: join.target_join_col.to_owned(),
@@ -84,7 +89,7 @@ pub(super) fn update_from_join_apply(
         // A replicated apply is an autocommit write: it matches the current
         // target rows.
         target_system_time: nodedb_types::SystemTimeScope::Current,
-    })
+    }))
 }
 
 #[cfg(test)]

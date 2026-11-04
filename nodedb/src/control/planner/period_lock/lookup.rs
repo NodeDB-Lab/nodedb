@@ -45,13 +45,3 @@ pub(super) async fn lookup_period_surrogate(
     )
     .await
 }
-
-/// Strip the `"<db_id>/"` prefix a planned collection name carries, yielding
-/// the catalog name a collection lookup is keyed on.
-pub(super) fn strip_db_prefix(database_id: DatabaseId, qualified: &str) -> &str {
-    if database_id == DatabaseId::DEFAULT {
-        return qualified;
-    }
-    let prefix = format!("{}/", database_id.as_u64());
-    qualified.strip_prefix(prefix.as_str()).unwrap_or(qualified)
-}

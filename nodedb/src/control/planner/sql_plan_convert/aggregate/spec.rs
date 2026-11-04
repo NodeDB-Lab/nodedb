@@ -411,7 +411,10 @@ pub(in crate::control::planner::sql_plan_convert) fn build_input_sourced_aggrega
         vshard_id: nodedb_types::CollectionKey::from_bare(ctx.database_id, "").vshard(),
         database_id: ctx.database_id,
         plan: PhysicalPlan::Query(QueryOp::Aggregate {
-            collection: nodedb_types::QualifiedCollection::from_stored(raw_collection),
+            collection: nodedb_types::QualifiedCollection::from_stored(
+                ctx.database_id,
+                raw_collection,
+            )?,
             input: Some(Box::new(child)),
             group_by: group_specs,
             aggregates: agg_specs,

@@ -103,7 +103,8 @@ pub async fn resolve_materialized_sum_targets(
 
             // The gate, before any read: a collection driving nothing pays one
             // cached index probe and nothing else.
-            let source = strip_db_prefix(database_id, collection);
+            let source =
+                nodedb_types::CollectionKey::from_qualified_str(database_id, collection)?.name();
             let Some(bindings) = state.materialized_sum_index.bindings_for_source(
                 catalog,
                 schema_version,
@@ -333,7 +334,8 @@ pub async fn resolve_sum_targets_for_bodies(
 ) -> crate::Result<Vec<ResolvedSumTarget>> {
     let schema_version = state.schema_version.current();
     let catalog = state.credentials.catalog();
-    let source = strip_db_prefix(database_id, source_collection);
+    let source =
+        nodedb_types::CollectionKey::from_qualified_str(database_id, source_collection)?.name();
     let Some(bindings) = state.materialized_sum_index.bindings_for_source(
         catalog,
         schema_version,
@@ -364,7 +366,8 @@ pub fn source_drives_bindings(
 ) -> crate::Result<Option<Arc<Vec<MaterializedSumBinding>>>> {
     let schema_version = state.schema_version.current();
     let catalog = state.credentials.catalog();
-    let source = strip_db_prefix(database_id, source_collection);
+    let source =
+        nodedb_types::CollectionKey::from_qualified_str(database_id, source_collection)?.name();
     state.materialized_sum_index.bindings_for_source(
         catalog,
         schema_version,
@@ -458,16 +461,6 @@ async fn resolve_bodies(
         }
     }
     Ok(resolved)
-}
-
-/// Strip the `"<db_id>/"` prefix a planned collection name carries, yielding the
-/// catalog name the binding index is keyed on.
-fn strip_db_prefix(database_id: DatabaseId, qualified: &str) -> &str {
-    if database_id == DatabaseId::DEFAULT {
-        return qualified;
-    }
-    let prefix = format!("{}/", database_id.as_u64());
-    qualified.strip_prefix(prefix.as_str()).unwrap_or(qualified)
 }
 
 #[cfg(test)]

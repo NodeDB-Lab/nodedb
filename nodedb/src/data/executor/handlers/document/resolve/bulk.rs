@@ -134,14 +134,17 @@ impl CoreLoop {
             // Rendered once here — `ResolvedPut::document_id` is the one `&str`
             // API downstream that still needs the storage key as text.
             let doc_id = storage_key.to_string();
-            mutations.push(put_mutation(ResolvedPut {
-                collection,
-                document_id: &doc_id,
-                surrogate,
-                value: doc_format::encode_to_msgpack(&doc),
-                precondition: Some(current_bytes),
-                resolved_sum_targets,
-            }));
+            mutations.push(put_mutation(
+                task.request.database_id,
+                ResolvedPut {
+                    collection,
+                    document_id: &doc_id,
+                    surrogate,
+                    value: doc_format::encode_to_msgpack(&doc),
+                    precondition: Some(current_bytes),
+                    resolved_sum_targets,
+                },
+            )?);
             if returning.is_some() {
                 returned_docs.push(nodedb_types::Value::from(doc));
             }
@@ -206,12 +209,13 @@ impl CoreLoop {
             .map_err(ErrorCode::from)?;
             let surrogate = key.surrogate();
             mutations.push(delete_mutation(
+                task.request.database_id,
                 collection,
                 &key.to_string(),
                 surrogate,
                 Some(stored.clone()),
                 resolved_sum_targets,
-            ));
+            )?);
             rows.push((identity, stored));
         }
 

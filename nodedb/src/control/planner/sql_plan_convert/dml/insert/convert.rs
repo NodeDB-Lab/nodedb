@@ -60,7 +60,7 @@ pub(in super::super::super) fn convert_insert(
     //
     // `IF NOT EXISTS` (ON CONFLICT DO NOTHING → `if_absent`) cannot be honored by
     // `CrdtOp::DocUpsert`, which is an unconditional LWW full-replace: reject.
-    let gates = super::super::balanced_gate::document_collection_write_gates(ctx, collection)?;
+    let gates = super::super::balanced_gate::document_collection_write_gates(ctx, key)?;
     // A row that supplies a generated column is refused: the engine computes
     // it on every write.
     super::super::write_checks::refuse_generated_cells(user_collection, &gates.generated, rows)?;
@@ -108,7 +108,7 @@ pub(in super::super::super) fn convert_insert(
     let declared_pk = if is_auto_rowid_pk(primary_key) {
         None
     } else {
-        declared_primary_key_name(ctx, collection)?
+        declared_primary_key_name(ctx, key)?
     };
 
     for row in rows {

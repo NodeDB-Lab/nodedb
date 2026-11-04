@@ -95,7 +95,9 @@ pub(crate) async fn route_atomic_statement(
     .map_err(|error| StatementError::Error(crate::Error::from(error)))?;
 
     let in_txn_block = in_block(session);
-    if !in_txn_block && statement_needs_implicit_txn(state, &tasks) {
+    if !in_txn_block
+        && statement_needs_implicit_txn(state, &tasks).map_err(StatementError::Error)?
+    {
         if !all_writes_bufferable(&tasks) {
             return Err(StatementError::Error(unbufferable_joined_statement()));
         }

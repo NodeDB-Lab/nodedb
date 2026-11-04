@@ -179,8 +179,10 @@ pub async fn sequence_replicated_graph_write(
     state: &SharedState,
     entry: &ReplicatedEntry,
 ) -> crate::Result<Option<Response>> {
-    let Some(plan) =
-        crate::control::wal_replication::decode::sequenced_graph_write_plan(&entry.write)?
+    let Some(plan) = crate::control::wal_replication::decode::sequenced_graph_write_plan(
+        DatabaseId::new(entry.database_id),
+        &entry.write,
+    )?
     else {
         return Ok(None);
     };

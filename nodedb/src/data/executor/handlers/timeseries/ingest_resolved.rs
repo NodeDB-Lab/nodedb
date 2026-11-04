@@ -256,8 +256,18 @@ impl CoreLoop {
                 let Some(values) = values else {
                     continue;
                 };
-                let series_key =
-                    ilp_ingest::row_series_key(batch.measurement.as_str(), &schema, values);
+                let series_key = match ilp_ingest::row_series_key(
+                    task.request.database_id,
+                    batch.measurement.as_str(),
+                    &schema,
+                    values,
+                ) {
+                    Ok(series_key) => series_key,
+                    Err(e) => {
+                        failed = Some(format!("row {position}: {e}"));
+                        break;
+                    }
+                };
                 let series_id = ilp_ingest::resolve_series(catalog, &series_key);
                 match mt.ingest_row(series_id, values) {
                     Err(e) => {

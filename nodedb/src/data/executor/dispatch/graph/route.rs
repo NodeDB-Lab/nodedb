@@ -420,7 +420,7 @@ impl CoreLoop {
             task.request.database_id,
             params,
             scope,
-        ) {
+        )? {
             Some(collection) => self.prepare_csr_view(
                 task.request.database_id.as_u64(),
                 tid,

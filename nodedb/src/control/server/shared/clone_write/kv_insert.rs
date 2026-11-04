@@ -13,7 +13,7 @@ use nodedb_physical::physical_plan::{KvOp, PhysicalPlan};
 use nodedb_physical::physical_task::PhysicalTask;
 
 use super::entry::CloneWriteOutcome;
-use super::util::{strip_db_prefix, write_err};
+use super::util::write_err;
 
 /// Collect `(collection, keys)` for the KV write shapes that create rows.
 fn classify(plan: &PhysicalPlan) -> Option<(&str, Vec<&[u8]>)> {
@@ -55,7 +55,8 @@ pub(super) async fn intercept_kv_clone_insert(
     };
 
     let db_id = task.database_id;
-    let coll_name = strip_db_prefix(db_id, collection_qualified);
+    let coll_name =
+        nodedb_types::CollectionKey::from_qualified_str(db_id, collection_qualified)?.name();
 
     let catalog = state.credentials.catalog();
     let desc = catalog

@@ -185,7 +185,9 @@ impl CoreLoop {
         ) {
             crate::engine::crdt::tenant_state::ValidatedApplyOutcome::Clean { .. } => {
                 self.checkpoint_coordinator.mark_dirty("crdt", 1);
-                self.note_collection_write(task, collection);
+                if let Err(e) = self.note_collection_write(task, collection) {
+                    return self.response_error(task, e);
+                }
                 self.response_ok(task)
             }
             crate::engine::crdt::tenant_state::ValidatedApplyOutcome::Rejected(reason) => {

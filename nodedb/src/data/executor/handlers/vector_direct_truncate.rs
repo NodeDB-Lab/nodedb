@@ -68,7 +68,11 @@ impl CoreLoop {
             if let Err(e) = outcome {
                 // The failed row stays whole. The rows before it are removed.
                 let removed = &surrogates[..at];
-                self.finish_vector_direct_write(task, &index_key, tid, collection, removed);
+                if let Err(note_error) =
+                    self.finish_vector_direct_write(task, &index_key, tid, collection, removed)
+                {
+                    return self.response_error(task, note_error);
+                }
                 return self.response_error(task, e);
             }
         }
@@ -78,7 +82,11 @@ impl CoreLoop {
         if let Some(coll) = self.vector_collections.get_mut(&index_key) {
             coll.truncate();
         }
-        self.finish_vector_direct_write(task, &index_key, tid, collection, &surrogates);
+        if let Err(e) =
+            self.finish_vector_direct_write(task, &index_key, tid, collection, &surrogates)
+        {
+            return self.response_error(task, e);
+        }
         self.invalidate_aggregate_cache_for_collection(database_id, tid, collection);
 
         let truncated = surrogates.len();

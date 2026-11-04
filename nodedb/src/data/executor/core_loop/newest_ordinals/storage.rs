@@ -51,7 +51,7 @@ impl CoreLoop {
             newest.max(self.stored_array_tiles_newest(*vshard, |id| {
                 names_array(id, *db, *tenant, collection)
             })?);
-        if collection_vshard(*db, collection) != *vshard {
+        if collection_vshard(*db, collection)? != *vshard {
             return Ok(newest);
         }
         newest = newest.max(self.sparse.versioned_collection_newest(
@@ -80,8 +80,9 @@ impl CoreLoop {
         &self,
         vshard: VShardId,
     ) -> crate::Result<Option<i64>> {
-        let on_vshard =
-            |db: DatabaseId, collection: &str| collection_vshard(db, collection) == vshard;
+        let on_vshard = |db: DatabaseId, collection: &str| -> crate::Result<bool> {
+            Ok(collection_vshard(db, collection)? == vshard)
+        };
         let mut newest: Option<i64> = None;
         for row in self.edge_store.newest_by_home()? {
             if row.vshard == vshard {
@@ -89,17 +90,17 @@ impl CoreLoop {
             }
         }
         for row in self.sparse.versioned_newest_by_collection()? {
-            if on_vshard(DatabaseId::new(row.database_id), &row.collection) {
+            if on_vshard(DatabaseId::new(row.database_id), &row.collection)? {
                 newest = newest.max(Some(row.newest));
             }
         }
         for row in self.kv_engine.newest_ordinal_by_collection() {
-            if on_vshard(row.database_id, &row.collection) {
+            if on_vshard(row.database_id, &row.collection)? {
                 newest = newest.max(Some(row.newest));
             }
         }
         for ((db, _, collection), engine) in &self.columnar_engines {
-            if on_vshard(*db, collection) {
+            if on_vshard(*db, collection)? {
                 newest = newest.max(engine.newest_ordinal());
             }
         }
@@ -108,7 +109,7 @@ impl CoreLoop {
             .keys()
             .chain(self.ts_registries.keys());
         for owner in ts_owners {
-            if on_vshard(owner.0, &owner.2) {
+            if on_vshard(owner.0, &owner.2)? {
                 newest = newest.max(self.stored_timeseries_newest(owner));
             }
         }

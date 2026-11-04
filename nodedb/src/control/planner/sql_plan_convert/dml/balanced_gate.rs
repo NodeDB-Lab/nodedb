@@ -63,22 +63,18 @@ pub(in crate::control::planner::sql_plan_convert) struct WriteGates {
 /// permits. An absent credential store or an absent collection row declares
 /// neither gate.
 ///
-/// `collection` may be bare or db-qualified: the catalog keys collections by
-/// the bare name, so the lookup de-qualifies it. A qualified name looked up
-/// as-is finds no row outside the default database, and the INSERT would
-/// silently skip the CRDT and BALANCED routing.
+/// The lookup reads the catalog row `key` names. The catalog keys a
+/// collection by its bare name, which `key` carries.
 pub(in crate::control::planner::sql_plan_convert) fn document_collection_write_gates(
     ctx: &ConvertContext,
-    collection: &str,
+    key: nodedb_types::CollectionKey<'_>,
 ) -> crate::Result<WriteGates> {
     let Some(credentials) = ctx.credentials.as_ref() else {
         return Ok(WriteGates::default());
     };
     let catalog = credentials.catalog();
-    let bare =
-        crate::control::target_identity::naming::bare_collection_name(ctx.database_id, collection);
     Ok(catalog
-        .get_collection(ctx.database_id, ctx.tenant_id.as_u64(), &bare)?
+        .get_collection(key.database_id(), ctx.tenant_id.as_u64(), key.name())?
         .map(|c| WriteGates {
             crdt: c.crdt,
             balanced: c.balanced.is_some(),

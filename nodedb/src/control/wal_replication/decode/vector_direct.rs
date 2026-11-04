@@ -15,17 +15,22 @@ use nodedb_physical::physical_plan::{
 use nodedb_types::Surrogate;
 
 use crate::bridge::envelope::PhysicalPlan;
+use crate::types::DatabaseId;
 
 /// `ReplicatedWrite::VectorDirectDelete` → `VectorOp::DirectDelete`.
 pub(super) fn direct_delete(
+    database_id: DatabaseId,
     collection: &str,
     field: &str,
     rows: &[Surrogate],
     returning: Option<ReturningSpec>,
     rls_filters: &[u8],
-) -> PhysicalPlan {
-    PhysicalPlan::Vector(VectorOp::DirectDelete {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+) -> crate::Result<PhysicalPlan> {
+    Ok(PhysicalPlan::Vector(VectorOp::DirectDelete {
+        collection: nodedb_types::QualifiedCollection::from_stored(
+            database_id,
+            collection.to_owned(),
+        )?,
         field: field.to_owned(),
         targets: VectorWriteTargets::Surrogates(rows.to_vec()),
         returning,
@@ -33,20 +38,24 @@ pub(super) fn direct_delete(
         // A write-policy collection never reaches this shape: the leader
         // refuses to propose a predicate it cannot decide for a follower.
         rls_write_check: nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
-    })
+    }))
 }
 
 /// `ReplicatedWrite::VectorDirectTruncate` → `VectorOp::DirectTruncate`.
 pub(super) fn direct_truncate(
+    database_id: DatabaseId,
     collection: &str,
     field: &str,
     restart_identity: bool,
-) -> PhysicalPlan {
-    PhysicalPlan::Vector(VectorOp::DirectTruncate {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+) -> crate::Result<PhysicalPlan> {
+    Ok(PhysicalPlan::Vector(VectorOp::DirectTruncate {
+        collection: nodedb_types::QualifiedCollection::from_stored(
+            database_id,
+            collection.to_owned(),
+        )?,
         field: field.to_owned(),
         restart_identity,
-    })
+    }))
 }
 
 /// Fields of the `VectorDirectUpdate` wire variant, bundled so
@@ -65,9 +74,15 @@ pub(super) struct DirectUpdateFields<'a> {
 }
 
 /// `ReplicatedWrite::VectorDirectUpdate` → `VectorOp::DirectUpdate`.
-pub(super) fn direct_update(f: DirectUpdateFields<'_>) -> PhysicalPlan {
-    PhysicalPlan::Vector(VectorOp::DirectUpdate {
-        collection: nodedb_types::QualifiedCollection::from_stored(f.collection.to_owned()),
+pub(super) fn direct_update(
+    database_id: DatabaseId,
+    f: DirectUpdateFields<'_>,
+) -> crate::Result<PhysicalPlan> {
+    Ok(PhysicalPlan::Vector(VectorOp::DirectUpdate {
+        collection: nodedb_types::QualifiedCollection::from_stored(
+            database_id,
+            f.collection.to_owned(),
+        )?,
         field: f.field.to_owned(),
         targets: VectorWriteTargets::Surrogates(f.rows.to_vec()),
         new_vector: f.new_vector.clone(),
@@ -79,7 +94,7 @@ pub(super) fn direct_update(f: DirectUpdateFields<'_>) -> PhysicalPlan {
         rls_filters: f.rls_filters.to_vec(),
         // See `direct_delete`.
         rls_write_check: nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
-    })
+    }))
 }
 
 /// Fields of the `DirectUpsert` wire variant, bundled so [`direct_upsert`]
@@ -100,9 +115,13 @@ pub(super) struct DirectUpsertFields<'a> {
     pub(super) rls_filters: &'a [u8],
 }
 
-pub(super) fn direct_upsert(f: DirectUpsertFields) -> crate::Result<PhysicalPlan> {
+pub(super) fn direct_upsert(
+    database_id: DatabaseId,
+    f: DirectUpsertFields,
+) -> crate::Result<PhysicalPlan> {
     let surrogate = Surrogate::new(f.surrogate);
-    let collection = nodedb_types::QualifiedCollection::from_stored(f.collection.to_owned());
+    let collection =
+        nodedb_types::QualifiedCollection::from_stored(database_id, f.collection.to_owned())?;
     // Carried on the record — a replay re-executes this write for the
     // originating request, not just for the follower's own state.
     let op = match f.intent {
@@ -171,9 +190,15 @@ pub(super) struct ResolvedDirectWriteFields<'a> {
 /// Every mutation travels verbatim: a `Delete` / `Update` names a surrogate
 /// bound when the row was inserted, an `Upsert` carries the leader-assigned
 /// surrogate `entry.rs` binds to the row's primary key.
-pub(super) fn resolved_direct_write(f: ResolvedDirectWriteFields<'_>) -> PhysicalPlan {
-    PhysicalPlan::Vector(VectorOp::ResolvedDirectWrite {
-        collection: nodedb_types::QualifiedCollection::from_stored(f.collection.to_owned()),
+pub(super) fn resolved_direct_write(
+    database_id: DatabaseId,
+    f: ResolvedDirectWriteFields<'_>,
+) -> crate::Result<PhysicalPlan> {
+    Ok(PhysicalPlan::Vector(VectorOp::ResolvedDirectWrite {
+        collection: nodedb_types::QualifiedCollection::from_stored(
+            database_id,
+            f.collection.to_owned(),
+        )?,
         field: f.field.to_owned(),
         quantization: f.quantization,
         storage_dtype: f.storage_dtype,
@@ -183,5 +208,5 @@ pub(super) fn resolved_direct_write(f: ResolvedDirectWriteFields<'_>) -> Physica
         // The leader decided the policy with a live identity before it
         // proposed; a replica applies what was committed.
         rls_write_check: nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
-    })
+    }))
 }

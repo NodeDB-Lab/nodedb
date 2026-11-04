@@ -132,7 +132,10 @@ impl CoreLoop {
             *db_id,
             vshard,
             PhysicalPlan::Columnar(ColumnarOp::Insert {
-                collection: nodedb_types::QualifiedCollection::from_stored(collection.clone()),
+                collection: nodedb_types::QualifiedCollection::from_stored(
+                    *db_id,
+                    collection.clone(),
+                )?,
                 payload: Vec::new(),
                 format: "msgpack".into(),
                 intent: ColumnarInsertIntent::Insert,

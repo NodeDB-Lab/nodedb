@@ -7,12 +7,14 @@
 
 use super::super::decode_sync_engines::decode_returning;
 use super::super::types::{BalanceDeltaFields, ReplicatedWrite};
+use super::ctx::DecodeCtx;
 use super::document;
 use super::document::{PointInsertOptions, ReturningFields, UpsertExtras};
 use super::document_join;
 use crate::bridge::envelope::PhysicalPlan;
 
-pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan> {
+pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Result<PhysicalPlan> {
+    let database_id = ctx.database_id;
     match write {
         ReplicatedWrite::PointPut {
             collection,
@@ -22,7 +24,8 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             resolved_sum_targets,
             returning,
             rls_filters,
-        } => Ok(document::point_put(
+        } => document::point_put(
+            database_id,
             collection,
             document_id,
             value,
@@ -32,7 +35,7 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
                 returning: decode_returning(returning)?,
                 rls_filters,
             },
-        )),
+        ),
         ReplicatedWrite::PointInsert {
             collection,
             document_id,
@@ -43,7 +46,8 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             deferred_sum_targets,
             returning,
             rls_filters,
-        } => Ok(document::point_insert(
+        } => document::point_insert(
+            database_id,
             collection,
             document_id,
             value,
@@ -59,7 +63,7 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
                     rls_filters,
                 },
             },
-        )),
+        ),
         ReplicatedWrite::PointDelete {
             collection,
             document_id,
@@ -67,7 +71,8 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             resolved_sum_targets,
             returning,
             rls_filters,
-        } => Ok(document::point_delete(
+        } => document::point_delete(
+            database_id,
             collection,
             document_id,
             *surrogate,
@@ -76,7 +81,7 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
                 returning: decode_returning(returning)?,
                 rls_filters,
             },
-        )),
+        ),
         ReplicatedWrite::PointUpdate {
             collection,
             document_id,
@@ -86,7 +91,8 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             returning,
             rls_filters,
             declared_primary_key,
-        } => Ok(document::point_update(
+        } => document::point_update(
+            database_id,
             collection,
             document_id,
             updates,
@@ -99,7 +105,7 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
                 },
                 declared_primary_key: declared_primary_key.clone(),
             },
-        )),
+        ),
         ReplicatedWrite::DocUpsert {
             collection,
             document_id,
@@ -109,7 +115,8 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             resolved_sum_targets,
             returning,
             rls_filters,
-        } => Ok(document::doc_upsert(
+        } => document::doc_upsert(
+            database_id,
             collection,
             document_id,
             value,
@@ -122,7 +129,7 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
                     rls_filters,
                 },
             },
-        )),
+        ),
         ReplicatedWrite::DocBatchUpsert {
             collection,
             documents,
@@ -132,6 +139,7 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             returning,
             rls_filters,
         } => document::batch_upsert(
+            database_id,
             collection,
             documents,
             surrogates,
@@ -154,12 +162,15 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             returning,
             rls_filters,
         } => document::batch_insert(
+            database_id,
             collection,
             documents,
             surrogates,
             *if_absent,
-            resolved_sum_targets,
-            deferred_sum_targets,
+            document::BatchSumTargets {
+                resolved: resolved_sum_targets,
+                deferred: deferred_sum_targets,
+            },
             ReturningFields {
                 returning: decode_returning(returning)?,
                 rls_filters,
@@ -170,12 +181,13 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             restart_identity,
             resolved_sum_targets,
             declared_primary_key,
-        } => Ok(document::truncate(
+        } => document::truncate(
+            database_id,
             collection,
             *restart_identity,
             resolved_sum_targets,
             declared_primary_key.clone(),
-        )),
+        ),
         ReplicatedWrite::BulkDml {
             collection,
             filters,
@@ -185,18 +197,21 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             returning,
             rls_filters,
             declared_primary_key,
-        } => Ok(document::bulk_dml(
+        } => document::bulk_dml(
+            database_id,
             collection,
             filters,
             *is_update,
             updates,
-            resolved_sum_targets,
-            ReturningFields {
-                returning: decode_returning(returning)?,
-                rls_filters,
+            document::BulkDmlExtras {
+                resolved_sum_targets,
+                returning: ReturningFields {
+                    returning: decode_returning(returning)?,
+                    rls_filters,
+                },
+                declared_primary_key: declared_primary_key.clone(),
             },
-            declared_primary_key.clone(),
-        )),
+        ),
         ReplicatedWrite::ApplyBalanceDelta {
             collection,
             document_id,
@@ -206,20 +221,23 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             join_column,
             join_value,
             declared_primary_key,
-        } => Ok(document::apply_balance_delta(BalanceDeltaFields {
-            collection,
-            document_id,
-            surrogate: *surrogate,
-            column,
-            delta,
-            join_column,
-            join_value,
-            declared_primary_key: declared_primary_key.as_deref(),
-        })),
+        } => document::apply_balance_delta(
+            database_id,
+            BalanceDeltaFields {
+                collection,
+                document_id,
+                surrogate: *surrogate,
+                column,
+                delta,
+                join_column,
+                join_value,
+                declared_primary_key: declared_primary_key.as_deref(),
+            },
+        ),
         ReplicatedWrite::DocumentResolvedWrite {
             mutations,
             response_payload,
-        } => Ok(document::resolved_write(mutations, response_payload)),
+        } => document::resolved_write(database_id, mutations, response_payload),
         ReplicatedWrite::MergeApply {
             target_collection,
             source,
@@ -234,7 +252,8 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             rls_filters,
             resolved_sum_targets,
             declared_primary_key,
-        } => Ok(document_join::merge_apply(
+        } => document_join::merge_apply(
+            database_id,
             document_join::JoinFields {
                 target_collection,
                 source,
@@ -254,7 +273,7 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
                 returning: decode_returning(returning)?,
                 rls_filters,
             },
-        )),
+        ),
         ReplicatedWrite::UpdateFromJoinApply {
             target_collection,
             source,
@@ -268,7 +287,8 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             rls_filters,
             resolved_sum_targets,
             declared_primary_key,
-        } => Ok(document_join::update_from_join_apply(
+        } => document_join::update_from_join_apply(
+            database_id,
             document_join::JoinFields {
                 target_collection,
                 source,
@@ -285,7 +305,7 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
                 returning: decode_returning(returning)?,
                 rls_filters,
             },
-        )),
+        ),
         _ => Err(crate::Error::Internal {
             detail: "entry_document::decode_arm called with a non-Document ReplicatedWrite \
                 variant (dispatch bug in decode/entry.rs's grouped Document match arm)"

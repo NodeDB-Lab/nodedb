@@ -225,7 +225,11 @@ impl CoreLoop {
         }
         if !written.is_empty() {
             let touched: Vec<Surrogate> = written.iter().map(|(k, _)| k.surrogate()).collect();
-            self.finish_vector_direct_write(task, &index_key, tid, collection, &touched);
+            if let Err(e) =
+                self.finish_vector_direct_write(task, &index_key, tid, collection, &touched)
+            {
+                return self.response_error(task, e);
+            }
         }
 
         if let Some(spec) = returning {

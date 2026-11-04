@@ -136,14 +136,17 @@ impl CoreLoop {
         )?;
 
         Ok(DocumentResolveOutcome {
-            mutations: vec![put_mutation(ResolvedPut {
-                collection,
-                document_id,
-                surrogate,
-                value: body,
-                precondition,
-                resolved_sum_targets,
-            })],
+            mutations: vec![put_mutation(
+                task.request.database_id,
+                ResolvedPut {
+                    collection,
+                    document_id,
+                    surrogate,
+                    value: body,
+                    precondition,
+                    resolved_sum_targets,
+                },
+            )?],
             response_payload,
         })
     }

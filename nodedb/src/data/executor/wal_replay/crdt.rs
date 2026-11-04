@@ -382,6 +382,14 @@ impl CoreLoop {
             };
 
             if let Some((document_id, surrogate, Some(bytes))) = projection {
+                let Some(qualified) = self.replay_qualified(
+                    "crdt",
+                    record.header.lsn,
+                    database_id,
+                    collection.to_owned(),
+                ) else {
+                    continue;
+                };
                 let task = Self::replay_task(
                     tid,
                     database_id,
@@ -389,9 +397,7 @@ impl CoreLoop {
                     nodedb_physical::physical_plan::PhysicalPlan::Crdt(
                         nodedb_physical::physical_plan::CrdtOp::ImportSnapshot {
                             tenant_id: tid.as_u64(),
-                            collection: nodedb_types::QualifiedCollection::from_stored(
-                                collection.to_owned(),
-                            ),
+                            collection: qualified,
                             bytes: Vec::new(),
                         },
                     ),

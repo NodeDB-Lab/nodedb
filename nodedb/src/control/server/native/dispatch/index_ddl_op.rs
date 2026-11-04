@@ -40,11 +40,13 @@ pub(crate) async fn handle_index_ddl_op(
     op: OpCode,
     fields: &TextFields,
 ) -> NativeResponse {
-    let collection = fields
-        .collection
-        .as_deref()
-        .unwrap_or("default")
-        .to_lowercase();
+    let collection = match crate::control::server::shared::request_collection::request_collection(
+        ctx.database_id(),
+        fields.collection.as_deref().unwrap_or("default"),
+    ) {
+        Ok(collection) => collection,
+        Err(error) => return error_to_native_with_sqlstate(seq, "42601", &error),
+    };
     let statements = match index_ddl_statements(ctx, op, fields, &collection) {
         Ok(statements) => statements,
         Err(error) => return error_to_native_with_sqlstate(seq, "42601", &error),

@@ -143,6 +143,8 @@ fn validate_metadata_sections(env: &Envelope, listed: &BTreeSet<u64>) -> Result<
                                 ),
                             }
                         })?;
+                    // A restored row mints its collection name in the destination.
+                    crate::control::relation_name::check_relation_name("collection", &coll.name)?;
                     refuse_unmaterialized_clone(&coll)?;
                 }
             }

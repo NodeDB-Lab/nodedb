@@ -113,7 +113,7 @@ pub(super) async fn read_node_incident_edges(
             // checks. The CSR can lag it, and a read that disagrees with the
             // guard refuses every retry.
             let plan = PhysicalPlan::Graph(GraphOp::TemporalNeighbors {
-                collection: QualifiedCollection::from_stored(collection.to_string()),
+                collection: QualifiedCollection::from_stored(database_id, collection.to_string())?,
                 node_id: node.clone(),
                 edge_label: None,
                 direction,
@@ -250,7 +250,7 @@ fn build_node_delete_tasks(
             })
     };
 
-    let qualified = QualifiedCollection::from_stored(collection.to_string());
+    let qualified = QualifiedCollection::from_stored(database_id, collection.to_string())?;
     let mut deletes = Vec::new();
     let mut deleted: BTreeSet<&EdgeTriple> = BTreeSet::new();
     for node in to_delete {
@@ -500,7 +500,8 @@ mod tests {
         };
         let tasks = vec![
             task(PhysicalPlan::Graph(GraphOp::EdgeDelete {
-                collection: QualifiedCollection::from_stored("c".to_string()),
+                collection: QualifiedCollection::from_stored(DatabaseId::DEFAULT, "c".to_string())
+                    .expect("bare name"),
                 src_id: "a".to_string(),
                 label: "L".to_string(),
                 dst_id: "b".to_string(),
@@ -509,7 +510,8 @@ mod tests {
                 rls_write_check: nodedb_types::RlsWriteCheck::decided_earlier_in_request(),
             })),
             task(PhysicalPlan::Graph(GraphOp::NodeEdgeGuard {
-                collection: QualifiedCollection::from_stored("c".to_string()),
+                collection: QualifiedCollection::from_stored(DatabaseId::DEFAULT, "c".to_string())
+                    .expect("bare name"),
                 node_id: "a".to_string(),
                 expected: Vec::new(),
             })),

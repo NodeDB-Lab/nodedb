@@ -121,7 +121,10 @@ pub(super) async fn dispatch_crdt_doc_deletes(
             .await
             .map_err(|e| OllpError::Terminal(Box::new(e)))?;
             let mut submission: Vec<PhysicalTask> = guards;
-            submission.extend(presence_guard(template, collection, &predicted));
+            submission.extend(
+                presence_guard(template, database_id, collection, &predicted)
+                    .map_err(|e| OllpError::Terminal(Box::new(e)))?,
+            );
             submission.extend(tasks.iter().cloned());
             submission.extend(deletes);
             if let Some(identity) = identity {
@@ -215,7 +218,10 @@ async fn read_crdt_nodes(
         return Ok(CrdtDeleteRead::default());
     }
     let plan = PhysicalPlan::Graph(GraphOp::NodePresenceRead {
-        collection: nodedb_types::QualifiedCollection::from_stored(at.collection.to_string()),
+        collection: nodedb_types::QualifiedCollection::from_stored(
+            at.database_id,
+            at.collection.to_string(),
+        )?,
         vshard: at.vshard.as_u32(),
         ids: nodes.to_vec(),
     });
@@ -266,21 +272,25 @@ async fn read_crdt_nodes(
 /// delete `template`. `None` when the delete names no bound node.
 fn presence_guard(
     template: &PhysicalTask,
+    database_id: DatabaseId,
     collection: &str,
     read: &CrdtDeleteRead,
-) -> Option<PhysicalTask> {
+) -> crate::Result<Option<PhysicalTask>> {
     if read.present.is_empty() && read.absent.is_empty() {
-        return None;
+        return Ok(None);
     }
-    Some(PhysicalTask {
+    Ok(Some(PhysicalTask {
         plan: PhysicalPlan::Graph(GraphOp::NodePresenceGuard {
-            collection: nodedb_types::QualifiedCollection::from_stored(collection.to_string()),
+            collection: nodedb_types::QualifiedCollection::from_stored(
+                database_id,
+                collection.to_string(),
+            )?,
             vshard: template.vshard_id.as_u32(),
             present: read.present.clone(),
             absent: read.absent.clone(),
         }),
         ..template.clone()
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -290,7 +300,11 @@ mod tests {
     #[test]
     fn only_a_crdt_document_delete_takes_this_path() {
         let delete = PhysicalPlan::Crdt(CrdtOp::DocDelete {
-            collection: nodedb_types::QualifiedCollection::from_stored("c".to_string()),
+            collection: nodedb_types::QualifiedCollection::from_stored(
+                DatabaseId::DEFAULT,
+                "c".to_string(),
+            )
+            .expect("bare name"),
             document_id: "a".to_string(),
             surrogate: None,
             returning: None,
@@ -298,7 +312,11 @@ mod tests {
         });
         assert!(is_crdt_doc_delete(&delete));
         let read = PhysicalPlan::Crdt(CrdtOp::Read {
-            collection: nodedb_types::QualifiedCollection::from_stored("c".to_string()),
+            collection: nodedb_types::QualifiedCollection::from_stored(
+                DatabaseId::DEFAULT,
+                "c".to_string(),
+            )
+            .expect("bare name"),
             document_id: "a".to_string(),
         });
         assert!(!is_crdt_doc_delete(&read));

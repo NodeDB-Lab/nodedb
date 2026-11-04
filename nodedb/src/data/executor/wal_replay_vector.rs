@@ -203,14 +203,21 @@ impl CoreLoop {
                         skipped += 1;
                         continue;
                     };
+                    let Some(qualified) = self.replay_qualified(
+                        "vector",
+                        record_lsn,
+                        DatabaseId::new(database_id),
+                        collection.clone(),
+                    ) else {
+                        skipped += 1;
+                        continue;
+                    };
                     let task = Self::replay_vector_task(
                         nodedb_types::TenantId::new(tenant_id),
                         DatabaseId::new(database_id),
                         vshard,
                         PhysicalPlan::Vector(nodedb_physical::physical_plan::VectorOp::Insert {
-                            collection: nodedb_types::QualifiedCollection::from_stored(
-                                collection.clone(),
-                            ),
+                            collection: qualified,
                             vector: vector.clone(),
                             dim,
                             field_name: field_name.clone(),

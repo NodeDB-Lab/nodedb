@@ -168,13 +168,9 @@ fn refuse_key_lookup(
         if stored.is_empty() || !ctx.collection_is_redacted(stored) {
             continue;
         }
-        let qualified = nodedb_types::QualifiedCollection::from_stored(stored.clone());
+        let bare = nodedb_types::CollectionKey::from_qualified_str(ctx.database_id, stored)?.name();
         let key = catalog
-            .get_collection(
-                ctx.database_id,
-                ctx.tenant_id,
-                qualified.collection_name(ctx.database_id),
-            )?
+            .get_collection(ctx.database_id, ctx.tenant_id, bare)?
             .and_then(|collection| {
                 crate::control::planner::catalog_adapter::convert_collection_type(&collection).2
             })

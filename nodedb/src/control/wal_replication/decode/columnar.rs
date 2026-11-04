@@ -3,43 +3,62 @@
 //! Decode `ReplicatedWrite` variants that produce `PhysicalPlan::Columnar`.
 
 use crate::bridge::envelope::PhysicalPlan;
+use crate::types::DatabaseId;
 use nodedb_physical::physical_plan::{ColumnarOp, RefreshCut, TimeseriesOp, UpdateValue};
 use nodedb_types::RlsWriteCheck;
 
 /// Reconstruct a `ColumnarOp::Truncate` plan. Same idempotent-replay
 /// contract as `kv::truncate`: whole-collection clear, no surrogate binding.
 pub(super) fn truncate(
+    database_id: DatabaseId,
     collection: &str,
     restart_identity: bool,
     erase_history: bool,
-) -> PhysicalPlan {
-    PhysicalPlan::Columnar(ColumnarOp::Truncate {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+) -> crate::Result<PhysicalPlan> {
+    Ok(PhysicalPlan::Columnar(ColumnarOp::Truncate {
+        collection: nodedb_types::QualifiedCollection::from_stored(
+            database_id,
+            collection.to_owned(),
+        )?,
         restart_identity,
         // The data group's leader stamps the entry
         // (`ReplicatedEntry::system_ordinal`), and every replica's funnel
         // stamps it.
         system_from: None,
         erase_history,
-    })
+    }))
 }
 
 /// Reconstruct a `TimeseriesOp::Truncate` plan. Same contract as
 /// [`truncate`].
-pub(super) fn timeseries_truncate(collection: &str, restart_identity: bool) -> PhysicalPlan {
-    PhysicalPlan::Timeseries(TimeseriesOp::Truncate {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+pub(super) fn timeseries_truncate(
+    database_id: DatabaseId,
+    collection: &str,
+    restart_identity: bool,
+) -> crate::Result<PhysicalPlan> {
+    Ok(PhysicalPlan::Timeseries(TimeseriesOp::Truncate {
+        collection: nodedb_types::QualifiedCollection::from_stored(
+            database_id,
+            collection.to_owned(),
+        )?,
         restart_identity,
-    })
+    }))
 }
 
 /// Reconstruct a `TimeseriesOp::RefreshAggregate` plan: the refresh cut,
 /// applied at this committed log position on every replica.
-pub(super) fn timeseries_aggregate_refresh(collection: &str, cut: RefreshCut) -> PhysicalPlan {
-    PhysicalPlan::Timeseries(TimeseriesOp::RefreshAggregate {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+pub(super) fn timeseries_aggregate_refresh(
+    database_id: DatabaseId,
+    collection: &str,
+    cut: RefreshCut,
+) -> crate::Result<PhysicalPlan> {
+    Ok(PhysicalPlan::Timeseries(TimeseriesOp::RefreshAggregate {
+        collection: nodedb_types::QualifiedCollection::from_stored(
+            database_id,
+            collection.to_owned(),
+        )?,
         cut,
-    })
+    }))
 }
 
 /// Reconstruct the columnar predicate-DML plan. The apply re-scans local
@@ -54,28 +73,31 @@ pub(super) fn timeseries_aggregate_refresh(collection: &str, cut: RefreshCut) ->
 /// carry a write policy goes through [`bulk_dml_resolved`] instead, which
 /// carries the already-decided rows rather than a predicate.
 pub(super) fn bulk_dml(
+    database_id: DatabaseId,
     collection: &str,
     filters: &[u8],
     is_update: bool,
     updates: &[(String, UpdateValue)],
-) -> PhysicalPlan {
+) -> crate::Result<PhysicalPlan> {
+    let collection =
+        nodedb_types::QualifiedCollection::from_stored(database_id, collection.to_owned())?;
     if is_update {
-        PhysicalPlan::Columnar(ColumnarOp::Update {
-            collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+        Ok(PhysicalPlan::Columnar(ColumnarOp::Update {
+            collection,
             filters: filters.to_vec(),
             updates: updates.to_vec(),
             system_from: None,
             rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
             system_time: nodedb_types::SystemTimeScope::Current,
-        })
+        }))
     } else {
-        PhysicalPlan::Columnar(ColumnarOp::Delete {
-            collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+        Ok(PhysicalPlan::Columnar(ColumnarOp::Delete {
+            collection,
             filters: filters.to_vec(),
             system_from: None,
             rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
             system_time: nodedb_types::SystemTimeScope::Current,
-        })
+        }))
     }
 }
 
@@ -91,6 +113,7 @@ pub(super) fn bulk_dml(
 /// applying this entry, including the leader that proposed it, is in that
 /// same position.
 pub(super) fn bulk_dml_resolved(
+    database_id: DatabaseId,
     collection: &str,
     is_update: bool,
     rows: &[super::super::types::ColumnarResolvedRow],
@@ -117,7 +140,10 @@ pub(super) fn bulk_dml_resolved(
             decoded.push((pk, new_row));
         }
         Ok(PhysicalPlan::Columnar(ColumnarOp::ResolvedUpdate {
-            collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+            collection: nodedb_types::QualifiedCollection::from_stored(
+                database_id,
+                collection.to_owned(),
+            )?,
             rows: decoded,
             system_from: None,
             rls_write_check: RlsWriteCheck::decided_earlier_in_request(),
@@ -128,7 +154,10 @@ pub(super) fn bulk_dml_resolved(
             .map(|row| decode_value(&row.pk_msgpack))
             .collect::<crate::Result<Vec<_>>>()?;
         Ok(PhysicalPlan::Columnar(ColumnarOp::ResolvedDelete {
-            collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+            collection: nodedb_types::QualifiedCollection::from_stored(
+                database_id,
+                collection.to_owned(),
+            )?,
             pks,
             system_from: None,
             rls_write_check: RlsWriteCheck::decided_earlier_in_request(),

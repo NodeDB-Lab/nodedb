@@ -55,21 +55,20 @@ type ReapTarget = (DatabaseId, TenantId, VShardId);
 fn reap_batches(
     due: Vec<DueExpiry>,
     leads: impl Fn(VShardId) -> bool,
-) -> Vec<(ReapTarget, Vec<KvResolvedMutation>)> {
+) -> crate::Result<Vec<(ReapTarget, Vec<KvResolvedMutation>)>> {
     let mut by_target: BTreeMap<(u64, u64, u32), Vec<KvResolvedMutation>> = BTreeMap::new();
     for entry in due {
         let database_id = DatabaseId::new(entry.database_id);
-        let vshard = CollectionKey::from_qualified_str(database_id, &entry.collection)
-            .unwrap_or_else(|_| CollectionKey::from_bare(database_id, &entry.collection))
-            .vshard();
+        let vshard = CollectionKey::from_qualified_str(database_id, &entry.collection)?.vshard();
         if !leads(vshard) {
             continue;
         }
+        let collection = QualifiedCollection::from_stored(database_id, entry.collection)?;
         by_target
             .entry((entry.database_id, entry.tenant_id, vshard.as_u32()))
             .or_default()
             .push(KvResolvedMutation::Reap {
-                collection: QualifiedCollection::from_stored(entry.collection),
+                collection,
                 key: entry.key,
                 expire_at_ms: entry.expire_at_ms,
             });
@@ -85,7 +84,7 @@ fn reap_batches(
             batches.push((target, chunk.to_vec()));
         }
     }
-    batches
+    Ok(batches)
 }
 
 /// The resolved write that reaps `mutations`. An expiry is the system's
@@ -127,7 +126,7 @@ pub async fn run_reap_pass(state: &SharedState, limit: u32) -> crate::Result<Rea
     };
     let batches = {
         let mr = multi_raft.lock().unwrap_or_else(|p| p.into_inner());
-        reap_batches(due, |vshard| mr.vshard_role_is_leader(vshard.as_u32()))
+        reap_batches(due, |vshard| mr.vshard_role_is_leader(vshard.as_u32()))?
     };
     if batches.is_empty() {
         return Ok(pass);
@@ -203,7 +202,8 @@ mod tests {
         let batches = reap_batches(
             vec![due("a", b"k1"), due(&other, b"k2"), due("a", b"k3")],
             |vshard| vshard == led,
-        );
+        )
+        .unwrap();
         assert_eq!(batches.len(), 1);
         let ((_, tenant, vshard), mutations) = &batches[0];
         assert_eq!((*tenant, *vshard), (TenantId::new(1), led));
@@ -223,6 +223,7 @@ mod tests {
             .map(|i| due("a", format!("k{i}").as_bytes()))
             .collect();
         let sizes: Vec<usize> = reap_batches(keys, |_| true)
+            .unwrap()
             .iter()
             .map(|(_, m)| m.len())
             .collect();

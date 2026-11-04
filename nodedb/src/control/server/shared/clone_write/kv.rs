@@ -23,7 +23,7 @@ use super::copy_source::{clone_source_view, copy_source_key};
 use super::probes::{
     ProbeTarget, RawTarget, dispatch_data_plane_raw, fetch_kv_source_value, probe_kv_key_in_target,
 };
-use super::util::{strip_db_prefix, synthetic_affected_response, write_err};
+use super::util::{synthetic_affected_response, write_err};
 
 /// What the copy-on-write decided for a KV delete on a shadowed clone. Every
 /// key's tombstone is already recorded.
@@ -89,7 +89,8 @@ pub(super) async fn intercept_kv_clone_write(
 
     // FieldSet path: check clone status, copy-up if needed.
     let db_id = task.database_id;
-    let coll_name = strip_db_prefix(db_id, collection_qualified);
+    let coll_name =
+        nodedb_types::CollectionKey::from_qualified_str(db_id, collection_qualified)?.name();
 
     let catalog = state.credentials.catalog();
 
@@ -232,7 +233,8 @@ async fn intercept_kv_clone_delete(
     } = target;
     let collection_qualified = collection.as_str();
     let db_id = task.database_id;
-    let coll_name = strip_db_prefix(db_id, collection_qualified);
+    let coll_name =
+        nodedb_types::CollectionKey::from_qualified_str(db_id, collection_qualified)?.name();
 
     let catalog = state.credentials.catalog();
 

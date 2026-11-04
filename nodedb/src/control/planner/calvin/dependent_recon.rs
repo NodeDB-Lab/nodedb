@@ -96,10 +96,10 @@ pub fn plan_needs_implicit_edge_recon(
     let edge_bearing = {
         // The plan names the collection database-qualified. The catalog keys
         // collections by the bare name.
-        let bare = crate::control::target_identity::naming::bare_collection_name(db, &coll);
+        let bare = nodedb_types::CollectionKey::from_qualified_str(db, &coll)?.name();
         let catalog = state.credentials.catalog();
         catalog
-            .get_collection(db, tenant_id.as_u64(), &bare)?
+            .get_collection(db, tenant_id.as_u64(), bare)?
             .map(|c| c.has_implicit_edges)
             .unwrap_or(false)
     };

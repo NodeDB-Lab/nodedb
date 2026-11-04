@@ -89,6 +89,16 @@ impl CoreLoop {
             "register document collection"
         );
 
+        // A violation names the collection the user wrote, never the
+        // database-qualified key the plan carries.
+        let user_collection = match nodedb_types::CollectionKey::from_qualified_str(
+            task.request.database_id,
+            collection,
+        ) {
+            Ok(key) => key.name(),
+            Err(e) => return self.response_error(task, crate::Error::from(e)),
+        };
+
         // Struct literal with every field named — never `..Default::default()`.
         // A `CollectionConfig` field left unassigned here would make the
         // attribute silently absent on every registered collection instead of
@@ -109,12 +119,9 @@ impl CoreLoop {
             vector_fields: vector_fields.to_vec(),
             declared_columns: declared_columns.to_vec(),
             declared_key: declared_key.map(str::to_string),
-            // A violation names the collection the user wrote, never the
-            // database-qualified key the plan carries.
             type_guards:
                 crate::data::executor::enforcement::typeguard::CompiledTypeGuard::compile_all(
-                    nodedb_types::QualifiedCollection::from_stored(collection.to_string())
-                        .collection_name(task.request.database_id),
+                    user_collection,
                     &enforcement.type_guards,
                 ),
             incarnation,

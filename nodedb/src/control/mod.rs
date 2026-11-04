@@ -46,6 +46,7 @@ pub mod planner;
 pub mod promql;
 pub mod propose_outcome;
 pub mod read_cut;
+pub mod relation_name;
 pub mod request_tracker;
 pub mod rolling_upgrade;
 pub mod router;

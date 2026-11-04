@@ -27,10 +27,9 @@ pub(super) fn document_collection_is_edge_bearing(
     };
     // The catalog keys collections by the bare name.
     let catalog = credentials.catalog();
-    let bare =
-        crate::control::target_identity::naming::bare_collection_name(ctx.database_id, collection);
+    let bare = nodedb_types::CollectionKey::from_qualified_str(ctx.database_id, collection)?.name();
     Ok(catalog
-        .get_collection(ctx.database_id, ctx.tenant_id.as_u64(), &bare)?
+        .get_collection(ctx.database_id, ctx.tenant_id.as_u64(), bare)?
         .map(|c| c.has_implicit_edges)
         .unwrap_or(false))
 }
@@ -49,11 +48,10 @@ pub(super) fn document_collection_is_shadowed_clone(
     let Some(credentials) = ctx.credentials.as_ref() else {
         return Ok(false);
     };
-    let bare =
-        crate::control::target_identity::naming::bare_collection_name(ctx.database_id, collection);
+    let bare = nodedb_types::CollectionKey::from_qualified_str(ctx.database_id, collection)?.name();
     Ok(credentials
         .catalog()
-        .get_collection(ctx.database_id, ctx.tenant_id.as_u64(), &bare)?
+        .get_collection(ctx.database_id, ctx.tenant_id.as_u64(), bare)?
         .is_some_and(|c| {
             c.cloned_from.is_some()
                 && !matches!(c.clone_status, nodedb_types::CloneStatus::Materialized)

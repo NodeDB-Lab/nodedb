@@ -58,12 +58,12 @@ fn index_type_to_str(index_type: &IndexType) -> &'static str {
 /// for a (collection, field) — wrapping the decoded `HnswParams` in
 /// `IndexConfig { hnsw, ..IndexConfig::default() }` before calling this.
 pub fn build_vector_set_params_plan(
-    collection: &str,
+    collection: nodedb_types::QualifiedCollection,
     field_name: &str,
     config: &IndexConfig,
 ) -> PhysicalPlan {
     PhysicalPlan::Vector(VectorOp::SetParams {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_string()),
+        collection,
         field_name: field_name.to_string(),
         dim: config.declared_dim,
         m: config.hnsw.m,

@@ -86,7 +86,8 @@ mod tests {
 
     fn row() -> PassiveReadKeyId {
         PassiveReadKeyId::kv(
-            QualifiedCollection::from_stored("items".to_owned()),
+            QualifiedCollection::from_stored(nodedb_types::DatabaseId::DEFAULT, "items".to_owned())
+                .expect("bare name"),
             b"alice:sword".to_vec(),
         )
     }

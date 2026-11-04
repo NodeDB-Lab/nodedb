@@ -205,6 +205,9 @@ impl SyncSession {
         if !identity.can_access_database(database_id) {
             return rejected_timeseries_ack(msg, "identity may not access the target database");
         }
+        if let Some(reason) = self.entry_refusal(&msg.collection) {
+            return rejected_timeseries_ack(msg, reason);
+        }
 
         // Decode Gorilla blocks to verify integrity.
         let timestamps = nodedb_codec::GorillaDecoder::new(&msg.ts_block).decode_all();

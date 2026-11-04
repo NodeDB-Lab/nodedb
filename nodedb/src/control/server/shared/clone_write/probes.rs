@@ -47,7 +47,7 @@ pub(super) async fn probe_row_in_target(
         txn_id,
     } = target;
     let plan = PhysicalPlan::Document(DocumentOp::PointGet {
-        collection: QualifiedCollection::from_stored(collection_qualified.to_string()),
+        collection: QualifiedCollection::from_stored(db_id, collection_qualified.to_string())?,
         document_id: document_id.to_string(),
         surrogate,
         pk_bytes: document_id.as_bytes().to_vec(),
@@ -104,7 +104,10 @@ pub(super) async fn fetch_source_row(
         kv_surrogate_ceiling: _,
     } = view;
     let plan = PhysicalPlan::Document(DocumentOp::PointGet {
-        collection: QualifiedCollection::from_stored(source_coll_qualified.to_string()),
+        collection: QualifiedCollection::from_stored(
+            source_db_id,
+            source_coll_qualified.to_string(),
+        )?,
         document_id: document_id.to_string(),
         surrogate: Some(surrogate),
         pk_bytes: document_id.as_bytes().to_vec(),
@@ -150,7 +153,7 @@ pub(super) async fn probe_kv_key_in_target(
         txn_id,
     } = target;
     let plan = PhysicalPlan::Kv(KvOp::Get {
-        collection: QualifiedCollection::from_stored(collection_qualified.to_string()),
+        collection: QualifiedCollection::from_stored(db_id, collection_qualified.to_string())?,
         key: kv_key.to_vec(),
         rls_filters: Vec::new(),
         // Internal probe of the clone's own target collection — never
@@ -193,7 +196,10 @@ pub(super) async fn fetch_kv_source_value(
         kv_surrogate_ceiling,
     } = view;
     let plan = PhysicalPlan::Kv(KvOp::Get {
-        collection: QualifiedCollection::from_stored(source_coll_qualified.to_string()),
+        collection: QualifiedCollection::from_stored(
+            source_db_id,
+            source_coll_qualified.to_string(),
+        )?,
         key: kv_key.to_vec(),
         rls_filters: Vec::new(),
         // A key bound in the source after the clone point is not part of

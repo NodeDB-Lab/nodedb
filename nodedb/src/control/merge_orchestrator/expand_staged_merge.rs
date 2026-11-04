@@ -29,8 +29,7 @@ use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 
 use super::resolve_arms::{ResolvedMergeArms, decode_resolve};
 use crate::control::target_identity::{
-    TargetPk, assign_target_surrogates, bare_collection_name, derive_document_id,
-    require_surrogate, resolve_target_pk,
+    TargetPk, assign_target_surrogates, derive_document_id, require_surrogate, resolve_target_pk,
 };
 
 /// Resolve one in-transaction `DocumentOp::Merge` task into the concrete,
@@ -86,9 +85,10 @@ pub(crate) async fn resolve_and_emit_merge_ops(
     }
 
     let catalog = state.credentials.catalog();
-    let target_bare = bare_collection_name(task.database_id, target_collection.as_str());
+    let target_bare =
+        nodedb_types::CollectionKey::from_qualified(task.database_id, &target_collection)?.name();
     let target = catalog
-        .get_collection(task.database_id, tenant_id.as_u64(), &target_bare)?
+        .get_collection(task.database_id, tenant_id.as_u64(), target_bare)?
         .ok_or_else(|| crate::Error::CollectionNotFound {
             tenant_id,
             collection: target_collection.to_string(),
@@ -234,8 +234,9 @@ async fn emit_arms(
             vshard_id,
             PhysicalPlan::Document(DocumentOp::PointInsert {
                 collection: nodedb_types::QualifiedCollection::from_stored(
+                    task.database_id,
                     target_collection.to_string(),
-                ),
+                )?,
                 document_id,
                 value: body,
                 if_absent: false,
@@ -261,8 +262,9 @@ async fn emit_arms(
             vshard_id,
             PhysicalPlan::Document(DocumentOp::PointPut {
                 collection: nodedb_types::QualifiedCollection::from_stored(
+                    task.database_id,
                     target_collection.to_string(),
-                ),
+                )?,
                 document_id,
                 value: body,
                 surrogate,
@@ -284,8 +286,9 @@ async fn emit_arms(
             vshard_id,
             PhysicalPlan::Document(DocumentOp::PointDelete {
                 collection: nodedb_types::QualifiedCollection::from_stored(
+                    task.database_id,
                     target_collection.to_string(),
-                ),
+                )?,
                 document_id,
                 surrogate: Some(surrogate),
                 pk_bytes,

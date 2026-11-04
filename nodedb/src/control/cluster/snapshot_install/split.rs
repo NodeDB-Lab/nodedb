@@ -67,10 +67,9 @@ impl CoreMap {
         database_id: u64,
         stored: &str,
     ) -> Result<usize, SnapshotInstallError> {
-        self.core_of(
-            group_id,
-            vshard_of_stored(DatabaseId::new(database_id), stored),
-        )
+        let vshard = vshard_of_stored(DatabaseId::new(database_id), stored)
+            .map_err(|source| SnapshotInstallError::CollectionName { group_id, source })?;
+        self.core_of(group_id, vshard)
     }
 }
 

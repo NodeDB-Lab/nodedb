@@ -104,7 +104,11 @@ mod tests {
     #[test]
     fn a_truncate_slice_resolves_at_its_turn() {
         use nodedb_physical::physical_plan::{DocumentOp, GraphOp, PhysicalPlan};
-        let collection = nodedb_types::QualifiedCollection::from_stored("c".to_string());
+        let collection = nodedb_types::QualifiedCollection::from_stored(
+            nodedb_types::DatabaseId::DEFAULT,
+            "c".to_string(),
+        )
+        .expect("bare name");
         let truncate = PhysicalPlan::Document(DocumentOp::Truncate {
             collection: collection.clone(),
             restart_identity: false,

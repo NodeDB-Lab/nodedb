@@ -222,8 +222,27 @@ async fn run_catchup_cycle(shared: &SharedState) -> CatchupResult {
             decoded.payload
         };
 
+        let collection =
+            match nodedb_types::QualifiedCollection::from_stored(database_id, decoded.collection) {
+                Ok(collection) => collection,
+                Err(e) => {
+                    // The record is durable, so skipping it loses committed rows.
+                    // The cursor stays below it and the corruption is reported.
+                    tracing::error!(
+                        error = %e,
+                        lsn = record.header.lsn,
+                        "WAL catch-up holds at a record with a malformed collection name"
+                    );
+                    crate::diag::wal_catchup_record_misnamed(
+                        record.header.database_id,
+                        record.header.lsn,
+                        &e.to_string(),
+                    );
+                    break;
+                }
+            };
         let plan = PhysicalPlan::Timeseries(TimeseriesOp::Ingest {
-            collection: nodedb_types::QualifiedCollection::from_stored(decoded.collection),
+            collection,
             payload,
             format,
             wal_lsn: Some(record.header.lsn),

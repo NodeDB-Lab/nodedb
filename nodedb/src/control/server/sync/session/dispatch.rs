@@ -65,7 +65,10 @@ impl SyncSession {
                 }
             },
             SyncMessageType::DeltaPush => {
-                let msg: DeltaPushMsg = frame.decode_body()?;
+                let mut msg: DeltaPushMsg = frame.decode_body()?;
+                if let Some(refusal) = self.refuse_delta_collection(&mut msg) {
+                    return Some(refusal);
+                }
                 if let Some(shared) = shared {
                     // Authorize before session bookkeeping or a provisional ACK.
                     // `authorize_delta_write` emits denial audit records through

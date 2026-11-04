@@ -307,7 +307,7 @@ mod tests {
     use std::sync::Arc;
 
     use nodedb_physical::physical_plan::meta::PassiveReadKeyId;
-    use nodedb_types::{QualifiedCollection, Value};
+    use nodedb_types::{DatabaseId, QualifiedCollection, Value};
 
     use super::*;
     use crate::bridge::dispatch::Dispatcher;
@@ -330,7 +330,7 @@ mod tests {
     fn values() -> Vec<u8> {
         let values = vec![(
             PassiveReadKeyId::kv(
-                QualifiedCollection::from_stored("items".to_owned()),
+                QualifiedCollection::from_stored(DatabaseId::DEFAULT, "items".to_owned()).unwrap(),
                 b"k".to_vec(),
             ),
             Value::Bytes(b"v".to_vec()),

@@ -99,15 +99,12 @@ pub async fn txn_node_delete_tasks(
         }
         _ => return Ok(Vec::new()),
     };
-    let bare = crate::control::target_identity::naming::bare_collection_name(
-        database_id,
-        collection.as_str(),
-    );
+    let bare = nodedb_types::CollectionKey::from_qualified(database_id, collection)?.name();
     let Some(coll) =
         state
             .credentials
             .catalog()
-            .get_collection(database_id, tenant_id.as_u64(), &bare)?
+            .get_collection(database_id, tenant_id.as_u64(), bare)?
     else {
         return Ok(Vec::new());
     };

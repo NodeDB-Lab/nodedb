@@ -217,7 +217,9 @@ impl CoreLoop {
         }
 
         // Record the committed row's version, as a point put does.
-        self.note_surrogate_write(task, tid, collection, surrogate.as_u32());
+        if let Err(e) = self.note_surrogate_write(task, tid, collection, surrogate.as_u32()) {
+            return self.response_error(task, e);
+        }
 
         // `current_bytes` is the pre-merge stored row, already read
         // above — thread it to the Event Plane as `old_value` so the

@@ -115,7 +115,7 @@ mod tests {
     }
 
     fn task_at(lsn: u64) -> ExecutionTask {
-        let mut task = task_with_vshard(collection_vshard(DatabaseId::DEFAULT, "orders"));
+        let mut task = task_with_vshard(collection_vshard(DatabaseId::DEFAULT, "orders").unwrap());
         task.wal_lsn = Some(Lsn::new(lsn));
         task
     }
@@ -351,7 +351,7 @@ mod tests {
         )]);
         let reads = [predicate()];
         let task = task_at(10);
-        let home = collection_vshard(DatabaseId::DEFAULT, "orders");
+        let home = collection_vshard(DatabaseId::DEFAULT, "orders").unwrap();
         // The warm replica caches the slice before the record lands, so the
         // install's keyed note raises the cached value.
         assert_eq!(
