@@ -6,6 +6,7 @@
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
+use crate::control::security::buses::{SessionInvalidationBus, UserChangeBus};
 use crate::control::security::tenant::{TenantIsolation, TenantQuota};
 use crate::control::server::sync::dlq::{DlqConfig, SyncDlq};
 
@@ -75,6 +76,11 @@ impl SharedState {
             bus_consumer_handle,
             permission_cache,
         } = buses;
+        // Credential mutations publish to the same buses the state holds.
+        credentials.set_buses(
+            Arc::new(SessionInvalidationBus::from_existing(si_bus.sender())),
+            Arc::new(UserChangeBus::from_existing(uc_bus.sender())),
+        );
         let AuthInputs {
             metering_config,
             siem,
