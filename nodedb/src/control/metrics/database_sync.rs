@@ -2,12 +2,12 @@
 
 //! Bind `DatabaseMetricsRegistry` entries to catalog databases.
 //!
-//! Entries are created when a database is created or restored, and at
-//! startup for every listed database. Only the drop of a database removes
-//! its entry. A scrape reads names and never adds or removes an entry, so a
-//! stale catalog read cannot resurrect or prune a series.
+//! The `PutDatabase` and `DeleteDatabase` post-apply hooks create and remove
+//! entries on every node. Startup and a metadata image install reconcile the
+//! registry with the catalog. A scrape reads names and never adds or removes
+//! an entry, so a stale catalog read cannot resurrect or prune a series.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use nodedb_types::DatabaseId;
 
@@ -22,6 +22,22 @@ pub fn ensure_listed(
     for db in catalog.list_databases()? {
         registry.ensure_database(db.id);
     }
+    Ok(())
+}
+
+/// Make the registry hold exactly the databases the catalog lists.
+/// Called after a metadata image replaced the catalog.
+pub fn reconcile(registry: &DatabaseMetricsRegistry, catalog: &SystemCatalog) -> crate::Result<()> {
+    let listed: HashSet<DatabaseId> = catalog
+        .list_databases()?
+        .into_iter()
+        .map(|d| d.id)
+        .collect();
+    for id in &listed {
+        registry.ensure_database(*id);
+    }
+    let mut w = registry.counters.write().unwrap_or_else(|p| p.into_inner());
+    w.retain(|id, _| listed.contains(id));
     Ok(())
 }
 

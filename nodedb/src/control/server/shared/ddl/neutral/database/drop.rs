@@ -183,9 +183,6 @@ pub async fn drop_database(
     .await
     .map_err(|e| DdlError::from_error_in_context("catalog propose failed", &e))?;
 
-    // Remove every per-database metric series.
-    state.database_metrics.remove_database(db_id);
-
     Ok(status("DROP DATABASE"))
 }
 

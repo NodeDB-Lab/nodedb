@@ -6,9 +6,11 @@
 //! node: the admission registry's connection cap, the memory governor's byte
 //! ceiling, (database scope only) the maintenance CPU budget, and (tenant
 //! scope only) the tenant isolation view. A zero dimension clears the
-//! corresponding cap.
+//! corresponding cap. A database quota also sets the storage limit gauge in
+//! the database metrics registry.
 //!
 //! A database or tenant drop releases the caps of that scope on every node.
+//! A database drop also removes the metrics entry.
 //! The matching row deletion is durable state and lives in apply.
 
 use nodedb_types::{DatabaseId, QuotaRecord, TenantId};
@@ -17,7 +19,20 @@ use crate::control::security::tenant::TenantQuota;
 use crate::control::state::SharedState;
 
 /// Install a database quota into live enforcement.
+///
+/// Creates the metrics entry first, so a quota that applies before the
+/// database descriptor still records its storage limit.
 pub fn put_database(db_id: DatabaseId, record: &QuotaRecord, shared: &SharedState) {
+    shared.database_metrics.ensure_database(db_id);
+    install_database_caps(db_id, record, shared);
+}
+
+/// Point live enforcement and the storage limit gauge at `record`.
+/// The gauge write is a no-op when the database has no metrics entry.
+fn install_database_caps(db_id: DatabaseId, record: &QuotaRecord, shared: &SharedState) {
+    shared
+        .database_metrics
+        .set_storage_limit(db_id, record.max_storage_bytes);
     shared
         .maintenance_budget
         .set_cap(db_id, record.maintenance_cpu_pct);
@@ -35,8 +50,10 @@ pub fn put_database(db_id: DatabaseId, record: &QuotaRecord, shared: &SharedStat
 }
 
 /// Drop a database quota from live enforcement, restoring defaults.
+///
+/// Never creates a metrics entry, so a dropped database stays absent.
 pub fn delete_database(db_id: DatabaseId, shared: &SharedState) {
-    put_database(db_id, &QuotaRecord::DEFAULT, shared);
+    install_database_caps(db_id, &QuotaRecord::DEFAULT, shared);
 }
 
 /// Install a tenant quota into live enforcement.
@@ -87,9 +104,10 @@ fn set_tenant_caps(
     }
 }
 
-/// Release a dropped database's live caps, its tenants' caps included.
-/// Row deletion belongs to apply; this frees in-memory enforcement only.
+/// Release a dropped database's live caps, its tenants' caps included, and
+/// its metrics entry. Row deletion belongs to apply; this frees memory only.
 pub fn release_database_scope(db_id: DatabaseId, shared: &SharedState) {
+    shared.database_metrics.remove_database(db_id);
     shared.maintenance_budget.set_cap(db_id, 0);
     shared.admission_registry.clear_database_scope(db_id);
     shared.governor.clear_database_scope(db_id);
@@ -108,6 +126,8 @@ mod tests {
 
     use super::*;
     use crate::bridge::dispatch::Dispatcher;
+    use crate::control::catalog_entry::post_apply::database;
+    use crate::control::security::catalog::database_types::{DatabaseDescriptor, DatabaseStatus};
     use crate::wal::WalManager;
 
     /// Shared state with a live admission registry.
@@ -143,6 +163,93 @@ mod tests {
         assert_eq!(registry.database_live_connections(db), None);
         assert_eq!(registry.tenant_live_connections(db, tenant), None);
         assert_eq!(registry.database_live_connections(other), Some(0));
+    }
+
+    fn limited(max_storage_bytes: u64) -> QuotaRecord {
+        QuotaRecord {
+            max_storage_bytes,
+            ..QuotaRecord::DEFAULT
+        }
+    }
+
+    fn descriptor(id: DatabaseId) -> DatabaseDescriptor {
+        DatabaseDescriptor {
+            id,
+            name: "metrics_db".to_string(),
+            status: DatabaseStatus::Active,
+            created_at_lsn: 1,
+            quota_ref: 0,
+            parent_clone: None,
+            mirror_origin: None,
+            audit_dml: nodedb_types::AuditDmlMode::None,
+            idle_session_timeout_secs: 0,
+        }
+    }
+
+    #[test]
+    fn database_put_creates_the_metrics_entry() {
+        let (shared, _dir) = make_state();
+        let db = DatabaseId::new(21);
+        assert!(shared.database_metrics.get(db).is_none());
+
+        database::put(descriptor(db), Arc::clone(&shared));
+
+        assert!(shared.database_metrics.get(db).is_some());
+    }
+
+    #[test]
+    fn database_delete_removes_the_metrics_entry() {
+        let (shared, _dir) = make_state();
+        let db = DatabaseId::new(22);
+        database::put(descriptor(db), Arc::clone(&shared));
+
+        database::delete(db.as_u64(), Arc::clone(&shared));
+
+        assert!(shared.database_metrics.get(db).is_none());
+    }
+
+    #[test]
+    fn put_database_sets_the_storage_limit() {
+        let (shared, _dir) = make_state();
+        let db = DatabaseId::new(23);
+        database::put(descriptor(db), Arc::clone(&shared));
+
+        put_database(db, &limited(4096), &shared);
+
+        assert_eq!(shared.database_metrics.storage_limit(db), 4096);
+    }
+
+    #[test]
+    fn quota_before_database_keeps_the_storage_limit() {
+        let (shared, _dir) = make_state();
+        let db = DatabaseId::new(24);
+
+        put_database(db, &limited(8192), &shared);
+        database::put(descriptor(db), Arc::clone(&shared));
+
+        assert_eq!(shared.database_metrics.storage_limit(db), 8192);
+    }
+
+    #[test]
+    fn delete_database_resets_the_storage_limit_to_zero() {
+        let (shared, _dir) = make_state();
+        let db = DatabaseId::new(25);
+        put_database(db, &limited(4096), &shared);
+
+        delete_database(db, &shared);
+
+        assert_eq!(shared.database_metrics.storage_limit(db), 0);
+        assert!(shared.database_metrics.get(db).is_some());
+    }
+
+    #[test]
+    fn delete_database_does_not_create_a_metrics_entry() {
+        let (shared, _dir) = make_state();
+        let db = DatabaseId::new(26);
+
+        delete_database(db, &shared);
+
+        assert!(shared.database_metrics.get(db).is_none());
     }
 
     #[test]

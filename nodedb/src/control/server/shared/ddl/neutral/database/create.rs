@@ -112,10 +112,6 @@ pub async fn create_database(
     .await
     .map_err(|e| DdlError::from_error_in_context("catalog propose failed", &e))?;
 
-    // Create the per-database metric series. Gauges start at zero and
-    // are updated by their respective subsystems.
-    state.database_metrics.ensure_database(db_id);
-
     state.audit_record_with_db(
         crate::control::security::audit::AuditEvent::DatabaseCreated,
         None,

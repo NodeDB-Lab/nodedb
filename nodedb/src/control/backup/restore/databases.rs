@@ -164,7 +164,6 @@ async fn create_database(state: &SharedState, blob: &DatabaseBlob) -> Result<Dat
     if let Some(record) = &blob.database_quota {
         restore_database_quota(state, id, record).await?;
     }
-    state.database_metrics.ensure_database(id);
     state.audit_record_with_db(
         crate::control::security::audit::AuditEvent::DatabaseCreated,
         None,
