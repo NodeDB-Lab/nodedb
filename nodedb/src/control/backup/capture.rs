@@ -113,21 +113,25 @@ fn decode_owned(
             None => Ok(false),
         }
     };
-    let mut kept_params = Vec::with_capacity(snap.vector_params.len());
-    for entry in std::mem::take(&mut snap.vector_params) {
-        if owned(&entry.0)? {
-            kept_params.push(entry);
-        }
-    }
-    snap.vector_params = kept_params;
-    let mut kept_configs = Vec::with_capacity(snap.index_configs.len());
-    for entry in std::mem::take(&mut snap.index_configs) {
-        if owned(&entry.0)? {
-            kept_configs.push(entry);
-        }
-    }
-    snap.index_configs = kept_configs;
+    retain_owned(&mut snap.vector_params, &owned)?;
+    retain_owned(&mut snap.index_configs, &owned)?;
     Ok(snap)
+}
+
+/// Keep the entries of `entries` whose key `owned` accepts.
+fn retain_owned<V>(
+    entries: &mut Vec<(String, V)>,
+    owned: &impl Fn(&str) -> Result<bool, Error>,
+) -> Result<(), Error> {
+    let mut error = None;
+    entries.retain(|(key, _)| match owned(key) {
+        Ok(keep) => keep,
+        Err(e) => {
+            error.get_or_insert(e);
+            false
+        }
+    });
+    error.map_or(Ok(()), Err)
 }
 
 /// The homes of `record`, or `None` when its collection is not one of
