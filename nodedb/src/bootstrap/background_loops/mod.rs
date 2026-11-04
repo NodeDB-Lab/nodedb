@@ -9,6 +9,7 @@ pub mod maintenance;
 pub mod mirror;
 pub mod response_poller;
 pub mod spawn;
+pub mod storage_bytes;
 pub mod timers;
 
 pub use mirror::log_mirror_restart_decisions;

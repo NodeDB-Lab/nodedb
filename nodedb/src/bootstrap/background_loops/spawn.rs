@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use tracing::info;
 
-use super::{database_metrics, maintenance, mirror, timers};
+use super::{database_metrics, maintenance, mirror, storage_bytes, timers};
 use crate::ServerConfig;
 use crate::control::shutdown::ShutdownBus;
 use crate::control::state::SharedState;
@@ -59,6 +59,10 @@ pub fn spawn_background_loops(
     }
     mirror::spawn_mirror_lag_monitor(shared);
     database_metrics::spawn_database_metrics_sampler(shared);
+    storage_bytes::spawn_storage_sampler(
+        shared,
+        storage_bytes::storage_sample_period(config.tuning.maintenance.storage_sample_interval_ms),
+    );
 
     let event_plane = spawn_event_plane(shared, &shutdown_bus, components, num_cores);
 

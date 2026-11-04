@@ -323,6 +323,8 @@ pub struct SharedState {
     pub connection_tracker: Arc<crate::control::metrics::ConnectionTracker>,
     /// This node's last sampled share of stored bytes per database and tenant.
     pub storage_shares: Arc<crate::control::metrics::StorageShares>,
+    /// Cluster stored bytes per database and tenant, read lock-free.
+    pub cluster_storage_totals: Arc<crate::control::metrics::ClusterStorageTotals>,
     /// Global per-cluster quota ceiling enforced when database quotas are
     /// written. Set at startup from `[server]` config (`memory_limit`,
     /// `max_connections`). Zero on a dimension means no ceiling there.

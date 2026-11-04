@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! `NODEDB_CLONE_SWEEP_INTERVAL_MS` / `NODEDB_CONSTRAINT_RECONCILE_INTERVAL_MS`
-//! / `NODEDB_SCOPE_EXPIRY_INTERVAL_SECS` overrides — background maintenance
-//! loop intervals.
+//! / `NODEDB_SCOPE_EXPIRY_INTERVAL_SECS` / `NODEDB_STORAGE_SAMPLE_INTERVAL_MS`
+//! overrides — background maintenance loop intervals.
 
 use crate::config::server::ServerConfig;
 
@@ -36,6 +36,14 @@ fn apply_scope_expiry_interval_secs(
     Ok(())
 }
 
+fn apply_storage_sample_interval_ms(
+    config: &mut ServerConfig,
+    raw: &str,
+) -> Result<(), &'static str> {
+    config.tuning.maintenance.storage_sample_interval_ms = parse_u64_positive(raw)?;
+    Ok(())
+}
+
 pub(in super::super) const ROWS: &[EnvRow] = &[
     EnvRow {
         name: "NODEDB_CLONE_SWEEP_INTERVAL_MS",
@@ -50,6 +58,11 @@ pub(in super::super) const ROWS: &[EnvRow] = &[
     EnvRow {
         name: "NODEDB_SCOPE_EXPIRY_INTERVAL_SECS",
         apply: apply_scope_expiry_interval_secs,
+        redact: false,
+    },
+    EnvRow {
+        name: "NODEDB_STORAGE_SAMPLE_INTERVAL_MS",
+        apply: apply_storage_sample_interval_ms,
         redact: false,
     },
 ];

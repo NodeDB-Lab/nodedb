@@ -56,3 +56,22 @@ fn scope_expiry_interval_below_floor_fails_startup() {
         "5",
     );
 }
+
+#[test]
+fn malformed_storage_sample_interval_fails_startup() {
+    let _guard = EnvGuard::set("NODEDB_STORAGE_SAMPLE_INTERVAL_MS", "0");
+    let mut cfg = ServerConfig::default();
+    assert_rejected(
+        apply_env_overrides(&mut cfg),
+        "NODEDB_STORAGE_SAMPLE_INTERVAL_MS",
+        "0",
+    );
+}
+
+#[test]
+fn storage_sample_interval_override_applies() {
+    let _guard = EnvGuard::set("NODEDB_STORAGE_SAMPLE_INTERVAL_MS", "250");
+    let mut cfg = ServerConfig::default();
+    apply_env_overrides(&mut cfg).expect("a positive interval applies");
+    assert_eq!(cfg.tuning.maintenance.storage_sample_interval_ms, 250);
+}

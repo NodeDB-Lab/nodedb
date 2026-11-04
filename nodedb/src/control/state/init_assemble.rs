@@ -299,6 +299,9 @@ impl SharedState {
             database_metrics: Arc::new(crate::control::metrics::DatabaseMetricsRegistry::new()),
             connection_tracker: Arc::new(crate::control::metrics::ConnectionTracker::new()),
             storage_shares: Arc::new(crate::control::metrics::StorageShares::default()),
+            cluster_storage_totals: Arc::new(
+                crate::control::metrics::ClusterStorageTotals::default(),
+            ),
             quota_ceiling: Arc::new(std::sync::RwLock::new(
                 crate::control::security::catalog::GlobalQuotaCeiling::default(),
             )),

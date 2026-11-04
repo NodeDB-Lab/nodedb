@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! `MetaOp::QueryStorageBytes`: this core's stored bytes per database and
-//! tenant.
+//! `MetaOp::QueryStorageBytes`: this core's stored bytes per vShard, database
+//! and tenant.
 //!
 //! The source of each engine's stored bytes:
 //!
@@ -20,7 +20,9 @@
 //! Memtables do not count. The WAL holds their rows until a flush writes them.
 //!
 //! A collection counts when its home vShard is in the led set and routes to
-//! this core. An array tile counts the same way by its placement vShard.
+//! this core. An array tile counts the same way by its placement vShard. Each
+//! byte counts under the vShard that admits it, so the Control Plane can split
+//! the answer by Raft group.
 //!
 //! Edges live on their endpoint keys' vShards, not on the collection home. The
 //! edge counter splits each collection by the edge's two endpoint homes. A core
@@ -43,12 +45,12 @@ use crate::data::executor::task::ExecutionTask;
 use crate::engine::graph::edge_store::home_bytes::EdgeHomes;
 use crate::types::{VShardId, core_for_vshard};
 
-/// One answer row: `(database_id, tenant_id, stored bytes)`.
-pub type TenantBytesRow = (u64, u64, u64);
+/// One answer row: `(vshard_id, database_id, tenant_id, stored bytes)`.
+pub type TenantBytesRow = (u32, u64, u64, u64);
 
 impl CoreLoop {
     /// `MetaOp::QueryStorageBytes`: answer this core's stored bytes per
-    /// `(database, tenant)` against `led_vshards`.
+    /// `(vshard, database, tenant)` against `led_vshards`.
     pub(in crate::data::executor) fn execute_query_storage_bytes(
         &self,
         task: &ExecutionTask,
@@ -64,8 +66,8 @@ impl CoreLoop {
         }
     }
 
-    /// This core's stored bytes per `(database, tenant)` of the collections
-    /// `led_vshards` covers, in key order. A counter that does not read, or a
+    /// This core's stored bytes per `(vshard, database, tenant)` of the
+    /// collections `led_vshards` covers, in key order. A counter that does not read, or a
     /// stored name not in its database's stored form, fails the call.
     pub(in crate::data::executor) fn led_storage_bytes(
         &self,
@@ -181,7 +183,8 @@ struct StorageTally {
     /// Home vShard per database and stored collection name, computed once per
     /// call.
     homes: HashMap<DatabaseId, HashMap<String, u32>>,
-    totals: HashMap<(u64, u64), u64>,
+    /// Bytes per `(vshard, database, tenant)`.
+    totals: HashMap<(u32, u64, u64), u64>,
 }
 
 impl StorageTally {
@@ -204,10 +207,10 @@ impl StorageTally {
             && core_for_vshard(VShardId::new(vshard), self.num_cores) == self.core_id
     }
 
-    fn add(&mut self, database_id: DatabaseId, tenant_id: TenantId, bytes: u64) {
+    fn add(&mut self, vshard: u32, database_id: DatabaseId, tenant_id: TenantId, bytes: u64) {
         let total = self
             .totals
-            .entry((database_id.as_u64(), tenant_id.as_u64()))
+            .entry((vshard, database_id.as_u64(), tenant_id.as_u64()))
             .or_insert(0);
         *total = total.saturating_add(bytes);
     }
@@ -225,7 +228,7 @@ impl StorageTally {
         }
         let home = self.home(database_id, stored)?;
         if self.counts_here(home) {
-            self.add(database_id, tenant_id, bytes);
+            self.add(home, database_id, tenant_id, bytes);
         }
         Ok(())
     }
@@ -243,8 +246,11 @@ impl StorageTally {
         let on_core = homes
             .iter()
             .find(|&home| core_for_vshard(VShardId::new(home), self.num_cores) == self.core_id);
-        if bytes > 0 && on_core.is_some_and(|home| self.led.contains(&home)) {
-            self.add(database_id, tenant_id, bytes);
+        if let Some(home) = on_core
+            && bytes > 0
+            && self.led.contains(&home)
+        {
+            self.add(home, database_id, tenant_id, bytes);
         }
     }
 
@@ -257,7 +263,7 @@ impl StorageTally {
         bytes: u64,
     ) {
         if bytes > 0 && self.counts_here(placement) {
-            self.add(database_id, tenant_id, bytes);
+            self.add(placement, database_id, tenant_id, bytes);
         }
     }
 
@@ -265,7 +271,9 @@ impl StorageTally {
         let mut rows: Vec<TenantBytesRow> = self
             .totals
             .into_iter()
-            .map(|((database_id, tenant_id), bytes)| (database_id, tenant_id, bytes))
+            .map(|((vshard, database_id, tenant_id), bytes)| {
+                (vshard, database_id, tenant_id, bytes)
+            })
             .collect();
         rows.sort_unstable();
         rows
@@ -342,8 +350,17 @@ mod tests {
 
     fn total(rows: &[TenantBytesRow], database_id: DatabaseId, tenant_id: u64) -> u64 {
         rows.iter()
-            .find(|(d, t, _)| *d == database_id.as_u64() && *t == tenant_id)
-            .map_or(0, |(_, _, bytes)| *bytes)
+            .filter(|(_, d, t, _)| *d == database_id.as_u64() && *t == tenant_id)
+            .map(|(_, _, _, bytes)| *bytes)
+            .sum()
+    }
+
+    /// The vShards the rows of `(database_id, tenant_id)` count under.
+    fn vshards(rows: &[TenantBytesRow], database_id: DatabaseId, tenant_id: u64) -> Vec<u32> {
+        rows.iter()
+            .filter(|(_, d, t, _)| *d == database_id.as_u64() && *t == tenant_id)
+            .map(|(vshard, _, _, _)| *vshard)
+            .collect()
     }
 
     /// Writes into documents, edges, KV and columnar segments of two
@@ -427,11 +444,19 @@ mod tests {
         assert!(kv > 0);
         assert_eq!(total(&partial, OTHER_DB, 2), kv + 300);
         assert_eq!(total(&all, OTHER_DB, 2), kv + 300);
-        assert_eq!(
-            partial.len(),
-            2,
-            "one row per database and tenant: {partial:?}"
-        );
+        let pairs: HashSet<(u64, u64)> = partial.iter().map(|(_, d, t, _)| (*d, *t)).collect();
+        assert_eq!(pairs.len(), 2, "two databases and tenants: {partial:?}");
+
+        // Each row counts under the home vShard of its collection.
+        let mut other = vshards(&partial, OTHER_DB, 2);
+        other.sort_unstable();
+        let mut expected = vec![home(OTHER_DB, "1024/cache"), home(OTHER_DB, "1024/metrics")];
+        expected.sort_unstable();
+        expected.dedup();
+        assert_eq!(other, expected, "{partial:?}");
+        assert!(!vshards(&all, DatabaseId::DEFAULT, 1).is_empty());
+        assert!(vshards(&all, DatabaseId::DEFAULT, 1).contains(&hidden));
+        assert!(!vshards(&partial, DatabaseId::DEFAULT, 1).contains(&hidden));
 
         assert!(core.led_storage_bytes(&[]).unwrap().is_empty());
     }
@@ -473,7 +498,7 @@ mod tests {
         let response = core.execute_query_storage_bytes(&make_default_task(), &every_vshard());
         assert_eq!(response.status, Status::Ok);
         let rows: Vec<TenantBytesRow> = zerompk::from_msgpack(response.payload.as_bytes()).unwrap();
-        assert_eq!(rows, vec![(0, 3, 42)]);
+        assert_eq!(rows, vec![(home(DatabaseId::DEFAULT, "events"), 0, 3, 42)]);
     }
 
     /// One core counts its copy of an edge once, under the lowest of the
@@ -503,6 +528,7 @@ mod tests {
         );
         let rows = core.led_storage_bytes(&[low]).unwrap();
         assert_eq!(total(&rows, DatabaseId::DEFAULT, 5), counted);
+        assert_eq!(vshards(&rows, DatabaseId::DEFAULT, 5), vec![low]);
         let rows = core.led_storage_bytes(&[high]).unwrap();
         assert_eq!(
             total(&rows, DatabaseId::DEFAULT, 5),

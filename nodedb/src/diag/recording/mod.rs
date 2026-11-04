@@ -87,6 +87,7 @@ pub use retention::retention_autowire_orphaned;
 pub use shared::entry_kind;
 pub use storage_bytes::{
     storage_bytes_residue, storage_bytes_sample_failed, storage_bytes_underflow,
+    storage_share_peer_skipped,
 };
 pub use vector::vector_index_not_applied;
 pub use vector_build::{

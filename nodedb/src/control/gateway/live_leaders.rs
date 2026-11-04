@@ -46,6 +46,15 @@ impl LiveLeaders {
             .map_or(0, |s| s.leader_id)
     }
 
+    /// This node's Raft term of `group_id`, or `0` when Raft knows no such
+    /// group here. A leader's term is the term it leads in.
+    pub fn term_of(&self, group_id: u64) -> u64 {
+        self.statuses
+            .as_deref()
+            .and_then(|statuses| statuses.iter().find(|s| s.group_id == group_id))
+            .map_or(0, |s| s.term)
+    }
+
     /// Resolve `vshard_id` against this snapshot, with `routing` as the hint fallback.
     pub fn resolve(
         &self,

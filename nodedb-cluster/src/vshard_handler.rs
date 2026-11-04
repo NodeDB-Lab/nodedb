@@ -106,6 +106,10 @@ pub fn dispatch_by_type(envelope: &VShardEnvelope) -> DispatchTarget {
         VShardMessageType::ArrayShardElementwiseResp => DispatchTarget::ArrayCoordinator,
         VShardMessageType::ArrayShardMaintReq => DispatchTarget::ArrayShard,
         VShardMessageType::ArrayShardMaintResp => DispatchTarget::ArrayCoordinator,
+
+        // Storage accounting
+        VShardMessageType::StorageShareRequest => DispatchTarget::StorageShare,
+        VShardMessageType::StorageShareResponse => DispatchTarget::StorageAggregator,
     }
 }
 
@@ -149,6 +153,10 @@ pub enum DispatchTarget {
     ArrayShard,
     /// Array coordinator: receives shard responses and merges them.
     ArrayCoordinator,
+    /// Storage share: the node answers its latest stored-byte share.
+    StorageShare,
+    /// Storage aggregator: receives storage share answers.
+    StorageAggregator,
 }
 
 /// Build a response envelope for a timeseries scatter response.
@@ -197,6 +205,12 @@ mod tests {
     fn dispatch_ts_retention() {
         let env = VShardEnvelope::new(VShardMessageType::TsRetentionCommand, 1, 2, 42, vec![]);
         assert_eq!(dispatch_by_type(&env), DispatchTarget::TimeseriesRetention);
+    }
+
+    #[test]
+    fn dispatch_storage_share() {
+        let env = VShardEnvelope::new(VShardMessageType::StorageShareRequest, 1, 2, 0, vec![]);
+        assert_eq!(dispatch_by_type(&env), DispatchTarget::StorageShare);
     }
 
     #[test]
@@ -256,6 +270,8 @@ mod tests {
             VShardMessageType::ArrayShardElementwiseResp,
             VShardMessageType::ArrayShardMaintReq,
             VShardMessageType::ArrayShardMaintResp,
+            VShardMessageType::StorageShareRequest,
+            VShardMessageType::StorageShareResponse,
         ];
         for msg_type in all_types {
             let env = VShardEnvelope::new(msg_type, 1, 2, 0, vec![]);

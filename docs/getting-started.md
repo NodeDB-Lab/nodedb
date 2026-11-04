@@ -587,8 +587,9 @@ a crashed node's descriptor leases block DDL until they expire.
 | `tuning.maintenance.clone_sweep_interval_ms`          | `NODEDB_CLONE_SWEEP_INTERVAL_MS`          | `30000` |
 | `tuning.maintenance.constraint_reconcile_interval_ms` | `NODEDB_CONSTRAINT_RECONCILE_INTERVAL_MS` | `1000`  |
 | `tuning.maintenance.scope_expiry_interval_secs`       | `NODEDB_SCOPE_EXPIRY_INTERVAL_SECS`       | `60`    |
+| `tuning.maintenance.storage_sample_interval_ms`       | `NODEDB_STORAGE_SAMPLE_INTERVAL_MS`       | `30000` |
 
-All three must be positive. `scope_expiry_interval_secs` has a floor of `10`.
+All four must be positive. `scope_expiry_interval_secs` has a floor of `10`.
 Below that the sweep costs more than the resolution it buys.
 
 **Calvin scheduler settings** (config file only):

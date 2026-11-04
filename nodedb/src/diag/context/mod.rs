@@ -85,7 +85,7 @@ pub(in crate::diag) use redo_stream::{
 };
 pub(in crate::diag) use retention::RetentionAutowireOrphaned;
 pub(in crate::diag) use storage_bytes::{
-    StorageBytesResidue, StorageBytesSampleFailed, StorageBytesUnderflow,
+    StorageBytesResidue, StorageBytesSampleFailed, StorageBytesUnderflow, StorageSharePeerSkipped,
 };
 pub(in crate::diag) use vector::VectorIndexNotApplied;
 pub(in crate::diag) use vector_build::{

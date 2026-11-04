@@ -151,6 +151,12 @@ pub enum VShardMessageType {
     ArrayShardMaintReq = 92,
     /// Gather: shard acknowledges the maintenance.
     ArrayShardMaintResp = 93,
+
+    // ── Storage accounting ──
+    /// Ask a node for its latest stored-byte share, per Raft group it leads.
+    StorageShareRequest = 100,
+    /// A node's latest stored-byte share.
+    StorageShareResponse = 101,
 }
 
 /// Wire protocol version of the `VShardEnvelope` binary frame.
@@ -280,6 +286,8 @@ impl VShardMessageType {
             91 => VShardMessageType::ArrayShardElementwiseResp,
             92 => VShardMessageType::ArrayShardMaintReq,
             93 => VShardMessageType::ArrayShardMaintResp,
+            100 => VShardMessageType::StorageShareRequest,
+            101 => VShardMessageType::StorageShareResponse,
             _ => return None,
         };
         Some(msg_type)
@@ -355,6 +363,8 @@ mod tests {
             VShardMessageType::ArrayShardElementwiseResp,
             VShardMessageType::ArrayShardMaintReq,
             VShardMessageType::ArrayShardMaintResp,
+            VShardMessageType::StorageShareRequest,
+            VShardMessageType::StorageShareResponse,
         ];
 
         for msg_type in types {

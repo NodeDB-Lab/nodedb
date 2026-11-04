@@ -3,9 +3,8 @@
 //! Per-database metrics sampler: publishes gauges and counter deltas that
 //! no hot path writes.
 //!
-//! Two cadences run. The fast one samples every `SAMPLE_PERIOD`. The slow one
-//! reads stored bytes from every core every `STORAGE_SAMPLE_PERIOD`, so a slow
-//! core never delays the fast gauges.
+//! It samples every `SAMPLE_PERIOD`. Stored bytes sample on their own loop,
+//! so a slow core never delays these gauges.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -15,7 +14,6 @@ use nodedb_types::DatabaseId;
 
 use crate::control::metrics::connections::publish_connections;
 use crate::control::metrics::histogram::HistogramSnapshot;
-use crate::control::metrics::storage::{STORAGE_SAMPLE_PERIOD, sample_storage};
 use crate::control::shutdown::{ShutdownPhase, spawn_loop};
 use crate::control::state::SharedState;
 
@@ -130,12 +128,10 @@ fn publish_lease_deltas(shared: &SharedState, prev: &mut SamplerState) {
     prev.lease_secs = current;
 }
 
-/// Spawn the loop that samples per-database metrics every `SAMPLE_PERIOD`,
-/// and the loop that samples stored bytes every `STORAGE_SAMPLE_PERIOD`.
+/// Spawn the loop that samples per-database metrics every `SAMPLE_PERIOD`.
 ///
 /// A sampling error logs a warning and the next tick retries.
 pub(crate) fn spawn_database_metrics_sampler(shared: &Arc<SharedState>) {
-    spawn_storage_sampler(shared);
     let state = Arc::clone(shared);
     spawn_loop(
         &shared.loop_registry,
@@ -151,32 +147,6 @@ pub(crate) fn spawn_database_metrics_sampler(shared: &Arc<SharedState>) {
                     _ = tick.tick() => {
                         if let Err(error) = sample_once(&state, &mut prev) {
                             tracing::warn!(error = %error, "database metrics sample failed");
-                        }
-                    }
-                }
-            }
-        },
-    );
-}
-
-/// Spawn the loop that publishes this node's stored bytes every
-/// `STORAGE_SAMPLE_PERIOD`. A failed sample keeps the last published share.
-fn spawn_storage_sampler(shared: &Arc<SharedState>) {
-    let state = Arc::clone(shared);
-    spawn_loop(
-        &shared.loop_registry,
-        &shared.shutdown,
-        "storage_bytes_sampler",
-        ShutdownPhase::DrainingControlPlane,
-        move |mut shutdown| async move {
-            let mut tick = tokio::time::interval(STORAGE_SAMPLE_PERIOD);
-            loop {
-                tokio::select! {
-                    _ = shutdown.wait_cancelled() => break,
-                    _ = tick.tick() => {
-                        if let Err(error) = sample_storage(&state).await {
-                            crate::diag::storage_bytes_sample_failed(&error);
-                            tracing::warn!(error = %error, "storage bytes sample failed");
                         }
                     }
                 }

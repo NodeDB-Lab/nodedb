@@ -20,6 +20,6 @@ pub use histogram::AtomicHistogram;
 pub use overload_responses::{OverloadProtocol, OverloadResponses, overload_responses};
 pub use per_vshard::{PerVShardMetrics, PerVShardMetricsRegistry, VShardStatsSnapshot};
 pub use purge::PurgeMetrics;
-pub use storage::{StorageShare, StorageShares};
+pub use storage::{ClusterStorageTotals, StorageShare, StorageShares};
 pub use system::{CoreFailStopReport, CoreFailStops, CoreHeartbeats, GraphCount, SystemMetrics};
 pub use tenant::TenantQuotaMetrics;

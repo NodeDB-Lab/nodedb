@@ -346,7 +346,11 @@ fn build_envelope_handler(
         Arc::new(crate::event::cross_shard::CrossShardMetrics::new()),
         handle.node_id,
     ));
-    Ok(build_vshard_handler(array_executor, cross_shard_receiver))
+    Ok(build_vshard_handler(
+        array_executor,
+        cross_shard_receiver,
+        Arc::downgrade(shared),
+    ))
 }
 
 /// Read the snapshot-transfer config from the pending subsystem config.

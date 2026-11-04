@@ -16,11 +16,14 @@ use crate::control::server::exchange::gather::eager_dispatch_to_all_cores_until;
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TenantId, TraceId};
 
-/// One core's answer row: `(database_id, tenant_id, stored bytes)`.
-type CoreRow = (u64, u64, u64);
+/// One core's answer row: `(vshard_id, database_id, tenant_id, stored bytes)`.
+type CoreRow = (u32, u64, u64, u64);
+
+/// Stored bytes per `(vshard, database, tenant)`.
+pub type VShardTotals = HashMap<(u32, DatabaseId, TenantId), u64>;
 
 /// Send `MetaOp::QueryStorageBytes` to every local core and sum the answers
-/// per `(database, tenant)`.
+/// per `(vshard, database, tenant)`.
 ///
 /// Every core must answer by `deadline`. A core that fails, refuses or misses
 /// the deadline fails the whole read: a partial sum reads as a smaller total.
@@ -28,7 +31,7 @@ pub async fn query_local_storage_bytes(
     state: &SharedState,
     led_vshards: Vec<u32>,
     deadline: Instant,
-) -> crate::Result<HashMap<(DatabaseId, TenantId), u64>> {
+) -> crate::Result<VShardTotals> {
     crate::control::server::broadcast::broadcast_call_count_increment();
     let max_result_bytes = state.tuning.network.max_query_result_bytes as usize;
     let plan = PhysicalPlan::Meta(MetaOp::QueryStorageBytes { led_vshards });
@@ -63,11 +66,15 @@ pub async fn query_local_storage_bytes(
         .into_iter()
         .map(|(core_id, collected)| core_rows(core_id, classify_core_response(collected)));
 
-    let mut totals: HashMap<(DatabaseId, TenantId), u64> = HashMap::new();
+    let mut totals = VShardTotals::new();
     for rows in require_every_core(outcomes)? {
-        for (database_id, tenant_id, bytes) in rows {
+        for (vshard, database_id, tenant_id, bytes) in rows {
             let total = totals
-                .entry((DatabaseId::new(database_id), TenantId::new(tenant_id)))
+                .entry((
+                    vshard,
+                    DatabaseId::new(database_id),
+                    TenantId::new(tenant_id),
+                ))
                 .or_insert(0);
             *total = total.saturating_add(bytes);
         }
@@ -114,7 +121,7 @@ mod tests {
 
     #[test]
     fn a_core_answer_decodes_as_rows() {
-        let rows: Vec<CoreRow> = vec![(0, 1, 10), (5, 2, 7)];
+        let rows: Vec<CoreRow> = vec![(3, 0, 1, 10), (9, 5, 2, 7)];
         let payload = zerompk::to_msgpack_vec(&rows).unwrap();
         let decoded = core_rows(2, Ok(Some(response(payload)))).unwrap();
         assert_eq!(decoded, Some(rows));

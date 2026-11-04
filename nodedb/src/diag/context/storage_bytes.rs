@@ -124,6 +124,37 @@ impl DomainContext for StorageBytesSampleFailed<'_> {
     }
 }
 
+/// A peer that did not answer a storage round, so the round skipped it.
+pub(in crate::diag) struct StorageSharePeerSkipped<'a> {
+    /// The peer the round skipped.
+    pub peer: u64,
+    /// What failed, without the per-occurrence detail.
+    pub error_class: &'a str,
+}
+
+impl DomainContext for StorageSharePeerSkipped<'_> {
+    fn domain_kind(&self) -> &'static str {
+        "nodedb.storage_share_peer_skipped"
+    }
+
+    fn grouping_key(&self) -> String {
+        // The peer id changes per occurrence. The error class names the cause.
+        format!("cause={}", self.error_class)
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "peer": self.peer,
+            "error_class": self.error_class,
+            "why_fatal": "the cluster storage total keeps the peer's last report until it \
+                          is three sample periods old, then counts the peer's groups as zero. \
+                          Storage quotas read a smaller total until the peer answers",
+            "operator_action": "check that the peer is up and reachable over the cluster \
+                                 transport. The next round asks again with no operator step",
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,5 +204,16 @@ mod tests {
             error_class: "deadline",
         };
         assert_eq!(ctx.grouping_key(), "cause=deadline");
+    }
+
+    #[test]
+    fn peer_skip_grouping_keys_the_cause() {
+        let first = StorageSharePeerSkipped {
+            peer: 2,
+            error_class: "dispatch",
+        };
+        let second = StorageSharePeerSkipped { peer: 3, ..first };
+        assert_eq!(first.grouping_key(), second.grouping_key());
+        assert_eq!(first.grouping_key(), "cause=dispatch");
     }
 }

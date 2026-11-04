@@ -3,18 +3,20 @@
 //! The storage sampler reads a database's stored bytes from every core.
 //!
 //! The test server is the sole member of a one-node cluster, so its share is
-//! the total and reaches the database storage gauge. Writes raise the gauge. A
+//! the cluster total. A round publishes it to the cluster totals store and
+//! the database storage gauge. Writes raise the gauge. A
 //! purged drop lowers it once the Data Plane reclaims the collection.
 
 use std::time::{Duration, Instant};
 
-use nodedb::control::metrics::storage::sample_storage;
+use nodedb::control::metrics::storage::{StorageAggregator, sample_storage};
 use nodedb_test_support::pgwire_harness::TestServer;
 use nodedb_types::DatabaseId;
 
 const COLLECTION: &str = "storage_sampler_probe";
 
-/// Run one storage sample. Returns the default database's storage gauge.
+/// Run one storage sample and one round. Returns the default database's
+/// storage gauge.
 ///
 /// The background sampler can publish between this sample and the read. The
 /// store is quiet then, so both samples read the same bytes.
@@ -28,9 +30,21 @@ async fn sampled(srv: &TestServer) -> u64 {
         srv.shared.storage_shares.latest().is_some(),
         "the sample publishes a share"
     );
-    srv.shared
+    StorageAggregator::new(Duration::from_secs(30))
+        .run_round(&srv.shared)
+        .await;
+    let totals = &srv.shared.cluster_storage_totals;
+    assert!(totals.has_total(), "a lone node's round is complete");
+    let gauge = srv
+        .shared
         .database_metrics
-        .storage_bytes(DatabaseId::DEFAULT)
+        .storage_bytes(DatabaseId::DEFAULT);
+    assert_eq!(
+        totals.database_bytes(DatabaseId::DEFAULT),
+        gauge,
+        "the store and the gauge publish the same round"
+    );
+    gauge
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

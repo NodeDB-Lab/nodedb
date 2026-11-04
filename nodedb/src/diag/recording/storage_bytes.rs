@@ -77,3 +77,20 @@ pub fn storage_bytes_sample_failed(err: &crate::Error) {
     .with_backtrace()
     .emit();
 }
+
+/// Report a peer that did not answer a storage round. Called from the
+/// storage aggregator, which skips the peer and asks again next round.
+pub fn storage_share_peer_skipped(peer: u64, err: &crate::Error) {
+    let class = error_class(err);
+    let ctx = context::StorageSharePeerSkipped {
+        peer,
+        error_class: &class,
+    };
+    let _ = Capture::new(
+        EventKind::Error,
+        "storage bytes: a peer did not answer its storage share, so the round skipped it",
+    )
+    .error_chain(error_chain_of(err))
+    .domain(&ctx)
+    .emit();
+}

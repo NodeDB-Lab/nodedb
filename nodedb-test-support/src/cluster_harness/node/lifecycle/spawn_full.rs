@@ -356,33 +356,9 @@ impl TestClusterNode {
             nodedb_types::config::tuning::StartupTuning::default().data_group_recovery_timeout(),
         );
 
-        // CRDT constraint reconcile loop (leader-gated). The production server
-        // spawns this from `spawn_background_loops`, which the harness does not
-        // call; wire it directly so cluster tests exercise constraint delivery
-        // to every replica's validator. Registered on `shared.loop_registry`,
-        // so cluster shutdown stops it with the other loops.
-        // The interval comes from the same startup gate the server uses, so a
-        // test that sets `NODEDB_CONSTRAINT_RECONCILE_INTERVAL_MS` to suppress
-        // the loop is honoured here exactly as it is in production. Parsing it
-        // a second way here is what would let the two drift apart.
-        let mut loop_config = nodedb::ServerConfig::default();
-        nodedb::config::server::apply_env_overrides(&mut loop_config)
-            .map_err(|e| format!("environment override rejected: {e}"))?;
-        nodedb::bootstrap::constraint_reconcile::spawn_constraint_reconcile(
-            Arc::clone(&shared),
-            loop_config
-                .tuning
-                .maintenance
-                .constraint_reconcile_interval_ms,
-        );
-
-        // The KV TTL reaper, which `spawn_background_loops` also starts. A
-        // key's TTL ends only through the reap its group's leader proposes,
-        // so a cluster without it never expires a key.
-        nodedb::bootstrap::background_loops::kv_expiry::spawn_kv_expiry_reaper(
-            &shared,
-            &loop_config,
-        );
+        // The production loops `spawn_background_loops` starts and a cluster
+        // test depends on.
+        super::loops::spawn_production_loops(&shared)?;
 
         // Spawn the descriptor lease renewal loop on the cluster shutdown
         // channel so cluster shutdown stops it cleanly. `start_raft` above
