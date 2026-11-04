@@ -216,20 +216,22 @@ fn maintenance_budget_tracker_three_level() {
 #[test]
 fn database_metrics_registry_independent_counters() {
     let reg = DatabaseMetricsRegistry::new();
+    let (a, b) = (DatabaseId::new(1), DatabaseId::new(2));
+    reg.ensure_database(a);
+    reg.ensure_database(b);
     for _ in 0..5 {
-        reg.record_qps("alpha");
+        reg.record_qps(a);
     }
     for _ in 0..3 {
-        reg.record_qps("beta");
+        reg.record_qps(b);
     }
-    use std::sync::atomic::Ordering;
-    let alpha = reg.get_or_create("alpha").qps_total.load(Ordering::Relaxed);
-    let beta = reg.get_or_create("beta").qps_total.load(Ordering::Relaxed);
-    assert_eq!(alpha, 5);
-    assert_eq!(beta, 3);
+    assert_eq!(reg.qps_total(a), 5);
+    assert_eq!(reg.qps_total(b), 3);
 
+    let names =
+        std::collections::HashMap::from([(a, "alpha".to_string()), (b, "beta".to_string())]);
     let mut out = String::new();
-    reg.render_prometheus(&mut out);
+    reg.render_prometheus(&names, &mut out);
     assert!(out.contains(r#"database="alpha"} 5"#));
     assert!(out.contains(r#"database="beta"} 3"#));
 }

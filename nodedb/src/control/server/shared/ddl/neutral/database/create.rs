@@ -112,15 +112,9 @@ pub async fn create_database(
     .await
     .map_err(|e| DdlError::from_error_in_context("catalog propose failed", &e))?;
 
-    // Register per-database metric series so the names appear in Prometheus
-    // output immediately after creation. Tenants, memory, and storage start
-    // at zero and are updated by their respective subsystems.
-    if let Some(m) = &state.system_metrics {
-        m.set_database_collections(name, 0);
-        m.set_database_tenants(name, 0);
-        m.set_database_memory_bytes(name, 0);
-        m.set_database_storage_bytes(name, 0);
-    }
+    // Create the per-database metric series. Gauges start at zero and
+    // are updated by their respective subsystems.
+    state.database_metrics.ensure_database(db_id);
 
     state.audit_record_with_db(
         crate::control::security::audit::AuditEvent::DatabaseCreated,

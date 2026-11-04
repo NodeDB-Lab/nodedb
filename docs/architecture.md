@@ -317,13 +317,13 @@ All resource consumption is observable via Prometheus metrics prefixed `nodedb_`
 
 **Per-Database Metrics** (`nodedb_database_*{database="<name"}`):
 
-- `qps` — Requests per second
+- `qps_total` — Cumulative requests admitted
 - `memory_bytes` — Total memory reserved
 - `storage_bytes` — Cumulative storage on-disk
 - `connections` — Open connections
 - `bridge_queue_depth` — Pending requests in SPSC bridge virtual queue
-- `wal_commit_latency_p99` — 99th percentile WAL fsync latency (milliseconds)
-- `maintenance_cpu_seconds` — CPU seconds spent in background tasks (per minute, reset window)
+- `wal_commit_latency_p99_us` — 99th percentile WAL commit latency (microseconds)
+- `maintenance_lease_seconds_total` — Cumulative wall seconds holding a maintenance lease
 - `mirror_lag_ms` — Replication lag to follower replicas (distributed deployments)
 
 **Per-Tenant Metrics** (`nodedb_tenant_*{database="<name>", tenant="<tenant>"}`):

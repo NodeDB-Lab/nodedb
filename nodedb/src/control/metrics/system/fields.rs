@@ -229,38 +229,6 @@ pub struct SystemMetrics {
     /// Updated once per phase transition during graceful shutdown.
     pub shutdown_phase_durations_ms: RwLock<HashMap<String, u64>>,
 
-    // ── Per-database metrics ──
-    /// Per-database query counter.
-    /// Key: database name string.
-    /// Rendered as `nodedb_database_queries_total{database="..."}`.
-    pub database_queries_by_name: RwLock<HashMap<String, u64>>,
-    /// Per-database error counter.
-    /// Key: database name string.
-    /// Rendered as `nodedb_database_errors_total{database="..."}`.
-    pub database_errors_by_name: RwLock<HashMap<String, u64>>,
-    /// Per-database collection count gauge.
-    /// Key: database name string.
-    /// Rendered as `nodedb_database_collections_total{database="..."}`.
-    pub database_collections_by_name: RwLock<HashMap<String, u64>>,
-    /// Per-database tenant count gauge.
-    /// Key: database name string.
-    /// Rendered as `nodedb_database_tenants_total{database="..."}`.
-    /// Incremented at tenant-in-database registration; stub-zero pending
-    /// per-database tenant tracking work.
-    pub database_tenants_by_name: RwLock<HashMap<String, u64>>,
-    /// Per-database memory usage gauge (bytes).
-    /// Key: database name string.
-    /// Rendered as `nodedb_database_memory_bytes{database="..."}`.
-    /// Updated by the memory governor; stub-zero pending per-database
-    /// memory accounting work.
-    pub database_memory_bytes_by_name: RwLock<HashMap<String, u64>>,
-    /// Per-database storage usage gauge (bytes).
-    /// Key: database name string.
-    /// Rendered as `nodedb_database_storage_bytes{database="..."}`.
-    /// Updated by compaction; stub-zero pending per-database storage
-    /// accounting work.
-    pub database_storage_bytes_by_name: RwLock<HashMap<String, u64>>,
-
     // ── IO priority scheduler ──
     /// Per-priority IO queue-depth and wait-latency metrics.
     ///

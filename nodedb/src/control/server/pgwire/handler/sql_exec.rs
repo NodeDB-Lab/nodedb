@@ -407,14 +407,8 @@ impl NodeDbPgHandler {
             .get_current_database(session_id)
             .unwrap_or(crate::types::DatabaseId::DEFAULT);
 
-        // Increment per-database QPS counter and per-database metrics registry.
-        let catalog = self.state.credentials.catalog();
-        if let Ok(Some(desc)) = catalog.get_database(database_id) {
-            if let Some(ref m) = self.state.system_metrics {
-                m.record_database_query(&desc.name);
-            }
-            self.state.database_metrics.record_qps(&desc.name);
-        }
+        // Count the request. The registry ignores ids without an entry.
+        self.state.database_metrics.record_qps(database_id);
 
         // Request-admission gate: internal-service exemption, blacklist,
         // account status, then rate limit — run exactly once per statement,

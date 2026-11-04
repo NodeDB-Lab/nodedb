@@ -355,13 +355,17 @@ KILL SESSION 'sid_abc123';
 NodeDB exposes per-database metrics for observability:
 
 ```
-nodedb_database_qps{database="prod"}
+nodedb_database_qps_total{database="prod"}
+nodedb_database_errors_total{database="prod"}
+nodedb_database_collections_total{database="prod"}
+nodedb_database_tenants_total{database="prod"}
 nodedb_database_memory_bytes{database="prod"}
 nodedb_database_storage_bytes{database="prod"}
 nodedb_database_connections{database="prod"}
+nodedb_database_bridge_queue_depth{database="prod"}
 nodedb_database_mirror_lag_ms{database="prod_eu"}  -- if mirrored
-nodedb_database_wal_commit_latency_p99{database="prod"}
-nodedb_database_maintenance_cpu_seconds{database="prod"}
+nodedb_database_wal_commit_latency_p99_us{database="prod"}
+nodedb_database_maintenance_lease_seconds_total{database="prod"}
 ```
 
 Similarly, tenant metrics are labeled by both database and tenant:

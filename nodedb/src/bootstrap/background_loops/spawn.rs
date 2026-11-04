@@ -51,6 +51,12 @@ pub fn spawn_background_loops(
     // these asynchronously via the mirror_link_registry once QUIC transport
     // is available.
     mirror::log_mirror_restart_decisions(shared);
+    if let Err(e) = crate::control::metrics::database_sync::ensure_listed(
+        &shared.database_metrics,
+        shared.credentials.catalog(),
+    ) {
+        tracing::warn!(error = %e, "database metrics: catalog list error at startup");
+    }
     mirror::spawn_mirror_lag_monitor(shared);
 
     let event_plane = spawn_event_plane(shared, &shutdown_bus, components, num_cores);
