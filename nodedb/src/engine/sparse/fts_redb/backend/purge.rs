@@ -17,6 +17,10 @@ use redb::{TableDefinition, WriteTransaction};
 
 use super::core::RedbFtsBackend;
 use super::shared::redb_err;
+use crate::engine::sparse::btree::storage_bytes::SPARSE_COUNTER;
+use crate::engine::sparse::fts_redb::bytes::{
+    posting_key_len, remove_doc_fields_row, remove_doc_row, remove_segment_row,
+};
 use crate::engine::sparse::fts_redb::keys::{
     KeyOwner, doc_fields_key, doc_key, meta_key, posting_key, segment_key, stats_key,
 };
@@ -24,6 +28,7 @@ use crate::engine::sparse::fts_redb::scan::{self, DocKeyDef};
 use crate::engine::sparse::fts_redb::tables::{
     DOC_FIELDS, DOC_LENGTHS, DOC_TERMS, INDEX_META, POSTINGS, SEGMENTS, STATS,
 };
+use crate::engine::storage_bytes::StorageDelta;
 
 /// Index metadata sub-keys that configure a collection rather than hold its
 /// indexed data: they survive a data-only purge.
@@ -95,23 +100,17 @@ fn purge(
         .begin_write()
         .map_err(|e| redb_err("purge write txn", e))?;
     let mut removed = 0;
+    let mut delta = StorageDelta::default();
 
-    removed += drop_posting_rows(&write_txn, database_id, tid, owner)?;
+    removed += drop_posting_rows(&write_txn, owner, &mut delta)?;
     // DOC_LENGTHS and DOC_TERMS are per-document rows of the same indexes and
     // must go together: a surviving term set would name posting lists that no
     // longer exist.
-    removed += drop_doc_rows(
-        &write_txn,
-        DOC_LENGTHS,
-        database_id,
-        tid,
-        owner,
-        "doc_lengths",
-    )?;
-    drop_doc_rows(&write_txn, DOC_TERMS, database_id, tid, owner, "doc_terms")?;
+    removed += drop_doc_rows(&write_txn, DOC_LENGTHS, owner, "doc_lengths", &mut delta)?;
+    drop_doc_rows(&write_txn, DOC_TERMS, owner, "doc_terms", &mut delta)?;
     drop_meta_rows(&write_txn, database_id, tid, owner, meta)?;
-    removed += drop_segment_rows(&write_txn, database_id, tid, owner)?;
-    super::history_rows::drop_owned(&write_txn, owner)?;
+    removed += drop_segment_rows(&write_txn, owner, &mut delta)?;
+    super::history_rows::drop_owned(&write_txn, owner, &mut delta)?;
 
     {
         let mut stats = write_txn
@@ -131,11 +130,15 @@ fn purge(
         let keys =
             scan::doc_fields_keys(&fields, owner).map_err(|e| redb_err("doc_fields range", e))?;
         for (c, s) in &keys {
-            fields
-                .remove(doc_fields_key(database_id, tid, c, Surrogate::new(*s)))
-                .map_err(|e| redb_err("remove doc_fields", e))?;
+            remove_doc_fields_row(
+                &mut fields,
+                doc_fields_key(database_id, tid, c, Surrogate::new(*s)),
+                &mut delta,
+            )
+            .map_err(|e| redb_err("remove doc_fields", e))?;
         }
     }
+    delta.apply(&write_txn, SPARSE_COUNTER)?;
 
     write_txn
         .commit()
@@ -143,46 +146,56 @@ fn purge(
     Ok(removed)
 }
 
-/// Delete every POSTINGS row `owner` covers.
+/// Delete every POSTINGS row `owner` covers, recording their bytes in
+/// `delta`.
 fn drop_posting_rows(
     txn: &WriteTransaction,
-    database_id: u64,
-    tid: u64,
     owner: KeyOwner<'_>,
+    delta: &mut StorageDelta,
 ) -> crate::Result<usize> {
+    let (database_id, tid) = (owner.database_id(), owner.tid());
     let mut table = txn
         .open_table(POSTINGS)
         .map_err(|e| redb_err("open postings", e))?;
     let keys = scan::posting_keys(&table, owner).map_err(|e| redb_err("postings range", e))?;
     for (c, f, term, s) in &keys {
-        table
-            .remove(posting_key(
-                database_id,
-                tid,
-                IndexScope::from_key(c, f),
-                term,
-                Surrogate::new(*s),
-            ))
-            .map_err(|e| redb_err("remove postings", e))?;
+        let key = posting_key(
+            database_id,
+            tid,
+            IndexScope::from_key(c, f),
+            term,
+            Surrogate::new(*s),
+        );
+        let removed = table
+            .remove(key)
+            .map_err(|e| redb_err("remove postings", e))?
+            .map(|prior| prior.value().len());
+        if let Some(len) = removed {
+            delta.removed(database_id, tid, c, posting_key_len(&key), len);
+        }
     }
     Ok(keys.len())
 }
 
-/// Delete every SEGMENTS row `owner` covers.
+/// Delete every SEGMENTS row `owner` covers, recording their bytes in
+/// `delta`.
 fn drop_segment_rows(
     txn: &WriteTransaction,
-    database_id: u64,
-    tid: u64,
     owner: KeyOwner<'_>,
+    delta: &mut StorageDelta,
 ) -> crate::Result<usize> {
+    let (database_id, tid) = (owner.database_id(), owner.tid());
     let mut table = txn
         .open_table(SEGMENTS)
         .map_err(|e| redb_err("open segments", e))?;
     let keys = scan::str_keys(&table, owner).map_err(|e| redb_err("segments range", e))?;
     for (c, f, s) in &keys {
-        table
-            .remove(segment_key(database_id, tid, IndexScope::from_key(c, f), s))
-            .map_err(|e| redb_err("remove segments", e))?;
+        remove_segment_row(
+            &mut table,
+            segment_key(database_id, tid, IndexScope::from_key(c, f), s),
+            delta,
+        )
+        .map_err(|e| redb_err("remove segments", e))?;
     }
     Ok(keys.len())
 }
@@ -210,27 +223,28 @@ fn drop_meta_rows(
     Ok(())
 }
 
-/// Delete every row `owner` covers from a DOC_LENGTHS-shaped table.
+/// Delete every row `owner` covers from a DOC_LENGTHS-shaped table,
+/// recording their bytes in `delta`.
 fn drop_doc_rows(
     txn: &WriteTransaction,
     def: TableDefinition<'static, DocKeyDef, &'static [u8]>,
-    database_id: u64,
-    tid: u64,
     owner: KeyOwner<'_>,
     name: &str,
+    delta: &mut StorageDelta,
 ) -> crate::Result<usize> {
+    let (database_id, tid) = (owner.database_id(), owner.tid());
     let mut table = txn
         .open_table(def)
         .map_err(|e| redb_err(&format!("open {name}"), e))?;
     let keys = scan::doc_keys(&table, owner).map_err(|e| redb_err(&format!("{name} range"), e))?;
     for (c, f, s) in &keys {
-        table
-            .remove(doc_key(
-                database_id,
-                tid,
-                IndexScope::from_key(c, f),
-                Surrogate::new(*s),
-            ))
+        let key = doc_key(
+            database_id,
+            tid,
+            IndexScope::from_key(c, f),
+            Surrogate::new(*s),
+        );
+        remove_doc_row(&mut table, key, delta)
             .map_err(|e| redb_err(&format!("remove {name}"), e))?;
     }
     Ok(keys.len())

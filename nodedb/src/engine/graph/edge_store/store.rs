@@ -12,8 +12,10 @@ use std::sync::Arc;
 use nodedb_types::{DatabaseId, TenantId};
 use redb::{Database, TableDefinition};
 
+use super::home_bytes::ensure_edge_storage_bytes_table;
 use super::node_labels::{NODE_LABEL_LSN, NODE_LABEL_VERSIONS};
 use super::stats::GRAPH_STATS;
+use super::storage_bytes::EDGE_COUNTER;
 use super::temporal::visibility::{EDGE_APPLIED, EDGE_CUTS};
 use crate::engine::durability_gate::GatedDatabase;
 
@@ -131,6 +133,8 @@ impl EdgeStore {
                 .open_table(NODE_LABEL_LSN)
                 .map_err(|e| redb_err("open node_label_lsn", e))?;
         }
+        // Read transactions open the stored-bytes counter before any write.
+        ensure_edge_storage_bytes_table(&write_txn, EDGE_COUNTER)?;
         write_txn.commit().map_err(|e| redb_err("commit", e))?;
         let label_lsn_floor = Self::read_label_lsn(&db)?;
 

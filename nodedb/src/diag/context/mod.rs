@@ -28,6 +28,7 @@ mod read_cut;
 mod recovery;
 mod redo_stream;
 mod retention;
+mod storage_bytes;
 mod vector;
 mod vector_build;
 mod version_cleanup;
@@ -83,6 +84,9 @@ pub(in crate::diag) use redo_stream::{
     RedoAbandonGivenUp, RedoSnapshotDebtNotRecorded, RedoStreamLostHere,
 };
 pub(in crate::diag) use retention::RetentionAutowireOrphaned;
+pub(in crate::diag) use storage_bytes::{
+    StorageBytesResidue, StorageBytesSampleFailed, StorageBytesUnderflow,
+};
 pub(in crate::diag) use vector::VectorIndexNotApplied;
 pub(in crate::diag) use vector_build::{
     VectorBuildNotInstalled, VectorBuilderUnavailable, VectorCodecNotBuilt,

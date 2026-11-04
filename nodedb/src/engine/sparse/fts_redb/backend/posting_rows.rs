@@ -16,8 +16,10 @@ use nodedb_types::Surrogate;
 use redb::{ReadableTable, Table};
 
 use super::shared::redb_err;
+use crate::engine::sparse::fts_redb::bytes::posting_key_len;
 use crate::engine::sparse::fts_redb::keys::{posting_key, term_bounds};
 use crate::engine::sparse::fts_redb::scan::PostingKeyDef;
+use crate::engine::storage_bytes::StorageDelta;
 
 /// The writable POSTINGS table of one write transaction.
 pub(crate) type PostingTable<'txn> = Table<'txn, PostingKeyDef, &'static [u8]>;
@@ -128,30 +130,46 @@ where
     Ok(n)
 }
 
-/// Write `posting` under `term` in one index, replacing the document's prior
-/// posting there. `doc_len` is the token count of the posting's document.
-/// One row insert.
+/// One document's posting under one term, with the token count of the
+/// document.
+#[derive(Clone, Copy)]
+pub(crate) struct PostingWrite<'a> {
+    pub term: &'a str,
+    pub posting: &'a Posting,
+    pub doc_len: u32,
+}
+
+/// Write `row`'s posting in one index, replacing the document's prior
+/// posting under the term. One row insert. `delta` records the bytes the
+/// row adds.
 pub(crate) fn put(
     table: &mut PostingTable<'_>,
     database_id: u64,
     tid: u64,
     index: IndexScope<'_>,
-    term: &str,
-    posting: &Posting,
-    doc_len: u32,
+    row: PostingWrite<'_>,
+    delta: &mut StorageDelta,
 ) -> crate::Result<()> {
-    let bytes = encode(posting, doc_len)?;
-    table
-        .insert(
-            posting_key(database_id, tid, index, term, posting.doc_id),
-            bytes.as_slice(),
-        )
-        .map_err(|e| redb_err("insert posting", e))?;
+    let bytes = encode(row.posting, row.doc_len)?;
+    let key = posting_key(database_id, tid, index, row.term, row.posting.doc_id);
+    let old = table
+        .insert(key, bytes.as_slice())
+        .map_err(|e| redb_err("insert posting", e))?
+        .map(|prior| prior.value().len());
+    delta.replaced(
+        database_id,
+        tid,
+        index.collection(),
+        posting_key_len(&key),
+        old,
+        bytes.len(),
+    );
     Ok(())
 }
 
 /// Remove the posting of `surrogate` under `term` in one index. One row
-/// remove. Returns whether a posting was there.
+/// remove. `delta` records the bytes the row held. Returns whether a
+/// posting was there.
 pub(crate) fn remove(
     table: &mut PostingTable<'_>,
     database_id: u64,
@@ -159,10 +177,22 @@ pub(crate) fn remove(
     index: IndexScope<'_>,
     term: &str,
     surrogate: Surrogate,
+    delta: &mut StorageDelta,
 ) -> crate::Result<bool> {
+    let key = posting_key(database_id, tid, index, term, surrogate);
     let removed = table
-        .remove(posting_key(database_id, tid, index, term, surrogate))
-        .map_err(|e| redb_err("remove posting", e))?;
+        .remove(key)
+        .map_err(|e| redb_err("remove posting", e))?
+        .map(|prior| prior.value().len());
+    if let Some(len) = removed {
+        delta.removed(
+            database_id,
+            tid,
+            index.collection(),
+            posting_key_len(&key),
+            len,
+        );
+    }
     Ok(removed.is_some())
 }
 
@@ -186,13 +216,15 @@ fn list_surrogates(
     Ok(out)
 }
 
-/// Remove every posting of `term` in one index. Returns how many rows went.
+/// Remove every posting of `term` in one index. `delta` records the bytes
+/// the rows held. Returns how many rows went.
 pub(crate) fn remove_list(
     table: &mut PostingTable<'_>,
     database_id: u64,
     tid: u64,
     index: IndexScope<'_>,
     term: &str,
+    delta: &mut StorageDelta,
 ) -> crate::Result<usize> {
     let surrogates = list_surrogates(table, database_id, tid, index, term)?;
     for &surrogate in &surrogates {
@@ -203,26 +235,28 @@ pub(crate) fn remove_list(
             index,
             term,
             Surrogate::new(surrogate),
+            delta,
         )?;
     }
     Ok(surrogates.len())
 }
 
-/// Make `postings` the whole posting list of `term` in one index: rows of
-/// documents absent from `postings` are removed, and one row per posting is
+/// Make `rows` the whole posting list of `term` in one index: rows of
+/// documents absent from `rows` are removed, and one row per posting is
 /// written. A later posting of the same document replaces an earlier one.
-/// `doc_lens` holds the token count of each posting's document, parallel to
-/// `postings`.
+/// Every row of `rows` names `term`. `delta` records the bytes the change
+/// adds and removes.
 pub(crate) fn replace_list(
     table: &mut PostingTable<'_>,
     database_id: u64,
     tid: u64,
     index: IndexScope<'_>,
     term: &str,
-    postings: &[Posting],
-    doc_lens: &[u32],
+    rows: &[PostingWrite<'_>],
+    delta: &mut StorageDelta,
 ) -> crate::Result<()> {
-    let keep: std::collections::HashSet<u32> = postings.iter().map(|p| p.doc_id.as_u32()).collect();
+    let keep: std::collections::HashSet<u32> =
+        rows.iter().map(|row| row.posting.doc_id.as_u32()).collect();
     for surrogate in list_surrogates(table, database_id, tid, index, term)? {
         if !keep.contains(&surrogate) {
             remove(
@@ -232,11 +266,12 @@ pub(crate) fn replace_list(
                 index,
                 term,
                 Surrogate::new(surrogate),
+                delta,
             )?;
         }
     }
-    for (posting, doc_len) in postings.iter().zip(doc_lens) {
-        put(table, database_id, tid, index, term, posting, *doc_len)?;
+    for row in rows {
+        put(table, database_id, tid, index, *row, delta)?;
     }
     Ok(())
 }

@@ -93,6 +93,7 @@ pub(super) fn apply_meta(ctx: &PermCtx<'_>, op: &mut MetaOp) -> crate::Result<()
         | MetaOp::PurgeVersionsBelow { .. }
         | MetaOp::KvDueExpiries { .. }
         | MetaOp::RefreshGraphCount { .. }
+        | MetaOp::QueryStorageBytes { .. }
         | MetaOp::PurgeTenant { .. }
         | MetaOp::UnregisterCollection { .. }
         | MetaOp::UnregisterMaterializedView { .. }

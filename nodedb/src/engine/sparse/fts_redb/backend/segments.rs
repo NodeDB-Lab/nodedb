@@ -9,9 +9,12 @@ use redb::ReadableTable as _;
 
 use super::core::RedbFtsBackend;
 use super::shared::redb_err;
+use crate::engine::sparse::btree::storage_bytes::SPARSE_COUNTER;
+use crate::engine::sparse::fts_redb::bytes::{put_segment_row, remove_segment_row};
 use crate::engine::sparse::fts_redb::keys::{KeyOwner, segment_key};
 use crate::engine::sparse::fts_redb::scan;
 use crate::engine::sparse::fts_redb::tables::SEGMENTS;
+use crate::engine::storage_bytes::StorageDelta;
 use crate::storage::quarantine::CollectionScope;
 use crate::storage::quarantine::engines::{FtsSegmentRef, validate_fts_segment_bytes};
 
@@ -27,14 +30,20 @@ pub(super) fn write(
         .db
         .begin_write()
         .map_err(|e| redb_err("write txn", e))?;
+    let mut delta = StorageDelta::default();
     {
         let mut table = write_txn
             .open_table(SEGMENTS)
             .map_err(|e| redb_err("open segments", e))?;
-        table
-            .insert(segment_key(database_id, tid, index, segment_id), data)
-            .map_err(|e| redb_err("insert segment", e))?;
+        put_segment_row(
+            &mut table,
+            segment_key(database_id, tid, index, segment_id),
+            data,
+            &mut delta,
+        )
+        .map_err(|e| redb_err("insert segment", e))?;
     }
+    delta.apply(&write_txn, SPARSE_COUNTER)?;
     write_txn.commit().map_err(|e| redb_err("commit", e))?;
     Ok(())
 }
@@ -106,17 +115,21 @@ pub(super) fn remove(
         .db
         .begin_write()
         .map_err(|e| redb_err("write txn", e))?;
+    let mut delta = StorageDelta::default();
     {
         let mut table = write_txn
             .open_table(SEGMENTS)
             .map_err(|e| redb_err("open segments", e))?;
-        // `Table::remove` returns `Result<Option<AccessGuard<V>>>` — propagate
-        // the error so a corrupt index or aborted txn surfaces; the absent-key
-        // case (`Ok(None)`) is intentionally a no-op, not an error.
-        table
-            .remove(segment_key(database_id, tid, index, segment_id))
-            .map_err(|e| redb_err("remove segment", e))?;
+        // The error propagates so a corrupt index or aborted txn surfaces.
+        // An absent key is a no-op, not an error.
+        remove_segment_row(
+            &mut table,
+            segment_key(database_id, tid, index, segment_id),
+            &mut delta,
+        )
+        .map_err(|e| redb_err("remove segment", e))?;
     }
+    delta.apply(&write_txn, SPARSE_COUNTER)?;
     write_txn.commit().map_err(|e| redb_err("commit", e))?;
     Ok(())
 }
@@ -162,26 +175,32 @@ pub(super) fn compact_commit(
         .db
         .begin_write()
         .map_err(|e| redb_err("compact txn", e))?;
+    let mut delta = StorageDelta::default();
     {
         let mut table = write_txn
             .open_table(SEGMENTS)
             .map_err(|e| redb_err("open segments for compact", e))?;
-        table
-            .insert(
-                segment_key(database_id, tid, index, new_segment_id),
-                new_segment_data,
-            )
-            .map_err(|e| redb_err("insert merged segment", e))?;
+        put_segment_row(
+            &mut table,
+            segment_key(database_id, tid, index, new_segment_id),
+            new_segment_data,
+            &mut delta,
+        )
+        .map_err(|e| redb_err("insert merged segment", e))?;
         for id in merged_ids {
             // Propagate remove errors so a failed source-segment removal aborts
             // the entire transaction; otherwise we would commit a state in
             // which both old and new segments are visible to readers, causing
             // double-counted postings during BM25 scoring.
-            table
-                .remove(segment_key(database_id, tid, index, id.as_str()))
-                .map_err(|e| redb_err("remove merged source segment", e))?;
+            remove_segment_row(
+                &mut table,
+                segment_key(database_id, tid, index, id.as_str()),
+                &mut delta,
+            )
+            .map_err(|e| redb_err("remove merged source segment", e))?;
         }
     }
+    delta.apply(&write_txn, SPARSE_COUNTER)?;
     write_txn
         .commit()
         .map_err(|e| redb_err("compact txn commit", e))?;

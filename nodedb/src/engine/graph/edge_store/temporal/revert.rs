@@ -7,9 +7,13 @@
 //! write changed beside the version: the edge counters, the zero summary row
 //! and the endpoint identity bindings.
 
+use crate::engine::graph::edge_store::home_bytes::EdgeStorageDelta;
 use crate::engine::graph::edge_store::stats::table::{GRAPH_STATS, summary_key};
 use crate::engine::graph::edge_store::stats::update::{
     EdgeStatsKey, decrement_counts, increment_counts,
+};
+use crate::engine::graph::edge_store::storage_bytes::{
+    EDGE_COUNTER, insert_applied_row, insert_edge_row, remove_applied_row, remove_edge_row,
 };
 use crate::engine::graph::edge_store::store::{
     EDGES, EdgeStore, NODE_SURROGATES, REVERSE_EDGES, redb_err,
@@ -97,40 +101,41 @@ impl EdgeStore {
             .db
             .begin_write()
             .map_err(|e| redb_err("begin_write", e))?;
+        let mut delta = EdgeStorageDelta::default();
         {
             let mut edges = write_txn
                 .open_table(EDGES)
                 .map_err(|e| redb_err("open edges", e))?;
-            let restored = match &written.prior_forward {
-                Some(prior) => edges
-                    .insert((d, t, fwd.as_str()), prior.as_slice())
-                    .map(drop),
-                None => edges.remove((d, t, fwd.as_str())).map(drop),
+            let key = (d, t, fwd.as_str());
+            let what = "remove edge version";
+            match &written.prior_forward {
+                Some(prior) => insert_edge_row(&mut edges, key, prior, &mut delta, what)?,
+                None => remove_edge_row(&mut edges, key, &mut delta, what)?,
             };
-            restored.map_err(|e| redb_err("remove edge version", e))?;
             drop(edges);
 
             let mut reverse = write_txn
                 .open_table(REVERSE_EDGES)
                 .map_err(|e| redb_err("open reverse", e))?;
-            let restored = match &written.prior_reverse {
-                Some(prior) => reverse
-                    .insert((d, t, rev.as_str()), prior.as_slice())
-                    .map(drop),
-                None => reverse.remove((d, t, rev.as_str())).map(drop),
+            let key = (d, t, rev.as_str());
+            let what = "remove reverse edge version";
+            match &written.prior_reverse {
+                Some(prior) => insert_edge_row(&mut reverse, key, prior, &mut delta, what)?,
+                None => remove_edge_row(&mut reverse, key, &mut delta, what)?,
             };
-            restored.map_err(|e| redb_err("remove reverse edge version", e))?;
             drop(reverse);
 
             let mut applied = write_txn
                 .open_table(EDGE_APPLIED)
                 .map_err(|e| redb_err("open edge_applied", e))?;
-            let restored = match written.prior_applied {
-                Some(prior) => applied.insert((d, t, fwd.as_str()), prior).map(drop),
-                None => applied.remove((d, t, fwd.as_str())).map(drop),
+            let key = (d, t, fwd.as_str());
+            let what = "restore edge applied ordinal";
+            match written.prior_applied {
+                Some(prior) => insert_applied_row(&mut applied, key, prior, &mut delta, what)?,
+                None => remove_applied_row(&mut applied, key, &mut delta, what)?,
             };
-            restored.map_err(|e| redb_err("restore edge applied ordinal", e))?;
             drop(applied);
+            delta.apply(&write_txn, EDGE_COUNTER)?;
 
             let key = EdgeStatsKey {
                 db: d,

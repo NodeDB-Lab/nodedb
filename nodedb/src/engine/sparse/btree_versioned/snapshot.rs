@@ -9,9 +9,10 @@
 use redb::TableDefinition;
 
 use super::doc::DOCUMENTS_VERSIONED;
-use super::history_bytes::insert_counted;
+use super::history_bytes::{apply_versioned_delta, insert_counted};
 use super::index::INDEXES_VERSIONED;
 use crate::engine::sparse::btree::{SparseEngine, redb_err};
+use crate::engine::storage_bytes::StorageDelta;
 
 impl SparseEngine {
     /// Every document version of `tenant_id` in `database_id`, as
@@ -63,12 +64,14 @@ impl SparseEngine {
             .db
             .begin_write()
             .map_err(|e| redb_err("write txn", e))?;
+        let mut delta = StorageDelta::default();
         {
             let mut table = txn
                 .open_table(table_def)
                 .map_err(|e| redb_err("open table", e))?;
-            insert_counted(&txn, &mut table, key, value)?;
+            insert_counted(&mut table, key, value, &mut delta)?;
         }
+        apply_versioned_delta(&txn, delta)?;
         txn.commit().map_err(|e| redb_err("commit", e))?;
         Ok(())
     }

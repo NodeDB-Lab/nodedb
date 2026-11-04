@@ -171,6 +171,11 @@ pub(crate) async fn execute_plan_all_local_cores(
                          sends it to every core itself"
                     .into(),
             }),
+            MetaOp::QueryStorageBytes { .. } => Err(crate::Error::Internal {
+                detail: "QueryStorageBytes reached the all-core fan; the storage sampler \
+                         sends it to every core itself"
+                    .into(),
+            }),
             // One image per core, kept apart by core id. A merged payload
             // loses which core each image belongs to.
             MetaOp::CreateSnapshot => Err(crate::Error::Internal {

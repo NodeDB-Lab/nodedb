@@ -18,8 +18,11 @@ use super::doc_fields;
 use super::doc_terms;
 use super::errors::inverted_err;
 use super::indexing::{IndexDocScope, prior_doc_length};
+use crate::engine::sparse::btree::storage_bytes::SPARSE_COUNTER;
+use crate::engine::sparse::fts_redb::bytes::remove_doc_row;
 use crate::engine::sparse::fts_redb::keys::doc_key;
 use crate::engine::sparse::fts_redb::tables::DOC_LENGTHS;
+use crate::engine::storage_bytes::StorageDelta;
 
 /// The edits one index takes from a batch.
 #[derive(Default)]
@@ -52,6 +55,7 @@ impl InvertedIndex {
         let txn = db.begin_write().map_err(|e| inverted_err("write txn", e))?;
         // Keyed by field key: empty for the whole-document index.
         let mut edits: BTreeMap<String, IndexEdits> = BTreeMap::new();
+        let mut delta = StorageDelta::default();
         for surrogate in surrogates {
             let doc = IndexDocScope {
                 database_id,
@@ -70,16 +74,19 @@ impl InvertedIndex {
                 };
                 // The version's tokens leave for the history before its
                 // postings go.
-                self.end_text_version_in_txn(&txn, doc, index, old_len)?;
+                self.end_text_version_in_txn(&txn, doc, index, old_len, &mut delta)?;
                 let terms = doc_terms::occupied_terms(&txn, doc, index, true)?;
-                doc_terms::clear(&txn, doc, index)?;
+                doc_terms::clear(&txn, doc, index, &mut delta)?;
                 {
                     let mut lengths = txn
                         .open_table(DOC_LENGTHS)
                         .map_err(|e| inverted_err("open doc_lengths", e))?;
-                    lengths
-                        .remove(doc_key(database_id, tid.as_u64(), index, *surrogate))
-                        .map_err(|e| inverted_err("remove doc length", e))?;
+                    remove_doc_row(
+                        &mut lengths,
+                        doc_key(database_id, tid.as_u64(), index, *surrogate),
+                        &mut delta,
+                    )
+                    .map_err(|e| inverted_err("remove doc length", e))?;
                 }
                 let entry = edits.entry(field_key).or_default();
                 for term in terms {
@@ -88,16 +95,16 @@ impl InvertedIndex {
                 entry.count -= 1;
                 entry.total -= i64::from(old_len);
             }
-            doc_fields::clear(&txn, doc)?;
+            doc_fields::clear(&txn, doc, &mut delta)?;
         }
         for (field_key, index_edits) in &edits {
             let index = scope_of(collection, field_key)?;
             doc_terms::strip_postings_many(
                 &txn,
-                database_id,
-                tid.as_u64(),
+                (database_id, tid.as_u64()),
                 index,
                 &index_edits.postings,
+                &mut delta,
             )?;
             Self::update_stats_in_txn(
                 &txn,
@@ -108,6 +115,7 @@ impl InvertedIndex {
                 index_edits.total,
             )?;
         }
+        delta.apply(&txn, SPARSE_COUNTER)?;
         txn.commit()
             .map_err(|e| inverted_err("commit batch remove", e))?;
         Ok(())

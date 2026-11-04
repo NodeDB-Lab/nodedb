@@ -19,8 +19,11 @@ use super::doc_fields;
 use super::doc_terms;
 use super::errors::inverted_err;
 use super::indexing::{IndexDocScope, prior_doc_length};
+use crate::engine::sparse::btree::storage_bytes::SPARSE_COUNTER;
+use crate::engine::sparse::fts_redb::bytes::remove_doc_row;
 use crate::engine::sparse::fts_redb::keys::doc_key;
 use crate::engine::sparse::fts_redb::tables::DOC_LENGTHS;
+use crate::engine::storage_bytes::StorageDelta;
 
 impl InvertedIndex {
     /// Remove a document from every index of its collection.
@@ -65,20 +68,34 @@ impl InvertedIndex {
 
     /// Remove a document from every index of its collection within an
     /// externally-owned write transaction: each field index its field set
-    /// names, the whole-document index, and the field-set row.
+    /// names, the whole-document index, and the field-set row. The
+    /// stored-bytes counter moves inside `txn`.
     pub fn remove_document_in_txn(
         &self,
         txn: &WriteTransaction,
         doc: IndexDocScope<'_>,
     ) -> crate::Result<()> {
+        let mut delta = StorageDelta::default();
+        self.remove_document_counted(txn, doc, &mut delta)?;
+        delta.apply(txn, SPARSE_COUNTER)
+    }
+
+    /// [`Self::remove_document_in_txn`], recording the stored bytes it
+    /// removes in `delta` for the caller to apply.
+    pub(super) fn remove_document_counted(
+        &self,
+        txn: &WriteTransaction,
+        doc: IndexDocScope<'_>,
+        delta: &mut StorageDelta,
+    ) -> crate::Result<()> {
         self.note_doc_write(doc);
         for field in doc_fields::read(txn, doc)? {
             let index = IndexScope::field(doc.collection, &field)
                 .ok_or_else(|| inverted_err("doc_fields", "stored field name is empty"))?;
-            self.remove_scope_in_txn(txn, doc, index)?;
+            self.remove_scope_in_txn(txn, doc, index, delta)?;
         }
-        self.remove_scope_in_txn(txn, doc, IndexScope::document(doc.collection))?;
-        doc_fields::clear(txn, doc)
+        self.remove_scope_in_txn(txn, doc, IndexScope::document(doc.collection), delta)?;
+        doc_fields::clear(txn, doc, delta)
     }
 
     /// Remove a document from one index.
@@ -93,31 +110,30 @@ impl InvertedIndex {
         txn: &WriteTransaction,
         doc: IndexDocScope<'_>,
         index: IndexScope<'_>,
+        delta: &mut StorageDelta,
     ) -> crate::Result<()> {
         let Some(old_len) = prior_doc_length(txn, doc, index)? else {
             return Ok(());
         };
         // The version's tokens leave for the history before its postings go.
-        self.end_text_version_in_txn(txn, doc, index, old_len)?;
+        self.end_text_version_in_txn(txn, doc, index, old_len, delta)?;
 
         // The stored term set names exactly the lists this document occupies;
         // the fallback scan covers a document whose term set row is missing.
         let terms = doc_terms::occupied_terms(txn, doc, index, true)?;
-        doc_terms::strip_postings(txn, doc, index, &terms)?;
-        doc_terms::clear(txn, doc, index)?;
+        doc_terms::strip_postings(txn, doc, index, &terms, delta)?;
+        doc_terms::clear(txn, doc, index, delta)?;
 
         {
             let mut lengths = txn
                 .open_table(DOC_LENGTHS)
                 .map_err(|e| inverted_err("open doc_lengths", e))?;
-            lengths
-                .remove(doc_key(
-                    doc.database_id,
-                    doc.tid.as_u64(),
-                    index,
-                    doc.surrogate,
-                ))
-                .map_err(|e| inverted_err("remove doc length", e))?;
+            remove_doc_row(
+                &mut lengths,
+                doc_key(doc.database_id, doc.tid.as_u64(), index, doc.surrogate),
+                delta,
+            )
+            .map_err(|e| inverted_err("remove doc length", e))?;
         }
 
         Self::update_stats_in_txn(txn, doc.database_id, doc.tid, index, -1, -(old_len as i64))

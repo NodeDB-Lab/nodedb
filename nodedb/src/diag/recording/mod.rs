@@ -30,6 +30,7 @@ mod recovery;
 mod redo_stream;
 mod retention;
 mod shared;
+mod storage_bytes;
 mod vector;
 mod vector_build;
 mod version_cleanup;
@@ -84,6 +85,9 @@ pub use redo_stream::{
 };
 pub use retention::retention_autowire_orphaned;
 pub use shared::entry_kind;
+pub use storage_bytes::{
+    storage_bytes_residue, storage_bytes_sample_failed, storage_bytes_underflow,
+};
 pub use vector::vector_index_not_applied;
 pub use vector_build::{
     VectorBuildTarget, vector_build_failed, vector_builder_disconnected,

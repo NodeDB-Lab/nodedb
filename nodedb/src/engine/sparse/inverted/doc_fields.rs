@@ -13,8 +13,10 @@ use redb::{ReadableTable as _, WriteTransaction};
 
 use super::errors::inverted_err;
 use super::indexing::IndexDocScope;
+use crate::engine::sparse::fts_redb::bytes::{put_doc_fields_row, remove_doc_fields_row};
 use crate::engine::sparse::fts_redb::keys::doc_fields_key;
 use crate::engine::sparse::fts_redb::tables::DOC_FIELDS;
+use crate::engine::storage_bytes::StorageDelta;
 
 /// The non-empty field names the document holds postings in. Empty when no
 /// row is stored.
@@ -38,14 +40,16 @@ pub(super) fn read(txn: &WriteTransaction, doc: IndexDocScope<'_>) -> crate::Res
     }
 }
 
-/// Record `fields` as the document's field set. An empty set removes the row.
+/// Record `fields` as the document's field set. An empty set removes the
+/// row. `delta` records the stored bytes the write changes.
 pub(super) fn put(
     txn: &WriteTransaction,
     doc: IndexDocScope<'_>,
     fields: &BTreeSet<&str>,
+    delta: &mut StorageDelta,
 ) -> crate::Result<()> {
     if fields.is_empty() {
-        return clear(txn, doc);
+        return clear(txn, doc, delta);
     }
     let encoded: Vec<&str> = fields.iter().copied().collect();
     let bytes =
@@ -53,32 +57,38 @@ pub(super) fn put(
     let mut table = txn
         .open_table(DOC_FIELDS)
         .map_err(|e| inverted_err("open doc_fields", e))?;
-    table
-        .insert(
-            doc_fields_key(
-                doc.database_id,
-                doc.tid.as_u64(),
-                doc.collection,
-                doc.surrogate,
-            ),
-            bytes.as_slice(),
-        )
-        .map_err(|e| inverted_err("insert doc_fields", e))?;
-    Ok(())
-}
-
-/// Drop the document's field-set row.
-pub(super) fn clear(txn: &WriteTransaction, doc: IndexDocScope<'_>) -> crate::Result<()> {
-    let mut table = txn
-        .open_table(DOC_FIELDS)
-        .map_err(|e| inverted_err("open doc_fields", e))?;
-    table
-        .remove(doc_fields_key(
+    put_doc_fields_row(
+        &mut table,
+        doc_fields_key(
             doc.database_id,
             doc.tid.as_u64(),
             doc.collection,
             doc.surrogate,
-        ))
-        .map_err(|e| inverted_err("remove doc_fields", e))?;
-    Ok(())
+        ),
+        bytes.as_slice(),
+        delta,
+    )
+    .map_err(|e| inverted_err("insert doc_fields", e))
+}
+
+/// Drop the document's field-set row. `delta` records the bytes it held.
+pub(super) fn clear(
+    txn: &WriteTransaction,
+    doc: IndexDocScope<'_>,
+    delta: &mut StorageDelta,
+) -> crate::Result<()> {
+    let mut table = txn
+        .open_table(DOC_FIELDS)
+        .map_err(|e| inverted_err("open doc_fields", e))?;
+    remove_doc_fields_row(
+        &mut table,
+        doc_fields_key(
+            doc.database_id,
+            doc.tid.as_u64(),
+            doc.collection,
+            doc.surrogate,
+        ),
+        delta,
+    )
+    .map_err(|e| inverted_err("remove doc_fields", e))
 }

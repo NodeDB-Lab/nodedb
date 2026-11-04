@@ -399,6 +399,7 @@ pub fn inject_returning_spec(plan: &mut PhysicalPlan, spec: ReturningSpec) {
             | MetaOp::PurgeVersionsBelow { .. }
             | MetaOp::KvDueExpiries { .. }
             | MetaOp::RefreshGraphCount { .. }
+            | MetaOp::QueryStorageBytes { .. }
             | MetaOp::PurgeTenant { .. }
             | MetaOp::UnregisterCollection { .. }
             | MetaOp::UnregisterMaterializedView { .. }

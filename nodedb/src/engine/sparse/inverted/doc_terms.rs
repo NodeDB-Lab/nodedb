@@ -44,9 +44,11 @@ use nodedb_fts::IndexScope;
 use super::errors::inverted_err;
 use super::indexing::IndexDocScope;
 use crate::engine::sparse::fts_redb::backend::posting_rows;
+use crate::engine::sparse::fts_redb::bytes::{put_doc_row, remove_doc_row};
 use crate::engine::sparse::fts_redb::keys::{KeyOwner, doc_key};
 use crate::engine::sparse::fts_redb::scan;
 use crate::engine::sparse::fts_redb::tables::{DOC_TERMS, POSTINGS};
+use crate::engine::storage_bytes::StorageDelta;
 
 /// The term set a previous index of this surrogate recorded in `index`, or
 /// `None` when none is stored.
@@ -73,12 +75,13 @@ pub(super) fn stored(
 /// Record `terms` as the document's current term set in `index`, replacing
 /// any prior one. Must be called in the same transaction as the posting
 /// writes it describes, so a crash can never leave the set disagreeing with
-/// POSTINGS.
+/// POSTINGS. `delta` records the stored bytes the write changes.
 pub(super) fn put(
     txn: &WriteTransaction,
     doc: IndexDocScope<'_>,
     index: IndexScope<'_>,
     terms: &BTreeSet<&str>,
+    delta: &mut StorageDelta,
 ) -> crate::Result<()> {
     let encoded: Vec<&str> = terms.iter().copied().collect();
     let bytes =
@@ -86,34 +89,33 @@ pub(super) fn put(
     let mut table = txn
         .open_table(DOC_TERMS)
         .map_err(|e| inverted_err("open doc_terms", e))?;
-    table
-        .insert(
-            doc_key(doc.database_id, doc.tid.as_u64(), index, doc.surrogate),
-            bytes.as_slice(),
-        )
-        .map_err(|e| inverted_err("insert doc_terms", e))?;
-    Ok(())
+    put_doc_row(
+        &mut table,
+        doc_key(doc.database_id, doc.tid.as_u64(), index, doc.surrogate),
+        bytes.as_slice(),
+        delta,
+    )
+    .map_err(|e| inverted_err("insert doc_terms", e))
 }
 
 /// Drop the document's term-set row in `index`. Paired with the removal of
 /// its `DOC_LENGTHS` row so the two never disagree about whether the
-/// document is in the index.
+/// document is in the index. `delta` records the bytes it held.
 pub(super) fn clear(
     txn: &WriteTransaction,
     doc: IndexDocScope<'_>,
     index: IndexScope<'_>,
+    delta: &mut StorageDelta,
 ) -> crate::Result<()> {
     let mut table = txn
         .open_table(DOC_TERMS)
         .map_err(|e| inverted_err("open doc_terms", e))?;
-    table
-        .remove(doc_key(
-            doc.database_id,
-            doc.tid.as_u64(),
-            index,
-            doc.surrogate,
-        ))
-        .map_err(|e| inverted_err("remove doc_terms", e))?;
+    remove_doc_row(
+        &mut table,
+        doc_key(doc.database_id, doc.tid.as_u64(), index, doc.surrogate),
+        delta,
+    )
+    .map_err(|e| inverted_err("remove doc_terms", e))?;
     Ok(())
 }
 
@@ -142,12 +144,13 @@ pub(super) fn index_terms(
 /// Remove the surrogate's posting from each of `terms` in `index`: one row
 /// per term. A term whose last posting goes has no rows left, so its `df`
 /// returns to its true value instead of counting a document that no longer
-/// contains it.
+/// contains it. `delta` records the bytes the rows held.
 pub(super) fn strip_postings(
     txn: &WriteTransaction,
     doc: IndexDocScope<'_>,
     index: IndexScope<'_>,
     terms: &[String],
+    delta: &mut StorageDelta,
 ) -> crate::Result<()> {
     if terms.is_empty() {
         return Ok(());
@@ -157,29 +160,38 @@ pub(super) fn strip_postings(
         .open_table(POSTINGS)
         .map_err(|e| inverted_err("open postings", e))?;
     for term in terms {
-        posting_rows::remove(&mut table, doc.database_id, t, index, term, doc.surrogate)?;
+        posting_rows::remove(
+            &mut table,
+            doc.database_id,
+            t,
+            index,
+            term,
+            doc.surrogate,
+            delta,
+        )?;
     }
     Ok(())
 }
 
 /// Remove every surrogate `removals` names from its term's posting list in
-/// `index`: one row per `(term, surrogate)` pair.
+/// `index`: one row per `(term, surrogate)` pair. `delta` records the bytes
+/// the rows held.
 pub(super) fn strip_postings_many(
     txn: &WriteTransaction,
-    database_id: u64,
-    tid: u64,
+    (database_id, tid): (u64, u64),
     index: IndexScope<'_>,
     removals: &std::collections::BTreeMap<
         String,
         std::collections::HashSet<nodedb_types::Surrogate>,
     >,
+    delta: &mut StorageDelta,
 ) -> crate::Result<()> {
     let mut table = txn
         .open_table(POSTINGS)
         .map_err(|e| inverted_err("open postings", e))?;
     for (term, docs) in removals {
         for surrogate in docs {
-            posting_rows::remove(&mut table, database_id, tid, index, term, *surrogate)?;
+            posting_rows::remove(&mut table, database_id, tid, index, term, *surrogate, delta)?;
         }
     }
     Ok(())

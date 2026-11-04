@@ -20,8 +20,10 @@ use super::doc_fields;
 use super::doc_terms;
 use super::errors::inverted_err;
 use super::indexing::{IndexDocScope, prior_doc_length};
+use crate::engine::sparse::btree::storage_bytes::SPARSE_COUNTER;
 use crate::engine::sparse::fts_redb::backend::posting_rows;
 use crate::engine::sparse::fts_redb::tables::POSTINGS;
+use crate::engine::storage_bytes::StorageDelta;
 
 /// The analyzed token streams one document is indexed with, one per index.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,29 +81,33 @@ impl InvertedIndex {
         };
         let db = self.inner.backend().db();
         let txn = db.begin_write().map_err(|e| inverted_err("write txn", e))?;
-        self.write_document_image(&txn, doc, image)?;
+        let mut delta = StorageDelta::default();
+        self.write_document_image(&txn, doc, image, &mut delta)?;
+        delta.apply(&txn, SPARSE_COUNTER)?;
         txn.commit()
             .map_err(|e| inverted_err("commit image restore", e))?;
         Ok(())
     }
 
     /// Replace the document's footprint in every index with `image`.
+    /// `delta` records the stored bytes it changes.
     pub(super) fn write_document_image(
         &self,
         txn: &redb::WriteTransaction,
         doc: IndexDocScope<'_>,
         image: &FtsDocImage,
+        delta: &mut StorageDelta,
     ) -> crate::Result<()> {
-        self.remove_document_in_txn(txn, doc)?;
+        self.remove_document_counted(txn, doc, delta)?;
         let mut fields: BTreeSet<&str> = BTreeSet::new();
         for (field, tokens) in &image.scopes {
             let index = IndexScope::from_key(doc.collection, field);
-            self.write_index_data(txn, doc, index, tokens)?;
+            self.write_index_data(txn, doc, index, tokens, delta)?;
             if let Some(name) = index.field_name() {
                 fields.insert(name);
             }
         }
-        doc_fields::put(txn, doc, &fields)
+        doc_fields::put(txn, doc, &fields, delta)
     }
 
     /// The footprint of `doc` across the whole-document index and every field

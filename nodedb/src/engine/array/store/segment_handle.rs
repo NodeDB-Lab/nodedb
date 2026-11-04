@@ -13,6 +13,7 @@
 //! the decrypted plaintext — mmap zero-copy is not available for encrypted
 //! on-disk blobs, which is acceptable given the one-time open cost.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -59,6 +60,9 @@ pub struct SegmentHandle {
     /// Header and footer decoded once at open, shared by every reader.
     header: SegmentHeader,
     footer: Arc<SegmentFooter>,
+    /// Encoded tile bytes under each placement, summed from the footer once
+    /// at open.
+    placement_bytes: Arc<HashMap<u32, u64>>,
 }
 
 impl SegmentHandle {
@@ -103,7 +107,7 @@ impl SegmentHandle {
             Arc::new(Backing::Mmap(Arc::new(mmap)))
         };
 
-        let (rtree, schema_hash, tile_count, header, footer) = {
+        let (rtree, schema_hash, tile_count, header, footer, placement_bytes) = {
             let reader =
                 SegmentReader::open(backing.bytes()).map_err(|e| SegmentHandleError::Open {
                     detail: format!("{path:?}: {e}"),
@@ -115,12 +119,18 @@ impl SegmentHandle {
                 });
             }
             let rtree = HilbertPackedRTree::build(reader.tiles());
+            let mut placement_bytes: HashMap<u32, u64> = HashMap::new();
+            for entry in reader.tiles() {
+                let held = placement_bytes.entry(entry.placement).or_insert(0);
+                *held = held.saturating_add(u64::from(entry.length));
+            }
             (
                 rtree,
                 reader.schema_hash(),
                 reader.tile_count(),
                 *reader.header(),
                 Arc::clone(reader.footer()),
+                placement_bytes,
             )
         };
 
@@ -132,6 +142,7 @@ impl SegmentHandle {
             id,
             header,
             footer,
+            placement_bytes: Arc::new(placement_bytes),
         })
     }
 
@@ -145,6 +156,12 @@ impl SegmentHandle {
 
     pub fn tile_count(&self) -> usize {
         self.tile_count
+    }
+
+    /// Encoded tile bytes under each placement. Header and footer framing
+    /// belong to no placement and do not count.
+    pub fn placement_bytes(&self) -> &HashMap<u32, u64> {
+        &self.placement_bytes
     }
 
     pub fn rtree(&self) -> &HilbertPackedRTree {

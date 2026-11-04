@@ -2,6 +2,7 @@
 
 pub mod cascade;
 pub mod history_bytes;
+pub mod home_bytes;
 pub mod node_identity;
 pub mod node_label_purge;
 pub mod node_label_snapshot;
@@ -11,6 +12,7 @@ pub mod query;
 pub mod scan;
 pub mod snapshot;
 pub mod stats;
+pub mod storage_bytes;
 pub mod store;
 pub mod temporal;
 

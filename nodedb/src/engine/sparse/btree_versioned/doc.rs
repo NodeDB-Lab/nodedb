@@ -5,13 +5,14 @@
 use nodedb_types::StorageKey;
 use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 
-use super::history_bytes::{insert_counted, remove_counted};
+use super::history_bytes::{apply_versioned_delta, insert_counted, remove_counted};
 use super::key::{doc_prefix, doc_prefix_end, versioned_doc_key};
 use super::value::{
     TAG_GDPR_ERASED, TAG_LIVE, TAG_TOMBSTONE, VersionedPut, decode_value, encode_value,
 };
 use super::visible::{RowRef, visible_body, visible_version};
 use crate::engine::sparse::btree::{SparseEngine, redb_err};
+use crate::engine::storage_bytes::StorageDelta;
 
 /// One row of an audit-log (`AS OF SYSTEM TIME NULL`) scan: a single
 /// system-time version of a document plus the temporal coordinates read from
@@ -82,7 +83,9 @@ impl SparseEngine {
         let mut t = txn
             .open_table(DOCUMENTS_VERSIONED)
             .map_err(|e| redb_err("open table", e))?;
-        insert_counted(txn, &mut t, &key, &val)
+        let mut delta = StorageDelta::default();
+        insert_counted(&mut t, &key, &val, &mut delta)?;
+        apply_versioned_delta(txn, delta)
     }
 
     /// Append a tombstone version in its own write transaction.
@@ -118,7 +121,9 @@ impl SparseEngine {
         let mut t = txn
             .open_table(DOCUMENTS_VERSIONED)
             .map_err(|e| redb_err("open table", e))?;
-        insert_counted(txn, &mut t, &key, &val)
+        let mut delta = StorageDelta::default();
+        insert_counted(&mut t, &key, &val, &mut delta)?;
+        apply_versioned_delta(txn, delta)
     }
 
     /// Physically remove one version's redb entry inside a caller-owned
@@ -140,7 +145,9 @@ impl SparseEngine {
         let mut t = txn
             .open_table(DOCUMENTS_VERSIONED)
             .map_err(|e| redb_err("open table", e))?;
-        remove_counted(txn, &mut t, &key)
+        let mut delta = StorageDelta::default();
+        remove_counted(&mut t, &key, &mut delta)?;
+        apply_versioned_delta(txn, delta)
     }
 
     /// Check whether the current-state version of `doc_id` is live (not
@@ -189,6 +196,7 @@ impl SparseEngine {
             .begin_write()
             .map_err(|e| redb_err("write txn", e))?;
         let mut replaced = 0;
+        let mut delta = StorageDelta::default();
         {
             let mut t = txn
                 .open_table(DOCUMENTS_VERSIONED)
@@ -201,10 +209,11 @@ impl SparseEngine {
                 .map_err(|e| redb_err("entry", e))?;
             let erased = encode_value(TAG_GDPR_ERASED, 0, 0, &[]);
             for k in keys {
-                insert_counted(&txn, &mut t, &k, &erased)?;
+                insert_counted(&mut t, &k, &erased, &mut delta)?;
                 replaced += 1;
             }
         }
+        apply_versioned_delta(&txn, delta)?;
         txn.commit().map_err(|e| redb_err("commit", e))?;
         Ok(replaced)
     }

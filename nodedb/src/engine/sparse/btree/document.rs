@@ -15,7 +15,9 @@ use tracing::debug;
 use super::engine::SparseEngine;
 use super::tables::redb_err;
 use crate::engine::sparse::btree_versioned::doc::DOCUMENTS_VERSIONED;
-use crate::engine::sparse::btree_versioned::history_bytes::insert_counted;
+use crate::engine::sparse::btree_versioned::history_bytes::{
+    apply_versioned_delta, insert_counted,
+};
 use crate::engine::sparse::btree_versioned::key::{
     coll_prefix, coll_prefix_end, versioned_doc_key,
 };
@@ -23,6 +25,7 @@ use crate::engine::sparse::btree_versioned::value::{
     TAG_LIVE, TAG_TOMBSTONE, decode_value, encode_value,
 };
 use crate::engine::sparse::btree_versioned::visible::{RowRef, visible_body, visible_version};
+use crate::engine::storage_bytes::StorageDelta;
 
 impl SparseEngine {
     /// Append a live version of `document_id` at `sys_from`, in its own
@@ -44,6 +47,7 @@ impl SparseEngine {
             .db
             .begin_write()
             .map_err(|e| redb_err("write txn", e))?;
+        let mut delta = StorageDelta::default();
         let prior = {
             let mut table = txn
                 .open_table(DOCUMENTS_VERSIONED)
@@ -57,9 +61,10 @@ impl SparseEngine {
             let prior = visible_body(&table, row, None)?.map(|(_, body)| body);
             let key = versioned_doc_key(database_id, tenant_id, collection, document_id, sys_from);
             let val = encode_value(TAG_LIVE, i64::MIN, i64::MAX, value);
-            insert_counted(&txn, &mut table, &key, &val)?;
+            insert_counted(&mut table, &key, &val, &mut delta)?;
             prior
         };
+        apply_versioned_delta(&txn, delta)?;
         txn.commit().map_err(|e| redb_err("commit", e))?;
         debug!(collection, %document_id, sys_from, len = value.len(), "document put");
         Ok(prior)
@@ -202,7 +207,9 @@ impl SparseEngine {
         if prior.is_some() {
             let key = versioned_doc_key(database_id, tenant_id, collection, document_id, sys_from);
             let val = encode_value(TAG_TOMBSTONE, 0, 0, &[]);
-            insert_counted(txn, &mut table, &key, &val)?;
+            let mut delta = StorageDelta::default();
+            insert_counted(&mut table, &key, &val, &mut delta)?;
+            apply_versioned_delta(txn, delta)?;
         }
         Ok(prior)
     }

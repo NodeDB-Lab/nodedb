@@ -37,6 +37,9 @@ pub struct ArrayStore {
     /// The newest tile-version stamp any segment or the memtable holds under
     /// each placement, at or above the true newest.
     pub(super) newest_stamps: HashMap<u32, i64>,
+    /// Encoded tile bytes of every open segment under each placement. Each
+    /// install and replacement moves it, so a read never walks the segments.
+    pub(super) placement_bytes: HashMap<u32, u64>,
 }
 
 impl ArrayStore {
@@ -79,6 +82,10 @@ impl ArrayStore {
             }
             segments.insert(seg.id.clone(), h);
         }
+        let mut placement_bytes = HashMap::new();
+        for handle in segments.values() {
+            super::segments::add_placement_bytes(&mut placement_bytes, handle);
+        }
         let mut newest_stamps = HashMap::new();
         for handle in segments.values() {
             super::versions::merge_newest_stamps(
@@ -96,6 +103,7 @@ impl ArrayStore {
             next_segment_seq: max_seq + 1,
             kek,
             newest_stamps,
+            placement_bytes,
         })
     }
 
@@ -140,5 +148,10 @@ impl ArrayStore {
 
     pub fn manifest_mut(&mut self) -> &mut Manifest {
         &mut self.manifest
+    }
+
+    /// Encoded tile bytes of every open segment, per placement vShard.
+    pub fn placement_bytes(&self) -> &HashMap<u32, u64> {
+        &self.placement_bytes
     }
 }

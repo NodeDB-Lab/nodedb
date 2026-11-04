@@ -13,16 +13,33 @@ use super::core::InvertedIndex;
 use super::doc_fields;
 use super::errors::inverted_err;
 use super::indexing::IndexDocScope;
+use crate::engine::sparse::btree::storage_bytes::SPARSE_COUNTER;
+use crate::engine::storage_bytes::StorageDelta;
 
 impl InvertedIndex {
     /// Replace a document's footprint in every index: the whole-document index
     /// and one index per top-level string field. A field the previous version
-    /// held and this one does not is retracted from that field's index.
+    /// held and this one does not is retracted from that field's index. The
+    /// stored-bytes counter moves inside `txn`.
     pub fn index_document_in_txn(
         &self,
         txn: &WriteTransaction,
         doc: IndexDocScope<'_>,
         text: &DocumentText,
+    ) -> crate::Result<()> {
+        let mut delta = StorageDelta::default();
+        self.index_document_counted(txn, doc, text, &mut delta)?;
+        delta.apply(txn, SPARSE_COUNTER)
+    }
+
+    /// [`Self::index_document_in_txn`], recording the stored bytes it
+    /// changes in `delta` for the caller to apply.
+    fn index_document_counted(
+        &self,
+        txn: &WriteTransaction,
+        doc: IndexDocScope<'_>,
+        text: &DocumentText,
+        delta: &mut StorageDelta,
     ) -> crate::Result<()> {
         self.note_doc_write(doc);
         let prior = doc_fields::read(txn, doc)?;
@@ -31,10 +48,11 @@ impl InvertedIndex {
             doc,
             IndexScope::document(doc.collection),
             &text.whole(),
+            delta,
         )?;
         let mut held: BTreeSet<&str> = BTreeSet::new();
         for (index, value) in text.field_scopes(doc.collection) {
-            if self.index_scope_in_txn(txn, doc, index, value)?
+            if self.index_scope_in_txn(txn, doc, index, value, delta)?
                 && let Some(name) = index.field_name()
             {
                 held.insert(name);
@@ -43,9 +61,9 @@ impl InvertedIndex {
         for gone in prior.iter().filter(|f| !held.contains(f.as_str())) {
             let index = IndexScope::field(doc.collection, gone)
                 .ok_or_else(|| inverted_err("doc_fields", "stored field name is empty"))?;
-            self.remove_scope_in_txn(txn, doc, index)?;
+            self.remove_scope_in_txn(txn, doc, index, delta)?;
         }
-        doc_fields::put(txn, doc, &held)
+        doc_fields::put(txn, doc, &held, delta)
     }
 
     /// Index `text` under one scope. Text with no terms removes the document
@@ -56,13 +74,14 @@ impl InvertedIndex {
         doc: IndexDocScope<'_>,
         index: IndexScope<'_>,
         text: &str,
+        delta: &mut StorageDelta,
     ) -> crate::Result<bool> {
         let tokens = self.analyze_for_collection(doc.database_id, doc.tid, doc.collection, text)?;
         if tokens.is_empty() {
-            self.remove_scope_in_txn(txn, doc, index)?;
+            self.remove_scope_in_txn(txn, doc, index, delta)?;
             return Ok(false);
         }
-        self.write_index_data(txn, doc, index, &tokens)?;
+        self.write_index_data(txn, doc, index, &tokens, delta)?;
         Ok(true)
     }
 }

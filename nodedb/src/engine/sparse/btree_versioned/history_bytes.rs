@@ -1,17 +1,26 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Stored-bytes counter of the versioned document and index tables.
+//! Stored-bytes counters of the versioned document and index tables.
 //!
 //! Every document collection keeps every row version and index entry
 //! version until purge, so the bytes a tenant's documents hold grow with
-//! history. Each write that adds, rewrites or removes a stored entry adjusts
-//! the tenant's counter inside the same write transaction, so the counter
-//! commits or rolls back with the entries it counts. The Data Plane charges
-//! the counter to the document engine's memory budget.
+//! history. Each write that adds, rewrites or removes a stored entry records
+//! the change in a [`StorageDelta`]. The writer applies the delta inside the
+//! same write transaction, so both counters commit or roll back with the
+//! entries they count:
+//!
+//! - the per-collection `STORAGE_BYTES` counter of the sparse file;
+//! - the per-tenant `DOCUMENT_HISTORY_BYTES` counter, which the Data Plane
+//!   charges to the document engine's memory budget.
 
 use redb::{ReadableDatabase, ReadableTable, TableDefinition, WriteTransaction};
 
+use crate::engine::sparse::btree::storage_bytes::SPARSE_COUNTER;
 use crate::engine::sparse::btree::{SparseEngine, redb_err};
+use crate::engine::storage_bytes::StorageDelta;
+
+/// The per-tenant counter name in underflow reports.
+const HISTORY_COUNTER: &str = "sparse.document_history";
 
 /// `"{database_id}:{tenant}"` → bytes the tenant's versioned document and
 /// index entries hold, keys included.
@@ -23,9 +32,15 @@ fn tenant_key(database_id: u64, tenant: u64) -> String {
     format!("{database_id}:{tenant}")
 }
 
-/// The bytes one stored entry holds: its key and its value.
-pub(in crate::engine::sparse) fn entry_bytes(key: &str, value_len: usize) -> i64 {
-    i64::try_from(key.len().saturating_add(value_len)).unwrap_or(i64::MAX)
+/// The `(database_id, tenant, collection)` a versioned table key names: its
+/// first three `:`-separated fields. A collection name holds no `:`.
+pub(in crate::engine::sparse) fn key_scope(key: &str) -> Option<(u64, u64, &str)> {
+    let mut parts = key.splitn(4, ':');
+    let database_id = parts.next()?.parse().ok()?;
+    let tenant = parts.next()?.parse().ok()?;
+    let collection = parts.next()?;
+    parts.next()?;
+    Some((database_id, tenant, collection))
 }
 
 /// The `(database_id, tenant)` a versioned table key names: its first two
@@ -38,8 +53,8 @@ pub(in crate::engine::sparse) fn key_tenant(key: &str) -> Option<(u64, u64)> {
 }
 
 /// Add `delta` bytes to the counter of `(database_id, tenant)` inside `txn`.
-/// The counter never drops below zero.
-pub(in crate::engine::sparse) fn adjust_history_bytes(
+/// A change below zero is reported and clamps at zero.
+fn adjust_history_bytes(
     txn: &WriteTransaction,
     database_id: u64,
     tenant: u64,
@@ -57,10 +72,22 @@ pub(in crate::engine::sparse) fn adjust_history_bytes(
         .map_err(|e| redb_err("read history bytes", e))?
         .map(|guard| guard.value())
         .unwrap_or(0);
-    let next = if delta >= 0 {
-        current.saturating_add(delta.unsigned_abs())
-    } else {
-        current.saturating_sub(delta.unsigned_abs())
+    let next = match u64::try_from(delta) {
+        Ok(added) => current.saturating_add(added),
+        Err(_) => {
+            let removed = delta.unsigned_abs();
+            if removed > current {
+                crate::diag::storage_bytes_underflow(
+                    HISTORY_COUNTER,
+                    database_id,
+                    tenant,
+                    None,
+                    current,
+                    removed,
+                );
+            }
+            current.saturating_sub(removed)
+        }
     };
     if next == 0 {
         table
@@ -74,47 +101,68 @@ pub(in crate::engine::sparse) fn adjust_history_bytes(
     Ok(())
 }
 
-/// Insert `value` under `key` into a versioned table inside `txn`, and move
-/// the key's tenant counter by the bytes the insert adds (a rewrite of an
-/// existing key counts the difference).
-pub(in crate::engine::sparse) fn insert_counted(
+/// Apply the change `delta` records for the versioned tables inside `txn`:
+/// each collection's stored-bytes counter and each tenant's history counter.
+/// Every writer of the versioned tables calls it before its transaction
+/// commits.
+pub(in crate::engine::sparse) fn apply_versioned_delta(
     txn: &WriteTransaction,
+    delta: StorageDelta,
+) -> crate::Result<()> {
+    for (database_id, tenant, change) in delta.tenant_sums() {
+        adjust_history_bytes(txn, database_id, tenant, change)?;
+    }
+    delta.apply(txn, SPARSE_COUNTER)
+}
+
+/// Insert `value` under `key` into a versioned table, and record the bytes
+/// the insert adds in `delta`. A rewrite of an existing key records the
+/// difference.
+pub(in crate::engine::sparse) fn insert_counted(
     table: &mut redb::Table<'_, &'static str, &'static [u8]>,
     key: &str,
     value: &[u8],
+    delta: &mut StorageDelta,
 ) -> crate::Result<()> {
-    let (database_id, tenant) = tenant_of(key)?;
+    let (database_id, tenant, collection) = scope_of(key)?;
     let replaced = table
         .insert(key, value)
         .map_err(|e| redb_err("insert", e))?
         .map(|old| old.value().len());
-    let delta = entry_bytes(key, value.len()) - replaced.map_or(0, |len| entry_bytes(key, len));
-    adjust_history_bytes(txn, database_id, tenant, delta)
+    delta.replaced(
+        database_id,
+        tenant,
+        collection,
+        key.len(),
+        replaced,
+        value.len(),
+    );
+    Ok(())
 }
 
-/// Remove `key` from a versioned table inside `txn`, and take its bytes off
-/// its tenant counter. Removing an absent key changes nothing.
+/// Remove `key` from a versioned table, and record the bytes it held in
+/// `delta`. Removing an absent key records nothing.
 pub(in crate::engine::sparse) fn remove_counted(
-    txn: &WriteTransaction,
     table: &mut redb::Table<'_, &'static str, &'static [u8]>,
     key: &str,
+    delta: &mut StorageDelta,
 ) -> crate::Result<()> {
-    let (database_id, tenant) = tenant_of(key)?;
+    let (database_id, tenant, collection) = scope_of(key)?;
     let removed = table
         .remove(key)
         .map_err(|e| redb_err("remove", e))?
         .map(|old| old.value().len());
-    match removed {
-        Some(len) => adjust_history_bytes(txn, database_id, tenant, -entry_bytes(key, len)),
-        None => Ok(()),
+    if let Some(len) = removed {
+        delta.removed(database_id, tenant, collection, key.len(), len);
     }
+    Ok(())
 }
 
-/// [`key_tenant`], with a key that names no tenant as a storage error.
-fn tenant_of(key: &str) -> crate::Result<(u64, u64)> {
-    key_tenant(key).ok_or_else(|| crate::Error::Storage {
+/// [`key_scope`], with a key that names no collection as a storage error.
+fn scope_of(key: &str) -> crate::Result<(u64, u64, &str)> {
+    key_scope(key).ok_or_else(|| crate::Error::Storage {
         engine: "sparse".into(),
-        detail: format!("versioned key names no tenant: {key:?}"),
+        detail: format!("versioned key names no collection: {key:?}"),
     })
 }
 
@@ -185,5 +233,18 @@ mod tests {
             Some((3, 7))
         );
         assert_eq!(key_tenant("x:7:users"), None);
+    }
+
+    #[test]
+    fn a_key_names_its_collection() {
+        assert_eq!(
+            key_scope("3:7:users:0000002a\u{0}00000000000000000010"),
+            Some((3, 7, "users"))
+        );
+        assert_eq!(
+            key_scope("3:7:users:email:a@b:0000002a\u{0}00000000000000000010"),
+            Some((3, 7, "users"))
+        );
+        assert_eq!(key_scope("3:7:users"), None);
     }
 }

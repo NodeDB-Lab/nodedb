@@ -26,7 +26,11 @@ use super::errors::inverted_err;
 use super::indexing::IndexDocScope;
 use super::rebuild_journal::JournalState;
 use super::rebuild_snapshot::{FtsRebuilt, RebuiltScope};
-use crate::engine::sparse::fts_redb::backend::posting_rows;
+use crate::engine::sparse::btree::storage_bytes::SPARSE_COUNTER;
+use crate::engine::sparse::fts_redb::backend::posting_rows::{self, PostingWrite};
+use crate::engine::sparse::fts_redb::bytes::{
+    posting_key_len, put_doc_fields_row, put_doc_row, remove_doc_fields_row, remove_doc_row,
+};
 use crate::engine::sparse::fts_redb::keys::{
     KeyOwner, doc_fields_key, doc_key, posting_key, stats_key,
 };
@@ -34,6 +38,7 @@ use crate::engine::sparse::fts_redb::scan::{self, DocKeyDef};
 use crate::engine::sparse::fts_redb::tables::{
     DOC_FIELDS, DOC_LENGTHS, DOC_TERMS, POSTINGS, STATS,
 };
+use crate::engine::storage_bytes::StorageDelta;
 
 /// Why a cutover left the live index as it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -119,15 +124,19 @@ impl InvertedIndex {
             ));
         }
 
-        clear_collection_rows(&txn, rebuilt.database_id, rebuilt.tid, &rebuilt.collection)?;
-        write_rebuilt_rows(&txn, &rebuilt)?;
+        let mut delta = StorageDelta::default();
+        let owner = KeyOwner::collection(rebuilt.database_id, rebuilt.tid, &rebuilt.collection);
+        clear_collection_rows(&txn, owner, &mut delta)?;
+        write_rebuilt_rows(&txn, &rebuilt, &mut delta)?;
 
         for (surrogate, image) in &live {
+            let doc = doc_of(*surrogate);
             match image {
-                Some(image) => self.write_document_image(&txn, doc_of(*surrogate), image)?,
-                None => self.remove_document_in_txn(&txn, doc_of(*surrogate))?,
+                Some(image) => self.write_document_image(&txn, doc, image, &mut delta)?,
+                None => self.remove_document_counted(&txn, doc, &mut delta)?,
             }
         }
+        delta.apply(&txn, SPARSE_COUNTER)?;
 
         txn.commit()
             .map_err(|e| inverted_err("rebuild cutover commit", e))?;
@@ -143,15 +152,15 @@ impl InvertedIndex {
     }
 }
 
-/// Remove the rows of every index of the collection from every table the
-/// rebuild owns, and the collection's field sets.
+/// Remove the rows of every index of the collection `owner` names from every
+/// table the rebuild owns, and the collection's field sets. `delta` records
+/// the stored bytes the rows held.
 fn clear_collection_rows(
     txn: &WriteTransaction,
-    database_id: u64,
-    tid: u64,
-    collection: &str,
+    owner: KeyOwner<'_>,
+    delta: &mut StorageDelta,
 ) -> crate::Result<()> {
-    let owner = KeyOwner::collection(database_id, tid, collection);
+    let (database_id, tid) = (owner.database_id(), owner.tid());
     {
         let mut table = txn
             .open_table(POSTINGS)
@@ -159,19 +168,24 @@ fn clear_collection_rows(
         let keys = scan::posting_keys(&table, owner)
             .map_err(|e| inverted_err("rebuild postings range", e))?;
         for (c, f, term, s) in &keys {
-            table
-                .remove(posting_key(
-                    database_id,
-                    tid,
-                    IndexScope::from_key(c, f),
-                    term,
-                    Surrogate::new(*s),
-                ))
-                .map_err(|e| inverted_err("rebuild remove postings", e))?;
+            let key = posting_key(
+                database_id,
+                tid,
+                IndexScope::from_key(c, f),
+                term,
+                Surrogate::new(*s),
+            );
+            let removed = table
+                .remove(key)
+                .map_err(|e| inverted_err("rebuild remove postings", e))?
+                .map(|prior| prior.value().len());
+            if let Some(len) = removed {
+                delta.removed(database_id, tid, c, posting_key_len(&key), len);
+            }
         }
     }
-    clear_doc_rows(txn, DOC_LENGTHS, "doc_lengths", database_id, tid, owner)?;
-    clear_doc_rows(txn, DOC_TERMS, "doc_terms", database_id, tid, owner)?;
+    clear_doc_rows(txn, DOC_LENGTHS, "doc_lengths", owner, delta)?;
+    clear_doc_rows(txn, DOC_TERMS, "doc_terms", owner, delta)?;
     {
         let mut stats = txn
             .open_table(STATS)
@@ -190,44 +204,53 @@ fn clear_collection_rows(
     let keys = scan::doc_fields_keys(&fields, owner)
         .map_err(|e| inverted_err("rebuild doc_fields range", e))?;
     for (c, s) in &keys {
-        fields
-            .remove(doc_fields_key(database_id, tid, c, Surrogate::new(*s)))
-            .map_err(|e| inverted_err("rebuild remove doc_fields", e))?;
+        remove_doc_fields_row(
+            &mut fields,
+            doc_fields_key(database_id, tid, c, Surrogate::new(*s)),
+            delta,
+        )
+        .map_err(|e| inverted_err("rebuild remove doc_fields", e))?;
     }
     Ok(())
 }
 
-/// Remove every row `owner` covers from a DOC_LENGTHS-shaped table.
+/// Remove every row `owner` covers from a DOC_LENGTHS-shaped table. `delta`
+/// records the bytes the rows held.
 fn clear_doc_rows(
     txn: &WriteTransaction,
     def: TableDefinition<'static, DocKeyDef, &'static [u8]>,
     name: &str,
-    database_id: u64,
-    tid: u64,
     owner: KeyOwner<'_>,
+    delta: &mut StorageDelta,
 ) -> crate::Result<()> {
+    let (database_id, tid) = (owner.database_id(), owner.tid());
     let mut table = txn
         .open_table(def)
         .map_err(|e| inverted_err(&format!("rebuild open {name}"), e))?;
     let keys = scan::doc_keys(&table, owner)
         .map_err(|e| inverted_err(&format!("rebuild {name} range"), e))?;
     for (c, f, doc) in &keys {
-        table
-            .remove(doc_key(
-                database_id,
-                tid,
-                IndexScope::from_key(c, f),
-                Surrogate::new(*doc),
-            ))
+        let key = doc_key(
+            database_id,
+            tid,
+            IndexScope::from_key(c, f),
+            Surrogate::new(*doc),
+        );
+        remove_doc_row(&mut table, key, delta)
             .map_err(|e| inverted_err(&format!("rebuild remove {name}"), e))?;
     }
     Ok(())
 }
 
-/// Write the rebuilt rows of every index of the collection.
-fn write_rebuilt_rows(txn: &WriteTransaction, rebuilt: &FtsRebuilt) -> crate::Result<()> {
+/// Write the rebuilt rows of every index of the collection. `delta` records
+/// the stored bytes the rows add.
+fn write_rebuilt_rows(
+    txn: &WriteTransaction,
+    rebuilt: &FtsRebuilt,
+    delta: &mut StorageDelta,
+) -> crate::Result<()> {
     for scope in &rebuilt.scopes {
-        write_rebuilt_scope(txn, rebuilt, scope)?;
+        write_rebuilt_scope(txn, rebuilt, scope, delta)?;
     }
     let mut table = txn
         .open_table(DOC_FIELDS)
@@ -235,26 +258,29 @@ fn write_rebuilt_rows(txn: &WriteTransaction, rebuilt: &FtsRebuilt) -> crate::Re
     for (doc, fields) in &rebuilt.doc_fields {
         let bytes = zerompk::to_msgpack_vec(fields)
             .map_err(|e| inverted_err("rebuild serialize doc_fields", e))?;
-        table
-            .insert(
-                doc_fields_key(
-                    rebuilt.database_id,
-                    rebuilt.tid,
-                    &rebuilt.collection,
-                    Surrogate::new(*doc),
-                ),
-                bytes.as_slice(),
-            )
-            .map_err(|e| inverted_err("rebuild insert doc_fields", e))?;
+        put_doc_fields_row(
+            &mut table,
+            doc_fields_key(
+                rebuilt.database_id,
+                rebuilt.tid,
+                &rebuilt.collection,
+                Surrogate::new(*doc),
+            ),
+            bytes.as_slice(),
+            delta,
+        )
+        .map_err(|e| inverted_err("rebuild insert doc_fields", e))?;
     }
     Ok(())
 }
 
-/// Write the rebuilt rows of one index.
+/// Write the rebuilt rows of one index. `delta` records the stored bytes
+/// the rows add.
 fn write_rebuilt_scope(
     txn: &WriteTransaction,
     rebuilt: &FtsRebuilt,
     scope: &RebuiltScope,
+    delta: &mut StorageDelta,
 ) -> crate::Result<()> {
     let db = rebuilt.database_id;
     let t = rebuilt.tid;
@@ -273,7 +299,12 @@ fn write_rebuilt_scope(
                     .get(&posting.doc_id.as_u32())
                     .copied()
                     .unwrap_or(posting.term_freq);
-                posting_rows::put(&mut table, db, t, index, term, posting, doc_len)?;
+                let row = PostingWrite {
+                    term,
+                    posting,
+                    doc_len,
+                };
+                posting_rows::put(&mut table, db, t, index, row, delta)?;
             }
         }
     }
@@ -284,9 +315,13 @@ fn write_rebuilt_scope(
         for &(doc, len) in &scope.doc_lengths {
             let bytes = zerompk::to_msgpack_vec(&len)
                 .map_err(|e| inverted_err("rebuild serialize doc_length", e))?;
-            table
-                .insert(doc_key(db, t, index, Surrogate::new(doc)), bytes.as_slice())
-                .map_err(|e| inverted_err("rebuild insert doc_length", e))?;
+            put_doc_row(
+                &mut table,
+                doc_key(db, t, index, Surrogate::new(doc)),
+                bytes.as_slice(),
+                delta,
+            )
+            .map_err(|e| inverted_err("rebuild insert doc_length", e))?;
         }
     }
     {
@@ -296,12 +331,13 @@ fn write_rebuilt_scope(
         for (doc, terms) in &scope.doc_terms {
             let bytes = zerompk::to_msgpack_vec(terms)
                 .map_err(|e| inverted_err("rebuild serialize doc_terms", e))?;
-            table
-                .insert(
-                    doc_key(db, t, index, Surrogate::new(*doc)),
-                    bytes.as_slice(),
-                )
-                .map_err(|e| inverted_err("rebuild insert doc_terms", e))?;
+            put_doc_row(
+                &mut table,
+                doc_key(db, t, index, Surrogate::new(*doc)),
+                bytes.as_slice(),
+                delta,
+            )
+            .map_err(|e| inverted_err("rebuild insert doc_terms", e))?;
         }
     }
     let mut stats = txn

@@ -701,4 +701,12 @@ pub enum MetaOp {
     /// CSR node only when its home vShard is in the set and routes to this
     /// core, plus that node's live out-edges. The core answers no payload.
     RefreshGraphCount { hosted_vshards: Vec<u32> },
+
+    /// Read this core's stored bytes, summed per `(database, tenant)`.
+    ///
+    /// `led_vshards` names every vShard whose Raft group this node leads. The
+    /// core counts a collection only when its home vShard is in the set and
+    /// routes to this core. The core answers one msgpack array of
+    /// `(database_id, tenant_id, bytes)`. Only the storage sampler sends it.
+    QueryStorageBytes { led_vshards: Vec<u32> },
 }

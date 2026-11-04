@@ -33,6 +33,11 @@ impl LiveLeaders {
         }
     }
 
+    /// Whether a Raft status source answered this snapshot.
+    pub fn is_wired(&self) -> bool {
+        self.statuses.is_some()
+    }
+
     /// The live leader of `group_id`, or `0` when Raft knows none.
     pub fn leader_of(&self, group_id: u64) -> u64 {
         self.statuses

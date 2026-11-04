@@ -38,6 +38,7 @@ use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::reclaim;
 use crate::data::executor::handlers::reclaim_retry::retry_reclaim;
 use crate::data::executor::task::ExecutionTask;
+use crate::engine::storage_bytes::DroppedScope;
 use crate::types::TenantId;
 
 /// Per-engine reclaim counts produced by clearing one collection.
@@ -222,6 +223,17 @@ impl CoreLoop {
         // Inverted index: postings + doc_lengths + stats + segments.
         let inv_removed = retry_reclaim("inverted.purge_collection", tid_raw, collection, || {
             self.inverted.purge_collection(db_raw, tid, collection)
+        })?;
+
+        // Every counted row of the collection in the sparse file is gone, so
+        // its stored-bytes counter row goes too.
+        let dropped = DroppedScope::Collection {
+            database_id: db_raw,
+            tenant_id: tid_raw,
+            collection,
+        };
+        retry_reclaim("sparse.retire_storage_bytes", tid_raw, collection, || {
+            self.sparse.retire_storage_bytes(dropped)
         })?;
 
         // Graph edge store: remove all edges scoped to this (database, collection).
