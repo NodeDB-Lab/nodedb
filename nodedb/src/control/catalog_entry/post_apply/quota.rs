@@ -108,7 +108,7 @@ fn set_tenant_caps(
 /// its metrics entry. Row deletion belongs to apply; this frees memory only.
 pub fn release_database_scope(db_id: DatabaseId, shared: &SharedState) {
     shared.database_metrics.remove_database(db_id);
-    shared.maintenance_budget.set_cap(db_id, 0);
+    shared.maintenance_budget.clear_database(db_id);
     shared.admission_registry.clear_database_scope(db_id);
     shared.governor.clear_database_scope(db_id);
 }

@@ -322,6 +322,8 @@ pub struct SharedState {
     pub system_metrics: Option<Arc<crate::control::metrics::SystemMetrics>>,
     /// Per-database quota usage counters for Prometheus scraping.
     pub database_metrics: Arc<crate::control::metrics::DatabaseMetricsRegistry>,
+    /// Live pgwire and native connection counts per database.
+    pub connection_tracker: Arc<crate::control::metrics::ConnectionTracker>,
     /// Global per-cluster quota ceiling enforced when database quotas are
     /// written. Set at startup from `[server]` config (`memory_limit`,
     /// `max_connections`). Zero on a dimension means no ceiling there.

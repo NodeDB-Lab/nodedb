@@ -71,11 +71,13 @@ pub struct NodeDbPgHandlerFactory {
 
 impl NodeDbPgHandlerFactory {
     pub fn new(state: Arc<SharedState>, auth_mode: AuthMode) -> Self {
+        let sessions = Arc::new(SessionStore::new());
+        state.connection_tracker.register_pgwire(&sessions);
         Self {
             auth_mode,
             credentials: Arc::clone(&state.credentials),
             state,
-            sessions: Arc::new(SessionStore::new()),
+            sessions,
             restore_state: Arc::new(crate::control::backup::RestoreState::new()),
             array_copy: Arc::new(ArrayCopyState::new()),
             registry: Arc::new(ConnectionRegistry::new()),

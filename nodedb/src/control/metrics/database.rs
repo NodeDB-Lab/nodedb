@@ -41,6 +41,8 @@ pub struct DatabaseCounters {
     pub bridge_queue_depth: AtomicU64,
     /// WAL group-commit latency observations in microseconds.
     pub wal_commit_latency: AtomicHistogram,
+    /// WAL commit latency P99 in microseconds over the last sampling window.
+    pub wal_commit_latency_p99_us: AtomicU64,
     /// Cumulative wall microseconds spent holding a maintenance lease.
     pub maintenance_lease_micros_total: AtomicU64,
     /// Mirror replication lag in milliseconds (`now_ms - last_apply_ms`).
@@ -96,6 +98,12 @@ impl DatabaseMetricsRegistry {
         r.get(&db).map(Arc::clone)
     }
 
+    /// Ids of every database with an entry. Order is unspecified.
+    pub fn database_ids(&self) -> Vec<DatabaseId> {
+        let r = self.counters.read().unwrap_or_else(|p| p.into_inner());
+        r.keys().copied().collect()
+    }
+
     /// Remove every series of `db`.
     pub fn remove_database(&self, db: DatabaseId) {
         let mut w = self.counters.write().unwrap_or_else(|p| p.into_inner());
@@ -124,10 +132,11 @@ impl DatabaseMetricsRegistry {
         }
     }
 
-    /// WAL commit latency P99 in microseconds. Zero without observations.
+    /// WAL commit latency P99 in microseconds over the last sampling window.
+    /// Zero before the first sample or without observations.
     pub fn wal_commit_latency_p99_us(&self, db: DatabaseId) -> u64 {
         self.get(db)
-            .map_or(0, |c| c.wal_commit_latency.percentile(0.99))
+            .map_or(0, |c| c.wal_commit_latency_p99_us.load(Ordering::Relaxed))
     }
 
     /// Add wall seconds spent holding a maintenance lease.
@@ -148,6 +157,10 @@ impl DatabaseMetricsRegistry {
         }
     }
 
+    store_setter!(
+        /// Set the WAL commit P99 gauge in microseconds.
+        set_wal_commit_p99_us, wal_commit_latency_p99_us
+    );
     store_setter!(
         /// Set the collection-count gauge.
         set_collections, collections
@@ -286,15 +299,18 @@ mod tests {
     }
 
     #[test]
-    fn wal_commit_p99_reads_back() {
+    fn wal_commit_p99_gauge_reads_back() {
         let reg = DatabaseMetricsRegistry::new();
         reg.ensure_database(db(1));
         assert_eq!(reg.wal_commit_latency_p99_us(db(1)), 0);
         for _ in 0..100 {
             reg.observe_wal_commit(db(1), 400);
         }
-        let p99 = reg.wal_commit_latency_p99_us(db(1));
-        assert!(p99 > 100 && p99 <= 500, "p99 was {p99}");
+        assert_eq!(reg.wal_commit_latency_p99_us(db(1)), 0);
+        reg.set_wal_commit_p99_us(db(1), 480);
+        assert_eq!(reg.wal_commit_latency_p99_us(db(1)), 480);
+        reg.set_wal_commit_p99_us(db(2), 5);
+        assert!(reg.get(db(2)).is_none());
     }
 
     #[test]

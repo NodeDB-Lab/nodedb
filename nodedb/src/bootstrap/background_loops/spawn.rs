@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use tracing::info;
 
-use super::{maintenance, mirror, timers};
+use super::{database_metrics, maintenance, mirror, timers};
 use crate::ServerConfig;
 use crate::control::shutdown::ShutdownBus;
 use crate::control::state::SharedState;
@@ -58,6 +58,7 @@ pub fn spawn_background_loops(
         tracing::warn!(error = %e, "database metrics: catalog list error at startup");
     }
     mirror::spawn_mirror_lag_monitor(shared);
+    database_metrics::spawn_database_metrics_sampler(shared);
 
     let event_plane = spawn_event_plane(shared, &shutdown_bus, components, num_cores);
 

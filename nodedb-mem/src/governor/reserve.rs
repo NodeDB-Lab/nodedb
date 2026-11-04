@@ -13,6 +13,7 @@ use crate::error::{MemError, Result};
 use crate::over_release::ReleaseIdentity;
 use crate::reservation_token::{ReservationParams, ReservationToken};
 use crate::reserve_scope::{ReserveScope, ReservedLayers};
+use crate::scoped_budget::ScopedBudget;
 
 /// Build the token both entry points return. They differ in how they reach
 /// a committed [`ReservedLayers`], never in what they build from one.
@@ -36,6 +37,28 @@ fn token_from_layers(
 }
 
 impl MemoryGovernor {
+    /// Run `f` on the database's scoped budget, creating an uncapped entry
+    /// on the first reserve so the usage snapshot covers every database.
+    ///
+    /// The common path takes only the read lock. The write lock is taken
+    /// once per database, and the entry is re-checked under it.
+    fn with_database_budget<R>(&self, db: DatabaseId, f: impl FnOnce(&ScopedBudget) -> R) -> R {
+        {
+            let map = self
+                .database_budgets
+                .read()
+                .unwrap_or_else(|p| p.into_inner());
+            if let Some(budget) = map.get(&db) {
+                return f(budget);
+            }
+        }
+        let mut map = self
+            .database_budgets
+            .write()
+            .unwrap_or_else(|p| p.into_inner());
+        f(map.entry(db).or_insert_with(|| ScopedBudget::new(None)))
+    }
+
     // ── 4-arity reservation ───────────────────────────────────────────────────
 
     /// Reserve `size` bytes for one (database, tenant, engine) triple.
@@ -43,7 +66,8 @@ impl MemoryGovernor {
     /// Checks global, database, tenant, then engine. Widest scope first
     /// fails fast, leaving the fewest layers to roll back.
     ///
-    /// Databases and tenants without a budget are uncapped and skipped. A
+    /// Databases and tenants without a budget are uncapped. A database
+    /// without a cap gets an uncapped counter on its first reserve. A
     /// zero engine limit denies with [`MemError::BudgetExhausted`].
     ///
     /// # Errors
@@ -61,25 +85,16 @@ impl MemoryGovernor {
 
         scope.try_credit_global()?;
 
-        {
-            let map = self
-                .database_budgets
-                .read()
-                .unwrap_or_else(|p| p.into_inner());
-            if let Some(budget) = map.get(&db) {
-                match budget.try_reserve(size) {
-                    Ok(arc) => scope.credit_database(arc),
-                    Err(denied) => {
-                        return Err(MemError::DatabaseBudgetExhausted {
-                            db,
-                            requested: size,
-                            available: budget.available(),
-                            limit: denied.limit,
-                        });
-                    }
-                }
-            }
-        }
+        let database = self.with_database_budget(db, |budget| match budget.try_reserve(size) {
+            Ok(arc) => Ok(arc),
+            Err(denied) => Err(MemError::DatabaseBudgetExhausted {
+                db,
+                requested: size,
+                available: budget.available(),
+                limit: denied.limit,
+            }),
+        })?;
+        scope.credit_database(database);
 
         {
             let map = self
@@ -137,15 +152,7 @@ impl MemoryGovernor {
 
         scope.credit_global_unchecked();
 
-        {
-            let map = self
-                .database_budgets
-                .read()
-                .unwrap_or_else(|p| p.into_inner());
-            if let Some(budget) = map.get(&db) {
-                scope.credit_database(budget.credit(size));
-            }
-        }
+        scope.credit_database(self.with_database_budget(db, |budget| budget.credit(size)));
 
         {
             let map = self
@@ -179,6 +186,20 @@ mod tests {
     use crate::governor::test_support::{db, tenant, test_config};
 
     // ── Basic 4-arity reservation ────────────────────────────────────────────
+
+    #[test]
+    fn first_reserve_creates_an_uncapped_database_entry() {
+        let gov = MemoryGovernor::new(test_config()).unwrap();
+        assert!(gov.database_budgets.read().unwrap().is_empty());
+
+        let _tok = gov
+            .try_reserve(db(), tenant(), EngineId::Vector, 100)
+            .unwrap();
+
+        let map = gov.database_budgets.read().unwrap();
+        assert_eq!(map[&db()].limit, None);
+        assert_eq!(map[&db()].allocated.load(Ordering::Relaxed), 100);
+    }
 
     #[test]
     fn reserve_within_budget() {

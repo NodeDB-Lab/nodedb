@@ -5,6 +5,8 @@
 
 use std::sync::atomic::Ordering;
 
+use nodedb_types::DatabaseId;
+
 use super::core::MemoryGovernor;
 use crate::engine::EngineId;
 use crate::pressure::{PressureLevel, PressureThresholds};
@@ -102,6 +104,33 @@ impl MemoryGovernor {
             })
             .collect()
     }
+
+    /// Allocated bytes and cap for every database that holds or held memory.
+    ///
+    /// A database appears from its first reserve until `clear_database_scope`.
+    /// Order is unspecified. Takes the map read lock once.
+    pub fn database_usage_snapshot(&self) -> Vec<DatabaseUsage> {
+        let map = self
+            .database_budgets
+            .read()
+            .unwrap_or_else(|p| p.into_inner());
+        map.iter()
+            .map(|(&database_id, budget)| DatabaseUsage {
+                database_id,
+                allocated_bytes: budget.allocated.load(Ordering::Relaxed),
+                limit_bytes: budget.limit,
+            })
+            .collect()
+    }
+}
+
+/// Point-in-time memory use of one database.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DatabaseUsage {
+    pub database_id: DatabaseId,
+    pub allocated_bytes: usize,
+    /// `None` means the database has no cap.
+    pub limit_bytes: Option<usize>,
 }
 
 /// Point-in-time snapshot of an engine's memory state.
@@ -163,5 +192,59 @@ mod tests {
             .unwrap();
         assert_eq!(gov.engine_pressure(EngineId::Vector), PressureLevel::Normal);
         assert_eq!(gov.worst_engine_pressure(), PressureLevel::Critical);
+    }
+
+    fn usage_of(gov: &MemoryGovernor, id: DatabaseId) -> Option<DatabaseUsage> {
+        gov.database_usage_snapshot()
+            .into_iter()
+            .find(|u| u.database_id == id)
+    }
+
+    #[test]
+    fn usage_snapshot_lists_capped_and_uncapped_databases() {
+        let gov = MemoryGovernor::new(test_config()).unwrap();
+        let capped = DatabaseId::new(1);
+        let uncapped = DatabaseId::new(2);
+        gov.set_database_budget(capped, 1000);
+        let _a = gov
+            .try_reserve(capped, tenant(), EngineId::Vector, 300)
+            .unwrap();
+        let _b = gov
+            .try_reserve(uncapped, tenant(), EngineId::Vector, 200)
+            .unwrap();
+
+        assert_eq!(gov.database_usage_snapshot().len(), 2);
+        let c = usage_of(&gov, capped).unwrap();
+        assert_eq!((c.allocated_bytes, c.limit_bytes), (300, Some(1000)));
+        let u = usage_of(&gov, uncapped).unwrap();
+        assert_eq!((u.allocated_bytes, u.limit_bytes), (200, None));
+    }
+
+    #[test]
+    fn usage_snapshot_covers_charged_memory_and_drops_on_release() {
+        let gov = MemoryGovernor::new(test_config()).unwrap();
+        let tok = gov.charge(db(), tenant(), EngineId::Vector, 128);
+        assert_eq!(usage_of(&gov, db()).unwrap().allocated_bytes, 128);
+        drop(tok);
+        assert_eq!(usage_of(&gov, db()).unwrap().allocated_bytes, 0);
+    }
+
+    #[test]
+    fn clear_database_scope_removes_capped_and_uncapped_usage() {
+        let gov = MemoryGovernor::new(test_config()).unwrap();
+        let capped = DatabaseId::new(1);
+        let uncapped = DatabaseId::new(2);
+        gov.set_database_budget(capped, 1000);
+        let _a = gov
+            .try_reserve(capped, tenant(), EngineId::Vector, 10)
+            .unwrap();
+        let _b = gov
+            .try_reserve(uncapped, tenant(), EngineId::Vector, 10)
+            .unwrap();
+
+        gov.clear_database_scope(capped);
+        gov.clear_database_scope(uncapped);
+
+        assert!(gov.database_usage_snapshot().is_empty());
     }
 }

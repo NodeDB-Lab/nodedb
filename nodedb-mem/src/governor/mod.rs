@@ -19,4 +19,4 @@ mod test_support;
 pub use config::GovernorConfig;
 pub use core::MemoryGovernor;
 pub use global_counter::GlobalCounter;
-pub use metrics::EngineSnapshot;
+pub use metrics::{DatabaseUsage, EngineSnapshot};

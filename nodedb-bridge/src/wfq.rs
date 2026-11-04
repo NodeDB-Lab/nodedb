@@ -226,6 +226,17 @@ impl<T> WeightedFairQueue<T> {
             .unwrap_or(0)
     }
 
+    /// Yield `(database_id, depth)` for every virtual queue holding items.
+    ///
+    /// Empty, not-yet-reaped queues are skipped. Order is unspecified.
+    /// Walks the queue map once and allocates nothing.
+    pub fn nonempty_depths(&self) -> impl Iterator<Item = (u64, usize)> + '_ {
+        self.queues
+            .iter()
+            .filter(|(_, vq)| !vq.items.is_empty())
+            .map(|(&database_id, vq)| (database_id, vq.items.len()))
+    }
+
     /// Total items across all virtual queues.
     pub fn total_depth(&self) -> usize {
         self.total
@@ -302,6 +313,21 @@ impl<T> WeightedFairQueue<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nonempty_depths_lists_only_queues_with_items() {
+        let mut wfq: WeightedFairQueue<u32> = WeightedFairQueue::new(64, 100);
+        wfq.try_enqueue(1, 10).unwrap();
+        wfq.try_enqueue(1, 11).unwrap();
+        wfq.try_enqueue(2, 20).unwrap();
+
+        let mut depths: Vec<_> = wfq.nonempty_depths().collect();
+        depths.sort_unstable();
+        assert_eq!(depths, vec![(1, 2), (2, 1)]);
+
+        while wfq.pop_next().is_some() {}
+        assert_eq!(wfq.nonempty_depths().count(), 0);
+    }
 
     #[test]
     fn single_db_behaves_like_fifo() {

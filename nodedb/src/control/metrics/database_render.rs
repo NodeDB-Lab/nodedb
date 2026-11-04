@@ -127,12 +127,10 @@ impl DatabaseMetricsRegistry {
         emit(
             out,
             "nodedb_database_wal_commit_latency_p99_us",
-            "WAL commit latency P99 in microseconds per database",
+            "WAL commit latency P99 in microseconds per database over the last sampling window",
             "gauge",
             &rows,
-            |out, c| {
-                let _ = write!(out, "{}", c.wal_commit_latency.percentile(0.99));
-            },
+            load(|c| &c.wal_commit_latency_p99_us),
         );
         emit(
             out,

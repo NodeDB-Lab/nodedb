@@ -124,6 +124,7 @@ impl SharedState {
                 ),
             ),
         );
+        wal.set_fsync_metrics(Arc::clone(&system_metrics));
         let hlc_clock = wal.hlc_clock();
         let tenant_marks = super::tenant_marks::TenantMarks::load(credentials.catalog())?;
         // The fence reads the cache's sources before the cache is wrapped.
@@ -296,6 +297,7 @@ impl SharedState {
             shuffle_id_counter: AtomicU64::new(1),
             system_metrics: Some(system_metrics),
             database_metrics: Arc::new(crate::control::metrics::DatabaseMetricsRegistry::new()),
+            connection_tracker: Arc::new(crate::control::metrics::ConnectionTracker::new()),
             quota_ceiling: Arc::new(std::sync::RwLock::new(
                 crate::control::security::catalog::GlobalQuotaCeiling::default(),
             )),

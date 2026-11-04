@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 
+pub mod connections;
 pub mod database;
 pub mod database_render;
 pub mod database_sync;
@@ -12,6 +13,7 @@ pub mod purge;
 pub mod system;
 pub mod tenant;
 
+pub use connections::{ConnectionTracker, NativeConnectionGuard};
 pub use database::{DatabaseCounters, DatabaseMetricsRegistry, DatabaseQuotaMetrics};
 pub use histogram::AtomicHistogram;
 pub use overload_responses::{OverloadProtocol, OverloadResponses, overload_responses};

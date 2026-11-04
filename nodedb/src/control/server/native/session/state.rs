@@ -10,6 +10,7 @@ use tokio::net::TcpStream;
 use tokio::sync::OwnedSemaphorePermit;
 
 use crate::config::auth::AuthMode;
+use crate::control::metrics::NativeConnectionGuard;
 use crate::control::planner::context::QueryContext;
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::admission::{AdmissionRegistry, ConnectionPermit};
@@ -85,6 +86,8 @@ pub struct NativeSession {
     pub(super) admission_registry: Arc<AdmissionRegistry>,
     pub(super) global_permit: Option<OwnedSemaphorePermit>,
     pub(super) connection_permit: Option<ConnectionPermit>,
+    /// Counts this connection under its database until the session drops.
+    pub(super) connection_guard: Option<NativeConnectionGuard>,
 }
 
 impl NativeSession {
@@ -120,6 +123,7 @@ impl NativeSession {
             admission_registry,
             global_permit: Some(global_permit),
             connection_permit: None,
+            connection_guard: None,
         }
     }
 
