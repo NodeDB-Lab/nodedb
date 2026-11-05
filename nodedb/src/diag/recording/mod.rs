@@ -37,7 +37,10 @@ mod version_cleanup;
 mod vshard_departure;
 
 pub use array_sync::array_snapshot_buffer_poisoned;
-pub use audit::{audit_flush_not_persisted, audit_wal_append_failed};
+pub use audit::{
+    audit_flush_not_persisted, audit_wal_append_failed, security_bus_lagged,
+    security_bus_rows_not_recorded,
+};
 pub use catalog::{
     catalog_apply_orphan_row, collection_purge_row_missing, consumer_group_offsets_retained,
     metadata_apply_wedged, synonym_group_not_applied,

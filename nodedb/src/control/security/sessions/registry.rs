@@ -179,6 +179,19 @@ impl SessionRegistry {
         killed
     }
 
+    /// Kill all sessions of a tenant. Returns the number of sessions signalled.
+    pub fn kill_sessions_for_tenant(&self, tenant_id: u64, reason: KillReason) -> usize {
+        let sessions = self.sessions.read().unwrap_or_else(|p| p.into_inner());
+        let mut killed = 0;
+        for s in sessions.values() {
+            if s.tenant_id == tenant_id {
+                let _ = s.kill_tx.send(reason);
+                killed += 1;
+            }
+        }
+        killed
+    }
+
     /// Kill all sessions matching a username string (for blacklist / emergency
     /// paths that identify users by name rather than numeric ID).
     pub fn kill_sessions_for_username(&self, username: &str, reason: KillReason) -> usize {
@@ -487,6 +500,24 @@ mod tests {
         assert_eq!(killed, 1);
         assert!(rx.has_changed().unwrap_or(false));
         assert_eq!(*rx.borrow_and_update(), KillReason::UserDropped);
+    }
+
+    /// A tenant kill names sessions by their tenant, never by a user id that
+    /// happens to hold the same number.
+    #[test]
+    fn a_tenant_kill_ends_the_tenants_sessions_only() {
+        let reg = SessionRegistry::new();
+        let mut in_tenant = params(5, "10.0.0.1:5000", "native");
+        in_tenant.tenant_id = 7;
+        let mut user_with_tenants_number = params(7, "10.0.0.1:5001", "native");
+        user_with_tenants_number.tenant_id = 8;
+        let in_tenant = reg.register("s1", &in_tenant).unwrap();
+        let other = reg.register("s2", &user_with_tenants_number).unwrap();
+
+        assert_eq!(reg.kill_sessions_for_tenant(7, KillReason::AdminKill), 1);
+
+        assert_eq!(*in_tenant.borrow(), KillReason::AdminKill);
+        assert_eq!(*other.borrow(), KillReason::Alive);
     }
 
     #[test]

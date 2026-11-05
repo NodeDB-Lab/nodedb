@@ -19,7 +19,8 @@ use std::time::{Duration, Instant};
 use crate::control::lease::{
     drain_for_owner_async, end_drain_async, move_source_descriptor, move_tenant_drain_owner,
 };
-use crate::control::security::buses::{SessionInvalidated, SessionInvalidationReason};
+use crate::control::security::audit::AuditEvent;
+use crate::control::security::sessions::KillReason;
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TenantId};
 use nodedb_cluster::DescriptorId;
@@ -43,12 +44,19 @@ pub async fn run(
         )
     };
 
-    // The tenant_id rides as user_id so the bus consumer closes the tenant's
-    // sessions.
-    state.session_invalidation_bus.publish(SessionInvalidated {
-        user_id: tenant_id.as_u64(),
-        reason: SessionInvalidationReason::UserDeactivated,
-    });
+    let killed = state
+        .session_registry
+        .kill_sessions_for_tenant(tenant_id.as_u64(), KillReason::AdminKill);
+    state.audit_record(
+        AuditEvent::SessionRevoked,
+        Some(tenant_id),
+        "move_tenant",
+        &format!(
+            "tenant_id={} source_db={} sessions_killed={killed}",
+            tenant_id.as_u64(),
+            source_db_id.as_u64()
+        ),
+    );
 
     let descriptors = source_descriptors(state, source_db_id)
         .map_err(|e| timed_out().with_cause(crate::error_classify::classify(&e)))?;
@@ -110,4 +118,62 @@ fn source_descriptors(
         .collect();
     descriptors.extend(super::arrays::source_descriptors(catalog, source_db_id)?);
     Ok(descriptors)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::bridge::dispatch::Dispatcher;
+    use crate::control::security::sessions::SessionParams;
+    use crate::wal::WalManager;
+
+    fn session_in_tenant(user_id: u64, tenant_id: u64) -> SessionParams {
+        SessionParams {
+            user_id,
+            username: format!("user{user_id}"),
+            db_user: format!("user{user_id}"),
+            peer_addr: "127.0.0.1:5555".to_string(),
+            protocol: "native".to_string(),
+            auth_method: "password".to_string(),
+            tenant_id,
+            credential_version: 0,
+            current_database: None,
+            token_expiry_ms: None,
+        }
+    }
+
+    /// The tenant's sessions end. A user whose id equals the tenant's number keeps
+    /// its session, and the user-keyed bus carries no event for that number.
+    #[tokio::test]
+    async fn the_drain_phase_ends_the_moved_tenants_sessions_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal =
+            Arc::new(WalManager::open_for_testing(&dir.path().join("test.wal")).expect("wal"));
+        let (dispatcher, _) = Dispatcher::new(1, 64);
+        let state = SharedState::new(dispatcher, wal).expect("state");
+        let mut si_rx = state.credentials.subscribe_session_invalidation();
+        let moved = state
+            .session_registry
+            .register("moved", &session_in_tenant(5, 7))
+            .expect("register");
+        let other = state
+            .session_registry
+            .register("other", &session_in_tenant(7, 8))
+            .expect("register");
+
+        run(
+            &state,
+            TenantId::new(7),
+            DatabaseId::new(70),
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("a source database with no collections drains at once");
+
+        assert_eq!(*moved.borrow(), KillReason::AdminKill);
+        assert_eq!(*other.borrow(), KillReason::Alive);
+        assert!(si_rx.try_recv().is_err());
+    }
 }

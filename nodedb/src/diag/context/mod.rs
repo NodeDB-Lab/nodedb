@@ -36,7 +36,9 @@ mod vshard_departure;
 mod write_path;
 
 pub(in crate::diag) use array_sync::ArraySnapshotBufferPoisoned;
-pub(in crate::diag) use audit::{AuditFlushNotPersisted, AuditWalAppendFailed};
+pub(in crate::diag) use audit::{
+    AuditFlushNotPersisted, AuditWalAppendFailed, SecurityBusLagged, SecurityBusRowsNotRecorded,
+};
 pub(in crate::diag) use catalog::{
     CatalogApplyOrphanRow, CollectionPurgeRowMissing, ConsumerGroupOffsetsRetained,
     MetadataApplyWedged, SynonymGroupNotApplied,

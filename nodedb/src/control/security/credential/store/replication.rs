@@ -159,14 +159,7 @@ impl CredentialStore {
         if let Err(error) = self.bump_version(user_id) {
             tracing::error!(user_id, error = %error, "replicated user version update failed");
         }
-        if let Some(bus) = self.uc_bus.get() {
-            bus.publish(super::super::super::buses::UserChanged { user_id });
-        }
-        if let Some(reason) = invalidation
-            && let Some(bus) = self.si_bus.get()
-        {
-            bus.publish(super::super::super::buses::SessionInvalidated { user_id, reason });
-        }
+        self.publish_user_mutation(user_id, stored.is_active, invalidation);
     }
 
     /// Remove a replicated dropped user from the in-memory cache and
@@ -194,7 +187,99 @@ mod tests {
     };
 
     use crate::control::security::identity::Role;
+    use crate::control::security::sessions::{KillReason, SessionParams, SessionRegistry};
     use crate::types::TenantId;
+
+    fn registered(
+        store: &CredentialStore,
+        user_id: u64,
+    ) -> tokio::sync::watch::Receiver<KillReason> {
+        let registry = std::sync::Arc::new(SessionRegistry::new());
+        store.set_session_registry(std::sync::Arc::clone(&registry));
+        registry
+            .register(
+                "s1",
+                &SessionParams {
+                    user_id,
+                    username: "u".into(),
+                    db_user: "u".into(),
+                    peer_addr: "127.0.0.1:5000".into(),
+                    protocol: "native".into(),
+                    auth_method: "password".into(),
+                    tenant_id: 9,
+                    credential_version: 0,
+                    current_database: None,
+                    token_expiry_ms: None,
+                },
+            )
+            .expect("register session")
+    }
+
+    #[test]
+    fn a_replicated_deactivation_ends_the_users_sessions() {
+        let store = CredentialStore::new().expect("in-memory credential store");
+        let user_id = store
+            .create_user(
+                "deactivated",
+                "password",
+                TenantId::new(9),
+                vec![Role::ReadWrite],
+            )
+            .expect("create user");
+        let kill = registered(&store, user_id);
+        let mut stored = store
+            .get_user("deactivated")
+            .expect("user exists")
+            .to_stored();
+        stored.is_active = false;
+
+        store.install_replicated_user(
+            &stored,
+            Some(crate::control::security::buses::SessionInvalidationReason::RoleAltered),
+        );
+
+        assert_eq!(*kill.borrow(), KillReason::UserDropped);
+    }
+
+    #[test]
+    fn a_replicated_role_change_leaves_sessions_open() {
+        let store = CredentialStore::new().expect("in-memory credential store");
+        let user_id = store
+            .create_user(
+                "altered",
+                "password",
+                TenantId::new(9),
+                vec![Role::ReadWrite],
+            )
+            .expect("create user");
+        let kill = registered(&store, user_id);
+        let stored = store.get_user("altered").expect("user exists").to_stored();
+
+        store.install_replicated_user(
+            &stored,
+            Some(crate::control::security::buses::SessionInvalidationReason::RoleAltered),
+        );
+
+        assert_eq!(*kill.borrow(), KillReason::Alive);
+    }
+
+    #[test]
+    fn a_replicated_drop_ends_the_users_sessions() {
+        let store = CredentialStore::new().expect("in-memory credential store");
+        let user_id = store
+            .create_user(
+                "dropped",
+                "password",
+                TenantId::new(9),
+                vec![Role::ReadWrite],
+            )
+            .expect("create user");
+        let kill = registered(&store, user_id);
+
+        store.install_replicated_drop("dropped");
+
+        assert_eq!(*kill.borrow(), KillReason::UserDropped);
+    }
 
     #[test]
     fn prepare_user_rejects_empty_password_without_id_allocation_or_proposal() {

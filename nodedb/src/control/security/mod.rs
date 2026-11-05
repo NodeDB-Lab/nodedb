@@ -49,7 +49,6 @@ pub mod role;
 pub mod role_assignment;
 pub mod scope;
 pub mod session_handle;
-pub mod session_registry;
 pub mod sessions;
 pub mod siem;
 pub mod source_credential;

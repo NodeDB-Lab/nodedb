@@ -50,7 +50,9 @@ pub use guard::{AuditLogGuard, lock_audit_log};
 pub use level::AuditLevel;
 pub use log::AuditLog;
 pub use log::AuditRecordInput;
-pub use log_commit::{StagedBatch, record_batch_concurrent, record_concurrent};
+pub use log_commit::{
+    StagedBatch, record_batch_best_effort, record_batch_concurrent, record_concurrent,
+};
 pub use recorder::{AuditRecorder, PendingAudit};
 pub use restore::restore_audit_log;
 pub use undrop_detail::{UndropAuditDetail, UndropStage};

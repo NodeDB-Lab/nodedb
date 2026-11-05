@@ -81,6 +81,8 @@ impl SharedState {
             Arc::new(SessionInvalidationBus::from_existing(si_bus.sender())),
             Arc::new(UserChangeBus::from_existing(uc_bus.sender())),
         );
+        // A hard revoke ends sessions in the registry the state holds.
+        credentials.set_session_registry(Arc::clone(&session_registry));
         let AuthInputs {
             metering_config,
             siem,

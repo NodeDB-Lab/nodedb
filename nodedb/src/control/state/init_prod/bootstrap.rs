@@ -210,10 +210,8 @@ pub(super) fn run(
     let startup_gate = StartupGate::pre_fired();
     let shared_audit = Arc::new(Mutex::new(audit_log));
     let prod_session_registry = Arc::new(SessionRegistry::new());
-    let (si_bus, uc_bus, bus_consumer_task) = super::super::buses_init::init_security_buses(
-        Arc::clone(&shared_audit),
-        Arc::clone(&prod_session_registry),
-    );
+    let (si_bus, uc_bus, bus_consumer_task) =
+        super::super::buses_init::init_security_buses(Arc::clone(&shared_audit));
     let bus_consumer_handle = bus_consumer_task;
 
     Ok(ProdBootstrap {

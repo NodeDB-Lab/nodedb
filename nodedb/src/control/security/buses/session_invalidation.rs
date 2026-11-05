@@ -6,13 +6,13 @@
 //! mutation renders existing sessions incorrect (DROP USER, soft-delete via
 //! `is_active=false`, GRANT/REVOKE ROLE, ALTER USER SET ROLE).
 //!
-//! The bus consumer subscribes and:
-//! - Walks `ActiveSessions` for matching `user_id`.
-//! - Writes the `SessionRevoked` audit row before acting on the connection.
+//! The bus feeds the audit log: its consumer writes one `SessionRevoked` row per
+//! event. It ends no session. A hard revoke ends its sessions on the mutation's
+//! own path, before the event is published.
 //!
 //! Shutdown: the bus consumer exits when the `Sender` is dropped.
-//! Capacity: 256 events.  Lag above that threshold causes the consumer to
-//! record an `AuditBusLagged` row and continue (no panic, no silent drop).
+//! Capacity: 256 events.  Lag above that threshold costs audit rows: the
+//! consumer records an `AuditBusLagged` row with the count and continues.
 
 use tokio::sync::broadcast;
 

@@ -12,6 +12,8 @@
 use std::sync::Arc;
 
 use nodedb::bridge::dispatch::Dispatcher;
+use nodedb::control::security::audit::AuditEvent;
+use nodedb::control::security::buses::session_invalidation::SESSION_INVALIDATION_CHANNEL_CAPACITY;
 use nodedb::control::security::identity::{AuthMethod, Role};
 use nodedb::control::security::sessions::{KillReason, SessionParams, SessionRegistry};
 use nodedb::control::state::SharedState;
@@ -197,6 +199,113 @@ async fn in_flight_propagation_grant_visible() {
         fresh.roles.contains(&Role::ReadWrite),
         "fresh identity must contain newly granted role"
     );
+}
+
+// ---------------------------------------------------------------------------
+// A hard revoke reaches sessions with no help from the buses
+// ---------------------------------------------------------------------------
+
+/// The state has no runtime here, so no consumer reads either bus. The signal
+/// is visible when `drop_user` returns, with no await in between.
+#[test]
+fn drop_user_ends_sessions_with_no_bus_consumer() {
+    let state = make_state();
+    let user_id = state
+        .credentials
+        .create_user("ivy", "pw333", TenantId::new(1), vec![Role::ReadOnly])
+        .expect("create_user failed");
+    let kill_rx = state
+        .session_registry
+        .register("ivy-1", &sample_params(user_id, "ivy"))
+        .expect("register failed");
+
+    state
+        .credentials
+        .drop_user("ivy")
+        .expect("drop_user failed");
+
+    assert_eq!(*kill_rx.borrow(), KillReason::UserDropped);
+}
+
+#[test]
+fn a_role_change_leaves_sessions_open_and_a_drop_ends_them() {
+    let state = make_state();
+    let user_id = state
+        .credentials
+        .create_user("jan", "pw444", TenantId::new(1), vec![Role::ReadOnly])
+        .expect("create_user failed");
+    let kill_rx = state
+        .session_registry
+        .register("jan-1", &sample_params(user_id, "jan"))
+        .expect("register failed");
+
+    state
+        .credentials
+        .update_roles("jan", vec![Role::ReadWrite])
+        .expect("update_roles failed");
+    assert_eq!(*kill_rx.borrow(), KillReason::Alive);
+
+    state
+        .credentials
+        .drop_user("jan")
+        .expect("drop_user failed");
+    assert_eq!(*kill_rx.borrow(), KillReason::UserDropped);
+}
+
+/// A consumer that lost events and cannot take the audit lock still leaves the
+/// revoke intact. The kill lands with the lock held and the bus overrun. The
+/// lost rows then surface as one `AuditBusLagged` row once the lock is released.
+#[tokio::test]
+async fn a_lagged_bus_and_a_stalled_audit_log_do_not_delay_a_hard_revoke() {
+    let dir = tempfile::tempdir().unwrap();
+    let wal = Arc::new(WalManager::open_for_testing(&dir.path().join("test.wal")).unwrap());
+    let (dispatcher, _) = Dispatcher::new(1, 64);
+    let state = SharedState::new(dispatcher, wal).unwrap();
+    let user_id = state
+        .credentials
+        .create_user("kim", "pw555", TenantId::new(1), vec![Role::ReadOnly])
+        .expect("create_user failed");
+    let kill_rx = state
+        .session_registry
+        .register("kim-1", &sample_params(user_id, "kim"))
+        .expect("register failed");
+
+    {
+        let _stalled = state.audit.lock().unwrap();
+        // This single-threaded runtime never runs the consumer in this block,
+        // so these publishes overrun the session-invalidation bus.
+        for _ in 0..=SESSION_INVALIDATION_CHANNEL_CAPACITY {
+            state
+                .credentials
+                .update_roles("kim", vec![Role::ReadOnly])
+                .expect("update_roles failed");
+        }
+        state
+            .credentials
+            .drop_user("kim")
+            .expect("drop_user failed");
+        assert_eq!(*kill_rx.borrow(), KillReason::UserDropped);
+    }
+
+    let lagged = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let details: Vec<String> = state
+                .audit
+                .lock()
+                .unwrap()
+                .query_by_event(&AuditEvent::AuditBusLagged)
+                .iter()
+                .map(|entry| entry.detail.clone())
+                .collect();
+            if !details.is_empty() {
+                return details;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the lag reaches the audit log");
+    assert!(lagged[0].contains("session_invalidation_bus lagged"));
 }
 
 // ---------------------------------------------------------------------------

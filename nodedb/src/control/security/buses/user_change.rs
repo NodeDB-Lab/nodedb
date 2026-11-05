@@ -3,10 +3,9 @@
 //! User-change broadcast channel.
 //!
 //! Producers publish a [`UserChanged`] event on every [`CredentialStore`]
-//! mutation.  The bus consumer uses this for cheap per-user version probing:
-//! if the current version of a user's `UserRecord` has advanced, open sessions
-//! rebuild their `AuthenticatedIdentity` from the latest persisted state at
-//! the next request boundary.
+//! mutation. The bus feeds the audit log: its consumer writes one
+//! `PrivilegeChange` row per event. The user's version counter moves ahead of
+//! the publish, so a lost event costs that row and nothing else.
 //!
 //! Shutdown: the bus consumer exits when the `Sender` is dropped.
 //! Capacity: 1 024 events.

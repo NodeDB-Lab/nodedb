@@ -191,7 +191,18 @@ pub fn record_batch_concurrent<'a>(
 ///
 /// A WAL error is logged and reported, and the entry stays published. Returns its seq.
 pub fn record_concurrent(audit: &Mutex<AuditLog>, input: AuditRecordInput<'_>) -> u64 {
-    let staged = lock_audit_log(audit).stage_batch([input]);
+    record_batch_best_effort(audit, [input])
+}
+
+/// Record every input in order with one sync, best-effort.
+///
+/// A WAL error is logged and reported, and the entries stay published.
+/// Returns the last seq, `0` for an empty batch.
+pub fn record_batch_best_effort<'a>(
+    audit: &Mutex<AuditLog>,
+    inputs: impl IntoIterator<Item = AuditRecordInput<'a>>,
+) -> u64 {
+    let staged = lock_audit_log(audit).stage_batch(inputs);
     let seq = staged.last_seq().unwrap_or(0);
     let (_, durable) = staged.wait_durable();
     lock_audit_log(audit).publish_through(seq);

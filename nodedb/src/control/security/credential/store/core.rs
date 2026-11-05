@@ -18,6 +18,8 @@ use tracing::info;
 use super::super::super::catalog::SystemCatalog;
 use super::super::super::time::now_secs;
 use crate::config::auth::Argon2Config;
+use crate::control::security::buses::SessionInvalidationReason;
+use crate::control::security::sessions::{KillReason, SessionRegistry};
 
 use super::super::lockout::LoginAttemptTracker;
 use super::super::record::{UserRecord, validate_stored_user_credentials};
@@ -59,6 +61,9 @@ pub struct CredentialStore {
     /// User-change bus (None until `set_buses` is called; None in test stores).
     pub(in crate::control::security::credential) uc_bus:
         std::sync::OnceLock<Arc<crate::control::security::buses::UserChangeBus>>,
+    /// The sessions a hard revoke ends (None in test stores with no sessions).
+    pub(in crate::control::security::credential) session_registry:
+        std::sync::OnceLock<Arc<SessionRegistry>>,
 }
 
 /// Acquire a poison-free read guard for security-critical credential state.
@@ -122,6 +127,7 @@ impl CredentialStore {
             versions: RwLock::new(HashMap::new()),
             si_bus: std::sync::OnceLock::new(),
             uc_bus: std::sync::OnceLock::new(),
+            session_registry: std::sync::OnceLock::new(),
         })
     }
 
@@ -162,6 +168,7 @@ impl CredentialStore {
             versions: RwLock::new(HashMap::new()),
             si_bus: std::sync::OnceLock::new(),
             uc_bus: std::sync::OnceLock::new(),
+            session_registry: std::sync::OnceLock::new(),
         })
     }
 
@@ -224,6 +231,31 @@ impl CredentialStore {
     ) {
         let _ = self.si_bus.set(si_bus);
         let _ = self.uc_bus.set(uc_bus);
+    }
+
+    /// Wire in the session registry a hard revoke ends sessions through.
+    /// Called once from `SharedState` construction.
+    pub fn set_session_registry(&self, registry: Arc<SessionRegistry>) {
+        let _ = self.session_registry.set(registry);
+    }
+
+    /// End every open session of `user_id` when `reason` is a hard revoke.
+    ///
+    /// This runs on the mutation's own path, with no bus and no audit write in
+    /// front of it. The signal reaches every session however far the audit
+    /// consumer lags. It takes a read lock and sends on a watch, so it does no
+    /// I/O on the metadata apply path.
+    pub(in crate::control::security::credential) fn end_sessions_on_hard_revoke(
+        &self,
+        user_id: u64,
+        reason: &SessionInvalidationReason,
+    ) {
+        if !reason.is_hard_revoke() {
+            return;
+        }
+        if let Some(registry) = self.session_registry.get() {
+            registry.kill_sessions_for_user(user_id, KillReason::UserDropped);
+        }
     }
 
     /// Subscribe to user-change events.  Returns a broadcast receiver that
@@ -289,16 +321,17 @@ impl CredentialStore {
     /// In order:
     /// 1. Persist the `UserRecord` to redb via `persist_user`.
     /// 2. Bump the per-user version counter.
-    /// 3. Publish `UserChanged` on the user-change bus.
-    /// 4. If `invalidation` is `Some`, publish `SessionInvalidated` on the
+    /// 3. End the user's sessions on a hard revoke.
+    /// 4. Publish `UserChanged` on the user-change bus.
+    /// 5. If `invalidation` is `Some`, publish `SessionInvalidated` on the
     ///    session-invalidation bus.
     ///
-    /// Both bus publishes are fire-and-forget — a return value of 0 (no
-    /// active subscribers) is silently accepted.
+    /// Both buses feed the audit log. Each publish is fire-and-forget — a
+    /// return value of 0 (no active subscribers) is silently accepted.
     pub(in crate::control::security::credential) fn commit_user_mutation(
         &self,
         record: &mut UserRecord,
-        invalidation: Option<crate::control::security::buses::SessionInvalidationReason>,
+        invalidation: Option<SessionInvalidationReason>,
     ) -> crate::Result<()> {
         let user_id = record.user_id;
 
@@ -308,30 +341,47 @@ impl CredentialStore {
         // 2. Version bump.
         self.bump_version(user_id)?;
 
-        // 3. UserChanged.
+        self.publish_user_mutation(user_id, record.is_active, invalidation);
+        Ok(())
+    }
+
+    /// Steps 3 to 5 of [`Self::commit_user_mutation`], for a mutation whose
+    /// record is already visible to readers. An inactive record is a hard
+    /// revoke, whatever reason its mutation names.
+    pub(in crate::control::security::credential) fn publish_user_mutation(
+        &self,
+        user_id: u64,
+        is_active: bool,
+        invalidation: Option<SessionInvalidationReason>,
+    ) {
+        let invalidation = if is_active {
+            invalidation
+        } else {
+            Some(SessionInvalidationReason::UserDeactivated)
+        };
+        if let Some(reason) = &invalidation {
+            self.end_sessions_on_hard_revoke(user_id, reason);
+        }
         if let Some(bus) = self.uc_bus.get() {
             bus.publish(crate::control::security::buses::UserChanged { user_id });
         }
-
-        // 4. SessionInvalidated (if reason given).
         if let Some(reason) = invalidation
             && let Some(bus) = self.si_bus.get()
         {
             bus.publish(crate::control::security::buses::SessionInvalidated { user_id, reason });
         }
-
-        Ok(())
     }
 
     /// Fully retire a dropped user's persisted + in-process state.
     ///
     /// In order:
-    /// 1. Delete the record from the redb catalog (idempotent — a
+    /// 1. End the user's sessions. This comes first: the cache no longer holds
+    ///    the user, so a failed catalog delete must not leave a session open.
+    /// 2. Delete the record from the redb catalog (idempotent — a
     ///    missing key is a harmless no-op).
-    /// 2. Publish `UserChanged` on the user-change bus.
-    /// 3. Publish `SessionInvalidated` with `UserDropped` so open
-    ///    sessions are hard-revoked.
-    /// 4. Discard the per-user version counter — the username may be
+    /// 3. Publish `UserChanged` on the user-change bus.
+    /// 4. Publish `SessionInvalidated` with `UserDropped` for the audit log.
+    /// 5. Discard the per-user version counter — the username may be
     ///    recreated later under a fresh `user_id`.
     ///
     /// The caller must have already removed the in-memory cache entry.
@@ -341,23 +391,26 @@ impl CredentialStore {
     ) -> crate::Result<()> {
         let user_id = record.user_id;
 
-        // 1. Delete from the persistent catalog.
+        // 1. Hard-revoke open sessions.
+        self.end_sessions_on_hard_revoke(user_id, &SessionInvalidationReason::UserDropped);
+
+        // 2. Delete from the persistent catalog.
         self.catalog.delete_user(&record.username)?;
 
-        // 2. UserChanged.
+        // 3. UserChanged.
         if let Some(bus) = self.uc_bus.get() {
             bus.publish(crate::control::security::buses::UserChanged { user_id });
         }
 
-        // 3. SessionInvalidated — hard-revoke open sessions.
+        // 4. SessionInvalidated.
         if let Some(bus) = self.si_bus.get() {
             bus.publish(crate::control::security::buses::SessionInvalidated {
                 user_id,
-                reason: crate::control::security::buses::SessionInvalidationReason::UserDropped,
+                reason: SessionInvalidationReason::UserDropped,
             });
         }
 
-        // 4. Discard the per-user version counter.
+        // 5. Discard the per-user version counter.
         write_lock(&self.versions).remove(&user_id);
 
         Ok(())
