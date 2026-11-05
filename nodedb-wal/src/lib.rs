@@ -58,6 +58,8 @@ mod segment_envelope;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod segmented;
 #[cfg(not(target_arch = "wasm32"))]
+mod segmented_scan;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod temporal_purge;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod time_anchors;
@@ -100,7 +102,7 @@ pub use replay::{
 };
 pub use secure_mem::SecureKey;
 #[cfg(not(target_arch = "wasm32"))]
-pub use segmented::{SegmentedWal, SegmentedWalConfig};
+pub use segmented::{SegmentScanner, SegmentedWal, SegmentedWalConfig};
 #[cfg(not(target_arch = "wasm32"))]
 pub use temporal_purge::{TemporalPurgeEngine, TemporalPurgePayload};
 #[cfg(not(target_arch = "wasm32"))]

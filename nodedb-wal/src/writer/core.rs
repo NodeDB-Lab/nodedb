@@ -70,6 +70,10 @@ pub struct WalWriter {
     /// `(lsn, hlc_wall_ns)` of an anchor in the batch whose fsync has not
     /// succeeded yet.
     pub(super) pending_anchor: Option<(u64, u64)>,
+
+    /// Count of buffer flushes that reached the file.
+    /// A split sync compares it to learn whether a flush followed its fsync's start.
+    pub(super) flush_epoch: u64,
 }
 
 impl WalWriter {
@@ -113,6 +117,7 @@ impl WalWriter {
             dwb_unprotected_records: 0,
             unanchored: false,
             pending_anchor: None,
+            flush_epoch: 0,
         })
     }
 
@@ -216,6 +221,7 @@ impl WalWriter {
             dwb_unprotected_records: 0,
             unanchored: false,
             pending_anchor: None,
+            flush_epoch: 0,
         })
     }
 
@@ -388,10 +394,22 @@ impl WalWriter {
     /// page cache. Returning early there would report durability the log does
     /// not have, so the fsync is skipped only when nothing is outstanding.
     pub fn sync(&mut self) -> Result<()> {
+        if !self.prepare_sync()? {
+            return Ok(());
+        }
+        fsync_and_track(&self.file, &mut self.durability)?;
+        self.publish_time_anchor();
+        Ok(())
+    }
+
+    /// Bring the file up to date, leaving only the fsync to run.
+    ///
+    /// Returns `false` when nothing is outstanding and no fsync is owed.
+    pub(super) fn prepare_sync(&mut self) -> Result<bool> {
         self.durability.check()?;
 
         if self.durability.should_skip_sync(self.buffer.is_empty()) {
-            return Ok(());
+            return Ok(false);
         }
 
         // Crash injection: die before the DWB is made durable. Recovery must
@@ -414,9 +432,7 @@ impl WalWriter {
             std::io::Error::other(format!("failpoint wal::before_wal_fsync: {detail}"))
         ));
 
-        fsync_and_track(&self.file, &mut self.durability)?;
-        self.publish_time_anchor();
-        Ok(())
+        Ok(true)
     }
 
     /// Seal the WAL — no more writes will be accepted.

@@ -60,6 +60,11 @@ impl WalWriter {
         let Some((lsn, hlc_wall_ns)) = self.pending_anchor.take() else {
             return;
         };
+        self.record_time_anchor(lsn, hlc_wall_ns);
+    }
+
+    /// Record one anchor whose fsync succeeded.
+    pub(super) fn record_time_anchor(&self, lsn: u64, hlc_wall_ns: u64) {
         let Some(anchors) = &self.config.time_anchors else {
             return;
         };

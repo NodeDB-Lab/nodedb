@@ -95,6 +95,16 @@ impl DurabilityState {
 /// helper is the only place a successful fsync clears the outstanding-flush
 /// marker, so the two can never drift apart.
 pub(crate) fn fsync_and_track(file: &File, state: &mut DurabilityState) -> Result<()> {
+    if let Err(e) = fsync_file(file) {
+        return Err(state.poison(format!("fsync failed: {e}")));
+    }
+
+    state.record_sync_ok();
+    Ok(())
+}
+
+/// Fsync `file`. The caller latches a failure into its [`DurabilityState`].
+pub(crate) fn fsync_file(file: &File) -> std::io::Result<()> {
     // Crash injection: the kernel reports a writeback error at the fsync.
     // Everything already handed to the page cache is unrecoverable from here.
     #[cfg(feature = "failpoints")]
@@ -102,17 +112,12 @@ pub(crate) fn fsync_and_track(file: &File, state: &mut DurabilityState) -> Resul
         nodedb_types::fail_point::FailScope::Any,
         "wal::fsync_failure",
     ) {
-        return Err(state.poison(format!(
-            "fsync failed: failpoint wal::fsync_failure: {detail}"
+        return Err(std::io::Error::other(format!(
+            "failpoint wal::fsync_failure: {detail}"
         )));
     }
 
-    if let Err(e) = file.sync_all() {
-        return Err(state.poison(format!("fsync failed: {e}")));
-    }
-
-    state.record_sync_ok();
-    Ok(())
+    file.sync_all()
 }
 
 #[cfg(test)]
