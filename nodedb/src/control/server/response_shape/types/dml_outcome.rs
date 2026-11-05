@@ -332,6 +332,22 @@ fn counted(outcome: DmlOutcome) -> u64 {
     }
 }
 
+/// Whether `plan`'s count is read from its write's reply. Each such plan of a
+/// Calvin transaction adds its own count to the one reply the transaction
+/// answers, and the fold reads that total once.
+pub fn plan_count_reads_reply(plan: &PhysicalPlan) -> bool {
+    match super::describe_plan(plan) {
+        PlanKind::DmlResult(verb) => DmlOutcome::verb_carries_count(verb),
+        PlanKind::DmlResultByOp => true,
+        PlanKind::Execution
+        | PlanKind::ArraySlice
+        | PlanKind::GraphRag
+        | PlanKind::ReturningRows
+        | PlanKind::SingleDocument
+        | PlanKind::MultiRow => false,
+    }
+}
+
 /// The verb two folded outcomes share, `None` when they cannot share one.
 fn merged_verb(first: &'static str, second: &'static str) -> Option<&'static str> {
     if first == second {

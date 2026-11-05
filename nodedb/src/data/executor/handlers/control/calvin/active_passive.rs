@@ -145,7 +145,7 @@ impl CoreLoop {
             for plan in plans {
                 self.stage_calvin_plan(task, synthetic_txn_id, *tenant_id, plan, &mut staging)?;
             }
-            Ok::<CalvinReply, ErrorCode>(staging.reply)
+            Ok::<CalvinReply, ErrorCode>(staging.into_reply())
         }));
         self.apply_scope.calvin_txn_ordinal = None;
         self.epoch_system_ms = prev_epoch_ms;

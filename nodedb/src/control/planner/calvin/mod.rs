@@ -47,7 +47,8 @@ pub use graph_sequencing::{
 pub use predicate::predicate_class_for_filters;
 pub use retry_loop::{DependentOutcome, DependentRetryArgs, run_dependent_with_retry};
 pub use settling_writes::{
-    refuse_repeated_settled_rows, refuse_several_settling_writes, ships_balance_delta,
+    refuse_repeated_settled_rows, refuse_several_returning_tasks, refuse_several_settling_writes,
+    ships_balance_delta,
 };
 pub use submit::{
     RoutedAssignment, submit_and_await_calvin, submit_and_await_calvin_until, submit_calvin_routed,

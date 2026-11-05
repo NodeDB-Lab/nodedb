@@ -154,6 +154,7 @@ async fn dispatch_dependent_edge_recon_inner(
     user_roles: Vec<String>,
     reads: &[ReadSetEntry],
 ) -> crate::Result<DependentReconOutcome> {
+    super::settling_writes::refuse_several_returning_tasks(&tasks)?;
     // A stage validates nothing without a snapshot ordinal, so every route
     // below stamps this one on its transaction.
     let snapshot_ordinal = TxnReads::autocommit(reads)?.snapshot_ordinal;

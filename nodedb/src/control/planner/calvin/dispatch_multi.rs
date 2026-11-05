@@ -206,6 +206,7 @@ pub async fn dispatch_authorized_tasks_to_calvin(
         .into_iter()
         .map(|task| task.into_physical_task())
         .collect();
+    super::settling_writes::refuse_several_returning_tasks(&tasks)?;
     let read_vshards = read_vshards_of(reads)?;
     match classify_dispatch(&tasks, &read_vshards) {
         DispatchClass::MultiShard { .. } => {

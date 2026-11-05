@@ -6,7 +6,9 @@ pub mod dml_outcome;
 pub mod plan_kind;
 pub mod shaped;
 
-pub use dml_outcome::{DmlFoldError, DmlOutcome, FoldedTag, StatementTag, TaskTagRole};
+pub use dml_outcome::{
+    DmlFoldError, DmlOutcome, FoldedTag, StatementTag, TaskTagRole, plan_count_reads_reply,
+};
 pub(crate) use dml_outcome::{
     dml_outcome_by_op, dml_outcome_from_payload, payload_to_dml_outcome, replaced_write_outcome,
     staged_dml_outcome,

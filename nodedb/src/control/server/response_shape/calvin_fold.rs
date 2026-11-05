@@ -17,7 +17,7 @@ use super::request::MaterializedShapeRequest;
 use super::schema::OutputSchema;
 use super::types::{
     DmlFoldError, DmlOutcome, FoldedTag, PlanKind, ShapedRows, StatementTag, TaskTagRole,
-    describe_plan, dml_outcome_by_op, dml_outcome_from_payload,
+    describe_plan, dml_outcome_by_op, dml_outcome_from_payload, plan_count_reads_reply,
 };
 use crate::bridge::envelope::Response;
 use crate::control::security::auth_context::AuthContext;
@@ -75,6 +75,12 @@ pub struct CalvinBatchFold {
 /// statement: it folds as opaque, as it never deposits. Every RETURNING task
 /// reads the one deposited payload, so the payload is shaped at most once
 /// per batch. A RETURNING task folds nothing into the tag.
+///
+/// Every count-bearing task reads the one deposited answer, which holds the
+/// total of the whole batch: each slice adds its plans' counts, and the
+/// coordinator adds its slices'. So the first such task folds the total, and
+/// each later one folds its verb alone. Rows answer in place of a count, so a
+/// plain task beside a RETURNING one folds as opaque.
 pub fn fold_calvin_batch(
     plans: &[&PhysicalPlan],
     apply_resp: Option<&Response>,
@@ -82,9 +88,19 @@ pub fn fold_calvin_batch(
 ) -> Result<CalvinBatchFold, CalvinFoldError> {
     let mut rows: Option<ShapedRows> = None;
     let mut tag = StatementTag::for_request(plans.iter().copied());
+    let rows_answer = apply_resp.is_some()
+        && plans
+            .iter()
+            .any(|plan| matches!(describe_plan(plan), PlanKind::ReturningRows));
+    let mut total_read = false;
     for plan in plans {
         let role = tag.role_of(plan);
         if role == TaskTagRole::Opaque {
+            tag.fold_opaque();
+            continue;
+        }
+        let reads_total = plan_count_reads_reply(plan);
+        if rows_answer && reads_total {
             tag.fold_opaque();
             continue;
         }
@@ -95,11 +111,29 @@ pub fn fold_calvin_batch(
         if returns_rows && rows.is_some() {
             continue;
         }
+        // A later task folds no count, so it raises no second notice for the
+        // lines the answer rejected.
+        if let (PlanKind::DmlResult(verb), true, true) =
+            (describe_plan(plan), reads_total, total_read)
+        {
+            tag.fold(role, DmlOutcome { verb, affected: 0 })
+                .map_err(CalvinFoldError::Verb)?;
+            continue;
+        }
         match calvin_task_outcome(plan, apply_resp, ctx).map_err(CalvinFoldError::Shape)? {
             CalvinTaskOutcome::Rows(shaped) => {
                 rows.get_or_insert(shaped);
             }
             CalvinTaskOutcome::Dml(outcome) => {
+                let outcome = if reads_total && total_read {
+                    DmlOutcome {
+                        affected: 0,
+                        ..outcome
+                    }
+                } else {
+                    outcome
+                };
+                total_read |= reads_total;
                 tag.fold(role, outcome).map_err(CalvinFoldError::Verb)?
             }
             CalvinTaskOutcome::Opaque => tag.fold_opaque(),

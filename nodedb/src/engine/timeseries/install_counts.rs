@@ -40,6 +40,10 @@ pub struct TsInstallCounts {
     /// The collection of the first install.
     pub collection: String,
     pub ts_installs: Vec<TsInstallCount>,
+    /// The statement's affected count: `accepted` plus the count of the plain
+    /// writes beside these installs. Every reader of an affected count reads
+    /// this field first.
+    pub affected: u64,
 }
 
 impl TsInstallCounts {
@@ -60,7 +64,19 @@ impl TsInstallCounts {
             rejected,
             collection,
             ts_installs,
+            affected: accepted,
         }
+    }
+
+    /// These counts with `plain` more rows from writes beside the installs.
+    pub fn with_plain_count(mut self, plain: u64) -> Self {
+        self.affected = self.affected.saturating_add(plain);
+        self
+    }
+
+    /// The rows of the plain writes beside the installs.
+    fn plain_count(&self) -> u64 {
+        self.affected.saturating_sub(self.accepted)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -105,12 +121,22 @@ pub fn merge_count_payloads(first: &[u8], second: &[u8]) -> Option<Vec<u8>> {
         (None, None) => return None,
         (Some(counts), None) | (None, Some(counts)) => counts,
         (Some(counts), Some(more)) => {
+            let plain = counts.plain_count().saturating_add(more.plain_count());
             let mut installs = counts.ts_installs;
             installs.extend(more.ts_installs);
-            TsInstallCounts::new(installs)
+            TsInstallCounts::new(installs).with_plain_count(plain)
         }
     };
     merged.to_bytes().ok()
+}
+
+/// `payload`'s install counts with `plain` more rows. `None` when `payload`
+/// carries no install counts.
+pub fn add_plain_count(payload: &[u8], plain: u64) -> Option<Vec<u8>> {
+    TsInstallCounts::from_payload(payload)?
+        .with_plain_count(plain)
+        .to_bytes()
+        .ok()
 }
 
 #[cfg(test)]
@@ -128,6 +154,27 @@ mod tests {
                 })
                 .collect(),
         )
+    }
+
+    /// The plain rows of each side survive a merge, and `accepted` stays the
+    /// rows the installs stored.
+    #[test]
+    fn plain_counts_add_across_a_merge() {
+        let first = counts(&[("cpu", 2, 0)])
+            .with_plain_count(3)
+            .to_bytes()
+            .expect("encode");
+        let second = add_plain_count(&counts(&[("mem", 1, 0)]).to_bytes().expect("encode"), 4)
+            .expect("install counts");
+        let merged = merge_count_payloads(&first, &second).expect("merged");
+        let decoded = TsInstallCounts::from_payload(&merged).expect("decode");
+        assert_eq!(decoded.accepted, 3);
+        assert_eq!(decoded.affected, 10);
+    }
+
+    #[test]
+    fn a_plain_payload_takes_no_plain_count() {
+        assert!(add_plain_count(&[0x80], 1).is_none());
     }
 
     #[test]

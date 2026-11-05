@@ -39,6 +39,7 @@ mod calvin_old_term_redo_copy;
 mod calvin_ollp_cross_node;
 mod calvin_ollp_pk_delete;
 mod calvin_ollp_update;
+mod calvin_partial_host_counts;
 mod calvin_read_version_leader_move;
 mod calvin_remote_participant_report;
 mod calvin_replica_content;

@@ -24,6 +24,29 @@ statements.";
 pub const SAME_ROW_WRITES_REFUSAL: &str = "several writes of one request rewrite the same source \
 row of a materialized sum; run them as separate statements.";
 
+/// The refusal of a Calvin task set with several `RETURNING` tasks.
+pub const SEVERAL_RETURNING_REFUSAL: &str = "several writes of one request carry RETURNING and \
+commit through one Calvin transaction, which answers one write's rows; run them as separate \
+statements.";
+
+/// Refuse a Calvin task set with several `RETURNING` tasks. One transaction
+/// answers one set of rows: a slice keeps its last task's, and two slices with
+/// rows are a union no shape holds. Refused before anything commits, so no
+/// client gets one write's rows in place of two.
+pub fn refuse_several_returning_tasks(tasks: &[PhysicalTask]) -> crate::Result<()> {
+    use crate::control::server::response_shape::types::{PlanKind, describe_plan};
+    let returning = tasks
+        .iter()
+        .filter(|task| matches!(describe_plan(&task.plan), PlanKind::ReturningRows))
+        .count();
+    if returning > 1 {
+        return Err(Error::FeatureNotSupported {
+            detail: format!("{SEVERAL_RETURNING_REFUSAL} RETURNING writes: {returning}."),
+        });
+    }
+    Ok(())
+}
+
 /// Refuse a task set that settles one source row twice.
 ///
 /// Every write of a task set settles before any write stages, so a later write
@@ -213,6 +236,11 @@ mod tests {
     fn plain_predicate_writes_are_not_refused() {
         let tasks = [bulk_delete(), bulk_delete()];
         assert!(refuse_several_settling_writes(&tasks).is_ok());
+    }
+
+    #[test]
+    fn one_returning_task_is_not_refused() {
+        assert!(refuse_several_returning_tasks(&[bulk_delete()]).is_ok());
     }
 
     #[test]

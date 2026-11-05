@@ -32,7 +32,7 @@ pub mod collection_to_database;
 pub mod idle_timeout_cache;
 
 pub use self::calvin_ack_result::{
-    ACK_ROWS_FRAME_BUDGET, AckReply, AckReturning, AckSlice, CalvinAckResult,
+    ACK_ROWS_FRAME_BUDGET, AckReply, AckReturning, AckSlice, CalvinAckResult, UNREADABLE_ACK_REPORT,
 };
 pub use self::calvin_apply::CalvinApplyResult;
 pub use self::calvin_apply_sidecar::{CalvinApplySidecar, DEFAULT_APPLY_RESULT_TTL};
