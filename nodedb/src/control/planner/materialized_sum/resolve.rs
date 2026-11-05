@@ -188,6 +188,8 @@ pub async fn resolve_materialized_sum_targets(
         }
     }
 
+    // Every protocol settles here, so one refusal covers each of them.
+    crate::control::planner::calvin::refuse_repeated_settled_rows(&reads)?;
     tasks.extend(appended);
     Ok(reads)
 }

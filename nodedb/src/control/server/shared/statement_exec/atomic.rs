@@ -18,7 +18,11 @@
 //!    write as a static transaction. Its stage checks the reads.
 //! 4. A write that spans vShards commits through the Calvin sequencer, so a
 //!    derived task (a cross-shard balance move, an implicit edge) commits
-//!    with the user's write.
+//!    with the user's write. A predicate write among them takes the
+//!    coordinator, which reads the rows it matched.
+//!
+//! A request whose writes settle one balance from the same rows is refused
+//! ahead of every route.
 
 use std::sync::Arc;
 
@@ -27,7 +31,7 @@ use nodedb_physical::physical_task::PhysicalTask;
 use crate::control::lease::QueryLeaseScope;
 use crate::control::planner::calvin::{
     CrossShardTxnMode, DispatchClass, TxnDispatchPosition, classify_dispatch,
-    dispatch_authorized_tasks_to_calvin, read_vshards_of,
+    dispatch_authorized_tasks_to_calvin, read_vshards_of, refuse_several_settling_writes,
 };
 use crate::control::security::audit::ArcAuditEmitter;
 use crate::control::server::response_shape::calvin_fold::{
@@ -44,7 +48,9 @@ use crate::control::server::shared::write_admission::all_writes_bufferable;
 use crate::control::trigger::statement_txn::in_block;
 
 use super::answer::StatementAnswer;
-use super::edge_recon::{CalvinApplied, EdgeRecon, try_edge_recon, try_settled_recon};
+use super::edge_recon::{
+    CalvinApplied, EdgeRecon, try_edge_recon, try_multi_shard_predicate_recon, try_settled_recon,
+};
 use super::error::StatementError;
 use super::task_loop::{PlannedStatement, StatementExec, run_implicit_statement};
 
@@ -96,6 +102,8 @@ pub(crate) async fn route_atomic_statement(
         &ArcAuditEmitter(Arc::clone(&state.audit)),
     )
     .map_err(|error| StatementError::Error(crate::Error::from(error)))?;
+
+    refuse_several_settling_writes(&tasks).map_err(StatementError::Error)?;
 
     let in_txn_block = in_block(session);
     if !in_txn_block
@@ -191,6 +199,24 @@ pub(crate) async fn route_atomic_statement(
             }
             let cross_shard_mode = session.sessions.cross_shard_txn_mode(session.session_id);
             if !in_txn_block && cross_shard_mode == CrossShardTxnMode::Strict {
+                // A predicate write names the rows it matched only after the
+                // coordinator reads them, so it takes the route pgwire takes.
+                let (tasks, authorized) = match try_multi_shard_predicate_recon(
+                    state,
+                    exec.identity,
+                    tasks,
+                    authorized,
+                    &sum_target_reads,
+                )
+                .await
+                .map_err(StatementError::Error)?
+                {
+                    EdgeRecon::Applied(applied) => {
+                        meter_applied(exec, &applied);
+                        return Ok(AtomicRoute::Calvin(applied));
+                    }
+                    EdgeRecon::NotFired(tasks, authorized) => (tasks, authorized),
+                };
                 let plans = tasks.iter().map(|task| task.plan.clone()).collect();
                 let apply_result = dispatch_authorized_tasks_to_calvin(
                     state,

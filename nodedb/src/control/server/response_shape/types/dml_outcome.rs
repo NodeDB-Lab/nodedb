@@ -19,6 +19,9 @@ use crate::control::server::shared::sql::staging_predicates::{
 
 use super::PlanKind;
 
+/// The verb of a request whose statements report different verbs.
+pub const MIXED_VERB: &str = "MIXED";
+
 /// The count-bearing result of one write task, before any protocol renders it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DmlOutcome {
@@ -59,7 +62,10 @@ pub enum DmlFoldError {
 /// - `INSERT` mixed with `UPDATE`: verb `INSERT`, `affected` sums. This is a
 ///   multi-row `INSERT ... ON CONFLICT DO UPDATE` whose rows resolved
 ///   differently (`PlanKind::DmlResultByOp`); Postgres tags it `INSERT 0 n`.
-/// - Any other verb mix: [`DmlFoldError::VerbMismatch`]. Never a silent pick.
+/// - Any other verb mix in a request ([`Self::for_request`]): verb
+///   [`MIXED_VERB`], `affected` sums the verbs that carry a count.
+/// - Any other verb mix in one statement ([`Self::for_plans`]):
+///   [`DmlFoldError::VerbMismatch`]. Never a silent pick.
 /// - An opaque task (`PlanKind::Execution`) adds nothing when a DML outcome
 ///   is folded before or after it. Only-opaque folds render as `OK`.
 /// - A task whose [`TaskTagRole`] is `Opaque` folds as an opaque task, whatever
@@ -77,6 +83,8 @@ pub struct StatementTag {
     /// Whether the statement carries the user's own write. When it does, a
     /// derived write folds as opaque.
     has_user_write: bool,
+    /// Whether the tasks can come from several statements, whose verbs differ.
+    several_statements: bool,
 }
 
 /// Whether one task's outcome answers the statement. Read from
@@ -106,6 +114,18 @@ impl StatementTag {
             dml: None,
             opaque: false,
             has_user_write: plans_have_user_write(plans),
+            several_statements: false,
+        }
+    }
+
+    /// An empty tag for a request that can hold several statements: HTTP,
+    /// WebSocket RPC, NDJSON and native SQL plan its text as one task set. Its
+    /// verbs can differ, and the tag answers [`MIXED_VERB`] with the summed
+    /// count.
+    pub fn for_request<'a>(plans: impl IntoIterator<Item = &'a PhysicalPlan>) -> Self {
+        Self {
+            several_statements: true,
+            ..Self::for_plans(plans)
         }
     }
 
@@ -129,13 +149,21 @@ impl StatementTag {
             self.dml = Some(outcome);
             return Ok(());
         };
-        let verb = merged_verb(current.verb, outcome.verb).ok_or(DmlFoldError::VerbMismatch {
-            first: current.verb,
-            second: outcome.verb,
-        })?;
-        self.dml = Some(DmlOutcome {
-            verb,
-            affected: current.affected.saturating_add(outcome.affected),
+        self.dml = Some(match merged_verb(current.verb, outcome.verb) {
+            Some(verb) => DmlOutcome {
+                verb,
+                affected: current.affected.saturating_add(outcome.affected),
+            },
+            None if self.several_statements => DmlOutcome {
+                verb: MIXED_VERB,
+                affected: counted(current).saturating_add(counted(outcome)),
+            },
+            None => {
+                return Err(DmlFoldError::VerbMismatch {
+                    first: current.verb,
+                    second: outcome.verb,
+                });
+            }
         });
         Ok(())
     }
@@ -295,6 +323,15 @@ pub(crate) fn payload_to_dml_outcome(
     }
 }
 
+/// The count an outcome adds to a tag of several verbs.
+fn counted(outcome: DmlOutcome) -> u64 {
+    if outcome.carries_count() {
+        outcome.affected
+    } else {
+        0
+    }
+}
+
 /// The verb two folded outcomes share, `None` when they cannot share one.
 fn merged_verb(first: &'static str, second: &'static str) -> Option<&'static str> {
     if first == second {
@@ -425,6 +462,35 @@ mod tests {
                 second: "DELETE",
             })
         );
+    }
+
+    fn request_tag() -> StatementTag {
+        StatementTag::for_request(std::iter::empty())
+    }
+
+    #[test]
+    fn a_request_of_several_verbs_answers_mixed_with_the_summed_count() {
+        let mut tag = request_tag();
+        tag.fold(COUNTS, outcome("UPDATE", 2)).expect("update");
+        tag.fold(COUNTS, outcome("DELETE", 3)).expect("delete");
+        tag.fold(COUNTS, outcome("INSERT", 1)).expect("insert");
+        assert_eq!(tag.finish(), Some(FoldedTag::Dml(outcome(MIXED_VERB, 6))));
+    }
+
+    #[test]
+    fn a_truncate_adds_no_count_to_a_request_of_several_verbs() {
+        let mut tag = request_tag();
+        tag.fold(COUNTS, outcome("TRUNCATE", 9)).expect("truncate");
+        tag.fold(COUNTS, outcome("UPDATE", 2)).expect("update");
+        assert_eq!(tag.finish(), Some(FoldedTag::Dml(outcome(MIXED_VERB, 2))));
+    }
+
+    #[test]
+    fn a_request_of_one_verb_keeps_it() {
+        let mut tag = request_tag();
+        tag.fold(COUNTS, outcome("DELETE", 1)).expect("first");
+        tag.fold(COUNTS, outcome("DELETE", 2)).expect("second");
+        assert_eq!(tag.finish(), Some(FoldedTag::Dml(outcome("DELETE", 3))));
     }
 
     #[test]

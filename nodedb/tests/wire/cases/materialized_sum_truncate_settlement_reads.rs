@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! TRUNCATE of an edge-bearing source of a cross-shard materialized sum over
-//! HTTP, with the source changed between settlement and the TRUNCATE's
-//! transaction.
+//! TRUNCATE of the source of a cross-shard materialized sum over HTTP, with the
+//! source changed between settlement and the TRUNCATE's transaction.
 //!
 //! Settlement ships the balance delta of the removed rows from the source
 //! images it reads. A source row that moves after that leaves the delta stale.
 //! Only the settlement reads, validated at their cut, guard it.
 //!
 //! The `recon::before_submit` gate parks the TRUNCATE after settlement. The
-//! test commits the source change while it is parked, then releases it.
+//! test commits the source change while it is parked, then releases it. HTTP
+//! renders the `40001` abort as status 409 with no SQLSTATE in the body.
 
 #![cfg(feature = "failpoints")]
 
@@ -47,17 +47,21 @@ async fn source_sum(server: &TestServer) -> i64 {
         .sum()
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn edge_bearing_truncate_keeps_the_sum_when_a_settled_source_row_moved() {
+/// Park a TRUNCATE of the source, move a source row, release it, and check the
+/// balance against the source sum. `edges` adds one edge first, which takes the
+/// edge-bearing route.
+async fn truncate_with_moved_source(edges: bool) {
     let gate_dir = tempfile::tempdir().expect("gate tempdir");
     let release = gate_dir.path().join("release-truncate");
     let spec = format!("recon::before_submit=wait_file({})", release.display());
     let server = TestServer::start_multicores_with_failpoints(FIXTURE_CORES, &spec).await;
     let server = sum_fixture_on(server).await;
-    server
-        .exec("GRAPH INSERT EDGE IN 'ptv_post' FROM 'e0' TO 'e1' TYPE 'l'")
-        .await
-        .expect("write one edge into the source");
+    if edges {
+        server
+            .exec("GRAPH INSERT EDGE IN 'ptv_post' FROM 'e0' TO 'e1' TYPE 'l'")
+            .await
+            .expect("write one edge into the source");
+    }
 
     let http_port = server.http_port;
     let parked = tokio::spawn(async move {
@@ -84,9 +88,10 @@ async fn edge_bearing_truncate_keeps_the_sum_when_a_settled_source_row_moved() {
         .await
         .expect("the parked TRUNCATE task")
         .expect("the HTTP answer");
-    assert!(
-        !status.is_success(),
-        "a stale settlement read aborts the TRUNCATE: {status}"
+    assert_eq!(
+        status.as_u16(),
+        409,
+        "a stale settlement read aborts the TRUNCATE"
     );
 
     assert_eq!(
@@ -94,4 +99,14 @@ async fn edge_bearing_truncate_keeps_the_sum_when_a_settled_source_row_moved() {
         source_sum(&server).await.to_string(),
         "the balance must equal the source sum"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn truncate_keeps_the_sum_when_a_settled_source_row_moved() {
+    truncate_with_moved_source(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn edge_bearing_truncate_keeps_the_sum_when_a_settled_source_row_moved() {
+    truncate_with_moved_source(true).await;
 }

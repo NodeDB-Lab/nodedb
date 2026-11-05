@@ -145,7 +145,9 @@ mod parked {
             .await
             .expect("the parked write task")
             .expect("the HTTP answer");
-        assert!(!status.is_success(), "the write aborts: {status}");
+        // HTTP renders the `40001` abort as status 409 with no SQLSTATE in the
+        // body.
+        assert_eq!(status.as_u16(), 409, "the write aborts");
         assert_balance_equals_source(&server).await;
     }
 }

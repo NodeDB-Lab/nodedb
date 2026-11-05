@@ -252,6 +252,8 @@ where
                 &op,
                 sessions.tx_id(session_id),
                 None,
+                // An expander emits point writes, never a TRUNCATE.
+                crate::control::planner::calvin::node_delete_txn::TxnEdgeTruncate::Refuse,
             )
             .await
             .map_err(StagingGateError::Dispatch)?;

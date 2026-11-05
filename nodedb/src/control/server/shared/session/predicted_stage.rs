@@ -54,10 +54,15 @@ where
             .map_err(StagingGateError::Dispatch)?;
         // A delete on an edge-bearing collection carries the edge tasks of
         // each row it deletes, read before the delete stages.
-        let mut derived =
-            txn_node_delete_tasks(state, &task, txn_id, read.as_ref().map(|read| &read.scan))
-                .await
-                .map_err(StagingGateError::Dispatch)?;
+        let mut derived = txn_node_delete_tasks(
+            state,
+            &task,
+            txn_id,
+            read.as_ref().map(|read| &read.scan),
+            sessions.tx_edge_truncate(session_id),
+        )
+        .await
+        .map_err(StagingGateError::Dispatch)?;
         let predicate_class = read.as_ref().map(|read| read.predicate_class);
         if let Some(read) = read {
             derived.extend(read.edge_tasks);

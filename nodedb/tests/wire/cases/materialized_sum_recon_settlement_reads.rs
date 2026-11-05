@@ -12,12 +12,18 @@
 //!
 //! The `recon::before_submit` gate parks the write after settlement and
 //! reconnaissance. The test commits the source change while the write is
-//! parked, then releases it.
+//! parked, then releases it. HTTP renders the `40001` abort as status 409 with
+//! no SQLSTATE in the body.
 
 #![cfg(feature = "failpoints")]
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+use nodedb::bridge::scan_filter::{FilterOp, ScanFilter};
+use nodedb_test_support::native_harness::{open_trust_session, send_request_within};
+use nodedb_types::Value;
+use nodedb_types::protocol::{OpCode, TextFields};
 
 use super::materialized_sum_cross_shard_expanders::{FIXTURE_CORES, balance, sum_fixture_on};
 use crate::harness::TestServer;
@@ -26,6 +32,8 @@ use crate::harness::TestServer;
 const PREDICATE_UPDATE: &str = "UPDATE ptv_post SET amount = '1' WHERE account_id = 'acc'";
 /// The concurrent change: `e0` goes from 10 to 20, and `acc` from 15 to 25.
 const MOVE_SOURCE: &str = "UPDATE ptv_post SET amount = '20' WHERE id = 'e0'";
+/// How long a native request waits for its parked answer.
+const PARKED_BOUND: Duration = Duration::from_secs(60);
 
 /// A server whose recon writes park at `recon::before_submit` until
 /// `release` exists, with the sum fixture created.
@@ -60,6 +68,55 @@ async fn source_sum(server: &TestServer) -> i64 {
         .sum()
 }
 
+/// Move the source while a write parks at the gate, then release it.
+async fn move_source_then_release(server: &TestServer, release: &Path) {
+    wait_parked(release).await;
+    server
+        .exec(MOVE_SOURCE)
+        .await
+        .expect("the concurrent source change");
+    assert_eq!(
+        balance(server, "acc").await,
+        "25",
+        "the concurrent change settles its own delta"
+    );
+    std::fs::write(release, b"release").expect("release the parked write");
+}
+
+async fn assert_balance_equals_source_sum(server: &TestServer) {
+    assert_eq!(
+        balance(server, "acc").await,
+        source_sum(server).await.to_string(),
+        "the balance must equal the source sum"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn http_recon_write_keeps_the_sum_when_a_settled_source_row_moved() {
+    let gate_dir = tempfile::tempdir().expect("gate tempdir");
+    let release = gate_dir.path().join("release-recon");
+    let server = parked_fixture(&release).await;
+
+    let http_port = server.http_port;
+    let parked = tokio::spawn(async move {
+        reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{http_port}/v1/query"))
+            .json(&serde_json::json!({ "sql": PREDICATE_UPDATE }))
+            .send()
+            .await
+            .map(|response| response.status().as_u16())
+            .map_err(|e| e.to_string())
+    });
+    move_source_then_release(&server, &release).await;
+
+    assert_eq!(
+        parked.await.expect("the parked write task"),
+        Ok(409),
+        "a stale settlement read aborts the write"
+    );
+    assert_balance_equals_source_sum(&server).await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pgwire_recon_write_keeps_the_sum_when_a_settled_source_row_moved() {
     let gate_dir = tempfile::tempdir().expect("gate tempdir");
@@ -77,27 +134,90 @@ async fn pgwire_recon_write_keeps_the_sum_when_a_settled_source_row_moved() {
             .map(|_| ())
             .map_err(|e| e.code().map(|code| code.code().to_owned()))
     });
-
-    wait_parked(&release).await;
-    server
-        .exec(MOVE_SOURCE)
-        .await
-        .expect("the concurrent source change");
-    assert_eq!(
-        balance(&server, "acc").await,
-        "25",
-        "the concurrent change settles its own delta"
-    );
-    std::fs::write(&release, b"release").expect("release the parked write");
+    move_source_then_release(&server, &release).await;
 
     assert_eq!(
         parked.await.expect("the parked write task"),
         Err(Some("40001".to_owned())),
         "a stale settlement read aborts the write"
     );
+    assert_balance_equals_source_sum(&server).await;
+}
+
+/// The same predicate write over the native protocol's SQL opcode. It reaches
+/// the shared `route_atomic_statement` path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_predicate_write_keeps_the_sum_after_a_concurrent_change() {
+    let gate_dir = tempfile::tempdir().expect("gate tempdir");
+    let release = gate_dir.path().join("release-recon");
+    let server = parked_fixture(&release).await;
+
+    let mut stream = open_trust_session(server.native_port, "nodedb").await;
+    let parked = tokio::spawn(async move {
+        send_request_within(
+            &mut stream,
+            2,
+            OpCode::Sql,
+            TextFields {
+                sql: Some(PREDICATE_UPDATE.into()),
+                ..Default::default()
+            },
+            Some(PARKED_BOUND),
+        )
+        .await
+    });
+    move_source_then_release(&server, &release).await;
+
+    let response = parked.await.expect("the parked write task");
     assert_eq!(
-        balance(&server, "acc").await,
-        source_sum(&server).await.to_string(),
-        "the balance must equal the source sum"
+        response.error.map(|error| error.code).as_deref(),
+        Some("40001"),
+        "a stale settlement read aborts the write"
     );
+    assert_balance_equals_source_sum(&server).await;
+}
+
+/// The same predicate write through `OpCode::DocumentBulkUpdate`, which runs in
+/// `handle_direct_op` and passes its own `sum_target_reads` to the recon gates.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_bulk_update_keeps_the_sum_after_a_concurrent_change() {
+    let gate_dir = tempfile::tempdir().expect("gate tempdir");
+    let release = gate_dir.path().join("release-recon");
+    let server = parked_fixture(&release).await;
+
+    let filters = zerompk::to_msgpack_vec(&vec![ScanFilter {
+        field: "account_id".to_string(),
+        op: FilterOp::Eq,
+        value: Value::String("acc".to_string()),
+        clauses: Vec::new(),
+        expr: None,
+    }])
+    .expect("encode the filter");
+    let amount = nodedb_types::value_to_msgpack(&Value::String("1".to_string()))
+        .expect("encode the new amount");
+    let mut stream = open_trust_session(server.native_port, "nodedb").await;
+    let parked = tokio::spawn(async move {
+        send_request_within(
+            &mut stream,
+            2,
+            OpCode::DocumentBulkUpdate,
+            TextFields {
+                collection: Some("ptv_post".to_string()),
+                filters: Some(filters),
+                updates: Some(vec![("amount".to_string(), amount)]),
+                ..Default::default()
+            },
+            Some(PARKED_BOUND),
+        )
+        .await
+    });
+    move_source_then_release(&server, &release).await;
+
+    let response = parked.await.expect("the parked write task");
+    assert_eq!(
+        response.error.map(|error| error.code).as_deref(),
+        Some("40001"),
+        "a stale settlement read aborts the write"
+    );
+    assert_balance_equals_source_sum(&server).await;
 }

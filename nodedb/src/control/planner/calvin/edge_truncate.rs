@@ -197,7 +197,7 @@ fn truncate_is_edge_bearing(state: &SharedState, task: &PhysicalTask) -> crate::
 }
 
 /// One `TruncateEdges` of `collection` per vShard, beside `rows_task`.
-fn edge_share_tasks(
+pub(super) fn edge_share_tasks(
     rows_task: &PhysicalTask,
     collection: &nodedb_types::QualifiedCollection,
 ) -> Vec<PhysicalTask> {

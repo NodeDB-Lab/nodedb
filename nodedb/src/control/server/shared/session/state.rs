@@ -151,6 +151,11 @@ pub struct ConnSession {
     /// the block's first statement, not at `BEGIN`. `None` outside a block
     /// and before the block's first statement.
     pub tx_snapshot: Option<super::txn_snapshot::HeldTxnSnapshot>,
+    /// What this session's transaction does with a TRUNCATE of an edge-bearing
+    /// collection. Only the private session of an implicit transaction that
+    /// reads nothing after its TRUNCATE sets `CutAtCommit`, and that session
+    /// ends with the transaction.
+    pub tx_edge_truncate: crate::control::planner::calvin::node_delete_txn::TxnEdgeTruncate,
     /// Identity of the current session transaction block, minted on `BEGIN`
     /// and cleared on `COMMIT`/`ROLLBACK`. Keys the per-transaction staging
     /// overlay. `None` outside a transaction block.
@@ -307,6 +312,8 @@ impl ConnSession {
             tx_body_tasks: BTreeSet::new(),
             tx_ts_preview_rejected: BTreeMap::new(),
             tx_snapshot: None,
+            tx_edge_truncate:
+                crate::control::planner::calvin::node_delete_txn::TxnEdgeTruncate::Refuse,
             tx_id: None,
             tx_vshards: BTreeSet::new(),
             tx_read_set: Vec::new(),

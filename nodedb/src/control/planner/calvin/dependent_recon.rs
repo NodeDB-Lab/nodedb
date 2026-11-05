@@ -4,20 +4,15 @@
 //!
 //! This is the session-UNAWARE core of the implicit-edge dependent-predicate
 //! path, extracted from the pgwire `dispatch_calvin_multishard` OLLP branch so
-//! the native protocol path can share one implementation. Two items live here:
+//! the native protocol path can share one implementation.
 //!
-//! - [`plan_needs_implicit_edge_recon`] — the detection gate: given a task set,
-//!   return the collection + database of the first dependent-predicate task
-//!   (`BulkUpdate`/`BulkDelete`), CRDT document delete or TRUNCATE whose
-//!   target collection `has_implicit_edges`, else `None`. It does NOT check
-//!   the not-in-txn-block or registry-available guards — those are
-//!   per-protocol / session-state concerns and stay at the call sites.
-//! - [`dispatch_dependent_edge_recon`] — the OLLP orchestration body: pre-exec
-//!   recon scan → derive mirrored EdgeDelete/EdgePut tasks, and for a delete
-//!   the node guards and incident-edge deletes → atomic Calvin submit → OLLP
-//!   drift-retry loop. It returns a protocol-neutral
-//!   [`DependentReconOutcome`]; each protocol synthesises its own command tags
-//!   from the original task list AFTER this returns `Ok`.
+//! [`dispatch_dependent_edge_recon`] is the OLLP orchestration body: pre-exec
+//! recon scan → derive mirrored EdgeDelete/EdgePut tasks, and for a delete the
+//! node guards and incident-edge deletes → atomic Calvin submit → OLLP
+//! drift-retry loop. It returns a protocol-neutral [`DependentReconOutcome`];
+//! each protocol synthesises its own command tags from the original task list
+//! AFTER this returns `Ok`. The detection gate lives in
+//! [`super::dependent_recon_gate`].
 
 use crate::Error;
 use crate::control::cluster::calvin::executor::ollp::error::OllpError;
@@ -71,64 +66,6 @@ pub(super) struct SettledReads<'a> {
     pub snapshot_ordinal: Option<i64>,
 }
 
-/// Detect whether `tasks` carry a dependent predicate or a TRUNCATE on an
-/// implicit-edge-bearing collection, requiring the edge recon path.
-///
-/// Returns `Some((collection, database_id))` of the FIRST dependent-predicate
-/// task (`BulkUpdate`/`BulkDelete`) or TRUNCATE whose target collection has
-/// `has_implicit_edges` set in the catalog, else `None`.
-///
-/// A genuine catalog READ error propagates as a typed [`crate::Error`]:
-/// misrouting a delete on a real I/O fault will silently skip edge cleanup
-/// (dangling edges). An ABSENT catalog (`None`) or absent collection row
-/// (`Ok(None)`) is treated as non-edge-bearing and yields `None`.
-///
-/// This does NOT check the not-in-transaction-block or registry-available
-/// guards — those differ per protocol / are session-state concerns and stay at
-/// the call sites.
-pub fn plan_needs_implicit_edge_recon(
-    state: &SharedState,
-    tasks: &[PhysicalTask],
-    tenant_id: TenantId,
-) -> crate::Result<Option<(String, DatabaseId)>> {
-    let Some(dep_task) = tasks.iter().find(|t| is_edge_recon_plan(&t.plan)) else {
-        return Ok(None);
-    };
-    // Every edge recon plan names its database-qualified collection.
-    let coll = dep_task
-        .plan
-        .collection()
-        .ok_or_else(|| Error::Internal {
-            detail: "internal invariant break: an edge recon plan names no collection".into(),
-        })?
-        .to_owned();
-    let db = dep_task.database_id;
-    let edge_bearing = {
-        // The plan names the collection database-qualified. The catalog keys
-        // collections by the bare name.
-        let bare = nodedb_types::CollectionKey::from_qualified_str(db, &coll)?.name();
-        let catalog = state.credentials.catalog();
-        catalog
-            .get_collection(db, tenant_id.as_u64(), bare)?
-            .map(|c| c.has_implicit_edges)
-            .unwrap_or(false)
-    };
-    if edge_bearing {
-        Ok(Some((coll, db)))
-    } else {
-        Ok(None)
-    }
-}
-
-/// Whether `plan` takes the edge recon path when its collection is
-/// edge-bearing: a dependent predicate write, a CRDT document delete, or a
-/// TRUNCATE.
-pub fn is_edge_recon_plan(plan: &nodedb_physical::physical_plan::PhysicalPlan) -> bool {
-    is_dependent_predicate(plan)
-        || super::dependent_recon_crdt::is_crdt_doc_delete(plan)
-        || super::edge_truncate::is_truncate(plan)
-}
-
 /// Drive the implicit-edge OLLP/Calvin reconnaissance dispatch for `tasks`.
 ///
 /// The coordinator owns the OLLP retry loop. This:
@@ -154,7 +91,8 @@ pub fn is_edge_recon_plan(plan: &nodedb_physical::physical_plan::PhysicalPlan) -
 /// typed [`crate::Error`]; the caller maps them to its protocol's error shape.
 ///
 /// `database_id` is supplied by the caller (it comes from the detection gate,
-/// [`plan_needs_implicit_edge_recon`]) so it does not have to be re-derived.
+/// [`super::dependent_recon_gate::plan_needs_implicit_edge_recon`]) so it does
+/// not have to be re-derived.
 ///
 /// The `TxClass` this builds accepts a write set on one vShard
 /// ([`build_single_vshard_predicted_tx_class`]). A delete whose row, node
@@ -273,6 +211,20 @@ async fn dispatch_dependent_edge_recon_inner(
             detail: "dependent-edge recon dispatch invoked without a dependent-predicate task"
                 .to_owned(),
         })?;
+
+    // A request of several predicate writes runs as an implicit transaction, so
+    // each reads the rows the one before it wrote. Recon scans one write.
+    if tasks
+        .iter()
+        .filter(|t| is_dependent_predicate(&t.plan))
+        .count()
+        > 1
+    {
+        return Err(Error::Internal {
+            detail: "dependent-edge recon dispatch invoked with several predicate writes"
+                .to_owned(),
+        });
+    }
 
     let orc = orchestrator.ok_or(Error::SequencerUnavailable)?;
     // Hoisted across the retry loop so both `submit` and `rescan` can borrow them.

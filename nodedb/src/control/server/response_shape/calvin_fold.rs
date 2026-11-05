@@ -81,7 +81,7 @@ pub fn fold_calvin_batch(
     ctx: &CalvinFoldCtx<'_>,
 ) -> Result<CalvinBatchFold, CalvinFoldError> {
     let mut rows: Option<ShapedRows> = None;
-    let mut tag = StatementTag::for_plans(plans.iter().copied());
+    let mut tag = StatementTag::for_request(plans.iter().copied());
     for plan in plans {
         let role = tag.role_of(plan);
         if role == TaskTagRole::Opaque {

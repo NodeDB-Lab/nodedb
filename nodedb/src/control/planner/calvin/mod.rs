@@ -5,6 +5,7 @@ pub mod cross_shard_mode;
 pub mod dependent_recon;
 pub mod dependent_recon_crdt;
 mod dependent_recon_finish;
+pub mod dependent_recon_gate;
 pub mod dependent_recon_node_edges;
 pub mod dependent_recon_plan;
 mod dependent_recon_predicate;
@@ -31,10 +32,8 @@ pub mod write_class;
 pub use abort_error::calvin_abort_error;
 pub use cross_shard_mode::CrossShardTxnMode;
 pub(crate) use dependent_recon::dispatch_dependent_edge_recon;
-pub use dependent_recon::{
-    DependentReconOutcome, dispatch_authorized_dependent_edge_recon, is_edge_recon_plan,
-    plan_needs_implicit_edge_recon,
-};
+pub use dependent_recon::{DependentReconOutcome, dispatch_authorized_dependent_edge_recon};
+pub use dependent_recon_gate::{is_edge_recon_plan, plan_needs_implicit_edge_recon};
 pub use dispatch::{
     classify_dispatch, is_dependent_predicate, is_write_plan, predicate_class, read_vshards_of,
 };
@@ -47,7 +46,9 @@ pub use graph_sequencing::{
 };
 pub use predicate::predicate_class_for_filters;
 pub use retry_loop::{DependentOutcome, DependentRetryArgs, run_dependent_with_retry};
-pub use settling_writes::ships_balance_delta;
+pub use settling_writes::{
+    refuse_repeated_settled_rows, refuse_several_settling_writes, ships_balance_delta,
+};
 pub use submit::{
     RoutedAssignment, submit_and_await_calvin, submit_and_await_calvin_until, submit_calvin_routed,
     submit_calvin_routed_assign, submit_calvin_routed_write,

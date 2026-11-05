@@ -337,7 +337,8 @@ pub(crate) async fn handle_direct_op(
         // A delete or update on an edge-bearing collection commits its edge
         // cleanup in the same Calvin transaction, as the SQL path's does.
         use super::edge_recon_gate::{
-            EdgeReconResult, try_edge_recon_dispatch, try_settled_recon_dispatch,
+            EdgeReconResult, try_edge_recon_dispatch, try_multi_shard_predicate_recon_dispatch,
+            try_settled_recon_dispatch,
         };
         let (tasks, authorized_tasks) =
             match try_edge_recon_dispatch(ctx, seq, tasks, authorized_tasks, &sum_target_reads)
@@ -391,6 +392,21 @@ pub(crate) async fn handle_direct_op(
                 DispatchClass::MultiShard { .. }
             );
         if route_to_calvin {
+            // The settled recon route took a recon plan on one vShard, so one
+            // here spans vShards. A predicate write names the rows it matched
+            // only after the coordinator reads them.
+            let (tasks, authorized_tasks) = match try_multi_shard_predicate_recon_dispatch(
+                ctx,
+                seq,
+                tasks,
+                authorized_tasks,
+                &sum_target_reads,
+            )
+            .await
+            {
+                EdgeReconResult::Outcome(outcome) => return outcome.into_response(),
+                EdgeReconResult::NotFired(tasks, authorized) => (tasks, authorized),
+            };
             let plans: Vec<PhysicalPlan> = tasks.iter().map(|task| task.plan.clone()).collect();
             match dispatch_authorized_tasks_to_calvin(
                 ctx.state,

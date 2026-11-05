@@ -97,9 +97,11 @@ async fn crdt_delete_beside_a_sum_source_write_keeps_the_sum_when_the_source_mov
         .await
         .expect("the parked request task")
         .expect("the HTTP answer");
-    assert!(
-        !status.is_success(),
-        "a stale settlement read aborts the request: {status}"
+    // HTTP renders the `40001` abort as status 409 with no SQLSTATE in the body.
+    assert_eq!(
+        status.as_u16(),
+        409,
+        "a stale settlement read aborts the request"
     );
 
     assert_eq!(

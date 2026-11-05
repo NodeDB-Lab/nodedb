@@ -13,7 +13,7 @@ use crate::control::server::shared::authorization::AuthorizedTaskSet;
 use crate::control::server::shared::session::TransactionState;
 use crate::control::server::shared::session::read_set::ReadSetEntry;
 use crate::control::server::shared::statement_exec::{
-    EdgeRecon, try_edge_recon, try_settled_recon,
+    EdgeRecon, try_edge_recon, try_multi_shard_predicate_recon, try_settled_recon,
 };
 use nodedb_physical::physical_task::PhysicalTask;
 
@@ -61,6 +61,21 @@ pub(super) async fn try_settled_recon_dispatch(
         reads,
     )
     .await;
+    outcome(ctx, seq, routed)
+}
+
+/// Route `tasks` through the OLLP/Calvin coordinator when they hold a recon
+/// plan. The caller classified them as multi-shard and outside a block, and
+/// returns a fired outcome at once: the tasks are consumed.
+pub(super) async fn try_multi_shard_predicate_recon_dispatch(
+    ctx: &DispatchCtx<'_>,
+    seq: u64,
+    tasks: Vec<PhysicalTask>,
+    authorized: AuthorizedTaskSet,
+    reads: &[ReadSetEntry],
+) -> EdgeReconResult {
+    let routed =
+        try_multi_shard_predicate_recon(ctx.state, ctx.identity, tasks, authorized, reads).await;
     outcome(ctx, seq, routed)
 }
 

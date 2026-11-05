@@ -49,7 +49,7 @@ impl StatementFold {
         Self {
             rows: Vec::new(),
             warnings: Vec::new(),
-            tag: StatementTag::for_plans(tasks.iter().map(|t| &t.plan)),
+            tag: StatementTag::for_request(tasks.iter().map(|t| &t.plan)),
             last_lsn: 0,
         }
     }

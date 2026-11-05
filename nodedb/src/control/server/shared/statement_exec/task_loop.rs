@@ -33,8 +33,9 @@ use crate::control::server::shared::session::{
     DmlTxnCtx, ResponseReads, record_reads_for_response,
 };
 use crate::control::server::shared::txn_route::{
-    StatementEvents, TxnTaskContext, TxnTaskOutcome, route_txn_task,
+    StatementEvents, TxnTaskContext, TxnTaskOutcome, route_txn_task, statement_fires_joined_body,
 };
+use crate::control::server::shared::write_admission::plan_is_write;
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TenantId};
 
@@ -276,13 +277,30 @@ pub(crate) async fn run_implicit_statement(
     statement: PlannedStatement,
     client: &DmlTxnCtx<'_>,
 ) -> Result<StatementAnswer, StatementError> {
+    let cuts_at_commit = reads_nothing_after_truncate(exec.state, &statement.tasks);
     crate::control::trigger::statement_txn::with_statement_txn_lifted(
         exec.state,
         exec.identity,
         client,
         true,
         StatementError::Error,
-        async |txn: &DmlTxnCtx<'_>| run_statement_loop(exec, statement, Some(txn)).await,
+        async |txn: &DmlTxnCtx<'_>| {
+            if cuts_at_commit {
+                txn.sessions.allow_tx_edge_truncate(txn.session_id);
+            }
+            run_statement_loop(exec, statement, Some(txn)).await
+        },
     )
     .await
+}
+
+/// Whether an implicit transaction of `tasks` reads no edge after a TRUNCATE:
+/// no task after it reads, and no joined body runs. Its edge shares then cut the
+/// edges at the transaction's turn, and nothing observes them before that.
+fn reads_nothing_after_truncate(state: &SharedState, tasks: &[PhysicalTask]) -> bool {
+    tasks
+        .iter()
+        .skip_while(|task| !crate::control::planner::calvin::edge_truncate::is_truncate(&task.plan))
+        .all(|task| plan_is_write(&task.plan))
+        && !statement_fires_joined_body(state, tasks)
 }

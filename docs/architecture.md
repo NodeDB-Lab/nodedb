@@ -160,6 +160,8 @@ SET cross_shard_txn = 'strict';
 SET cross_shard_txn = 'best_effort_non_atomic';
 ```
 
+In this mode a predicate write and the shipped balance of a materialized sum commit as separate groups. A failure of one group leaves the balance unequal to the source sum.
+
 (Bare `best_effort` is deliberately rejected; invalid values return SQLSTATE `22023`.)
 
 **Single-node deployments always run Calvin.** A node with no `[cluster]` section synthesizes a one-node cluster with its own sequencer group, so transactions spanning multiple cores (vShards) commit atomically. Uncontended single-shard point writes bypass the sequencer entirely and go directly through the relevant data-group Raft; contended or predicate/bulk writes route through the deterministic scheduler.

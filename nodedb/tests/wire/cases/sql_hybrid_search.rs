@@ -457,3 +457,26 @@ async fn hybrid_vector_leg_reads_the_named_column() {
     );
     assert_eq!(rows[0][0], "x", "emb_b ranks x first: {rows:?}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_score_alias_named_doc_id_is_refused() {
+    let server = TestServer::start().await;
+    create_hybrid_collection(&server, "hs_docid").await;
+
+    let result = server
+        .query_rows(
+            "SELECT id, \
+                    rrf_score(\
+                      vector_distance(embedding, ARRAY[0.1, 0.2, 0.3, 0.4]), \
+                      bm25_score(content, 'consensus')\
+                    ) AS doc_id \
+             FROM hs_docid ORDER BY doc_id DESC LIMIT 5",
+        )
+        .await;
+
+    let err = result.expect_err("an alias named doc_id must be refused");
+    assert!(
+        err.contains("doc_id"),
+        "the refusal names the field; got: {err}"
+    );
+}

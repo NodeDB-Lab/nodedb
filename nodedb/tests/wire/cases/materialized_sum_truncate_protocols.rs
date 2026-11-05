@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! TRUNCATE of the source of a cross-shard materialized sum over pgwire, on a
-//! collection without edges, with the source changed between settlement and
-//! the TRUNCATE's transaction.
+//! TRUNCATE of the source of a cross-shard materialized sum over pgwire and the
+//! native protocol, on a collection without edges, with the source changed
+//! between settlement and the TRUNCATE's transaction.
 //!
 //! Settlement ships the balance delta of the removed rows from the source
 //! images it reads. Only the settlement reads, validated at their cut, guard
@@ -16,11 +16,16 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use nodedb_test_support::native_harness::{open_trust_session, send_request_within};
+use nodedb_types::protocol::{OpCode, TextFields};
+
 use super::materialized_sum_cross_shard_expanders::{FIXTURE_CORES, balance, sum_fixture_on};
 use crate::harness::TestServer;
 
 /// The concurrent change: `e2` joins `acc`, which goes from 15 to 22.
 const MOVE_SOURCE: &str = "INSERT INTO ptv_post (id, account_id, amount) VALUES ('e2', 'acc', '7')";
+/// How long a native request waits for its parked answer.
+const PARKED_BOUND: Duration = Duration::from_secs(60);
 
 /// A server whose recon writes park at `recon::before_submit` until
 /// `release` exists, with the sum fixture created.
@@ -55,6 +60,29 @@ async fn source_sum(server: &TestServer) -> i64 {
         .sum()
 }
 
+/// Move the source while a TRUNCATE parks at the gate, then release it.
+async fn move_source_then_release(server: &TestServer, release: &Path) {
+    wait_parked(release).await;
+    tokio::time::timeout(Duration::from_secs(30), server.exec(MOVE_SOURCE))
+        .await
+        .expect("the concurrent source change did not return while the TRUNCATE was parked")
+        .expect("the concurrent source change");
+    assert_eq!(
+        balance(server, "acc").await,
+        "22",
+        "the concurrent change settles its own delta"
+    );
+    std::fs::write(release, b"release").expect("release the parked TRUNCATE");
+}
+
+async fn assert_balance_equals_source_sum(server: &TestServer) {
+    assert_eq!(
+        balance(server, "acc").await,
+        source_sum(server).await.to_string(),
+        "the balance must equal the source sum"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pgwire_truncate_keeps_the_sum_when_a_settled_source_row_moved() {
     let gate_dir = tempfile::tempdir().expect("gate tempdir");
@@ -72,27 +100,77 @@ async fn pgwire_truncate_keeps_the_sum_when_a_settled_source_row_moved() {
             .map(|_| ())
             .map_err(|e| e.code().map(|code| code.code().to_owned()))
     });
-
-    wait_parked(&release).await;
-    tokio::time::timeout(Duration::from_secs(30), server.exec(MOVE_SOURCE))
-        .await
-        .expect("the concurrent source change did not return while the TRUNCATE was parked")
-        .expect("the concurrent source change");
-    assert_eq!(
-        balance(&server, "acc").await,
-        "22",
-        "the concurrent change settles its own delta"
-    );
-    std::fs::write(&release, b"release").expect("release the parked TRUNCATE");
+    move_source_then_release(&server, &release).await;
 
     assert_eq!(
         parked.await.expect("the parked TRUNCATE task"),
         Err(Some("40001".to_owned())),
         "a stale settlement read aborts the TRUNCATE"
     );
+    assert_balance_equals_source_sum(&server).await;
+}
+
+/// The same TRUNCATE over the native protocol's SQL opcode.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_sql_truncate_keeps_the_sum_when_a_settled_source_row_moved() {
+    let gate_dir = tempfile::tempdir().expect("gate tempdir");
+    let release = gate_dir.path().join("release-truncate");
+    let server = parked_fixture(&release).await;
+
+    let mut stream = open_trust_session(server.native_port, "nodedb").await;
+    let parked = tokio::spawn(async move {
+        send_request_within(
+            &mut stream,
+            2,
+            OpCode::Sql,
+            TextFields {
+                sql: Some("TRUNCATE ptv_post".into()),
+                ..Default::default()
+            },
+            Some(PARKED_BOUND),
+        )
+        .await
+    });
+    move_source_then_release(&server, &release).await;
+
+    let response = parked.await.expect("the parked TRUNCATE task");
     assert_eq!(
-        balance(&server, "acc").await,
-        source_sum(&server).await.to_string(),
-        "the balance must equal the source sum"
+        response.error.map(|error| error.code).as_deref(),
+        Some("40001"),
+        "a stale settlement read aborts the TRUNCATE"
     );
+    assert_balance_equals_source_sum(&server).await;
+}
+
+/// The same TRUNCATE through `OpCode::DocumentTruncate`, which runs in
+/// `handle_direct_op`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_document_truncate_keeps_the_sum_when_a_settled_source_row_moved() {
+    let gate_dir = tempfile::tempdir().expect("gate tempdir");
+    let release = gate_dir.path().join("release-truncate");
+    let server = parked_fixture(&release).await;
+
+    let mut stream = open_trust_session(server.native_port, "nodedb").await;
+    let parked = tokio::spawn(async move {
+        send_request_within(
+            &mut stream,
+            2,
+            OpCode::DocumentTruncate,
+            TextFields {
+                collection: Some("ptv_post".to_string()),
+                ..Default::default()
+            },
+            Some(PARKED_BOUND),
+        )
+        .await
+    });
+    move_source_then_release(&server, &release).await;
+
+    let response = parked.await.expect("the parked TRUNCATE task");
+    assert_eq!(
+        response.error.map(|error| error.code).as_deref(),
+        Some("40001"),
+        "a stale settlement read aborts the TRUNCATE"
+    );
+    assert_balance_equals_source_sum(&server).await;
 }

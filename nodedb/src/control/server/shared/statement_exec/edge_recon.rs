@@ -111,6 +111,32 @@ pub(crate) async fn try_settled_recon(
     run_recon(state, identity, tasks, authorized, database_id, reads).await
 }
 
+/// Route `tasks` through the OLLP/Calvin coordinator when one of them is a recon
+/// plan and the statement spans several vShards, outside a transaction block.
+///
+/// The caller classified the statement as multi-shard. A predicate write that
+/// reaches Calvin must carry the rows it matched, which only the coordinator
+/// reads. A shipped balance puts a single-collection write on two vShards, so
+/// the edge-bearing gate does not see it.
+///
+/// `reads` are the images settlement folded that balance from.
+pub(crate) async fn try_multi_shard_predicate_recon(
+    state: &Arc<SharedState>,
+    identity: &AuthenticatedIdentity,
+    tasks: Vec<PhysicalTask>,
+    authorized: AuthorizedTaskSet,
+    reads: &[ReadSetEntry],
+) -> crate::Result<EdgeRecon> {
+    let Some(database_id) = tasks
+        .iter()
+        .find(|task| is_edge_recon_plan(&task.plan))
+        .map(|task| task.database_id)
+    else {
+        return Ok(EdgeRecon::NotFired(tasks, authorized));
+    };
+    run_recon(state, identity, tasks, authorized, database_id, reads).await
+}
+
 async fn run_recon(
     state: &Arc<SharedState>,
     identity: &AuthenticatedIdentity,
