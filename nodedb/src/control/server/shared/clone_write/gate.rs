@@ -20,6 +20,7 @@ use crate::control::security::identity::{AuthenticatedIdentity, Permission, requ
 use crate::control::security::permission::PermissionStore;
 use crate::control::security::role::RoleStore;
 use crate::control::server::shared::authorization::{AuthorizedTask, authorize_task_set};
+use crate::control::server::shared::write_admission::check_mirror_read;
 use crate::control::state::SharedState;
 use crate::types::{TraceId, VShardId};
 
@@ -214,6 +215,11 @@ pub async fn intercept_and_authorize(
         roles,
         emitter,
     } = params;
+    // Every client read of every protocol passes here. A server-owned read
+    // has no session consistency to judge, so it passes.
+    if required_permission(&task.plan) == Permission::Read && !identity.is_internal_service() {
+        check_mirror_read(state, task.database_id)?;
+    }
     // Taken before the clone-write hook, which can complete the write itself.
     let lease = write_lease(state, task.tenant_id, task.database_id, &task.plan).await?;
     if let CloneWriteOutcome::Handled(resp) =

@@ -9,6 +9,7 @@ use crate::control::constraint_install::{ConstraintTarget, constraint_targets};
 use crate::control::lease::DrainHolds;
 use crate::control::security::catalog::SystemCatalog;
 use crate::control::server::shared::session::ddl_buffer;
+use crate::control::server::shared::write_admission::check_mirror_ddl;
 use crate::control::state::SharedState;
 use crate::error::Error;
 
@@ -64,6 +65,7 @@ pub async fn propose_catalog_batch_async(
         if entries.is_empty() {
             return Ok(CatalogBatch::empty());
         }
+        check_mirror_ddl(shared, &entries)?;
         for entry in &entries {
             ddl_buffer::try_buffer(entry.clone());
         }
@@ -166,6 +168,7 @@ async fn plan_drain_and_stamp(
     if entries.is_empty() {
         return Ok(None);
     }
+    check_mirror_ddl(shared, &entries)?;
     drain_batch(shared, &entries, drains).await?;
     let stamped =
         catalog_entry::descriptor_stamp::stamp_batch(entries, &shared.hlc_clock, catalog)?;

@@ -44,6 +44,22 @@ pub fn parse_value(value: &str) -> Option<ReadConsistency> {
     }
 }
 
+/// The level a request field names, `Strong` when the request names none.
+///
+/// A level this cannot parse is refused: reading at another level than the one
+/// the client named returns data it did not ask for.
+pub fn parse_request_field(value: Option<&str>) -> crate::Result<ReadConsistency> {
+    let Some(value) = value else {
+        return Ok(ReadConsistency::Strong);
+    };
+    parse_value(value).ok_or_else(|| crate::Error::BadRequest {
+        detail: format!(
+            "invalid read_consistency '{value}'; send strong, eventual or \
+             bounded_staleness:<secs>, or omit the field"
+        ),
+    })
+}
+
 /// Format a `ReadConsistency` back into the canonical string form
 /// so `SHOW default_read_consistency` returns something parseable.
 pub fn format_value(rc: &ReadConsistency) -> String {
@@ -71,6 +87,19 @@ mod tests {
     use std::net::SocketAddr;
 
     use super::*;
+
+    #[test]
+    fn a_request_field_defaults_to_strong_and_refuses_an_unknown_level() {
+        assert_eq!(parse_request_field(None).unwrap(), ReadConsistency::Strong);
+        assert_eq!(
+            parse_request_field(Some("eventual")).unwrap(),
+            ReadConsistency::Eventual
+        );
+        assert!(matches!(
+            parse_request_field(Some("sometimes")),
+            Err(crate::Error::BadRequest { detail }) if detail.contains("sometimes")
+        ));
+    }
 
     #[test]
     fn parse_strong() {

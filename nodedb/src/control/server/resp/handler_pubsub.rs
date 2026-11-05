@@ -268,6 +268,9 @@ pub async fn handle_publish(
         Err(PublishError::TopicNotFound(topic)) => {
             RespValue::err(format!("ERR no such topic '{topic}'"))
         }
+        Err(PublishError::Refused(error)) => {
+            RespValue::err(format!("ERR publish refused: {error}"))
+        }
         Err(PublishError::Persistence(error)) => {
             RespValue::err(format!("ERR publish failed: {error}"))
         }

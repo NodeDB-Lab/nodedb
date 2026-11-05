@@ -21,6 +21,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tempfile::TempDir;
 
+use nodedb::control::catalog_entry::CatalogEntry;
+use nodedb::control::metadata_proposer::propose_catalog_entry_async;
 use nodedb::control::security::catalog::SystemCatalog;
 use nodedb::control::security::catalog::database_types::{DatabaseDescriptor, DatabaseStatus};
 pub use nodedb_test_support::pgwire_harness::TestServer;
@@ -100,9 +102,19 @@ pub fn inject_lag_record_for_id(
         .expect("inject lag record");
 }
 
-/// Create a mirror `DatabaseDescriptor` directly in the catalog of `server`,
-/// as if `MIRROR DATABASE` had been issued. This lets tests inspect catalog
-/// state without needing a full SQL round-trip.
+/// Propose `descriptor` through the metadata group, so the catalog and every
+/// mirror gate on the node see it.
+async fn propose_descriptor(server: &TestServer, descriptor: DatabaseDescriptor) {
+    propose_catalog_entry_async(
+        &server.shared,
+        &CatalogEntry::PutDatabase(Box::new(descriptor)),
+    )
+    .await
+    .expect("propose database descriptor");
+}
+
+/// Create a mirror database in `server`, as if `MIRROR DATABASE` had been
+/// issued.
 ///
 /// `status` must be one of `MirrorStatus::Following`, `Degraded`, etc.
 pub async fn inject_mirror_descriptor(
@@ -111,16 +123,35 @@ pub async fn inject_mirror_descriptor(
     status: MirrorStatus,
     last_applied_lsn: u64,
 ) {
-    let catalog = server.shared.credentials.catalog();
     let db_id = nodedb::control::database::allocate_database_id(&server.shared)
         .await
         .expect("allocate mirror database id");
     let descriptor = make_mirror_descriptor(db_id.as_u64(), name, status, last_applied_lsn);
-    // put_database writes both the forward (DATABASES) and reverse
-    // (DATABASES_BY_NAME) rows in one transaction.
-    catalog
-        .put_database(&descriptor)
-        .expect("inject mirror descriptor");
+    propose_descriptor(server, descriptor).await;
+}
+
+/// Turn the existing database `name` into a mirror. Its collections stay, so a
+/// statement against it reaches the mirror gates and not a missing-object
+/// refusal.
+pub async fn mark_database_mirror(server: &TestServer, name: &str, status: MirrorStatus) {
+    let catalog = server.shared.credentials.catalog();
+    let db_id = catalog
+        .get_database_id_by_name(name)
+        .expect("catalog lookup")
+        .expect("database exists");
+    let mut descriptor = catalog
+        .get_database(db_id)
+        .expect("catalog read")
+        .expect("descriptor exists");
+    descriptor.status = DatabaseStatus::Mirroring;
+    descriptor.mirror_origin = Some(MirrorOrigin {
+        source_cluster: TEST_SOURCE_CLUSTER.to_string(),
+        source_database: DatabaseId::new(0),
+        mode: MirrorMode::Async,
+        last_applied: Lsn::new(1),
+        status,
+    });
+    propose_descriptor(server, descriptor).await;
 }
 
 /// Write a `MirrorLagRecord` for `db_name` in `server`'s catalog with

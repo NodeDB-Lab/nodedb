@@ -137,7 +137,7 @@ pub(super) async fn run_task_loop(
             trace_id,
             database_id,
             txn_id: None,
-            linearizable: true,
+            linearizable: crate::control::server::shared::session::read_scope::linearizable(),
         };
         let payloads = gateway
             .execute(&gw_ctx, checked)

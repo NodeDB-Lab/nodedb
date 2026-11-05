@@ -33,6 +33,7 @@ mod params;
 pub mod pending_shard_reads;
 mod predicted_stage;
 pub mod read_consistency;
+pub mod read_scope;
 pub mod read_set;
 mod read_tree;
 pub mod record_reads;

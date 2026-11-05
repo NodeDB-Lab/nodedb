@@ -71,7 +71,7 @@ pub async fn submit_calvin_routed(
     state: &SharedState,
     mut tx_class: TxClass,
 ) -> crate::Result<Option<Response>> {
-    super::storage_gate::admit_storage(state, &tx_class)?;
+    super::submit_gate::admit_submit(state, &tx_class)?;
     let prepared = super::prepare::prepare_submit(state, &mut tx_class)?;
     // Every running server has a cluster transport, the synthesized one-node
     // cluster included. Without one, `start_raft` never ran here.

@@ -22,6 +22,7 @@ use crate::control::server::shared::plan_admission::{
     PlanAdmissionRequest, plan_authorize_and_admit,
 };
 use crate::control::server::shared::quota_admission::admit_quota_for_dispatch;
+use crate::control::server::shared::session::{read_consistency, read_scope};
 use crate::control::server::shared::statement_exec::{
     AtomicStatement, StatementExec, authorize_one_task,
 };
@@ -40,14 +41,34 @@ use super::{DatabaseQueryParam, resolve_database_id};
 ///
 /// Each row is a separate JSON line (`\n`-terminated), Content-Type
 /// `application/x-ndjson`, so clients can process large result sets unbuffered.
-/// An error is an in-band `{"error": "...", "code": "NDB-<n>"}` line.
+/// An error is an in-band `{"error": "...", "code": "NDB-<n>"}` line. The body's
+/// optional `read_consistency` defaults to `strong`.
 pub async fn query_ndjson(
+    state: State<AppState>,
+    headers: HeaderMap,
+    peer: PeerAddr,
+    transport: ClientTransport,
+    db_param: QueryParams<DatabaseQueryParam>,
+    axum::Json(body): axum::Json<crate::control::server::http::types::HttpQueryStreamRequest>,
+) -> Response {
+    match read_consistency::parse_request_field(body.read_consistency.as_deref()) {
+        Ok(level) => read_scope::with_request_consistency(
+            level,
+            ndjson_at_consistency(state, headers, peer, transport, db_param, body),
+        )
+        .await
+        .into_response(),
+        Err(error) => ApiError::from(error).into_response(),
+    }
+}
+
+async fn ndjson_at_consistency(
     State(state): State<AppState>,
     headers: HeaderMap,
     peer: PeerAddr,
     transport: ClientTransport,
     QueryParams(db_param): QueryParams<DatabaseQueryParam>,
-    axum::Json(body): axum::Json<crate::control::server::http::types::HttpQueryStreamRequest>,
+    body: crate::control::server::http::types::HttpQueryStreamRequest,
 ) -> impl IntoResponse {
     let (identity, verified_jwt) =
         match resolve_auth_parts(&headers, &state, peer.as_str(), transport.security()).await {
@@ -402,7 +423,7 @@ pub async fn query_ndjson(
                                 trace_id,
                                 database_id,
                                 txn_id: None,
-                                linearizable: true,
+                                linearizable: read_scope::linearizable(),
                             };
                             gateway.execute(&gw_ctx, checked).await
                         }

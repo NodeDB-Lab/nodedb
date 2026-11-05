@@ -843,7 +843,10 @@ pub enum Error {
     /// A strong-consistency read was attempted on a mirror database. Mirrors
     /// aren't the Raft leader for the source's commit log.
     #[error(
-        "database '{database}' is a mirror; redirect strong reads to source cluster '{source_cluster}'"
+        "database '{database}' is a mirror; redirect strong reads to source cluster \
+         '{source_cluster}', or read at 'eventual' or 'bounded_staleness:<secs>': set \
+         default_read_consistency on pgwire and native, or the read_consistency field on HTTP \
+         and WebSocket"
     )]
     StaleReadNotLeader {
         database: String,

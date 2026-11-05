@@ -94,7 +94,7 @@ fn sample_mirror_lag(shared: &SharedState) {
         // has not yet (re)established it after restart). `update_lag_status`
         // falls back to the catalog's apply time in that case, so the
         // disconnect timer still advances.
-        let last_received = shared.mirror_link_registry.last_received_ms(db.id);
+        let last_received = shared.mirror.links.last_received_ms(db.id);
         crate::control::mirror::update_lag_status(
             catalog,
             db.id,

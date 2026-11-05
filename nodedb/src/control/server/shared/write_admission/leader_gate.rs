@@ -41,10 +41,11 @@ use crate::types::VShardId;
 use nodedb_types::QualifiedCollection;
 
 use super::admission_keys::collection_admission_keys;
-use super::entry_storage::entry_adds_storage;
+use super::entry_storage::{entry_adds_storage, entry_writes_database};
 use super::gate::{
     WriteAdmission, WriteAdmissionGuard, WriteTarget, admit_request, admit_routed, lock_manager_of,
 };
+use super::mirror_gate::{await_entry_metadata_floor, check_mirror_writable};
 use super::route::calvin_route_keeps;
 use super::storage_quota::check_storage_quota;
 use super::tickets::AdmissionTicket;
@@ -81,8 +82,18 @@ impl DataProposeGate for LeaderWriteGate {
         let Some(mut entry) = ReplicatedEntry::from_bytes(entry) else {
             return Ok(Admitted::default());
         };
-        admit_redo_stream(&state, &entry, deadline).map_err(gate_error)?;
         // Before the reroute to the sequencer and before any key is held.
+        await_entry_metadata_floor(&state, entry.metadata_floor, deadline)
+            .await
+            .map_err(gate_error)?;
+        check_mirror_writable(
+            &state,
+            crate::types::DatabaseId::new(entry.database_id),
+            crate::event::EventSource::from(entry.event_source),
+            || entry_writes_database(&entry),
+        )
+        .map_err(gate_error)?;
+        admit_redo_stream(&state, &entry, deadline).map_err(gate_error)?;
         check_storage_quota(
             &state,
             crate::types::DatabaseId::new(entry.database_id),

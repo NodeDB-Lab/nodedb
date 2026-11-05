@@ -254,7 +254,8 @@ Uses:
 - `Eventual` — served immediately
 
 ```sql
-SELECT * FROM orders CONSISTENCY='bounded_staleness';  -- served from mirror
+SET default_read_consistency = 'bounded_staleness:5s';
+SELECT * FROM orders;  -- served from mirror when its lag is within 5 seconds
 ```
 
 ### Bootstrap and Lag
@@ -285,7 +286,14 @@ To re-mirror after promotion: drop the database and `CLONE DATABASE` from source
 
 - A mirror cannot be cloned (rejected with `CANNOT_CLONE_MIRROR`); promote first if needed
 - A clone can be mirrored
-- Pre-promotion writes return `MIRROR_READ_ONLY`
+- Pre-promotion writes and object DDL return `MIRROR_READ_ONLY` on every protocol
+- `DROP DATABASE`, `ALTER DATABASE`, `PROMOTE`, grants, quotas and consumer offsets stay allowed
+- A strong read returns `STALE_READ_NOT_LEADER` on every protocol. Strong is the default
+- A pgwire or native session reads a mirror after `SET default_read_consistency = 'eventual'` or `'bounded_staleness:<secs>'`
+- An HTTP request reads a mirror with the body field `read_consistency` on `POST /v1/query` and `POST /v1/query/stream`: `{"sql": "...", "read_consistency": "eventual"}`
+- A WebSocket RPC `query` reads a mirror with `params.read_consistency`: `{"id": 1, "method": "query", "params": {"sql": "...", "read_consistency": "bounded_staleness:5"}}`
+- `read_consistency` takes `strong`, `eventual` or `bounded_staleness:<secs>`. Any other value is refused
+- `bounded_staleness` is refused until the mirror applied an entry, and whenever its lag exceeds the bound
 
 ## Move Tenant
 

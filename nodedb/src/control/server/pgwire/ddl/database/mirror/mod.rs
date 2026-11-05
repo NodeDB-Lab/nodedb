@@ -8,7 +8,8 @@
 //! remains here are the runtime helpers that are NOT part of the DDL router:
 //!
 //! - [`read::check_mirror_read_consistency`] gates reads by the session's
-//!   `ReadConsistency` (used by the pgwire read path in `handler::dispatch`).
+//!   `ReadConsistency` (used by every protocol through the write-admission
+//!   module's `check_mirror_read`).
 //! - [`ddl_apply::apply_mirror_ddl_entry`] applies Raft DDL entries from the
 //!   source observer stream, atomically updating `_system.mirror_collection_map`
 //!   and `_system.mirror_lag`.

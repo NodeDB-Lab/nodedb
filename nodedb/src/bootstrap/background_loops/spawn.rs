@@ -48,7 +48,7 @@ pub fn spawn_background_loops(
 ) -> crate::event::EventPlane {
     // Mirror restart: enumerate databases that need observer links
     // re-established and log the decisions. The cluster layer processes
-    // these asynchronously via the mirror_link_registry once QUIC transport
+    // these asynchronously via the mirror link registry once QUIC transport
     // is available.
     mirror::log_mirror_restart_decisions(shared);
     if let Err(e) = crate::control::metrics::database_sync::ensure_listed(

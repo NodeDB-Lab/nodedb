@@ -103,7 +103,7 @@ pub(super) async fn try_open_stream(
         trace_id,
         database_id,
         txn_id: None,
-        linearizable: true,
+        linearizable: crate::control::server::shared::session::read_scope::linearizable(),
     };
     let stream = gateway.execute_stream(&ctx, checked_child).await?;
 

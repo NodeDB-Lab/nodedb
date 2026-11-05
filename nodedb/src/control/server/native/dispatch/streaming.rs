@@ -167,7 +167,7 @@ pub(crate) async fn try_open_sql_stream(
         trace_id: crate::types::TraceId::ZERO,
         database_id,
         txn_id: task.txn_id,
-        linearizable: true,
+        linearizable: crate::control::server::shared::session::read_scope::linearizable(),
     };
     let stream = gateway.execute_stream(&gw_ctx, checked_child).await?;
 

@@ -11,17 +11,18 @@ use crate::control::security::audit::ArcAuditEmitter;
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::shared::metering::{PlanMeteringInfo, meter_dispatch};
 use crate::control::server::shared::session::StatementDeadline;
+use crate::control::server::shared::write_admission::check_mirror_writable;
 use crate::control::state::SharedState;
 use crate::types::DatabaseId;
 
-use super::super::super::wire::{
-    CompensationHint, DeltaPushMsg, DeltaRejectMsg, SyncFrame, SyncMessageType,
-};
+use super::super::super::wire::{CompensationHint, DeltaPushMsg, SyncFrame};
 use super::authorize::{authorize_delta_write, permission_denied_delta_reject};
+use super::compensation::compensation_hint_for_dispatch_error;
 use super::outcome::frame_for_dispatch;
 use super::peer_identity::{
     PeerIdentity, PeerIdentityRequest, admit_peer_identity, peer_collision_reason,
 };
+use super::refusal::{retryable_binding_refusal, terminal_reject};
 use super::signature::delta_signature_valid;
 
 /// What one delta's durable dispatch produced.
@@ -37,7 +38,7 @@ pub(crate) struct DeltaDispatchOutcome {
 
 impl DeltaDispatchOutcome {
     /// A refusal decided before any CRDT merge ran, so nothing was trimmed.
-    fn refused(frame: Option<SyncFrame>) -> Self {
+    pub(super) fn refused(frame: Option<SyncFrame>) -> Self {
         Self {
             frame,
             trimmed_ops: 0,
@@ -155,6 +156,15 @@ pub(crate) async fn apply_delta_and_finalize(
             delta_msg,
             "sender is blocked",
             CompensationHint::PermissionDenied,
+        );
+    }
+
+    let source = crate::event::EventSource::CrdtSync;
+    if let Err(e) = check_mirror_writable(shared, database_id, source, || Ok(true)) {
+        return terminal_reject(
+            delta_msg,
+            e.to_string(),
+            compensation_hint_for_dispatch_error(&e),
         );
     }
 
@@ -451,43 +461,6 @@ pub(crate) async fn apply_delta_and_finalize(
     }
 }
 
-/// Refuse retryably: nothing was applied and the identical delta at the same
-/// sequence must be re-pushed once the binding can be established.
-fn retryable_binding_refusal(delta_msg: &DeltaPushMsg) -> Option<SyncFrame> {
-    use nodedb_types::sync::wire::AckStatus;
-
-    use super::super::super::wire::DeltaAckMsg;
-
-    let ack = DeltaAckMsg {
-        mutation_id: delta_msg.mutation_id,
-        lsn: 0,
-        clock_skew_warning_ms: None,
-        applied_seq: delta_msg.seq.saturating_sub(1),
-        status: AckStatus::Gap {
-            expected: delta_msg.seq,
-        },
-    };
-    SyncFrame::try_encode(SyncMessageType::DeltaAck, &ack)
-}
-
-/// A refusal decided in the Control Plane before the apply was ever attempted.
-///
-/// Every one of these is permanent for the frame as sent — a missing
-/// collection, a revoked grant, an invalid signature, an exhausted quota —
-/// so the sender must compensate rather than re-push identical bytes.
-fn terminal_reject(
-    delta_msg: &DeltaPushMsg,
-    reason: impl Into<String>,
-    compensation: CompensationHint,
-) -> DeltaDispatchOutcome {
-    let reject = DeltaRejectMsg {
-        mutation_id: delta_msg.mutation_id,
-        reason: reason.into(),
-        compensation: Some(compensation),
-    };
-    DeltaDispatchOutcome::refused(SyncFrame::try_encode(SyncMessageType::DeltaReject, &reject))
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -498,6 +471,7 @@ mod tests {
     use crate::types::TenantId;
     use crate::wal::WalManager;
 
+    use super::super::super::super::wire::{DeltaRejectMsg, SyncMessageType};
     use super::*;
 
     const PEER_ADDR: &str = "10.0.0.7:44321";
@@ -659,5 +633,24 @@ mod tests {
         let outcome = apply_delta_and_finalize(&state, &delta(), ack(), session(&identity)).await;
 
         assert_eq!(reject_reason(&outcome), "sender is blocked");
+    }
+
+    /// A mirror refuses a delta before any surrogate or catalog work, whether
+    /// or not it holds the collection.
+    #[tokio::test]
+    async fn a_delta_for_a_mirror_is_refused_as_read_only() {
+        let (state, _dir) = state_with_risk(RiskConfig::default());
+        grant_write(&state);
+        state
+            .mirror
+            .fence
+            .mark_read_only_for_test(DatabaseId::DEFAULT, "mirror_db");
+        let identity = pusher();
+
+        let outcome = apply_delta_and_finalize(&state, &delta(), ack(), session(&identity)).await;
+
+        let reason = reject_reason(&outcome);
+        assert!(reason.contains("read-only mirror"), "{reason}");
+        assert!(reason.contains("mirror_db"), "{reason}");
     }
 }

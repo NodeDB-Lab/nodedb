@@ -197,6 +197,8 @@ impl ExtendedQueryHandler for NodeDbPgHandler {
             self.sessions.statement_timeout(session_id),
             self.state.tuning.network.default_deadline_secs,
         );
+        let _read_scope =
+            crate::control::server::shared::session::read_scope::enter(&self.sessions, session_id);
 
         let result = self.execute_prepared(client, portal, max_rows).await;
         // Mirror the simple-query path: surface any queued NOTICE messages

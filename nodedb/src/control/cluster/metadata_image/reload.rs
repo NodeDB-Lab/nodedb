@@ -83,6 +83,7 @@ pub(super) async fn reload_registries(
     shared.audit_dml_cache.load_from_catalog(catalog)?;
     shared.collection_to_database.load_from_catalog(catalog)?;
     shared.idle_timeout_cache.load_from_catalog(catalog)?;
+    shared.mirror.fence.load_from_catalog(catalog)?;
 
     // Replicated watermarks.
     shared.database_registry.restore_persisted(

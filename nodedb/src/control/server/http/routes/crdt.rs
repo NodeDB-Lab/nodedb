@@ -101,6 +101,15 @@ pub async fn crdt_apply(
     .map_err(crate::Error::from)
     .map_err(ApiError::from)?;
 
+    // A mirror binds no surrogate for a delta it refuses.
+    crate::control::server::shared::write_admission::check_mirror_writable(
+        &state.shared,
+        database_id,
+        crate::event::EventSource::User,
+        || Ok(true),
+    )
+    .map_err(ApiError::from)?;
+
     // Decode and bound the external delta before allocating identity state.
     let delta = decode_bounded_delta(&body.delta)?;
 

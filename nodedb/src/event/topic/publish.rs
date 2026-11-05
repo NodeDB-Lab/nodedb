@@ -108,14 +108,28 @@ async fn publish_replicated(
             .tokio_instant(),
     )
     .await
-    .map_err(|error| match error {
+    .map_err(|error| propose_error(error, topic_name))?;
+    zerompk::from_msgpack::<u64>(&payload)
+        .map_err(|error| PublishError::Persistence(format!("publish result: {error}")))
+}
+
+/// The publish error for a failed propose.
+///
+/// A leader's write gate answers through the propose path, so a refusal
+/// reaches this node as `Error::RemoteTyped` with the public code of its class,
+/// never as the gate's own variant. The rule is the one
+/// `propose_replicated_entry` applies: only an unclassified failure loses its
+/// type. A classified error keeps its code and SQLSTATE.
+fn propose_error(error: crate::Error, topic_name: &str) -> PublishError {
+    match error {
         crate::Error::UndefinedObject { kind: "topic", .. } => {
             PublishError::TopicNotFound(topic_name.to_string())
         }
-        other => PublishError::Persistence(other.to_string()),
-    })?;
-    zerompk::from_msgpack::<u64>(&payload)
-        .map_err(|error| PublishError::Persistence(format!("publish result: {error}")))
+        unclassified if crate::error_classify::is_unclassified_failure(&unclassified) => {
+            PublishError::Persistence(unclassified.to_string())
+        }
+        classified => PublishError::Refused(Box::new(classified)),
+    }
 }
 
 /// The home vShard of a topic.
@@ -132,6 +146,9 @@ pub enum PublishError {
     /// The durable catalog cannot be read or committed, or the replicated
     /// publication did not commit.
     Persistence(String),
+    /// The propose answered with a classified error, such as a write gate's
+    /// refusal. It keeps its class, so the client gets its SQLSTATE.
+    Refused(Box<crate::Error>),
 }
 
 impl std::fmt::Display for PublishError {
@@ -139,16 +156,44 @@ impl std::fmt::Display for PublishError {
         match self {
             Self::TopicNotFound(topic) => write!(f, "topic '{topic}' does not exist"),
             Self::Persistence(error) => write!(f, "topic persistence error: {error}"),
+            Self::Refused(error) => write!(f, "{error}"),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::publish_to_topic;
+    use super::{PublishError, propose_error, publish_to_topic};
     use crate::event::cdc::stream_def::RetentionConfig;
     use crate::event::topic::TopicDef;
     use crate::types::DatabaseId;
+
+    /// A leader gate's refusal arrives by public code, and keeps its class.
+    #[test]
+    fn a_remote_refusal_keeps_its_class() {
+        let error = crate::Error::RemoteTyped {
+            code: nodedb_types::error::ErrorCode::MIRROR_READ_ONLY,
+            message: "database 'm' is a read-only mirror".into(),
+        };
+        let PublishError::Refused(refusal) = propose_error(error, "events") else {
+            panic!("a classified error stays typed");
+        };
+        assert_eq!(
+            crate::control::server::pgwire::types::error_to_sqlstate(&refusal).1,
+            nodedb_types::error::sqlstate::READ_ONLY_SQL_TRANSACTION
+        );
+    }
+
+    #[test]
+    fn an_unclassified_failure_is_a_persistence_error() {
+        let error = crate::Error::Internal {
+            detail: "raft loop stopped".into(),
+        };
+        assert!(matches!(
+            propose_error(error, "events"),
+            PublishError::Persistence(_)
+        ));
+    }
 
     /// A topic the registry does not hold refuses the publication before
     /// anything is proposed.

@@ -71,6 +71,8 @@ mod graph_traverse_cross_node;
 mod graph_traverse_reverse_cross_node;
 #[path = "../../sql_cluster_cross_node_dml_tests/join_cross_node.rs"]
 mod join_cross_node;
+#[path = "../../sql_cluster_cross_node_dml_tests/mirror_read_only_cross_node.rs"]
+mod mirror_read_only_cross_node;
 #[path = "../../sql_cluster_cross_node_dml_tests/native_implicit_edge_delete_cross_node.rs"]
 mod native_implicit_edge_delete_cross_node;
 #[path = "../../sql_cluster_cross_node_dml_tests/native_remote_home_surrogate_cross_node.rs"]

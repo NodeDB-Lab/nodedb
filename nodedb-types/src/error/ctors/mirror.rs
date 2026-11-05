@@ -36,7 +36,9 @@ impl NodeDbError {
             code: ErrorCode::STALE_READ_NOT_LEADER,
             message: format!(
                 "database '{database}' is a mirror and cannot serve strong-consistency reads; \
-                 redirect to source cluster '{source_cluster}'"
+                 redirect to source cluster '{source_cluster}', or read at 'eventual' or \
+                 'bounded_staleness:<secs>': set default_read_consistency on pgwire and native, \
+                 or the read_consistency field on HTTP and WebSocket"
             ),
             details: ErrorDetails::StaleReadNotLeader {
                 database,

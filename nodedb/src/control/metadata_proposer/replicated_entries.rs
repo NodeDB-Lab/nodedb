@@ -204,7 +204,8 @@ pub async fn propose_database_id_reserve(
 /// stalls another node's cursor.
 ///
 /// The entry carries the running statement's audit context, if any: a user
-/// `COMMIT OFFSET` is audited, a system cursor is not.
+/// `COMMIT OFFSET` is audited, a system cursor is not. A cursor is reader
+/// state, so a mirror takes it and no mirror check runs here.
 pub async fn propose_cursor_commit(
     shared: &SharedState,
     commit: OffsetCommit,

@@ -9,8 +9,10 @@ use crate::control::change_stream::{ChangeCursor, CursorStep, LiveSubscriptionSe
 use crate::control::security::audit::ArcAuditEmitter;
 use crate::control::security::identity::{AuthenticatedIdentity, Permission};
 use crate::control::server::shared::authorization::authorize_collection;
+use crate::control::server::shared::session::read_consistency::parse_request_field;
+use crate::control::server::shared::session::read_scope::with_request_consistency;
 use crate::control::state::SharedState;
-use crate::types::{DatabaseId, TraceId};
+use crate::types::{DatabaseId, ReadConsistency, TraceId};
 
 use super::execute_sql::execute_sql;
 use super::format::{
@@ -24,6 +26,21 @@ pub fn extract_session_id(req: &serde_json::Value) -> Option<String> {
         .and_then(|id| id.as_str())
         .filter(|id| !id.is_empty())
         .map(String::from)
+}
+
+/// The level `params.read_consistency` names, `Strong` when the request names
+/// none. A value that is not a known level's string is refused.
+fn request_consistency(req: &serde_json::Value) -> crate::Result<ReadConsistency> {
+    let Some(field) = req
+        .get("params")
+        .and_then(|params| params.get("read_consistency"))
+    else {
+        return parse_request_field(None);
+    };
+    match field.as_str() {
+        Some(level) => parse_request_field(Some(level)),
+        None => parse_request_field(Some(field.to_string().as_str())),
+    }
 }
 
 pub(super) struct MessageContext<'a> {
@@ -107,14 +124,21 @@ pub(super) async fn process_message(
             if sql.is_empty() {
                 return (error_response(id, "missing params.sql"), false);
             }
-            let response = match execute_sql(
-                &shared,
-                query_ctx,
-                identity,
-                database_id,
-                sql,
-                trace_id,
-                peer_addr,
+            let consistency = match request_consistency(&req) {
+                Ok(consistency) => consistency,
+                Err(error) => return (ws_error_from_gateway(&id, &error), false),
+            };
+            let response = match with_request_consistency(
+                consistency,
+                execute_sql(
+                    &shared,
+                    query_ctx,
+                    identity,
+                    database_id,
+                    sql,
+                    trace_id,
+                    peer_addr,
+                ),
             )
             .await
             {

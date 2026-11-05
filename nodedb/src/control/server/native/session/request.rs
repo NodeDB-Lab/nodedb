@@ -37,6 +37,10 @@ impl NativeSession {
             self.sessions.statement_timeout(self.peer_addr),
             self.state.tuning.network.default_deadline_secs,
         );
+        let _read_scope = crate::control::server::shared::session::read_scope::enter(
+            &self.sessions,
+            self.peer_addr.into(),
+        );
 
         // Auth handling.
         if op == OpCode::Auth {

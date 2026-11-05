@@ -11,6 +11,7 @@ pub mod gate;
 pub mod holds;
 pub mod leader_gate;
 pub mod lock_keys;
+pub mod mirror_gate;
 pub mod predicate;
 pub mod route;
 pub mod storage_quota;
@@ -19,10 +20,11 @@ pub mod wait;
 pub mod write_order_fence;
 pub mod write_order_lock;
 
-pub use entry_storage::entry_adds_storage;
+pub use entry_storage::{entry_adds_storage, entry_writes_database};
 pub use gate::{WriteAdmission, WriteAdmissionGuard, WriteTarget, admit, cp_routed_to_calvin};
 pub use holds::AdmissionHolds;
 pub use leader_gate::LeaderWriteGate;
+pub(crate) use mirror_gate::{check_mirror_ddl, check_mirror_read, check_mirror_writable};
 pub use predicate::{
     all_writes_bufferable, plan_adds_storage, plan_is_write, plan_requires_txn_buffering,
     plan_writes_user_data,

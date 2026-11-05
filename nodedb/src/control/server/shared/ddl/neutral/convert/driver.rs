@@ -19,6 +19,7 @@ use crate::control::server::shared::ddl::sync_dispatch::{
     SystemReason, SystemTask, dispatch_system_response_with_source,
 };
 use crate::control::server::shared::session::StatementDeadline;
+use crate::control::server::shared::write_admission::check_mirror_writable;
 use crate::control::state::SharedState;
 use nodedb_physical::physical_plan::MetaOp;
 
@@ -38,6 +39,13 @@ pub async fn convert_collection(
 ) -> Result<Vec<DdlResult>, DdlError> {
     let (collection, target_type, explicit_columns) = parse_convert_sql(sql)?;
     let tenant_id = identity.tenant_id;
+
+    // The re-encode reaches the core through the system door, ahead of the
+    // catalog write the metadata proposer gates.
+    check_mirror_writable(state, database_id, crate::event::EventSource::User, || {
+        Ok(true)
+    })
+    .map_err(|e| DdlError::from_error(&e))?;
 
     // Validate collection exists.
     let catalog = state.credentials.catalog();

@@ -79,7 +79,7 @@ pub async fn promote_database(
     // we log and continue. The operator's intent is to stop following; the
     // link will be garbage-collected when the Arc reference count reaches
     // zero. The database must become writable regardless.
-    state.mirror_link_registry.teardown_link(db_id);
+    state.mirror.links.teardown_link(db_id);
 
     // Flip status to Promoted in the mirror_origin record and set
     // the database status to Active so writes are accepted.

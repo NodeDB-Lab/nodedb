@@ -7,6 +7,7 @@ mod authorize;
 mod compensation;
 mod outcome;
 mod peer_identity;
+mod refusal;
 mod signature;
 
 pub(crate) use apply::{DeltaDispatchOutcome, DeltaSessionContext, apply_delta_and_finalize};

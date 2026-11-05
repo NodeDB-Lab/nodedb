@@ -16,6 +16,7 @@ use super::audit_context::AuditCtx;
 use super::ddl_buffer::DdlBuffer;
 use super::ephemeral_sequence::EphemeralSequences;
 use super::pending_shard_reads::ShardReads;
+use super::read_scope::ReadSession;
 
 /// Per-connection session slots. Each field is owned by its own module, which
 /// exposes the accessors; nothing outside reaches through this struct.
@@ -36,6 +37,9 @@ pub(super) struct ConnScope {
     /// Cross-shard reads the current request made, not yet recorded into the
     /// transaction read-set (see [`super::pending_shard_reads`]).
     pub(super) pending_shard_reads: RefCell<Vec<ShardReads>>,
+    /// The session the running statement reads its consistency from (see
+    /// [`super::read_scope`]). `None` outside a statement scope.
+    pub(super) read_session: RefCell<Option<ReadSession>>,
 }
 
 impl ConnScope {
@@ -47,6 +51,7 @@ impl ConnScope {
             statement_deadline: Cell::new(None),
             statement_notices: RefCell::new(Vec::new()),
             pending_shard_reads: RefCell::new(Vec::new()),
+            read_session: RefCell::new(None),
         }
     }
 }

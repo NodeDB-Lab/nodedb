@@ -416,7 +416,7 @@ pub async fn execute_sql(
                 trace_id,
                 database_id: checked.database_id(),
                 txn_id: None,
-                linearizable: true,
+                linearizable: crate::control::server::shared::session::read_scope::linearizable(),
             };
             let payloads: crate::Result<Vec<Vec<u8>>> = match shared.installed_gateway() {
                 Ok(gateway) => gateway.execute(&gw_ctx, checked).await,

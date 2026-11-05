@@ -253,7 +253,7 @@ impl SharedState {
             array_merger_registry: std::sync::Arc::new(
                 crate::control::array_sync::MergerRegistry::new(),
             ),
-            mirror_link_registry: Arc::new(crate::control::mirror::MirrorLinkRegistry::new()),
+            mirror: crate::control::mirror::MirrorState::default(),
             database_registry,
             surrogate_registry,
             surrogate_assigner,

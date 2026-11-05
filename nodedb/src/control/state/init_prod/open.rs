@@ -208,7 +208,7 @@ impl SharedState {
         })?;
 
         crate::event::topic::hydrate_topic_buffers(&state)?;
-        super::post_init::hydrate_caches(&state);
+        super::post_init::hydrate_caches(&state)?;
         crate::control::cluster::metadata_applier::seed_host_tables(&state)?;
         super::post_init::spawn_array_gc(&state);
 

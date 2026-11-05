@@ -120,6 +120,7 @@ pub async fn submit_calvin_routed_assign(
     state: &SharedState,
     mut tx_class: TxClass,
 ) -> crate::Result<RoutedAssignment> {
+    super::submit_gate::admit_submit(state, &tx_class)?;
     let stream = super::prepare::prepare_submit(state, &mut tx_class)?.stream;
 
     // Every running server has a cluster transport, the synthesized one-node

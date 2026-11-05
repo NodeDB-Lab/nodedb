@@ -12,6 +12,8 @@ use crate::control::server::shared::authorization::authorize_database;
 use crate::control::server::shared::plan_admission::{
     PlanAdmissionRequest, plan_authorize_and_admit,
 };
+use crate::control::server::shared::session::read_consistency::parse_request_field;
+use crate::control::server::shared::session::read_scope::with_request_consistency;
 use crate::control::server::shared::statement_exec::{AtomicStatement, StatementExec};
 
 use super::super::super::super::auth::{
@@ -28,15 +30,32 @@ use super::shape::{TaskLoopParams, run_task_loop};
 
 /// POST /v1/query — execute a SQL/DDL statement.
 ///
-/// Body: `{ "sql": "..." }`. Database context via `X-NodeDB-Database` header
-/// or `?database=` param.
+/// Body: `{ "sql": "...", "read_consistency": "..." }`. `read_consistency` is
+/// optional and defaults to `strong`. Database context via `X-NodeDB-Database`
+/// header or `?database=` param.
 pub async fn query(
+    headers: HeaderMap,
+    peer: PeerAddr,
+    transport: ClientTransport,
+    db_param: QueryParams<DatabaseQueryParam>,
+    state: State<AppState>,
+    axum::Json(body): axum::Json<HttpQueryRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let consistency = parse_request_field(body.read_consistency.as_deref())?;
+    with_request_consistency(
+        consistency,
+        query_at_consistency(headers, peer, transport, db_param, state, body),
+    )
+    .await
+}
+
+async fn query_at_consistency(
     headers: HeaderMap,
     peer: PeerAddr,
     transport: ClientTransport,
     QueryParams(db_param): QueryParams<DatabaseQueryParam>,
     State(state): State<AppState>,
-    axum::Json(body): axum::Json<HttpQueryRequest>,
+    body: HttpQueryRequest,
 ) -> Result<impl IntoResponse, ApiError> {
     let (identity, verified_jwt) =
         resolve_auth_parts(&headers, &state, peer.as_str(), transport.security()).await?;

@@ -42,6 +42,8 @@ impl SimpleQueryHandler for NodeDbPgHandler {
             self.sessions.statement_timeout(session_id),
             self.state.tuning.network.default_deadline_secs,
         );
+        let _read_scope =
+            crate::control::server::shared::session::read_scope::enter(&self.sessions, session_id);
 
         let identity = self.resolve_identity(client, &session_id)?;
         self.authorize_session_database(&identity, session_id)?;

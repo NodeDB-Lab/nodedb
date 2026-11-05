@@ -13,10 +13,12 @@ mod test_eventual_read_serves_local;
 mod test_full_lifecycle;
 #[path = "mirror/test_lag_transitions.rs"]
 mod test_lag_transitions;
-#[path = "mirror/test_no_writes_accepted_fuzz.rs"]
-mod test_no_writes_accepted_fuzz;
 #[path = "mirror/test_promotion_durability.rs"]
 mod test_promotion_durability;
+#[path = "mirror/test_read_consistency_selector.rs"]
+mod test_read_consistency_selector;
+#[path = "mirror/test_read_only_protocols.rs"]
+mod test_read_only_protocols;
 #[path = "mirror/test_restart_resume.rs"]
 mod test_restart_resume;
 #[path = "mirror/test_simulated_latency.rs"]

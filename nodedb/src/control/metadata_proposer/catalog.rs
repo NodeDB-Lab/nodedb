@@ -69,6 +69,13 @@ async fn propose_and_apply_locally(
     shared: &SharedState,
     entry: &CatalogEntry,
 ) -> Result<(ProposeOutcome, Vec<ConstraintTarget>), Error> {
+    // A refused entry never joins an open transaction, so its COMMIT holds
+    // nothing a mirror refuses.
+    crate::control::server::shared::write_admission::check_mirror_ddl(
+        shared,
+        std::slice::from_ref(entry),
+    )?;
+
     // Buffering is decided first, ahead of every replication-mode gate: an open
     // transaction owns the entry regardless of whether this deployment
     // replicates DDL, and COMMIT re-runs the mode choice for the whole batch.

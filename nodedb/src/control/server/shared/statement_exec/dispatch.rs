@@ -15,13 +15,15 @@ use crate::bridge::envelope::{PhysicalPlan, Response};
 use crate::control::gateway::core::QueryContext as GatewayQueryContext;
 use crate::control::gateway::router::is_task_vshard_scoped;
 use crate::control::security::audit::ArcAuditEmitter;
-use crate::control::security::identity::AuthenticatedIdentity;
+use crate::control::security::identity::{AuthenticatedIdentity, Permission, required_permission};
 use crate::control::server::exchange::resolve::{Resolved, resolve_and_materialize};
 use crate::control::server::exchange::{DistributedReadCapture, ReadScope};
 use crate::control::server::shared::authorization::{AuthorizedTask, authorize_task_set};
 use crate::control::server::shared::clone_write::{
     CloneCheckedOutcome, InterceptAndAuthorizeParams, intercept_and_authorize,
 };
+use crate::control::server::shared::session::read_scope;
+use crate::control::server::shared::write_admission::check_mirror_read;
 use crate::control::state::SharedState;
 use crate::types::TraceId;
 
@@ -156,15 +158,22 @@ pub(crate) async fn dispatch_statement_task(
         return Ok(DispatchedTask::answered(response));
     }
 
+    // Exchange legs run below, ahead of the dispatch capability gate's mirror
+    // read check, so a read checks here first.
+    if required_permission(&task.plan) == Permission::Read && !identity.is_internal_service() {
+        check_mirror_read(state, task.database_id)?;
+    }
+
     // Materialize catalog providers and resolve Exchange nodes before
-    // dispatch. Every statement read is strong, so every leg confirms its
+    // dispatch. Every leg of a read at a leader-confirming level confirms its
     // group where it is served.
+    let linearizable = read_scope::linearizable();
     let scope = ReadScope {
         database_id: task.database_id,
         tenant_id: task.tenant_id,
         trace_id: TraceId::ZERO,
         txn_id: task.txn_id,
-        linearizable: true,
+        linearizable,
     };
     match resolve_and_materialize(state, identity, task.plan, scope).await? {
         Resolved::Gathered(response, _watermarks, distributed_reads) => {
@@ -238,7 +247,7 @@ pub(crate) async fn dispatch_task_via_gateway(
         // The in-block transaction id lets local dispatch resolve the
         // per-transaction staging overlay.
         txn_id,
-        linearizable: true,
+        linearizable: read_scope::linearizable(),
     };
     gateway.execute_response(&gw_ctx, checked).await
 }
