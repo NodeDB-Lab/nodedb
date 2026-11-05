@@ -353,7 +353,7 @@ mod tests {
             let index = mr
                 .propose_to_group(nodedb_cluster::calvin::SEQUENCER_GROUP_ID, bytes.clone())
                 .expect("propose epoch batch to sequencer group");
-            mr.wait_all_durable_blocking();
+            mr.wait_all_durable_blocking().expect("durable");
             mr.tick().expect("tick");
             index
         };

@@ -9,7 +9,70 @@ use crate::error::{ClusterError, Result};
 use crate::group_disk::StagedLogStorage;
 use crate::multi_raft::core::MultiRaft;
 
+/// The leadership a write gate's admission belongs to: this node leads
+/// `group_id` at `term`. An entry admitted for it proposes only while that
+/// leadership holds, because the gate's stamp, lock keys and quota checks are
+/// this leader's alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdmissionTerm {
+    pub group_id: u64,
+    pub term: u64,
+}
+
+/// What [`MultiRaft::propose_gated`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GatedPropose {
+    /// The entry entered the leader's log.
+    Landed { group_id: u64, log_index: u64 },
+    /// This node leads the group, and the entry holds no admission for that
+    /// leadership. Nothing entered the log. The entry passes the gate again.
+    Readmit,
+}
+
 impl MultiRaft {
+    /// The leadership a write to `vshard_id` is admitted for right now.
+    /// `None` when this node does not lead the owning group.
+    pub fn admission_term(&self, vshard_id: u32) -> Option<AdmissionTerm> {
+        let group_id = self
+            .routing
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .group_for_vshard(vshard_id)
+            .ok()?;
+        let term = self.leader_term(group_id)?;
+        Some(AdmissionTerm { group_id, term })
+    }
+
+    /// Propose an entry that passed the write gate for `admitted`, or that
+    /// passed no gate when `admitted` is `None`.
+    ///
+    /// The check and the append both run under this struct's lock, so a leader
+    /// never appends an entry its gate did not admit at its current term. A
+    /// node that does not lead refuses with `NotLeader`, and the proposer
+    /// forwards the entry to the leader, which gates it there.
+    pub fn propose_gated(
+        &mut self,
+        vshard_id: u32,
+        data: Vec<u8>,
+        admitted: Option<AdmissionTerm>,
+    ) -> Result<GatedPropose> {
+        let group_id = self
+            .routing
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .group_for_vshard(vshard_id)?;
+        if let Some(term) = self.leader_term(group_id)
+            && admitted != Some(AdmissionTerm { group_id, term })
+        {
+            return Ok(GatedPropose::Readmit);
+        }
+        let (group_id, log_index) = self.propose(vshard_id, data)?;
+        Ok(GatedPropose::Landed {
+            group_id,
+            log_index,
+        })
+    }
+
     /// Get the leader for a given vShard (from local group state).
     pub fn leader_for_vshard(&self, vshard_id: u32) -> Result<Option<u64>> {
         let group_id = self
@@ -363,6 +426,101 @@ mod tests {
             "stamps must rise with the index: {stamps:?}"
         );
         assert_eq!(mr.newest_metadata_stamp(), stamps.last().copied());
+    }
+
+    /// A leader of data group 1, with vShard 0 on it, and its current term.
+    fn leading_data_group(dir: &std::path::Path) -> (MultiRaft, AdmissionTerm) {
+        let rt = RoutingTable::uniform(1, &[1], 1);
+        let mut mr = MultiRaft::new(1, rt, dir.to_path_buf());
+        mr.add_group(1, vec![]).unwrap();
+        for node in mr.groups.values_mut() {
+            node.election_deadline_override(Instant::now() - Duration::from_millis(1));
+        }
+        for _ in 0..3 {
+            if mr.is_group_leader(1) {
+                break;
+            }
+            mr.tick().unwrap();
+        }
+        let admitted = mr.admission_term(0).expect("this node leads the group");
+        assert_eq!(admitted.group_id, 1);
+        (mr, admitted)
+    }
+
+    /// An entry admitted for this leadership lands.
+    #[test]
+    fn an_entry_admitted_at_the_current_term_lands() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut mr, admitted) = leading_data_group(dir.path());
+        let before = mr.groups[&1].last_log_index();
+        let landed = mr.propose_gated(0, b"admitted".to_vec(), Some(admitted));
+        assert_eq!(
+            landed.unwrap(),
+            GatedPropose::Landed {
+                group_id: 1,
+                log_index: before + 1,
+            }
+        );
+    }
+
+    /// A node that became leader after it read no leadership holds no
+    /// admission. Its entry never enters the log unadmitted.
+    #[test]
+    fn a_leader_refuses_an_entry_the_gate_never_saw() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut mr, _) = leading_data_group(dir.path());
+        let before = mr.groups[&1].last_log_index();
+        let outcome = mr.propose_gated(0, b"unadmitted".to_vec(), None).unwrap();
+        assert_eq!(outcome, GatedPropose::Readmit);
+        assert_eq!(mr.groups[&1].last_log_index(), before);
+    }
+
+    /// An admission of an earlier term, or of another group, is no admission
+    /// of this leadership.
+    #[test]
+    fn a_leader_refuses_an_admission_of_another_term_or_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut mr, admitted) = leading_data_group(dir.path());
+        let before = mr.groups[&1].last_log_index();
+        for stale in [
+            AdmissionTerm {
+                term: admitted.term - 1,
+                ..admitted
+            },
+            AdmissionTerm {
+                group_id: 9,
+                ..admitted
+            },
+        ] {
+            let outcome = mr.propose_gated(0, b"stale".to_vec(), Some(stale)).unwrap();
+            assert_eq!(outcome, GatedPropose::Readmit, "{stale:?}");
+        }
+        assert_eq!(mr.groups[&1].last_log_index(), before);
+    }
+
+    /// A node that does not lead refuses, admitted or not, so its proposer
+    /// forwards the entry.
+    #[test]
+    fn a_follower_refuses_with_not_leader() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = RoutingTable::uniform(1, &[1, 2], 2);
+        let mut mr = MultiRaft::new(1, rt, dir.path().to_path_buf());
+        mr.add_group(1, vec![2]).unwrap();
+        assert_eq!(mr.admission_term(0), None);
+        let admitted = AdmissionTerm {
+            group_id: 1,
+            term: 1,
+        };
+        for admission in [None, Some(admitted)] {
+            let refused = mr.propose_gated(0, b"entry".to_vec(), admission);
+            assert!(
+                matches!(
+                    refused,
+                    Err(ClusterError::Raft(nodedb_raft::RaftError::NotLeader { .. }))
+                ),
+                "{refused:?}"
+            );
+        }
     }
 
     /// A follower takes no stamp into the log: its propose is refused.

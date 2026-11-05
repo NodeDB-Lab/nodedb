@@ -48,4 +48,5 @@ pub use leader_board::LeaderBoard;
 pub use mount::{GroupMountSpec, OpenedGroup};
 pub use ordinal_floor::{FloorAnswer, FloorRound};
 pub use peer_contact::PeerAckSample;
+pub use proposals::{AdmissionTerm, GatedPropose};
 pub use status::{GroupMembership, GroupStatus};

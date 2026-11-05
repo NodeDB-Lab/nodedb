@@ -293,7 +293,7 @@ impl ClusterArrayExecutor {
         // coordinator so the upstream NOTICE is emitted whenever any shard
         // dropped data below its system-time horizon.
         let resp = crate::data::executor::response_codec::ArraySliceResponse {
-            rows_msgpack: encode_row_array(&result.rows),
+            rows_msgpack: encode_row_array(&result.rows)?,
             truncated_before_horizon: result.truncated_before_horizon,
         };
         zerompk::to_msgpack_vec(&resp).map_err(|e| crate::Error::Codec {

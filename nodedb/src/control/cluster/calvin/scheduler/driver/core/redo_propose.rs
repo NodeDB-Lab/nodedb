@@ -368,7 +368,7 @@ mod tests {
             if let Some(entry) = entries.into_iter().find(|entry| entry.index == index) {
                 return entry.data;
             }
-            mr.wait_all_durable_blocking();
+            mr.wait_all_durable_blocking().expect("durable");
             mr.tick().expect("tick");
         }
         panic!("the entry at {index} never committed");

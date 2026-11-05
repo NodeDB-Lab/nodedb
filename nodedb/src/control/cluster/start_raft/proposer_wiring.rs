@@ -199,6 +199,16 @@ fn install_apply_gates(shared: &Arc<SharedState>, raft_loop: &Arc<RaftLoopType>)
     if shared.raft_apply_gates.set(apply_gates).is_err() {
         tracing::warn!("raft_apply_gates already set — start_raft appears to have run twice");
     }
+    // A fail-stopped group disk leaves the node serving its other groups, so
+    // the health surfaces read this record to report the lost replica.
+    let disk_halts = raft_loop
+        .multi_raft_handle()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .disk_halts();
+    if shared.raft_disk_halts.set(disk_halts).is_err() {
+        tracing::warn!("raft_disk_halts already set — start_raft appears to have run twice");
+    }
 }
 
 /// Install the `async_raft_proposer` in two phases: propose, then await this

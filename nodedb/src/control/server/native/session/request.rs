@@ -65,11 +65,17 @@ impl NativeSession {
             // the same consequence: the gate reads Ok while work sent to that
             // core never completes. One atomic load, so it stays on this path.
             // A fail-stopped core refuses its work outright, with the same
-            // consequence.
+            // consequence. A fail-stopped group disk takes out this node's
+            // replica of the group.
             let native_status = if self.state.metadata_apply_wedge.is_wedged()
                 || self.state.sequencer_halt.is_halted()
                 || self.state.sequencer_halt.apply_halt().is_halted()
                 || self.state.core_stall.is_stalled()
+                || self
+                    .state
+                    .raft_disk_halts
+                    .get()
+                    .is_some_and(|halts| halts.is_halted())
                 || self
                     .state
                     .system_metrics

@@ -153,6 +153,9 @@ pub struct SharedState {
     /// Per-group gates that order the apply loop's writes against snapshot
     /// installs. Set by `start_raft`.
     pub raft_apply_gates: OnceLock<Arc<nodedb_cluster::GroupApplyGates>>,
+    /// The record of this node's fail-stopped Raft group disks, for the health
+    /// surfaces. Set by `start_raft`.
+    pub raft_disk_halts: OnceLock<Arc<nodedb_cluster::group_disk::GroupDiskHalts>>,
     /// Answers whether a read can be served here: leadership confirmed for a
     /// linearizable read, replica freshness for a bounded-staleness one.
     /// Set by `start_raft`.

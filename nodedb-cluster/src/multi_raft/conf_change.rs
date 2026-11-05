@@ -286,7 +286,7 @@ mod tests {
             );
         }
         mr.tick().unwrap();
-        mr.wait_all_durable_blocking();
+        mr.wait_all_durable_blocking().unwrap();
         mr.tick().unwrap();
         let node = mr.groups.get(&0).unwrap();
         assert_eq!(node.role(), nodedb_raft::NodeRole::Leader);
@@ -338,7 +338,7 @@ mod tests {
             );
         }
         mr.tick().unwrap();
-        mr.wait_all_durable_blocking();
+        mr.wait_all_durable_blocking().unwrap();
         mr.tick().unwrap();
 
         mr.apply_conf_change(

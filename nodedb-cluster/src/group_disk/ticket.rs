@@ -64,7 +64,7 @@ impl DurabilityTicket {
     }
 
     /// Wait until the writes are durable. Fails when the group's disk closed
-    /// first: the group was unmounted, and the writes will never be durable.
+    /// or fail-stopped first: the writes will never be durable.
     pub async fn durable(self) -> crate::Result<()> {
         let mut rx = self.disk.subscribe();
         loop {
@@ -72,10 +72,21 @@ impl DurabilityTicket {
             if progress.durable_seq >= self.seq {
                 return Ok(());
             }
+            if progress.failed {
+                return Err(crate::ClusterError::Storage {
+                    detail: format!(
+                        "raft group {}: the disk fail-stopped before write {} was durable. \
+                         Fix the disk and restart the node.",
+                        self.disk.group_id(),
+                        self.seq
+                    ),
+                });
+            }
             if progress.closed || rx.changed().await.is_err() {
                 return Err(crate::ClusterError::Storage {
                     detail: format!(
-                        "raft group {}: the disk closed before write {} was durable",
+                        "raft group {}: the disk closed before write {} was durable. \
+                         The group left this node, so retry on its leader.",
                         self.disk.group_id(),
                         self.seq
                     ),
@@ -103,7 +114,9 @@ mod tests {
     fn idle_disk() -> (tempfile::TempDir, Arc<GroupDisk>) {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("group-3.redb");
-        let disk = Arc::new(GroupDisk::open(3, &path, Arc::default()).expect("open"));
+        let disk = Arc::new(
+            GroupDisk::open(3, &path, super::super::signals::DiskSignals::default()).expect("open"),
+        );
         (dir, disk)
     }
 

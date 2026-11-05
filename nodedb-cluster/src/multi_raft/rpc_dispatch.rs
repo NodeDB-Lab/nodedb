@@ -17,11 +17,29 @@ use crate::error::{ClusterError, Result};
 use super::core::MultiRaft;
 
 impl MultiRaft {
+    /// Refuse a Raft request to a replica whose disk fail-stopped: no answer
+    /// of it can rest on a durable write. Peers see a replica that is down,
+    /// and the group's other replicas carry it.
+    fn refuse_failed_disk(&self, group_id: u64) -> Result<()> {
+        match self.groups.get(&group_id) {
+            Some(node) if node.storage().disk_failed() => Err(ClusterError::Storage {
+                detail: format!(
+                    "raft group {group_id} on node {}: the disk fail-stopped after a write \
+                     error, so this replica answers no Raft request. Fix the disk and restart \
+                     the node.",
+                    self.node_id
+                ),
+            }),
+            _ => Ok(()),
+        }
+    }
+
     /// Route an AppendEntries RPC to the correct group.
     pub fn handle_append_entries(
         &mut self,
         req: &AppendEntriesRequest,
     ) -> Result<AppendEntriesResponse> {
+        self.refuse_failed_disk(req.group_id)?;
         let node = self
             .groups
             .get_mut(&req.group_id)
@@ -33,6 +51,7 @@ impl MultiRaft {
 
     /// Route a RequestVote RPC to the correct group.
     pub fn handle_request_vote(&mut self, req: &RequestVoteRequest) -> Result<RequestVoteResponse> {
+        self.refuse_failed_disk(req.group_id)?;
         let node = self
             .groups
             .get_mut(&req.group_id)
@@ -58,6 +77,7 @@ impl MultiRaft {
         &mut self,
         req: &InstallSnapshotRequest,
     ) -> Result<InstallSnapshotResponse> {
+        self.refuse_failed_disk(req.group_id)?;
         let node = self
             .groups
             .get_mut(&req.group_id)
@@ -81,6 +101,7 @@ impl MultiRaft {
         term: u64,
         last_included_index: u64,
     ) -> Result<bool> {
+        self.refuse_failed_disk(group_id)?;
         let node = self
             .groups
             .get(&group_id)

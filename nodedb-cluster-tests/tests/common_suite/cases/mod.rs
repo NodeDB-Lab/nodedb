@@ -139,6 +139,7 @@ mod native_gateway_migration;
 mod native_gather_join_in_txn_occ;
 mod native_write_drain_gate;
 mod node_labels_replicate_to_followers;
+mod ordinal_floor_leader_change;
 mod owner_read_on_non_replica;
 mod pgwire_gateway_migration;
 mod planner_local_only;

@@ -22,7 +22,9 @@ use nodedb_raft::message::LogEntry;
 use nodedb_raft::state::HardState;
 use nodedb_raft::storage::LogStorage;
 
-use crate::raft_storage_ops::{LogOp, apply_in_txn};
+use crate::raft_storage_ops::{
+    LogOp, LogWriteError, apply_in_txn, commit_error, database_error, transaction_error,
+};
 use crate::wire_version::envelope::decode_versioned;
 
 /// Log entries: key = index (big-endian u64 for sorted iteration), value = versioned-envelope bytes.
@@ -85,23 +87,27 @@ impl RedbLogStorage {
 impl RedbLogStorage {
     /// Apply `ops` in order inside one transaction. One commit, and so one
     /// group of fsyncs, makes the whole run durable.
-    pub fn commit_ops(&mut self, ops: &[LogOp<'_>]) -> nodedb_raft::error::Result<()> {
+    pub fn commit_ops(&mut self, ops: &[LogOp<'_>]) -> Result<(), LogWriteError> {
         if ops.is_empty() {
             return Ok(());
         }
         let txn = self
             .db
             .begin_write()
-            .map_err(|e| nodedb_raft::error::RaftError::Storage {
-                detail: format!("write txn: {e}"),
-            })?;
+            .map_err(|e| transaction_error("begin write", e))?;
         for op in ops {
             apply_in_txn(&txn, op)?;
         }
-        txn.commit()
-            .map_err(|e| nodedb_raft::error::RaftError::Storage {
-                detail: format!("commit: {e}"),
-            })
+        txn.commit().map_err(|e| commit_error("commit", e))
+    }
+
+    /// Open the log at `path` again after a write error. redb refuses every
+    /// call on a handle whose write failed, and repairs an interrupted commit
+    /// as it opens. The caller drops the failed handle first: redb holds one
+    /// handle per file.
+    pub(crate) fn reopen(path: &Path) -> Result<Self, LogWriteError> {
+        let db = Database::create(path).map_err(|e| database_error("reopen", e))?;
+        Ok(Self { db })
     }
 }
 

@@ -289,7 +289,7 @@ mod tests {
         }
         // Elect, then deliver the no-op once the disk holds it.
         mr.tick().expect("tick");
-        mr.wait_all_durable_blocking();
+        mr.wait_all_durable_blocking().expect("durable");
         for (gid, ready) in mr.tick().expect("tick").groups {
             if let Some(last) = ready.committed_entries.last() {
                 mr.advance_applied(gid, last.index).expect("advance");
@@ -299,7 +299,7 @@ mod tests {
             mr.propose(0, b"write".to_vec())
                 .expect("single voter commits");
         }
-        mr.wait_all_durable_blocking();
+        mr.wait_all_durable_blocking().expect("durable");
         let batch: Vec<LogEntry> = mr
             .tick()
             .expect("tick")

@@ -28,3 +28,23 @@ pub fn sequencer_backpressure_drop(
 
 #[inline]
 pub fn sequencer_participants_underivable(_epoch: u64, _raft_index: u64, _detail: &str) {}
+
+#[inline]
+pub fn raft_disk_write_retried(_group_id: u64, _attempt: u32, _ops: &[&'static str], _error: &str) {
+}
+
+#[inline]
+pub fn raft_disk_fail_stopped(_group_id: u64, _ops: &[&'static str], _error: &str) {}
+
+#[inline]
+pub fn raft_disk_write_abandoned(_group_id: u64, _ops: &[&'static str], _error: &str) {}
+
+#[inline]
+pub fn calvin_verdict_conflict(
+    _epoch: u64,
+    _position: u32,
+    _difference: &'static str,
+    _kept: &str,
+    _refused: &str,
+) {
+}

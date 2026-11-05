@@ -127,6 +127,25 @@ pub async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
         return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(body));
     }
 
+    // A fail-stopped group disk takes this node's replica of the group out,
+    // and the other replicas carry the group. The node serves everything
+    // else, so it reports degraded.
+    if let Some(halt) = state
+        .shared
+        .raft_disk_halts
+        .get()
+        .and_then(|halts| halts.report())
+    {
+        let body = json!({
+            "status": "degraded",
+            "reason": "raft_group_disk_failed",
+            "node_id": state.shared.node_id,
+            "group_id": halt.group_id,
+            "error": halt.error,
+        });
+        return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(body));
+    }
+
     // A fail-stopped core refuses every request routed to it: its state is
     // unknown until restart. The other cores serve, so the node is degraded.
     if let Some(stops) = state
@@ -416,6 +435,22 @@ mod tests {
             .expect("read healthz body");
         let body = sonic_rs::from_slice::<serde_json::Value>(&bytes).expect("healthz body is JSON");
         (status, body)
+    }
+
+    #[tokio::test]
+    async fn healthz_reports_a_fail_stopped_group_disk_as_degraded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = app_state(&dir);
+        let halts = std::sync::Arc::new(nodedb_cluster::group_disk::GroupDiskHalts::default());
+        assert!(state.shared.raft_disk_halts.set(halts.clone()).is_ok());
+        let (_, before) = healthz_body(state.clone()).await;
+        assert_ne!(before["reason"], "raft_group_disk_failed");
+
+        halts.record(7, "serialize entry: bad bytes".to_string());
+        let (status, body) = healthz_body(state).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["reason"], "raft_group_disk_failed");
+        assert_eq!(body["group_id"], 7);
     }
 
     #[tokio::test]

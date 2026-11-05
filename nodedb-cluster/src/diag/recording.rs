@@ -95,3 +95,84 @@ pub fn sequencer_participants_underivable(epoch: u64, raft_index: u64, detail: &
     .with_backtrace()
     .emit();
 }
+
+/// Report a Raft group's disk write that failed with an I/O error and is
+/// retried. Called from the writer's retry loop on each failed attempt. The
+/// grouping key holds no attempt, so the loop files one growing report.
+pub fn raft_disk_write_retried(group_id: u64, attempt: u32, ops: &[&'static str], error: &str) {
+    let ctx = context::RaftDiskWriteFailure {
+        cause: "io_error_retried",
+        group_id,
+        attempt,
+        ops,
+        error,
+    };
+    let _ = Capture::new(
+        EventKind::Error,
+        "Raft group disk: a write failed with an I/O error and is retried",
+    )
+    .domain(&ctx)
+    .emit();
+}
+
+/// Report a Raft group's disk that stopped on a write error no retry clears.
+/// Called from the writer's retry loop, the one site that classifies it.
+pub fn raft_disk_fail_stopped(group_id: u64, ops: &[&'static str], error: &str) {
+    let ctx = context::RaftDiskWriteFailure {
+        cause: "fail_stopped",
+        group_id,
+        attempt: 1,
+        ops,
+        error,
+    };
+    let _ = Capture::new(
+        EventKind::InvariantViolation,
+        "Raft group disk: a write failed with an error no retry clears; the replica stopped",
+    )
+    .domain(&ctx)
+    .with_backtrace()
+    .emit();
+}
+
+/// Report a Raft group's disk write abandoned because the disk closed while
+/// the write failed. Called from the writer's retry loop.
+pub fn raft_disk_write_abandoned(group_id: u64, ops: &[&'static str], error: &str) {
+    let ctx = context::RaftDiskWriteFailure {
+        cause: "abandoned_on_close",
+        group_id,
+        attempt: 1,
+        ops,
+        error,
+    };
+    let _ = Capture::new(
+        EventKind::Error,
+        "Raft group disk: a write failed while the disk closed; it was abandoned",
+    )
+    .domain(&ctx)
+    .emit();
+}
+
+/// Report a Calvin verdict that differs from the verdict stored for the same
+/// transaction. Called from `note_verdict`, which keeps the stored one.
+pub fn calvin_verdict_conflict(
+    epoch: u64,
+    position: u32,
+    difference: &'static str,
+    kept: &str,
+    refused: &str,
+) {
+    let ctx = context::CalvinVerdictConflict {
+        epoch,
+        position,
+        difference,
+        kept,
+        refused,
+    };
+    let _ = Capture::new(
+        EventKind::InvariantViolation,
+        "Calvin completion: a verdict differs from the stored verdict of its transaction",
+    )
+    .domain(&ctx)
+    .with_backtrace()
+    .emit();
+}

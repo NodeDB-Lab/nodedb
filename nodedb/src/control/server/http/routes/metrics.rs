@@ -278,6 +278,13 @@ pub async fn metrics(
         );
     }
 
+    // Fail-stopped Raft group disks. A node with no Raft running reports 0,
+    // so the gauge is always there to alert on.
+    match state.shared.raft_disk_halts.get() {
+        Some(halts) => halts.write_prometheus(&mut output),
+        None => nodedb_cluster::group_disk::GroupDiskHalts::default().write_prometheus(&mut output),
+    }
+
     // Auth observability: method-specific counters, duration histograms, anomaly detection.
     output.push_str(&state.shared.auth_metrics.to_prometheus());
 

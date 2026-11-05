@@ -248,23 +248,42 @@ fn count_value(count: u64) -> Result<AggValue, Error> {
 }
 
 /// One msgpack array holding the already-encoded `rows`, the shape a local
-/// array read answers with.
-pub(super) fn encode_row_array(rows: &[Vec<u8>]) -> Vec<u8> {
+/// array read answers with. More rows than a msgpack array holds refuse with
+/// SQLSTATE `54000`.
+pub(super) fn encode_row_array(rows: &[Vec<u8>]) -> Result<Vec<u8>, Error> {
     let mut out = Vec::with_capacity(5 + rows.iter().map(Vec::len).sum::<usize>());
-    let n = rows.len();
-    if n <= 15 {
-        out.push(0x90 | (n as u8));
-    } else if n <= u16::MAX as usize {
-        out.push(0xdc);
-        out.extend_from_slice(&(n as u16).to_be_bytes());
-    } else {
-        out.push(0xdd);
-        out.extend_from_slice(&(n as u32).to_be_bytes());
-    }
+    write_array_header(&mut out, rows.len())?;
     for row in rows {
         out.extend_from_slice(row);
     }
-    out
+    Ok(out)
+}
+
+/// Write the msgpack array header for `len` elements. A msgpack array holds at
+/// most `u32::MAX` elements.
+fn write_array_header(out: &mut Vec<u8>, len: usize) -> Result<(), Error> {
+    if let Ok(fix) = u8::try_from(len)
+        && fix <= 15
+    {
+        out.push(0x90 | fix);
+    } else if let Ok(short) = u16::try_from(len) {
+        out.push(0xdc);
+        out.extend_from_slice(&short.to_be_bytes());
+    } else if let Ok(long) = u32::try_from(len) {
+        out.push(0xdd);
+        out.extend_from_slice(&long.to_be_bytes());
+    } else {
+        return Err(Error::DataPlane(
+            crate::bridge::envelope::ErrorCode::ProgramLimitExceeded {
+                detail: format!(
+                    "array read: {len} rows exceed the msgpack array limit of {}. \
+                     Narrow the read to fewer rows.",
+                    u32::MAX
+                ),
+            },
+        ));
+    }
+    Ok(())
 }
 
 /// Map an array coordinator error to an [`Error`].
@@ -395,6 +414,45 @@ pub(super) fn array_resp_msg_type(opcode: u32) -> Option<VShardMessageType> {
 mod tests {
     use super::*;
     use crate::bridge::envelope::ErrorCode;
+
+    /// Each array size takes the shortest msgpack header that holds it.
+    #[test]
+    fn an_array_header_takes_the_shortest_form() {
+        let header = |len: usize| {
+            let mut out = Vec::new();
+            write_array_header(&mut out, len).expect("in range");
+            out
+        };
+        assert_eq!(header(15), vec![0x9f]);
+        assert_eq!(header(16), vec![0xdc, 0, 16]);
+        assert_eq!(header(65_535), vec![0xdc, 0xff, 0xff]);
+        assert_eq!(header(65_536), vec![0xdd, 0, 1, 0, 0]);
+        assert_eq!(
+            header(u32::MAX as usize),
+            vec![0xdd, 0xff, 0xff, 0xff, 0xff]
+        );
+    }
+
+    /// A row count past `u32::MAX` refuses and never wraps to a small header.
+    #[test]
+    fn a_row_count_past_the_msgpack_limit_refuses() {
+        let mut out = Vec::new();
+        let refused = write_array_header(&mut out, u32::MAX as usize + 1);
+        assert!(matches!(
+            refused,
+            Err(Error::DataPlane(ErrorCode::ProgramLimitExceeded { .. }))
+        ));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn encoded_rows_follow_their_header() {
+        let rows = vec![vec![0x01], vec![0x02, 0x03]];
+        assert_eq!(
+            encode_row_array(&rows).expect("in range"),
+            vec![0x92, 0x01, 0x02, 0x03]
+        );
+    }
 
     /// A grouped row writes its dim value typed as the dim: a Float64 dim
     /// writes the float and a String dim the string, never a bit pattern or
