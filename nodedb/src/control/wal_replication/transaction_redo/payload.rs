@@ -9,6 +9,7 @@ use nodedb_physical::physical_plan::{
 
 use nodedb_types::calvin::VersionedReadEntry;
 
+use crate::control::server::shared::write_admission::plan_adds_storage;
 use crate::control::state::SharedState;
 use crate::control::surrogate::{CarriedIdentity, collect_plan_identities};
 use crate::control::wal_replication::types::CalvinRedoMeta;
@@ -50,6 +51,11 @@ pub struct TransactionRedoPayload {
     /// The snapshot every read observed. `None` validates nothing: an
     /// autocommit record, or a Calvin slice its stage vote validated.
     pub snapshot_ordinal: Option<i64>,
+    /// Whether the transaction can add stored bytes. The proposer sets it from
+    /// the buffered plans. A Calvin slice reads `false`, because the Calvin
+    /// submit classified it. A payload decoded from an entry reads `false`,
+    /// because only the leader gate reads the flag.
+    pub adds_storage: bool,
 }
 
 /// What a committed Calvin slice's redo carries beside its record, derived
@@ -94,6 +100,7 @@ impl TransactionRedoPayload {
             calvin: None,
             reads: Vec::new(),
             snapshot_ordinal: None,
+            adds_storage: plans.iter().any(plan_adds_storage),
         })
     }
 
@@ -129,6 +136,7 @@ impl TransactionRedoPayload {
             calvin: Some(meta),
             reads: Vec::new(),
             snapshot_ordinal: None,
+            adds_storage: false,
         }
     }
 
@@ -201,6 +209,7 @@ mod tests {
             calvin,
             reads: Vec::new(),
             snapshot_ordinal: None,
+            adds_storage: false,
         }
     }
 

@@ -66,19 +66,19 @@ pub fn append_cross_shard_balance_tasks(
         else {
             continue;
         };
+        let source = nodedb_types::CollectionKey::from_qualified_str(database_id, collection)?;
         let Some(bindings) = state.materialized_sum_index.bindings_for_source(
             catalog,
             schema_version,
             database_id,
             tenant_id,
-            strip_db_prefix(database_id, collection),
+            source.name(),
         )?
         else {
             continue;
         };
 
         let mut for_task = Vec::new();
-        let source = nodedb_types::CollectionKey::from_qualified_str(database_id, collection)?;
         for binding in bindings.iter() {
             if sum_target_is_co_resident(source, &binding.target_collection) {
                 continue;
@@ -268,14 +268,4 @@ fn decode_bodies<B: AsRef<[u8]>>(bodies: &[B]) -> Vec<serde_json::Value> {
         .iter()
         .filter_map(|body| nodedb_types::json_from_msgpack(body.as_ref()).ok())
         .collect()
-}
-
-/// Strip the `"<db_id>/"` prefix a planned collection name carries, yielding the
-/// catalog name the binding index is keyed on.
-fn strip_db_prefix(database_id: DatabaseId, qualified: &str) -> &str {
-    if database_id == DatabaseId::DEFAULT {
-        return qualified;
-    }
-    let prefix = format!("{}/", database_id.as_u64());
-    qualified.strip_prefix(prefix.as_str()).unwrap_or(qualified)
 }

@@ -165,7 +165,10 @@ pub async fn run_preexec_scan(
     }
     let scan_plan = PhysicalPlan::Document(DocumentOp::Scan {
         // `collection` is the dependent plan's database-qualified name.
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_string()),
+        collection: nodedb_types::QualifiedCollection::from_stored(
+            database_id,
+            collection.to_string(),
+        )?,
         filters: filter_bytes,
         limit: usize::MAX,
         offset: 0,

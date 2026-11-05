@@ -15,7 +15,7 @@ use crate::control::state::SharedState;
 use nodedb_physical::physical_plan::{DocumentOp, KvOp, PhysicalPlan};
 use nodedb_physical::physical_task::PhysicalTask;
 
-use super::util::{strip_db_prefix, synthetic_affected_response, write_err};
+use super::util::{synthetic_affected_response, write_err};
 use crate::types::TxnId;
 
 /// Outcome of write-path clone interception.
@@ -182,7 +182,8 @@ fn refuse_unsupported_clone_write(
     };
 
     let db_id = task.database_id;
-    let coll_name = strip_db_prefix(db_id, qualified);
+    // A plan names a collection qualified and an array bare.
+    let coll_name = nodedb_types::CollectionKey::from_relation_name(db_id, qualified)?.name();
     let catalog = state.credentials.catalog();
 
     let Some(desc) = catalog

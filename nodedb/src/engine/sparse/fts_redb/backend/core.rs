@@ -16,10 +16,12 @@ use nodedb_types::Surrogate;
 use super::segments::CompactCommit;
 use super::shared::redb_err;
 use crate::engine::durability_gate::GatedDatabase;
+use crate::engine::sparse::btree::storage_bytes::SPARSE_COUNTER;
 use crate::engine::sparse::fts_redb::tables::{
     DOC_FIELDS, DOC_LENGTHS, DOC_TERMS, INDEX_META, POSTINGS, SEGMENTS, STATS, TEXT_ENDED,
     TEXT_LIVE_BY_FROM, TEXT_LIVE_FROM,
 };
+use crate::engine::storage_bytes::ensure_storage_bytes_table;
 use crate::storage::quarantine::QuarantineRegistry;
 
 /// Redb-backed FTS backend.
@@ -72,6 +74,8 @@ impl RedbFtsBackend {
                 .open_table(TEXT_ENDED)
                 .map_err(|e| redb_err("create text ended table", e))?;
         }
+        // Read transactions open the stored-bytes counter before any write.
+        ensure_storage_bytes_table(&write_txn, SPARSE_COUNTER)?;
         write_txn.commit().map_err(|e| redb_err("commit init", e))?;
 
         Ok(Self {

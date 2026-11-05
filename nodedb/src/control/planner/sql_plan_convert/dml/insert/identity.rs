@@ -33,18 +33,16 @@ pub(super) fn extract_doc_id(row: &[(String, SqlValue)], primary_key: &str) -> D
 /// as not declared — nothing to enforce.
 pub(in super::super::super) fn declared_primary_key_name(
     ctx: &ConvertContext,
-    collection: &str,
+    key: CollectionKey<'_>,
 ) -> crate::Result<Option<String>> {
     let Some(credentials) = ctx.credentials.as_ref() else {
         return Ok(None);
     };
-    // `collection` can be bare or db-qualified. The catalog keys collections
-    // by the bare name.
-    let bare =
-        crate::control::target_identity::naming::bare_collection_name(ctx.database_id, collection);
-    credentials
-        .catalog()
-        .declared_primary_key(ctx.database_id, ctx.tenant_id.as_u64(), &bare)
+    credentials.catalog().declared_primary_key(
+        key.database_id(),
+        ctx.tenant_id.as_u64(),
+        key.name(),
+    )
 }
 
 /// Resolve a row's document id and surrogate, refusing a NULL or omitted

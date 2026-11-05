@@ -102,7 +102,9 @@ impl CoreLoop {
         self.checkpoint_coordinator.mark_dirty("vector", 1);
         // Sparse vectors are keyed by `doc_id: String` — no cross-engine
         // surrogate — so the write is noted with no row key.
-        self.note_collection_write(task, collection);
+        if let Err(e) = self.note_collection_write(task, collection) {
+            return self.response_error(task, e);
+        }
         self.response_ok(task)
     }
 
@@ -256,7 +258,9 @@ impl CoreLoop {
             self.checkpoint_coordinator.mark_dirty("vector", 1);
             // Sparse vectors are keyed by `doc_id: String` — no cross-engine
             // surrogate — so the write is noted with no row key.
-            self.note_collection_write(task, collection);
+            if let Err(e) = self.note_collection_write(task, collection) {
+                return self.response_error(task, e);
+            }
             self.response_ok(task)
         } else {
             self.response_error(task, ErrorCode::NotFound)

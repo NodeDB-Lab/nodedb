@@ -126,5 +126,7 @@ fn copy_payload(stored: &str, parts: Vec<CopyRecordPart>) -> TransactionRedoPayl
         // validate.
         reads: Vec::new(),
         snapshot_ordinal: None,
+        // A copy writes rows into the clone.
+        adds_storage: true,
     }
 }

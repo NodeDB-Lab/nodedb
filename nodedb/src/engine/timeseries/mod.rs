@@ -38,6 +38,7 @@ pub mod s3_archive;
 pub mod schema_evolution;
 pub mod segment_index;
 pub mod self_decode;
+pub mod series_key;
 pub mod simd_agg;
 pub mod skip_index;
 pub mod sparse_index;

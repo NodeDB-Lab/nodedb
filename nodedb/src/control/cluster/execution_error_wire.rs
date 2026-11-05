@@ -184,6 +184,7 @@ pub(crate) fn execution_error_to_typed(err: crate::Error) -> TypedClusterError {
         | crate::Error::OidcNoDefaultDatabase { .. }
         | crate::Error::TenantVectorDimExceeded { .. }
         | crate::Error::TenantGraphDepthExceeded { .. }
+        | crate::Error::StorageQuotaExceeded { .. }
         | crate::Error::RoleInheritanceCycle { .. }
         | crate::Error::RoleInheritanceDepthExceeded { .. }
         | crate::Error::OllpExhausted { .. }

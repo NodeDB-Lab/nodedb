@@ -20,10 +20,9 @@ use nodedb_sql::types::{SqlExpr, SqlValue};
 use crate::control::planner::sql_plan_convert::convert::ConvertContext;
 use crate::control::planner::sql_plan_convert::value::row_to_msgpack;
 
-/// `true` when `collection` is a CRDT document collection.
+/// `true` when `key` names a CRDT document collection.
 ///
-/// `collection` may be bare or db-qualified: the catalog keys collections by
-/// the bare name, so the lookup de-qualifies it.
+/// The lookup reads the catalog row `key` names.
 ///
 /// A genuine catalog READ error propagates: misrouting a write to the non-CRDT
 /// path would silently bypass CRDT convergence. An ABSENT credential store or
@@ -32,16 +31,14 @@ use crate::control::planner::sql_plan_convert::value::row_to_msgpack;
 /// `update_delete/shared.rs` exactly.
 pub(in crate::control::planner::sql_plan_convert::dml) fn document_collection_is_crdt(
     ctx: &ConvertContext,
-    collection: &str,
+    key: nodedb_types::CollectionKey<'_>,
 ) -> crate::Result<bool> {
     let Some(credentials) = ctx.credentials.as_ref() else {
         return Ok(false);
     };
     let catalog = credentials.catalog();
-    let bare =
-        crate::control::target_identity::naming::bare_collection_name(ctx.database_id, collection);
     Ok(catalog
-        .get_collection(ctx.database_id, ctx.tenant_id.as_u64(), &bare)?
+        .get_collection(key.database_id(), ctx.tenant_id.as_u64(), key.name())?
         .map(|c| c.crdt)
         .unwrap_or(false))
 }

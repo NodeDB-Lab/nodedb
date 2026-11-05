@@ -106,6 +106,7 @@ impl CoreLoop {
         let mut catalog = SeriesCatalog::new();
         let outcome = ilp_ingest::ingest_batch_with_lvc(ilp_ingest::IngestBatchArgs {
             memtable: &mut scratch,
+            database_id: task.request.database_id,
             lines,
             catalog: &mut catalog,
             default_timestamp_ms: now_ms,

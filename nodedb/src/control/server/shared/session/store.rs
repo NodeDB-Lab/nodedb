@@ -127,6 +127,23 @@ impl SessionStore {
             .collect()
     }
 
+    /// Count registered typed connections per current database.
+    ///
+    /// A connection without a current database counts under `DatabaseId::DEFAULT`.
+    /// Legacy socket-keyed sessions are not connections and never count.
+    pub fn connections_by_database(&self) -> HashMap<DatabaseId, u64> {
+        let sessions = self.sessions.read().unwrap_or_else(|p| p.into_inner());
+        let mut counts = HashMap::new();
+        for entry in sessions.values().filter(|e| e.metadata.is_some()) {
+            let db = entry
+                .session
+                .current_database
+                .unwrap_or(DatabaseId::DEFAULT);
+            *counts.entry(db).or_insert(0) += 1;
+        }
+        counts
+    }
+
     /// Snapshot only exact typed connections for administrative display.
     pub fn connection_snapshot_with_state(
         &self,
@@ -450,6 +467,31 @@ mod tests {
             store.fetch_cursor(session, "previous_database_cursor", 1),
             Err(crate::Error::BadRequest { detail }) if detail == "cursor \"previous_database_cursor\" does not exist"
         ));
+    }
+
+    #[test]
+    fn connections_by_database_counts_only_typed_connections() {
+        let store = SessionStore::new();
+        let metadata = ConnectionMetadata {
+            peer_addr: address(4000),
+            local_addr: address(5432),
+        };
+        let ids: Vec<ConnectionId> = (1..=4).map(|n| ConnectionId::new(n).unwrap()).collect();
+        for id in &ids {
+            store.register_connection(*id, metadata).unwrap();
+        }
+        store.set_current_database(ids[0], DatabaseId::new(7));
+        store.set_current_database(ids[1], DatabaseId::new(7));
+        store.set_current_database(ids[2], DatabaseId::new(8));
+        store.ensure_session(address(4001));
+        store.set_current_database(address(4001), DatabaseId::new(9));
+
+        let counts = store.connections_by_database();
+        assert_eq!(counts.get(&DatabaseId::new(7)), Some(&2));
+        assert_eq!(counts.get(&DatabaseId::new(8)), Some(&1));
+        assert_eq!(counts.get(&DatabaseId::DEFAULT), Some(&1));
+        assert_eq!(counts.get(&DatabaseId::new(9)), None);
+        assert_eq!(counts.values().sum::<u64>(), 4);
     }
 
     #[test]

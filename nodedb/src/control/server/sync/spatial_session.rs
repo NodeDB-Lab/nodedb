@@ -26,18 +26,16 @@ impl SyncSession {
     ) -> Option<SyncFrame> {
         self.last_activity = std::time::Instant::now();
 
-        if !self.authenticated {
+        if let Some(reason) = self.entry_refusal(&msg.collection) {
             let ack = SpatialInsertAckMsg {
                 collection: msg.collection.clone(),
                 field: msg.field.clone(),
                 doc_id: msg.doc_id.clone(),
                 batch_id: msg.batch_id,
                 accepted: false,
-                reject_reason: Some("unauthenticated".to_string()),
+                reject_reason: Some(reason.clone()),
                 applied_seq: 0,
-                status: AckStatus::Rejected {
-                    reason: "unauthenticated".to_string(),
-                },
+                status: AckStatus::Rejected { reason },
             };
             return SyncFrame::try_encode(SyncMessageType::SpatialInsertAck, &ack);
         }
@@ -199,18 +197,16 @@ impl SyncSession {
     ) -> Option<SyncFrame> {
         self.last_activity = std::time::Instant::now();
 
-        if !self.authenticated {
+        if let Some(reason) = self.entry_refusal(&msg.collection) {
             let ack = SpatialDeleteAckMsg {
                 collection: msg.collection.clone(),
                 field: msg.field.clone(),
                 doc_id: msg.doc_id.clone(),
                 batch_id: msg.batch_id,
                 accepted: false,
-                reject_reason: Some("unauthenticated".to_string()),
+                reject_reason: Some(reason.clone()),
                 applied_seq: 0,
-                status: AckStatus::Rejected {
-                    reason: "unauthenticated".to_string(),
-                },
+                status: AckStatus::Rejected { reason },
             };
             return SyncFrame::try_encode(SyncMessageType::SpatialDeleteAck, &ack);
         }

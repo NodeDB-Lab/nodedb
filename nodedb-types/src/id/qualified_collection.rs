@@ -12,6 +12,9 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use super::DatabaseId;
+use super::collection_key::{
+    CollectionKey, CollectionKeyError, QUALIFIER_SEPARATOR, parse_qualifier,
+};
 use crate::error::NodeDbError;
 
 /// A collection name qualified by its database.
@@ -50,10 +53,52 @@ impl QualifiedCollection {
     }
 
     /// Rebuild a `QualifiedCollection` from a string already qualified on
-    /// disk or on the wire. The only way to construct one without going
-    /// through `new`; never call this with an unqualified name.
-    pub fn from_stored(qualified: String) -> Self {
-        Self(qualified)
+    /// disk, on a plan, or on the wire.
+    ///
+    /// `stored` must have the form [`Self::new`] writes for `database_id`.
+    /// Any other form is [`CollectionKeyError::NotQualified`]. The empty
+    /// string is the no-collection sentinel and is accepted.
+    pub fn from_stored(
+        database_id: DatabaseId,
+        stored: String,
+    ) -> Result<Self, CollectionKeyError> {
+        CollectionKey::from_qualified_str(database_id, &stored)?;
+        Ok(Self(stored))
+    }
+
+    /// Qualify a collection name a caller supplied for `database_id`.
+    ///
+    /// A bare name qualifies through [`Self::new`]. A name that carries
+    /// exactly this database's qualifier is kept as it is. A name that
+    /// carries another database's qualifier is
+    /// [`CollectionKeyError::ForeignDatabase`]. An empty name, or a name
+    /// with any other `/`, is [`CollectionKeyError::InvalidName`].
+    pub fn from_request(
+        database_id: DatabaseId,
+        caller_form: &str,
+    ) -> Result<Self, CollectionKeyError> {
+        if CollectionKey::is_bare_name(caller_form) {
+            return Ok(Self::new(database_id, caller_form));
+        }
+        let invalid = || CollectionKeyError::InvalidName {
+            database_id: database_id.as_u64(),
+            name: caller_form.to_owned(),
+        };
+        let (head, bare) = caller_form
+            .split_once(QUALIFIER_SEPARATOR)
+            .ok_or_else(invalid)?;
+        if !CollectionKey::is_bare_name(bare) {
+            return Err(invalid());
+        }
+        match parse_qualifier(head) {
+            Some(raw) if raw == database_id.as_u64() => Ok(Self(caller_form.to_owned())),
+            Some(raw) => Err(CollectionKeyError::ForeignDatabase {
+                database_id: database_id.as_u64(),
+                foreign_database_id: raw,
+                name: caller_form.to_owned(),
+            }),
+            None => Err(invalid()),
+        }
     }
 
     pub fn as_str(&self) -> &str {
@@ -64,38 +109,23 @@ impl QualifiedCollection {
     /// qualifier [`Self::new`] writes outside the default database, else
     /// the default database.
     ///
-    /// A collection name never holds a `/`. A `/` after a non-numeric head
-    /// marks a malformed stored name and returns a serialization error.
+    /// A collection name never holds a `/`. A stored name with a qualifier
+    /// that is not a canonical non-default id, an empty tail, or a second
+    /// `/` is malformed and returns a serialization error.
     pub fn database_of_stored(qualified: &str) -> Result<DatabaseId, NodeDbError> {
-        match qualified.split_once('/') {
-            None => Ok(DatabaseId::DEFAULT),
-            Some((head, _)) => head.parse::<u64>().map(DatabaseId::new).map_err(|e| {
-                NodeDbError::serialization(
-                    "qualified collection name",
-                    format!("collection '{qualified}' has a non-numeric database qualifier: {e}"),
-                )
-            }),
+        let Some((head, bare)) = qualified.split_once(QUALIFIER_SEPARATOR) else {
+            return Ok(DatabaseId::DEFAULT);
+        };
+        match parse_qualifier(head) {
+            Some(raw) if CollectionKey::is_bare_name(bare) => Ok(DatabaseId::new(raw)),
+            _ => Err(NodeDbError::serialization(
+                "qualified collection name",
+                format!(
+                    "collection '{qualified}' is not a stored collection name: \
+                     expected '<name>' or '<database_id>/<name>'"
+                ),
+            )),
         }
-    }
-
-    /// The bare collection name of a stored name: the name without the
-    /// `{id}/` qualifier [`Self::new`] writes outside the default database.
-    /// A stored name in the default database is its bare name.
-    pub fn bare_of_stored(qualified: &str) -> &str {
-        match qualified.split_once('/') {
-            Some((head, bare)) if head.parse::<u64>().is_ok() => bare,
-            _ => qualified,
-        }
-    }
-
-    /// The collection name [`Self::new`] qualified for `database_id`: the
-    /// catalog key a collection lookup in that database takes.
-    pub fn collection_name(&self, database_id: DatabaseId) -> &str {
-        if database_id == DatabaseId::DEFAULT {
-            return &self.0;
-        }
-        let prefix = format!("{}/", database_id.as_u64());
-        self.0.strip_prefix(prefix.as_str()).unwrap_or(&self.0)
     }
 }
 
@@ -108,18 +138,6 @@ impl fmt::Display for QualifiedCollection {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_stored_name_names_its_bare_collection() {
-        assert_eq!(QualifiedCollection::bare_of_stored("users"), "users");
-        assert_eq!(QualifiedCollection::bare_of_stored("7/users"), "users");
-        assert_eq!(
-            QualifiedCollection::bare_of_stored(
-                QualifiedCollection::new(DatabaseId::new(9), "a/b").as_str()
-            ),
-            "a/b"
-        );
-    }
 
     #[test]
     fn a_stored_name_names_its_database() {
@@ -143,6 +161,12 @@ mod tests {
         let err = QualifiedCollection::database_of_stored("tenant/users")
             .expect_err("a non-numeric qualifier must fail");
         assert_eq!(err.code(), crate::error::ErrorCode::SERIALIZATION);
+        for malformed in ["7/a/b", "07/users", "0/users", "7/", "/users"] {
+            assert!(
+                QualifiedCollection::database_of_stored(malformed).is_err(),
+                "{malformed}"
+            );
+        }
     }
 
     #[test]
@@ -156,14 +180,6 @@ mod tests {
     fn non_default_database_yields_prefixed_name() {
         let q = QualifiedCollection::new(DatabaseId::new(7), "users");
         assert_eq!(q.as_str(), "7/users");
-    }
-
-    #[test]
-    fn collection_name_inverts_new() {
-        let q = QualifiedCollection::new(DatabaseId::new(7), "users");
-        assert_eq!(q.collection_name(DatabaseId::new(7)), "users");
-        let bare = QualifiedCollection::new(DatabaseId::DEFAULT, "users");
-        assert_eq!(bare.collection_name(DatabaseId::DEFAULT), "users");
     }
 
     #[test]
@@ -202,7 +218,70 @@ mod tests {
 
     #[test]
     fn from_stored_does_not_qualify() {
-        let q = QualifiedCollection::from_stored("7/users".to_string());
+        let q = QualifiedCollection::from_stored(DatabaseId::new(7), "7/users".to_string())
+            .expect("qualified for database 7");
         assert_eq!(q.as_str(), "7/users");
+    }
+
+    #[test]
+    fn from_stored_refuses_a_name_of_another_form() {
+        let db = DatabaseId::new(7);
+        for stored in ["users", "8/users", "7/a/b", "7/"] {
+            let err = QualifiedCollection::from_stored(db, stored.to_string()).expect_err(stored);
+            assert!(
+                matches!(err, CollectionKeyError::NotQualified { .. }),
+                "{stored}: {err}"
+            );
+        }
+        assert!(QualifiedCollection::from_stored(DatabaseId::DEFAULT, "7/users".into()).is_err());
+        assert!(QualifiedCollection::from_stored(db, String::new()).is_ok());
+    }
+
+    #[test]
+    fn from_request_qualifies_a_bare_name() {
+        let q = QualifiedCollection::from_request(DatabaseId::new(7), "users").expect("bare");
+        assert_eq!(q, QualifiedCollection::new(DatabaseId::new(7), "users"));
+        let q = QualifiedCollection::from_request(DatabaseId::DEFAULT, "users").expect("bare");
+        assert_eq!(q.as_str(), "users");
+    }
+
+    #[test]
+    fn from_request_keeps_this_database_qualifier() {
+        let q = QualifiedCollection::from_request(DatabaseId::new(7), "7/users").expect("own");
+        assert_eq!(q, QualifiedCollection::new(DatabaseId::new(7), "users"));
+    }
+
+    #[test]
+    fn from_request_refuses_a_foreign_qualifier() {
+        let err =
+            QualifiedCollection::from_request(DatabaseId::new(7), "8/users").expect_err("foreign");
+        assert_eq!(
+            err,
+            CollectionKeyError::ForeignDatabase {
+                database_id: 7,
+                foreign_database_id: 8,
+                name: "8/users".to_owned(),
+            }
+        );
+        assert!(matches!(
+            QualifiedCollection::from_request(DatabaseId::DEFAULT, "7/users"),
+            Err(CollectionKeyError::ForeignDatabase { .. })
+        ));
+    }
+
+    #[test]
+    fn from_request_refuses_a_malformed_name() {
+        let db = DatabaseId::new(7);
+        for name in ["", "/users", "7/", "7/a/b", "users/", "x/users", "07/users"] {
+            let err = QualifiedCollection::from_request(db, name).expect_err(name);
+            assert!(
+                matches!(err, CollectionKeyError::InvalidName { .. }),
+                "{name}: {err}"
+            );
+        }
+        assert!(matches!(
+            QualifiedCollection::from_request(DatabaseId::DEFAULT, "0/users"),
+            Err(CollectionKeyError::InvalidName { .. })
+        ));
     }
 }

@@ -7,7 +7,8 @@ use tokio::sync::OwnedMutexGuard;
 use crate::bridge::envelope::PhysicalPlan;
 use crate::control::server::shared::write_admission::gate::admit_routed;
 use crate::control::server::shared::write_admission::{
-    AdmissionTicket, WriteAdmission, WriteAdmissionGuard, WriteTarget,
+    AdmissionTicket, WriteAdmission, WriteAdmissionGuard, WriteTarget, check_storage_quota,
+    plan_adds_storage,
 };
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TenantId, VShardId};
@@ -24,6 +25,8 @@ pub(super) struct AdmissionTarget<'a> {
     /// applies it as a client write. A write of another event source waits
     /// for its keys instead.
     pub may_route: bool,
+    /// The write's event source. A follower apply replays an admitted entry.
+    pub event_source: crate::event::EventSource,
 }
 
 /// Outcome of the write-admission phase.
@@ -61,12 +64,25 @@ pub(super) async fn admit_write(
     ordering: WriteOrdering,
     deadline: std::time::Instant,
 ) -> crate::Result<AdmissionOutcome> {
+    // An ordered write applies on every replica. Refusing it here splits replicas.
+    if matches!(ordering, WriteOrdering::Gate) {
+        // A replicable write passes the same check at the leader gate and
+        // never reaches this funnel with `Gate`.
+        check_storage_quota(
+            shared,
+            target.database_id,
+            target.tenant_id,
+            target.event_source,
+            || Ok(plan_adds_storage(target.plan)),
+        )?;
+    }
     let AdmissionTarget {
         tenant_id,
         database_id,
         vshard_id,
         plan,
         may_route,
+        event_source: _,
     } = target;
     Ok(match ordering {
         WriteOrdering::AlreadyOrdered => AdmissionOutcome::Proceed {

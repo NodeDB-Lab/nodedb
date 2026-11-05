@@ -285,21 +285,6 @@ async fn rewrite_set_op(
     }
 }
 
-/// Strip the `"<db_id>/"` prefix added by `db_qualified()`, returning the
-/// bare collection name.  If the collection was stored without a prefix
-/// (default database, id == 0), the string is returned as-is.
-pub(super) fn strip_db_prefix(db_id: DatabaseId, qualified: &str) -> &str {
-    if db_id == DatabaseId::DEFAULT {
-        return qualified;
-    }
-    let prefix = format!("{}/", db_id.as_u64());
-    if let Some(stripped) = qualified.strip_prefix(prefix.as_str()) {
-        stripped
-    } else {
-        qualified
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::rewrite_system_time;
@@ -314,6 +299,12 @@ mod tests {
     use nodedb_types::vector_distance::DistanceMetric;
 
     const COLL: &str = "7/users";
+
+    /// `COLL` as database 7 stores it.
+    fn coll() -> QualifiedCollection {
+        QualifiedCollection::from_stored(nodedb_types::DatabaseId::new(7), COLL.to_string())
+            .expect("qualified for database 7")
+    }
 
     /// Wrap a plan the way the converter wraps every sharded source.
     fn gather(plan: PhysicalPlan) -> PhysicalPlan {
@@ -335,7 +326,7 @@ mod tests {
             (
                 "document_scan",
                 PhysicalPlan::Document(DocumentOp::Scan {
-                    collection: QualifiedCollection::from_stored(COLL.to_string()),
+                    collection: coll(),
                     limit: 10,
                     offset: 0,
                     sort_keys: Vec::new(),
@@ -352,7 +343,7 @@ mod tests {
             (
                 "columnar_scan",
                 PhysicalPlan::Columnar(ColumnarOp::Scan {
-                    collection: QualifiedCollection::from_stored(COLL.to_string()),
+                    collection: coll(),
                     projection: Vec::new(),
                     limit: 10,
                     filters: Vec::new(),
@@ -367,7 +358,7 @@ mod tests {
             (
                 "partial_aggregate",
                 PhysicalPlan::Query(QueryOp::PartialAggregate {
-                    collection: QualifiedCollection::from_stored(COLL.to_string()),
+                    collection: coll(),
                     group_by: Vec::new(),
                     aggregates: Vec::new(),
                     filters: Vec::new(),
@@ -377,7 +368,7 @@ mod tests {
             (
                 "partial_aggregate_state",
                 PhysicalPlan::Query(QueryOp::PartialAggregateState {
-                    collection: QualifiedCollection::from_stored(COLL.to_string()),
+                    collection: coll(),
                     input: None,
                     group_by: Vec::new(),
                     aggregates: Vec::new(),
@@ -388,7 +379,7 @@ mod tests {
             (
                 "vector_search",
                 PhysicalPlan::Vector(VectorOp::Search {
-                    collection: QualifiedCollection::from_stored(COLL.to_string()),
+                    collection: coll(),
                     query_vector: vec![0.0, 1.0],
                     top_k: 4,
                     ef_search: 16,
@@ -406,7 +397,7 @@ mod tests {
             (
                 "text_search",
                 PhysicalPlan::Text(TextOp::Search {
-                    collection: QualifiedCollection::from_stored(COLL.to_string()),
+                    collection: coll(),
                     field: None,
                     query: "hello".to_string(),
                     top_k: 4,
@@ -422,7 +413,7 @@ mod tests {
             (
                 "text_bm25_score_scan",
                 PhysicalPlan::Text(TextOp::BM25ScoreScan {
-                    collection: QualifiedCollection::from_stored(COLL.to_string()),
+                    collection: coll(),
                     filters: Vec::new(),
                     rls_filters: Vec::new(),
                     scores: vec![nodedb_physical::physical_plan::TextScoreSpec {
@@ -439,7 +430,7 @@ mod tests {
             (
                 "text_hybrid_search",
                 PhysicalPlan::Text(TextOp::HybridSearch {
-                    collection: QualifiedCollection::from_stored(COLL.to_string()),
+                    collection: coll(),
                     vector_field: String::new(),
                     query_vector: vec![0.0, 1.0],
                     text_field: None,
@@ -459,7 +450,7 @@ mod tests {
             (
                 "text_hybrid_search_triple",
                 PhysicalPlan::Text(TextOp::HybridSearchTriple {
-                    collection: QualifiedCollection::from_stored(COLL.to_string()),
+                    collection: coll(),
                     vector_field: String::new(),
                     query_vector: vec![0.0, 1.0],
                     text_field: None,
@@ -482,7 +473,7 @@ mod tests {
             (
                 "graph_rag_fusion",
                 PhysicalPlan::Graph(GraphOp::RagFusion {
-                    collection: QualifiedCollection::from_stored(COLL.to_string()),
+                    collection: coll(),
                     query_vector: vec![0.0, 1.0],
                     vector_top_k: 4,
                     edge_label: None,

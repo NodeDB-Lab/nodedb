@@ -202,14 +202,21 @@ impl CoreLoop {
                     skipped += 1;
                     continue;
                 };
+                let Some(qualified) = self.replay_qualified(
+                    "fts",
+                    record_lsn,
+                    database_id,
+                    payload.collection.clone(),
+                ) else {
+                    skipped += 1;
+                    continue;
+                };
                 let task = Self::replay_fts_task(
                     nodedb_types::TenantId::new(tenant_id),
                     database_id,
                     vshard,
                     PhysicalPlan::Text(TextOp::FtsIndexDoc {
-                        collection: nodedb_types::QualifiedCollection::from_stored(
-                            payload.collection.clone(),
-                        ),
+                        collection: qualified,
                         surrogate,
                         fields: payload.fields.clone(),
                         provenance: Some(prov.clone()),
@@ -315,14 +322,21 @@ impl CoreLoop {
                     skipped += 1;
                     continue;
                 };
+                let Some(qualified) = self.replay_qualified(
+                    "fts",
+                    record_lsn,
+                    database_id,
+                    payload.collection.clone(),
+                ) else {
+                    skipped += 1;
+                    continue;
+                };
                 let task = Self::replay_fts_task(
                     nodedb_types::TenantId::new(tenant_id),
                     database_id,
                     vshard,
                     PhysicalPlan::Text(TextOp::FtsDeleteDoc {
-                        collection: nodedb_types::QualifiedCollection::from_stored(
-                            payload.collection.clone(),
-                        ),
+                        collection: qualified,
                         surrogate,
                         provenance: Some(prov.clone()),
                     }),

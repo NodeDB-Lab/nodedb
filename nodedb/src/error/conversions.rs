@@ -78,13 +78,24 @@ impl From<crate::engine::kv::KvHistoryOverlap> for Error {
     }
 }
 
-/// A qualified collection name that does not carry its database's qualifier
-/// reached a placement or surrogate path. Every qualified name is built by
-/// `QualifiedCollection::new`, so this is an internal invariant break.
+/// A collection name that does not have its database's form.
+///
+/// A stored or plan-carried name comes from `QualifiedCollection::new`, so
+/// `NotQualified` is an internal invariant break. `ForeignDatabase` and
+/// `InvalidName` come from a caller-supplied name. They render as
+/// SQLSTATE `42601`, the code CREATE COLLECTION gives an invalid name.
 impl From<nodedb_types::CollectionKeyError> for Error {
     fn from(e: nodedb_types::CollectionKeyError) -> Self {
-        Error::Internal {
-            detail: e.to_string(),
+        use nodedb_types::CollectionKeyError;
+        match e {
+            CollectionKeyError::NotQualified { .. } => Error::Internal {
+                detail: e.to_string(),
+            },
+            CollectionKeyError::ForeignDatabase { .. } | CollectionKeyError::InvalidName { .. } => {
+                Error::BadRequest {
+                    detail: e.to_string(),
+                }
+            }
         }
     }
 }

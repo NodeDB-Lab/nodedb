@@ -11,9 +11,7 @@
 use nodedb_types::{DatabaseId, Surrogate, TenantId};
 
 use crate::control::state::SharedState;
-use crate::control::target_identity::{
-    TargetPk, assign_target_surrogates, bare_collection_name, resolve_target_pk,
-};
+use crate::control::target_identity::{TargetPk, assign_target_surrogates, resolve_target_pk};
 use crate::engine::document::store::StorageKey;
 
 /// Resolved, per-statement copy context shared across every source batch.
@@ -38,7 +36,7 @@ pub(crate) fn resolve_copy_spec(
         .get_collection(
             database_id,
             tenant_id.as_u64(),
-            &bare_collection_name(database_id, target_collection),
+            nodedb_types::CollectionKey::from_qualified_str(database_id, target_collection)?.name(),
         )?
         .ok_or_else(|| crate::Error::CollectionNotFound {
             tenant_id,

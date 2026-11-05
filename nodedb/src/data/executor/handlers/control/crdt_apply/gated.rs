@@ -408,8 +408,8 @@ impl CoreLoop {
                 &bytes,
             );
         }
-        if imported_authoritative {
-            self.note_collection_write(task, collection);
+        if imported_authoritative && let Err(e) = self.note_collection_write(task, collection) {
+            return self.response_error(task, e);
         }
 
         // The high-water-mark and the client-visible frame are decided

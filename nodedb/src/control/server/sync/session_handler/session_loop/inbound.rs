@@ -226,11 +226,21 @@ async fn handle_crdt(
     frame: &SyncFrame,
 ) -> Flow {
     // Decode the CRDT message once for authorization and final dispatch.
-    let delta_msg = if frame.msg_type == SyncMessageType::DeltaPush {
+    let mut delta_msg = if frame.msg_type == SyncMessageType::DeltaPush {
         frame.decode_body::<DeltaPushMsg>()
     } else {
         None
     };
+
+    // A foreign or malformed collection name is refused before authorization.
+    if let Some(delta_msg) = delta_msg.as_mut()
+        && let Some(refusal) = session.refuse_delta_collection(delta_msg)
+    {
+        if !send(ws, &refusal).await {
+            return Flow::Break;
+        }
+        return Flow::Continue;
+    }
 
     if let Some(delta_msg) = delta_msg.as_ref() {
         let authorized = shared.as_ref().is_some_and(|shared| {

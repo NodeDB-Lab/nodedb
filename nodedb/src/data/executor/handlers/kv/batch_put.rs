@@ -160,7 +160,9 @@ impl CoreLoop {
         // version against that single LSN.
         if task.wal_lsn().is_some() {
             for row in &rows {
-                self.note_kv_write(task, did, tid, collection, row.key);
+                if let Err(e) = self.note_kv_write(task, did, tid, collection, row.key) {
+                    return self.response_error(task, e);
+                }
             }
         }
         if let Some(spec) = returning {

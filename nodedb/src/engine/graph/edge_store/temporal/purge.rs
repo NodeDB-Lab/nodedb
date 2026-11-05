@@ -18,6 +18,10 @@
 
 use super::keys::{is_tombstone, parse_versioned_edge_key, versioned_edge_key};
 use super::visibility::{EDGE_APPLIED, EDGE_CUTS, ReadVisibility, cut_key, read_visibility};
+use crate::engine::graph::edge_store::home_bytes::EdgeStorageDelta;
+use crate::engine::graph::edge_store::storage_bytes::{
+    EDGE_COUNTER, remove_applied_row, remove_edge_row,
+};
 use crate::engine::graph::edge_store::store::{EDGES, EdgeStore, REVERSE_EDGES, redb_err};
 use nodedb_types::TenantId;
 use nodedb_types::temporal::ms_to_ordinal_upper;
@@ -70,6 +74,7 @@ impl EdgeStore {
             .db
             .begin_write()
             .map_err(|e| redb_err("begin_write purge", e))?;
+        let mut delta = EdgeStorageDelta::default();
         {
             let mut edges = write_txn
                 .open_table(EDGES)
@@ -81,14 +86,12 @@ impl EdgeStore {
                 .open_table(EDGE_APPLIED)
                 .map_err(|e| redb_err("open edge_applied purge", e))?;
             for v in &victims {
-                edges
-                    .remove((db, t, v.fwd_key.as_str()))
-                    .map_err(|e| redb_err("remove edge", e))?;
-                rev.remove((db, t, v.rev_key.as_str()))
-                    .map_err(|e| redb_err("remove reverse", e))?;
-                applied
-                    .remove((db, t, v.fwd_key.as_str()))
-                    .map_err(|e| redb_err("remove edge applied ordinal", e))?;
+                let fwd = (db, t, v.fwd_key.as_str());
+                remove_edge_row(&mut edges, fwd, &mut delta, "remove edge")?;
+                let rev_key = (db, t, v.rev_key.as_str());
+                remove_edge_row(&mut rev, rev_key, &mut delta, "remove reverse")?;
+                let what = "remove edge applied ordinal";
+                remove_applied_row(&mut applied, fwd, &mut delta, what)?;
             }
             let mut cut_rows = write_txn
                 .open_table(EDGE_CUTS)
@@ -100,6 +103,7 @@ impl EdgeStore {
                     .map_err(|e| redb_err("remove edge cut", e))?;
             }
         }
+        delta.apply(&write_txn, EDGE_COUNTER)?;
         write_txn
             .commit()
             .map_err(|e| redb_err("commit purge", e))?;

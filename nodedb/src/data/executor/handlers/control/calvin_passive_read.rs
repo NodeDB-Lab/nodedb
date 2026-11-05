@@ -15,7 +15,7 @@
 //! The engines key their tables by that same string.
 
 use nodedb_physical::physical_plan::meta::PassiveReadKeyId;
-use nodedb_types::{QualifiedCollection, StorageKey, Surrogate, Value};
+use nodedb_types::{DatabaseId, QualifiedCollection, StorageKey, Surrogate, Value};
 
 use crate::bridge::envelope::ErrorCode;
 use crate::data::executor::core_loop::CoreLoop;
@@ -58,32 +58,27 @@ impl CoreLoop {
                                 "calvin passive read of {collection} row {surrogate}: {e}"
                             ),
                         })?;
+                    let qualified = passive_collection(database_id, collection)?;
                     Ok((
-                        PassiveReadKeyId::surrogate(
-                            QualifiedCollection::from_stored(collection.clone()),
-                            surrogate,
-                        ),
+                        PassiveReadKeyId::surrogate(qualified, surrogate),
                         stored_value(stored),
                     ))
                 })
                 .collect(),
             EngineKeySet::Kv { collection, keys } => {
                 let now_ms = current_ms();
-                Ok(keys
-                    .iter()
+                keys.iter()
                     .map(|key| {
                         let stored = self
                             .kv_engine
                             .get(database_id, tid, collection, key, now_ms);
-                        (
-                            PassiveReadKeyId::kv(
-                                QualifiedCollection::from_stored(collection.clone()),
-                                key.clone(),
-                            ),
+                        let qualified = passive_collection(database_id, collection)?;
+                        Ok((
+                            PassiveReadKeyId::kv(qualified, key.clone()),
                             stored_value(stored),
-                        )
+                        ))
                     })
-                    .collect())
+                    .collect()
             }
             EngineKeySet::Vector { collection, .. }
             | EngineKeySet::Edge { collection, .. }
@@ -97,6 +92,15 @@ impl CoreLoop {
             }),
         }
     }
+}
+
+/// The stored collection a passive read names, checked against its database.
+fn passive_collection(
+    database_id: u64,
+    collection: &str,
+) -> Result<QualifiedCollection, ErrorCode> {
+    QualifiedCollection::from_stored(DatabaseId::new(database_id), collection.to_owned())
+        .map_err(|e| ErrorCode::from(crate::Error::from(e)))
 }
 
 /// The value a passive read reports for a row: its stored bytes, or `Null`

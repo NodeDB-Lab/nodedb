@@ -133,6 +133,10 @@ impl CoreLoop {
                 self.execute_refresh_graph_count(task, hosted_vshards)
             }
 
+            MetaOp::QueryStorageBytes { led_vshards } => {
+                self.execute_query_storage_bytes(task, led_vshards)
+            }
+
             MetaOp::ConvertCollection {
                 collection,
                 target_type,

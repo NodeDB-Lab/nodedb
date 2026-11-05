@@ -10,6 +10,7 @@ use crate::data::executor::task::ExecutionTask;
 use crate::types::Lsn;
 
 use super::super::CoreLoop;
+use super::super::newest_ordinals::collection_vshard;
 use super::keys::{KeyRepr, WriteStamp};
 
 impl CoreLoop {
@@ -54,12 +55,15 @@ impl CoreLoop {
         collection: &str,
         key: Option<KeyRepr>,
         stamp: WriteStamp,
-    ) {
+    ) -> crate::Result<()> {
+        // A name that does not match `db` is refused here, before a deferred
+        // note could carry it past the install.
+        collection_vshard(db, collection)?;
         if let Some(scope) = self.redo_apply.scope.as_mut() {
             scope.defer_write(db, tenant, collection, key, stamp);
-            return;
+            return Ok(());
         }
-        self.publish_write(db, tenant, collection, key, stamp);
+        self.publish_write(db, tenant, collection, key, stamp)
     }
 
     /// Publish a write note: the write lands in the newest-ordinal cache, and
@@ -71,9 +75,10 @@ impl CoreLoop {
         collection: &str,
         key: Option<KeyRepr>,
         stamp: WriteStamp,
-    ) {
-        self.track_newest_write(db, tenant, collection, key.as_ref(), stamp.vshard);
+    ) -> crate::Result<()> {
+        self.track_newest_write(db, tenant, collection, key.as_ref(), stamp.vshard)?;
         self.publish_applied(stamp);
+        Ok(())
     }
 
     /// Note the write's LSN as applied and advance the core watermark
@@ -99,12 +104,13 @@ impl CoreLoop {
         tenant: TenantId,
         collection: &str,
         stamp: WriteStamp,
-    ) {
+    ) -> crate::Result<()> {
+        collection_vshard(db, collection)?;
         if let Some(scope) = self.redo_apply.scope.as_mut() {
             scope.defer_collection_wipe(db, tenant, collection, stamp);
-            return;
+            return Ok(());
         }
-        self.publish_collection_wipe(db, tenant, collection, stamp);
+        self.publish_collection_wipe(db, tenant, collection, stamp)
     }
 
     /// Publish a wipe note: forget the collection's cached newest ordinals,
@@ -115,15 +121,16 @@ impl CoreLoop {
         tenant: TenantId,
         collection: &str,
         stamp: WriteStamp,
-    ) {
+    ) -> crate::Result<()> {
         self.newest_ordinals.forget_collection(
             db,
             tenant,
             collection,
-            crate::data::executor::core_loop::newest_ordinals::collection_vshard(db, collection),
+            collection_vshard(db, collection)?,
         );
         self.newest_ordinals.forget_vshard(stamp.vshard);
         self.publish_applied(stamp);
+        Ok(())
     }
 
     /// Note a committed whole-collection removal, if `task` carries a WAL
@@ -133,15 +140,16 @@ impl CoreLoop {
         task: &ExecutionTask,
         tid: u64,
         collection: &str,
-    ) {
+    ) -> crate::Result<()> {
         if let Some(stamp) = self.task_write_stamp(task) {
             self.note_collection_wipe(
                 task.request.database_id,
                 TenantId::new(tid),
                 collection,
                 stamp,
-            );
+            )?;
         }
+        Ok(())
     }
 
     /// Note a committed write with no row key, if `task` carries a WAL
@@ -152,7 +160,7 @@ impl CoreLoop {
         &mut self,
         task: &ExecutionTask,
         collection: &str,
-    ) {
+    ) -> crate::Result<()> {
         if let Some(stamp) = self.task_write_stamp(task) {
             self.note_write(
                 task.request.database_id,
@@ -160,8 +168,9 @@ impl CoreLoop {
                 collection,
                 None,
                 stamp,
-            );
+            )?;
         }
+        Ok(())
     }
 
     /// Note a committed document/vector write, keyed by the written row's
@@ -174,7 +183,7 @@ impl CoreLoop {
         tid: u64,
         collection: &str,
         surrogate: u32,
-    ) {
+    ) -> crate::Result<()> {
         if let Some(stamp) = self.task_write_stamp(task) {
             self.note_write(
                 task.request.database_id,
@@ -182,8 +191,9 @@ impl CoreLoop {
                 collection,
                 Some(KeyRepr::Surrogate(surrogate)),
                 stamp,
-            );
+            )?;
         }
+        Ok(())
     }
 
     /// Note a write a replay arm applied from the WAL record at
@@ -205,8 +215,20 @@ impl CoreLoop {
         record_lsn: u64,
     ) {
         let db = DatabaseId::new(database_id);
-        if let Some(stamp) = self.replay_stamp(db, collection, record_lsn) {
-            self.note_write(db, TenantId::new(tenant_id), collection, key, stamp);
+        let noted = match self.replay_stamp(db, collection, record_lsn) {
+            Some(Ok(stamp)) => {
+                self.note_write(db, TenantId::new(tenant_id), collection, key, stamp)
+            }
+            Some(Err(error)) => Err(error),
+            None => Ok(()),
+        };
+        if let Err(error) = noted {
+            self.replay_record_unapplied(
+                "write_note",
+                "collection key",
+                record_lsn,
+                &error.to_string(),
+            );
         }
     }
 
@@ -220,8 +242,20 @@ impl CoreLoop {
         record_lsn: u64,
     ) {
         let db = DatabaseId::new(database_id);
-        if let Some(stamp) = self.replay_stamp(db, collection, record_lsn) {
-            self.note_collection_wipe(db, TenantId::new(tenant_id), collection, stamp);
+        let noted = match self.replay_stamp(db, collection, record_lsn) {
+            Some(Ok(stamp)) => {
+                self.note_collection_wipe(db, TenantId::new(tenant_id), collection, stamp)
+            }
+            Some(Err(error)) => Err(error),
+            None => Ok(()),
+        };
+        if let Err(error) = noted {
+            self.replay_record_unapplied(
+                "write_note",
+                "collection key",
+                record_lsn,
+                &error.to_string(),
+            );
         }
     }
 
@@ -232,18 +266,16 @@ impl CoreLoop {
         db: DatabaseId,
         collection: &str,
         record_lsn: u64,
-    ) -> Option<WriteStamp> {
+    ) -> Option<crate::Result<WriteStamp>> {
         if record_lsn == 0 {
             return None;
         }
         Some(match self.record_stamps.get(record_lsn) {
-            Some(stamp) => stamp,
-            None => WriteStamp {
-                vshard: crate::data::executor::core_loop::newest_ordinals::collection_vshard(
-                    db, collection,
-                ),
+            Some(stamp) => Ok(stamp),
+            None => collection_vshard(db, collection).map(|vshard| WriteStamp {
+                vshard,
                 lsn: Lsn::new(record_lsn),
-            },
+            }),
         })
     }
 }

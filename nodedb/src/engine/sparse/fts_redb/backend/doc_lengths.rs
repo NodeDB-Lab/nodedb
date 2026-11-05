@@ -11,8 +11,11 @@ use redb::{ReadableDatabase, ReadableTable};
 
 use super::core::RedbFtsBackend;
 use super::shared::redb_err;
+use crate::engine::sparse::btree::storage_bytes::SPARSE_COUNTER;
+use crate::engine::sparse::fts_redb::bytes::{put_doc_row, remove_doc_row};
 use crate::engine::sparse::fts_redb::keys::doc_key;
 use crate::engine::sparse::fts_redb::tables::DOC_LENGTHS;
+use crate::engine::storage_bytes::StorageDelta;
 
 pub(super) fn read(
     backend: &RedbFtsBackend,
@@ -116,16 +119,22 @@ pub(super) fn write(
         .db
         .begin_write()
         .map_err(|e| redb_err("write txn", e))?;
+    let mut delta = StorageDelta::default();
     {
         let mut table = write_txn
             .open_table(DOC_LENGTHS)
             .map_err(|e| redb_err("open doc_lengths", e))?;
         let bytes =
             zerompk::to_msgpack_vec(&length).map_err(|e| redb_err("serialize doc_len", e))?;
-        table
-            .insert(doc_key(database_id, tid, index, doc_id), bytes.as_slice())
-            .map_err(|e| redb_err("insert doc_len", e))?;
+        put_doc_row(
+            &mut table,
+            doc_key(database_id, tid, index, doc_id),
+            bytes.as_slice(),
+            &mut delta,
+        )
+        .map_err(|e| redb_err("insert doc_len", e))?;
     }
+    delta.apply(&write_txn, SPARSE_COUNTER)?;
     write_txn.commit().map_err(|e| redb_err("commit", e))?;
     Ok(())
 }
@@ -141,14 +150,19 @@ pub(super) fn remove(
         .db
         .begin_write()
         .map_err(|e| redb_err("write txn", e))?;
+    let mut delta = StorageDelta::default();
     {
         let mut table = write_txn
             .open_table(DOC_LENGTHS)
             .map_err(|e| redb_err("open doc_lengths", e))?;
-        table
-            .remove(doc_key(database_id, tid, index, doc_id))
-            .map_err(|e| redb_err("remove doc_len", e))?;
+        remove_doc_row(
+            &mut table,
+            doc_key(database_id, tid, index, doc_id),
+            &mut delta,
+        )
+        .map_err(|e| redb_err("remove doc_len", e))?;
     }
+    delta.apply(&write_txn, SPARSE_COUNTER)?;
     write_txn.commit().map_err(|e| redb_err("commit", e))?;
     Ok(())
 }

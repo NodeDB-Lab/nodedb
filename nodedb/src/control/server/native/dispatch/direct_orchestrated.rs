@@ -46,7 +46,12 @@ pub(super) async fn dispatch_orchestrated(
         let task = bare_task(ctx, plan, vshard_id);
         // A copy into the source of a cross-shard materialized sum runs in the
         // implicit transaction, which ships each balance to its target.
-        if !statement_needs_implicit_txn(ctx.state, std::slice::from_ref(&task)) {
+        let needs_implicit_txn =
+            match statement_needs_implicit_txn(ctx.state, std::slice::from_ref(&task)) {
+                Ok(needs) => needs,
+                Err(error) => return Some(error_to_native(seq, &error)),
+            };
+        if !needs_implicit_txn {
             let authorized = match super::sql_gateway::authorize_native_task(ctx, &task) {
                 Ok(authorized) => authorized,
                 Err(error) => return Some(error_to_native(seq, &error)),
@@ -76,7 +81,12 @@ pub(super) async fn dispatch_orchestrated(
         // cross-shard materialized sum, runs in the implicit transaction. It
         // stages each removed row's edge tasks and ships each balance to its
         // target.
-        if !statement_needs_implicit_txn(ctx.state, std::slice::from_ref(&task)) {
+        let needs_implicit_txn =
+            match statement_needs_implicit_txn(ctx.state, std::slice::from_ref(&task)) {
+                Ok(needs) => needs,
+                Err(error) => return Some(error_to_native(seq, &error)),
+            };
+        if !needs_implicit_txn {
             let authorized = match super::sql_gateway::authorize_native_task(ctx, &task) {
                 Ok(authorized) => authorized,
                 Err(error) => return Some(error_to_native(seq, &error)),
@@ -104,7 +114,12 @@ pub(super) async fn dispatch_orchestrated(
         let task = bare_task(ctx, plan, vshard_id);
         // An update of the source of a cross-shard materialized sum runs in the
         // implicit transaction, which ships each balance to its target.
-        if !statement_needs_implicit_txn(ctx.state, std::slice::from_ref(&task)) {
+        let needs_implicit_txn =
+            match statement_needs_implicit_txn(ctx.state, std::slice::from_ref(&task)) {
+                Ok(needs) => needs,
+                Err(error) => return Some(error_to_native(seq, &error)),
+            };
+        if !needs_implicit_txn {
             let authorized = match super::sql_gateway::authorize_native_task(ctx, &task) {
                 Ok(authorized) => authorized,
                 Err(error) => return Some(error_to_native(seq, &error)),

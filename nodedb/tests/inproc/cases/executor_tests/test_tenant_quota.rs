@@ -90,18 +90,17 @@ fn memory_enforcement() {
     assert!(iso.check(t(1)).is_allowed());
 }
 
+/// Storage is enforced at write admission, against the cluster total. The
+/// tenant check stays open, so reads and deletes reach an over-limit tenant.
 #[test]
-fn storage_enforcement() {
+fn storage_over_limit_leaves_the_tenant_check_open() {
     let mut iso = TenantIsolation::new(TenantQuota {
         max_storage_bytes: 5000,
         ..Default::default()
     });
 
     iso.update_storage(t(1), 6000);
-    assert!(matches!(
-        iso.check(t(1)),
-        QuotaCheck::StorageExceeded { .. }
-    ));
+    assert!(iso.check(t(1)).is_allowed());
 }
 
 #[test]

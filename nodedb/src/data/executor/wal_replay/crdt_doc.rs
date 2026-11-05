@@ -92,8 +92,13 @@ impl CoreLoop {
             } => {
                 let document_id = RowIdentity::from_user_key(document_id);
                 let surrogate = Surrogate::new(surrogate);
+                let Some(qualified) =
+                    self.replay_qualified("crdt", record_lsn, database_id, collection.clone())
+                else {
+                    return Some(0);
+                };
                 let plan = PhysicalPlan::Crdt(CrdtOp::DocUpsert {
-                    collection: nodedb_types::QualifiedCollection::from_stored(collection.clone()),
+                    collection: qualified,
                     document_id: document_id.clone().into_string(),
                     fields_json: fields_json.clone(),
                     surrogate,
@@ -134,8 +139,13 @@ impl CoreLoop {
             } => {
                 let document_id = RowIdentity::from_user_key(document_id);
                 let surrogate = Surrogate::new(surrogate);
+                let Some(qualified) =
+                    self.replay_qualified("crdt", record_lsn, database_id, collection.clone())
+                else {
+                    return Some(0);
+                };
                 let plan = PhysicalPlan::Crdt(CrdtOp::DocDelete {
-                    collection: nodedb_types::QualifiedCollection::from_stored(collection.clone()),
+                    collection: qualified,
                     document_id: document_id.clone().into_string(),
                     surrogate: Some(surrogate),
                     returning: None,

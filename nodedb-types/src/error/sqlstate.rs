@@ -226,6 +226,9 @@ pub const UNDEFINED_FUNCTION: &str = "42883";
 
 // ── Class 53 — Insufficient Resources ────────────────────────────────────────
 
+/// `53100` — `disk_full` (a database or tenant is at its `max_storage_bytes`)
+pub const DISK_FULL: &str = "53100";
+
 /// `53200` — `out_of_memory`
 pub const OUT_OF_MEMORY: &str = "53200";
 
@@ -455,6 +458,7 @@ mod tests {
             CANNOT_COERCE,
             UNDEFINED_TABLE,
             UNDEFINED_FUNCTION,
+            DISK_FULL,
             OUT_OF_MEMORY,
             TOO_MANY_CONNECTIONS,
             CONFIGURATION_LIMIT_EXCEEDED,

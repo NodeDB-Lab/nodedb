@@ -202,13 +202,15 @@ impl CoreLoop {
         if wal_lsn > 0 {
             let lsn = crate::types::Lsn::new(wal_lsn);
             let stamp = self.task_write_stamp_at(task, lsn);
+            let stored =
+                nodedb_types::QualifiedCollection::new(task.request.database_id, &array_id.name);
             self.note_write(
                 task.request.database_id,
                 task.request.tenant_id,
-                &array_id.name,
+                stored.as_str(),
                 None,
                 stamp,
-            );
+            )?;
             self.floors.applied_prefix.note_applied(lsn);
         }
         self.flush_array_if_full(array_id)

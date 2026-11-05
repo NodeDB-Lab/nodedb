@@ -186,3 +186,8 @@ pub const VSHARD_ARRAY_SHARD_ELEMENTWISE_REQ: u16 = 90;
 pub const VSHARD_ARRAY_SHARD_ELEMENTWISE_RESP: u16 = 91;
 pub const VSHARD_ARRAY_SHARD_MAINT_REQ: u16 = 92;
 pub const VSHARD_ARRAY_SHARD_MAINT_RESP: u16 = 93;
+
+// VShardMessageType discriminants for storage accounting (u16). These mirror
+// `crate::wire::VShardMessageType` repr values.
+pub const VSHARD_STORAGE_SHARE_REQ: u16 = 100;
+pub const VSHARD_STORAGE_SHARE_RESP: u16 = 101;

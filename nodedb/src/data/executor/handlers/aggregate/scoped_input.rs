@@ -32,10 +32,13 @@ impl CoreLoop {
         tid: u64,
         collection: &str,
         system_time: SystemTimeScope,
-    ) -> PhysicalPlan {
-        let qualified = QualifiedCollection::from_stored(collection.to_string());
+    ) -> crate::Result<PhysicalPlan> {
+        let qualified = QualifiedCollection::from_stored(
+            nodedb_types::DatabaseId::new(did),
+            collection.to_string(),
+        )?;
         if self.is_timeseries_collection(did, tid, collection) {
-            return PhysicalPlan::Timeseries(TimeseriesOp::Scan {
+            return Ok(PhysicalPlan::Timeseries(TimeseriesOp::Scan {
                 collection: qualified,
                 time_range: UNBOUNDED_TIME_RANGE,
                 projection: Vec::new(),
@@ -53,10 +56,10 @@ impl CoreLoop {
                 having: Vec::new(),
                 tiering: None,
                 output_columns: Vec::new(),
-            });
+            }));
         }
         if self.kv_engine.has_collection(did, tid, collection) {
-            return PhysicalPlan::Kv(KvOp::Scan {
+            return Ok(PhysicalPlan::Kv(KvOp::Scan {
                 collection: qualified,
                 cursor: Vec::new(),
                 count: EVERY_ROW,
@@ -67,7 +70,7 @@ impl CoreLoop {
                 match_pattern: None,
                 surrogate_ceiling: None,
                 system_time,
-            });
+            }));
         }
         let columnar_key = (
             crate::types::DatabaseId::new(did),
@@ -75,7 +78,7 @@ impl CoreLoop {
             collection.to_string(),
         );
         if self.columnar_engines.contains_key(&columnar_key) {
-            return PhysicalPlan::Columnar(ColumnarOp::Scan {
+            return Ok(PhysicalPlan::Columnar(ColumnarOp::Scan {
                 collection: qualified,
                 projection: Vec::new(),
                 limit: EVERY_ROW,
@@ -86,9 +89,9 @@ impl CoreLoop {
                 valid_at_ms: None,
                 prefilter: None,
                 computed_columns: Vec::new(),
-            });
+            }));
         }
-        PhysicalPlan::Document(DocumentOp::Scan {
+        Ok(PhysicalPlan::Document(DocumentOp::Scan {
             collection: qualified,
             limit: EVERY_ROW,
             offset: 0,
@@ -101,6 +104,6 @@ impl CoreLoop {
             system_time,
             valid_at_ms: None,
             prefilter: None,
-        })
+        }))
     }
 }

@@ -101,6 +101,7 @@ pub(super) async fn reload_registries(
     for (db, tenant_id) in before.tenant_quotas.difference(&after.tenant_quotas) {
         quota::delete_tenant(*db, *tenant_id, shared);
     }
+    crate::control::metrics::database_sync::reconcile(&shared.database_metrics, catalog)?;
     crate::bootstrap::quota_replay::replay_quotas(shared);
 
     // Metadata-group host state.

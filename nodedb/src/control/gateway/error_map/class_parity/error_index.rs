@@ -3,7 +3,7 @@
 //! A dense index per `crate::Error` variant.
 
 /// The number of `crate::Error` variants [`error_variant_index`] numbers.
-pub(super) const ERROR_VARIANT_COUNT: usize = 127;
+pub(super) const ERROR_VARIANT_COUNT: usize = 128;
 
 /// A dense index per `crate::Error` variant. Exhaustive, so a new variant
 /// fails to compile here until it gets an index, and
@@ -139,5 +139,6 @@ pub(crate) fn error_variant_index(err: &crate::Error) -> usize {
         E::UngroupedColumn { .. } => 125,
         E::UnknownSrid { .. } => 126,
         E::TxnSnapshotTooOld { .. } => 97,
+        E::StorageQuotaExceeded { .. } => 127,
     }
 }

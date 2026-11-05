@@ -346,6 +346,7 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             | MetaOp::PurgeVersionsBelow { .. }
             | MetaOp::KvDueExpiries { .. }
             | MetaOp::RefreshGraphCount { .. }
+            | MetaOp::QueryStorageBytes { .. }
             | MetaOp::PurgeTenant { .. }
             | MetaOp::UnregisterCollection { .. }
             | MetaOp::UnregisterMaterializedView { .. }

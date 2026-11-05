@@ -12,9 +12,7 @@ use crate::control::maintenance::clone_materializer::dispatch_local;
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::source_read::{SourceReadContext, read_source_rows};
 use crate::control::state::SharedState;
-use crate::control::target_identity::{
-    bare_collection_name, derive_document_id, resolve_target_pk,
-};
+use crate::control::target_identity::{derive_document_id, resolve_target_pk};
 use crate::query::ResolvedUpdateRowWire;
 use nodedb_physical::physical_plan::DocumentOp;
 use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
@@ -61,9 +59,10 @@ pub(crate) async fn resolve_and_emit_update_from_join_ops(
     }
 
     let catalog = state.credentials.catalog();
-    let target_bare = bare_collection_name(task.database_id, target_collection.as_str());
+    let target_bare =
+        nodedb_types::CollectionKey::from_qualified(task.database_id, &target_collection)?.name();
     let target = catalog
-        .get_collection(task.database_id, tenant_id.as_u64(), &target_bare)?
+        .get_collection(task.database_id, tenant_id.as_u64(), target_bare)?
         .ok_or_else(|| crate::Error::CollectionNotFound {
             tenant_id,
             collection: target_collection.to_string(),

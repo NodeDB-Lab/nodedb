@@ -124,6 +124,8 @@ pub(super) struct NdjsonBody {
     /// redaction policy store for every batch.
     pub state: Arc<crate::control::state::SharedState>,
     pub lease_scope: crate::control::lease::QueryLeaseScope,
+    /// The database charged for a mid-stream error.
+    pub database_id: nodedb_types::DatabaseId,
     pub meter_guard: Option<DetachedMeterGuard>,
 }
 
@@ -146,6 +148,7 @@ pub(super) fn ndjson_body_stream(
         redaction,
         state,
         lease_scope,
+        database_id,
         meter_guard,
     } = body;
     async_stream::stream! {
@@ -172,6 +175,7 @@ pub(super) fn ndjson_body_stream(
                 None => break,
                 Some(Ok(b)) => b,
                 Some(Err(e)) => {
+                    state.database_metrics.record_error(database_id);
                     yield Ok(Bytes::from(error_line(&e)));
                     return;
                 }
@@ -183,6 +187,7 @@ pub(super) fn ndjson_body_stream(
                     // A malformed batch payload is surfaced as an in-band error
                     // line (matching the mid-stream dispatch-error path above)
                     // rather than silently dropping the batch.
+                    state.database_metrics.record_error(database_id);
                     yield Ok(Bytes::from(error_line_in_context("malformed response batch", &e)));
                     return;
                 }
@@ -204,6 +209,7 @@ pub(super) fn ndjson_body_stream(
                 Err(e) => {
                     // In-band error line, matching the malformed-batch path
                     // above: the HTTP body itself never errors.
+                    state.database_metrics.record_error(database_id);
                     yield Ok(Bytes::from(error_line(&e)));
                     return;
                 }
@@ -295,6 +301,7 @@ mod tests {
             redaction: None,
             state: test_state(),
             lease_scope: crate::control::lease::QueryLeaseScope::empty(),
+            database_id: nodedb_types::DatabaseId::DEFAULT,
             meter_guard: None,
         }))
         .await;
@@ -312,6 +319,7 @@ mod tests {
             redaction: None,
             state: test_state(),
             lease_scope: crate::control::lease::QueryLeaseScope::empty(),
+            database_id: nodedb_types::DatabaseId::DEFAULT,
             meter_guard: None,
         }))
         .await;
@@ -334,6 +342,7 @@ mod tests {
             redaction: None,
             state: test_state(),
             lease_scope: crate::control::lease::QueryLeaseScope::empty(),
+            database_id: nodedb_types::DatabaseId::DEFAULT,
             meter_guard: None,
         }))
         .await;
@@ -423,6 +432,7 @@ mod tests {
                 redaction: None,
                 state: Arc::clone(&state),
                 lease_scope: crate::control::lease::QueryLeaseScope::empty(),
+                database_id: nodedb_types::DatabaseId::DEFAULT,
                 meter_guard: Some(guard),
             });
             futures::pin_mut!(body);

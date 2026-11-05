@@ -73,6 +73,7 @@ pub mod routing_membership;
 pub mod rpc_codec;
 pub mod shard_split;
 pub mod snapshot_board;
+pub mod storage_share;
 pub mod subsystem;
 pub mod swim;
 pub mod sync_frame_versioned;

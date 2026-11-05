@@ -3,7 +3,7 @@
 //! Small response/error-shaping helpers shared by the Document and KV clone
 //! write-interception paths.
 
-use nodedb_types::{DatabaseId, Lsn};
+use nodedb_types::Lsn;
 
 use crate::bridge::envelope::{Response, Status};
 use crate::types::RequestId;
@@ -37,15 +37,6 @@ pub(super) fn synthetic_affected_response(
         read_vshards: crate::types::ReadShards::new(),
         write_set: Vec::new(),
     }
-}
-
-/// Strip the `"<db_id>/"` db-qualified prefix.
-pub(super) fn strip_db_prefix(db_id: DatabaseId, qualified: &str) -> &str {
-    if db_id == DatabaseId::DEFAULT {
-        return qualified;
-    }
-    let prefix = format!("{}/", db_id.as_u64());
-    qualified.strip_prefix(prefix.as_str()).unwrap_or(qualified)
 }
 
 /// Wrap a clone write-path failure as a typed dispatch error.

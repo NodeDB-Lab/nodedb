@@ -90,7 +90,7 @@ pub(super) async fn reissue_vector_params(
         let name = target.resolve(collection)?;
 
         let plan = super::super::vector_reissue::build_vector_set_params_plan(
-            name.stored.as_str(),
+            name.stored.clone(),
             field_name,
             &config,
         );

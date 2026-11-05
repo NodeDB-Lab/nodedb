@@ -114,7 +114,9 @@ impl CoreLoop {
         debug!(core = self.core_id, %collection, "kv truncate");
         let count = self.kv_engine.truncate(did, tid, collection);
         // Every key leaves, and no per-key version names them.
-        self.note_task_collection_wipe(task, tid, collection);
+        if let Err(e) = self.note_task_collection_wipe(task, tid, collection) {
+            return self.response_error(task, e);
+        }
         match response_codec::encode_count("deleted", count) {
             Ok(payload) => self.response_with_payload(task, payload),
             Err(e) => self.response_error(task, ErrorCode::from(e)),

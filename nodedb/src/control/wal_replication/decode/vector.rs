@@ -7,7 +7,9 @@
 
 use super::super::decode_sync_engines;
 use super::super::types::ReplicatedWrite;
+use super::ctx::DecodeCtx;
 use crate::bridge::envelope::PhysicalPlan;
+use crate::types::DatabaseId;
 use nodedb_physical::physical_plan::VectorOp;
 use nodedb_types::Surrogate;
 
@@ -26,7 +28,8 @@ use nodedb_types::Surrogate;
 /// the full enum, mirroring how `decode/entry.rs` itself handles `ArrayOp` /
 /// `ArraySchema` reaching `to_physical_plan` (an internal dispatch-contract
 /// violation, not a reachable production state).
-pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan> {
+pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Result<PhysicalPlan> {
+    let database_id = ctx.database_id;
     match write {
         ReplicatedWrite::VectorInsert {
             collection,
@@ -36,25 +39,28 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             surrogate,
             pk_bytes,
             provenance,
-        } => insert(InsertFields {
-            collection,
-            vector,
-            dim: *dim,
-            field_name,
-            surrogate: *surrogate,
-            pk_bytes,
-            provenance,
-        }),
+        } => insert(
+            database_id,
+            InsertFields {
+                collection,
+                vector,
+                dim: *dim,
+                field_name,
+                surrogate: *surrogate,
+                pk_bytes,
+                provenance,
+            },
+        ),
         ReplicatedWrite::VectorBatchInsert {
             collection,
             vectors,
             dim,
             surrogates,
-        } => batch_insert(collection, vectors, *dim, surrogates),
+        } => batch_insert(database_id, collection, vectors, *dim, surrogates),
         ReplicatedWrite::VectorDelete {
             collection,
             vector_id,
-        } => Ok(delete(collection, *vector_id)),
+        } => delete(database_id, collection, *vector_id),
         ReplicatedWrite::SetVectorParams {
             collection,
             field_name,
@@ -66,33 +72,36 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             pq_m,
             ivf_cells,
             ivf_nprobe,
-        } => Ok(set_params(SetParamsFields {
-            collection,
-            field_name,
-            dim: *dim,
-            m: *m,
-            ef_construction: *ef_construction,
-            metric,
-            index_type,
-            pq_m: *pq_m,
-            ivf_cells: *ivf_cells,
-            ivf_nprobe: *ivf_nprobe,
-        })),
+        } => set_params(
+            database_id,
+            SetParamsFields {
+                collection,
+                field_name,
+                dim: *dim,
+                m: *m,
+                ef_construction: *ef_construction,
+                metric,
+                index_type,
+                pq_m: *pq_m,
+                ivf_cells: *ivf_cells,
+                ivf_nprobe: *ivf_nprobe,
+            },
+        ),
         ReplicatedWrite::DropVectorIndex {
             collection,
             field_name,
-        } => Ok(drop_index(collection, field_name)),
+        } => drop_index(database_id, collection, field_name),
         ReplicatedWrite::SparseInsert {
             collection,
             field_name,
             doc_id,
             entries,
-        } => Ok(sparse_insert(collection, field_name, doc_id, entries)),
+        } => sparse_insert(database_id, collection, field_name, doc_id, entries),
         ReplicatedWrite::SparseDelete {
             collection,
             field_name,
             doc_id,
-        } => Ok(sparse_delete(collection, field_name, doc_id)),
+        } => sparse_delete(database_id, collection, field_name, doc_id),
         ReplicatedWrite::MultiVectorInsert {
             collection,
             field_name,
@@ -101,30 +110,29 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             vectors,
             count,
             dim,
-        } => Ok(multi_vector_insert(MultiVectorInsertFields {
-            collection,
-            field_name,
-            document_surrogate: *document_surrogate,
-            pk_bytes,
-            vectors,
-            count: *count,
-            dim: *dim,
-        })),
+        } => multi_vector_insert(
+            database_id,
+            MultiVectorInsertFields {
+                collection,
+                field_name,
+                document_surrogate: *document_surrogate,
+                pk_bytes,
+                vectors,
+                count: *count,
+                dim: *dim,
+            },
+        ),
         ReplicatedWrite::MultiVectorDelete {
             collection,
             field_name,
             document_surrogate,
-        } => Ok(multi_vector_delete(
-            collection,
-            field_name,
-            *document_surrogate,
-        )),
+        } => multi_vector_delete(database_id, collection, field_name, *document_surrogate),
         ReplicatedWrite::DeleteBySurrogate {
             collection,
             surrogate,
             field_name,
             provenance,
-        } => delete_by_surrogate(collection, *surrogate, field_name, provenance),
+        } => delete_by_surrogate(database_id, collection, *surrogate, field_name, provenance),
         ReplicatedWrite::DirectUpsert {
             collection,
             field,
@@ -139,43 +147,45 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             on_conflict_updates,
             returning,
             rls_filters,
-        } => super::vector_direct::direct_upsert(super::vector_direct::DirectUpsertFields {
-            collection,
-            field,
-            surrogate: *surrogate,
-            pk_bytes,
-            vector,
-            payload,
-            quantization: *quantization,
-            storage_dtype: *storage_dtype,
-            payload_indexes,
-            intent: *intent,
-            on_conflict_updates,
-            returning: decode_sync_engines::decode_returning(returning)?,
-            rls_filters,
-        }),
+        } => super::vector_direct::direct_upsert(
+            database_id,
+            super::vector_direct::DirectUpsertFields {
+                collection,
+                field,
+                surrogate: *surrogate,
+                pk_bytes,
+                vector,
+                payload,
+                quantization: *quantization,
+                storage_dtype: *storage_dtype,
+                payload_indexes,
+                intent: *intent,
+                on_conflict_updates,
+                returning: decode_sync_engines::decode_returning(returning)?,
+                rls_filters,
+            },
+        ),
         ReplicatedWrite::VectorDirectDelete {
             collection,
             field,
             rows,
             returning,
             rls_filters,
-        } => Ok(super::vector_direct::direct_delete(
+        } => super::vector_direct::direct_delete(
+            database_id,
             collection,
             field,
             rows,
             decode_sync_engines::decode_returning(returning)?,
             rls_filters,
-        )),
+        ),
         ReplicatedWrite::VectorDirectTruncate {
             collection,
             field,
             restart_identity,
-        } => Ok(super::vector_direct::direct_truncate(
-            collection,
-            field,
-            *restart_identity,
-        )),
+        } => {
+            super::vector_direct::direct_truncate(database_id, collection, field, *restart_identity)
+        }
         ReplicatedWrite::VectorDirectUpdate {
             collection,
             field,
@@ -187,7 +197,8 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             payload_indexes,
             returning,
             rls_filters,
-        } => Ok(super::vector_direct::direct_update(
+        } => super::vector_direct::direct_update(
+            database_id,
             super::vector_direct::DirectUpdateFields {
                 collection,
                 field,
@@ -200,7 +211,7 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
                 returning: decode_sync_engines::decode_returning(returning)?,
                 rls_filters,
             },
-        )),
+        ),
         ReplicatedWrite::VectorResolvedDirectWrite {
             collection,
             field,
@@ -209,7 +220,8 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             payload_indexes,
             mutations,
             response_payload,
-        } => Ok(super::vector_direct::resolved_direct_write(
+        } => super::vector_direct::resolved_direct_write(
+            database_id,
             super::vector_direct::ResolvedDirectWriteFields {
                 collection,
                 field,
@@ -219,7 +231,7 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
                 mutations,
                 response_payload,
             },
-        )),
+        ),
         _ => Err(crate::Error::Internal {
             detail: "vector::decode_arm called with a non-Vector ReplicatedWrite variant \
                 (dispatch bug in decode/entry.rs's grouped Vector match arm)"
@@ -240,10 +252,13 @@ pub(super) struct InsertFields<'a> {
     pub(super) provenance: &'a Option<Vec<u8>>,
 }
 
-pub(super) fn insert(f: InsertFields) -> crate::Result<PhysicalPlan> {
+pub(super) fn insert(database_id: DatabaseId, f: InsertFields) -> crate::Result<PhysicalPlan> {
     let provenance = decode_sync_engines::decode_provenance(f.provenance)?;
     Ok(PhysicalPlan::Vector(VectorOp::Insert {
-        collection: nodedb_types::QualifiedCollection::from_stored(f.collection.to_owned()),
+        collection: nodedb_types::QualifiedCollection::from_stored(
+            database_id,
+            f.collection.to_owned(),
+        )?,
         vector: f.vector.to_vec(),
         dim: f.dim,
         field_name: f.field_name.to_owned(),
@@ -254,6 +269,7 @@ pub(super) fn insert(f: InsertFields) -> crate::Result<PhysicalPlan> {
 }
 
 pub(super) fn batch_insert(
+    database_id: DatabaseId,
     collection: &str,
     vectors: &[Vec<f32>],
     dim: usize,
@@ -275,18 +291,28 @@ pub(super) fn batch_insert(
     }
     let surrogates: Vec<Surrogate> = surrogates.iter().map(|&raw| Surrogate::new(raw)).collect();
     Ok(PhysicalPlan::Vector(VectorOp::BatchInsert {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+        collection: nodedb_types::QualifiedCollection::from_stored(
+            database_id,
+            collection.to_owned(),
+        )?,
         vectors: vectors.to_vec(),
         dim,
         surrogates,
     }))
 }
 
-pub(super) fn delete(collection: &str, vector_id: u32) -> PhysicalPlan {
-    PhysicalPlan::Vector(VectorOp::Delete {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+pub(super) fn delete(
+    database_id: DatabaseId,
+    collection: &str,
+    vector_id: u32,
+) -> crate::Result<PhysicalPlan> {
+    Ok(PhysicalPlan::Vector(VectorOp::Delete {
+        collection: nodedb_types::QualifiedCollection::from_stored(
+            database_id,
+            collection.to_owned(),
+        )?,
         vector_id,
-    })
+    }))
 }
 
 /// Fields of the `SetVectorParams` wire variant, bundled so [`set_params`]
@@ -304,9 +330,15 @@ pub(super) struct SetParamsFields<'a> {
     pub(super) ivf_nprobe: usize,
 }
 
-pub(super) fn set_params(f: SetParamsFields) -> PhysicalPlan {
-    PhysicalPlan::Vector(VectorOp::SetParams {
-        collection: nodedb_types::QualifiedCollection::from_stored(f.collection.to_owned()),
+pub(super) fn set_params(
+    database_id: DatabaseId,
+    f: SetParamsFields,
+) -> crate::Result<PhysicalPlan> {
+    Ok(PhysicalPlan::Vector(VectorOp::SetParams {
+        collection: nodedb_types::QualifiedCollection::from_stored(
+            database_id,
+            f.collection.to_owned(),
+        )?,
         field_name: f.field_name.to_owned(),
         dim: f.dim,
         m: f.m,
@@ -316,36 +348,55 @@ pub(super) fn set_params(f: SetParamsFields) -> PhysicalPlan {
         pq_m: f.pq_m,
         ivf_cells: f.ivf_cells,
         ivf_nprobe: f.ivf_nprobe,
-    })
+    }))
 }
 
-pub(super) fn drop_index(collection: &str, field_name: &str) -> PhysicalPlan {
-    PhysicalPlan::Vector(VectorOp::DropIndex {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+pub(super) fn drop_index(
+    database_id: DatabaseId,
+    collection: &str,
+    field_name: &str,
+) -> crate::Result<PhysicalPlan> {
+    Ok(PhysicalPlan::Vector(VectorOp::DropIndex {
+        collection: nodedb_types::QualifiedCollection::from_stored(
+            database_id,
+            collection.to_owned(),
+        )?,
         field_name: field_name.to_owned(),
-    })
+    }))
 }
 
 pub(super) fn sparse_insert(
+    database_id: DatabaseId,
     collection: &str,
     field_name: &str,
     doc_id: &str,
     entries: &[(u32, f32)],
-) -> PhysicalPlan {
-    PhysicalPlan::Vector(VectorOp::SparseInsert {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+) -> crate::Result<PhysicalPlan> {
+    Ok(PhysicalPlan::Vector(VectorOp::SparseInsert {
+        collection: nodedb_types::QualifiedCollection::from_stored(
+            database_id,
+            collection.to_owned(),
+        )?,
         field_name: field_name.to_owned(),
         doc_id: doc_id.to_owned(),
         entries: entries.to_vec(),
-    })
+    }))
 }
 
-pub(super) fn sparse_delete(collection: &str, field_name: &str, doc_id: &str) -> PhysicalPlan {
-    PhysicalPlan::Vector(VectorOp::SparseDelete {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+pub(super) fn sparse_delete(
+    database_id: DatabaseId,
+    collection: &str,
+    field_name: &str,
+    doc_id: &str,
+) -> crate::Result<PhysicalPlan> {
+    Ok(PhysicalPlan::Vector(VectorOp::SparseDelete {
+        collection: nodedb_types::QualifiedCollection::from_stored(
+            database_id,
+            collection.to_owned(),
+        )?,
         field_name: field_name.to_owned(),
         doc_id: doc_id.to_owned(),
-    })
+    }))
 }
 
 /// Fields of the `MultiVectorInsert` wire variant, bundled so
@@ -361,32 +412,43 @@ pub(super) struct MultiVectorInsertFields<'a> {
     pub(super) dim: usize,
 }
 
-pub(super) fn multi_vector_insert(f: MultiVectorInsertFields<'_>) -> PhysicalPlan {
-    PhysicalPlan::Vector(VectorOp::MultiVectorInsert {
-        collection: nodedb_types::QualifiedCollection::from_stored(f.collection.to_owned()),
+pub(super) fn multi_vector_insert(
+    database_id: DatabaseId,
+    f: MultiVectorInsertFields<'_>,
+) -> crate::Result<PhysicalPlan> {
+    Ok(PhysicalPlan::Vector(VectorOp::MultiVectorInsert {
+        collection: nodedb_types::QualifiedCollection::from_stored(
+            database_id,
+            f.collection.to_owned(),
+        )?,
         field_name: f.field_name.to_owned(),
         document_surrogate: Surrogate::new(f.document_surrogate),
         pk_bytes: f.pk_bytes.clone(),
         vectors: f.vectors.to_vec(),
         count: f.count,
         dim: f.dim,
-    })
+    }))
 }
 
 pub(super) fn multi_vector_delete(
+    database_id: DatabaseId,
     collection: &str,
     field_name: &str,
     document_surrogate: u32,
-) -> PhysicalPlan {
-    PhysicalPlan::Vector(VectorOp::MultiVectorDelete {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+) -> crate::Result<PhysicalPlan> {
+    Ok(PhysicalPlan::Vector(VectorOp::MultiVectorDelete {
+        collection: nodedb_types::QualifiedCollection::from_stored(
+            database_id,
+            collection.to_owned(),
+        )?,
         field_name: field_name.to_owned(),
         // Deletes an already-bound identity; nothing to bind.
         document_surrogate: Surrogate::new(document_surrogate),
-    })
+    }))
 }
 
 pub(super) fn delete_by_surrogate(
+    database_id: DatabaseId,
     collection: &str,
     surrogate: Option<u32>,
     field_name: &str,
@@ -394,7 +456,10 @@ pub(super) fn delete_by_surrogate(
 ) -> crate::Result<PhysicalPlan> {
     let provenance = decode_sync_engines::decode_provenance(provenance)?;
     Ok(PhysicalPlan::Vector(VectorOp::DeleteBySurrogate {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+        collection: nodedb_types::QualifiedCollection::from_stored(
+            database_id,
+            collection.to_owned(),
+        )?,
         // Deletes an already-bound identity, or none; no re-binding needed.
         surrogate: surrogate.map(Surrogate::new),
         field_name: field_name.to_owned(),

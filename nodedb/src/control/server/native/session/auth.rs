@@ -196,6 +196,7 @@ impl NativeSession {
                     );
                 };
                 self.connection_permit = Some(ConnectionPermit::assemble(global, scoped));
+                self.connection_guard = Some(self.state.connection_tracker.track_native(db_id));
 
                 // Auth succeeds only once the selected database is persisted
                 // for every subsequent SQL and direct native operation.

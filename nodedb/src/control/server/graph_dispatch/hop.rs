@@ -145,6 +145,9 @@ pub(super) async fn execute_neighbor_hop(
         .saturating_sub(discovered_so_far)
         .min(u32::MAX as usize) as u32;
 
+    let collection = collection
+        .map(|c| nodedb_types::QualifiedCollection::from_stored(database_id, c.to_string()))
+        .transpose()?;
     let scope = ExpandScope {
         tenant_id,
         database_id,
@@ -161,7 +164,7 @@ pub(super) async fn execute_neighbor_hop(
 
     // Single-node mode: no routing table — every frontier node is local.
     if shared.cluster_routing.is_none() {
-        let rows = expand_local(shared, scope, frontier).await?;
+        let rows = expand_local(shared, &scope, frontier).await?;
         let merged = dedup_destinations(&rows);
         let mut reads = ShardReadLog::new();
         reads.note(key_vshards(frontier));
@@ -181,7 +184,7 @@ pub(super) async fn execute_neighbor_hop(
     let mut all_rows: Vec<NeighborRow> = if local_nodes.is_empty() {
         Vec::new()
     } else {
-        let rows = expand_local(shared, scope, &local_nodes).await?;
+        let rows = expand_local(shared, &scope, &local_nodes).await?;
         reads.note(key_vshards(&local_nodes));
         rows
     };
@@ -190,7 +193,7 @@ pub(super) async fn execute_neighbor_hop(
     // decode its response with the SAME decoder. Issue all remote dispatches
     // concurrently.
     if !remote_by_owner.is_empty() {
-        let remote_rows = expand_remote(shared, scope, remote_by_owner, &mut reads).await?;
+        let remote_rows = expand_remote(shared, &scope, remote_by_owner, &mut reads).await?;
         all_rows.extend(remote_rows);
     }
 
@@ -276,12 +279,11 @@ fn partition_frontier_by_owner(
 }
 
 /// Shared scope for one expansion of a BFS frontier.
-#[derive(Clone, Copy)]
 struct ExpandScope<'a> {
     tenant_id: TenantId,
     database_id: DatabaseId,
     /// Collection scope, or `None` for a label-only traversal.
-    collection: Option<&'a str>,
+    collection: Option<nodedb_types::QualifiedCollection>,
     /// Empty keeps every edge. Otherwise an edge with any listed label.
     edge_labels: &'a [String],
     direction: Direction,
@@ -301,9 +303,7 @@ impl ExpandScope<'_> {
     /// The `NeighborsMulti` plan that expands `node_ids` in this scope.
     fn plan(&self, node_ids: Vec<String>) -> PhysicalPlan {
         PhysicalPlan::Graph(GraphOp::NeighborsMulti {
-            collection: self
-                .collection
-                .map(|c| nodedb_types::QualifiedCollection::from_stored(c.to_string())),
+            collection: self.collection.clone(),
             node_ids,
             edge_labels: self.edge_labels.to_vec(),
             direction: self.direction,
@@ -320,7 +320,7 @@ impl ExpandScope<'_> {
 /// crossed edges. The caller notes the frontier's key vShards as read.
 async fn expand_local(
     shared: &SharedState,
-    scope: ExpandScope<'_>,
+    scope: &ExpandScope<'_>,
     node_ids: &[String],
 ) -> crate::Result<Vec<NeighborRow>> {
     let plan = scope.plan(node_ids.to_vec());
@@ -394,7 +394,7 @@ fn frontier_by_owner_core(
 /// Notes each owner's vShard in `reads` at the version it reported.
 async fn expand_remote(
     shared: &SharedState,
-    scope: ExpandScope<'_>,
+    scope: &ExpandScope<'_>,
     owners: Vec<RemoteOwnerBatch>,
     reads: &mut ShardReadLog,
 ) -> crate::Result<Vec<NeighborRow>> {
@@ -404,7 +404,7 @@ async fn expand_remote(
         linearizable,
         txn_id,
         ..
-    } = scope;
+    } = *scope;
     // The dispatcher's remote path needs an owned `Arc<SharedState>`. In
     // cluster mode the gateway is always wired; `gateway_shared` fails loudly
     // if it is absent (rather than silently degrading to a partial local-only

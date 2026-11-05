@@ -121,8 +121,14 @@ pub(super) async fn resolve_hash_join(
 
     Ok(Resolved::Plan(Box::new(PhysicalPlan::Query(
         QueryOp::HashJoin {
-            left_collection: nodedb_types::QualifiedCollection::from_stored(left_collection),
-            right_collection: nodedb_types::QualifiedCollection::from_stored(right_collection),
+            left_collection: nodedb_types::QualifiedCollection::from_stored(
+                ctx.database_id,
+                left_collection,
+            )?,
+            right_collection: nodedb_types::QualifiedCollection::from_stored(
+                ctx.database_id,
+                right_collection,
+            )?,
             left_alias,
             right_alias,
             on,

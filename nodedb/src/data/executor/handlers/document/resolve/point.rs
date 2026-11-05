@@ -169,14 +169,17 @@ impl CoreLoop {
             &self.crs_context(),
         )?;
         Ok(DocumentResolveOutcome {
-            mutations: vec![put_mutation(ResolvedPut {
-                collection,
-                document_id,
-                surrogate,
-                value,
-                precondition: Some(current_bytes),
-                resolved_sum_targets,
-            })],
+            mutations: vec![put_mutation(
+                task.request.database_id,
+                ResolvedPut {
+                    collection,
+                    document_id,
+                    surrogate,
+                    value,
+                    precondition: Some(current_bytes),
+                    resolved_sum_targets,
+                },
+            )?],
             response_payload,
         })
     }
@@ -248,12 +251,13 @@ impl CoreLoop {
         )?;
         Ok(DocumentResolveOutcome {
             mutations: vec![delete_mutation(
+                task.request.database_id,
                 collection,
                 document_id,
                 surrogate,
                 Some(prior),
                 resolved_sum_targets,
-            )],
+            )?],
             response_payload,
         })
     }

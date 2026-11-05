@@ -78,6 +78,14 @@ pub async fn crdt_apply(
     // `X-RateLimit-*` / `Retry-After` on.
     let rate_limit_headers = admit(&state, &identity, database_id, peer.as_str(), "crdt_apply")?;
 
+    // The path names the collection bare, or with this database's own
+    // qualifier. Any other form is refused.
+    let collection = crate::control::server::shared::request_collection::request_collection(
+        database_id,
+        &collection,
+    )
+    .map_err(ApiError::from)?;
+
     let body: HttpCrdtApplyRequest = sonic_rs::from_slice(&raw_body)
         .map_err(|e| ApiError::BadRequest(format!("invalid CRDT apply request body: {e}")))?;
 

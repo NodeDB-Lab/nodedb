@@ -201,6 +201,7 @@ pub(super) fn retryable_refusal_reason(error: &crate::Error) -> Option<&str> {
         | crate::Error::OidcNoDefaultDatabase { .. }
         | crate::Error::TenantVectorDimExceeded { .. }
         | crate::Error::TenantGraphDepthExceeded { .. }
+        | crate::Error::StorageQuotaExceeded { .. }
         | crate::Error::RoleInheritanceCycle { .. }
         | crate::Error::RoleInheritanceDepthExceeded { .. }
         | crate::Error::OllpExhausted { .. }
@@ -354,6 +355,7 @@ fn is_indeterminate(error: &crate::Error) -> bool {
         | crate::Error::OidcNoDefaultDatabase { .. }
         | crate::Error::TenantVectorDimExceeded { .. }
         | crate::Error::TenantGraphDepthExceeded { .. }
+        | crate::Error::StorageQuotaExceeded { .. }
         | crate::Error::RoleInheritanceCycle { .. }
         | crate::Error::RoleInheritanceDepthExceeded { .. }
         | crate::Error::MirrorReadOnly { .. } => false,

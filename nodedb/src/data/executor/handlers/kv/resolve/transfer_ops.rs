@@ -6,6 +6,7 @@
 //! transfer is one write, so a rejection on either side resolves neither half.
 
 use nodedb_physical::physical_plan::KvResolveOutcome;
+use nodedb_types::DatabaseId;
 
 use super::context::{ResolveResult, ResolvedPut, delete_mutation, put_mutation};
 use crate::bridge::envelope::ErrorCode;
@@ -84,24 +85,30 @@ impl CoreLoop {
 
         // `execute_kv_transfer` puts both rows with `ttl_ms: 0`, clearing any
         // TTL either held. Preserved verbatim.
-        let debit = put_mutation(ResolvedPut {
-            collection,
-            key: source_key,
-            value: computed.new_source,
-            ttl_ms: 0,
-            expire_at_ms: 0,
-            surrogate: debit_surrogate,
-            precondition: Some(source_bytes),
-        });
-        let credit = put_mutation(ResolvedPut {
-            collection,
-            key: dest_key,
-            value: computed.new_dest,
-            ttl_ms: 0,
-            expire_at_ms: 0,
-            surrogate: credit_surrogate,
-            precondition: dest_bytes,
-        });
+        let debit = put_mutation(
+            DatabaseId::new(did),
+            ResolvedPut {
+                collection,
+                key: source_key,
+                value: computed.new_source,
+                ttl_ms: 0,
+                expire_at_ms: 0,
+                surrogate: debit_surrogate,
+                precondition: Some(source_bytes),
+            },
+        )?;
+        let credit = put_mutation(
+            DatabaseId::new(did),
+            ResolvedPut {
+                collection,
+                key: dest_key,
+                value: computed.new_dest,
+                ttl_ms: 0,
+                expire_at_ms: 0,
+                surrogate: credit_surrogate,
+                precondition: dest_bytes,
+            },
+        )?;
         let mutations = if source_key <= dest_key {
             vec![debit, credit]
         } else {
@@ -183,16 +190,24 @@ impl CoreLoop {
 
         Ok(KvResolveOutcome {
             mutations: vec![
-                delete_mutation(source_collection, item_key, Some(item_data)),
-                put_mutation(ResolvedPut {
-                    collection: dest_collection,
-                    key: dest_key,
-                    value: dest_data,
-                    ttl_ms: 0,
-                    expire_at_ms: 0,
-                    surrogate,
-                    precondition: dest_existing,
-                }),
+                delete_mutation(
+                    DatabaseId::new(did),
+                    source_collection,
+                    item_key,
+                    Some(item_data),
+                )?,
+                put_mutation(
+                    DatabaseId::new(did),
+                    ResolvedPut {
+                        collection: dest_collection,
+                        key: dest_key,
+                        value: dest_data,
+                        ttl_ms: 0,
+                        expire_at_ms: 0,
+                        surrogate,
+                        precondition: dest_existing,
+                    },
+                )?,
             ],
             response_payload,
         })

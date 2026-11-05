@@ -145,15 +145,18 @@ impl CoreLoop {
                 if self.claim_for_validation() {
                     continue;
                 }
+                let Some(qualified) =
+                    self.replay_qualified("graph", record_lsn, database_id, collection.clone())
+                else {
+                    continue;
+                };
                 let task = Self::replay_graph_task(
                     tenant_id,
                     database_id,
                     crate::types::VShardId::new(record.header.vshard_id),
                     record_lsn,
                     PhysicalPlan::Graph(GraphOp::EdgePut {
-                        collection: nodedb_types::QualifiedCollection::from_stored(
-                            collection.clone(),
-                        ),
+                        collection: qualified,
                         src_id: src_id.clone(),
                         label: label.clone(),
                         dst_id: dst_id.clone(),
@@ -240,15 +243,18 @@ impl CoreLoop {
                 if self.claim_for_validation() {
                     continue;
                 }
+                let Some(qualified) =
+                    self.replay_qualified("graph", record_lsn, database_id, collection.clone())
+                else {
+                    continue;
+                };
                 let task = Self::replay_graph_task(
                     tenant_id,
                     database_id,
                     crate::types::VShardId::new(record.header.vshard_id),
                     record_lsn,
                     PhysicalPlan::Graph(GraphOp::EdgeDelete {
-                        collection: nodedb_types::QualifiedCollection::from_stored(
-                            collection.clone(),
-                        ),
+                        collection: qualified,
                         src_id: src_id.clone(),
                         label: label.clone(),
                         dst_id: dst_id.clone(),

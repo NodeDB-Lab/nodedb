@@ -118,17 +118,32 @@ pub(crate) fn keep_group_records(
             detail: format!("cut capture: decode the tenant {tenant_id} snapshot: {e}"),
         })?;
     retain_tenant_data_for_vshards(&mut snap, tenant_id, vshards, |record| {
-        Some(homes_of_stored(database_id, record))
-    });
+        homes_of_stored(database_id, record).map(Some)
+    })?;
     // The vector build parameters are keyed like `vectors`. The shared filter
     // leaves them alone, and every group's capture carries them all.
-    let owned = |key: &str| {
-        extract_db_tenant_scoped_collection(key, tenant_id).is_some_and(|collection| {
-            homes_of_stored(database_id, StoredRecord::Row { collection }).owned_by(vshards)
-        })
+    let owned = |key: &str| -> Result<bool, Error> {
+        match extract_db_tenant_scoped_collection(key, tenant_id) {
+            Some(collection) => Ok(
+                homes_of_stored(database_id, StoredRecord::Row { collection })?.owned_by(vshards),
+            ),
+            None => Ok(false),
+        }
     };
-    snap.vector_params.retain(|(key, _)| owned(key));
-    snap.index_configs.retain(|(key, _)| owned(key));
+    let mut kept_params = Vec::with_capacity(snap.vector_params.len());
+    for entry in std::mem::take(&mut snap.vector_params) {
+        if owned(&entry.0)? {
+            kept_params.push(entry);
+        }
+    }
+    snap.vector_params = kept_params;
+    let mut kept_configs = Vec::with_capacity(snap.index_configs.len());
+    for entry in std::mem::take(&mut snap.index_configs) {
+        if owned(&entry.0)? {
+            kept_configs.push(entry);
+        }
+    }
+    snap.index_configs = kept_configs;
     zerompk::to_msgpack_vec(&snap).map_err(|e| Error::Serialization {
         format: "msgpack".into(),
         detail: format!("cut capture: encode the tenant {tenant_id} snapshot: {e}"),

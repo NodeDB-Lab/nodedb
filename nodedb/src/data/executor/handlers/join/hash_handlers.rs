@@ -257,11 +257,15 @@ impl CoreLoop {
         } else if let Some(bm) = left_bm {
             // An empty bitmap admits no row: the scan returns none.
             let scan_plan =
-                crate::data::executor::dispatch::bitmap::hashjoin_inline::prefiltered_scan_plan(
+                match crate::data::executor::dispatch::bitmap::hashjoin_inline::prefiltered_scan_plan(
+                    join.task.request.database_id,
                     left_collection,
                     scan_limit,
                     bm,
-                );
+                ) {
+                    Ok(plan) => plan,
+                    Err(e) => return self.response_error(join.task, ErrorCode::from(e)),
+                };
             let resp = self.execute_plan(join.task, &scan_plan);
             // Forward a failing sub-plan response (e.g. ResourcesExhausted
             // from the bitmap scan) instead of swallowing it to an empty
@@ -319,11 +323,15 @@ impl CoreLoop {
         } else if let Some(bm) = right_bm {
             // An empty bitmap admits no row: the scan returns none.
             let scan_plan =
-                crate::data::executor::dispatch::bitmap::hashjoin_inline::prefiltered_scan_plan(
+                match crate::data::executor::dispatch::bitmap::hashjoin_inline::prefiltered_scan_plan(
+                    join.task.request.database_id,
                     right_collection,
                     scan_limit,
                     bm,
-                );
+                ) {
+                    Ok(plan) => plan,
+                    Err(e) => return self.response_error(join.task, ErrorCode::from(e)),
+                };
             let resp = self.execute_plan(join.task, &scan_plan);
             // Forward a failing sub-plan response (e.g. ResourcesExhausted
             // from the bitmap scan) instead of swallowing it to an empty

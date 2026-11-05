@@ -8,13 +8,10 @@ use nodedb_types::protocol::Limits;
 
 use crate::bridge::dispatch::{Dispatcher, OutcomeFloor};
 use crate::control::request_tracker::RequestTracker;
-use crate::control::security::apikey::ApiKeyStore;
-use crate::control::security::audit::AuditLog;
-use crate::control::security::credential::CredentialStore;
-use crate::control::security::permission::PermissionStore;
-use crate::control::security::rls::RlsPolicyStore;
-use crate::control::security::role::RoleStore;
-use crate::control::security::tenant::TenantIsolation;
+use crate::control::security::{
+    apikey::ApiKeyStore, audit::AuditLog, credential::CredentialStore, permission::PermissionStore,
+    rls::RlsPolicyStore, role::RoleStore, tenant::TenantIsolation,
+};
 use crate::control::server::sync::dlq::SyncDlq;
 use crate::wal::WalManager;
 
@@ -322,6 +319,12 @@ pub struct SharedState {
     pub system_metrics: Option<Arc<crate::control::metrics::SystemMetrics>>,
     /// Per-database quota usage counters for Prometheus scraping.
     pub database_metrics: Arc<crate::control::metrics::DatabaseMetricsRegistry>,
+    /// Live pgwire and native connection counts per database.
+    pub connection_tracker: Arc<crate::control::metrics::ConnectionTracker>,
+    /// This node's last sampled share of stored bytes per database and tenant.
+    pub storage_shares: Arc<crate::control::metrics::StorageShares>,
+    /// Cluster stored bytes per database and tenant, read lock-free.
+    pub cluster_storage_totals: Arc<crate::control::metrics::ClusterStorageTotals>,
     /// Global per-cluster quota ceiling enforced when database quotas are
     /// written. Set at startup from `[server]` config (`memory_limit`,
     /// `max_connections`). Zero on a dimension means no ceiling there.

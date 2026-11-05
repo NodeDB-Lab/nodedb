@@ -54,11 +54,21 @@ pub fn statement_fires_joined_body(state: &SharedState, tasks: &[PhysicalTask]) 
 ///   the source of a materialized sum whose target lives on another vShard.
 ///   The expansion ships that balance on an `ApplyBalanceDelta` task homed
 ///   on the target, and COMMIT applies it with the source rows.
-pub fn statement_needs_implicit_txn(state: &SharedState, tasks: &[PhysicalTask]) -> bool {
-    statement_fires_joined_body(state, tasks)
-        || tasks
-            .iter()
-            .any(|task| merges_into_edge_bearing(state, task) || moves_cross_shard_sum(state, task))
+///
+/// A MERGE target name without its database's form is an error.
+pub fn statement_needs_implicit_txn(
+    state: &SharedState,
+    tasks: &[PhysicalTask],
+) -> crate::Result<bool> {
+    if statement_fires_joined_body(state, tasks) {
+        return Ok(true);
+    }
+    for task in tasks {
+        if merges_into_edge_bearing(state, task)? || moves_cross_shard_sum(state, task) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Whether `task` is an unexpanded `INSERT ... SELECT`, `UPDATE ... FROM` or
@@ -121,25 +131,24 @@ fn moves_cross_shard_sum(state: &SharedState, task: &PhysicalTask) -> bool {
 
 /// Whether `task` is a `MERGE` into an edge-bearing collection. A catalog
 /// read error reads as edge-bearing, so the MERGE takes the transaction
-/// that keeps its edges consistent.
-fn merges_into_edge_bearing(state: &SharedState, task: &PhysicalTask) -> bool {
+/// that keeps its edges consistent. A target name without its database's
+/// form is an error.
+fn merges_into_edge_bearing(state: &SharedState, task: &PhysicalTask) -> crate::Result<bool> {
     let PhysicalPlan::Document(DocumentOp::Merge {
         target_collection, ..
     }) = &task.plan
     else {
-        return false;
+        return Ok(false);
     };
-    let bare = crate::control::target_identity::naming::bare_collection_name(
-        task.database_id,
-        target_collection.as_str(),
-    );
-    state
+    let bare =
+        nodedb_types::CollectionKey::from_qualified(task.database_id, target_collection)?.name();
+    Ok(state
         .credentials
         .catalog()
-        .get_collection(task.database_id, task.tenant_id.as_u64(), &bare)
+        .get_collection(task.database_id, task.tenant_id.as_u64(), bare)
         .map_or(true, |coll| {
             coll.is_some_and(|coll| coll.has_implicit_edges)
-        })
+        }))
 }
 
 /// The error for a statement that fires a joined body but plans a write its

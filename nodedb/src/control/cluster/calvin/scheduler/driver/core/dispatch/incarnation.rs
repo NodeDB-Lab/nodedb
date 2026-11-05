@@ -44,15 +44,19 @@ impl Scheduler {
         for named in &tx_class.incarnations {
             match named.kind {
                 IncarnationKind::Collection => {
-                    let key = CollectionKey::from_qualified_str(database_id, &named.collection)
-                        .unwrap_or_else(|_| {
-                            CollectionKey::from_bare(database_id, &named.collection)
-                        });
-                    keys.insert(GateKey::Collection {
-                        database_id: key.database_id().as_u64(),
-                        tenant_id,
-                        name: key.name().to_string(),
-                    });
+                    match CollectionKey::from_qualified_str(database_id, &named.collection) {
+                        Ok(key) => {
+                            keys.insert(GateKey::Collection {
+                                database_id: key.database_id().as_u64(),
+                                tenant_id,
+                                name: key.name().to_string(),
+                            });
+                        }
+                        Err(e) => {
+                            self.vote_abort_on_bad_name(&named.collection, &e);
+                            superseded = true;
+                        }
+                    }
                 }
                 IncarnationKind::Array => match array_gate_key(
                     &mirror,
@@ -61,12 +65,16 @@ impl Scheduler {
                     &named.collection,
                     named.incarnation,
                 ) {
-                    Some(key) => {
+                    Ok(Some(key)) => {
                         keys.insert(key);
                     }
                     // An unstamped write of an array this replica does not
                     // hold has nothing to write into.
-                    None => superseded = true,
+                    Ok(None) => superseded = true,
+                    Err(e) => {
+                        self.vote_abort_on_bad_name(&named.collection, &e);
+                        superseded = true;
+                    }
                 },
             }
         }
@@ -82,13 +90,14 @@ impl Scheduler {
         let catalog = self.shared.credentials.catalog();
         for named in &tx_class.incarnations {
             let holds = match named.kind {
-                IncarnationKind::Array => Ok(array_holds_incarnation(
+                IncarnationKind::Array => array_holds_incarnation(
                     &mirror,
                     tx_class.tenant_id,
                     database_id,
                     &named.collection,
                     named.incarnation,
-                )),
+                )
+                .map_err(crate::Error::from),
                 IncarnationKind::Collection if named.incarnation == Hlc::ZERO => Ok(true),
                 IncarnationKind::Collection => catalog.holds_incarnation(
                     database_id,
@@ -113,6 +122,17 @@ impl Scheduler {
             }
         }
         (superseded, gates)
+    }
+
+    /// Log a collection name in a txn that is not this database's stored form.
+    /// The caller votes abort.
+    fn vote_abort_on_bad_name(&self, collection: &str, error: &nodedb_types::CollectionKeyError) {
+        error!(
+            vshard_id = self.vshard_id,
+            collection = %collection,
+            error = %error,
+            "calvin scheduler: incarnation names a collection in a malformed form; voting abort"
+        );
     }
 
     /// Release every gate the pending txns hold, so a purge never waits on

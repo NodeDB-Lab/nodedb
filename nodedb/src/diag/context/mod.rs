@@ -28,6 +28,7 @@ mod read_cut;
 mod recovery;
 mod redo_stream;
 mod retention;
+mod storage_bytes;
 mod vector;
 mod vector_build;
 mod version_cleanup;
@@ -63,8 +64,8 @@ pub(in crate::diag) use data_plane::{
 pub(in crate::diag) use event_image::{StrictRowImageUnrendered, TimeseriesRowImageUndecodable};
 pub(in crate::diag) use held_entry::{ApplyPanicked, HeldEntryDebtNotRecorded, RedoEntryMalformed};
 pub(in crate::diag) use index_rebuild::IndexRebuildNotInstalled;
-pub(in crate::diag) use ingest::IlpAcceptedLinesDropped;
 pub use ingest::IlpFlushOutcome;
+pub(in crate::diag) use ingest::{CatchupRecordMisnamed, IlpAcceptedLinesDropped};
 pub(in crate::diag) use lease::{
     DdlCleanupNotCompleted, DescriptorDrainNotEnded, DescriptorLeaseNotRenewed,
 };
@@ -83,6 +84,9 @@ pub(in crate::diag) use redo_stream::{
     RedoAbandonGivenUp, RedoSnapshotDebtNotRecorded, RedoStreamLostHere,
 };
 pub(in crate::diag) use retention::RetentionAutowireOrphaned;
+pub(in crate::diag) use storage_bytes::{
+    StorageBytesResidue, StorageBytesSampleFailed, StorageBytesUnderflow, StorageSharePeerSkipped,
+};
 pub(in crate::diag) use vector::VectorIndexNotApplied;
 pub(in crate::diag) use vector_build::{
     VectorBuildNotInstalled, VectorBuilderUnavailable, VectorCodecNotBuilt,

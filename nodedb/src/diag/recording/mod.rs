@@ -30,6 +30,7 @@ mod recovery;
 mod redo_stream;
 mod retention;
 mod shared;
+mod storage_bytes;
 mod vector;
 mod vector_build;
 mod version_cleanup;
@@ -60,7 +61,7 @@ pub use data_plane::{
 pub use event_image::{strict_row_image_unrendered, timeseries_row_image_undecodable};
 pub use held_entry::{apply_panicked, held_entry_debt_not_recorded, redo_entry_malformed};
 pub use index_rebuild::{IndexRebuildTarget, index_rebuild_not_installed};
-pub use ingest::{ilp_invalid_utf8_drop, ilp_line_read_drop};
+pub use ingest::{ilp_invalid_utf8_drop, ilp_line_read_drop, wal_catchup_record_misnamed};
 pub use lease::{
     ddl_cleanup_not_completed, descriptor_drain_not_ended, descriptor_lease_not_renewed,
 };
@@ -84,6 +85,10 @@ pub use redo_stream::{
 };
 pub use retention::retention_autowire_orphaned;
 pub use shared::entry_kind;
+pub use storage_bytes::{
+    storage_bytes_residue, storage_bytes_sample_failed, storage_bytes_underflow,
+    storage_share_peer_skipped,
+};
 pub use vector::vector_index_not_applied;
 pub use vector_build::{
     VectorBuildTarget, vector_build_failed, vector_builder_disconnected,

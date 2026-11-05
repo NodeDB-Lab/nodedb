@@ -84,7 +84,10 @@ pub(in crate::control::planner) async fn recon_scan_rows(
     filters: Vec<u8>,
 ) -> crate::Result<Vec<serde_json::Value>> {
     let scan_plan = PhysicalPlan::Document(DocumentOp::Scan {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+        collection: nodedb_types::QualifiedCollection::from_stored(
+            database_id,
+            collection.to_owned(),
+        )?,
         filters,
         limit: usize::MAX,
         offset: 0,
@@ -135,7 +138,10 @@ pub(crate) async fn recon_point_row(
     surrogate: Surrogate,
 ) -> crate::Result<Option<serde_json::Value>> {
     let get_plan = PhysicalPlan::Document(DocumentOp::PointGet {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+        collection: nodedb_types::QualifiedCollection::from_stored(
+            database_id,
+            collection.to_owned(),
+        )?,
         document_id: document_id.to_owned(),
         surrogate: Some(surrogate),
         pk_bytes: document_id.as_bytes().to_vec(),

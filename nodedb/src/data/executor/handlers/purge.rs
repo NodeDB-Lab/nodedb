@@ -14,6 +14,7 @@ use tracing::{info, warn};
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
+use crate::engine::storage_bytes::DroppedScope;
 use crate::types::TenantId;
 
 impl CoreLoop {
@@ -91,9 +92,29 @@ impl CoreLoop {
             Ok(n) => n,
             Err(e) => {
                 warn!(tenant_id, error = %e, "inverted index purge failed");
-                0
+                return self.response_error(
+                    task,
+                    ErrorCode::Internal {
+                        detail: format!("inverted index purge: {e}"),
+                    },
+                );
             }
         };
+
+        // Every counted row of the tenant in the sparse file is gone, so its
+        // stored-bytes counter rows go too.
+        if let Err(e) = self.sparse.retire_storage_bytes(DroppedScope::Tenant {
+            database_id,
+            tenant_id,
+        }) {
+            warn!(tenant_id, error = %e, "sparse storage bytes purge failed");
+            return self.response_error(
+                task,
+                ErrorCode::Internal {
+                    detail: format!("sparse storage bytes purge: {e}"),
+                },
+            );
+        }
 
         // 4. Vector engine: remove all collections for this tenant. O(1) structural
         // deletion per entry — no key-prefix scan needed with tuple keys.

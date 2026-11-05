@@ -26,6 +26,10 @@ fn default_scope_expiry_interval_secs() -> u64 {
     60
 }
 
+fn default_storage_sample_interval_ms() -> u64 {
+    30_000
+}
+
 /// Tuning knobs for background maintenance triggered by user writes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MaintenanceTuning {
@@ -62,6 +66,15 @@ pub struct MaintenanceTuning {
     /// sweep costs more than the resolution it buys.
     #[serde(default = "default_scope_expiry_interval_secs")]
     pub scope_expiry_interval_secs: u64,
+
+    /// Interval between stored-byte samples, in milliseconds.
+    ///
+    /// Each sample reads byte counters on every core and asks every peer for
+    /// its share. A peer report older than three intervals drops out of the
+    /// cluster total. Lowering it refreshes storage quotas sooner, at the cost
+    /// of more core reads and peer requests.
+    #[serde(default = "default_storage_sample_interval_ms")]
+    pub storage_sample_interval_ms: u64,
 }
 
 impl Default for MaintenanceTuning {
@@ -71,6 +84,7 @@ impl Default for MaintenanceTuning {
             clone_sweep_interval_ms: default_clone_sweep_interval_ms(),
             constraint_reconcile_interval_ms: default_constraint_reconcile_interval_ms(),
             scope_expiry_interval_secs: default_scope_expiry_interval_secs(),
+            storage_sample_interval_ms: default_storage_sample_interval_ms(),
         }
     }
 }
@@ -93,6 +107,7 @@ mod tests {
         assert_eq!(tuning.clone_sweep_interval_ms, 30_000);
         assert_eq!(tuning.constraint_reconcile_interval_ms, 1_000);
         assert_eq!(tuning.scope_expiry_interval_secs, 60);
+        assert_eq!(tuning.storage_sample_interval_ms, 30_000);
     }
 
     #[test]

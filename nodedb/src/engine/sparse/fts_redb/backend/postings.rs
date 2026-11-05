@@ -11,11 +11,13 @@ use nodedb_types::Surrogate;
 use redb::{ReadableDatabase, ReadableTable};
 
 use super::core::RedbFtsBackend;
-use super::posting_rows;
+use super::posting_rows::{self, PostingWrite};
 use super::shared::redb_err;
+use crate::engine::sparse::btree::storage_bytes::SPARSE_COUNTER;
 use crate::engine::sparse::fts_redb::keys::{KeyOwner, doc_key};
 use crate::engine::sparse::fts_redb::scan;
 use crate::engine::sparse::fts_redb::tables::{DOC_LENGTHS, POSTINGS};
+use crate::engine::storage_bytes::StorageDelta;
 
 pub(super) fn read(
     backend: &RedbFtsBackend,
@@ -90,38 +92,44 @@ fn length_of(
     zerompk::from_msgpack::<u32>(value.value()).map_err(|e| redb_err("deserialize doc_length", e))
 }
 
-/// Run `apply` on the POSTINGS table in one committed write transaction.
+/// Run `apply` on the POSTINGS table in one committed write transaction,
+/// and apply the stored-bytes change it records before the commit.
 fn with_postings<R>(
     backend: &RedbFtsBackend,
-    apply: impl FnOnce(&mut posting_rows::PostingTable<'_>) -> crate::Result<R>,
+    apply: impl FnOnce(&mut posting_rows::PostingTable<'_>, &mut StorageDelta) -> crate::Result<R>,
 ) -> crate::Result<R> {
     let write_txn = backend
         .db
         .begin_write()
         .map_err(|e| redb_err("write txn", e))?;
+    let mut delta = StorageDelta::default();
     let out = {
         let mut table = write_txn
             .open_table(POSTINGS)
             .map_err(|e| redb_err("open postings", e))?;
-        apply(&mut table)?
+        apply(&mut table, &mut delta)?
     };
+    delta.apply(&write_txn, SPARSE_COUNTER)?;
     write_txn.commit().map_err(|e| redb_err("commit", e))?;
     Ok(out)
 }
 
 /// Run `apply` on the POSTINGS table and the DOC_LENGTHS table in one
-/// committed write transaction.
+/// committed write transaction, and apply the stored-bytes change it
+/// records before the commit.
 fn with_postings_and_lengths<R>(
     backend: &RedbFtsBackend,
     apply: impl FnOnce(
         &mut posting_rows::PostingTable<'_>,
         &redb::Table<'_, scan::DocKeyDef, &'static [u8]>,
+        &mut StorageDelta,
     ) -> crate::Result<R>,
 ) -> crate::Result<R> {
     let write_txn = backend
         .db
         .begin_write()
         .map_err(|e| redb_err("write txn", e))?;
+    let mut delta = StorageDelta::default();
     let out = {
         let lengths = write_txn
             .open_table(DOC_LENGTHS)
@@ -129,8 +137,9 @@ fn with_postings_and_lengths<R>(
         let mut table = write_txn
             .open_table(POSTINGS)
             .map_err(|e| redb_err("open postings", e))?;
-        apply(&mut table, &lengths)?
+        apply(&mut table, &lengths, &mut delta)?
     };
+    delta.apply(&write_txn, SPARSE_COUNTER)?;
     write_txn.commit().map_err(|e| redb_err("commit", e))?;
     Ok(out)
 }
@@ -143,12 +152,18 @@ pub(super) fn write(
     term: &str,
     postings: &[Posting],
 ) -> crate::Result<()> {
-    with_postings_and_lengths(backend, |table, lengths| {
-        let doc_lens = postings
+    with_postings_and_lengths(backend, |table, lengths, delta| {
+        let rows = postings
             .iter()
-            .map(|posting| length_of(lengths, database_id, tid, index, posting))
-            .collect::<crate::Result<Vec<u32>>>()?;
-        posting_rows::replace_list(table, database_id, tid, index, term, postings, &doc_lens)
+            .map(|posting| {
+                Ok(PostingWrite {
+                    term,
+                    posting,
+                    doc_len: length_of(lengths, database_id, tid, index, posting)?,
+                })
+            })
+            .collect::<crate::Result<Vec<PostingWrite<'_>>>>()?;
+        posting_rows::replace_list(table, database_id, tid, index, term, &rows, delta)
     })
 }
 
@@ -159,8 +174,8 @@ pub(super) fn remove(
     index: IndexScope<'_>,
     term: &str,
 ) -> crate::Result<()> {
-    with_postings(backend, |table| {
-        posting_rows::remove_list(table, database_id, tid, index, term).map(|_| ())
+    with_postings(backend, |table, delta| {
+        posting_rows::remove_list(table, database_id, tid, index, term, delta).map(|_| ())
     })
 }
 
@@ -172,9 +187,13 @@ pub(super) fn upsert_one(
     term: &str,
     posting: &Posting,
 ) -> crate::Result<()> {
-    with_postings_and_lengths(backend, |table, lengths| {
-        let doc_len = length_of(lengths, database_id, tid, index, posting)?;
-        posting_rows::put(table, database_id, tid, index, term, posting, doc_len)
+    with_postings_and_lengths(backend, |table, lengths, delta| {
+        let row = PostingWrite {
+            term,
+            posting,
+            doc_len: length_of(lengths, database_id, tid, index, posting)?,
+        };
+        posting_rows::put(table, database_id, tid, index, row, delta)
     })
 }
 
@@ -186,8 +205,8 @@ pub(super) fn remove_one(
     term: &str,
     doc_id: Surrogate,
 ) -> crate::Result<()> {
-    with_postings(backend, |table| {
-        posting_rows::remove(table, database_id, tid, index, term, doc_id).map(|_| ())
+    with_postings(backend, |table, delta| {
+        posting_rows::remove(table, database_id, tid, index, term, doc_id, delta).map(|_| ())
     })
 }
 

@@ -329,9 +329,6 @@ impl SharedState {
             QuotaCheck::RateLimited { qps, limit } => Err(crate::Error::BadRequest {
                 detail: format!("tenant {tenant_id}: rate limited ({qps}/{limit} qps)"),
             }),
-            QuotaCheck::StorageExceeded { used, limit } => Err(crate::Error::BadRequest {
-                detail: format!("tenant {tenant_id}: storage quota ({used}/{limit} bytes)"),
-            }),
         }
     }
 

@@ -7,9 +7,10 @@
 //! drift this protocol exists to prevent.
 
 use nodedb_physical::physical_plan::{KvResolveOutcome, KvResolvedMutation};
+use nodedb_types::DatabaseId;
 
 use super::context::{
-    ResolveResult, ResolvedPut, delete_mutation, expiry_from_ttl, one, put_mutation,
+    ResolveResult, ResolvedPut, delete_mutation, expiry_from_ttl, one, put_mutation, qualified,
 };
 use crate::bridge::envelope::ErrorCode;
 use crate::data::executor::core_loop::CoreLoop;
@@ -93,15 +94,18 @@ impl CoreLoop {
         };
 
         Ok(one(
-            put_mutation(ResolvedPut {
-                collection,
-                key,
-                value: stored_bytes,
-                ttl_ms,
-                expire_at_ms: expiry_from_ttl(ttl_ms, now_ms),
-                surrogate,
-                precondition: existing_bytes,
-            }),
+            put_mutation(
+                DatabaseId::new(did),
+                ResolvedPut {
+                    collection,
+                    key,
+                    value: stored_bytes,
+                    ttl_ms,
+                    expire_at_ms: expiry_from_ttl(ttl_ms, now_ms),
+                    surrogate,
+                    precondition: existing_bytes,
+                },
+            )?,
             response_payload,
         ))
     }
@@ -148,8 +152,8 @@ impl CoreLoop {
         };
         let mutations = pre_images
             .into_iter()
-            .map(|(key, body)| delete_mutation(collection, key, Some(body)))
-            .collect();
+            .map(|(key, body)| delete_mutation(DatabaseId::new(did), collection, key, Some(body)))
+            .collect::<Result<Vec<_>, ErrorCode>>()?;
         Ok(KvResolveOutcome {
             mutations,
             response_payload,
@@ -169,9 +173,7 @@ impl CoreLoop {
         let precondition = self.resolve_kv_ttl_precondition(&target, now_ms)?;
         Ok(one(
             KvResolvedMutation::Expire {
-                collection: nodedb_types::QualifiedCollection::from_stored(
-                    target.collection.to_owned(),
-                ),
+                collection: qualified(DatabaseId::new(target.did), target.collection)?,
                 key: target.key.to_vec(),
                 ttl_ms,
                 resolved_now_ms: now_ms,
@@ -187,9 +189,7 @@ impl CoreLoop {
         let precondition = self.resolve_kv_ttl_precondition(&target, current_ms())?;
         Ok(one(
             KvResolvedMutation::Persist {
-                collection: nodedb_types::QualifiedCollection::from_stored(
-                    target.collection.to_owned(),
-                ),
+                collection: qualified(DatabaseId::new(target.did), target.collection)?,
                 key: target.key.to_vec(),
                 precondition,
             },
@@ -294,17 +294,20 @@ impl CoreLoop {
             )?,
         };
         Ok(one(
-            put_mutation(ResolvedPut {
-                collection,
-                key,
-                value: computed.new_value,
-                // `execute_kv_field_set` puts with `ttl_ms: 0`, which clears
-                // any TTL the key held. Preserved verbatim here.
-                ttl_ms: 0,
-                expire_at_ms: 0,
-                surrogate,
-                precondition: current,
-            }),
+            put_mutation(
+                DatabaseId::new(did),
+                ResolvedPut {
+                    collection,
+                    key,
+                    value: computed.new_value,
+                    // `execute_kv_field_set` puts with `ttl_ms: 0`, which clears
+                    // any TTL the key held. Preserved verbatim here.
+                    ttl_ms: 0,
+                    expire_at_ms: 0,
+                    surrogate,
+                    precondition: current,
+                },
+            )?,
             response_payload,
         ))
     }

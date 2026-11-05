@@ -35,7 +35,7 @@ use nodedb_physical::physical_plan::{DocumentOp, ReturningSpec, RowSource};
 use super::resolve_arms::decode_resolve;
 use crate::control::planner::materialized_sum::resolve_sum_targets_for_bodies;
 use crate::control::target_identity::{
-    assign_target_surrogates, bare_collection_name, derive_document_id, resolve_target_pk,
+    assign_target_surrogates, derive_document_id, resolve_target_pk,
 };
 
 /// Upper bound on resolve→apply retries under concurrent source/target drift.
@@ -140,9 +140,11 @@ pub async fn run_authorized_merge(
 /// merge handler produces, so the dispatch loops render the same command tag.
 pub(crate) async fn run_merge(state: &SharedState, args: MergeArgs<'_>) -> crate::Result<Response> {
     let catalog = state.credentials.catalog();
-    let target_bare = bare_collection_name(args.database_id, args.target_collection);
+    let target_bare =
+        nodedb_types::CollectionKey::from_qualified_str(args.database_id, args.target_collection)?
+            .name();
     let target = catalog
-        .get_collection(args.database_id, args.tenant_id.as_u64(), &target_bare)?
+        .get_collection(args.database_id, args.tenant_id.as_u64(), target_bare)?
         .ok_or_else(|| crate::Error::CollectionNotFound {
             tenant_id: args.tenant_id,
             collection: args.target_collection.to_string(),
@@ -172,7 +174,7 @@ pub(crate) async fn run_merge(state: &SharedState, args: MergeArgs<'_>) -> crate
             MergePass::Resolve,
             Some(source_rows.clone()),
             Vec::new(),
-        );
+        )?;
         let resolve_resp = dispatch_local(
             state,
             args.tenant_id,
@@ -281,7 +283,7 @@ pub(crate) async fn run_merge(state: &SharedState, args: MergeArgs<'_>) -> crate
             MergePass::Apply(inserts),
             Some(source_rows),
             resolved_sum_targets,
-        );
+        )?;
         let apply_resp = apply_orchestrated_write(
             state,
             args.tenant_id,
@@ -334,7 +336,7 @@ fn merge_plan(
     pass: MergePass,
     source_rows: Option<Vec<Vec<u8>>>,
     resolved_sum_targets: Vec<nodedb_physical::physical_plan::ResolvedSumTarget>,
-) -> PhysicalPlan {
+) -> crate::Result<PhysicalPlan> {
     // Only APPLY can project rows; RESOLVE's payload is the fixed
     // `(updates, deletes, inserts)` tuple `decode_resolve` expects. RESOLVE
     // carries the live check unread; APPLY carries the decision the
@@ -351,8 +353,9 @@ fn merge_plan(
     let resolve_only = resolved_inserts.is_none();
     let merge = DocumentOp::Merge {
         target_collection: nodedb_types::QualifiedCollection::from_stored(
+            args.database_id,
             args.target_collection.to_string(),
-        ),
+        )?,
         source: args.source.clone(),
         source_alias: args.source_alias.to_string(),
         target_join_col: args.target_join_col.to_string(),
@@ -369,9 +372,9 @@ fn merge_plan(
         declared_primary_key: args.declared_primary_key.map(str::to_string),
         target_system_time: nodedb_types::SystemTimeScope::Current,
     };
-    if resolve_only {
+    Ok(if resolve_only {
         PhysicalPlan::Document(DocumentOp::ResolveWrite(Box::new(merge)))
     } else {
         PhysicalPlan::Document(merge)
-    }
+    })
 }

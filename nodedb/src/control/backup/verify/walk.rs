@@ -117,10 +117,11 @@ impl Walk<'_> {
     }
 
     /// The bare catalog name of a collection the snapshot names as `stored`.
-    pub(super) fn bare(&self, stored: &str) -> String {
-        stored_collection_key(self.database_id, stored)
+    /// A name not in the stored form of the snapshot's database is an error.
+    pub(super) fn bare(&self, stored: &str) -> Result<String, Error> {
+        Ok(stored_collection_key(self.database_id, stored)?
             .name()
-            .to_string()
+            .to_string())
     }
 
     /// The part after `"{db}:{tid}:"` of a scoped section key.

@@ -182,7 +182,11 @@ mod tests {
             },
             expected: BTreeMap::from([(
                 PassiveReadKeyId::kv(
-                    nodedb_types::QualifiedCollection::from_stored("sessions".to_owned()),
+                    nodedb_types::QualifiedCollection::from_stored(
+                        nodedb_types::DatabaseId::DEFAULT,
+                        "sessions".to_owned(),
+                    )
+                    .unwrap(),
                     b"abc".to_vec(),
                 ),
                 Some(b"stored".to_vec()),
@@ -208,7 +212,11 @@ mod tests {
         let keys_only = spec.total_bytes();
         spec.expected.insert(
             PassiveReadKeyId::kv(
-                nodedb_types::QualifiedCollection::from_stored("s".to_owned()),
+                nodedb_types::QualifiedCollection::from_stored(
+                    nodedb_types::DatabaseId::DEFAULT,
+                    "s".to_owned(),
+                )
+                .unwrap(),
                 b"k".to_vec(),
             ),
             Some(vec![0u8; 100]),

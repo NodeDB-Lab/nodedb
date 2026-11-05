@@ -352,6 +352,7 @@ mod tests {
             origin: RedoOrigin::Commit,
             calvin: None,
             snapshot_ordinal: None,
+            adds_storage: false,
         };
         match decode_transaction_redo(&write).expect("decode") {
             DecodedTransactionRedo::Chunked(chunked) => chunked,

@@ -100,6 +100,8 @@ pub(super) fn meta_collection(op: &MetaOp) -> Option<&str> {
         MetaOp::KvDueExpiries { .. } => None,
         // Every graph CSR on the core, in every tenant.
         MetaOp::RefreshGraphCount { .. } => None,
+        // Every collection's stored bytes on the core, in every tenant.
+        MetaOp::QueryStorageBytes { .. } => None,
         // The continuous-aggregate registry: no row is read or written.
         MetaOp::RegisterContinuousAggregate { .. }
         | MetaOp::UnregisterContinuousAggregate { .. }

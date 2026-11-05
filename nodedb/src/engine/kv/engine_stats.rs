@@ -197,6 +197,23 @@ impl KvEngine {
             .unwrap_or(0)
     }
 
+    /// Each collection's `(database_id, tenant_id, collection, bytes)`, with
+    /// the bytes [`Self::collection_mem_usage`] reports. A table with no
+    /// reverse-mapped name or scope is skipped.
+    pub fn collection_mem_usages(&self) -> impl Iterator<Item = (u64, u64, &str, u64)> {
+        self.tables.iter().filter_map(|(tkey, table)| {
+            let database_id = self.hash_to_database.get(tkey)?.as_u64();
+            let tenant_id = *self.hash_to_tenant.get(tkey)?;
+            let collection = self.hash_to_collection.get(tkey)?;
+            Some((
+                database_id,
+                tenant_id,
+                collection.as_str(),
+                table.mem_usage() as u64,
+            ))
+        })
+    }
+
     /// Comprehensive observability snapshot for this KV engine.
     pub fn stats(&self) -> KvStats {
         let mut total_entries = 0usize;

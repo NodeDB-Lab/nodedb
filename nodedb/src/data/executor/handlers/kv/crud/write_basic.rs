@@ -81,7 +81,9 @@ impl CoreLoop {
         };
         self.emit_kv_write_event(task, collection, op, key, Some(value), old_slice);
 
-        self.note_kv_write(task, did, tid, collection, key);
+        if let Err(e) = self.note_kv_write(task, did, tid, collection, key) {
+            return self.response_error(task, e);
+        }
         if let Some(spec) = returning {
             // `value` IS the stored body on this path: the put writes the
             // caller's bytes verbatim, so projecting them is projecting the
@@ -161,7 +163,9 @@ impl CoreLoop {
             None,
         );
 
-        self.note_kv_write(task, did, tid, collection, key);
+        if let Err(e) = self.note_kv_write(task, did, tid, collection, key) {
+            return self.response_error(task, e);
+        }
         if let Some(spec) = returning {
             return self.kv_stored_returning_response(task, spec, rls_filters, &[(key, value)]);
         }
@@ -243,7 +247,9 @@ impl CoreLoop {
             None,
         );
 
-        self.note_kv_write(task, did, tid, collection, key);
+        if let Err(e) = self.note_kv_write(task, did, tid, collection, key) {
+            return self.response_error(task, e);
+        }
         if let Some(spec) = returning {
             return self.kv_stored_returning_response(task, spec, rls_filters, &[(key, value)]);
         }
@@ -260,9 +266,9 @@ impl CoreLoop {
         tid: u64,
         collection: &str,
         key: &[u8],
-    ) {
+    ) -> crate::Result<()> {
         let Some(stamp) = self.task_write_stamp(task) else {
-            return;
+            return Ok(());
         };
         self.note_write(
             crate::types::DatabaseId::new(did),
@@ -270,6 +276,6 @@ impl CoreLoop {
             collection,
             Some(crate::data::executor::core_loop::write_note::KeyRepr::KvKey(Box::from(key))),
             stamp,
-        );
+        )
     }
 }

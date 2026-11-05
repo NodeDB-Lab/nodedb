@@ -22,7 +22,7 @@ use nodedb_physical::physical_task::PhysicalTask;
 use super::copy_source::{clone_source_view, copy_source_row};
 use super::entry::CloneWriteOutcome;
 use super::probes::{ProbeTarget, fetch_source_row, probe_row_in_target};
-use super::util::{strip_db_prefix, synthetic_affected_response, write_err};
+use super::util::{synthetic_affected_response, write_err};
 use crate::control::server::shared::session::ddl_buffer::buffered_clone_suppressions;
 use crate::types::TxnId;
 
@@ -168,7 +168,8 @@ pub(super) async fn intercept_doc_clone_write(
     let catalog = state.credentials.catalog();
 
     let db_id = task.database_id;
-    let coll_name = strip_db_prefix(db_id, write.collection_qualified);
+    let coll_name =
+        nodedb_types::CollectionKey::from_qualified_str(db_id, write.collection_qualified)?.name();
 
     let desc = catalog
         .get_collection(db_id, tenant_id.as_u64(), coll_name)

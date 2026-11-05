@@ -89,6 +89,8 @@ pub(super) fn validate_array_rows(
         .collect();
     let mut rowed: BTreeSet<(u64, String)> = BTreeSet::new();
     for (source, entry) in array_rows(env)? {
+        // A restored row mints its array name in the destination.
+        crate::control::relation_name::check_relation_name("array", &entry.name)?;
         let Some(database) = names.get(&source) else {
             return Err(malformed(format!(
                 "the row of array '{}' names database {source}, which the backup's database \

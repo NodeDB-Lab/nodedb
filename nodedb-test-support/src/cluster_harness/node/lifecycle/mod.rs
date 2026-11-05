@@ -31,6 +31,7 @@
 //! restart in [`restart`].
 
 mod client_slot;
+mod loops;
 mod restart;
 mod spawn_full;
 mod spawn_variants;

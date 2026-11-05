@@ -509,7 +509,7 @@ mod tests {
         let floor = watcher.current() + 3;
         let snapshot = TenantDataSnapshot {
             documents_versioned: vec![(
-                "1:1:recreated:doc1\x0000000000000000000001".to_string(),
+                "1:1:1/recreated:doc1\x0000000000000000000001".to_string(),
                 b"new".to_vec(),
             )],
             metadata_floor: floor,

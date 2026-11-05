@@ -38,6 +38,7 @@ pub async fn create_materialized_view(
     let refresh_mode = refresh_mode.to_string();
 
     let tenant_id = identity.tenant_id;
+    crate::control::relation_name::check_relation_name("materialized view", &name)?;
 
     // Streaming MVs are Event-Plane objects: they source from a change stream
     // (named in the query's FROM clause) and maintain per-group partial

@@ -134,14 +134,18 @@ pub fn full_scan_plan_for_collection(
     tenant_id: TenantId,
     side: ScanSide<'_>,
 ) -> crate::Result<Option<PhysicalPlan>> {
-    let collection = side.collection;
+    // `side.collection` is the plan's database-qualified name. The catalog
+    // keys the collection by its bare name.
+    let key = nodedb_types::CollectionKey::from_qualified_str(database_id, side.collection)?;
+    let qualified =
+        nodedb_types::QualifiedCollection::from_stored(database_id, side.collection.to_string())?;
     let system_time = side.system_time;
     // Both predicate sets travel in the slot the RLS filters already use: that
     // slot is evaluated per row before any join match, which is what a local
     // `WHERE` predicate needs too.
     let side_filters = combine_side_filters(side.rls_filters, side.scan_filters)?;
     let catalog = state.credentials.catalog();
-    let stored = match catalog.get_collection(database_id, tenant_id.as_u64(), collection)? {
+    let stored = match catalog.get_collection(database_id, tenant_id.as_u64(), key.name())? {
         Some(s) => s,
         None => return Ok(None),
     };
@@ -150,7 +154,7 @@ pub fn full_scan_plan_for_collection(
         CollectionType::Document(DocumentMode::Schemaless)
         | CollectionType::Document(DocumentMode::Strict(_)) => {
             PhysicalPlan::Document(DocumentOp::Scan {
-                collection: nodedb_types::QualifiedCollection::from_stored(collection.to_string()),
+                collection: qualified,
                 limit: COMPLETE_SCAN,
                 offset: 0,
                 filters: side_filters,
@@ -165,7 +169,7 @@ pub fn full_scan_plan_for_collection(
             })
         }
         CollectionType::KeyValue(_) => PhysicalPlan::Kv(KvOp::Scan {
-            collection: nodedb_types::QualifiedCollection::from_stored(collection.to_string()),
+            collection: qualified,
             cursor: Vec::new(),
             count: COMPLETE_SCAN,
             filters: side_filters,
@@ -179,7 +183,7 @@ pub fn full_scan_plan_for_collection(
         CollectionType::Columnar(ColumnarProfile::Plain)
         | CollectionType::Columnar(ColumnarProfile::Spatial { .. }) => {
             PhysicalPlan::Columnar(ColumnarOp::Scan {
-                collection: nodedb_types::QualifiedCollection::from_stored(collection.to_string()),
+                collection: qualified,
                 projection: Vec::new(),
                 limit: COMPLETE_SCAN,
                 filters: Vec::new(),
@@ -193,7 +197,7 @@ pub fn full_scan_plan_for_collection(
         }
         CollectionType::Columnar(ColumnarProfile::Timeseries { .. }) => {
             PhysicalPlan::Timeseries(TimeseriesOp::Scan {
-                collection: nodedb_types::QualifiedCollection::from_stored(collection.to_string()),
+                collection: qualified,
                 // No time filter: every row, pre-epoch ones included.
                 time_range: nodedb_physical::physical_plan::UNBOUNDED_TIME_RANGE,
                 projection: Vec::new(),

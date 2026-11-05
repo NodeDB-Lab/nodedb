@@ -94,6 +94,7 @@ fn payload_of(
         calvin,
         reads: content.reads,
         snapshot_ordinal,
+        adds_storage: false,
     }
 }
 
@@ -106,6 +107,7 @@ pub fn decode_transaction_redo(write: &ReplicatedWrite) -> crate::Result<Decoded
         origin,
         calvin,
         snapshot_ordinal,
+        adds_storage: _,
     } = write
     else {
         return Err(crate::Error::Internal {
@@ -199,6 +201,7 @@ mod tests {
                 home_vshard: None,
             }],
             snapshot_ordinal: Some(1_700_000_000_000_000_123),
+            adds_storage: false,
         }
     }
 

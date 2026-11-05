@@ -169,6 +169,7 @@ mod single_node_calvin_returning;
 mod single_node_calvin_two_phase;
 mod sql_ddl_cluster;
 mod sql_schedule_lease_gating;
+mod storage_totals_cluster;
 mod surrogate_raft;
 mod surrogate_vshard_transfer;
 mod sync_collection_schema;

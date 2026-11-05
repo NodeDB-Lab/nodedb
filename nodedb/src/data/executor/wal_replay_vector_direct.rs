@@ -72,12 +72,20 @@ impl CoreLoop {
         ) else {
             return false;
         };
+        let Some(qualified) = self.replay_qualified(
+            "vector",
+            record_lsn,
+            DatabaseId::new(database_id),
+            collection.clone(),
+        ) else {
+            return false;
+        };
         let task = Self::replay_vector_task(
             nodedb_types::TenantId::new(tenant_id),
             DatabaseId::new(database_id),
             vshard,
             PhysicalPlan::Vector(VectorOp::DirectDelete {
-                collection: nodedb_types::QualifiedCollection::from_stored(collection.clone()),
+                collection: qualified,
                 field: field.clone(),
                 targets: targets.clone(),
                 returning: None,
@@ -157,12 +165,20 @@ impl CoreLoop {
         ) else {
             return false;
         };
+        let Some(qualified) = self.replay_qualified(
+            "vector",
+            record_lsn,
+            DatabaseId::new(database_id),
+            collection.clone(),
+        ) else {
+            return false;
+        };
         let task = Self::replay_vector_task(
             nodedb_types::TenantId::new(tenant_id),
             DatabaseId::new(database_id),
             vshard,
             PhysicalPlan::Vector(VectorOp::DirectTruncate {
-                collection: nodedb_types::QualifiedCollection::from_stored(collection.clone()),
+                collection: qualified,
                 field: field.clone(),
                 restart_identity: false,
             }),
@@ -239,12 +255,20 @@ impl CoreLoop {
         ) else {
             return false;
         };
+        let Some(qualified) = self.replay_qualified(
+            "vector",
+            record_lsn,
+            DatabaseId::new(database_id),
+            collection.clone(),
+        ) else {
+            return false;
+        };
         let task = Self::replay_vector_task(
             nodedb_types::TenantId::new(tenant_id),
             DatabaseId::new(database_id),
             vshard,
             PhysicalPlan::Vector(VectorOp::DirectUpdate {
-                collection: nodedb_types::QualifiedCollection::from_stored(collection.clone()),
+                collection: qualified,
                 field: field.clone(),
                 targets: targets.clone(),
                 new_vector: new_vector.clone(),

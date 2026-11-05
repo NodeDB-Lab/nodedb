@@ -51,12 +51,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_update_from(
         ctx,
     } = params;
     let collection_key = ctx.collection_key(collection);
-    let coll_qualified = crate::control::planner::sql_plan_convert::convert::db_qualified(
-        ctx.database_id,
-        collection,
-    );
     let qualified_collection = nodedb_types::QualifiedCollection::new(ctx.database_id, collection);
-    let collection = coll_qualified.as_str();
     // The source is any SELECT: its own filters (the WHERE conjuncts over
     // the source alone, or a CTE body's WHERE) and its read policy apply.
     // The whole source is read before the first write, so no collection is
@@ -74,7 +69,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_update_from(
     let vshard = collection_key.vshard();
     // A declared PRIMARY KEY implies NOT NULL; the Data Plane checks the
     // post-image against this name once the SET expressions are evaluated.
-    let declared_primary_key = super::super::declared_primary_key_name(ctx, collection)?;
+    let declared_primary_key = super::super::declared_primary_key_name(ctx, collection_key)?;
 
     Ok(vec![PhysicalTask {
         tenant_id,

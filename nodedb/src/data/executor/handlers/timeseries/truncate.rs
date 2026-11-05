@@ -184,7 +184,9 @@ impl CoreLoop {
         );
         // No wipe: timeseries reads record only `Predicate` keys, which the
         // collection version bounds.
-        self.note_collection_write(task, collection);
+        if let Err(e) = self.note_collection_write(task, collection) {
+            return self.response_error(task, e);
+        }
         self.invalidate_aggregate_cache_for_collection(db.as_u64(), tid.as_u64(), collection);
 
         debug!(core = self.core_id, %collection, truncated, ordinal, "timeseries truncate complete");

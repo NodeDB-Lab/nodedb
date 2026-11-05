@@ -63,6 +63,7 @@ pub(in super::super) fn convert_create_array(
         ctx,
     } = args;
     ctx.require_execute("CREATE ARRAY")?;
+    crate::control::relation_name::check_relation_name("array", name)?;
     let array_catalog = ctx
         .array_catalog
         .as_ref()

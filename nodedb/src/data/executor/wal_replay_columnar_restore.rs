@@ -115,12 +115,17 @@ impl CoreLoop {
         else {
             return Some(0);
         };
+        let Some(qualified) =
+            self.replay_qualified("columnar", record_lsn, database_id, collection.clone())
+        else {
+            return Some(0);
+        };
         let task = Self::replay_task(
             tid,
             database_id,
             vshard,
             PhysicalPlan::Columnar(ColumnarOp::Insert {
-                collection: nodedb_types::QualifiedCollection::from_stored(collection.clone()),
+                collection: qualified,
                 payload: Vec::new(),
                 format: "msgpack".into(),
                 intent: ColumnarInsertIntent::Restore,
@@ -279,7 +284,8 @@ impl CoreLoop {
                 collection,
             );
             self.checkpoint_coordinator.mark_dirty("columnar", written);
-            self.note_collection_write(task, collection);
+            self.note_collection_write(task, collection)
+                .map_err(ErrorCode::from)?;
         }
         Ok(written)
     }

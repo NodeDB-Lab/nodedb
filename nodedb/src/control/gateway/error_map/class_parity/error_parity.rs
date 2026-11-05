@@ -107,6 +107,7 @@ fn classified_sqlstates() -> Vec<(usize, &'static str)> {
         (100, sqlstate::SYNTAX_ERROR),
         (101, sqlstate::QUOTA_EXCEEDED),
         (102, sqlstate::QUOTA_EXCEEDED),
+        (127, sqlstate::DISK_FULL),
         (103, sqlstate::SYNTAX_ERROR),
         (104, sqlstate::SYNTAX_ERROR),
         (106, sqlstate::READ_ONLY_SQL_TRANSACTION),
@@ -155,6 +156,10 @@ fn dedicated_codes_render_the_class_of_their_variant() {
     assert_eq!(
         numeric_code_to_sqlstate(Ec::TENANT_GRAPH_DEPTH_EXCEEDED),
         sqlstate::QUOTA_EXCEEDED
+    );
+    assert_eq!(
+        numeric_code_to_sqlstate(Ec::STORAGE_QUOTA_EXCEEDED),
+        sqlstate::DISK_FULL
     );
     assert_eq!(
         numeric_code_to_sqlstate(Ec::MIRROR_READ_ONLY),

@@ -314,6 +314,7 @@ fn meta_read_key(op: &MetaOp) -> ReadKey {
         | MetaOp::PurgeVersionsBelow { .. }
         | MetaOp::KvDueExpiries { .. }
         | MetaOp::RefreshGraphCount { .. }
+        | MetaOp::QueryStorageBytes { .. }
         | MetaOp::PurgeTenant { .. }
         | MetaOp::UnregisterCollection { .. }
         | MetaOp::UnregisterMaterializedView { .. }

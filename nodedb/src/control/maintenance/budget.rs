@@ -82,6 +82,8 @@ struct TrackerInner {
     /// Per-database CPU-seconds cap per minute.
     /// Derived from `maintenance_cpu_pct / 100.0 * 60.0`.
     caps: HashMap<DatabaseId, f64>,
+    /// Per-database cumulative lease wall microseconds since process start.
+    lease_micros: HashMap<DatabaseId, u64>,
 }
 
 impl TrackerInner {
@@ -89,6 +91,7 @@ impl TrackerInner {
         Self {
             windows: HashMap::new(),
             caps: HashMap::new(),
+            lease_micros: HashMap::new(),
         }
     }
 
@@ -127,6 +130,26 @@ impl MaintenanceBudgetTracker {
         };
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         inner.caps.insert(db, cap);
+    }
+
+    /// Cumulative lease wall seconds per database since process start.
+    ///
+    /// Counts every released lease. Unlike the sliding window, entries never expire.
+    pub fn cumulative_lease_secs_snapshot(&self) -> Vec<(DatabaseId, f64)> {
+        let inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        inner
+            .lease_micros
+            .iter()
+            .map(|(db, micros)| (*db, *micros as f64 / 1_000_000.0))
+            .collect()
+    }
+
+    /// Remove all window, cap, and cumulative state of a dropped database.
+    pub fn clear_database(&self, db: DatabaseId) {
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        inner.windows.remove(&db);
+        inner.caps.remove(&db);
+        inner.lease_micros.remove(&db);
     }
 
     /// Attempt to acquire a maintenance lease for `db`.
@@ -180,10 +203,15 @@ pub struct MaintenanceLease {
 
 impl Drop for MaintenanceLease {
     fn drop(&mut self) {
-        let elapsed = self.start.elapsed().as_secs_f64();
+        let elapsed = self.start.elapsed();
         let now_secs = current_secs();
+        let micros = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
         let mut inner = self.tracker.inner.lock().unwrap_or_else(|p| p.into_inner());
-        inner.window_for_mut(self.db).record(now_secs, elapsed);
+        inner
+            .window_for_mut(self.db)
+            .record(now_secs, elapsed.as_secs_f64());
+        let total = inner.lease_micros.entry(self.db).or_insert(0);
+        *total = total.saturating_add(micros);
     }
 }
 
@@ -210,6 +238,34 @@ mod tests {
 
     fn tracker() -> Arc<MaintenanceBudgetTracker> {
         Arc::new(MaintenanceBudgetTracker::new())
+    }
+
+    #[test]
+    fn cumulative_lease_secs_accumulate_per_database() {
+        let t = tracker();
+        let a = DatabaseId::new(10);
+        let b = DatabaseId::new(11);
+        {
+            let _la = t.try_acquire(a, 0.0).unwrap();
+            let _lb = t.try_acquire(b, 0.0).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        {
+            let _la = t.try_acquire(a, 0.0).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let snap: std::collections::HashMap<_, _> =
+            t.cumulative_lease_secs_snapshot().into_iter().collect();
+        assert_eq!(snap.len(), 2);
+        assert!(snap[&a] >= 0.04);
+        assert!(snap[&b] >= 0.02);
+        assert!(snap[&a] > snap[&b]);
+
+        t.clear_database(a);
+        let snap: std::collections::HashMap<_, _> =
+            t.cumulative_lease_secs_snapshot().into_iter().collect();
+        assert!(!snap.contains_key(&a));
+        assert!(snap.contains_key(&b));
     }
 
     #[test]

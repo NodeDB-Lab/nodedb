@@ -78,8 +78,9 @@ async fn restore_locked(
         }
         let plan = PhysicalPlan::Crdt(CrdtOp::Apply {
             collection: nodedb_types::QualifiedCollection::from_stored(
+                workflow.database_id,
                 workflow.collection.to_owned(),
-            ),
+            )?,
             document_id: document_id.to_owned(),
             delta: delta.clone(),
             peer_id,

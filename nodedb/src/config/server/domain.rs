@@ -150,6 +150,10 @@ pub(super) fn validate_domain(config: &ServerConfig) -> crate::Result<()> {
         m.constraint_reconcile_interval_ms,
         "tuning.maintenance.constraint_reconcile_interval_ms",
     )?;
+    positive_u64(
+        m.storage_sample_interval_ms,
+        "tuning.maintenance.storage_sample_interval_ms",
+    )?;
     if m.scope_expiry_interval_secs < MIN_SCOPE_EXPIRY_SECS {
         return Err(reject(
             "tuning.maintenance.scope_expiry_interval_secs",

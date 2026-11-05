@@ -62,6 +62,7 @@ async fn register_array_catalog_entry(
     snapshot: &[u8],
     schema_hlc: SchemaHlc,
 ) -> crate::Result<()> {
+    crate::control::relation_name::check_relation_name("array", array)?;
     let catalog = state.credentials.catalog();
     if catalog
         .get_array_in_database(tenant_id, database_id, array)?

@@ -119,7 +119,10 @@ pub(super) async fn process_message(
             .await
             {
                 Ok(result) => serde_json::json!({"id": id, "result": result}).to_string(),
-                Err(error) => ws_error_from_gateway(&id, &error),
+                Err(error) => {
+                    shared.database_metrics.record_error(database_id);
+                    ws_error_from_gateway(&id, &error)
+                }
             };
             (response, false)
         }
@@ -136,6 +139,14 @@ pub(super) async fn process_message(
                     false,
                 );
             }
+            let collection =
+                match crate::control::server::shared::request_collection::request_collection(
+                    database_id,
+                    &collection,
+                ) {
+                    Ok(collection) => collection,
+                    Err(error) => return (error_response(id, &error.to_string()), false),
+                };
             let emitter = ArcAuditEmitter(Arc::clone(&shared.audit));
             if let Err(error) = authorize_collection(
                 identity,

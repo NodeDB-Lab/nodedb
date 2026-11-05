@@ -13,7 +13,7 @@ use std::collections::{BTreeSet, HashSet};
 
 use futures::future::join_all;
 use nodedb_physical::physical_plan::MetaOp;
-use nodedb_types::DatabaseId;
+use nodedb_types::{CollectionKeyError, DatabaseId};
 
 use crate::Error;
 use crate::bridge::envelope::PhysicalPlan;
@@ -102,32 +102,58 @@ fn decode_owned(
             ),
         })?;
     let homes_of = |record: StoredRecord<'_>| homes_if_captured(database_id, collections, record);
-    retain_tenant_data_for_vshards(&mut snap, tenant_id, source_vshards, homes_of);
+    retain_tenant_data_for_vshards(&mut snap, tenant_id, source_vshards, homes_of)?;
     // The vector build parameters are keyed like `vectors`. The shared filter
     // leaves them alone, and a re-issue configures a collection the
     // capture does not name.
-    let owned = |key: &str| {
-        extract_db_tenant_scoped_collection(key, tenant_id).is_some_and(|collection| {
-            homes_of(StoredRecord::Row { collection })
-                .is_some_and(|homes| homes.owned_by(source_vshards))
-        })
+    let owned = |key: &str| -> Result<bool, Error> {
+        match extract_db_tenant_scoped_collection(key, tenant_id) {
+            Some(collection) => Ok(homes_of(StoredRecord::Row { collection })?
+                .is_some_and(|homes| homes.owned_by(source_vshards))),
+            None => Ok(false),
+        }
     };
-    snap.vector_params.retain(|(key, _)| owned(key));
-    snap.index_configs.retain(|(key, _)| owned(key));
+    retain_owned(&mut snap.vector_params, &owned)?;
+    retain_owned(&mut snap.index_configs, &owned)?;
     Ok(snap)
 }
 
+/// Keep the entries of `entries` whose key `owned` accepts.
+fn retain_owned<V>(
+    entries: &mut Vec<(String, V)>,
+    owned: &impl Fn(&str) -> Result<bool, Error>,
+) -> Result<(), Error> {
+    let mut error = None;
+    entries.retain(|(key, _)| match owned(key) {
+        Ok(keep) => keep,
+        Err(e) => {
+            error.get_or_insert(e);
+            false
+        }
+    });
+    error.map_or(Ok(()), Err)
+}
+
 /// The homes of `record`, or `None` when its collection is not one of
-/// `collections`.
+/// `collections`. A row whose collection is not in the stored form of
+/// `database_id` is an error.
 fn homes_if_captured(
     database_id: DatabaseId,
     collections: &BTreeSet<String>,
     record: StoredRecord<'_>,
-) -> Option<RecordHomes> {
-    let key = stored_collection_key(database_id, record.collection());
-    collections
-        .contains(key.name())
-        .then(|| homes_of_stored(database_id, record))
+) -> Result<Option<RecordHomes>, CollectionKeyError> {
+    // An array is named by its bare name; every other record by its stored name.
+    let captured = match record {
+        StoredRecord::ArrayCells { array, .. } => collections.contains(array),
+        StoredRecord::Row { .. } | StoredRecord::Edge { .. } => {
+            let key = stored_collection_key(database_id, record.collection())?;
+            collections.contains(key.name())
+        }
+    };
+    if !captured {
+        return Ok(None);
+    }
+    homes_of_stored(database_id, record).map(Some)
 }
 
 #[cfg(test)]
@@ -146,12 +172,21 @@ mod tests {
         let names = captured(&["orders"]);
         let stored = QualifiedCollection::new(DB, "orders");
         let expected = CollectionKey::from_bare(DB, "orders").vshard();
-        for collection in [stored.as_str(), "orders"] {
-            let homes = homes_if_captured(DB, &names, StoredRecord::Row { collection })
-                .expect("captured collection");
-            assert_eq!(homes.owner(), expected);
-            assert!(homes.is_single());
-        }
+        let collection = stored.as_str();
+        let homes = homes_if_captured(DB, &names, StoredRecord::Row { collection })
+            .unwrap()
+            .expect("captured collection");
+        assert_eq!(homes.owner(), expected);
+        assert!(homes.is_single());
+    }
+
+    #[test]
+    fn a_bare_name_outside_the_default_database_is_refused() {
+        let names = captured(&["orders"]);
+        let row = StoredRecord::Row {
+            collection: "orders",
+        };
+        assert!(homes_if_captured(DB, &names, row).is_err());
     }
 
     #[test]
@@ -161,13 +196,13 @@ mod tests {
         let row = StoredRecord::Row {
             collection: stored.as_str(),
         };
-        assert!(homes_if_captured(DB, &names, row).is_none());
+        assert!(homes_if_captured(DB, &names, row).unwrap().is_none());
         let edge = StoredRecord::Edge {
             collection: stored.as_str(),
             src: "a",
             dst: "b",
         };
-        assert!(homes_if_captured(DB, &names, edge).is_none());
+        assert!(homes_if_captured(DB, &names, edge).unwrap().is_none());
     }
 
     #[test]
@@ -180,7 +215,7 @@ mod tests {
             dst: "b",
         };
         assert_eq!(
-            homes_if_captured(DB, &names, edge),
+            homes_if_captured(DB, &names, edge).unwrap(),
             Some(RecordHomes::edge("a", "b"))
         );
     }
@@ -215,7 +250,7 @@ mod tests {
         let cross = edges
             .iter()
             .filter_map(|k| StoredRecord::from_edge_key(k))
-            .filter(|r| !homes_of_stored(DB, *r).is_single())
+            .filter(|r| !homes_of_stored(DB, *r).unwrap().is_single())
             .count();
         assert!(cross > 0, "the fixture holds cross-shard edges");
 
@@ -227,6 +262,7 @@ mod tests {
                 .filter(|k| {
                     StoredRecord::from_edge_key(k).is_some_and(|r| {
                         homes_of_stored(DB, r)
+                            .unwrap()
                             .iter()
                             .any(|home| replicates(node, group_of(home)))
                     })
@@ -268,7 +304,8 @@ mod tests {
         };
         retain_tenant_data_for_vshards(&mut snap, 7, &all, |record| {
             homes_if_captured(DB, &names, record)
-        });
+        })
+        .unwrap();
         assert_eq!(
             snap.kv_tables,
             vec![(format!("1025:7:{}", kept.as_str()), vec![1])]

@@ -93,7 +93,7 @@ mod tests {
     /// Two key-value rows keep two identities, whatever their keys hash to.
     #[test]
     fn kv_rows_keep_distinct_identities() {
-        let collection = QualifiedCollection::from_stored("items".to_owned());
+        let collection = QualifiedCollection::new(crate::DatabaseId::DEFAULT, "items");
         let a = PassiveReadKeyId::kv(collection.clone(), b"alice:sword".to_vec());
         let b = PassiveReadKeyId::kv(collection, b"alice:shield".to_vec());
         assert_ne!(a, b);
@@ -102,7 +102,10 @@ mod tests {
     /// An identity survives a msgpack round trip.
     #[test]
     fn identity_round_trips_through_msgpack() {
-        let id = PassiveReadKeyId::surrogate(QualifiedCollection::from_stored("o".to_owned()), 9);
+        let id = PassiveReadKeyId::surrogate(
+            QualifiedCollection::new(crate::DatabaseId::DEFAULT, "o"),
+            9,
+        );
         let bytes = zerompk::to_msgpack_vec(&id).expect("encode");
         let back: PassiveReadKeyId = zerompk::from_msgpack(&bytes).expect("decode");
         assert_eq!(back, id);

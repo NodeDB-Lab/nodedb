@@ -104,7 +104,7 @@ pub(super) fn convert_truncate(
                 // scans the rows this TRUNCATE will remove.
                 resolved_sum_targets: Vec::new(),
                 // Names the column each removed row's identity is read from.
-                declared_primary_key: super::dml::declared_primary_key_name(ctx, collection)?,
+                declared_primary_key: super::dml::declared_primary_key_name(ctx, collection_key)?,
             })
         }
         EngineType::KeyValue => PhysicalPlan::Kv(KvOp::Truncate {

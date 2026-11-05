@@ -26,11 +26,13 @@ pub(crate) async fn handle_graph_match(
     seq: u64,
     fields: &TextFields,
 ) -> NativeResponse {
-    let collection = fields
-        .collection
-        .as_deref()
-        .unwrap_or("default")
-        .to_lowercase();
+    let collection = match crate::control::server::shared::request_collection::request_collection(
+        ctx.database_id(),
+        fields.collection.as_deref().unwrap_or("default"),
+    ) {
+        Ok(collection) => collection,
+        Err(error) => return error_to_native(seq, &error),
+    };
     let tenant_id = ctx.tenant_id();
 
     if let Err(error) = super::limits::check_op_limits(ctx.state, fields) {

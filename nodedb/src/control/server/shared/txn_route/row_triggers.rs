@@ -100,7 +100,10 @@ pub(super) async fn fire_before(
             ctx.identity,
             task.database_id,
             ctx.auth,
-            &nodedb_types::QualifiedCollection::from_stored(info.collection.clone()),
+            &nodedb_types::QualifiedCollection::from_stored(
+                task.database_id,
+                info.collection.clone(),
+            )?,
             &document_id,
             ctx.txn.sessions.tx_id(ctx.txn.session_id),
         )
@@ -170,14 +173,12 @@ async fn enforce_checks(
     let Some(new_row) = info.new_fields.as_ref() else {
         return Ok(());
     };
-    let collection = crate::control::target_identity::naming::bare_collection_name(
-        database_id,
-        &info.collection,
-    );
+    let collection =
+        nodedb_types::CollectionKey::from_qualified_str(database_id, &info.collection)?.name();
     let Some(entry) = ctx.state.credentials.catalog().get_collection(
         database_id,
         tenant_id.as_u64(),
-        &collection,
+        collection,
     )?
     else {
         return Ok(());

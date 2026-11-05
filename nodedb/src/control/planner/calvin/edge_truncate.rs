@@ -212,12 +212,11 @@ pub(super) fn collection_is_edge_bearing(
     database_id: DatabaseId,
     collection: &str,
 ) -> crate::Result<bool> {
-    let bare =
-        crate::control::target_identity::naming::bare_collection_name(database_id, collection);
+    let bare = nodedb_types::CollectionKey::from_qualified_str(database_id, collection)?.name();
     Ok(state
         .credentials
         .catalog()
-        .get_collection(database_id, tenant_id.as_u64(), &bare)?
+        .get_collection(database_id, tenant_id.as_u64(), bare)?
         .is_some_and(|coll| coll.has_implicit_edges))
 }
 
@@ -231,7 +230,11 @@ mod tests {
             vshard_id: VShardId::new(3),
             database_id: DatabaseId::DEFAULT,
             plan: PhysicalPlan::Document(DocumentOp::Truncate {
-                collection: nodedb_types::QualifiedCollection::from_stored("c".to_string()),
+                collection: nodedb_types::QualifiedCollection::from_stored(
+                    DatabaseId::DEFAULT,
+                    "c".to_string(),
+                )
+                .expect("bare name"),
                 restart_identity: false,
                 resolved_sum_targets: Vec::new(),
                 declared_primary_key: None,
@@ -246,7 +249,11 @@ mod tests {
         let task = truncate_task();
         assert!(is_truncate(&task.plan));
         let share = PhysicalPlan::Graph(GraphOp::TruncateEdges {
-            collection: nodedb_types::QualifiedCollection::from_stored("c".to_string()),
+            collection: nodedb_types::QualifiedCollection::from_stored(
+                DatabaseId::DEFAULT,
+                "c".to_string(),
+            )
+            .expect("bare name"),
             vshard: 1,
         });
         assert!(!is_truncate(&share));
@@ -257,7 +264,9 @@ mod tests {
     #[test]
     fn a_truncate_carries_one_edge_share_per_vshard() {
         let task = truncate_task();
-        let collection = nodedb_types::QualifiedCollection::from_stored("c".to_string());
+        let collection =
+            nodedb_types::QualifiedCollection::from_stored(DatabaseId::DEFAULT, "c".to_string())
+                .expect("bare name");
         let shares = edge_share_tasks(&task, &collection);
         assert_eq!(shares.len(), nodedb_cluster::routing::VSHARD_COUNT as usize);
         for (vshard, share) in (0u32..).zip(&shares) {

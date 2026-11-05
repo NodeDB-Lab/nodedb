@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Per-database quota usage tracking and Prometheus rendering.
+//! Per-database metric counters, keyed by `DatabaseId`.
 //!
-//! `DatabaseQuotaMetrics` is a snapshot struct produced on each scrape from
-//! the live atomic counters embedded in `SystemMetrics`. It carries the same
-//! resource dimensions as `TenantQuotaMetrics` plus infrastructure metrics
-//! specific to the database layer (bridge queue depth, WAL commit latency,
-//! and maintenance CPU seconds).
+//! The registry is the single home of every per-database series. Names
+//! resolve at render time from a caller-supplied id-to-name map, so a
+//! rename or drop never leaves a stale series. Hot-path writers update an
+//! existing entry only. `ensure_database` creates entries, so an in-flight
+//! request after DROP cannot resurrect a series.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,43 +14,67 @@ use std::sync::{Arc, RwLock};
 
 use nodedb_types::DatabaseId;
 
+use super::histogram::AtomicHistogram;
+
 /// Live atomic counters for one database.
 ///
-/// Stored inside `DatabaseMetricsRegistry` and updated from the hot path.
-/// All fields are `AtomicU64`; counters are cumulative since process start.
+/// Counters are cumulative since process start. Gauges hold the last sample.
 #[derive(Debug, Default)]
 pub struct DatabaseCounters {
-    /// Cumulative requests admitted for this database.
+    /// Cumulative requests admitted.
     pub qps_total: AtomicU64,
-    /// Current memory usage in bytes (sampled from governor).
+    /// Cumulative query errors.
+    pub errors_total: AtomicU64,
+    /// Current collection count.
+    pub collections: AtomicU64,
+    /// Current tenant count.
+    pub tenants: AtomicU64,
+    /// Current memory usage in bytes.
     pub memory_bytes: AtomicU64,
     /// Current storage usage in bytes.
     pub storage_bytes: AtomicU64,
+    /// Storage limit in bytes. Zero means unlimited or unknown.
+    pub storage_limit_bytes: AtomicU64,
     /// Current active connection count.
     pub connections: AtomicU64,
     /// SPSC bridge virtual-queue depth snapshot.
     pub bridge_queue_depth: AtomicU64,
-    /// WAL commit latency P99 in microseconds (updated by WAL group-commit path).
+    /// WAL group-commit latency observations in microseconds.
+    pub wal_commit_latency: AtomicHistogram,
+    /// WAL commit latency P99 in microseconds over the last sampling window.
     pub wal_commit_latency_p99_us: AtomicU64,
-    /// Cumulative maintenance CPU-seconds consumed by this database.
-    pub maintenance_cpu_seconds_total: AtomicU64,
+    /// Cumulative wall microseconds spent holding a maintenance lease.
+    pub maintenance_lease_micros_total: AtomicU64,
     /// Mirror replication lag in milliseconds (`now_ms - last_apply_ms`).
     /// Zero for non-mirror databases or a promoted mirror.
     pub mirror_lag_ms: AtomicU64,
 }
 
-/// Registry of per-database atomic counter handles.
-///
-/// `Arc<DatabaseCounters>` handles are cloned and handed to subsystems
-/// (WFQ, WAL, governor) for lock-free updates. The registry is the
-/// control-plane-side collection point for Prometheus scrapes.
+/// Registry of per-database counter handles.
 #[derive(Debug, Default)]
 pub struct DatabaseMetricsRegistry {
-    /// Map from database display name to its live counter handle.
-    ///
-    /// Display names are resolved from `DatabaseId` via the catalog name cache.
-    /// The registry is write-locked only on first registration of a new database.
-    counters: RwLock<HashMap<String, Arc<DatabaseCounters>>>,
+    pub(super) counters: RwLock<HashMap<DatabaseId, Arc<DatabaseCounters>>>,
+}
+
+macro_rules! store_setter {
+    ($(#[$doc:meta])* $fn:ident, $field:ident) => {
+        $(#[$doc])*
+        pub fn $fn(&self, db: DatabaseId, value: u64) {
+            if let Some(c) = self.get(db) {
+                c.$field.store(value, Ordering::Relaxed);
+            }
+        }
+    };
+}
+
+macro_rules! load_reader {
+    ($(#[$doc:meta])* $fn:ident, $field:ident) => {
+        $(#[$doc])*
+        pub fn $fn(&self, db: DatabaseId) -> u64 {
+            self.get(db)
+                .map_or(0, |c| c.$field.load(Ordering::Relaxed))
+        }
+    };
 }
 
 impl DatabaseMetricsRegistry {
@@ -59,83 +83,66 @@ impl DatabaseMetricsRegistry {
         Self::default()
     }
 
-    /// Get or create the counter handle for `db_name`.
-    ///
-    /// The returned `Arc<DatabaseCounters>` is stable for the process lifetime.
-    pub fn get_or_create(&self, db_name: &str) -> Arc<DatabaseCounters> {
-        // Fast path: read lock.
-        {
-            let r = self.counters.read().unwrap_or_else(|p| p.into_inner());
-            if let Some(c) = r.get(db_name) {
-                return Arc::clone(c);
-            }
+    /// Create the entry for `db` if absent and return its handle.
+    pub fn ensure_database(&self, db: DatabaseId) -> Arc<DatabaseCounters> {
+        if let Some(c) = self.get(db) {
+            return c;
         }
-        // Slow path: write lock.
         let mut w = self.counters.write().unwrap_or_else(|p| p.into_inner());
-        w.entry(db_name.to_string())
-            .or_insert_with(|| Arc::new(DatabaseCounters::default()))
-            .clone()
+        Arc::clone(w.entry(db).or_default())
     }
 
-    /// Increment the QPS counter for `db_name` by 1.
-    pub fn record_qps(&self, db_name: &str) {
-        self.get_or_create(db_name)
-            .qps_total
-            .fetch_add(1, Ordering::Relaxed);
+    /// Return the handle for `db`, or `None` when no entry exists.
+    pub fn get(&self, db: DatabaseId) -> Option<Arc<DatabaseCounters>> {
+        let r = self.counters.read().unwrap_or_else(|p| p.into_inner());
+        r.get(&db).map(Arc::clone)
     }
 
-    /// Set the memory-bytes gauge for `db_name`.
-    pub fn set_memory_bytes(&self, db_name: &str, bytes: u64) {
-        self.get_or_create(db_name)
-            .memory_bytes
-            .store(bytes, Ordering::Relaxed);
+    /// Ids of every database with an entry. Order is unspecified.
+    pub fn database_ids(&self) -> Vec<DatabaseId> {
+        let r = self.counters.read().unwrap_or_else(|p| p.into_inner());
+        r.keys().copied().collect()
     }
 
-    /// Set the storage-bytes gauge for `db_name`.
-    pub fn set_storage_bytes(&self, db_name: &str, bytes: u64) {
-        self.get_or_create(db_name)
-            .storage_bytes
-            .store(bytes, Ordering::Relaxed);
+    /// Remove every series of `db`.
+    pub fn remove_database(&self, db: DatabaseId) {
+        let mut w = self.counters.write().unwrap_or_else(|p| p.into_inner());
+        w.remove(&db);
     }
 
-    /// Set the active-connections gauge for `db_name`.
-    pub fn set_connections(&self, db_name: &str, count: u64) {
-        self.get_or_create(db_name)
-            .connections
-            .store(count, Ordering::Relaxed);
+    /// Count one admitted request. No-op when `db` has no entry.
+    pub fn record_qps(&self, db: DatabaseId) {
+        if let Some(c) = self.get(db) {
+            c.qps_total.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
-    /// Set the bridge queue-depth snapshot for `db_name`.
-    pub fn set_bridge_queue_depth(&self, db_name: &str, depth: u64) {
-        self.get_or_create(db_name)
-            .bridge_queue_depth
-            .store(depth, Ordering::Relaxed);
+    /// Count one query error. No-op when `db` has no entry.
+    pub fn record_error(&self, db: DatabaseId) {
+        if let Some(c) = self.get(db) {
+            c.errors_total.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
-    /// Set the WAL commit latency P99 (microseconds) for `db_name`.
-    pub fn set_wal_latency_p99(&self, db_name: &str, us: u64) {
-        self.get_or_create(db_name)
-            .wal_commit_latency_p99_us
-            .store(us, Ordering::Relaxed);
+    /// Record one WAL group-commit latency in microseconds.
+    /// No-op when `db` has no entry.
+    pub fn observe_wal_commit(&self, db: DatabaseId, micros: u64) {
+        if let Some(c) = self.get(db) {
+            c.wal_commit_latency.observe(micros);
+        }
     }
 
-    /// Set the mirror replication lag in milliseconds for `db_name`.
+    /// WAL commit latency P99 in microseconds over the last sampling window.
+    /// Zero before the first sample or without observations.
+    pub fn wal_commit_latency_p99_us(&self, db: DatabaseId) -> u64 {
+        self.get(db)
+            .map_or(0, |c| c.wal_commit_latency_p99_us.load(Ordering::Relaxed))
+    }
+
+    /// Add wall seconds spent holding a maintenance lease.
     ///
-    /// Computed as `now_ms - last_apply_ms` using wall-clock time. The
-    /// bounded-staleness read rejection path uses the same wall-clock basis,
-    /// so the metric and the rejection gate are always consistent.
-    pub fn set_mirror_lag_ms(&self, db_name: &str, lag_ms: u64) {
-        self.get_or_create(db_name)
-            .mirror_lag_ms
-            .store(lag_ms, Ordering::Relaxed);
-    }
-
-    /// Add `secs` fractional CPU-seconds to the maintenance counter for `db_name`.
-    ///
-    /// Converts to integer microseconds (rounded) to avoid `AtomicF64` complexity.
-    /// Negative or non-finite inputs are clamped to zero so accidental underflow
-    /// in upstream timing arithmetic cannot subtract from the cumulative counter.
-    pub fn add_maintenance_cpu_secs(&self, db_name: &str, secs: f64) {
+    /// Stored as integer microseconds. Negative or non-finite input adds zero.
+    pub fn add_maintenance_lease_secs(&self, db: DatabaseId, secs: f64) {
         let us = if secs.is_finite() && secs > 0.0 {
             (secs * 1_000_000.0).round() as u64
         } else {
@@ -144,103 +151,68 @@ impl DatabaseMetricsRegistry {
         if us == 0 {
             return;
         }
-        self.get_or_create(db_name)
-            .maintenance_cpu_seconds_total
-            .fetch_add(us, Ordering::Relaxed);
+        if let Some(c) = self.get(db) {
+            c.maintenance_lease_micros_total
+                .fetch_add(us, Ordering::Relaxed);
+        }
     }
 
-    /// Render all registered databases as Prometheus text format 0.0.4.
-    ///
-    /// Labels: `database="<name>"`.
-    pub fn render_prometheus(&self, out: &mut String) {
-        use std::fmt::Write as _;
+    store_setter!(
+        /// Set the WAL commit P99 gauge in microseconds.
+        set_wal_commit_p99_us, wal_commit_latency_p99_us
+    );
+    store_setter!(
+        /// Set the collection-count gauge.
+        set_collections, collections
+    );
+    store_setter!(
+        /// Set the tenant-count gauge.
+        set_tenants, tenants
+    );
+    store_setter!(
+        /// Set the memory-bytes gauge.
+        set_memory_bytes, memory_bytes
+    );
+    store_setter!(
+        /// Set the storage-bytes gauge.
+        set_storage_bytes, storage_bytes
+    );
+    store_setter!(
+        /// Set the storage limit in bytes. Zero means unlimited.
+        set_storage_limit, storage_limit_bytes
+    );
+    store_setter!(
+        /// Set the active-connections gauge.
+        set_connections, connections
+    );
+    store_setter!(
+        /// Set the bridge queue-depth snapshot.
+        set_bridge_queue_depth, bridge_queue_depth
+    );
+    store_setter!(
+        /// Set the mirror replication lag in milliseconds.
+        ///
+        /// Computed as `now_ms - last_apply_ms` on the wall clock, the same
+        /// basis as the bounded-staleness read rejection.
+        set_mirror_lag_ms, mirror_lag_ms
+    );
 
-        let r = self.counters.read().unwrap_or_else(|p| p.into_inner());
-        if r.is_empty() {
-            return;
-        }
-
-        let mut pairs: Vec<_> = r.iter().collect();
-        pairs.sort_by(|a, b| a.0.cmp(b.0));
-
-        macro_rules! emit_counter {
-            ($name:literal, $help:literal, $field:ident) => {
-                let _ = write!(
-                    out,
-                    "# HELP {} {}\n# TYPE {} counter\n",
-                    $name, $help, $name
-                );
-                for (db, c) in &pairs {
-                    let _ = writeln!(
-                        out,
-                        r#"{}{{database="{}"}} {}"#,
-                        $name,
-                        db,
-                        c.$field.load(Ordering::Relaxed)
-                    );
-                }
-                out.push('\n');
-            };
-        }
-
-        macro_rules! emit_gauge {
-            ($name:literal, $help:literal, $field:ident) => {
-                let _ = write!(out, "# HELP {} {}\n# TYPE {} gauge\n", $name, $help, $name);
-                for (db, c) in &pairs {
-                    let _ = writeln!(
-                        out,
-                        r#"{}{{database="{}"}} {}"#,
-                        $name,
-                        db,
-                        c.$field.load(Ordering::Relaxed)
-                    );
-                }
-                out.push('\n');
-            };
-        }
-
-        emit_counter!(
-            "nodedb_database_qps_total",
-            "Cumulative requests admitted per database",
-            qps_total
-        );
-        emit_gauge!(
-            "nodedb_database_memory_used_bytes",
-            "Current memory usage per database in bytes",
-            memory_bytes
-        );
-        emit_gauge!(
-            "nodedb_database_storage_used_bytes",
-            "Current storage usage per database in bytes",
-            storage_bytes
-        );
-        emit_gauge!(
-            "nodedb_database_connections",
-            "Active connections per database",
-            connections
-        );
-        emit_gauge!(
-            "nodedb_database_bridge_queue_depth",
-            "SPSC bridge virtual-queue depth per database",
-            bridge_queue_depth
-        );
-        emit_gauge!(
-            "nodedb_database_wal_commit_latency_p99_us",
-            "WAL commit latency P99 in microseconds per database",
-            wal_commit_latency_p99_us
-        );
-        emit_counter!(
-            "nodedb_database_maintenance_cpu_us_total",
-            "Cumulative maintenance CPU microseconds consumed per database",
-            maintenance_cpu_seconds_total
-        );
-        emit_gauge!(
-            "nodedb_database_mirror_lag_ms",
-            "Mirror replication lag in milliseconds (wall-clock now minus last apply timestamp); \
-             zero for non-mirror or promoted databases",
-            mirror_lag_ms
-        );
-    }
+    load_reader!(
+        /// Storage limit in bytes. Zero means unlimited or unknown.
+        storage_limit, storage_limit_bytes
+    );
+    load_reader!(
+        /// Storage usage in bytes. Zero means unknown.
+        storage_bytes, storage_bytes
+    );
+    load_reader!(
+        /// Memory usage in bytes. Zero means unknown.
+        memory_bytes, memory_bytes
+    );
+    load_reader!(
+        /// Cumulative requests admitted. Zero means unknown.
+        qps_total, qps_total
+    );
 }
 
 /// Snapshot struct for a single database's quota metrics.
@@ -260,8 +232,8 @@ pub struct DatabaseQuotaMetrics {
     pub connections_limit: u64,
     pub bridge_queue_depth: u64,
     pub wal_commit_latency_p99_us: u64,
-    pub maintenance_cpu_seconds_used: f64,
-    pub maintenance_cpu_pct_limit: u8,
+    pub maintenance_lease_seconds_used: f64,
+    pub maintenance_lease_pct_limit: u8,
 }
 
 impl DatabaseQuotaMetrics {
@@ -277,34 +249,91 @@ impl DatabaseQuotaMetrics {
 mod tests {
     use super::*;
 
+    fn db(n: u64) -> DatabaseId {
+        DatabaseId::new(n)
+    }
+
     #[test]
-    fn registry_get_or_create_idempotent() {
+    fn ensure_database_is_idempotent() {
         let reg = DatabaseMetricsRegistry::new();
-        let a = reg.get_or_create("mydb");
-        let b = reg.get_or_create("mydb");
-        // Both arcs point to the same allocation.
+        let a = reg.ensure_database(db(1));
+        let b = reg.ensure_database(db(1));
         assert!(Arc::ptr_eq(&a, &b));
     }
 
     #[test]
-    fn record_qps_increments() {
+    fn record_qps_increments_existing_entry() {
         let reg = DatabaseMetricsRegistry::new();
-        reg.record_qps("db1");
-        reg.record_qps("db1");
-        let c = reg.get_or_create("db1");
-        assert_eq!(c.qps_total.load(Ordering::Relaxed), 2);
+        reg.ensure_database(db(1));
+        reg.record_qps(db(1));
+        reg.record_qps(db(1));
+        assert_eq!(reg.qps_total(db(1)), 2);
     }
 
     #[test]
-    fn render_prometheus_contains_labels() {
+    fn record_qps_on_unknown_id_creates_nothing() {
         let reg = DatabaseMetricsRegistry::new();
-        reg.record_qps("alpha");
-        reg.record_qps("beta");
+        reg.record_qps(db(9));
+        reg.record_error(db(9));
+        reg.set_memory_bytes(db(9), 5);
+        reg.observe_wal_commit(db(9), 5);
+        reg.add_maintenance_lease_secs(db(9), 1.0);
+        assert!(reg.get(db(9)).is_none());
+        assert!(reg.counters.read().unwrap().is_empty());
+    }
+
+    #[test]
+    fn remove_database_drops_every_series() {
+        let reg = DatabaseMetricsRegistry::new();
+        reg.ensure_database(db(1));
+        reg.record_qps(db(1));
+        reg.set_storage_bytes(db(1), 10);
+        reg.remove_database(db(1));
+        let names = HashMap::from([(db(1), "a".to_string())]);
         let mut out = String::new();
-        reg.render_prometheus(&mut out);
-        assert!(out.contains(r#"database="alpha""#));
-        assert!(out.contains(r#"database="beta""#));
-        assert!(out.contains("nodedb_database_qps_total"));
+        reg.render_prometheus(&names, &mut out);
+        assert!(!out.contains(r#"database="a""#));
+        assert_eq!(reg.storage_bytes(db(1)), 0);
+        reg.record_qps(db(1));
+        assert!(reg.get(db(1)).is_none());
+    }
+
+    #[test]
+    fn wal_commit_p99_gauge_reads_back() {
+        let reg = DatabaseMetricsRegistry::new();
+        reg.ensure_database(db(1));
+        assert_eq!(reg.wal_commit_latency_p99_us(db(1)), 0);
+        for _ in 0..100 {
+            reg.observe_wal_commit(db(1), 400);
+        }
+        assert_eq!(reg.wal_commit_latency_p99_us(db(1)), 0);
+        reg.set_wal_commit_p99_us(db(1), 480);
+        assert_eq!(reg.wal_commit_latency_p99_us(db(1)), 480);
+        reg.set_wal_commit_p99_us(db(2), 5);
+        assert!(reg.get(db(2)).is_none());
+    }
+
+    #[test]
+    fn storage_limit_round_trips_and_defaults_to_zero() {
+        let reg = DatabaseMetricsRegistry::new();
+        assert_eq!(reg.storage_limit(db(1)), 0);
+        reg.ensure_database(db(1));
+        reg.set_storage_limit(db(1), 4096);
+        assert_eq!(reg.storage_limit(db(1)), 4096);
+    }
+
+    #[test]
+    fn maintenance_lease_ignores_non_positive_input() {
+        let reg = DatabaseMetricsRegistry::new();
+        reg.ensure_database(db(1));
+        reg.add_maintenance_lease_secs(db(1), -1.0);
+        reg.add_maintenance_lease_secs(db(1), f64::NAN);
+        reg.add_maintenance_lease_secs(db(1), 1.5);
+        let c = reg.ensure_database(db(1));
+        assert_eq!(
+            c.maintenance_lease_micros_total.load(Ordering::Relaxed),
+            1_500_000
+        );
     }
 
     #[test]
@@ -321,8 +350,8 @@ mod tests {
             connections_limit: 0,
             bridge_queue_depth: 0,
             wal_commit_latency_p99_us: 0,
-            maintenance_cpu_seconds_used: 0.0,
-            maintenance_cpu_pct_limit: 25,
+            maintenance_lease_seconds_used: 0.0,
+            maintenance_lease_pct_limit: 25,
         };
         assert!(m.is_over_quota());
     }

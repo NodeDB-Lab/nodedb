@@ -102,6 +102,8 @@ pub async fn create_continuous_aggregate(
         incarnation: state.hlc_clock.now(),
     };
 
+    crate::control::relation_name::check_relation_name("continuous aggregate", &def.name)?;
+
     // Validate source collection exists and is timeseries.
     let tenant_id = identity.tenant_id;
     {

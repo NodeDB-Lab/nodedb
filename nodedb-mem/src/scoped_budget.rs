@@ -25,7 +25,7 @@ pub(crate) struct BudgetDenied {
 }
 
 impl ScopedBudget {
-    fn new(limit: Option<usize>) -> Self {
+    pub(crate) fn new(limit: Option<usize>) -> Self {
         Self {
             limit,
             allocated: Arc::new(AtomicUsize::new(0)),
@@ -40,19 +40,21 @@ impl ScopedBudget {
             self.allocated.fetch_add(size, Ordering::AcqRel);
             return Ok(Arc::clone(&self.allocated));
         };
+        // The headroom saturates at zero, so the check cannot wrap.
+        let mut current = self.allocated.load(Ordering::Relaxed);
         loop {
-            let current = self.allocated.load(Ordering::Relaxed);
-            if current + size > limit {
+            if size > limit.saturating_sub(current) {
                 return Err(BudgetDenied { limit });
             }
+            let new_val = current + size;
             match self.allocated.compare_exchange_weak(
                 current,
-                current + size,
+                new_val,
                 Ordering::AcqRel,
                 Ordering::Relaxed,
             ) {
                 Ok(_) => return Ok(Arc::clone(&self.allocated)),
-                Err(_) => continue,
+                Err(actual) => current = actual,
             }
         }
     }
@@ -108,6 +110,16 @@ pub(crate) fn clear_scoped_limit<K: Eq + std::hash::Hash>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn try_reserve_denies_when_sum_overflows_usize() {
+        let budget = ScopedBudget::new(Some(usize::MAX));
+        budget.allocated.store(usize::MAX - 1, Ordering::Relaxed);
+
+        let denied = budget.try_reserve(2).unwrap_err();
+        assert_eq!(denied.limit, usize::MAX);
+        assert_eq!(budget.allocated.load(Ordering::Relaxed), usize::MAX - 1);
+    }
 
     #[test]
     fn uncapped_budget_tracks_without_rejecting() {

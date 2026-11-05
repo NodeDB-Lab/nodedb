@@ -7,12 +7,14 @@
 //! `CompactionStats`. `execute_compact` is the entry point dispatched from
 //! the Control Plane via `PhysicalPlan::Compact`.
 
+use std::collections::HashMap;
+
 use tracing::info;
 
 use crate::bridge::envelope::Response;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
-use nodedb_types::DatabaseId;
+use nodedb_types::{DatabaseId, TenantId};
 
 use super::budget::BudgetGate;
 use super::stats::CompactionStats;
@@ -140,28 +142,7 @@ impl CoreLoop {
         }
 
         // 2. CSR compaction: merge write buffers into dense arrays.
-        // CSR is not per-database keyed; use DEFAULT as the budget scope.
-        let csr_db = DatabaseId::DEFAULT;
-        match self.acquire_maintenance_lease(csr_db, force) {
-            BudgetGate::Granted(_lease) => {
-                match self.csr.compact_all() {
-                    Ok(()) => stats.csr_compacted = true,
-                    Err(e) => tracing::warn!(
-                        error = %e,
-                        "CSR compaction rejected by memory governor; skipping"
-                    ),
-                }
-                // _lease drops here, recording elapsed wall-clock into the budget window.
-            }
-            BudgetGate::Deferred => {
-                stats.csr_deferred = true;
-                tracing::debug!(
-                    core = self.core_id,
-                    db = csr_db.as_u64(),
-                    "CSR compaction deferred: database over maintenance budget"
-                );
-            }
-        }
+        self.run_csr_compaction(force, &mut stats);
 
         // 3. L1 segment compaction: per-(tenant, collection) → per-database gated.
         let (merged, deferred) = self.run_segment_compaction(force);
@@ -206,6 +187,54 @@ impl CoreLoop {
         }
 
         stats
+    }
+}
+
+impl CoreLoop {
+    /// Compact CSR partitions, billing each database's lease to that database.
+    ///
+    /// An index with no partitions gates on `DatabaseId::DEFAULT`.
+    fn run_csr_compaction(&mut self, force: bool, stats: &mut CompactionStats) {
+        let mut by_database: HashMap<DatabaseId, Vec<TenantId>> = HashMap::new();
+        for ((db, tid), _) in self.csr.iter() {
+            by_database.entry(*db).or_default().push(*tid);
+        }
+        if by_database.is_empty() {
+            by_database.insert(DatabaseId::DEFAULT, Vec::new());
+        }
+        for (db, tenants) in by_database {
+            match self.acquire_maintenance_lease(db, force) {
+                BudgetGate::Granted(_lease) => {
+                    let mut failed = false;
+                    for tid in tenants {
+                        let Some(part) = self.csr.partition_mut(db, tid) else {
+                            continue;
+                        };
+                        if let Err(e) = part.compact() {
+                            tracing::warn!(
+                                error = %e,
+                                db = db.as_u64(),
+                                "CSR compaction rejected by memory governor; skipping"
+                            );
+                            failed = true;
+                            break;
+                        }
+                    }
+                    if !failed {
+                        stats.csr_compacted = true;
+                    }
+                    // `_lease` drops here, recording elapsed wall-clock against `db`.
+                }
+                BudgetGate::Deferred => {
+                    stats.csr_deferred = true;
+                    tracing::debug!(
+                        core = self.core_id,
+                        db = db.as_u64(),
+                        "CSR compaction deferred: database over maintenance budget"
+                    );
+                }
+            }
+        }
     }
 }
 

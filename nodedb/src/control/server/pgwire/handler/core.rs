@@ -125,6 +125,15 @@ impl NodeDbPgHandler {
         self.sessions.fail_transaction(self.session_id);
     }
 
+    /// Count one failed client request against the session's database.
+    pub(crate) fn record_request_error(&self) {
+        let database_id = self
+            .sessions
+            .get_current_database(self.session_id)
+            .unwrap_or(crate::types::DatabaseId::DEFAULT);
+        self.state.database_metrics.record_error(database_id);
+    }
+
     pub(super) fn next_request_id(&self) -> RequestId {
         self.state.next_request_id()
     }

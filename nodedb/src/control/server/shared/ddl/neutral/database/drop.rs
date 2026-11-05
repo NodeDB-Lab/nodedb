@@ -183,19 +183,6 @@ pub async fn drop_database(
     .await
     .map_err(|e| DdlError::from_error_in_context("catalog propose failed", &e))?;
 
-    // Remove per-database metrics entries on drop.
-    if let Some(m) = &state.system_metrics {
-        if let Ok(mut map) = m.database_collections_by_name.write() {
-            map.remove(name);
-        }
-        if let Ok(mut map) = m.database_queries_by_name.write() {
-            map.remove(name);
-        }
-        if let Ok(mut map) = m.database_errors_by_name.write() {
-            map.remove(name);
-        }
-    }
-
     Ok(status("DROP DATABASE"))
 }
 

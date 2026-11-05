@@ -84,8 +84,7 @@ pub(crate) fn catalog_unique_claim_sets(
 ) -> crate::Result<Vec<EngineKeySet>> {
     let catalog = state.credentials.catalog();
     unique_claim_sets(plans, |collection| {
-        let key = nodedb_types::CollectionKey::from_qualified_str(database_id, collection)
-            .unwrap_or_else(|_| nodedb_types::CollectionKey::from_bare(database_id, collection));
+        let key = nodedb_types::CollectionKey::from_relation_name(database_id, collection)?;
         let stored = catalog.get_collection(key.database_id(), tenant_id, key.name())?;
         Ok(stored.map_or_else(Vec::new, |stored| {
             stored

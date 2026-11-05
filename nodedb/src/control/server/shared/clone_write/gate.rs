@@ -152,8 +152,7 @@ fn record_collections(
 ) -> crate::Result<()> {
     let catalog = state.credentials.catalog();
     for qualified in collections {
-        let key = nodedb_types::CollectionKey::from_qualified_str(database_id, &qualified)
-            .unwrap_or_else(|_| nodedb_types::CollectionKey::from_bare(database_id, &qualified));
+        let key = nodedb_types::CollectionKey::from_relation_name(database_id, &qualified)?;
         let Some(stored) = catalog.get_collection(database_id, tenant_id.as_u64(), key.name())?
         else {
             continue;

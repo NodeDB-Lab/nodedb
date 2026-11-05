@@ -13,11 +13,12 @@
 use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 
 use super::doc::DOCUMENTS_VERSIONED;
-use super::history_bytes::remove_counted;
+use super::history_bytes::{apply_versioned_delta, remove_counted};
 use super::index::INDEXES_VERSIONED;
 use super::key::{coll_prefix, coll_prefix_end, tenant_prefix, tenant_prefix_end};
 use super::value::TAG_TOMBSTONE;
 use crate::engine::sparse::btree::{KeyedTable, SparseEngine, invalid_storage_key_err, redb_err};
+use crate::engine::storage_bytes::StorageDelta;
 
 impl SparseEngine {
     /// Hard-drop **every** version of every document + secondary-index entry
@@ -67,6 +68,7 @@ impl SparseEngine {
 
         let docs_removed;
         let idx_removed;
+        let mut delta = StorageDelta::default();
         {
             let mut docs = txn
                 .open_table(DOCUMENTS_VERSIONED)
@@ -81,7 +83,7 @@ impl SparseEngine {
             }
             docs_removed = doc_keys.len();
             for k in &doc_keys {
-                remove_counted(&txn, &mut docs, k)?;
+                remove_counted(&mut docs, k, &mut delta)?;
             }
 
             let mut idx = txn
@@ -97,9 +99,10 @@ impl SparseEngine {
             }
             idx_removed = idx_keys.len();
             for k in &idx_keys {
-                remove_counted(&txn, &mut idx, k)?;
+                remove_counted(&mut idx, k, &mut delta)?;
             }
         }
+        apply_versioned_delta(&txn, delta)?;
         txn.commit()
             .map_err(|e| redb_err("commit versioned drop", e))?;
         Ok((docs_removed, idx_removed))
@@ -149,20 +152,22 @@ impl SparseEngine {
             .db
             .begin_write()
             .map_err(|e| redb_err("write txn purge", e))?;
+        let mut delta = StorageDelta::default();
         {
             let mut docs = txn
                 .open_table(DOCUMENTS_VERSIONED)
                 .map_err(|e| redb_err("open docs purge", e))?;
             for k in &doc_victims {
-                remove_counted(&txn, &mut docs, k)?;
+                remove_counted(&mut docs, k, &mut delta)?;
             }
             let mut idx = txn
                 .open_table(INDEXES_VERSIONED)
                 .map_err(|e| redb_err("open idx purge", e))?;
             for k in &idx_victims {
-                remove_counted(&txn, &mut idx, k)?;
+                remove_counted(&mut idx, k, &mut delta)?;
             }
         }
+        apply_versioned_delta(&txn, delta)?;
         txn.commit().map_err(|e| redb_err("commit purge", e))?;
         Ok((doc_victims.len(), idx_victims.len()))
     }

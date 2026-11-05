@@ -64,7 +64,7 @@ pub(in super::super) fn convert_upsert(
     // honored: CRDT conflict resolution IS the LWW full-replace `DocUpsert`
     // performs, so a caller-supplied merge clause has no place to run. Reject
     // rather than silently ignore it.
-    let gates = super::balanced_gate::document_collection_write_gates(ctx, collection)?;
+    let gates = super::balanced_gate::document_collection_write_gates(ctx, key)?;
     // A write that supplies a generated column is refused, in its rows and
     // in its `ON CONFLICT DO UPDATE SET` targets.
     super::write_checks::refuse_generated_cells(user_collection, &gates.generated, rows)?;
@@ -96,7 +96,7 @@ pub(in super::super) fn convert_upsert(
     let declared_pk = if is_auto_rowid_pk(primary_key) {
         None
     } else {
-        declared_primary_key_name(ctx, collection)?
+        declared_primary_key_name(ctx, key)?
     };
 
     // A multi-row document upsert lowers to ONE `BatchUpsert` page: one

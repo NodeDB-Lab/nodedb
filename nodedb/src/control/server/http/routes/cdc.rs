@@ -52,7 +52,6 @@ pub async fn sse_stream(
     headers: HeaderMap,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
     reject_tenant_override(params.tenant_id)?;
-    let collection = collection.to_lowercase();
     let tenant_id = identity.tenant_id();
     let database_id = resolve_database_id(
         &headers,
@@ -67,6 +66,11 @@ pub async fn sse_stream(
     // Runs before the collection authorization and before any subscription or
     // snapshot is taken.
     admit_without_rate_limit(&state, &identity.0, database_id, peer.as_str())?;
+    let collection = crate::control::server::shared::request_collection::request_collection(
+        database_id,
+        &collection,
+    )
+    .map_err(ApiError::from)?;
     authorize(&identity, &state, database_id, &collection)?;
     let cursor = parse_last_event_id(&headers)?;
     if cursor.is_some() && params.since_ms.is_some() {
@@ -129,7 +133,6 @@ pub async fn poll_changes(
             "since_lsn is no longer supported; use the opaque cursor parameter".into(),
         ));
     }
-    let collection = collection.to_lowercase();
     let tenant_id = identity.tenant_id();
     let database_id = resolve_database_id(
         &headers,
@@ -141,6 +144,11 @@ pub async fn poll_changes(
     // Full gate: a poll is a discrete per-request read of the caller's change
     // data, exactly the shape the rate limiter's cost table models.
     let rate_limit_headers = admit(&state, &identity.0, database_id, peer.as_str(), "cdc_poll")?;
+    let collection = crate::control::server::shared::request_collection::request_collection(
+        database_id,
+        &collection,
+    )
+    .map_err(ApiError::from)?;
     authorize(&identity, &state, database_id, &collection)?;
     let cursor = params.cursor.as_deref().map(parse_cursor).transpose()?;
     if cursor.is_some() && params.since_ms.is_some() {

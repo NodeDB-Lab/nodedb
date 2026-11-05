@@ -89,10 +89,15 @@ fn handle_select(cmd: &RespCommand, session: &mut RespSession) -> RespValue {
         Some(name) if is_internal_collection(name) => {
             RespValue::err("NOPERM the internal catalog collection cannot be selected")
         }
-        Some(name) => {
-            session.collection = name.to_string();
-            RespValue::ok()
-        }
+        // A RESP session runs in the default database. A name that carries
+        // a database qualifier names no collection it can select.
+        Some(name) => match QualifiedCollection::from_request(DatabaseId::DEFAULT, name) {
+            Ok(qualified) => {
+                session.collection = qualified.as_str().to_string();
+                RespValue::ok()
+            }
+            Err(e) => RespValue::err(format!("ERR invalid collection name: {e}")),
+        },
         None => RespValue::err("ERR wrong number of arguments for 'select' command"),
     }
 }

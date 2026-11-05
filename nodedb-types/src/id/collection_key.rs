@@ -12,21 +12,53 @@
 //! allocator accept. It has no `From<&str>`. A caller builds it from a bare
 //! catalog name with [`CollectionKey::from_bare`], or from a qualified name
 //! with [`CollectionKey::from_qualified`], which strips the qualifier.
+//!
+//! A collection name never holds `/`. Every DDL path that mints a name
+//! refuses one, so `"{database_id}/{name}"` parses in exactly one way.
 
 use super::{DatabaseId, QualifiedCollection};
 
-/// Error returned when a qualified collection name does not carry the
-/// qualifier of the database it is resolved in.
+/// The separator between the database qualifier and the bare name.
+///
+/// No collection name holds it, so a qualified name splits in exactly one way.
+pub(crate) const QUALIFIER_SEPARATOR: char = '/';
+
+/// Error returned when a collection name does not have the form its database
+/// gives it.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CollectionKeyError {
-    /// The name lacks the `"{database_id}/"` prefix that
-    /// [`QualifiedCollection::new`] writes for a non-default database.
+    /// A stored or plan-carried name lacks the form [`QualifiedCollection::new`]
+    /// writes for its database. This is an internal invariant break.
     #[error(
-        "collection name '{name}' is not qualified for database {database_id}; \
-         expected the prefix '{database_id}/'"
+        "stored collection name '{name}' is not a name database {database_id} writes; \
+         the default database stores '<name>', any other database stores '{database_id}/<name>'"
     )]
     NotQualified {
         /// Raw id of the database the name was resolved in.
+        database_id: u64,
+        /// The rejected name.
+        name: String,
+    },
+    /// A caller-supplied name carries the qualifier of another database.
+    #[error(
+        "collection '{name}' names database {foreign_database_id}, \
+         not the current database {database_id}"
+    )]
+    ForeignDatabase {
+        /// Raw id of the database the request runs in.
+        database_id: u64,
+        /// Raw id of the database the qualifier names.
+        foreign_database_id: u64,
+        /// The rejected name.
+        name: String,
+    },
+    /// A caller-supplied name is empty or holds a stray `/`.
+    #[error(
+        "collection name '{name}' is not valid in database {database_id}: \
+         a collection name is non-empty and holds no '/'"
+    )]
+    InvalidName {
+        /// Raw id of the database the request runs in.
         database_id: u64,
         /// The rejected name.
         name: String,
@@ -51,7 +83,25 @@ pub struct CollectionKey<'a> {
     name: &'a str,
 }
 
+/// The database id a qualifier head names, in the canonical form
+/// [`QualifiedCollection::new`] writes: ASCII digits with no leading zero.
+///
+/// The default database is never written as a qualifier, so `0` yields `None`.
+pub(crate) fn parse_qualifier(head: &str) -> Option<u64> {
+    if head.is_empty() || head.starts_with('0') || !head.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    head.parse::<u64>().ok()
+}
+
 impl<'a> CollectionKey<'a> {
+    /// `true` when `name` is a bare collection name: non-empty, with no `/`.
+    ///
+    /// Every DDL path that mints a collection name refuses a name this rejects.
+    pub fn is_bare_name(name: &str) -> bool {
+        !name.is_empty() && !name.contains(QUALIFIER_SEPARATOR)
+    }
+
     /// Build a key from the bare name the catalog keys the collection by.
     ///
     /// `name` must be the catalog name, never a `"{database_id}/{name}"`
@@ -71,33 +121,54 @@ impl<'a> CollectionKey<'a> {
     /// Build a key from a database-qualified name carried as a string on a
     /// plan, a WAL record, or the wire.
     ///
-    /// The default database stores names unqualified, so the name is taken
-    /// as-is. The empty name marks a plan with no routing collection and is
-    /// the same in both forms, so it is also taken as-is. Any other name in
-    /// any other database requires the exact `"{database_id}/"` prefix
-    /// [`QualifiedCollection::new`] writes. Exactly one prefix is stripped,
-    /// so a bare name that itself contains `/` survives intact.
+    /// The default database takes a bare name with no `/`. Any other
+    /// database takes exactly `"{database_id}/{name}"`, with a bare `name`.
+    /// The empty string marks a plan with no routing collection in every
+    /// database, so it maps to the empty key. Every other form is an error.
     pub fn from_qualified_str(
         database_id: DatabaseId,
         qualified: &'a str,
     ) -> Result<Self, CollectionKeyError> {
-        if database_id == DatabaseId::DEFAULT || qualified.is_empty() {
+        if qualified.is_empty() {
             return Ok(Self::from_bare(database_id, qualified));
         }
         let not_qualified = || CollectionKeyError::NotQualified {
             database_id: database_id.as_u64(),
             name: qualified.to_owned(),
         };
-        let (head, bare) = qualified.split_once('/').ok_or_else(not_qualified)?;
-        if head.is_empty() || !head.bytes().all(|b| b.is_ascii_digit()) {
-            return Err(not_qualified());
+        if database_id == DatabaseId::DEFAULT {
+            return if Self::is_bare_name(qualified) {
+                Ok(Self::from_bare(database_id, qualified))
+            } else {
+                Err(not_qualified())
+            };
         }
-        match head.parse::<u64>() {
-            Ok(raw) if raw == database_id.as_u64() && !head.starts_with('0') => {
+        let (head, bare) = qualified
+            .split_once(QUALIFIER_SEPARATOR)
+            .ok_or_else(not_qualified)?;
+        match parse_qualifier(head) {
+            Some(raw) if raw == database_id.as_u64() && Self::is_bare_name(bare) => {
                 Ok(Self::from_bare(database_id, bare))
             }
             _ => Err(not_qualified()),
         }
+    }
+
+    /// Build a key from a relation name a physical plan reports.
+    ///
+    /// A plan names a collection in the form [`QualifiedCollection::new`]
+    /// writes. It names a provider relation (a catalog table or a continuous
+    /// aggregate) and an array bare. No relation name holds `/`, so a name
+    /// without `/` is bare in every database, and a name with `/` must
+    /// carry exactly this database's qualifier. Every other form is an error.
+    pub fn from_relation_name(
+        database_id: DatabaseId,
+        name: &'a str,
+    ) -> Result<Self, CollectionKeyError> {
+        if Self::is_bare_name(name) {
+            return Ok(Self::from_bare(database_id, name));
+        }
+        Self::from_qualified_str(database_id, name)
     }
 
     /// The database the collection lives in.
@@ -165,10 +236,31 @@ mod tests {
     }
 
     #[test]
-    fn exactly_one_qualifier_is_stripped() {
+    fn a_nested_qualifier_is_rejected() {
         let qualified = QualifiedCollection::new(DB, "1024/nested");
-        let key = CollectionKey::from_qualified(DB, &qualified).expect("qualified");
-        assert_eq!(key.name(), "1024/nested");
+        assert!(CollectionKey::from_qualified(DB, &qualified).is_err());
+        assert!(CollectionKey::from_qualified_str(DatabaseId::new(7), "1024/x").is_err());
+        assert!(CollectionKey::from_qualified_str(DB, "1024/a/b").is_err());
+    }
+
+    #[test]
+    fn a_default_database_name_with_a_separator_is_rejected() {
+        let err =
+            CollectionKey::from_qualified_str(DatabaseId::DEFAULT, "7/x").expect_err("separator");
+        assert_eq!(
+            err,
+            CollectionKeyError::NotQualified {
+                database_id: 0,
+                name: "7/x".to_owned(),
+            }
+        );
+        assert!(CollectionKey::from_qualified_str(DatabaseId::DEFAULT, "/x").is_err());
+        assert!(CollectionKey::from_qualified_str(DatabaseId::DEFAULT, "x/").is_err());
+    }
+
+    #[test]
+    fn an_empty_tail_is_rejected() {
+        assert!(CollectionKey::from_qualified_str(DB, "1024/").is_err());
     }
 
     #[test]
@@ -189,6 +281,33 @@ mod tests {
         assert!(CollectionKey::from_qualified_str(DB, "+1024/users").is_err());
         assert!(CollectionKey::from_qualified_str(DB, "01024/users").is_err());
         assert!(CollectionKey::from_qualified_str(DB, "/users").is_err());
+        assert!(CollectionKey::from_qualified_str(DB, "0/users").is_err());
+    }
+
+    #[test]
+    fn a_relation_name_is_bare_or_carries_this_database_qualifier() {
+        let db = DatabaseId::new(7);
+        let key = CollectionKey::from_relation_name(db, "7/orders").expect("qualified");
+        assert_eq!(key, CollectionKey::from_bare(db, "orders"));
+        let key = CollectionKey::from_relation_name(db, "_system.audit_log").expect("bare");
+        assert_eq!(key.name(), "_system.audit_log");
+        let key = CollectionKey::from_relation_name(db, "").expect("sentinel");
+        assert_eq!(key.name(), "");
+        for name in ["8/orders", "7/a/b", "7/", "x/orders"] {
+            assert!(
+                CollectionKey::from_relation_name(db, name).is_err(),
+                "{name}"
+            );
+        }
+        assert!(CollectionKey::from_relation_name(DatabaseId::DEFAULT, "7/orders").is_err());
+    }
+
+    #[test]
+    fn bare_names_hold_no_separator() {
+        assert!(CollectionKey::is_bare_name("users"));
+        assert!(!CollectionKey::is_bare_name(""));
+        assert!(!CollectionKey::is_bare_name("7/users"));
+        assert!(!CollectionKey::is_bare_name("users/"));
     }
 
     #[test]

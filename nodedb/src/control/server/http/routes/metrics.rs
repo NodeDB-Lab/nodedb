@@ -236,7 +236,14 @@ pub async fn metrics(
     output.push_str(&format!("nodedb_users_active {user_count}\n\n"));
 
     // Per-database quota metrics (QPS, memory, storage, connections, bridge, WAL, maintenance).
-    state.shared.database_metrics.render_prometheus(&mut output);
+    match crate::control::metrics::database_sync::database_names(state.shared.credentials.catalog())
+    {
+        Ok(names) => state
+            .shared
+            .database_metrics
+            .render_prometheus(&names, &mut output),
+        Err(e) => tracing::warn!(error = %e, "metrics: database list read error"),
+    }
 
     // Per-tenant quota metrics (QPS, memory, storage) with both database + tenant labels.
     if let Ok(tenants) = state.shared.tenants.lock() {

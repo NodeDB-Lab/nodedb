@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 pub mod backend;
+pub mod bytes;
 pub mod keys;
 pub mod scan;
 pub mod tables;

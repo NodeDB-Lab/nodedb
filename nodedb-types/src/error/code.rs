@@ -113,6 +113,9 @@ error_codes! {
     DATABASE_QUOTA_EXCEEDED = 1402;
     /// The server is under global resource pressure and cannot accept new requests.
     SERVER_OVERLOAD = 1403;
+    /// A write was refused because the database or tenant has stored bytes at
+    /// or over its `max_storage_bytes` quota.
+    STORAGE_QUOTA_EXCEEDED = 1404;
 
     // Clone (1500–1599)
 

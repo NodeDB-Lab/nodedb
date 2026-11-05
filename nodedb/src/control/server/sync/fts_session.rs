@@ -23,17 +23,15 @@ impl SyncSession {
     ) -> Option<SyncFrame> {
         self.last_activity = std::time::Instant::now();
 
-        if !self.authenticated {
+        if let Some(reason) = self.entry_refusal(&msg.collection) {
             let ack = FtsIndexAckMsg {
                 collection: msg.collection.clone(),
                 doc_id: msg.doc_id.clone(),
                 batch_id: msg.batch_id,
                 accepted: false,
-                reject_reason: Some("unauthenticated".to_string()),
+                reject_reason: Some(reason.clone()),
                 applied_seq: 0,
-                status: AckStatus::Rejected {
-                    reason: "unauthenticated".to_string(),
-                },
+                status: AckStatus::Rejected { reason },
             };
             return SyncFrame::try_encode(SyncMessageType::FtsIndexAck, &ack);
         }
@@ -160,17 +158,15 @@ impl SyncSession {
     ) -> Option<SyncFrame> {
         self.last_activity = std::time::Instant::now();
 
-        if !self.authenticated {
+        if let Some(reason) = self.entry_refusal(&msg.collection) {
             let ack = FtsDeleteAckMsg {
                 collection: msg.collection.clone(),
                 doc_id: msg.doc_id.clone(),
                 batch_id: msg.batch_id,
                 accepted: false,
-                reject_reason: Some("unauthenticated".to_string()),
+                reject_reason: Some(reason.clone()),
                 applied_seq: 0,
-                status: AckStatus::Rejected {
-                    reason: "unauthenticated".to_string(),
-                },
+                status: AckStatus::Rejected { reason },
             };
             return SyncFrame::try_encode(SyncMessageType::FtsDeleteAck, &ack);
         }

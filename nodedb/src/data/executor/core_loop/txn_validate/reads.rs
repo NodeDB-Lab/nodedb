@@ -156,7 +156,7 @@ mod tests {
     const TID: u64 = 1;
 
     fn task_for(collection: &str) -> ExecutionTask {
-        task_with_vshard(collection_vshard(DatabaseId::DEFAULT, collection))
+        task_with_vshard(collection_vshard(DatabaseId::DEFAULT, collection).unwrap())
     }
 
     fn entry(engine: EngineTag, collection: &str, key: ReadKeyIdent) -> VersionedReadEntry {
@@ -243,8 +243,9 @@ mod tests {
             TenantId::new(TID),
             "docs",
             Some(&KeyRepr::Surrogate(7)),
-            collection_vshard(DatabaseId::DEFAULT, "docs"),
-        );
+            collection_vshard(DatabaseId::DEFAULT, "docs").unwrap(),
+        )
+        .unwrap();
         assert!(unchanged(&mut core, doc_point("docs", 7), 120));
         assert!(unchanged(
             &mut core,
@@ -267,8 +268,9 @@ mod tests {
             TenantId::new(TID),
             "docs",
             Some(&KeyRepr::Surrogate(2)),
-            collection_vshard(DatabaseId::DEFAULT, "docs"),
-        );
+            collection_vshard(DatabaseId::DEFAULT, "docs").unwrap(),
+        )
+        .unwrap();
         assert!(!unchanged(&mut core, predicate(), 120));
         assert!(unchanged(&mut core, predicate(), 130));
         // Another collection's write leaves the slice alone.
@@ -390,7 +392,7 @@ mod tests {
     fn a_homed_read_of_every_collection_validates_against_the_vshard() {
         let (mut core, _, _, _dir) = make_core();
         doc_version(&core, "docs", 1, 100);
-        let home = collection_vshard(DatabaseId::DEFAULT, "docs");
+        let home = collection_vshard(DatabaseId::DEFAULT, "docs").unwrap();
         let homed = VersionedReadEntry {
             engine: EngineTag::Graph,
             collection: String::new(),

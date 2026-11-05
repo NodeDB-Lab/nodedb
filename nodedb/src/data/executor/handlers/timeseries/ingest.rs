@@ -281,6 +281,7 @@ impl CoreLoop {
         let catalog = self.ts_series_catalogs.entry(key.clone()).or_default();
         let outcome = ilp_ingest::ingest_batch_with_lvc(ilp_ingest::IngestBatchArgs {
             memtable: mt,
+            database_id: task.request.database_id,
             lines: &lines,
             catalog,
             default_timestamp_ms: now_ms,

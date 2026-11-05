@@ -6,6 +6,7 @@
 //! binds the whole plan afterwards.
 
 use crate::bridge::envelope::PhysicalPlan;
+use crate::types::DatabaseId;
 use nodedb_physical::physical_plan::{BatchEdge, GraphOp};
 use nodedb_types::RlsWriteCheck;
 
@@ -23,9 +24,12 @@ pub(super) struct EdgePutFields<'a> {
     pub(super) valid_until_ms: Option<i64>,
 }
 
-pub(super) fn edge_put(f: EdgePutFields) -> PhysicalPlan {
-    PhysicalPlan::Graph(GraphOp::EdgePut {
-        collection: nodedb_types::QualifiedCollection::from_stored(f.collection.to_owned()),
+pub(super) fn edge_put(database_id: DatabaseId, f: EdgePutFields) -> crate::Result<PhysicalPlan> {
+    Ok(PhysicalPlan::Graph(GraphOp::EdgePut {
+        collection: nodedb_types::QualifiedCollection::from_stored(
+            database_id,
+            f.collection.to_owned(),
+        )?,
         src_id: f.src_id.to_owned(),
         label: f.label.to_owned(),
         dst_id: f.dst_id.to_owned(),
@@ -34,19 +38,23 @@ pub(super) fn edge_put(f: EdgePutFields) -> PhysicalPlan {
         dst_surrogate: nodedb_types::Surrogate::new(f.dst_surrogate),
         valid_from_ms: f.valid_from_ms,
         valid_until_ms: f.valid_until_ms,
-    })
+    }))
 }
 
 pub(super) fn edge_delete(
+    database_id: DatabaseId,
     collection: &str,
     src_id: &str,
     label: &str,
     dst_id: &str,
     src_surrogate: u32,
     dst_surrogate: u32,
-) -> PhysicalPlan {
-    PhysicalPlan::Graph(GraphOp::EdgeDelete {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+) -> crate::Result<PhysicalPlan> {
+    Ok(PhysicalPlan::Graph(GraphOp::EdgeDelete {
+        collection: nodedb_types::QualifiedCollection::from_stored(
+            database_id,
+            collection.to_owned(),
+        )?,
         src_id: src_id.to_owned(),
         label: label.to_owned(),
         dst_id: dst_id.to_owned(),
@@ -56,7 +64,7 @@ pub(super) fn edge_delete(
         // already-committed write. The writing identity is not available on
         // this node. The leader enforces RLS before proposing the write.
         rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
-    })
+    }))
 }
 
 pub(super) fn set_node_labels(node_id: &str, labels: &[String]) -> PhysicalPlan {
@@ -76,35 +84,47 @@ pub(super) fn remove_node_labels(node_id: &str, labels: &[String]) -> PhysicalPl
 /// Rebuild every edge of a `ReplicatedBatchEdge` slice as a `BatchEdge`,
 /// endpoint surrogates verbatim. Shared by the `EdgePutBatch` and
 /// `EdgeDeleteBatch` decode arms.
-fn batch_edges(edges: &[super::super::types::ReplicatedBatchEdge]) -> Vec<BatchEdge> {
+fn batch_edges(
+    database_id: DatabaseId,
+    edges: &[super::super::types::ReplicatedBatchEdge],
+) -> crate::Result<Vec<BatchEdge>> {
     edges
         .iter()
-        .map(|e| BatchEdge {
-            collection: nodedb_types::QualifiedCollection::from_stored(e.collection.clone()),
-            src_id: e.src_id.clone(),
-            label: e.label.clone(),
-            dst_id: e.dst_id.clone(),
-            src_surrogate: nodedb_types::Surrogate::new(e.src_surrogate),
-            dst_surrogate: nodedb_types::Surrogate::new(e.dst_surrogate),
-            valid_from_ms: e.valid_from_ms,
-            valid_until_ms: e.valid_until_ms,
-            properties: e.properties.clone(),
+        .map(|e| {
+            Ok(BatchEdge {
+                collection: nodedb_types::QualifiedCollection::from_stored(
+                    database_id,
+                    e.collection.clone(),
+                )?,
+                src_id: e.src_id.clone(),
+                label: e.label.clone(),
+                dst_id: e.dst_id.clone(),
+                src_surrogate: nodedb_types::Surrogate::new(e.src_surrogate),
+                dst_surrogate: nodedb_types::Surrogate::new(e.dst_surrogate),
+                valid_from_ms: e.valid_from_ms,
+                valid_until_ms: e.valid_until_ms,
+                properties: e.properties.clone(),
+            })
         })
         .collect()
 }
 
-pub(super) fn edge_put_batch(edges: &[super::super::types::ReplicatedBatchEdge]) -> PhysicalPlan {
-    PhysicalPlan::Graph(GraphOp::EdgePutBatch {
-        edges: batch_edges(edges),
-    })
+pub(super) fn edge_put_batch(
+    database_id: DatabaseId,
+    edges: &[super::super::types::ReplicatedBatchEdge],
+) -> crate::Result<PhysicalPlan> {
+    Ok(PhysicalPlan::Graph(GraphOp::EdgePutBatch {
+        edges: batch_edges(database_id, edges)?,
+    }))
 }
 
 pub(super) fn edge_delete_batch(
+    database_id: DatabaseId,
     edges: &[super::super::types::ReplicatedBatchEdge],
-) -> PhysicalPlan {
-    PhysicalPlan::Graph(GraphOp::EdgeDeleteBatch {
-        edges: batch_edges(edges),
-    })
+) -> crate::Result<PhysicalPlan> {
+    Ok(PhysicalPlan::Graph(GraphOp::EdgeDeleteBatch {
+        edges: batch_edges(database_id, edges)?,
+    }))
 }
 
 #[cfg(test)]
@@ -233,7 +253,7 @@ mod tests {
             let entry = to_replicated_entry(tenant, DatabaseId::DEFAULT, vshard, &plan)
                 .expect("encode")
                 .expect("an edge or label write has a replicated form");
-            let carried = decode::sequenced_graph_write_plan(&entry.write)
+            let carried = decode::sequenced_graph_write_plan(DatabaseId::DEFAULT, &entry.write)
                 .expect("decode")
                 .expect("an edge or label write runs as a Calvin transaction");
             assert_eq!(carried, plan);

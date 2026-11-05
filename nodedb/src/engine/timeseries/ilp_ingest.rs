@@ -10,12 +10,14 @@ use std::borrow::Cow;
 
 use super::columnar_memtable::{ColumnType, ColumnValue, ColumnarMemtable};
 use super::ilp::{FieldValue, IlpLine};
+use nodedb_types::DatabaseId;
 use nodedb_types::columnar::schema::{TS_SYSTEM, TS_VALID_FROM, TS_VALID_UNTIL};
-use nodedb_types::timeseries::{IngestResult, SeriesCatalog, SeriesKey};
+use nodedb_types::timeseries::{IngestResult, SeriesCatalog};
 
 pub use super::ilp_schema::{
     ensure_bitemporal_columns, ensure_system_column, evolve_schema, infer_schema, new_columns,
 };
+pub use super::series_key::{resolve_series, row_series_key};
 
 /// The system-time stamp every row of one ingest batch stores.
 ///
@@ -57,6 +59,9 @@ pub struct IngestBatchOutcome {
 /// Inputs to [`ingest_batch_with_lvc`].
 pub struct IngestBatchArgs<'a, 'l> {
     pub memtable: &'a mut ColumnarMemtable,
+    /// The database the batch's collection lives in. A line's measurement is
+    /// resolved in it.
+    pub database_id: DatabaseId,
     pub lines: &'a [IlpLine<'l>],
     pub catalog: &'a mut SeriesCatalog,
     pub default_timestamp_ms: i64,
@@ -77,12 +82,14 @@ pub struct IngestBatchArgs<'a, 'l> {
 /// Returns (accepted_count, rejected_count).
 pub fn ingest_batch(
     memtable: &mut ColumnarMemtable,
+    database_id: DatabaseId,
     lines: &[IlpLine<'_>],
     catalog: &mut SeriesCatalog,
     default_timestamp_ms: i64,
 ) -> (usize, usize) {
     let outcome = ingest_batch_with_lvc(IngestBatchArgs {
         memtable,
+        database_id,
         lines,
         catalog,
         default_timestamp_ms,
@@ -102,6 +109,7 @@ pub fn ingest_batch(
 pub fn ingest_batch_with_lvc(args: IngestBatchArgs<'_, '_>) -> IngestBatchOutcome {
     let IngestBatchArgs {
         memtable,
+        database_id,
         lines,
         catalog,
         default_timestamp_ms,
@@ -126,7 +134,15 @@ pub fn ingest_batch_with_lvc(args: IngestBatchArgs<'_, '_>) -> IngestBatchOutcom
             continue;
         }
         let (ts_ms, values) = line_row(&schema, line, default_timestamp_ms, stamp);
-        let key = row_series_key(line.measurement.as_ref(), &schema, &values);
+        // A measurement without its database's form names no collection.
+        let key = match row_series_key(database_id, line.measurement.as_ref(), &schema, &values) {
+            Ok(key) => key,
+            Err(error) => {
+                rejected += 1;
+                first_rejection.get_or_insert_with(|| error.to_string());
+                continue;
+            }
+        };
         let series_id = resolve_series(catalog, &key);
 
         // `ingest_row` appends at the tail of every column and rolls the
@@ -240,68 +256,6 @@ fn field_kind(value: &FieldValue<'_>) -> &'static str {
         FieldValue::Bool(_) => "boolean",
         FieldValue::Str(_) => "string",
     }
-}
-
-/// The series key of a stored row: its measurement's bare collection name
-/// and every non-NULL `Symbol` cell it stores, as `(column, value)`.
-///
-/// The measurement is the routed collection, qualified by its database.
-/// A series catalog belongs to one collection, so the key names the bare
-/// collection: a row moved or restored into another database keeps the
-/// series its catalog names.
-///
-/// The column type decides, never how a writer spelled the value. A
-/// `Symbol` column holds an ILP tag and an ILP string field alike, and a
-/// SQL, JSON or msgpack row carries no tag set at all. A key taken from the
-/// line's tag set would split one collection's rows into different series
-/// by protocol. A row read back and written again (a restore, a clone copy)
-/// also gets the key it had. A `Text` cell is a field and names no tag, so
-/// a high-cardinality string never mints a series.
-///
-/// `values` are the row's cells in `schema` order, as `line_row` and the
-/// resolved ingest build them.
-pub fn row_series_key(
-    measurement: &str,
-    schema: &super::columnar_memtable::ColumnarSchema,
-    values: &[ColumnValue],
-) -> SeriesKey {
-    let tags: Vec<(String, String)> = schema
-        .columns
-        .iter()
-        .zip(values)
-        .filter_map(|((name, column_type), value)| match (column_type, value) {
-            (super::columnar_memtable::ColumnType::Symbol, ColumnValue::Symbol(text)) => {
-                Some((name.clone(), text.clone()))
-            }
-            _ => None,
-        })
-        .collect();
-    SeriesKey::new(
-        nodedb_types::QualifiedCollection::bare_of_stored(measurement),
-        tags,
-    )
-}
-
-/// The series ID of `key`, resolved through `catalog`.
-///
-/// Resolve through the catalog, never `to_series_id(0)` directly. The natural
-/// hash can collide, and both consumers of the ID (`memtable.ingest_row`
-/// row-count stats and the last-value cache) key on it. A collision taken at
-/// face value folds one series' rows and last value into an unrelated series.
-pub fn resolve_series(
-    catalog: &mut SeriesCatalog,
-    key: &SeriesKey,
-) -> nodedb_types::timeseries::SeriesId {
-    let resolved = catalog.resolve_detailed(key);
-    if resolved.newly_registered && resolved.rehash_attempt > 0 {
-        tracing::warn!(
-            metric = %key.metric,
-            series_id = resolved.id,
-            rehash_attempt = resolved.rehash_attempt,
-            "SeriesId hash collision resolved by rehash"
-        );
-    }
-    resolved.id
 }
 
 /// Record a stored row in the last-value cache: its first Float64 value
@@ -500,6 +454,7 @@ mod tests {
         ColumnData, ColumnarMemtableConfig, TimeKind,
     };
     use crate::engine::timeseries::ilp::parse_batch;
+    use nodedb_types::timeseries::SeriesKey;
 
     fn default_config() -> ColumnarMemtableConfig {
         ColumnarMemtableConfig {
@@ -507,33 +462,6 @@ mod tests {
             hard_memory_limit: 20 * 1024 * 1024,
             max_tag_cardinality: 10_000,
         }
-    }
-
-    /// One row keys one series in every database: a series catalog belongs
-    /// to its collection, so a moved or restored row keeps its series.
-    #[test]
-    fn a_row_keys_the_same_series_in_every_database() {
-        let schema = super::super::columnar_memtable::ColumnarSchema {
-            columns: vec![
-                ("ts".into(), ColumnType::Timestamp(TimeKind::Millis)),
-                ("host".into(), ColumnType::Symbol),
-                ("v".into(), ColumnType::Float64),
-            ],
-            timestamp_idx: 0,
-            codecs: Vec::new(),
-        };
-        let values = [
-            ColumnValue::Timestamp(1_000),
-            ColumnValue::Symbol("a".into()),
-            ColumnValue::Float64(1.0),
-        ];
-        let in_default = row_series_key("cpu", &schema, &values);
-        assert_eq!(in_default, row_series_key("1024/cpu", &schema, &values));
-        assert_eq!(in_default, row_series_key("1025/cpu", &schema, &values));
-        assert_eq!(
-            in_default,
-            nodedb_types::timeseries::SeriesKey::new("cpu", vec![("host".into(), "a".into())])
-        );
     }
 
     #[test]
@@ -576,7 +504,10 @@ mod tests {
 
         let mut mt = ColumnarMemtable::new(schema, default_config());
         let mut catalog = SeriesCatalog::new();
-        assert_eq!(ingest_batch(&mut mt, &lines, &mut catalog, 0), (1, 1));
+        assert_eq!(
+            ingest_batch(&mut mt, DatabaseId::DEFAULT, &lines, &mut catalog, 0),
+            (1, 1)
+        );
     }
 
     /// A plain collection's batch stores its ordinal in `_ts_system` and
@@ -641,6 +572,7 @@ mod tests {
         });
         let outcome = ingest_batch_with_lvc(IngestBatchArgs {
             memtable: &mut mt,
+            database_id: DatabaseId::DEFAULT,
             lines: &lines,
             catalog: &mut catalog,
             default_timestamp_ms: 0,
@@ -703,7 +635,8 @@ mod tests {
         let mut mt = ColumnarMemtable::new(schema, default_config());
         let mut catalog = SeriesCatalog::new();
 
-        let (accepted, rejected) = ingest_batch(&mut mt, &lines, &mut catalog, 0);
+        let (accepted, rejected) =
+            ingest_batch(&mut mt, DatabaseId::DEFAULT, &lines, &mut catalog, 0);
         assert_eq!(accepted, 3);
         assert_eq!(rejected, 0);
         assert_eq!(mt.row_count(), 3);
@@ -722,7 +655,7 @@ mod tests {
 
         let mut mt = ColumnarMemtable::new(schema, default_config());
         let mut catalog = SeriesCatalog::new();
-        ingest_batch(&mut mt, &lines, &mut catalog, 0);
+        ingest_batch(&mut mt, DatabaseId::DEFAULT, &lines, &mut catalog, 0);
 
         let s1 = SeriesKey::new("cpu", vec![("host".into(), "server01".into())]);
         let s2 = SeriesKey::new("cpu", vec![("host".into(), "server02".into())]);
@@ -730,7 +663,7 @@ mod tests {
         assert_eq!(catalog.get(s2.to_series_id(0)), Some(&s2));
 
         // A second batch reuses the registrations rather than re-minting IDs.
-        ingest_batch(&mut mt, &lines, &mut catalog, 0);
+        ingest_batch(&mut mt, DatabaseId::DEFAULT, &lines, &mut catalog, 0);
         assert_eq!(catalog.len(), 2);
     }
 
@@ -742,7 +675,7 @@ mod tests {
 
         let mut mt = ColumnarMemtable::new(schema, default_config());
         let mut catalog = SeriesCatalog::new();
-        ingest_batch(&mut mt, &lines, &mut catalog, 0);
+        ingest_batch(&mut mt, DatabaseId::DEFAULT, &lines, &mut catalog, 0);
 
         let ts = mt.column(0).as_timestamps()[0];
         assert_eq!(ts, 1_704_067_200_000); // ms
@@ -757,7 +690,13 @@ mod tests {
         let mut mt = ColumnarMemtable::new(schema, default_config());
         let mut catalog = SeriesCatalog::new();
         let default_ts = 9999;
-        ingest_batch(&mut mt, &lines, &mut catalog, default_ts);
+        ingest_batch(
+            &mut mt,
+            DatabaseId::DEFAULT,
+            &lines,
+            &mut catalog,
+            default_ts,
+        );
 
         let ts = mt.column(0).as_timestamps()[0];
         assert_eq!(ts, 9999);
@@ -771,7 +710,7 @@ mod tests {
 
         let mut mt = ColumnarMemtable::new(schema, default_config());
         let mut catalog = SeriesCatalog::new();
-        ingest_batch(&mut mt, &lines, &mut catalog, 0);
+        ingest_batch(&mut mt, DatabaseId::DEFAULT, &lines, &mut catalog, 0);
         assert_eq!(mt.row_count(), 1);
     }
 
@@ -791,7 +730,7 @@ mod tests {
         // Ingest and verify the string value is recoverable.
         let mut mt = ColumnarMemtable::new(schema.clone(), default_config());
         let mut catalog = SeriesCatalog::new();
-        ingest_batch(&mut mt, &lines, &mut catalog, 0);
+        ingest_batch(&mut mt, DatabaseId::DEFAULT, &lines, &mut catalog, 0);
         assert_eq!(mt.row_count(), 1);
 
         // Find qname column index and resolve symbol.
@@ -835,7 +774,7 @@ mod tests {
             },
         );
         let mut catalog = SeriesCatalog::new();
-        ingest_batch(&mut mt, &lines, &mut catalog, 0);
+        ingest_batch(&mut mt, DatabaseId::DEFAULT, &lines, &mut catalog, 0);
 
         assert_eq!(mt.row_count(), 1000, "no row hits the tag cap");
         assert_eq!(mt.series_count(), 1, "one tag value is one series");
@@ -868,6 +807,7 @@ mod tests {
 
         let outcome = ingest_batch_with_lvc(IngestBatchArgs {
             memtable: &mut mt,
+            database_id: DatabaseId::DEFAULT,
             lines: &lines,
             catalog: &mut catalog,
             default_timestamp_ms: 0,

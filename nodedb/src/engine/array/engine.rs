@@ -136,6 +136,14 @@ impl ArrayEngine {
         self.arrays.keys()
     }
 
+    /// Each open array with its segments' encoded tile bytes per placement
+    /// vShard. Cost is the number of open arrays.
+    pub fn placement_bytes_by_array(&self) -> impl Iterator<Item = (&ArrayId, &HashMap<u32, u64>)> {
+        self.arrays
+            .iter()
+            .map(|(id, store)| (id, store.placement_bytes()))
+    }
+
     /// Install the at-rest encryption key for SEGA segment envelopes.
     ///
     /// Propagates the key to every currently-open `ArrayStore` and stores it

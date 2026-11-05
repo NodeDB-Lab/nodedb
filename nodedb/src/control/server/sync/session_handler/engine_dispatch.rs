@@ -41,7 +41,8 @@ pub(super) enum EngineOutcome {
 macro_rules! dispatch {
     ($ws:ident, $session:ident, $frame:ident, $shared:ident,
      $msg_ty:ty, $method:ident, $make_shared:expr, $noop:expr) => {{
-        if let Some(msg) = $frame.decode_body::<$msg_ty>() {
+        if let Some(mut msg) = $frame.decode_body::<$msg_ty>() {
+            $session.normalize_collection(&mut msg.collection);
             let ack = if let Some(shared) = $shared.as_ref() {
                 $session.$method(&msg, &$make_shared(shared)).await
             } else {

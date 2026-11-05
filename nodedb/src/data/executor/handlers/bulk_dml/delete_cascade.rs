@@ -137,7 +137,7 @@ impl CoreLoop {
         cascade: BulkDeleteRowCascade<'_>,
         write_set: &mut Vec<WriteSetEntry>,
         returned_docs: &mut Vec<nodedb_types::Value>,
-    ) {
+    ) -> Result<(), ErrorCode> {
         let BulkDeleteRowCascade {
             task,
             database_id,
@@ -214,8 +214,6 @@ impl CoreLoop {
             collection,
             &storage_key,
         );
-        // Note the committed delete against its surrogate + collection.
-        self.note_surrogate_write(task, tid, collection, row_surrogate.as_u32());
         // The removal, journalled after apply: the plan carries no
         // pre-dispatch record of it. A delete carries no post-image body. The
         // tombstone carries its version key, so replay closes the same
@@ -239,6 +237,10 @@ impl CoreLoop {
         if returning && let Some(doc) = pre_delete_doc {
             returned_docs.push(nodedb_types::Value::from(doc));
         }
+        // Note the committed delete against its surrogate + collection. It
+        // runs last, so a refused note leaves the journal entry and event whole.
+        self.note_surrogate_write(task, tid, collection, row_surrogate.as_u32())
+            .map_err(ErrorCode::from)
     }
 
     /// Remove the text of the rows in `pending` from the inverted index in

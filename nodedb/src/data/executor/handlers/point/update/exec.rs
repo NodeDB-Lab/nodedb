@@ -254,7 +254,11 @@ impl CoreLoop {
                     Ok(target_write_set) => {
                         // Note the committed row's write against its
                         // surrogate and collection.
-                        self.note_surrogate_write(task, tid, collection, surrogate.as_u32());
+                        if let Err(e) =
+                            self.note_surrogate_write(task, tid, collection, surrogate.as_u32())
+                        {
+                            return self.response_error(task, e);
+                        }
                         self.doc_cache.put(
                             task.request.database_id.as_u64(),
                             tid,

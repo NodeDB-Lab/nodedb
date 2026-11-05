@@ -59,6 +59,8 @@ pub struct WalManager {
     pub(super) ordinal_clock: Arc<nodedb_types::OrdinalClock>,
     /// Floors truncation keeps for holders that read records back at boot.
     pub(super) floor_holds: super::floor_holds::WalFloorHolds,
+    /// Receives the duration of every group-commit fsync once installed.
+    pub(super) fsync_metrics: std::sync::OnceLock<Arc<crate::control::metrics::SystemMetrics>>,
 }
 
 impl WalManager {
@@ -93,6 +95,12 @@ impl WalManager {
     /// which prevents `SIGNED_DELTAS` from being enabled.
     pub fn crdt_signing_root(&self) -> crate::Result<Option<[u8; 32]>> {
         Ok(self.crdt_signing_root)
+    }
+
+    /// Install the metrics that record each group-commit fsync duration.
+    /// The first install wins.
+    pub fn set_fsync_metrics(&self, metrics: Arc<crate::control::metrics::SystemMetrics>) {
+        let _ = self.fsync_metrics.set(metrics);
     }
 
     /// The floors truncation of this WAL keeps.
@@ -231,6 +239,7 @@ impl WalManager {
             time_anchors,
             ordinal_clock: Arc::new(nodedb_types::OrdinalClock::new()),
             floor_holds: super::floor_holds::WalFloorHolds::default(),
+            fsync_metrics: std::sync::OnceLock::new(),
         })
     }
 

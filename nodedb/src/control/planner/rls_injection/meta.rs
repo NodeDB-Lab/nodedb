@@ -94,6 +94,7 @@ pub(super) fn inject_meta(ctx: &RlsCtx<'_>, op: &mut MetaOp) -> crate::Result<()
         | MetaOp::PurgeVersionsBelow { .. }
         | MetaOp::KvDueExpiries { .. }
         | MetaOp::RefreshGraphCount { .. }
+        | MetaOp::QueryStorageBytes { .. }
         | MetaOp::PurgeTenant { .. }
         | MetaOp::UnregisterCollection { .. }
         | MetaOp::UnregisterMaterializedView { .. }

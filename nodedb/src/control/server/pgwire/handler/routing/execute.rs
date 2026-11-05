@@ -191,6 +191,7 @@ impl NodeDbPgHandler {
                     &self.state,
                     &tasks,
                 )
+                .map_err(|error| sql_error(&error))?
             {
                 if !all_writes_bufferable(&tasks) {
                     return Err(sql_error(

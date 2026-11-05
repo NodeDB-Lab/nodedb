@@ -11,9 +11,13 @@ use nodedb_types::{DatabaseId, Hlc};
 
 use super::types::{StoredCollection, SystemCatalog};
 
-fn key_of(database_id: DatabaseId, collection: &str) -> nodedb_types::CollectionKey<'_> {
-    nodedb_types::CollectionKey::from_qualified_str(database_id, collection)
-        .unwrap_or_else(|_| nodedb_types::CollectionKey::from_bare(database_id, collection))
+/// The catalog key `collection` names in `database_id`: a plan's qualified
+/// name or a bare name. Any other form is an error.
+fn key_of(
+    database_id: DatabaseId,
+    collection: &str,
+) -> Result<nodedb_types::CollectionKey<'_>, nodedb_types::CollectionKeyError> {
+    nodedb_types::CollectionKey::from_relation_name(database_id, collection)
 }
 
 impl SystemCatalog {
@@ -26,7 +30,7 @@ impl SystemCatalog {
         tenant_id: u64,
         collection: &str,
     ) -> crate::Result<Hlc> {
-        let key = key_of(database_id, collection);
+        let key = key_of(database_id, collection)?;
         Ok(self
             .get_collection(key.database_id(), tenant_id, key.name())?
             .map_or(Hlc::ZERO, |row| row.incarnation))
@@ -41,7 +45,7 @@ impl SystemCatalog {
         collection: &str,
         incarnation: Hlc,
     ) -> crate::Result<bool> {
-        let key = key_of(database_id, collection);
+        let key = key_of(database_id, collection)?;
         Ok(self
             .get_committed_collection(key.database_id(), tenant_id, key.name())?
             .is_some_and(|row| row.incarnation == incarnation))

@@ -110,6 +110,14 @@ impl CoreLoop {
         else {
             return Some(0);
         };
+        let Some(qualified) = self.replay_qualified(
+            "columnar",
+            record_lsn,
+            database_id,
+            record.collection.clone(),
+        ) else {
+            return Some(0);
+        };
         // An assignment that does not decode rejects the record, the same way
         // a malformed resolved row does below.
         let updates = match crate::wal::decode_columnar_dml_updates(&record.updates) {
@@ -140,9 +148,7 @@ impl CoreLoop {
         // `WriteAborted` marker before the refusal is acknowledged.
         let plan = if record.is_update {
             PhysicalPlan::Columnar(ColumnarOp::Update {
-                collection: nodedb_types::QualifiedCollection::from_stored(
-                    record.collection.clone(),
-                ),
+                collection: qualified,
                 filters: record.filters.clone(),
                 updates: updates.clone(),
                 system_from: record.system_from,
@@ -151,9 +157,7 @@ impl CoreLoop {
             })
         } else {
             PhysicalPlan::Columnar(ColumnarOp::Delete {
-                collection: nodedb_types::QualifiedCollection::from_stored(
-                    record.collection.clone(),
-                ),
+                collection: qualified,
                 filters: record.filters.clone(),
                 system_from: record.system_from,
                 rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
@@ -304,6 +308,14 @@ impl CoreLoop {
         else {
             return Some(0);
         };
+        let Some(qualified) = self.replay_qualified(
+            "columnar",
+            record_lsn,
+            database_id,
+            record.collection.clone(),
+        ) else {
+            return Some(0);
+        };
         let replay_check = RlsWriteCheck::already_decided_elsewhere();
 
         let response = if record.is_update {
@@ -342,9 +354,7 @@ impl CoreLoop {
                 rows.push((pk, new_row));
             }
             let plan = PhysicalPlan::Columnar(ColumnarOp::ResolvedUpdate {
-                collection: nodedb_types::QualifiedCollection::from_stored(
-                    record.collection.clone(),
-                ),
+                collection: qualified,
                 rows: rows.clone(),
                 system_from: record.system_from,
                 rls_write_check: replay_check.clone(),
@@ -385,9 +395,7 @@ impl CoreLoop {
                 pks.push(pk);
             }
             let plan = PhysicalPlan::Columnar(ColumnarOp::ResolvedDelete {
-                collection: nodedb_types::QualifiedCollection::from_stored(
-                    record.collection.clone(),
-                ),
+                collection: qualified,
                 pks: pks.clone(),
                 system_from: record.system_from,
                 rls_write_check: replay_check.clone(),

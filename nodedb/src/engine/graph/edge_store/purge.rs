@@ -13,11 +13,14 @@ use std::collections::HashSet;
 use nodedb_types::TenantId;
 use redb::KeyRange;
 
+use super::home_bytes::EdgeStorageDelta;
 use super::node_labels::{NODE_LABEL_VERSIONS, parse_version_key};
 use super::stats::table::{GRAPH_STATS, collection_stat_prefix};
+use super::storage_bytes::{EDGE_COUNTER, EdgeKey, drain_counted, every_row, retire_edge_bytes};
 use super::store::{EDGES, EdgeStore, REVERSE_EDGES, redb_err};
 use super::temporal::parse_versioned_edge_key;
 use super::temporal::visibility::{EDGE_APPLIED, EDGE_CUTS};
+use crate::engine::storage_bytes::DroppedScope;
 use crate::types::{HomedRecord, RecordHomes};
 
 /// Remove every entry of `table` inside `range`, returning how many went.
@@ -46,28 +49,13 @@ where
     Ok(removed)
 }
 
-/// Remove every entry of `table` whose versioned edge key's endpoint homes
-/// `removes` accepts, returning how many went. The forward and the reverse
-/// key name the same two endpoints, so one test serves every table keyed by
-/// either. A key that does not parse names no home and stays.
-fn drain_by_homes(
-    table: &mut redb::Table<'_, (u64, u64, &'static str), impl redb::Value + 'static>,
-    removes: &impl Fn(RecordHomes) -> bool,
-    what: &'static str,
-) -> crate::Result<usize> {
-    let mut removed = 0usize;
-    let drained = table
-        .extract_from_if((0u64, 0u64, "").., |key, _| {
-            parse_versioned_edge_key(key.2).is_some_and(|(_, src, _, dst, _)| {
-                removes(RecordHomes::of(HomedRecord::Edge { src, dst }))
-            })
-        })
-        .map_err(|e| redb_err(what, e))?;
-    for entry in drained {
-        entry.map_err(|e| redb_err(what, e))?;
-        removed += 1;
-    }
-    Ok(removed)
+/// Whether `removes` accepts the endpoint homes `key`'s versioned edge key
+/// names. The forward and the reverse key name the same two endpoints, so
+/// one test serves every table keyed by either. A key that does not parse
+/// names no home and stays.
+fn homed_by(key: EdgeKey<'_>, removes: &impl Fn(RecordHomes) -> bool) -> bool {
+    parse_versioned_edge_key(key.2)
+        .is_some_and(|(_, src, _, dst, _)| removes(RecordHomes::of(HomedRecord::Edge { src, dst })))
 }
 
 impl EdgeStore {
@@ -148,20 +136,44 @@ impl EdgeStore {
             .begin_write()
             .map_err(|e| redb_err("begin_write", e))?;
         let removed;
+        let mut delta = EdgeStorageDelta::default();
+        let all = (0u64, 0u64, "")..;
         {
             let mut edges = write_txn
                 .open_table(EDGES)
                 .map_err(|e| redb_err("open edges", e))?;
-            removed = drain_by_homes(&mut edges, removes, "edge purge by home")?;
+            let what = "edge purge by home";
+            removed = drain_counted(
+                &mut edges,
+                all.clone(),
+                |k| homed_by(k, removes),
+                &mut delta,
+                what,
+            )?;
             let mut rev_t = write_txn
                 .open_table(REVERSE_EDGES)
                 .map_err(|e| redb_err("open reverse", e))?;
-            drain_by_homes(&mut rev_t, removes, "reverse edge purge by home")?;
+            let what = "reverse edge purge by home";
+            drain_counted(
+                &mut rev_t,
+                all.clone(),
+                |k| homed_by(k, removes),
+                &mut delta,
+                what,
+            )?;
             let mut applied = write_txn
                 .open_table(EDGE_APPLIED)
                 .map_err(|e| redb_err("open edge_applied", e))?;
-            drain_by_homes(&mut applied, removes, "edge applied purge by home")?;
+            let what = "edge applied purge by home";
+            drain_counted(
+                &mut applied,
+                all,
+                |k| homed_by(k, removes),
+                &mut delta,
+                what,
+            )?;
         }
+        delta.apply(&write_txn, EDGE_COUNTER)?;
         write_txn
             .commit()
             .map_err(|e| redb_err("commit edge purge by home", e))?;
@@ -177,21 +189,26 @@ impl EdgeStore {
             .begin_write()
             .map_err(|e| redb_err("begin_write", e))?;
         let mut removed = 0;
+        let mut delta = EdgeStorageDelta::default();
 
         {
             let mut edges = write_txn
                 .open_table(EDGES)
                 .map_err(|e| redb_err("open edges", e))?;
-            removed += drain_range(&mut edges, (db, t, "")..(db, t + 1, ""), "edge purge")?;
+            let range = (db, t, "")..(db, t + 1, "");
+            removed += drain_counted(&mut edges, range, every_row, &mut delta, "edge purge")?;
         }
 
         {
             let mut rev_t = write_txn
                 .open_table(REVERSE_EDGES)
                 .map_err(|e| redb_err("open reverse", e))?;
-            removed += drain_range(
+            let range = (db, t, "")..(db, t + 1, "");
+            removed += drain_counted(
                 &mut rev_t,
-                (db, t, "")..(db, t + 1, ""),
+                range,
+                every_row,
+                &mut delta,
                 "reverse edge purge",
             )?;
         }
@@ -218,9 +235,12 @@ impl EdgeStore {
             let mut applied = write_txn
                 .open_table(EDGE_APPLIED)
                 .map_err(|e| redb_err("open edge_applied", e))?;
-            drain_range(
+            let range = (db, t, "")..(db, t + 1, "");
+            drain_counted(
                 &mut applied,
-                (db, t, "")..(db, t + 1, ""),
+                range,
+                every_row,
+                &mut delta,
                 "edge applied purge",
             )?;
             let mut labels = write_txn
@@ -232,6 +252,12 @@ impl EdgeStore {
                 "node label version purge",
             )?;
         }
+        delta.apply(&write_txn, EDGE_COUNTER)?;
+        let tenant = DroppedScope::Tenant {
+            database_id: db,
+            tenant_id: t,
+        };
+        retire_edge_bytes(&write_txn, tenant)?;
 
         write_txn
             .commit()
@@ -256,14 +282,18 @@ impl EdgeStore {
             .begin_write()
             .map_err(|e| redb_err("begin_write", e))?;
         let mut removed = 0;
+        let mut delta = EdgeStorageDelta::default();
+        let range = (db, t, prefix.as_str())..(db, t, prefix_end.as_str());
 
         {
             let mut edges = write_txn
                 .open_table(EDGES)
                 .map_err(|e| redb_err("open edges", e))?;
-            removed += drain_range(
+            removed += drain_counted(
                 &mut edges,
-                (db, t, prefix.as_str())..(db, t, prefix_end.as_str()),
+                range.clone(),
+                every_row,
+                &mut delta,
                 "edge purge",
             )?;
         }
@@ -272,11 +302,8 @@ impl EdgeStore {
             let mut rev_t = write_txn
                 .open_table(REVERSE_EDGES)
                 .map_err(|e| redb_err("open reverse", e))?;
-            drain_range(
-                &mut rev_t,
-                (db, t, prefix.as_str())..(db, t, prefix_end.as_str()),
-                "reverse edge purge",
-            )?;
+            let what = "reverse edge purge";
+            drain_counted(&mut rev_t, range.clone(), every_row, &mut delta, what)?;
         }
 
         // Clear the GRAPH_STATS summary + per-label rows for this collection
@@ -306,12 +333,21 @@ impl EdgeStore {
             let mut applied = write_txn
                 .open_table(EDGE_APPLIED)
                 .map_err(|e| redb_err("open edge_applied", e))?;
-            drain_range(
+            drain_counted(
                 &mut applied,
-                (db, t, prefix.as_str())..(db, t, prefix_end.as_str()),
+                range,
+                every_row,
+                &mut delta,
                 "edge applied purge",
             )?;
         }
+        delta.apply(&write_txn, EDGE_COUNTER)?;
+        let dropped = DroppedScope::Collection {
+            database_id: db,
+            tenant_id: t,
+            collection,
+        };
+        retire_edge_bytes(&write_txn, dropped)?;
 
         write_txn
             .commit()

@@ -287,7 +287,9 @@ impl CoreLoop {
 
         self.checkpoint_coordinator.mark_dirty("sparse", 1);
 
-        self.note_surrogate_write(task, tid, collection, surrogate.as_u32());
+        if let Err(e) = self.note_surrogate_write(task, tid, collection, surrogate.as_u32()) {
+            return self.response_error(task, e);
+        }
 
         // The exact bytes storage holds. A `RETURNING` projection reads
         // these rather than `value`, so it reports the generated columns and

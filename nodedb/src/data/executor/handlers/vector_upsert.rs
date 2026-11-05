@@ -312,7 +312,11 @@ impl CoreLoop {
         }) {
             return self.response_error(task, e);
         }
-        self.finish_vector_direct_write(task, &index_key, tid, collection, &[surrogate]);
+        if let Err(e) =
+            self.finish_vector_direct_write(task, &index_key, tid, collection, &[surrogate])
+        {
+            return self.response_error(task, e);
+        }
 
         // Answered only once every step above has succeeded, so a statement
         // that fails after the row landed reports the failure rather than a row

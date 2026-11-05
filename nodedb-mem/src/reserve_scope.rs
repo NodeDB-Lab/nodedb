@@ -69,18 +69,20 @@ impl ReserveScope {
             self.global_credited = true;
             return Ok(());
         }
+        // The headroom saturates at zero, so the check cannot wrap.
+        let mut current = self.global.allocated.load(Ordering::Relaxed);
         loop {
-            let current = self.global.allocated.load(Ordering::Relaxed);
-            if current + self.size > self.global.ceiling {
+            if self.size > self.global.ceiling.saturating_sub(current) {
                 return Err(MemError::GlobalCeilingExceeded {
                     allocated: current,
                     ceiling: self.global.ceiling,
                     requested: self.size,
                 });
             }
+            let new_val = current + self.size;
             match self.global.allocated.compare_exchange_weak(
                 current,
-                current + self.size,
+                new_val,
                 Ordering::AcqRel,
                 Ordering::Relaxed,
             ) {
@@ -88,7 +90,7 @@ impl ReserveScope {
                     self.global_credited = true;
                     return Ok(());
                 }
-                Err(_) => continue,
+                Err(actual) => current = actual,
             }
         }
     }
@@ -182,5 +184,29 @@ impl Drop for ReserveScope {
                 self.identity,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::EngineId;
+    use nodedb_types::{DatabaseId, TenantId};
+
+    #[test]
+    fn try_credit_global_rejects_when_sum_overflows_usize() {
+        let global = Arc::new(GlobalCounter::new(usize::MAX));
+        global.allocated.store(usize::MAX - 1, Ordering::Relaxed);
+        let identity = ReleaseIdentity {
+            db: DatabaseId::DEFAULT,
+            tenant: TenantId::new(1),
+            engine: EngineId::Vector,
+        };
+        let mut scope = ReserveScope::new(Arc::clone(&global), 2, identity);
+
+        let err = scope.try_credit_global().unwrap_err();
+        assert!(matches!(err, MemError::GlobalCeilingExceeded { .. }));
+        assert_eq!(global.allocated.load(Ordering::Relaxed), usize::MAX - 1);
+        assert!(!scope.global_credited);
     }
 }

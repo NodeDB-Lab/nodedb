@@ -69,7 +69,7 @@ impl Walk<'_> {
         }
         for ((stored, row_key), mut versions) in versioned {
             versions.sort_by_key(|(sys, _)| *sys);
-            let bare = self.bare(stored);
+            let bare = self.bare(stored)?;
             let shape = self.shapes.get(&bare).unwrap_or(&unknown);
             let mut decoded = Vec::with_capacity(versions.len());
             for (sys, raw) in versions {
@@ -145,7 +145,7 @@ impl Walk<'_> {
             let hash = hasher.finish();
             let is_newest = newest.get(&(stored, src, label, dst)) == Some(&system_from);
             sink(Row {
-                collection: self.bare(stored),
+                collection: self.bare(stored)?,
                 part: VerifiedPart::Edges,
                 key: Some(key_hash(VerifiedPart::Edges, &endpoints)),
                 hash,

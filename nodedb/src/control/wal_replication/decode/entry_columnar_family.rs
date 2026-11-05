@@ -7,20 +7,20 @@
 //! [`super::super::decode_sync_engines`]; the columnar predicate-DML arm
 //! delegates to [`super::columnar`].
 //!
-//! Delegated from `decode/entry.rs`'s single grouped match arm. None of these
-//! arms scope by tenancy, so this group takes no [`DecodeCtx`]. `write` is
+//! Delegated from `decode/entry.rs`'s single grouped match arm. Every
+//! collection name decodes under the database in [`DecodeCtx`]. `write` is
 //! guaranteed by the caller to already be one of these variants — see
 //! `entry_document::decode_arm` for the trailing-arm contract.
-//!
-//! [`DecodeCtx`]: super::ctx::DecodeCtx
 
 use super::super::decode_sync_engines;
 use super::super::decode_sync_engines::ColumnarIngestWire;
 use super::super::types::ReplicatedWrite;
 use super::columnar;
+use super::ctx::DecodeCtx;
 use crate::bridge::envelope::PhysicalPlan;
 
-pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan> {
+pub(super) fn decode_arm(ctx: &DecodeCtx, write: &ReplicatedWrite) -> crate::Result<PhysicalPlan> {
+    let database_id = ctx.database_id;
     match write {
         ReplicatedWrite::ColumnarIngest {
             collection,
@@ -34,19 +34,22 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             restored_versions,
             returning,
             rls_filters,
-        } => decode_sync_engines::columnar_ingest(ColumnarIngestWire {
-            collection,
-            payload,
-            format,
-            intent: *intent,
-            on_conflict_updates,
-            schema_bytes,
-            surrogates,
-            restored_versions,
-            prov_bytes: provenance,
-            returning_bytes: returning,
-            rls_filters,
-        }),
+        } => decode_sync_engines::columnar_ingest(
+            database_id,
+            ColumnarIngestWire {
+                collection,
+                payload,
+                format,
+                intent: *intent,
+                on_conflict_updates,
+                schema_bytes,
+                surrogates,
+                restored_versions,
+                prov_bytes: provenance,
+                returning_bytes: returning,
+                rls_filters,
+            },
+        ),
         ReplicatedWrite::TimeseriesIngest {
             collection,
             payload,
@@ -58,25 +61,30 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             returning,
             rls_filters,
         } => decode_sync_engines::timeseries_ingest(
-            collection,
-            payload,
-            format,
-            surrogates,
-            provenance,
-            returning,
-            rls_filters,
+            database_id,
+            decode_sync_engines::TimeseriesIngestWire {
+                collection,
+                payload,
+                format,
+                surrogates,
+                provenance,
+                returning,
+                rls_filters,
+            },
         ),
         ReplicatedWrite::FtsIndex {
             collection,
             surrogate,
             fields,
             provenance,
-        } => decode_sync_engines::fts_index(collection, *surrogate, fields, provenance),
+        } => {
+            decode_sync_engines::fts_index(database_id, collection, *surrogate, fields, provenance)
+        }
         ReplicatedWrite::FtsDelete {
             collection,
             surrogate,
             provenance,
-        } => decode_sync_engines::fts_delete(collection, *surrogate, provenance),
+        } => decode_sync_engines::fts_delete(database_id, collection, *surrogate, provenance),
         ReplicatedWrite::SpatialInsert {
             collection,
             field,
@@ -84,6 +92,7 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             geometry_bytes,
             provenance,
         } => decode_sync_engines::spatial_insert(
+            database_id,
             collection,
             field,
             *surrogate,
@@ -95,34 +104,36 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<PhysicalPlan>
             field,
             surrogate,
             provenance,
-        } => decode_sync_engines::spatial_delete(collection, field, *surrogate, provenance),
+        } => decode_sync_engines::spatial_delete(
+            database_id,
+            collection,
+            field,
+            *surrogate,
+            provenance,
+        ),
         ReplicatedWrite::ColumnarBulkDml {
             collection,
             filters,
             is_update,
             updates,
-        } => Ok(columnar::bulk_dml(collection, filters, *is_update, updates)),
+        } => columnar::bulk_dml(database_id, collection, filters, *is_update, updates),
         ReplicatedWrite::ColumnarBulkDmlResolved {
             collection,
             is_update,
             rows,
-        } => columnar::bulk_dml_resolved(collection, *is_update, rows),
+        } => columnar::bulk_dml_resolved(database_id, collection, *is_update, rows),
         ReplicatedWrite::ColumnarTruncate {
             collection,
             restart_identity,
             erase_history,
-        } => Ok(columnar::truncate(
-            collection,
-            *restart_identity,
-            *erase_history,
-        )),
+        } => columnar::truncate(database_id, collection, *restart_identity, *erase_history),
         ReplicatedWrite::TimeseriesTruncate {
             collection,
             restart_identity,
-        } => Ok(columnar::timeseries_truncate(collection, *restart_identity)),
-        ReplicatedWrite::TimeseriesAggregateRefresh { collection, cut } => Ok(
-            columnar::timeseries_aggregate_refresh(collection, cut.clone()),
-        ),
+        } => columnar::timeseries_truncate(database_id, collection, *restart_identity),
+        ReplicatedWrite::TimeseriesAggregateRefresh { collection, cut } => {
+            columnar::timeseries_aggregate_refresh(database_id, collection, cut.clone())
+        }
         _ => Err(crate::Error::Internal {
             detail: "entry_columnar_family::decode_arm called with a non-columnar-family \
                 ReplicatedWrite variant (dispatch bug in decode/entry.rs's grouped \

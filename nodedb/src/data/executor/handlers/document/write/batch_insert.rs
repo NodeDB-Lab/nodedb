@@ -374,7 +374,11 @@ impl CoreLoop {
         // Record each committed row's version against its surrogate and
         // collection.
         for (_, _, key) in &applied {
-            self.note_surrogate_write(task, tid, collection, key.surrogate().as_u32());
+            if let Err(e) =
+                self.note_surrogate_write(task, tid, collection, key.surrogate().as_u32())
+            {
+                return self.response_error(task, e);
+            }
         }
 
         self.checkpoint_coordinator

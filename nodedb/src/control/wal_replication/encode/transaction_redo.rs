@@ -83,6 +83,7 @@ fn redo_entry(
             origin: payload.origin,
             calvin: payload.calvin.clone(),
             snapshot_ordinal: payload.snapshot_ordinal,
+            adds_storage: payload.adds_storage,
         },
     )
     .with_event_source(payload.event_source)
@@ -225,6 +226,7 @@ fn redo_proposal(
         origin: payload.origin,
         calvin: payload.calvin.clone(),
         snapshot_ordinal: payload.snapshot_ordinal,
+        adds_storage: payload.adds_storage,
     };
     Ok(RedoProposal::Chunked {
         stream,
@@ -315,6 +317,7 @@ mod tests {
             calvin: None,
             reads: Vec::new(),
             snapshot_ordinal: None,
+            adds_storage: false,
         }
     }
 
@@ -414,6 +417,34 @@ mod tests {
                 ..
             } if named == calvin_stream()
         ));
+    }
+
+    #[test]
+    fn the_entry_carries_the_payloads_storage_flag_inline_and_chunked() {
+        for adds_storage in [true, false] {
+            let mut redo = payload(300_000);
+            redo.adds_storage = adds_storage;
+            let RedoProposal::Chunked { last, .. } =
+                session_redo_proposal(target(), &redo, 64 * 1024).expect("chunked proposal")
+            else {
+                panic!("a 300 KB redo over a 64 KiB limit chunks");
+            };
+            assert!(matches!(
+                last.write,
+                ReplicatedWrite::TransactionRedo { adds_storage: flag, .. } if flag == adds_storage
+            ));
+            redo.redo.ops[0].payload = vec![7; 8];
+            let inline = transaction_redo_entry(
+                target().tenant_id,
+                target().database_id,
+                target().vshard_id,
+                &redo,
+            );
+            assert!(matches!(
+                inline.write,
+                ReplicatedWrite::TransactionRedo { adds_storage: flag, .. } if flag == adds_storage
+            ));
+        }
     }
 
     #[test]

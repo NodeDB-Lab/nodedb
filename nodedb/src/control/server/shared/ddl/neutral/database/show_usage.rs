@@ -3,7 +3,7 @@
 //! Handler for `SHOW DATABASE USAGE FOR <name>`.
 //!
 //! The tenant-admin gate, catalog lookup, live-gauge reads from
-//! `SystemMetrics`, and per-dimension row rendering (`unlimited` limit +
+//! `DatabaseMetricsRegistry`, and per-dimension row rendering (`unlimited` limit +
 //! `percent_used`) run here. The result is the protocol-neutral
 //! [`DdlResult`] over `ShapedRows`. Every column is `Text`.
 
@@ -42,17 +42,15 @@ pub fn show_database_usage(
         .map_err(|e| DdlError::from_error_in_context("quota read failed", &e))?
         .unwrap_or(QuotaRecord::DEFAULT);
 
-    // Pull live gauges from the system metrics registry. Dimensions without a
+    // Pull live gauges from the database metrics registry. Dimensions without a
     // per-database accounting source land as `0`, which is the gauge's actual
     // value, not a fabricated placeholder.
-    let (cur_memory, cur_storage, cur_queries) = match &state.system_metrics {
-        Some(m) => (
-            m.database_memory_bytes(name),
-            m.database_storage_bytes(name),
-            m.database_queries_total(name),
-        ),
-        None => (0, 0, 0),
-    };
+    let metrics = &state.database_metrics;
+    let (cur_memory, cur_storage, cur_queries) = (
+        metrics.memory_bytes(db_id),
+        metrics.storage_bytes(db_id),
+        metrics.qps_total(db_id),
+    );
     // Live connections come from the admission registry, which holds one
     // permit per connection admitted to this database. `None` means the
     // database has no `max_connections` cap, so no per-database counter

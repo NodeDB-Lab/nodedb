@@ -358,7 +358,14 @@ mod tests {
         BarrierEvent::Read {
             passive_vshard,
             values: vec![(
-                PassiveReadKeyId::surrogate(QualifiedCollection::from_stored("c".to_owned()), 1),
+                PassiveReadKeyId::surrogate(
+                    QualifiedCollection::from_stored(
+                        nodedb_types::DatabaseId::DEFAULT,
+                        "c".to_owned(),
+                    )
+                    .expect("bare name"),
+                    1,
+                ),
                 Value::Null,
             )],
         }

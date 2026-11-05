@@ -25,9 +25,11 @@ use nodedb_types::{Surrogate, TenantId};
 use super::core::InvertedIndex;
 use super::doc_terms;
 use super::errors::inverted_err;
-use crate::engine::sparse::fts_redb::backend::posting_rows;
+use crate::engine::sparse::fts_redb::backend::posting_rows::{self, PostingWrite};
+use crate::engine::sparse::fts_redb::bytes::put_doc_row;
 use crate::engine::sparse::fts_redb::keys::{doc_key, stats_key};
 use crate::engine::sparse::fts_redb::tables::{DOC_LENGTHS, POSTINGS, STATS};
+use crate::engine::storage_bytes::StorageDelta;
 
 /// `(database_id, tenant, collection, surrogate)` scope shared by the
 /// transaction-participating indexing entry points.
@@ -152,13 +154,15 @@ impl InvertedIndex {
 
     /// Core per-index write: postings, doc length, term set, and stats of
     /// `doc` in `index`, within a transaction. Bypasses the LSM memtable so
-    /// Origin transactions can stay atomic with the document write.
+    /// Origin transactions can stay atomic with the document write. `delta`
+    /// records the stored bytes the write changes.
     pub(super) fn write_index_data(
         &self,
         txn: &WriteTransaction,
         doc: IndexDocScope<'_>,
         index: IndexScope<'_>,
         tokens: &[String],
+        delta: &mut StorageDelta,
     ) -> crate::Result<()> {
         let IndexDocScope {
             database_id,
@@ -192,7 +196,7 @@ impl InvertedIndex {
         // The prior version's tokens leave for the history before the
         // strip below removes its postings.
         if let Some(len) = prior_len {
-            self.end_text_version_in_txn(txn, doc, index, len)?;
+            self.end_text_version_in_txn(txn, doc, index, len, delta)?;
         }
 
         // Retract the document from every term the previous version put it in
@@ -204,8 +208,8 @@ impl InvertedIndex {
             .into_iter()
             .filter(|term| !new_terms.contains(term.as_str()))
             .collect();
-        doc_terms::strip_postings(txn, doc, index, &dropped)?;
-        doc_terms::put(txn, doc, index, &new_terms)?;
+        doc_terms::strip_postings(txn, doc, index, &dropped, delta)?;
+        doc_terms::put(txn, doc, index, &new_terms, delta)?;
 
         let mut postings_table = txn
             .open_table(POSTINGS)
@@ -221,15 +225,12 @@ impl InvertedIndex {
                 term_freq: freq,
                 positions,
             };
-            posting_rows::put(
-                &mut postings_table,
-                database_id,
-                t,
-                index,
+            let row = PostingWrite {
                 term,
-                &posting,
+                posting: &posting,
                 doc_len,
-            )?;
+            };
+            posting_rows::put(&mut postings_table, database_id, t, index, row, delta)?;
         }
         drop(postings_table);
 
@@ -239,12 +240,13 @@ impl InvertedIndex {
 
         let len_bytes =
             zerompk::to_msgpack_vec(&doc_len).map_err(|e| inverted_err("serialize doc_len", e))?;
-        lengths
-            .insert(
-                doc_key(database_id, t, index, surrogate),
-                len_bytes.as_slice(),
-            )
-            .map_err(|e| inverted_err("insert doc_len", e))?;
+        put_doc_row(
+            &mut lengths,
+            doc_key(database_id, t, index, surrogate),
+            len_bytes.as_slice(),
+            delta,
+        )
+        .map_err(|e| inverted_err("insert doc_len", e))?;
         drop(lengths);
 
         let (count_delta, total_delta) = match prior_len {
@@ -259,7 +261,7 @@ impl InvertedIndex {
         };
 
         Self::update_stats_in_txn(txn, database_id, tid, index, count_delta, total_delta)?;
-        self.start_text_version_in_txn(txn, doc, index)?;
+        self.start_text_version_in_txn(txn, doc, index, delta)?;
 
         debug!(
             database_id,

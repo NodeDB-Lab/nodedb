@@ -20,11 +20,15 @@ pub(super) struct MatchView<'a> {
 
 impl CoreLoop {
     /// The edge-store name of the collection `IN '<collection>'` names.
-    pub(super) fn match_collection(task: &ExecutionTask, query: &MatchQuery) -> Option<String> {
+    pub(super) fn match_collection(
+        task: &ExecutionTask,
+        query: &MatchQuery,
+    ) -> crate::Result<Option<String>> {
         query
             .collection
             .as_deref()
             .map(|c| super::graph_algo_edges::algo_collection(task.request.database_id, c))
+            .transpose()
     }
 
     /// Build or reuse the CSR a MATCH at `scope` reads.
@@ -35,7 +39,7 @@ impl CoreLoop {
         query: &MatchQuery,
         scope: &GraphReadScope,
     ) -> Result<(), crate::Error> {
-        let collection = Self::match_collection(task, query);
+        let collection = Self::match_collection(task, query)?;
         self.prepare_csr_view(
             task.request.database_id.as_u64(),
             tid,
@@ -60,7 +64,7 @@ impl CoreLoop {
         scope: &GraphReadScope,
     ) -> Result<Option<MatchView<'_>>, crate::Error> {
         let database_id = task.request.database_id.as_u64();
-        let collection = Self::match_collection(task, query);
+        let collection = Self::match_collection(task, query)?;
         let Some(csr) = self.csr_view(database_id, tid, collection.as_deref(), scope)? else {
             return Ok(None);
         };

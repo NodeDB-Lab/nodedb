@@ -6,9 +6,10 @@
 //! whole plan afterwards.
 
 use crate::bridge::envelope::PhysicalPlan;
+use crate::types::DatabaseId;
 use nodedb_physical::physical_plan::{KvBatchIntent, KvCounterShape, KvOp, ReturningSpec};
-use nodedb_types::RlsWriteCheck;
 use nodedb_types::sync::wire::SyncProvenance;
+use nodedb_types::{QualifiedCollection, RlsWriteCheck};
 
 /// A decoded RETURNING projection spec plus the read filters gating it — see
 /// `ReplicatedWrite::KvPut::returning`. Bundled — plain positional arguments
@@ -28,6 +29,7 @@ pub(super) struct PutFields<'a> {
 }
 
 pub(super) fn put(
+    database_id: DatabaseId,
     put: PutFields<'_>,
     returning: ReturningFields<'_>,
     provenance: Option<SyncProvenance>,
@@ -41,7 +43,7 @@ pub(super) fn put(
     } = put;
     let surrogate = nodedb_types::Surrogate::new(surrogate);
     Ok(PhysicalPlan::Kv(KvOp::Put {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+        collection: QualifiedCollection::from_stored(database_id, collection.to_owned())?,
         key: key.to_vec(),
         value: value.to_vec(),
         ttl_ms,
@@ -58,22 +60,24 @@ pub(super) fn put(
 /// — the writing identity isn't available on this node, so re-deciding at
 /// recovery time makes it non-deterministic.
 pub(super) fn delete(
+    database_id: DatabaseId,
     collection: &str,
     keys: &[Vec<u8>],
     returning: ReturningFields<'_>,
     provenance: Option<SyncProvenance>,
-) -> PhysicalPlan {
-    PhysicalPlan::Kv(KvOp::Delete {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+) -> crate::Result<PhysicalPlan> {
+    Ok(PhysicalPlan::Kv(KvOp::Delete {
+        collection: QualifiedCollection::from_stored(database_id, collection.to_owned())?,
         keys: keys.to_vec(),
         rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
         returning: returning.returning,
         rls_filters: returning.rls_filters.to_vec(),
         provenance,
-    })
+    }))
 }
 
 pub(super) fn insert(
+    database_id: DatabaseId,
     collection: &str,
     key: &[u8],
     value: &[u8],
@@ -83,7 +87,7 @@ pub(super) fn insert(
 ) -> crate::Result<PhysicalPlan> {
     let surrogate = nodedb_types::Surrogate::new(surrogate);
     Ok(PhysicalPlan::Kv(KvOp::Insert {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+        collection: QualifiedCollection::from_stored(database_id, collection.to_owned())?,
         key: key.to_vec(),
         value: value.to_vec(),
         ttl_ms,
@@ -104,6 +108,7 @@ pub(super) struct ConflictEntry<'a> {
 }
 
 pub(super) fn insert_on_conflict_update(
+    database_id: DatabaseId,
     collection: &str,
     entry: ConflictEntry<'_>,
     returning: ReturningFields<'_>,
@@ -117,7 +122,7 @@ pub(super) fn insert_on_conflict_update(
     } = entry;
     let surrogate = nodedb_types::Surrogate::new(surrogate);
     Ok(PhysicalPlan::Kv(KvOp::InsertOnConflictUpdate {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+        collection: QualifiedCollection::from_stored(database_id, collection.to_owned())?,
         key: key.to_vec(),
         value: value.to_vec(),
         ttl_ms,
@@ -132,6 +137,7 @@ pub(super) fn insert_on_conflict_update(
 }
 
 pub(super) fn batch_put(
+    database_id: DatabaseId,
     collection: &str,
     entries: &[(Vec<u8>, Vec<u8>)],
     ttl_ms: u64,
@@ -140,7 +146,7 @@ pub(super) fn batch_put(
     returning: ReturningFields<'_>,
 ) -> crate::Result<PhysicalPlan> {
     Ok(PhysicalPlan::Kv(KvOp::BatchPut {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+        collection: QualifiedCollection::from_stored(database_id, collection.to_owned())?,
         entries: entries.to_vec(),
         ttl_ms,
         intent,
@@ -154,24 +160,34 @@ pub(super) fn batch_put(
     }))
 }
 
-pub(super) fn expire(collection: &str, key: &[u8], ttl_ms: u64) -> PhysicalPlan {
-    PhysicalPlan::Kv(KvOp::Expire {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+pub(super) fn expire(
+    database_id: DatabaseId,
+    collection: &str,
+    key: &[u8],
+    ttl_ms: u64,
+) -> crate::Result<PhysicalPlan> {
+    Ok(PhysicalPlan::Kv(KvOp::Expire {
+        collection: QualifiedCollection::from_stored(database_id, collection.to_owned())?,
         key: key.to_vec(),
         ttl_ms,
         rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
-    })
+    }))
 }
 
-pub(super) fn persist(collection: &str, key: &[u8]) -> PhysicalPlan {
-    PhysicalPlan::Kv(KvOp::Persist {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+pub(super) fn persist(
+    database_id: DatabaseId,
+    collection: &str,
+    key: &[u8],
+) -> crate::Result<PhysicalPlan> {
+    Ok(PhysicalPlan::Kv(KvOp::Persist {
+        collection: QualifiedCollection::from_stored(database_id, collection.to_owned())?,
         key: key.to_vec(),
         rls_write_check: RlsWriteCheck::already_decided_elsewhere(),
-    })
+    }))
 }
 
 pub(super) fn incr(
+    database_id: DatabaseId,
     collection: &str,
     key: &[u8],
     delta: i64,
@@ -181,7 +197,7 @@ pub(super) fn incr(
 ) -> crate::Result<PhysicalPlan> {
     let surrogate = nodedb_types::Surrogate::new(surrogate);
     Ok(PhysicalPlan::Kv(KvOp::Incr {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+        collection: QualifiedCollection::from_stored(database_id, collection.to_owned())?,
         key: key.to_vec(),
         delta,
         ttl_ms,
@@ -192,6 +208,7 @@ pub(super) fn incr(
 }
 
 pub(super) fn incr_float(
+    database_id: DatabaseId,
     collection: &str,
     key: &[u8],
     delta: &str,
@@ -200,7 +217,7 @@ pub(super) fn incr_float(
 ) -> crate::Result<PhysicalPlan> {
     let surrogate = nodedb_types::Surrogate::new(surrogate);
     Ok(PhysicalPlan::Kv(KvOp::IncrFloat {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+        collection: QualifiedCollection::from_stored(database_id, collection.to_owned())?,
         key: key.to_vec(),
         delta: delta.to_owned(),
         surrogate,
@@ -210,6 +227,7 @@ pub(super) fn incr_float(
 }
 
 pub(super) fn cas(
+    database_id: DatabaseId,
     collection: &str,
     key: &[u8],
     expected: &[u8],
@@ -218,7 +236,7 @@ pub(super) fn cas(
 ) -> crate::Result<PhysicalPlan> {
     let surrogate = nodedb_types::Surrogate::new(surrogate);
     Ok(PhysicalPlan::Kv(KvOp::Cas {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+        collection: QualifiedCollection::from_stored(database_id, collection.to_owned())?,
         key: key.to_vec(),
         expected: expected.to_vec(),
         new_value: new_value.to_vec(),
@@ -228,6 +246,7 @@ pub(super) fn cas(
 }
 
 pub(super) fn get_set(
+    database_id: DatabaseId,
     collection: &str,
     key: &[u8],
     new_value: &[u8],
@@ -236,7 +255,7 @@ pub(super) fn get_set(
 ) -> crate::Result<PhysicalPlan> {
     let surrogate = nodedb_types::Surrogate::new(surrogate);
     Ok(PhysicalPlan::Kv(KvOp::GetSet {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+        collection: QualifiedCollection::from_stored(database_id, collection.to_owned())?,
         key: key.to_vec(),
         new_value: new_value.to_vec(),
         surrogate,
@@ -261,9 +280,12 @@ pub(super) struct RegisterSortedIndexFields<'a> {
     pub(super) window_end_ms: u64,
 }
 
-pub(super) fn register_sorted_index(f: RegisterSortedIndexFields) -> PhysicalPlan {
-    PhysicalPlan::Kv(KvOp::RegisterSortedIndex {
-        collection: nodedb_types::QualifiedCollection::from_stored(f.collection.to_owned()),
+pub(super) fn register_sorted_index(
+    database_id: DatabaseId,
+    f: RegisterSortedIndexFields,
+) -> crate::Result<PhysicalPlan> {
+    Ok(PhysicalPlan::Kv(KvOp::RegisterSortedIndex {
+        collection: QualifiedCollection::from_stored(database_id, f.collection.to_owned())?,
         index_name: f.index_name.to_owned(),
         sort_columns: f.sort_columns.to_vec(),
         key_column: f.key_column.to_owned(),
@@ -271,7 +293,7 @@ pub(super) fn register_sorted_index(f: RegisterSortedIndexFields) -> PhysicalPla
         window_timestamp_column: f.window_timestamp_column.to_owned(),
         window_start_ms: f.window_start_ms,
         window_end_ms: f.window_end_ms,
-    })
+    }))
 }
 
 pub(super) fn drop_sorted_index(index_name: &str) -> PhysicalPlan {
@@ -283,29 +305,35 @@ pub(super) fn drop_sorted_index(index_name: &str) -> PhysicalPlan {
 /// Reconstruct a `RegisterIndex` plan. No surrogate binding — apply re-runs
 /// registration (and, if `backfill`, the scan) live on the follower.
 pub(super) fn register_index(
+    database_id: DatabaseId,
     collection: &str,
     field: &str,
     field_position: usize,
     backfill: bool,
-) -> PhysicalPlan {
-    PhysicalPlan::Kv(KvOp::RegisterIndex {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+) -> crate::Result<PhysicalPlan> {
+    Ok(PhysicalPlan::Kv(KvOp::RegisterIndex {
+        collection: QualifiedCollection::from_stored(database_id, collection.to_owned())?,
         field: field.to_owned(),
         field_position,
         backfill,
-    })
+    }))
 }
 
 /// Reconstruct a `DropIndex` plan. Same surrogate-free contract as
 /// [`register_index`].
-pub(super) fn drop_index(collection: &str, field: &str) -> PhysicalPlan {
-    PhysicalPlan::Kv(KvOp::DropIndex {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+pub(super) fn drop_index(
+    database_id: DatabaseId,
+    collection: &str,
+    field: &str,
+) -> crate::Result<PhysicalPlan> {
+    Ok(PhysicalPlan::Kv(KvOp::DropIndex {
+        collection: QualifiedCollection::from_stored(database_id, collection.to_owned())?,
         field: field.to_owned(),
-    })
+    }))
 }
 
 pub(super) fn field_set(
+    database_id: DatabaseId,
     collection: &str,
     key: &[u8],
     updates: &[(String, Vec<u8>)],
@@ -315,7 +343,7 @@ pub(super) fn field_set(
 ) -> crate::Result<PhysicalPlan> {
     let surrogate = nodedb_types::Surrogate::new(surrogate);
     Ok(PhysicalPlan::Kv(KvOp::FieldSet {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+        collection: QualifiedCollection::from_stored(database_id, collection.to_owned())?,
         key: key.to_vec(),
         updates: updates.to_vec(),
         surrogate,
@@ -328,11 +356,15 @@ pub(super) fn field_set(
 
 /// Reconstruct a `Truncate` plan. Same idempotent-replay contract as
 /// `document::truncate` — no surrogate binding, whole-collection clear.
-pub(super) fn truncate(collection: &str, restart_identity: bool) -> PhysicalPlan {
-    PhysicalPlan::Kv(KvOp::Truncate {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+pub(super) fn truncate(
+    database_id: DatabaseId,
+    collection: &str,
+    restart_identity: bool,
+) -> crate::Result<PhysicalPlan> {
+    Ok(PhysicalPlan::Kv(KvOp::Truncate {
+        collection: QualifiedCollection::from_stored(database_id, collection.to_owned())?,
         restart_identity,
-    })
+    }))
 }
 
 #[cfg(test)]

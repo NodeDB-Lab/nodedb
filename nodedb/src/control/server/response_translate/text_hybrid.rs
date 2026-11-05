@@ -38,7 +38,8 @@ use super::pk_resolve::resolve_surrogate_pks;
 /// unresolved or headless surrogate is left untouched (no fabricated PK).
 /// On a decode failure, or a catalog error resolving the identity column,
 /// the payload is returned unchanged: a row never gains a wrongly named
-/// column. A resolver error fails the call.
+/// column. A resolver error, or a `collection` without its database's
+/// form, fails the call.
 pub async fn translate_text_search_payload(
     payload: &[u8],
     state: &SharedState,
@@ -50,11 +51,12 @@ pub async fn translate_text_search_payload(
         return Ok(payload.to_vec());
     }
 
+    let bare = nodedb_types::CollectionKey::from_qualified_str(database_id, collection)?.name();
     let text = decode_payload_to_json(payload);
     let Ok(JsonValue::Array(mut rows)) = sonic_rs::from_str::<JsonValue>(&text) else {
         return Ok(payload.to_vec());
     };
-    let Ok(identity_column) = identity_column(state, database_id, tenant_id, collection) else {
+    let Ok(identity_column) = identity_column(state, database_id, tenant_id, bare) else {
         return Ok(payload.to_vec());
     };
 
@@ -103,24 +105,19 @@ pub async fn translate_text_search_payload(
     })
 }
 
-/// The column `collection`'s rows render their identity under: its declared
-/// key, per `document_declared_key`, else `id`. The Data Plane's register
-/// config comes from the same function.
+/// The column the rows of the collection named `bare` render their
+/// identity under: its declared key, per `document_declared_key`, else `id`.
+/// The Data Plane's register config comes from the same function.
 fn identity_column(
     state: &SharedState,
     database_id: DatabaseId,
     tenant_id: TenantId,
-    collection: &str,
+    bare: &str,
 ) -> crate::Result<String> {
-    let qualified = nodedb_types::QualifiedCollection::from_stored(collection.to_string());
     let declared_key = state
         .credentials
         .catalog()
-        .get_collection(
-            database_id,
-            tenant_id.as_u64(),
-            qualified.collection_name(database_id),
-        )?
+        .get_collection(database_id, tenant_id.as_u64(), bare)?
         .and_then(|stored| {
             crate::control::planner::catalog_adapter::document_declared_key(&stored)
         });

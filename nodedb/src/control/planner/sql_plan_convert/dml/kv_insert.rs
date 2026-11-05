@@ -40,7 +40,7 @@ pub(in super::super) fn convert_kv_insert(
     let key_column = if on_conflict_updates.is_empty() {
         None
     } else {
-        Some(kv_key_column(ctx, collection)?)
+        Some(kv_key_column(ctx, collection_key)?)
     };
     // The built-in `key` column is not in the body, so an assignment that
     // keeps it writes nothing there.
@@ -220,16 +220,18 @@ fn kv_entry_value(value_cols: &[(String, SqlValue)]) -> crate::Result<Vec<u8>> {
 /// The column a KV collection's key is read from: its schema's primary-key
 /// column, else the built-in `key` column. The SQL planner extracts the key
 /// by the same rule.
-fn kv_key_column(ctx: &ConvertContext, collection: &str) -> crate::Result<String> {
+fn kv_key_column(
+    ctx: &ConvertContext,
+    key: nodedb_types::CollectionKey<'_>,
+) -> crate::Result<String> {
     let Some(credentials) = ctx.credentials.as_ref() else {
         return Ok(KV_KEY_COLUMN.to_string());
     };
-    let bare =
-        crate::control::target_identity::naming::bare_collection_name(ctx.database_id, collection);
-    let stored =
-        credentials
-            .catalog()
-            .get_collection(ctx.database_id, ctx.tenant_id.as_u64(), &bare)?;
+    let stored = credentials.catalog().get_collection(
+        key.database_id(),
+        ctx.tenant_id.as_u64(),
+        key.name(),
+    )?;
     let declared = stored.and_then(|stored| match stored.collection_type {
         CollectionType::KeyValue(config) => config
             .schema

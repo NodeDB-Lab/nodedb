@@ -275,8 +275,8 @@ fn filter_node_snapshot(
         &mut snap,
         tenant_id,
         source_vshards,
-        |record| Some(super::snapshot_keys::homes_of_stored(database_id, record)),
-    );
+        |record| super::snapshot_keys::homes_of_stored(database_id, record).map(Some),
+    )?;
     zerompk::to_msgpack_vec(&snap).map_err(|e| Error::Internal {
         detail: format!("backup: re-encode filtered snapshot: {e}"),
     })

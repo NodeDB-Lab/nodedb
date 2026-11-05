@@ -98,14 +98,13 @@ impl<'a> ExternalCrdtPostImagePolicy<'a> {
             // A delete leaves no post-image for a rule to judge.
             return Ok(());
         };
-        let bare = crate::control::target_identity::naming::bare_collection_name(
-            source.database_id,
-            self.collection,
-        );
+        let bare =
+            nodedb_types::CollectionKey::from_qualified_str(source.database_id, self.collection)?
+                .name();
         let Some(coll) =
             source
                 .catalog
-                .get_collection(source.database_id, self.tenant_id.as_u64(), &bare)?
+                .get_collection(source.database_id, self.tenant_id.as_u64(), bare)?
         else {
             return Ok(());
         };
@@ -113,7 +112,7 @@ impl<'a> ExternalCrdtPostImagePolicy<'a> {
         if !coll.type_guards.is_empty() {
             let compiled =
                 crate::data::executor::enforcement::typeguard::CompiledTypeGuard::compile_all(
-                    &bare,
+                    bare,
                     &coll.type_guards,
                 );
             crate::data::executor::enforcement::typeguard::check_type_guards(
@@ -132,7 +131,7 @@ impl<'a> ExternalCrdtPostImagePolicy<'a> {
             };
             if !rules.is_empty() {
                 check_update_transitions(
-                    &bare,
+                    bare,
                     rules,
                     &serde_json::Value::from(previous.clone()),
                     &serde_json::Value::from(document.clone()),

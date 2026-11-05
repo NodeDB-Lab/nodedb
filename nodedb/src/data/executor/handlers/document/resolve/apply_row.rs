@@ -213,7 +213,8 @@ impl CoreLoop {
             &stored_bytes,
             precondition,
         );
-        self.note_surrogate_write(task, tid, collection, surrogate.as_u32());
+        self.note_surrogate_write(task, tid, collection, surrogate.as_u32())
+            .map_err(ErrorCode::from)?;
 
         // The row, journalled after apply from the body `apply_point_put`
         // took. A resolved write's mutations can name several collections,
@@ -333,7 +334,8 @@ impl CoreLoop {
         self.checkpoint_coordinator.mark_dirty("sparse", 1);
 
         if let Some(prior_bytes) = outcome.prior_value.as_deref() {
-            self.note_surrogate_write(task, tid, collection, surrogate.as_u32());
+            self.note_surrogate_write(task, tid, collection, surrogate.as_u32())
+                .map_err(ErrorCode::from)?;
             self.emit_document_delete_event(
                 task,
                 tid,

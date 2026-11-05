@@ -11,10 +11,11 @@ use std::ops::ControlFlow;
 use nodedb_types::StorageKey;
 use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 
-use super::history_bytes::{insert_counted, remove_counted};
+use super::history_bytes::{apply_versioned_delta, insert_counted, remove_counted};
 use super::index_visible::{EntryRange, for_each_visible_entry, upper_value_bound};
 use super::value::{TAG_LIVE, TAG_TOMBSTONE, VersionedIndexEntry};
 use crate::engine::sparse::btree::{KeyedTable, SparseEngine, invalid_storage_key_err, redb_err};
+use crate::engine::storage_bytes::StorageDelta;
 
 /// Keys carry the leading `{database_id}:` component.
 pub(crate) const INDEXES_VERSIONED: TableDefinition<&str, &[u8]> =
@@ -46,7 +47,9 @@ impl SparseEngine {
         let mut t = txn
             .open_table(INDEXES_VERSIONED)
             .map_err(|e| redb_err("open table", e))?;
-        insert_counted(txn, &mut t, &key, &[TAG_LIVE])
+        let mut delta = StorageDelta::default();
+        insert_counted(&mut t, &key, &[TAG_LIVE], &mut delta)?;
+        apply_versioned_delta(txn, delta)
     }
 
     /// `versioned_index_tombstone` inside a caller-owned write transaction.
@@ -59,7 +62,9 @@ impl SparseEngine {
         let mut t = txn
             .open_table(INDEXES_VERSIONED)
             .map_err(|e| redb_err("open table", e))?;
-        insert_counted(txn, &mut t, &key, &[TAG_TOMBSTONE])
+        let mut delta = StorageDelta::default();
+        insert_counted(&mut t, &key, &[TAG_TOMBSTONE], &mut delta)?;
+        apply_versioned_delta(txn, delta)
     }
 
     /// Physically remove one versioned index entry's redb entry inside a
@@ -78,7 +83,9 @@ impl SparseEngine {
         let mut t = txn
             .open_table(INDEXES_VERSIONED)
             .map_err(|e| redb_err("open table", e))?;
-        remove_counted(txn, &mut t, &key)
+        let mut delta = StorageDelta::default();
+        remove_counted(&mut t, &key, &mut delta)?;
+        apply_versioned_delta(txn, delta)
     }
 
     /// Whether an entry, live or tombstone, is stored at exactly `e`'s key,
@@ -146,9 +153,11 @@ impl SparseEngine {
             .map(|r| r.map(|(k, _)| k.value().to_string()))
             .collect::<Result<_, _>>()
             .map_err(|e| redb_err("entry", e))?;
+        let mut delta = StorageDelta::default();
         for key in &keys {
-            remove_counted(txn, &mut t, key)?;
+            remove_counted(&mut t, key, &mut delta)?;
         }
+        apply_versioned_delta(txn, delta)?;
         Ok(keys.len())
     }
 
@@ -360,10 +369,11 @@ impl SparseEngine {
         let mut t = txn
             .open_table(INDEXES_VERSIONED)
             .map_err(|e| redb_err("open table", e))?;
+        let mut delta = StorageDelta::default();
         for key in keys.iter() {
-            insert_counted(txn, &mut t, key, &[TAG_LIVE])?;
+            insert_counted(&mut t, key, &[TAG_LIVE], &mut delta)?;
         }
-        Ok(())
+        apply_versioned_delta(txn, delta)
     }
 }
 

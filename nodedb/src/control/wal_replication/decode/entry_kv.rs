@@ -7,17 +7,22 @@
 
 use super::super::decode_sync_engines::{decode_provenance, decode_returning};
 use super::super::types::ReplicatedWrite;
+use super::ctx::DecodeCtx;
 use super::kv::{PutFields, ReturningFields};
 use super::{kv, kv_resolved};
 use crate::bridge::envelope::PhysicalPlan;
 
-pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<(PhysicalPlan, Option<u64>)> {
+pub(super) fn decode_arm(
+    ctx: &DecodeCtx,
+    write: &ReplicatedWrite,
+) -> crate::Result<(PhysicalPlan, Option<u64>)> {
+    let database_id = ctx.database_id;
     let mut resolved_now_ms: Option<u64> = None;
     let plan = match write {
         ReplicatedWrite::KvTruncate {
             collection,
             restart_identity,
-        } => kv::truncate(collection, *restart_identity),
+        } => kv::truncate(database_id, collection, *restart_identity)?,
         ReplicatedWrite::KvPut {
             collection,
             key,
@@ -31,6 +36,7 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<(PhysicalPlan
         } => {
             resolved_now_ms = *rn;
             kv::put(
+                database_id,
                 PutFields {
                     collection,
                     key,
@@ -52,6 +58,7 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<(PhysicalPlan
             rls_filters,
             provenance,
         } => kv::delete(
+            database_id,
             collection,
             keys,
             ReturningFields {
@@ -59,7 +66,7 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<(PhysicalPlan
                 rls_filters,
             },
             decode_provenance(provenance)?,
-        ),
+        )?,
         ReplicatedWrite::KvInsert {
             collection,
             key,
@@ -72,6 +79,7 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<(PhysicalPlan
         } => {
             resolved_now_ms = *rn;
             kv::insert(
+                database_id,
                 collection,
                 key,
                 value,
@@ -96,6 +104,7 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<(PhysicalPlan
         } => {
             resolved_now_ms = *rn;
             kv::insert_on_conflict_update(
+                database_id,
                 collection,
                 kv::ConflictEntry {
                     key,
@@ -122,6 +131,7 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<(PhysicalPlan
         } => {
             resolved_now_ms = *rn;
             kv::batch_put(
+                database_id,
                 collection,
                 entries,
                 *ttl_ms,
@@ -140,9 +150,11 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<(PhysicalPlan
             resolved_now_ms: rn,
         } => {
             resolved_now_ms = *rn;
-            kv::expire(collection, key, *ttl_ms)
+            kv::expire(database_id, collection, key, *ttl_ms)?
         }
-        ReplicatedWrite::KvPersist { collection, key } => kv::persist(collection, key),
+        ReplicatedWrite::KvPersist { collection, key } => {
+            kv::persist(database_id, collection, key)?
+        }
         ReplicatedWrite::KvIncr {
             collection,
             key,
@@ -153,7 +165,15 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<(PhysicalPlan
             shape,
         } => {
             resolved_now_ms = *rn;
-            kv::incr(collection, key, *delta, *ttl_ms, *surrogate, shape)?
+            kv::incr(
+                database_id,
+                collection,
+                key,
+                *delta,
+                *ttl_ms,
+                *surrogate,
+                shape,
+            )?
         }
         ReplicatedWrite::KvIncrFloat {
             collection,
@@ -161,21 +181,35 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<(PhysicalPlan
             delta,
             surrogate,
             shape,
-        } => kv::incr_float(collection, key, delta, *surrogate, shape)?,
+        } => kv::incr_float(database_id, collection, key, delta, *surrogate, shape)?,
         ReplicatedWrite::KvCas {
             collection,
             key,
             expected,
             new_value,
             surrogate,
-        } => kv::cas(collection, key, expected, new_value, *surrogate)?,
+        } => kv::cas(
+            database_id,
+            collection,
+            key,
+            expected,
+            new_value,
+            *surrogate,
+        )?,
         ReplicatedWrite::KvGetSet {
             collection,
             key,
             new_value,
             surrogate,
             rls_filters,
-        } => kv::get_set(collection, key, new_value, *surrogate, rls_filters)?,
+        } => kv::get_set(
+            database_id,
+            collection,
+            key,
+            new_value,
+            *surrogate,
+            rls_filters,
+        )?,
         ReplicatedWrite::KvRegisterSortedIndex {
             collection,
             index_name,
@@ -185,24 +219,29 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<(PhysicalPlan
             window_timestamp_column,
             window_start_ms,
             window_end_ms,
-        } => kv::register_sorted_index(kv::RegisterSortedIndexFields {
-            collection,
-            index_name,
-            sort_columns,
-            key_column,
-            window_type,
-            window_timestamp_column,
-            window_start_ms: *window_start_ms,
-            window_end_ms: *window_end_ms,
-        }),
+        } => kv::register_sorted_index(
+            database_id,
+            kv::RegisterSortedIndexFields {
+                collection,
+                index_name,
+                sort_columns,
+                key_column,
+                window_type,
+                window_timestamp_column,
+                window_start_ms: *window_start_ms,
+                window_end_ms: *window_end_ms,
+            },
+        )?,
         ReplicatedWrite::KvDropSortedIndex { index_name } => kv::drop_sorted_index(index_name),
         ReplicatedWrite::KvRegisterIndex {
             collection,
             field,
             field_position,
             backfill,
-        } => kv::register_index(collection, field, *field_position, *backfill),
-        ReplicatedWrite::KvDropIndex { collection, field } => kv::drop_index(collection, field),
+        } => kv::register_index(database_id, collection, field, *field_position, *backfill)?,
+        ReplicatedWrite::KvDropIndex { collection, field } => {
+            kv::drop_index(database_id, collection, field)?
+        }
         ReplicatedWrite::KvFieldSet {
             collection,
             key,
@@ -212,6 +251,7 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<(PhysicalPlan
             returning,
             rls_filters,
         } => kv::field_set(
+            database_id,
             collection,
             key,
             updates,
@@ -230,15 +270,18 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<(PhysicalPlan
             amount,
             debit_surrogate,
             credit_surrogate,
-        } => kv_resolved::transfer(kv_resolved::TransferFields {
-            collection,
-            source_key,
-            dest_key,
-            field,
-            amount: *amount,
-            debit_surrogate: *debit_surrogate,
-            credit_surrogate: *credit_surrogate,
-        })?,
+        } => kv_resolved::transfer(
+            database_id,
+            kv_resolved::TransferFields {
+                collection,
+                source_key,
+                dest_key,
+                field,
+                amount: *amount,
+                debit_surrogate: *debit_surrogate,
+                credit_surrogate: *credit_surrogate,
+            },
+        )?,
         ReplicatedWrite::KvResolvedWrite {
             mutations,
             response_payload,
@@ -246,7 +289,7 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<(PhysicalPlan
         } => {
             // Every replica judges the drift checks at the proposer's instant.
             resolved_now_ms = Some(*rn);
-            kv_resolved::resolved_write(mutations, response_payload)?
+            kv_resolved::resolved_write(database_id, mutations, response_payload)?
         }
         ReplicatedWrite::KvTransferItem {
             source_collection,
@@ -255,6 +298,7 @@ pub(super) fn decode_arm(write: &ReplicatedWrite) -> crate::Result<(PhysicalPlan
             dest_key,
             surrogate,
         } => kv_resolved::transfer_item(
+            database_id,
             source_collection,
             dest_collection,
             item_key,

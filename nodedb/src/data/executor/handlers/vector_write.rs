@@ -67,10 +67,14 @@ impl CoreLoop {
                 // Record this write per surrogate, so the newest-ordinal cache
                 // commit validation reads holds this batch.
                 for s in surrogates {
-                    self.note_surrogate_write(task, tid, collection, s.as_u32());
+                    if let Err(e) = self.note_surrogate_write(task, tid, collection, s.as_u32()) {
+                        return self.response_error(task, e);
+                    }
                 }
-                if surrogates.is_empty() {
-                    self.note_collection_write(task, collection);
+                if surrogates.is_empty()
+                    && let Err(e) = self.note_collection_write(task, collection)
+                {
+                    return self.response_error(task, e);
                 }
                 match super::super::response_codec::encode_count("inserted", vectors.len()) {
                     Ok(bytes) => self.response_with_payload(task, bytes),
@@ -171,7 +175,9 @@ impl CoreLoop {
             // surrogate — recording it as a `KeyRepr::Surrogate` would be a
             // wrong identity in a different key space. The write records its
             // collection only.
-            self.note_collection_write(task, collection);
+            if let Err(e) = self.note_collection_write(task, collection) {
+                return self.response_error(task, e);
+            }
             self.response_ok(task)
         } else {
             self.response_error(task, ErrorCode::NotFound)

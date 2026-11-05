@@ -24,9 +24,11 @@ use super::doc_fields;
 use super::doc_terms;
 use super::errors::inverted_err;
 use super::indexing::IndexDocScope;
+use crate::engine::sparse::btree::storage_bytes::SPARSE_COUNTER;
 use crate::engine::sparse::fts_redb::backend::history_rows::{self, EndedVersion};
 use crate::engine::sparse::fts_redb::backend::posting_rows;
 use crate::engine::sparse::fts_redb::tables::{POSTINGS, TEXT_ENDED, TEXT_LIVE_BY_FROM};
+use crate::engine::storage_bytes::StorageDelta;
 
 /// The ordinal of a write that changes no history: it records no ended
 /// version and no start. An index rebuild and the unit tests write this way.
@@ -44,13 +46,14 @@ impl InvertedIndex {
     /// End the indexed version of `doc` in `index`, which holds `doc_len`
     /// tokens, at `doc.ordinal`. Runs before the write strips the version's
     /// postings. A re-apply of the write that indexed the version (a WAL
-    /// replay) ends nothing.
+    /// replay) ends nothing. `delta` records the stored bytes it changes.
     pub(super) fn end_text_version_in_txn(
         &self,
         txn: &WriteTransaction,
         doc: IndexDocScope<'_>,
         index: IndexScope<'_>,
         doc_len: u32,
+        delta: &mut StorageDelta,
     ) -> crate::Result<()> {
         let t = doc.tid.as_u64();
         if doc.ordinal == UNVERSIONED {
@@ -61,11 +64,10 @@ impl InvertedIndex {
             return Ok(());
         }
         let tokens = stored_tokens(txn, doc, index, doc_len)?;
-        history_rows::clear_live(txn, doc.database_id, t, index, doc.surrogate)?;
+        history_rows::clear_live(txn, doc.database_id, t, index, doc.surrogate, delta)?;
         history_rows::put_ended(
             txn,
-            doc.database_id,
-            t,
+            (doc.database_id, t),
             index,
             &EndedVersion {
                 surrogate: doc.surrogate,
@@ -73,27 +75,29 @@ impl InvertedIndex {
                 sys_to: doc.ordinal,
                 tokens,
             },
+            delta,
         )
     }
 
     /// Record the version of `doc` the write indexed into `index` as live
-    /// from `doc.ordinal`.
+    /// from `doc.ordinal`. `delta` records the stored bytes it changes.
     pub(super) fn start_text_version_in_txn(
         &self,
         txn: &WriteTransaction,
         doc: IndexDocScope<'_>,
         index: IndexScope<'_>,
+        delta: &mut StorageDelta,
     ) -> crate::Result<()> {
         if doc.ordinal == UNVERSIONED {
             return Ok(());
         }
         history_rows::set_live(
             txn,
-            doc.database_id,
-            doc.tid.as_u64(),
+            (doc.database_id, doc.tid.as_u64()),
             index,
             doc.surrogate,
             doc.ordinal,
+            delta,
         )
     }
 
@@ -152,23 +156,29 @@ impl InvertedIndex {
         keys.extend(ended_fields.iter().cloned());
         keys.insert(String::new());
         let mut restored_any = false;
+        let mut delta = StorageDelta::default();
         for field_key in &keys {
             let index = IndexScope::from_key(collection, field_key);
             if history_rows::live_from(&txn, database_id, t, index, surrogate)? == Some(ordinal) {
-                self.remove_scope_in_txn(&txn, doc, index)?;
-                history_rows::clear_live(&txn, database_id, t, index, surrogate)?;
+                self.remove_scope_in_txn(&txn, doc, index, &mut delta)?;
+                history_rows::clear_live(&txn, database_id, t, index, surrogate, &mut delta)?;
                 if !field_key.is_empty() {
                     fields.remove(field_key);
                 }
             }
-            if let Some(version) =
-                history_rows::take_ended_at(&txn, database_id, t, index, surrogate, ordinal)?
-            {
+            if let Some(version) = history_rows::take_ended_at(
+                &txn,
+                (database_id, t),
+                index,
+                surrogate,
+                ordinal,
+                &mut delta,
+            )? {
                 let restored = IndexDocScope {
                     ordinal: version.sys_from,
                     ..doc
                 };
-                self.write_index_data(&txn, restored, index, &version.tokens)?;
+                self.write_index_data(&txn, restored, index, &version.tokens, &mut delta)?;
                 restored_any = true;
                 if !field_key.is_empty() {
                     fields.insert(field_key.clone());
@@ -176,7 +186,8 @@ impl InvertedIndex {
             }
         }
         let held: BTreeSet<&str> = fields.iter().map(String::as_str).collect();
-        doc_fields::put(&txn, doc, &held)?;
+        doc_fields::put(&txn, doc, &held, &mut delta)?;
+        delta.apply(&txn, SPARSE_COUNTER)?;
         txn.commit()
             .map_err(|e| inverted_err("commit text undo", e))?;
         Ok(restored_any)
@@ -226,7 +237,9 @@ impl InvertedIndex {
     ) -> crate::Result<usize> {
         let db = self.inner.backend().db();
         let txn = db.begin_write().map_err(|e| inverted_err("write txn", e))?;
-        let dropped = history_rows::purge_below(&txn, horizon_of)?;
+        let mut delta = StorageDelta::default();
+        let dropped = history_rows::purge_below(&txn, horizon_of, &mut delta)?;
+        delta.apply(&txn, SPARSE_COUNTER)?;
         txn.commit()
             .map_err(|e| inverted_err("commit text purge", e))?;
         Ok(dropped)

@@ -11,6 +11,8 @@ mod calvin_local;
 mod event_interest;
 mod fields;
 mod init;
+mod init_assemble;
+mod init_assemble_parts;
 mod init_prod;
 mod init_variants;
 mod metadata_ddl;

@@ -60,8 +60,8 @@ pub async fn resolve_read(
     let Some(raw_coll) = extract_collection(&task.plan) else {
         return Ok(None);
     };
-    // Strip the database prefix that db_qualified() prepends, e.g. "1/users" → "users".
-    let coll_name = super::rewrite::strip_db_prefix(db_id, raw_coll);
+    // A plan names a collection qualified and an array bare.
+    let coll_name = nodedb_types::CollectionKey::from_relation_name(db_id, raw_coll)?.name();
 
     // Short-circuit: not a clone or fully materialized.
     let Some(live) = live_clone(state, db_id, tenant_id, coll_name, "get_collection")? else {

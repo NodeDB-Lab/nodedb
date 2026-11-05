@@ -7,6 +7,8 @@ use std::collections::HashMap;
 use nodedb_types::{DatabaseId, TenantId};
 use redb::{ReadableDatabase, ReadableTable};
 
+use super::home_bytes::EdgeStorageDelta;
+use super::storage_bytes::{EDGE_COUNTER, insert_applied_row, insert_edge_row};
 use super::store::{
     BaseKey, EDGES, Edge, EdgeRecord, EdgeStore, REVERSE_EDGES, TenantBaseKey, redb_err,
 };
@@ -173,20 +175,30 @@ impl EdgeStore {
             .db
             .begin_write()
             .map_err(|e| redb_err("begin_write", e))?;
+        let mut delta = EdgeStorageDelta::default();
         {
             let mut edges = write_txn
                 .open_table(EDGES)
                 .map_err(|e| redb_err("open edges", e))?;
-            edges
-                .insert((db, t, composite_key), value)
-                .map_err(|e| redb_err("insert edge", e))?;
+            insert_edge_row(
+                &mut edges,
+                (db, t, composite_key),
+                value,
+                &mut delta,
+                "insert edge",
+            )?;
             let mut rev_t = write_txn
                 .open_table(REVERSE_EDGES)
                 .map_err(|e| redb_err("open reverse", e))?;
-            rev_t
-                .insert((db, t, rev_key.as_str()), rev_value)
-                .map_err(|e| redb_err("insert reverse", e))?;
+            insert_edge_row(
+                &mut rev_t,
+                (db, t, rev_key.as_str()),
+                rev_value,
+                &mut delta,
+                "insert reverse",
+            )?;
         }
+        delta.apply(&write_txn, EDGE_COUNTER)?;
         write_txn.commit().map_err(|e| redb_err("commit edge", e))?;
         Ok(())
     }
@@ -237,14 +249,20 @@ impl EdgeStore {
             .db
             .begin_write()
             .map_err(|e| redb_err("begin_write", e))?;
+        let mut delta = EdgeStorageDelta::default();
         {
             let mut table = write_txn
                 .open_table(EDGE_APPLIED)
                 .map_err(|e| redb_err("open edge_applied", e))?;
-            table
-                .insert((db, tid.as_u64(), composite_key), applied)
-                .map_err(|e| redb_err("insert edge applied ordinal", e))?;
+            insert_applied_row(
+                &mut table,
+                (db, tid.as_u64(), composite_key),
+                applied,
+                &mut delta,
+                "insert edge applied ordinal",
+            )?;
         }
+        delta.apply(&write_txn, EDGE_COUNTER)?;
         write_txn
             .commit()
             .map_err(|e| redb_err("commit edge applied ordinal", e))

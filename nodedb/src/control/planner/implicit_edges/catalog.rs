@@ -2,14 +2,16 @@
 
 //! Edge-bearing collection flag bookkeeping in the system catalog.
 
+use nodedb_types::CollectionKey;
+
 use crate::control::state::SharedState;
-use crate::types::{DatabaseId, TenantId};
+use crate::types::TenantId;
 
 /// Mark a collection as edge-bearing in the system catalog (idempotent).
 ///
 /// Sets [`StoredCollection::has_implicit_edges`] to `true` the first time an
 /// edge (implicit `_from`/`_to` document, or explicit `GRAPH INSERT EDGE`) is
-/// written into `collection`. This is the routing gate for implicit-edge
+/// written into the collection `key` names. This is the routing gate for implicit-edge
 /// DELETE / UPDATE cleanup — see `has_implicit_edges`'s doc comment.
 ///
 /// Read-then-conditional-write: if the collection is already flagged the write
@@ -27,16 +29,13 @@ use crate::types::{DatabaseId, TenantId};
 /// path prevents that.
 pub async fn mark_collection_edge_bearing(
     state: &SharedState,
-    database_id: DatabaseId,
+    key: CollectionKey<'_>,
     tenant_id: TenantId,
-    collection: &str,
 ) -> crate::Result<()> {
-    // Callers pass the plan's database-qualified name or the bare DDL name.
-    // The catalog keys collections by the bare name.
-    let bare =
-        crate::control::target_identity::naming::bare_collection_name(database_id, collection);
     let catalog = state.credentials.catalog();
-    let Some(mut coll) = catalog.get_collection(database_id, tenant_id.as_u64(), &bare)? else {
+    let Some(mut coll) =
+        catalog.get_collection(key.database_id(), tenant_id.as_u64(), key.name())?
+    else {
         // Collection row absent — don't fail the write over flag bookkeeping.
         return Ok(());
     };

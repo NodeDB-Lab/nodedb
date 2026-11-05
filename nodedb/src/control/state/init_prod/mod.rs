@@ -9,7 +9,7 @@ mod handles;
 mod open;
 mod open_config;
 mod post_init;
-mod stores;
+pub(in crate::control::state) mod stores;
 
 pub use handles::DataPlaneHandles;
 pub use open_config::OpenConfig;

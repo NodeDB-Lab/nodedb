@@ -267,13 +267,23 @@ impl CoreLoop {
         // Write notes and the watermark move only once the record is
         // settled.
         for note in std::mem::take(&mut scope.deferred_notes) {
-            match note.kind {
+            let published = match note.kind {
                 DeferredNoteKind::Wipe => {
                     self.publish_collection_wipe(note.db, note.tenant, &note.collection, note.stamp)
                 }
                 DeferredNoteKind::Row(key) => {
                     self.publish_write(note.db, note.tenant, &note.collection, key, note.stamp)
                 }
+            };
+            if let Err(error) = published {
+                self.fail_stop_core(
+                    FailStopCause::PostInstallFailed,
+                    &format!(
+                        "committed redo record at lsn {} installed, then failed: {error:?}",
+                        lsn.as_u64()
+                    ),
+                );
+                return self.response_error(task, error);
             }
         }
         // Events leave only once the record is settled. Every
@@ -320,8 +330,17 @@ impl CoreLoop {
         for collection in committed.collections {
             if keyed.contains(collection.as_str()) {
                 self.publish_applied(stamp);
-            } else {
-                self.note_write(task.request.database_id, tenant, collection, None, stamp);
+            } else if let Err(error) =
+                self.note_write(task.request.database_id, tenant, collection, None, stamp)
+            {
+                self.fail_stop_core(
+                    FailStopCause::PostInstallFailed,
+                    &format!(
+                        "committed redo record at lsn {} installed, then failed: {error:?}",
+                        lsn.as_u64()
+                    ),
+                );
+                return self.response_error(task, error);
             }
         }
         let write_set = target_write_set(&scope.target_writes);

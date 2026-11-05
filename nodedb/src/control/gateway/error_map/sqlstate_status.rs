@@ -22,6 +22,8 @@ pub(super) fn sqlstate_to_http_status(state: &str) -> u16 {
         sqlstate::UNDEFINED_TABLE => 404,
         // The object already exists: the request conflicts with the catalog.
         "42710" | "42P07" | "42723" => 409,
+        // A database or tenant is at its storage quota. Deleting data clears it.
+        sqlstate::DISK_FULL => 507,
         sqlstate::TOO_MANY_CONNECTIONS => 429,
         // A configured quota the request exceeds. A retry fails the same way.
         sqlstate::CONFIGURATION_LIMIT_EXCEEDED => 400,

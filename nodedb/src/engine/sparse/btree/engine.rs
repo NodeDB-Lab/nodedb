@@ -12,9 +12,11 @@ use tracing::info;
 
 use super::chain_head::CHAIN_HEADS;
 use super::crdt_dead_letter::CRDT_DEAD_LETTERS;
+use super::storage_bytes::SPARSE_COUNTER;
 use super::tables::redb_err;
 use super::write_set_capture::WRITE_SET_CAPTURES;
 use crate::engine::durability_gate::GatedDatabase;
+use crate::engine::storage_bytes::ensure_storage_bytes_table;
 
 /// redb-backed B-Tree storage engine for sparse/metadata queries.
 ///
@@ -51,6 +53,8 @@ impl SparseEngine {
                 .open_table(WRITE_SET_CAPTURES)
                 .map_err(|e| redb_err("open write set captures table", e))?;
         }
+        // Read transactions open the stored-bytes counter before any write.
+        ensure_storage_bytes_table(&write_txn, SPARSE_COUNTER)?;
         write_txn.commit().map_err(|e| redb_err("commit", e))?;
 
         info!(path = %path.display(), "sparse engine opened");

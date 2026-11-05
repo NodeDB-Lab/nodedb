@@ -2,6 +2,7 @@
 
 mod ack_decode;
 pub mod async_dispatch;
+mod collection_request;
 pub mod columnar_handler;
 pub mod definition_fanout;
 pub mod dlq;

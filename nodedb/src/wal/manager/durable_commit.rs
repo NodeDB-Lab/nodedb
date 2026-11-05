@@ -63,18 +63,24 @@ impl WalManager {
                     // advances to exactly what the fsync made durable, never past
                     // it.
                     let wal = std::sync::Arc::clone(&self.wal);
-                    let join = tokio::task::spawn_blocking(move || -> crate::Result<u64> {
+                    let join = tokio::task::spawn_blocking(move || -> crate::Result<(u64, u64)> {
                         let mut guard = wal.lock().unwrap_or_else(|p| p.into_inner());
+                        let started = std::time::Instant::now();
                         guard.sync().map_err(crate::Error::Wal)?;
+                        let fsync_us =
+                            u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
                         // `next_lsn()` is the next LSN to assign; the highest LSN
                         // this sync made durable is one below it.
-                        Ok(guard.next_lsn().saturating_sub(1))
+                        Ok((guard.next_lsn().saturating_sub(1), fsync_us))
                     })
                     .await;
 
                     let outcome = match join {
-                        Ok(Ok(durable_through)) => {
+                        Ok(Ok((durable_through, fsync_us))) => {
                             self.durable_lsn.fetch_max(durable_through, AcqRel);
+                            if let Some(metrics) = self.fsync_metrics.get() {
+                                metrics.record_wal_fsync(fsync_us);
+                            }
                             Ok(())
                         }
                         // fsync error: do NOT advance `durable_lsn`.
@@ -134,6 +140,32 @@ mod tests {
             .expect("append");
         wal.wait_durable(lsn).await.expect("wait_durable");
         assert!(wal.durable_lsn.load(Acquire) >= lsn.as_u64());
+    }
+
+    #[tokio::test]
+    async fn leader_fsync_is_recorded_once() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal = open_wal(dir.path());
+        let metrics = std::sync::Arc::new(crate::control::metrics::SystemMetrics::new());
+        wal.set_fsync_metrics(std::sync::Arc::clone(&metrics));
+        let lsn = wal
+            .appender(NO_APPLY_KEY)
+            .with_event_source(crate::event::EventSource::User)
+            .append_put(
+                TenantId::new(1),
+                VShardId::new(0),
+                DatabaseId::DEFAULT,
+                b"payload",
+            )
+            .expect("append");
+        wal.wait_durable(lsn).await.expect("wait_durable");
+        wal.wait_durable(lsn).await.expect("fast path");
+        assert_eq!(
+            metrics
+                .wal_fsync_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
     }
 
     #[tokio::test]

@@ -230,7 +230,7 @@ pub(super) async fn collect_classify_and_finish(
             (a, b) => a.or(b),
         };
         match durable_target {
-            Some(lsn) => shared.wal.wait_durable(lsn).await?,
+            Some(lsn) => wait_durable_timed(shared, database_id, lsn).await?,
             // Nothing to fsync. Legitimate for most plans, but if this funnel
             // was the one required to mint the record, the ack below promises
             // durability the engine cannot deliver — silent until a `kill -9`
@@ -240,7 +240,7 @@ pub(super) async fn collect_classify_and_finish(
     } else if let Some(lsn) = post_apply_lsn {
         // The refusal reports rows that stay committed: their records are
         // durable before the refusal returns.
-        shared.wal.wait_durable(lsn).await?;
+        wait_durable_timed(shared, database_id, lsn).await?;
     }
     // The group's parts are durable, or its origin was cancelled: the core
     // drops the write set it stored.
@@ -290,4 +290,19 @@ pub(super) async fn collect_classify_and_finish(
 
     observe(shared);
     Ok(SubmitOutcome { response })
+}
+
+/// Await WAL durability through `lsn` and record the wait against `database_id`.
+async fn wait_durable_timed(
+    shared: &SharedState,
+    database_id: DatabaseId,
+    lsn: Lsn,
+) -> crate::Result<()> {
+    let started = Instant::now();
+    let result = shared.wal.wait_durable(lsn).await;
+    let micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+    shared
+        .database_metrics
+        .observe_wal_commit(database_id, micros);
+    result
 }

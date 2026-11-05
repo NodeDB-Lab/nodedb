@@ -51,21 +51,20 @@ fn enforce_external_signing_policy(
     authorized: &AuthorizedTask,
     collection: &str,
 ) -> crate::Result<()> {
-    let bare = crate::control::target_identity::naming::bare_collection_name(
-        authorized.database_id(),
-        collection,
-    );
+    let bare =
+        nodedb_types::CollectionKey::from_qualified_str(authorized.database_id(), collection)?
+            .name();
     let stored = state
         .credentials
         .catalog()
         .get_collection(
             authorized.database_id(),
             authorized.tenant_id().as_u64(),
-            &bare,
+            bare,
         )?
         .ok_or_else(|| crate::Error::CollectionNotFound {
             tenant_id: authorized.tenant_id(),
-            collection: bare.clone(),
+            collection: bare.to_owned(),
         })?;
     if stored.crdt_signing_required
         && matches!(authorized.plan(), PhysicalPlan::Crdt(CrdtOp::Apply { .. }))

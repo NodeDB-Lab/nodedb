@@ -3,7 +3,7 @@
 //! Catalog + registry bootstrap for [`super::SharedState::open`].
 //!
 //! Migrates the credential store, replays every persisted registry from the
-//! system catalog, and wires the security event buses. Extracted out of the
+//! system catalog, and creates the security event buses. Extracted out of the
 //! top of `open()` so the returned [`ProdBootstrap`] bundles every value the
 //! constructor's `Self { .. }` literal needs; `open()` destructures one value
 //! instead of holding ~30 separate locals.
@@ -215,13 +215,6 @@ pub(super) fn run(
         Arc::clone(&prod_session_registry),
     );
     let bus_consumer_handle = bus_consumer_task;
-
-    // Wire the security buses into the credential store so mutations
-    // automatically publish to the in-process channels.
-    credentials.set_buses(
-        Arc::new(SessionInvalidationBus::from_existing(si_bus.sender())),
-        Arc::new(UserChangeBus::from_existing(uc_bus.sender())),
-    );
 
     Ok(ProdBootstrap {
         credentials,

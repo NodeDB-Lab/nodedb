@@ -12,9 +12,14 @@ use super::keys::{
 use super::payload::EdgeValuePayload;
 use super::revert::{EdgeCountChange, EdgeVersionWrite};
 use super::visibility::{read_visibility, visible_version, write_visibility};
+use crate::engine::graph::edge_store::home_bytes::EdgeStorageDelta;
 use crate::engine::graph::edge_store::stats::table::{GRAPH_STATS, SummaryRow, summary_key};
 use crate::engine::graph::edge_store::stats::update::{
     EdgeStatsKey, decrement_counts, increment_counts,
+};
+use crate::engine::graph::edge_store::storage_bytes::{
+    EDGE_COUNTER, insert_applied_row, insert_edge_row, remove_applied_row, replace_edge_row,
+    take_edge_row,
 };
 use crate::engine::graph::edge_store::store::{
     EDGES, EdgeStore, NODE_SURROGATES, REVERSE_EDGES, redb_err,
@@ -358,7 +363,8 @@ pub(in crate::engine::graph::edge_store) fn live_properties(
 /// system time. When `account_stats`, the counters follow the edge's current
 /// state: a write that makes the edge live counts one more edge, and one that
 /// ends it counts one fewer. A version below the newest one, or one a
-/// TRUNCATE hides, changes neither the current state nor the counters.
+/// TRUNCATE hides, changes neither the current state nor the counters. The
+/// stored-bytes counter moves inside `write_txn`.
 pub(in crate::engine::graph::edge_store) fn write_version_in(
     write_txn: &WriteTransaction,
     edge: EdgeRef<'_>,
@@ -373,6 +379,7 @@ pub(in crate::engine::graph::edge_store) fn write_version_in(
     let reverse: &[u8] = if is_sentinel(value) { value } else { &[] };
     let d = edge.db.as_u64();
     let t = edge.tid.as_u64();
+    let mut delta = EdgeStorageDelta::default();
 
     let was_live = {
         let mut edges = write_txn
@@ -383,25 +390,29 @@ pub(in crate::engine::graph::edge_store) fn write_version_in(
         // already holds the version is a second apply of it: a cross-shard
         // edge's other home on this core, or a replay. The home that accounts
         // the edge can apply second, and it must still see the change.
-        written.prior_forward = edges
-            .remove((d, t, fwd.as_str()))
-            .map_err(|e| redb_err("take edge version", e))?
-            .map(|prior| prior.value().to_vec());
+        written.prior_forward = take_edge_row(
+            &mut edges,
+            (d, t, fwd.as_str()),
+            &mut delta,
+            "take edge version",
+        )?;
         let was_live =
             live_properties(visible_version(&edges, &mut visibility, &edge, i64::MAX)?)?.is_some();
-        edges
-            .insert((d, t, fwd.as_str()), value)
-            .map_err(|e| redb_err("insert edge version", e))?;
-        let prior_applied = if stamp.applied == system_from {
-            visibility.applied.remove((d, t, fwd.as_str()))
+        insert_edge_row(
+            &mut edges,
+            (d, t, fwd.as_str()),
+            value,
+            &mut delta,
+            "insert edge version",
+        )?;
+        let applied_key = (d, t, fwd.as_str());
+        let what = "write edge applied ordinal";
+        written.prior_applied = if stamp.applied == system_from {
+            remove_applied_row(&mut visibility.applied, applied_key, &mut delta, what)?
         } else {
-            visibility
-                .applied
-                .insert((d, t, fwd.as_str()), stamp.applied)
+            let applied = &mut visibility.applied;
+            insert_applied_row(applied, applied_key, stamp.applied, &mut delta, what)?
         };
-        written.prior_applied = prior_applied
-            .map_err(|e| redb_err("write edge applied ordinal", e))?
-            .map(|prior| prior.value());
         written.current =
             live_properties(visible_version(&edges, &mut visibility, &edge, i64::MAX)?)?;
         written.was_live = was_live;
@@ -411,11 +422,15 @@ pub(in crate::engine::graph::edge_store) fn write_version_in(
     let mut rev_t = write_txn
         .open_table(REVERSE_EDGES)
         .map_err(|e| redb_err("open reverse", e))?;
-    written.prior_reverse = rev_t
-        .insert((d, t, rev.as_str()), reverse)
-        .map_err(|e| redb_err("insert reverse edge version", e))?
-        .map(|prior| prior.value().to_vec());
+    written.prior_reverse = replace_edge_row(
+        &mut rev_t,
+        (d, t, rev.as_str()),
+        reverse,
+        &mut delta,
+        "insert reverse edge version",
+    )?;
     drop(rev_t);
+    delta.apply(write_txn, EDGE_COUNTER)?;
 
     if account_stats {
         let key = EdgeStatsKey {

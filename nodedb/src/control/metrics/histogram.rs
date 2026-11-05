@@ -101,35 +101,20 @@ impl AtomicHistogram {
     ///
     /// Uses linear interpolation within the bucket that contains the target rank.
     pub fn percentile(&self, p: f64) -> u64 {
-        let total = self.count.load(Ordering::Relaxed);
-        if total == 0 {
-            return 0;
-        }
-        let target = (p * total as f64) as u64;
-        let mut cumulative = 0u64;
-        let mut prev_boundary = 0u64;
+        self.counts_snapshot().percentile(p)
+    }
 
-        for (i, &boundary) in self.boundaries.iter().enumerate() {
-            let bucket_count = self.buckets[i].load(Ordering::Relaxed);
-            cumulative += bucket_count;
-            if cumulative >= target {
-                // Linear interpolation within this bucket.
-                let bucket_start = prev_boundary;
-                let bucket_width = boundary - bucket_start;
-                if bucket_count == 0 {
-                    return boundary;
-                }
-                let fraction = if cumulative > target {
-                    (bucket_count - (cumulative - target)) as f64 / bucket_count as f64
-                } else {
-                    1.0
-                };
-                return bucket_start + (fraction * bucket_width as f64) as u64;
-            }
-            prev_boundary = boundary;
+    /// Copy the current bucket counts into an owned [`HistogramSnapshot`].
+    pub fn counts_snapshot(&self) -> HistogramSnapshot {
+        HistogramSnapshot {
+            boundaries: self.boundaries,
+            buckets: self
+                .buckets
+                .iter()
+                .map(|b| b.load(Ordering::Relaxed))
+                .collect(),
+            count: self.count.load(Ordering::Relaxed),
         }
-        // Beyond all buckets — return last boundary.
-        self.boundaries.last().copied().unwrap_or(0)
     }
 
     /// Write Prometheus histogram format to the output string.
@@ -186,6 +171,67 @@ impl AtomicHistogram {
     }
 }
 
+/// Plain-value copy of a histogram's bucket counts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistogramSnapshot {
+    boundaries: &'static [u64],
+    buckets: Vec<u64>,
+    count: u64,
+}
+
+impl HistogramSnapshot {
+    /// Observations recorded between `earlier` and `self`.
+    ///
+    /// Subtraction saturates per bucket. A snapshot with different bucket
+    /// boundaries yields `self` unchanged.
+    pub fn since(&self, earlier: &HistogramSnapshot) -> HistogramSnapshot {
+        if self.boundaries != earlier.boundaries {
+            return self.clone();
+        }
+        HistogramSnapshot {
+            boundaries: self.boundaries,
+            buckets: self
+                .buckets
+                .iter()
+                .zip(&earlier.buckets)
+                .map(|(now, before)| now.saturating_sub(*before))
+                .collect(),
+            count: self.count.saturating_sub(earlier.count),
+        }
+    }
+
+    /// Estimate a percentile in microseconds with linear interpolation inside
+    /// the bucket that holds the target rank. Zero when empty.
+    pub fn percentile(&self, p: f64) -> u64 {
+        let total = self.count;
+        if total == 0 {
+            return 0;
+        }
+        let target = (p * total as f64) as u64;
+        let mut cumulative = 0u64;
+        let mut prev_boundary = 0u64;
+
+        for (&boundary, &bucket_count) in self.boundaries.iter().zip(&self.buckets) {
+            cumulative += bucket_count;
+            if cumulative >= target {
+                let bucket_start = prev_boundary;
+                let bucket_width = boundary - bucket_start;
+                if bucket_count == 0 {
+                    return boundary;
+                }
+                let fraction = if cumulative > target {
+                    (bucket_count - (cumulative - target)) as f64 / bucket_count as f64
+                } else {
+                    1.0
+                };
+                return bucket_start + (fraction * bucket_width as f64) as u64;
+            }
+            prev_boundary = boundary;
+        }
+        self.boundaries.last().copied().unwrap_or(0)
+    }
+}
+
 impl Default for AtomicHistogram {
     fn default() -> Self {
         Self::new()
@@ -215,6 +261,33 @@ mod tests {
         h.observe(5000); // 5ms bucket
         assert_eq!(h.count(), 3);
         assert_eq!(h.sum_us(), 5550);
+    }
+
+    #[test]
+    fn window_p99_ignores_earlier_slow_samples() {
+        let h = AtomicHistogram::new();
+        for _ in 0..100 {
+            h.observe(800_000);
+        }
+        let before = h.counts_snapshot();
+        for _ in 0..100 {
+            h.observe(40);
+        }
+        let window = h.counts_snapshot().since(&before);
+        assert!(
+            window.percentile(0.99) <= 50,
+            "window={}",
+            window.percentile(0.99)
+        );
+        assert!(h.percentile(0.99) > 500_000);
+    }
+
+    #[test]
+    fn empty_window_reports_zero() {
+        let h = AtomicHistogram::new();
+        h.observe(800);
+        let snap = h.counts_snapshot();
+        assert_eq!(h.counts_snapshot().since(&snap).percentile(0.99), 0);
     }
 
     #[test]

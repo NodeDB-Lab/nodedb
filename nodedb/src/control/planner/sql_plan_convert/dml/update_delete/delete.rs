@@ -119,7 +119,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_delete(
     // CRDT gate: a `crdt = true` collection routes to `CrdtOp::DocDelete`.
     // Only a PK-targeted DELETE is representable; a predicate DELETE is
     // rejected — no silent fallthrough that will bypass CRDT convergence.
-    let is_crdt = super::super::crdt_gate::document_collection_is_crdt(ctx, collection)?;
+    let is_crdt = super::super::crdt_gate::document_collection_is_crdt(ctx, collection_key)?;
     if is_crdt && target_keys.is_empty() {
         return Err(crate::Error::BadRequest {
             detail: format!(
@@ -131,7 +131,7 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_delete(
 
     // A predicate delete stages each removed row under its client identity,
     // read from the declared `PRIMARY KEY` column when the DDL names one.
-    let declared_primary_key = super::super::declared_primary_key_name(ctx, collection)?;
+    let declared_primary_key = super::super::declared_primary_key_name(ctx, collection_key)?;
 
     // Edge-bearing gate: a PK-equality delete on a collection with implicit
     // edges must not lower to a static `PointDelete` — that bypasses OLLP

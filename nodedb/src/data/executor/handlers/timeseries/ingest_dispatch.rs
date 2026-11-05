@@ -322,8 +322,10 @@ impl CoreLoop {
             let applied_seq = self.sync_hwm_value(prov.producer_id, prov.stream_id);
             return self.sync_ack_response(task, AckStatus::Applied, applied_seq);
         }
-        if ingest_response.status == Status::Ok {
-            self.note_collection_write(task, collection);
+        if ingest_response.status == Status::Ok
+            && let Err(e) = self.note_collection_write(task, collection)
+        {
+            return self.response_error(task, e);
         }
         ingest_response
     }

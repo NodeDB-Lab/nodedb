@@ -133,6 +133,23 @@ impl SharedState {
         Ok(state)
     }
 
+    /// Create shared state whose rate limiter is built from `rate_limit_config`
+    /// instead of the disabled default (for tests that exercise throttling).
+    pub fn new_with_rate_limit_config(
+        dispatcher: Dispatcher,
+        wal: Arc<WalManager>,
+        rate_limit_config: crate::control::security::ratelimit::config::RateLimitConfig,
+    ) -> crate::Result<Arc<Self>> {
+        let mut state = Self::new_inner(dispatcher, wal)?;
+        let s = Arc::get_mut(&mut state).ok_or_else(|| crate::Error::Internal {
+            detail: "shared state was already shared before the rate limiter could be installed"
+                .into(),
+        })?;
+        s.rate_limiter =
+            crate::control::security::ratelimit::limiter::RateLimiter::new(rate_limit_config);
+        Ok(state)
+    }
+
     /// Create shared state whose TLS policy is built from `tls_policy_config`
     /// instead of the disabled default (for tests that exercise transport
     /// enforcement). Production wires the same configuration from

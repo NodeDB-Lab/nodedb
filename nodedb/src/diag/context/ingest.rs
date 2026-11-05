@@ -75,3 +75,36 @@ impl DomainContext for IlpAcceptedLinesDropped<'_> {
         })
     }
 }
+
+/// A durable timeseries WAL record names a collection that is malformed for
+/// its database, so catch-up cannot re-dispatch it.
+pub(in crate::diag) struct CatchupRecordMisnamed<'a> {
+    pub database_id: u64,
+    pub lsn: u64,
+    pub error: &'a str,
+}
+
+impl DomainContext for CatchupRecordMisnamed<'_> {
+    fn domain_kind(&self) -> &'static str {
+        "nodedb.wal_catchup_record_misnamed"
+    }
+
+    fn grouping_key(&self) -> String {
+        // The database names the stalled stream; the LSN is the occurrence,
+        // and every catch-up cycle meets the same record again.
+        format!("database_id={}", self.database_id)
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "database_id": self.database_id,
+            "lsn": self.lsn,
+            "error": self.error,
+            "why_fatal": "the record is durable and acknowledged, so skipping it loses \
+                          committed rows; catch-up holds its cursor below the record and \
+                          no later timeseries record of this WAL is re-dispatched",
+            "operator_action": "inspect the WAL record at 'lsn': its collection name does \
+                                 not carry the qualifier of 'database_id'",
+        })
+    }
+}

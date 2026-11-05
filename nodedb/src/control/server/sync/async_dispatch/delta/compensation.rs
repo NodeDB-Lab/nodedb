@@ -167,6 +167,7 @@ pub(super) fn compensation_hint_for_dispatch_error(e: &crate::Error) -> Compensa
         | crate::Error::OidcNoDefaultDatabase { .. }
         | crate::Error::TenantVectorDimExceeded { .. }
         | crate::Error::TenantGraphDepthExceeded { .. }
+        | crate::Error::StorageQuotaExceeded { .. }
         | crate::Error::RoleInheritanceCycle { .. }
         | crate::Error::RoleInheritanceDepthExceeded { .. }
         | crate::Error::MirrorReadOnly { .. }) => CompensationHint::Custom {

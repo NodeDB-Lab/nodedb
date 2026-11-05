@@ -8,6 +8,7 @@
 //! always `None` — followers allocate their own WAL LSN at apply time.
 
 use crate::bridge::envelope::PhysicalPlan;
+use crate::types::DatabaseId;
 use nodedb_physical::physical_plan::{
     ColumnarInsertIntent, ColumnarOp, ReturningSpec, SpatialOp, TextOp, TimeseriesOp, UpdateValue,
 };
@@ -66,11 +67,17 @@ pub struct ColumnarIngestWire<'a> {
     pub rls_filters: &'a [u8],
 }
 
-pub fn columnar_ingest(wire: ColumnarIngestWire<'_>) -> crate::Result<PhysicalPlan> {
+pub fn columnar_ingest(
+    database_id: DatabaseId,
+    wire: ColumnarIngestWire<'_>,
+) -> crate::Result<PhysicalPlan> {
     let provenance = decode_provenance(wire.prov_bytes)?;
     let returning = decode_returning(wire.returning_bytes)?;
     Ok(PhysicalPlan::Columnar(ColumnarOp::Insert {
-        collection: nodedb_types::QualifiedCollection::from_stored(wire.collection.to_owned()),
+        collection: nodedb_types::QualifiedCollection::from_stored(
+            database_id,
+            wire.collection.to_owned(),
+        )?,
         payload: wire.payload.to_vec(),
         format: wire.format.to_owned(),
         intent: wire.intent,
@@ -94,19 +101,37 @@ pub fn columnar_ingest(wire: ColumnarIngestWire<'_>) -> crate::Result<PhysicalPl
     }))
 }
 
+/// The fields a replicated timeseries ingest carries.
+pub struct TimeseriesIngestWire<'a> {
+    pub collection: &'a str,
+    pub payload: &'a [u8],
+    pub format: &'a str,
+    pub surrogates: &'a [u32],
+    pub provenance: &'a Option<Vec<u8>>,
+    pub returning: &'a Option<Vec<u8>>,
+    pub rls_filters: &'a [u8],
+}
+
 pub fn timeseries_ingest(
-    collection: &str,
-    payload: &[u8],
-    format: &str,
-    surrogates: &[u32],
-    prov_bytes: &Option<Vec<u8>>,
-    returning_bytes: &Option<Vec<u8>>,
-    rls_filters: &[u8],
+    database_id: DatabaseId,
+    wire: TimeseriesIngestWire<'_>,
 ) -> crate::Result<PhysicalPlan> {
+    let TimeseriesIngestWire {
+        collection,
+        payload,
+        format,
+        surrogates,
+        provenance: prov_bytes,
+        returning: returning_bytes,
+        rls_filters,
+    } = wire;
     let provenance = decode_provenance(prov_bytes)?;
     let returning = decode_returning(returning_bytes)?;
     Ok(PhysicalPlan::Timeseries(TimeseriesOp::Ingest {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+        collection: nodedb_types::QualifiedCollection::from_stored(
+            database_id,
+            collection.to_owned(),
+        )?,
         payload: payload.to_vec(),
         format: format.to_owned(),
         wal_lsn: None,
@@ -121,6 +146,7 @@ pub fn timeseries_ingest(
 }
 
 pub fn fts_index(
+    database_id: DatabaseId,
     collection: &str,
     surrogate: u32,
     fields: &[(String, String)],
@@ -128,7 +154,10 @@ pub fn fts_index(
 ) -> crate::Result<PhysicalPlan> {
     let provenance = decode_provenance(prov_bytes)?;
     Ok(PhysicalPlan::Text(TextOp::FtsIndexDoc {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+        collection: nodedb_types::QualifiedCollection::from_stored(
+            database_id,
+            collection.to_owned(),
+        )?,
         surrogate: Surrogate::new(surrogate),
         fields: fields.to_vec(),
         provenance,
@@ -136,19 +165,24 @@ pub fn fts_index(
 }
 
 pub fn fts_delete(
+    database_id: DatabaseId,
     collection: &str,
     surrogate: Option<u32>,
     prov_bytes: &Option<Vec<u8>>,
 ) -> crate::Result<PhysicalPlan> {
     let provenance = decode_provenance(prov_bytes)?;
     Ok(PhysicalPlan::Text(TextOp::FtsDeleteDoc {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+        collection: nodedb_types::QualifiedCollection::from_stored(
+            database_id,
+            collection.to_owned(),
+        )?,
         surrogate: surrogate.map(Surrogate::new),
         provenance,
     }))
 }
 
 pub fn spatial_insert(
+    database_id: DatabaseId,
     collection: &str,
     field: &str,
     surrogate: u32,
@@ -161,7 +195,10 @@ pub fn spatial_insert(
         })?;
     let provenance = decode_provenance(prov_bytes)?;
     Ok(PhysicalPlan::Spatial(SpatialOp::Insert {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+        collection: nodedb_types::QualifiedCollection::from_stored(
+            database_id,
+            collection.to_owned(),
+        )?,
         field: field.to_owned(),
         surrogate: Surrogate::new(surrogate),
         geometry,
@@ -170,6 +207,7 @@ pub fn spatial_insert(
 }
 
 pub fn spatial_delete(
+    database_id: DatabaseId,
     collection: &str,
     field: &str,
     surrogate: Option<u32>,
@@ -177,7 +215,10 @@ pub fn spatial_delete(
 ) -> crate::Result<PhysicalPlan> {
     let provenance = decode_provenance(prov_bytes)?;
     Ok(PhysicalPlan::Spatial(SpatialOp::Delete {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+        collection: nodedb_types::QualifiedCollection::from_stored(
+            database_id,
+            collection.to_owned(),
+        )?,
         field: field.to_owned(),
         surrogate: surrogate.map(Surrogate::new),
         provenance,

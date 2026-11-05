@@ -408,6 +408,9 @@ pub fn error_to_sqlstate(err: &crate::Error) -> (&'static str, &'static str, Str
         | crate::Error::TenantGraphDepthExceeded { .. } => {
             ("ERROR", sqlstate::QUOTA_EXCEEDED, err.to_string())
         }
+        crate::Error::StorageQuotaExceeded { .. } => {
+            ("ERROR", sqlstate::DISK_FULL, err.to_string())
+        }
         crate::Error::MirrorReadOnly { .. } => (
             "ERROR",
             sqlstate::READ_ONLY_SQL_TRANSACTION,

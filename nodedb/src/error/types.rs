@@ -804,6 +804,18 @@ pub enum Error {
     #[error("graph traversal depth {depth} exceeds tenant quota max_graph_depth={limit}")]
     TenantGraphDepthExceeded { depth: u32, limit: u32 },
 
+    /// A write was refused because the database or tenant stores `used` bytes
+    /// against a `max_storage_bytes` limit of `limit`.
+    #[error(
+        "storage quota exceeded for {scope}: {used} bytes stored, limit {limit} bytes. \
+         Delete data or raise max_storage_bytes"
+    )]
+    StorageQuotaExceeded {
+        scope: String,
+        used: u64,
+        limit: u64,
+    },
+
     /// A GRANT ROLE would create a cycle in the role inheritance graph.
     /// Enforced at write time so `resolve_inheritance` needs no runtime check.
     #[error(

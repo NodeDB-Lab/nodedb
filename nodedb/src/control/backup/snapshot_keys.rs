@@ -28,9 +28,10 @@
 //! path consumes. [`retain_tenant_data_for_vshards`] keeps each record on the
 //! source of its owner home, so every record is captured exactly once.
 
+use std::cell::RefCell;
 use std::collections::HashSet;
 
-use nodedb_types::{CollectionKey, DatabaseId};
+use nodedb_types::{CollectionKey, CollectionKeyError, DatabaseId, QualifiedCollection};
 
 use crate::engine::graph::edge_store::parse_versioned_edge_key;
 use crate::types::{HomedRecord, RecordHomes, TenantDataSnapshot};
@@ -70,34 +71,42 @@ impl<'a> StoredRecord<'a> {
 }
 
 /// The catalog key of a collection named as the Data Plane stores it in
-/// `database_id`. A name without the qualifier resolves as a bare name.
-pub fn stored_collection_key(database_id: DatabaseId, stored: &str) -> CollectionKey<'_> {
+/// `database_id`. A name not in the stored form of `database_id` is an error.
+pub fn stored_collection_key(
+    database_id: DatabaseId,
+    stored: &str,
+) -> Result<CollectionKey<'_>, CollectionKeyError> {
     CollectionKey::from_qualified_str(database_id, stored)
-        .unwrap_or_else(|_| CollectionKey::from_bare(database_id, stored))
 }
 
 /// The homes of a record stored in `database_id`.
 ///
 /// Deterministic, so every node that filters the same entry assigns it the
-/// same homes.
-pub fn homes_of_stored(database_id: DatabaseId, record: StoredRecord<'_>) -> RecordHomes {
-    match record {
+/// same homes. A row whose collection is not in the stored form of
+/// `database_id` is an error.
+pub fn homes_of_stored(
+    database_id: DatabaseId,
+    record: StoredRecord<'_>,
+) -> Result<RecordHomes, CollectionKeyError> {
+    Ok(match record {
         StoredRecord::Row { collection } => RecordHomes::of(HomedRecord::Row(
-            stored_collection_key(database_id, collection),
+            stored_collection_key(database_id, collection)?,
         )),
         StoredRecord::Edge { src, dst, .. } => RecordHomes::of(HomedRecord::Edge { src, dst }),
         StoredRecord::ArrayCells { vshard, .. } => RecordHomes::of(HomedRecord::ArrayCells {
             vshard: crate::types::VShardId::new(vshard),
         }),
-    }
+    })
 }
 
 /// The vShard of a collection named as the Data Plane stores it in
 /// `database_id`: the home of its rows.
-pub fn vshard_of_stored(database_id: DatabaseId, stored: &str) -> u32 {
-    homes_of_stored(database_id, StoredRecord::Row { collection: stored })
-        .owner()
-        .as_u32()
+pub fn vshard_of_stored(database_id: DatabaseId, stored: &str) -> Result<u32, CollectionKeyError> {
+    Ok(
+        homes_of_stored(database_id, StoredRecord::Row { collection: stored })?
+            .owner()
+            .as_u32(),
+    )
 }
 
 /// Extract the collection from a `"{db}:{tid}:{collection}[:suffix...]"` key.
@@ -149,8 +158,10 @@ pub fn extract_db_scoped_collection(key: &str, tenant_id: u64) -> Option<&str> {
 /// The retained section shapes are unchanged, so the RESTORE merge path
 /// (`merge_sections`) consumes the output exactly as before.
 ///
-/// `homes_of` maps a record to its homes, or to `None` to drop it (the caller
-/// passes [`homes_of_stored`] for the snapshot's database). Every section kind
+/// `homes_of` maps a record to its homes, to `None` to drop it, or to an error
+/// for a collection name not in the stored form of the snapshot's database
+/// (the caller passes [`homes_of_stored`] for that database). The first such
+/// error fails the call and leaves `snap` unspecified. Every section kind
 /// the snapshot carries is classified here so adding a section without
 /// updating this filter is impossible to miss:
 ///
@@ -161,7 +172,8 @@ pub fn extract_db_scoped_collection(key: &str, tenant_id: u64) -> Option<&str> {
 ///   via [`extract_db_scoped_collection`].
 /// - graph `edges` via [`StoredRecord::from_edge_key`], homed on endpoints.
 ///   The hidden edge versions, cuts and applied ordinals are dropped.
-/// - `surrogate_pk` by its explicit `collection` field (the bare name).
+/// - `surrogate_pk` by its explicit `collection` field (the bare name),
+///   qualified with the entry's database.
 /// - CRDT (`crdt_state`): per-collection, tenant-explicit. Each entry carries
 ///   its single collection, so it is kept iff that collection's vshard is in
 ///   `source_vshards` — the node owning the collection keeps it, every other
@@ -175,10 +187,15 @@ pub fn retain_tenant_data_for_vshards(
     snap: &mut TenantDataSnapshot,
     tenant_id: u64,
     source_vshards: &HashSet<u32>,
-    homes_of: impl Fn(StoredRecord<'_>) -> Option<RecordHomes>,
-) {
-    let owned = |record: StoredRecord<'_>| {
-        homes_of(record).is_some_and(|homes| homes.owned_by(source_vshards))
+    homes_of: impl Fn(StoredRecord<'_>) -> Result<Option<RecordHomes>, CollectionKeyError>,
+) -> Result<(), CollectionKeyError> {
+    let failure: RefCell<Option<CollectionKeyError>> = RefCell::new(None);
+    let owned = |record: StoredRecord<'_>| match homes_of(record) {
+        Ok(homes) => homes.is_some_and(|homes| homes.owned_by(source_vshards)),
+        Err(e) => {
+            failure.borrow_mut().get_or_insert(e);
+            false
+        }
     };
     let owned_row = |collection: &str| owned(StoredRecord::Row { collection });
     let in_group_db_tenant_scoped =
@@ -203,8 +220,11 @@ pub fn retain_tenant_data_for_vshards(
         .retain(|b| in_group_db_scoped(&b.collection_key));
     snap.columnar_engines.retain(|(k, _)| in_group_db_scoped(k));
     snap.kv_tables.retain(|(k, _)| in_group_db_scoped(k));
-    // surrogate_pk: the field IS the collection name.
-    snap.surrogate_pk.retain(|e| owned_row(&e.collection));
+    // surrogate_pk: the field is the bare collection name of the entry's database.
+    snap.surrogate_pk.retain(|e| {
+        let stored = QualifiedCollection::new(DatabaseId::new(e.database_id), &e.collection);
+        owned_row(stored.as_str())
+    });
     // An unparseable edge key has no determinable home; drop it from EVERY
     // node's retained set rather than duplicate it across all sources.
     snap.edges
@@ -241,6 +261,10 @@ pub fn retain_tenant_data_for_vshards(
             vshard: blob.vshard,
         })
     });
+    match failure.into_inner() {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 #[cfg(test)]
@@ -261,14 +285,24 @@ mod tests {
         let stored = QualifiedCollection::new(db, "orders");
         let expected =
             nodedb_cluster::routing::vshard_for_collection(CollectionKey::from_bare(db, "orders"));
-        assert_eq!(super::vshard_of_stored(db, stored.as_str()), expected);
         assert_eq!(
-            super::vshard_of_stored(DatabaseId::DEFAULT, "orders"),
+            super::vshard_of_stored(db, stored.as_str()).expect("stored name"),
+            expected
+        );
+        assert_eq!(
+            super::vshard_of_stored(DatabaseId::DEFAULT, "orders").expect("bare default name"),
             nodedb_cluster::routing::vshard_for_collection(CollectionKey::from_bare(
                 DatabaseId::DEFAULT,
                 "orders"
             ))
         );
+    }
+
+    /// A bare name outside the default database is not a stored name.
+    #[test]
+    fn a_bare_name_outside_the_default_database_is_refused() {
+        assert!(super::vshard_of_stored(DatabaseId::new(1025), "orders").is_err());
+        assert!(super::stored_collection_key(DatabaseId::new(1025), "orders").is_err());
     }
 
     #[test]
@@ -328,9 +362,9 @@ mod tests {
         use std::collections::HashSet;
 
         const TID: u64 = 1;
-        let homes_of = |r: StoredRecord<'_>| Some(homes_of_stored(DatabaseId::DEFAULT, r));
-        let va = vshard_of_stored(DatabaseId::DEFAULT, "alpha");
-        let vb = vshard_of_stored(DatabaseId::DEFAULT, "beta");
+        let homes_of = |r: StoredRecord<'_>| homes_of_stored(DatabaseId::DEFAULT, r).map(Some);
+        let va = vshard_of_stored(DatabaseId::DEFAULT, "alpha").unwrap();
+        let vb = vshard_of_stored(DatabaseId::DEFAULT, "beta").unwrap();
         assert_ne!(va, vb);
 
         let template = || TenantDataSnapshot {
@@ -361,7 +395,7 @@ mod tests {
         // Node owning only vshard(alpha) keeps alpha sections, drops beta.
         let mut node_a = template();
         let only_a: HashSet<u32> = [va].into_iter().collect();
-        retain_tenant_data_for_vshards(&mut node_a, TID, &only_a, homes_of);
+        retain_tenant_data_for_vshards(&mut node_a, TID, &only_a, homes_of).unwrap();
         assert_eq!(node_a.timeseries.len(), 1);
         assert_eq!(node_a.timeseries[0].0, format!("0:{TID}:alpha"));
         assert_eq!(node_a.columnar_engines.len(), 1);
@@ -371,7 +405,7 @@ mod tests {
         // Node owning only vshard(beta) keeps beta sections, drops alpha.
         let mut node_b = template();
         let only_b: HashSet<u32> = [vb].into_iter().collect();
-        retain_tenant_data_for_vshards(&mut node_b, TID, &only_b, homes_of);
+        retain_tenant_data_for_vshards(&mut node_b, TID, &only_b, homes_of).unwrap();
         assert_eq!(node_b.timeseries.len(), 1);
         assert_eq!(node_b.timeseries[0].0, format!("0:{TID}:beta"));
         assert_eq!(node_b.kv_tables.len(), 0, "alpha kv not owned by beta node");
@@ -379,7 +413,7 @@ mod tests {
         // Third replica owns neither → contributes nothing for these vshards.
         let mut node_c = template();
         let none: HashSet<u32> = HashSet::new();
-        retain_tenant_data_for_vshards(&mut node_c, TID, &none, homes_of);
+        retain_tenant_data_for_vshards(&mut node_c, TID, &none, homes_of).unwrap();
         assert!(node_c.timeseries.is_empty());
         assert!(node_c.columnar_engines.is_empty());
 
@@ -400,7 +434,7 @@ mod tests {
         use crate::types::TenantDataSnapshot;
         use std::collections::HashSet;
 
-        let homes_of = |r: StoredRecord<'_>| Some(homes_of_stored(DatabaseId::DEFAULT, r));
+        let homes_of = |r: StoredRecord<'_>| homes_of_stored(DatabaseId::DEFAULT, r).map(Some);
         let mut snap = TenantDataSnapshot {
             timeseries: vec![("0:1:alpha".into(), b"a".to_vec())],
             columnar_engines: vec![("0:1:beta".into(), b"b".to_vec())],
@@ -409,9 +443,9 @@ mod tests {
         };
         let all: HashSet<u32> = ["alpha", "beta", "gamma"]
             .iter()
-            .map(|c| vshard_of_stored(DatabaseId::DEFAULT, c))
+            .map(|c| vshard_of_stored(DatabaseId::DEFAULT, c).unwrap())
             .collect();
-        retain_tenant_data_for_vshards(&mut snap, 1, &all, homes_of);
+        retain_tenant_data_for_vshards(&mut snap, 1, &all, homes_of).unwrap();
         assert_eq!(snap.timeseries.len(), 1);
         assert_eq!(snap.columnar_engines.len(), 1);
         assert_eq!(snap.kv_tables.len(), 1);
@@ -425,14 +459,14 @@ mod tests {
         use crate::types::{TenantDataSnapshot, VShardId};
         use std::collections::HashSet;
 
-        let collection_home = vshard_of_stored(DatabaseId::DEFAULT, "follows");
+        let collection_home = vshard_of_stored(DatabaseId::DEFAULT, "follows").unwrap();
         let src = (0..4096)
             .map(|i| format!("n{i}"))
             .find(|k| VShardId::from_key(k.as_bytes()).as_u32() != collection_home)
             .expect("a node key off the collection home");
         let src_home = VShardId::from_key(src.as_bytes()).as_u32();
         let key = format!("follows\x00{src}\x00L\x00{src}\x00{:020}", 1);
-        let homes_of = |r: StoredRecord<'_>| Some(homes_of_stored(DatabaseId::DEFAULT, r));
+        let homes_of = |r: StoredRecord<'_>| homes_of_stored(DatabaseId::DEFAULT, r).map(Some);
         let template = || TenantDataSnapshot {
             edges: vec![(key.clone(), vec![])],
             ..Default::default()
@@ -440,12 +474,12 @@ mod tests {
 
         let mut by_collection = template();
         let collection_only: HashSet<u32> = [collection_home].into_iter().collect();
-        retain_tenant_data_for_vshards(&mut by_collection, 1, &collection_only, homes_of);
+        retain_tenant_data_for_vshards(&mut by_collection, 1, &collection_only, homes_of).unwrap();
         assert!(by_collection.edges.is_empty());
 
         let mut by_src = template();
         let src_only: HashSet<u32> = [src_home].into_iter().collect();
-        retain_tenant_data_for_vshards(&mut by_src, 1, &src_only, homes_of);
+        retain_tenant_data_for_vshards(&mut by_src, 1, &src_only, homes_of).unwrap();
         assert_eq!(by_src.edges.len(), 1);
     }
 
@@ -467,9 +501,9 @@ mod tests {
             arrays: vec![blob(3), blob(9)],
             ..Default::default()
         };
-        let homes_of = |r: StoredRecord<'_>| Some(homes_of_stored(DatabaseId::DEFAULT, r));
+        let homes_of = |r: StoredRecord<'_>| homes_of_stored(DatabaseId::DEFAULT, r).map(Some);
         let source: HashSet<u32> = [9].into_iter().collect();
-        retain_tenant_data_for_vshards(&mut snap, 1, &source, homes_of);
+        retain_tenant_data_for_vshards(&mut snap, 1, &source, homes_of).unwrap();
         assert_eq!(snap.arrays, vec![blob(9)]);
     }
 
@@ -479,7 +513,7 @@ mod tests {
         let record = StoredRecord::from_edge_key(&key).expect("versioned edge key");
         assert_eq!(record.collection(), "1025/follows");
         assert_eq!(
-            homes_of_stored(DatabaseId::new(1025), record),
+            homes_of_stored(DatabaseId::new(1025), record).unwrap(),
             crate::types::RecordHomes::edge("a", "b")
         );
         assert!(StoredRecord::from_edge_key("not-an-edge-key").is_none());

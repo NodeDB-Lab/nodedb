@@ -127,9 +127,9 @@ impl CoreLoop {
         src_id: &str,
         label: &str,
         dst_id: &str,
-    ) {
+    ) -> crate::Result<()> {
         let Some(stamp) = self.task_write_stamp(task) else {
-            return;
+            return Ok(());
         };
         self.note_write(
             task.request.database_id,
@@ -143,7 +143,7 @@ impl CoreLoop {
                 },
             ),
             stamp,
-        );
+        )
     }
 }
 

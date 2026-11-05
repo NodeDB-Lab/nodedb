@@ -57,6 +57,7 @@ pub(super) mod provider_scan;
 pub(super) mod provider_scan_compute;
 pub mod purge;
 pub mod query_collection_size;
+pub mod query_storage_bytes;
 pub mod rag_key;
 pub mod reclaim;
 pub(super) mod reclaim_retry;

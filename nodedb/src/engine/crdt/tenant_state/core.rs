@@ -246,6 +246,15 @@ impl TenantCrdtEngine {
         self.collections.keys().cloned().collect()
     }
 
+    /// Each collection with local CRDT state and the state's estimated bytes.
+    /// The estimate comes from the document's operation counter, calibrated
+    /// against a snapshot export only after the document halves or doubles.
+    pub fn collection_state_bytes(&self) -> impl Iterator<Item = (&str, u64)> {
+        self.collections
+            .iter()
+            .map(|(name, state)| (name.as_str(), state.estimated_memory_bytes() as u64))
+    }
+
     /// Register an array-engine surrogate ID as a valid cross-engine FK
     /// referent for this tenant.
     pub fn register_array_surrogate(&mut self, id: impl Into<String>) {

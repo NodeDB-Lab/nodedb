@@ -6,6 +6,7 @@
 //! apply can refuse a resolution state has moved past.
 
 use nodedb_physical::physical_plan::{KvResolveOutcome, KvResolvedMutation};
+use nodedb_types::DatabaseId;
 
 use crate::bridge::envelope::ErrorCode;
 use crate::data::executor::core_loop::CoreLoop;
@@ -59,16 +60,30 @@ pub(super) struct ResolvedPut<'a> {
 }
 
 /// Build the `Put` mutation a resolved write applies.
-pub(super) fn put_mutation(put: ResolvedPut<'_>) -> KvResolvedMutation {
-    KvResolvedMutation::Put {
-        collection: nodedb_types::QualifiedCollection::from_stored(put.collection.to_owned()),
+pub(super) fn put_mutation(
+    database_id: DatabaseId,
+    put: ResolvedPut<'_>,
+) -> Result<KvResolvedMutation, ErrorCode> {
+    let collection = qualified(database_id, put.collection)?;
+    Ok(KvResolvedMutation::Put {
+        collection,
         key: put.key.to_vec(),
         value: put.value,
         ttl_ms: put.ttl_ms,
         expire_at_ms: put.expire_at_ms,
         surrogate: put.surrogate,
         precondition: put.precondition,
-    }
+    })
+}
+
+/// The stored collection name for `collection`, or the error a name that
+/// does not match `database_id` raises.
+pub(super) fn qualified(
+    database_id: DatabaseId,
+    collection: &str,
+) -> Result<nodedb_types::QualifiedCollection, ErrorCode> {
+    nodedb_types::QualifiedCollection::from_stored(database_id, collection.to_owned())
+        .map_err(|e| ErrorCode::from(crate::Error::from(e)))
 }
 
 /// Bundled inputs for [`rewrite_mutation`]: a new value for a row the key
@@ -83,28 +98,34 @@ pub(super) struct ResolvedRewrite<'a> {
 }
 
 /// Build the `Rewrite` mutation a resolved write applies.
-pub(super) fn rewrite_mutation(rewrite: ResolvedRewrite<'_>) -> KvResolvedMutation {
-    KvResolvedMutation::Rewrite {
-        collection: nodedb_types::QualifiedCollection::from_stored(rewrite.collection.to_owned()),
+pub(super) fn rewrite_mutation(
+    database_id: DatabaseId,
+    rewrite: ResolvedRewrite<'_>,
+) -> Result<KvResolvedMutation, ErrorCode> {
+    let collection = qualified(database_id, rewrite.collection)?;
+    Ok(KvResolvedMutation::Rewrite {
+        collection,
         key: rewrite.key.to_vec(),
         value: rewrite.value,
         ttl_ms: rewrite.ttl_ms,
         expire_at_ms: rewrite.expire_at_ms,
         precondition: rewrite.precondition,
-    }
+    })
 }
 
 /// Build the `Delete` mutation a resolved write applies.
 pub(super) fn delete_mutation(
+    database_id: DatabaseId,
     collection: &str,
     key: &[u8],
     precondition: Option<Vec<u8>>,
-) -> KvResolvedMutation {
-    KvResolvedMutation::Delete {
-        collection: nodedb_types::QualifiedCollection::from_stored(collection.to_owned()),
+) -> Result<KvResolvedMutation, ErrorCode> {
+    let collection = qualified(database_id, collection)?;
+    Ok(KvResolvedMutation::Delete {
+        collection,
         key: key.to_vec(),
         precondition,
-    }
+    })
 }
 
 /// Absolute expiry for a write that installs `ttl_ms` from `now_ms`, matching

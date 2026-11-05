@@ -7,7 +7,7 @@
 use tracing::debug;
 
 use super::cache_key::{AggregateCacheKeyInputs, aggregate_cache_key};
-use crate::bridge::envelope::Response;
+use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
 use nodedb_physical::physical_plan::{AggregateSpec, GroupKeySpec};
@@ -66,12 +66,15 @@ impl CoreLoop {
         let input = match input {
             Some(sub_plan) => Some(sub_plan),
             None if !system_time.is_current() => {
-                scoped_scan = self.scoped_aggregate_scan(
+                scoped_scan = match self.scoped_aggregate_scan(
                     task.request.database_id.as_u64(),
                     tid,
                     collection,
                     system_time,
-                );
+                ) {
+                    Ok(plan) => plan,
+                    Err(e) => return self.response_error(task, ErrorCode::from(e)),
+                };
                 Some(&scoped_scan)
             }
             None => None,
@@ -465,13 +468,13 @@ mod tests {
             ordinal: 42,
             cut_marker: 0,
         };
-        let plan = core.scoped_aggregate_scan(0, 1, "kvcoll", scope);
+        let plan = core.scoped_aggregate_scan(0, 1, "kvcoll", scope).unwrap();
         let PhysicalPlan::Kv(nodedb_physical::physical_plan::KvOp::Scan { system_time, .. }) = plan
         else {
             panic!("a KV collection reads a KV scan");
         };
         assert_eq!(system_time, scope);
-        let unknown = core.scoped_aggregate_scan(0, 1, "docs", scope);
+        let unknown = core.scoped_aggregate_scan(0, 1, "docs", scope).unwrap();
         assert!(matches!(
             unknown,
             PhysicalPlan::Document(nodedb_physical::physical_plan::DocumentOp::Scan { .. })

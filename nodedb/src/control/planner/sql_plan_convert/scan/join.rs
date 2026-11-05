@@ -246,8 +246,8 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_join(
     let shuffle_keys = on_keys.clone();
 
     let hash_join = PhysicalPlan::Query(QueryOp::HashJoin {
-        left_collection: nodedb_types::QualifiedCollection::from_stored(left_collection),
-        right_collection: nodedb_types::QualifiedCollection::from_stored(right_collection),
+        left_collection: nodedb_types::QualifiedCollection::from_stored(db_id, left_collection)?,
+        right_collection: nodedb_types::QualifiedCollection::from_stored(db_id, right_collection)?,
         left_alias,
         right_alias,
         on: on_keys,

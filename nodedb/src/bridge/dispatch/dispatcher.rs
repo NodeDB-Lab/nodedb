@@ -12,7 +12,7 @@ use std::sync::Arc;
 use nodedb_bridge::backpressure::{BackpressureConfig, BackpressureController, PressureState};
 use nodedb_bridge::buffer::RingBuffer;
 use nodedb_bridge::wfq::WeightedFairQueue;
-use nodedb_types::PriorityClass;
+use nodedb_types::{DatabaseId, PriorityClass};
 use tokio::sync::Notify;
 
 use crate::bridge::envelope;
@@ -259,6 +259,21 @@ impl Dispatcher {
             .unwrap_or(PressureState::Normal)
     }
 
+    /// Requests staged in the weighted-fair queues, summed across cores per database.
+    ///
+    /// Counts only requests still in a weighted-fair queue. Requests already
+    /// pushed to an SPSC ring are excluded. Databases with no staged request
+    /// are absent. Runs in O(virtual queues).
+    pub fn database_queue_depths(&self) -> HashMap<DatabaseId, u64> {
+        let mut depths = HashMap::new();
+        for channel in &self.cores {
+            for (database_id, depth) in channel.wfq.nonempty_depths() {
+                *depths.entry(DatabaseId::new(database_id)).or_insert(0u64) += depth as u64;
+            }
+        }
+        depths
+    }
+
     /// Number of Data Plane cores.
     pub fn num_cores(&self) -> usize {
         self.cores.len()
@@ -274,5 +289,39 @@ impl Dispatcher {
     /// Router reference for vShard lookups.
     pub fn router(&self) -> &VShardRouter {
         &self.router
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bridge::dispatch::test_requests::make_request_for_db;
+
+    fn stage(dispatcher: &mut Dispatcher, core: usize, db: u64, req_id: u64) {
+        dispatcher.cores[core]
+            .wfq
+            .try_enqueue(db, make_request_for_db(0, db, req_id))
+            .unwrap();
+    }
+
+    #[test]
+    fn queue_depths_sum_across_cores_and_clear_when_drained() {
+        let (mut dispatcher, _data_sides) = Dispatcher::new(2, 64);
+        assert!(dispatcher.database_queue_depths().is_empty());
+
+        stage(&mut dispatcher, 0, 1, 1);
+        stage(&mut dispatcher, 0, 1, 2);
+        stage(&mut dispatcher, 1, 1, 3);
+        stage(&mut dispatcher, 1, 2, 4);
+
+        let depths = dispatcher.database_queue_depths();
+        assert_eq!(depths.len(), 2);
+        assert_eq!(depths[&DatabaseId::new(1)], 3);
+        assert_eq!(depths[&DatabaseId::new(2)], 1);
+
+        for channel in &mut dispatcher.cores {
+            channel.wfq.drain();
+        }
+        assert!(dispatcher.database_queue_depths().is_empty());
     }
 }

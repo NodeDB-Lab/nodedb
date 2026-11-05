@@ -125,9 +125,11 @@ impl CoreLoop {
         // The removed rows' index values record no version, so the first
         // removal records a wipe that bounds every index read.
         if progress.truncated == 0 {
-            self.note_task_collection_wipe(s.task, tid, collection);
+            self.note_task_collection_wipe(s.task, tid, collection)
+                .map_err(|e| refuse(progress.truncated, e))?;
         }
-        self.note_surrogate_write(s.task, tid, collection, surrogate.as_u32());
+        self.note_surrogate_write(s.task, tid, collection, surrogate.as_u32())
+            .map_err(|e| refuse(progress.truncated, e))?;
         // The row's text leaves the inverted index with every other row's,
         // in one purge once the statement's rows are removed.
         progress.removed.push(surrogate);

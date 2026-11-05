@@ -735,6 +735,7 @@ mod tests {
             }),
             reads: Vec::new(),
             snapshot_ordinal: None,
+            adds_storage: false,
         };
         let mut entry = crate::control::wal_replication::encode::transaction_redo_entry(
             crate::types::TenantId::new(4),

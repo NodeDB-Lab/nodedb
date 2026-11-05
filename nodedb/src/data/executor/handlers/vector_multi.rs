@@ -123,7 +123,11 @@ impl CoreLoop {
         self.checkpoint_coordinator.mark_dirty("vector", ids.len());
         // Record this write keyed by the shared document surrogate, so the
         // newest-ordinal cache commit validation reads holds this insert.
-        self.note_surrogate_write(task, tid, collection, document_surrogate.as_u32());
+        if let Err(e) =
+            self.note_surrogate_write(task, tid, collection, document_surrogate.as_u32())
+        {
+            return self.response_error(task, e);
+        }
 
         match super::super::response_codec::encode_count("inserted_vectors", ids.len()) {
             Ok(bytes) => self.response_with_payload(task, bytes),
@@ -163,7 +167,11 @@ impl CoreLoop {
             // Record this write keyed by the shared document surrogate, so
             // the newest-ordinal cache commit validation reads holds this
             // delete.
-            self.note_surrogate_write(task, tid, collection, document_surrogate.as_u32());
+            if let Err(e) =
+                self.note_surrogate_write(task, tid, collection, document_surrogate.as_u32())
+            {
+                return self.response_error(task, e);
+            }
         }
         self.response_ok(task)
     }

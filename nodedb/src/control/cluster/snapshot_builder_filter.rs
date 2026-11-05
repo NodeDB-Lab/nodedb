@@ -32,6 +32,24 @@ pub(crate) fn bind_in_group(
     .intersects(group_vshards)
 }
 
+/// Whether the row of the stored collection `collection` of `database_id` has
+/// a home in `group_vshards`. A name not in the stored form of `database_id`
+/// is not in the group: the first such error lands in `first_error`.
+pub(crate) fn stored_row_in_group(
+    database_id: DatabaseId,
+    collection: &str,
+    group_vshards: &HashSet<u32>,
+    first_error: &std::cell::RefCell<Option<nodedb_types::CollectionKeyError>>,
+) -> bool {
+    match homes_of_stored(database_id, StoredRecord::Row { collection }) {
+        Ok(homes) => homes.intersects(group_vshards),
+        Err(e) => {
+            first_error.borrow_mut().get_or_insert(e);
+            false
+        }
+    }
+}
+
 /// Move the vector multi-document membership and the index history sections
 /// of `snap` whose key passes `in_group` onto `merged`. Each entry is keyed
 /// `"{db}:{tid}:{collection}[:suffix]"` like the index it describes.
@@ -125,7 +143,7 @@ pub(crate) fn push_group_edges<V>(
                 ),
             });
         };
-        if homes_of_stored(database_id, record).intersects(group_vshards) {
+        if homes_of_stored(database_id, record)?.intersects(group_vshards) {
             out.push((database_id.as_u64(), tenant_id, key, value));
         }
     }
@@ -222,6 +240,7 @@ mod tests {
         for k in &edges {
             let record = StoredRecord::from_edge_key(k).expect("edge key");
             let want: BTreeSet<u32> = homes_of_stored(DB, record)
+                .unwrap()
                 .iter()
                 .map(|h| h.as_u32() % GROUPS)
                 .collect();

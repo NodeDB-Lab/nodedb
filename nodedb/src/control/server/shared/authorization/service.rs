@@ -12,12 +12,11 @@ use crate::control::security::identity::{
 };
 use crate::control::security::permission::PermissionStore;
 use crate::control::security::role::RoleStore;
-use crate::control::target_identity::bare_collection_name;
 use crate::types::TenantId;
 
 use super::capability::{AuthorizedCollection, AuthorizedTaskSet};
 use super::error::AuthorizationError;
-use super::requirements::{AuthorizationRequirement, plan_requirements};
+use super::requirements::{AuthorizationRequirement, plan_requirements, relation_grant_name};
 
 /// Ensure an identity can select `database_id`.
 pub fn authorize_database(
@@ -245,8 +244,13 @@ fn authorize_collection_requirement(
 ) -> Result<(), AuthorizationError> {
     // Physical plans prefix non-default-database collection names, whereas
     // grants and ownership use the unqualified collection name.
-    let grant_name = bare_collection_name(database_id, collection);
-    if !identity.is_superuser && is_system_collection(&grant_name) {
+    let grant_name = match relation_grant_name(database_id, collection) {
+        Ok(name) => name,
+        Err(error) => {
+            return deny(identity, emitter, format!("permission denied: {error}"));
+        }
+    };
+    if !identity.is_superuser && is_system_collection(grant_name) {
         return deny(
             identity,
             emitter,
@@ -262,7 +266,7 @@ fn authorize_collection_requirement(
         &scoped_identity,
         permission,
         database_id,
-        &grant_name,
+        grant_name,
         roles,
         &NoopAuditEmitter,
     ) {

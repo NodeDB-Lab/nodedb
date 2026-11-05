@@ -11,20 +11,21 @@
 use nodedb_graph::CsrIndex;
 use nodedb_graph::csr::weights::extract_weight_from_properties;
 use nodedb_physical::physical_plan::{AlgoEdge, GraphReadScope};
-use nodedb_types::{DatabaseId, QualifiedCollection, TenantId};
+use nodedb_types::{CollectionKey, DatabaseId, QualifiedCollection, TenantId};
 
 use crate::engine::graph::edge_store::EdgeStore;
 
 /// The edge-store name of an algorithm's collection in `database`.
-/// `AlgoParams::collection` names it bare; an already qualified name stays
-/// as it is.
-pub(in crate::data::executor) fn algo_collection(database: DatabaseId, collection: &str) -> String {
-    let bare = QualifiedCollection::from_stored(collection.to_string())
-        .collection_name(database)
-        .to_string();
-    QualifiedCollection::new(database, &bare)
+/// `AlgoParams::collection` names it bare. A name that carries this
+/// database's qualifier keeps it. Any other form is an error.
+pub(in crate::data::executor) fn algo_collection(
+    database: DatabaseId,
+    collection: &str,
+) -> crate::Result<String> {
+    let key = CollectionKey::from_relation_name(database, collection)?;
+    Ok(QualifiedCollection::new(database, key.name())
         .as_str()
-        .to_string()
+        .to_string())
 }
 
 /// The system-time ordinal an algorithm reads at `scope`. `AllVersions` has
@@ -47,7 +48,7 @@ pub(super) fn collection_edges(
     edge_label: Option<&str>,
     scope: &GraphReadScope,
 ) -> crate::Result<Vec<AlgoEdge>> {
-    let collection = algo_collection(DatabaseId::new(database_id), collection);
+    let collection = algo_collection(DatabaseId::new(database_id), collection)?;
     let records = edge_store.scan_collection_as_of(
         database_id,
         TenantId::new(tid),

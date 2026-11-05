@@ -101,8 +101,6 @@ pub enum QuotaCheck {
     Allowed,
     /// Request exceeds memory quota.
     MemoryExceeded { used: u64, limit: u64 },
-    /// Request exceeds storage quota.
-    StorageExceeded { used: u64, limit: u64 },
     /// Too many concurrent requests.
     ConcurrencyExceeded { active: u32, limit: u32 },
     /// Rate limit exceeded.
@@ -199,12 +197,6 @@ impl TenantIsolation {
             return QuotaCheck::MemoryExceeded {
                 used: usage.memory_bytes,
                 limit: quota.max_memory_bytes,
-            };
-        }
-        if quota.max_storage_bytes > 0 && usage.storage_bytes > quota.max_storage_bytes {
-            return QuotaCheck::StorageExceeded {
-                used: usage.storage_bytes,
-                limit: quota.max_storage_bytes,
             };
         }
         if quota.max_concurrent_requests > 0

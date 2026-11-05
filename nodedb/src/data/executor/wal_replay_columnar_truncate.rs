@@ -189,14 +189,20 @@ impl CoreLoop {
         else {
             return false;
         };
+        let Some(qualified) = self.replay_qualified(
+            "columnar",
+            record_lsn,
+            database_id,
+            record.collection.clone(),
+        ) else {
+            return false;
+        };
         let task = Self::replay_task(
             TenantId::new(tenant_id),
             database_id,
             vshard,
             PhysicalPlan::Columnar(ColumnarOp::Truncate {
-                collection: nodedb_types::QualifiedCollection::from_stored(
-                    record.collection.clone(),
-                ),
+                collection: qualified,
                 restart_identity: false,
                 system_from: record.system_from,
                 erase_history: record.erase_history,
@@ -273,14 +279,20 @@ impl CoreLoop {
         else {
             return false;
         };
+        let Some(qualified) = self.replay_qualified(
+            "timeseries",
+            record_lsn,
+            database_id,
+            record.collection.clone(),
+        ) else {
+            return false;
+        };
         let task = Self::replay_task(
             tid,
             database_id,
             vshard,
             PhysicalPlan::Timeseries(TimeseriesOp::Truncate {
-                collection: nodedb_types::QualifiedCollection::from_stored(
-                    record.collection.clone(),
-                ),
+                collection: qualified,
                 restart_identity: false,
             }),
             Some(Lsn::new(record_lsn)),

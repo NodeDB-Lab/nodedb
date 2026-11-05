@@ -59,3 +59,21 @@ fn record_ilp_drop(
     .with_backtrace()
     .emit();
 }
+
+/// Report a durable timeseries WAL record whose collection name is malformed
+/// for its database. Called only from WAL catch-up, which then holds its
+/// cursor below the record.
+pub fn wal_catchup_record_misnamed(database_id: u64, lsn: u64, error: &str) {
+    let ctx = context::CatchupRecordMisnamed {
+        database_id,
+        lsn,
+        error,
+    };
+    let _ = Capture::new(
+        EventKind::Corruption,
+        "WAL catch-up met a record whose collection name is malformed for its database",
+    )
+    .domain(&ctx)
+    .with_backtrace()
+    .emit();
+}

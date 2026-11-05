@@ -3,25 +3,32 @@
 //! The `VShardEnvelopeHandler` `RaftLoop` dispatches vShard envelopes to.
 
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use nodedb_cluster::distributed_array::{ArrayLocalExecutor, handle_array_shard_rpc};
 use nodedb_cluster::vshard_handler::{DispatchTarget, dispatch_by_type};
 use nodedb_cluster::wire::VShardEnvelope;
 
+use crate::control::metrics::storage::answer_storage_share;
+use crate::control::state::SharedState;
 use crate::event::cross_shard::CrossShardReceiver;
 
 /// Build the `VShardEnvelopeHandler` closure used by `RaftLoop`.
 ///
 /// The closure receives raw envelope bytes from the QUIC transport layer,
 /// dispatches based on `msg_type`, and returns a serialized response.
+///
+/// `shared` answers storage share requests. It is weak, so the handler the
+/// Raft loop holds never keeps the node's state alive.
 pub(crate) fn build_vshard_handler(
     array_executor: Arc<dyn ArrayLocalExecutor>,
     cross_shard_receiver: Arc<CrossShardReceiver>,
+    shared: Weak<SharedState>,
 ) -> nodedb_cluster::VShardEnvelopeHandler {
     Arc::new(move |bytes: Vec<u8>| {
         let executor = array_executor.clone();
         let receiver = Arc::clone(&cross_shard_receiver);
+        let shared = Weak::clone(&shared);
         let fut: Pin<
             Box<dyn std::future::Future<Output = nodedb_cluster::error::Result<Vec<u8>>> + Send>,
         > = Box::pin(async move {
@@ -70,6 +77,17 @@ pub(crate) fn build_vshard_handler(
                 // opcode+1 convention to apply: the receiver picks the response
                 // msg_type per request type itself.
                 DispatchTarget::EventPlane => Ok(receiver.handle_envelope(bytes).await),
+
+                // A peer's storage round asks for this node's latest share.
+                DispatchTarget::StorageShare => {
+                    let state = shared.upgrade().ok_or_else(|| {
+                        nodedb_cluster::error::ClusterError::Transport {
+                            detail: "vshard_handler: the node is shutting down; no storage share"
+                                .into(),
+                        }
+                    })?;
+                    answer_storage_share(&state, &envelope)
+                }
 
                 other => Err(nodedb_cluster::error::ClusterError::Transport {
                     detail: format!(

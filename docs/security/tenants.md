@@ -56,6 +56,8 @@ SHOW TENANT QUOTA FOR acme;
 EXPORT USAGE FOR TENANT acme PERIOD '2026-03' FORMAT 'json';
 ```
 
+`max_storage_bytes` is enforced at write admission against the tenant's cluster total over all databases. The total refreshes every storage sample period, so a burst can overshoot by one period's writes. Writes pass until the first complete total exists after boot. A write that can add bytes then fails with SQLSTATE `53100` once the total reaches the limit. Deletes, TRUNCATE, DROP, and maintenance writes stay allowed. See [Databases](../databases.md#storage-limit-enforcement).
+
 ## Creating Users for a Tenant
 
 ```sql

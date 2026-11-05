@@ -313,7 +313,10 @@ impl CoreLoop {
         }
 
         for key in &keys {
-            self.note_surrogate_write(task, tid, collection, key.surrogate.as_u32());
+            if let Err(e) = self.note_surrogate_write(task, tid, collection, key.surrogate.as_u32())
+            {
+                return self.response_error(task, e);
+            }
         }
         self.checkpoint_coordinator.mark_dirty("sparse", keys.len());
         for (key, body) in keys.iter().zip(&stored) {

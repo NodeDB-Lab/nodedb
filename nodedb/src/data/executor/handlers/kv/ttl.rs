@@ -69,7 +69,9 @@ impl CoreLoop {
             .kv_engine
             .expire(did, tid, collection, key, ttl_ms, now_ms)
         {
-            self.note_kv_write(task, did, tid, collection, key);
+            if let Err(e) = self.note_kv_write(task, did, tid, collection, key) {
+                return self.response_error(task, e);
+            }
             self.response_ok(task)
         } else {
             self.response_error(task, ErrorCode::NotFound)
@@ -99,7 +101,9 @@ impl CoreLoop {
         }
 
         if self.kv_engine.persist(did, tid, collection, key) {
-            self.note_kv_write(task, did, tid, collection, key);
+            if let Err(e) = self.note_kv_write(task, did, tid, collection, key) {
+                return self.response_error(task, e);
+            }
             self.response_ok(task)
         } else {
             self.response_error(task, ErrorCode::NotFound)

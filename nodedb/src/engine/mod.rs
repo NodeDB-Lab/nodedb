@@ -10,5 +10,6 @@ pub mod kv;
 pub mod random;
 pub mod sparse;
 pub mod spatial;
+pub mod storage_bytes;
 pub mod timeseries;
 pub mod vector;
