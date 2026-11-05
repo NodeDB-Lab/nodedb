@@ -37,7 +37,8 @@ mod write_path;
 
 pub(in crate::diag) use array_sync::ArraySnapshotBufferPoisoned;
 pub(in crate::diag) use audit::{
-    AuditFlushNotPersisted, AuditWalAppendFailed, SecurityBusLagged, SecurityBusRowsNotRecorded,
+    AuditFlushNotPersisted, AuditPruneNotApplied, AuditWalAppendFailed, AuditWalNotTruncated,
+    SecurityBusLagged, SecurityBusRowsNotRecorded,
 };
 pub(in crate::diag) use catalog::{
     CatalogApplyOrphanRow, CollectionPurgeRowMissing, ConsumerGroupOffsetsRetained,

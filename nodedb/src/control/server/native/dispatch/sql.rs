@@ -84,6 +84,13 @@ async fn handle_sql_inner(
         return resp(NativeResponse::ok(seq));
     }
 
+    // Each statement's DDL proposals carry its own text, with the parameters
+    // inlined above. A credential statement installs its redacted text.
+    let _audit = crate::control::server::shared::session::audit_context::AuditScope::statement(
+        ctx.identity,
+        sql_trimmed,
+    );
+
     // Transaction control. Its session handlers own the aborted-block state,
     // so it runs before the failed-transaction guard. pgwire classifies with
     // the same function, so both protocols accept the same spellings.

@@ -106,6 +106,16 @@ fn alter_auth_user_status(
     let status_str = parts[6].to_lowercase();
     let status_val: AuthStatus = status_str.parse().map_err(|e: String| err("42601", e))?;
 
+    // A status that restores access needs its record first.
+    // A status that removes access runs even when the audit log is down.
+    if status_val == AuthStatus::Active {
+        super::audit_intent::record_action_intent(
+            state,
+            identity,
+            Some(identity.tenant_id),
+            &format!("ALTER AUTH USER '{user_id}' SET STATUS {status_str}"),
+        )?;
+    }
     let found = state
         .auth_users
         .set_status(user_id, status_val)
@@ -159,6 +169,12 @@ pub fn purge_auth_users(
         .as_secs();
 
     let cutoff = now.saturating_sub(threshold_secs);
+    super::audit_intent::record_action_intent(
+        state,
+        identity,
+        Some(identity.tenant_id),
+        &format!("PURGE AUTH USERS INACTIVE FOR {duration_str}"),
+    )?;
     let purged = state
         .auth_users
         .purge_inactive(cutoff)

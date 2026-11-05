@@ -128,10 +128,18 @@ impl SyncSession {
                 owner,
             );
 
+        let action = format!(
+            "SYNC COLLECTION SCHEMA {} (session {})",
+            msg.descriptor.name, self.session_id
+        );
         let entry = CatalogEntry::PutCollectionIfAbsent(Box::new(stored));
-        if let Err(e) =
-            crate::control::metadata_proposer::propose_catalog_entry_async(shared, &entry).await
-        {
+        let proposed = crate::control::server::shared::session::audit_context::with_action_context(
+            identity,
+            action,
+            crate::control::metadata_proposer::propose_catalog_entry_async(shared, &entry),
+        )
+        .await;
+        if let Err(e) = proposed {
             warn!(
                 session = %self.session_id,
                 collection = %msg.descriptor.name,

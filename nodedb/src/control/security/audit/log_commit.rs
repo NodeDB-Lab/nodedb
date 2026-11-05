@@ -5,19 +5,37 @@
 //! Staging allocates seqs, chains hashes, and appends to the WAL sink under the audit lock.
 //! So WAL order equals seq order.
 //! The sync wait runs with the audit lock released, so concurrent recorders share one fsync.
+//! The WAL fsync runs with no WAL mutex held, so an append during an fsync does not wait for it.
 //! Publishing moves staged entries into the buffer in seq order, once a sync covers them.
 //! A covering sync makes every earlier WAL record durable too.
 //! So a caller can publish every staged entry up to its own last seq.
 //!
 //! An entry whose WAL append or sync failed is still published, so the hash chain stays whole.
 //! Its record call returns the error, and the error is reported.
+//! The exception is an entry whose append failed while the buffer is full.
+//! It has nowhere to live, so it is lost before it takes a seq, and the chain stays whole.
+//!
+//! An async caller reaches these functions from a Tokio worker.
+//! The audit lock wait and the sync wait run in [`hand_off_worker`], so that worker keeps running other tasks.
 
 use std::sync::{Arc, Mutex};
 
 use super::entry::{AuditEntry, hash_entry, now_us};
 use super::guard::lock_audit_log;
-use super::log::{AuditLog, AuditRecordInput};
+use super::log::{AuditLog, AuditRecordInput, WalOnlyRange};
 use super::wal_sink::AuditWalSink;
+
+/// Run `wait`, a blocking wait, without holding up the other tasks of a Tokio worker.
+///
+/// On a multi-thread runtime the worker's task queue moves to another thread for the wait.
+/// A blocking-pool thread, a plain thread, or a current-thread runtime has no such queue to move.
+/// So a current-thread runtime blocks for the wait.
+pub fn hand_off_worker<T>(wait: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current().map(|handle| handle.runtime_flavor()) {
+        Ok(tokio::runtime::RuntimeFlavor::MultiThread) => tokio::task::block_in_place(wait),
+        Ok(_) | Err(_) => wait(),
+    }
+}
 
 /// A batch appended to the WAL sink and staged, waiting for its sync.
 pub struct StagedBatch {
@@ -91,6 +109,26 @@ impl AuditLog {
             Some(sink) => sink.append_batch(&entries).map(Some),
             None => Ok(None),
         };
+        // A full buffer cannot hold an entry the WAL refused, so the batch ends here.
+        // It takes no seq, so the chain stays whole.
+        if self.is_full()
+            && let Err(e) = &appended
+        {
+            return StagedBatch {
+                seqs: Vec::new(),
+                sync_position: None,
+                sink: None,
+                append: Err(crate::Error::Storage {
+                    engine: "audit_log".into(),
+                    detail: format!(
+                        "{} audit entries are lost: the buffer is full and the audit WAL refused \
+                         them ({e}); fix the catalog and the audit WAL directory, then run VERIFY \
+                         AUDIT CHAIN",
+                        entries.len()
+                    ),
+                }),
+            };
+        }
 
         self.next_seq = next_seq;
         self.staged_hash = last_hash;
@@ -99,7 +137,7 @@ impl AuditLog {
         let append = match appended {
             Ok(Some(positions)) => {
                 sync_position = positions.last().copied();
-                self.wal_positions
+                self.staged_positions
                     .extend(seqs.iter().copied().zip(positions.iter().copied()));
                 Ok(())
             }
@@ -143,19 +181,53 @@ impl AuditLog {
             }
             self.published_seq = entry.seq;
             self.published_hash = hash_entry(&entry);
-            self.entries.push_back(entry);
             self.total_entries += 1;
+            let position = self.take_staged_position(entry.seq);
+            match position {
+                Some(position) if self.is_full() => self.extend_wal_only(entry.seq, position),
+                // An entry with no position is in memory only, so it stays in the buffer.
+                // The buffer overshoots by at most the entries staged before it filled up.
+                Some(position) => {
+                    self.wal_positions.push_back((entry.seq, position));
+                    self.entries.push_back(entry);
+                }
+                None => self.entries.push_back(entry),
+            }
         }
-        if self.entries.len() >= self.flush_bound {
+        if self.entries.len() >= self.flush_bound || self.wal_only.is_some() {
             self.flush_control.request_flush();
         }
     }
 
-    /// Record every input in order with one WAL sync, while the caller keeps the audit lock.
+    /// Remove and return the staged WAL position of the entry at `seq`, if the WAL took it.
+    fn take_staged_position(&mut self, seq: u64) -> Option<u64> {
+        while let Some(&(staged_seq, position)) = self.staged_positions.front() {
+            if staged_seq > seq {
+                return None;
+            }
+            self.staged_positions.pop_front();
+            if staged_seq == seq {
+                return Some(position);
+            }
+        }
+        None
+    }
+
+    /// Add the entry at `seq` to the WAL-only range.
+    fn extend_wal_only(&mut self, seq: u64, position: u64) {
+        let first_seq = self.wal_only.map_or(seq, |range| range.first_seq);
+        self.wal_only = Some(WalOnlyRange {
+            first_seq,
+            through_seq: seq,
+            position,
+        });
+    }
+
+    /// Test support: record every input in order with one WAL sync, while the caller keeps the audit lock.
     ///
-    /// Use this only where the lock spans more work, such as a sync session's delta push.
-    /// [`record_batch_concurrent`] lets concurrent recorders share the sync instead.
+    /// Production code uses [`record_batch_concurrent`], so concurrent recorders share the sync.
     /// Returns the seq of each entry, in input order.
+    #[cfg(test)]
     pub fn record_batch_durable<'a>(
         &mut self,
         inputs: impl IntoIterator<Item = AuditRecordInput<'a>>,
@@ -178,13 +250,15 @@ pub fn record_batch_concurrent<'a>(
     audit: &Mutex<AuditLog>,
     inputs: impl IntoIterator<Item = AuditRecordInput<'a>>,
 ) -> crate::Result<Vec<u64>> {
-    let staged = lock_audit_log(audit).stage_batch(inputs);
-    let last = staged.last_seq();
-    let (seqs, durable) = staged.wait_durable();
-    if let Some(last) = last {
-        lock_audit_log(audit).publish_through(last);
-    }
-    durable.map(|()| seqs)
+    hand_off_worker(|| {
+        let staged = lock_audit_log(audit).stage_batch(inputs);
+        let last = staged.last_seq();
+        let (seqs, durable) = staged.wait_durable();
+        if let Some(last) = last {
+            lock_audit_log(audit).publish_through(last);
+        }
+        durable.map(|()| seqs)
+    })
 }
 
 /// Record one entry with [`record_batch_concurrent`], best-effort.
@@ -202,15 +276,17 @@ pub fn record_batch_best_effort<'a>(
     audit: &Mutex<AuditLog>,
     inputs: impl IntoIterator<Item = AuditRecordInput<'a>>,
 ) -> u64 {
-    let staged = lock_audit_log(audit).stage_batch(inputs);
-    let seq = staged.last_seq().unwrap_or(0);
-    let (_, durable) = staged.wait_durable();
-    lock_audit_log(audit).publish_through(seq);
-    if let Err(e) = durable {
-        tracing::error!(error = %e, seq, "audit WAL write failed, entry is in memory only");
-        crate::diag::audit_wal_append_failed(&e, seq);
-    }
-    seq
+    hand_off_worker(|| {
+        let staged = lock_audit_log(audit).stage_batch(inputs);
+        let seq = staged.last_seq().unwrap_or(0);
+        let (_, durable) = staged.wait_durable();
+        lock_audit_log(audit).publish_through(seq);
+        if let Err(e) = durable {
+            tracing::error!(error = %e, seq, "audit WAL write failed, entry is not crash-safe");
+            crate::diag::audit_wal_append_failed(&e, seq);
+        }
+        seq
+    })
 }
 
 #[cfg(test)]
@@ -405,6 +481,51 @@ mod tests {
 
         fn truncate_through(&self, _position: u64) -> crate::Result<()> {
             Ok(())
+        }
+    }
+
+    /// A burst of records on every worker of a multi-thread runtime leaves a worker free.
+    ///
+    /// The sink holds each record for longer than the spawned probe needs to run.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_sync_wait_leaves_the_worker_free() {
+        let sink = Arc::new(GatedSink {
+            open: Mutex::new(false),
+            opened: Condvar::new(),
+            waiting: AtomicBool::new(false),
+        });
+        let audit = Arc::new(Mutex::new(AuditLog::new(1_000)));
+        lock_audit_log(&audit).set_wal_sink(Arc::clone(&sink) as Arc<dyn AuditWalSink>);
+
+        let recorders: Vec<_> = (0..4)
+            .map(|i| {
+                let audit = Arc::clone(&audit);
+                tokio::spawn(async move {
+                    let auth = AuditAuth::default();
+                    let detail = format!("worker-{i}");
+                    record_batch_concurrent(&audit, [input(&detail, &auth)])
+                })
+            })
+            .collect();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !sink.waiting.load(Ordering::Acquire) {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("a recorder reaches the sync");
+
+        // Every recorder waits in its sync. A task spawned now still runs.
+        let probe = tokio::spawn(async { tokio::task::yield_now().await });
+        tokio::time::timeout(Duration::from_secs(10), probe)
+            .await
+            .expect("a waiting recorder must not hold up the worker")
+            .expect("probe task");
+
+        *sink.open.lock().expect("gate") = true;
+        sink.opened.notify_all();
+        for recorder in recorders {
+            recorder.await.expect("recorder task").expect("durable");
         }
     }
 

@@ -64,12 +64,12 @@ pub async fn purge_tenant(
         ));
     }
 
-    state.audit_record(
-        AuditEvent::AdminAction,
+    super::super::audit_intent::record_action_intent(
+        state,
+        identity,
         Some(tenant_id),
-        &identity.username,
         &format!("PURGE TENANT {tid} CONFIRM — deleting all data across all engines"),
-    );
+    )?;
 
     let plan = crate::bridge::envelope::PhysicalPlan::Meta(
         nodedb_physical::physical_plan::MetaOp::PurgeTenant { tenant_id: tid },

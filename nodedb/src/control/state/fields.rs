@@ -29,6 +29,8 @@ pub struct SharedState {
     pub audit: Arc<Mutex<AuditLog>>,
     /// Control Plane recorder for Event Plane audit records, spawned on first use.
     pub(super) audit_recorder: OnceLock<crate::control::security::audit::AuditRecorder>,
+    /// Per-peer bound on the audit rows bearer refusals write.
+    pub bearer_refusal_throttle: crate::control::security::bearer::BearerRefusalThrottle,
     pub api_keys: ApiKeyStore,
     pub roles: RoleStore,
     pub permissions: PermissionStore,

@@ -7,7 +7,7 @@
 //! Boot commits those entries to the catalog before the server takes traffic.
 //! The log then continues the seq counter and the hash chain from the newest persisted entry.
 
-use std::collections::BTreeMap;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use tracing::{info, warn};
@@ -28,21 +28,28 @@ pub fn restore_audit_log(
 ) -> crate::Result<AuditLog> {
     let persisted_max = catalog.load_audit_max_seq()?;
 
-    let mut unflushed: BTreeMap<u64, AuditEntry> = BTreeMap::new();
-    for (_data_lsn, bytes) in wal.recover_audit_entries()? {
-        match zerompk::from_msgpack::<AuditEntry>(&bytes) {
-            Ok(entry) if entry.seq > persisted_max => {
-                unflushed.insert(entry.seq, entry);
-            }
+    // WAL order equals seq order, so a crash during these commits leaves a prefix committed.
+    // The next boot starts above that prefix.
+    let mut chunk: Vec<AuditEntry> = Vec::with_capacity(DEFAULT_FLUSH_BOUND);
+    let mut committed = 0usize;
+    wal.scan_audit_entries(|_data_lsn, bytes| {
+        match zerompk::from_msgpack::<AuditEntry>(bytes) {
+            Ok(entry) if entry.seq > persisted_max => chunk.push(entry),
             Ok(_) => {}
             Err(e) => warn!(error = %e, "skipping malformed audit WAL record"),
         }
-    }
-    if !unflushed.is_empty() {
-        let entries: Vec<AuditEntry> = unflushed.into_values().collect();
-        catalog.append_audit_entries(&entries)?;
+        if chunk.len() >= DEFAULT_FLUSH_BOUND {
+            catalog.append_audit_entries(&chunk)?;
+            committed += chunk.len();
+            chunk.clear();
+        }
+        Ok(ControlFlow::Continue(()))
+    })?;
+    catalog.append_audit_entries(&chunk)?;
+    committed += chunk.len();
+    if committed > 0 {
         info!(
-            count = entries.len(),
+            count = committed,
             "committed unflushed audit WAL entries to the catalog"
         );
     }

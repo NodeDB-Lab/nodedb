@@ -28,7 +28,6 @@
 
 use serde_json::{Map, Value as JsonValue};
 
-use crate::control::security::audit::verify_chain;
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::response_shape::types::ShapedRows;
 use crate::control::state::SharedState;
@@ -272,10 +271,9 @@ pub fn verify_audit_chain(
         return Err(err("42501", "permission denied: requires superuser"));
     }
 
-    let (entries, tail_hash) = state
-        .audit_chain_snapshot()
+    let (report, _last_in_range) = state
+        .verify_audit_chain(1, u64::MAX)
         .map_err(|e| DdlError::from_error_in_context("audit log read failed", &e))?;
-    let report = verify_chain(&entries, 1, u64::MAX, &tail_hash);
     match report.broken_at {
         None => {
             let columns = vec!["status".to_string(), "entries".to_string()];

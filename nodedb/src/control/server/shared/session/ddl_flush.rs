@@ -295,6 +295,16 @@ async fn reserve_buffered(
     // until the finalize applies.
     let constraint_targets = constraint_targets(catalog, &stamped)?;
 
+    // Durable before the batch reserves anything, so a failed record refuses the COMMIT.
+    crate::control::metadata_proposer::audit_intent::record_ddl_intents(
+        state,
+        &stamped
+            .iter()
+            .zip(&audits)
+            .map(|(entry, audit)| (entry, audit.as_ref()))
+            .collect::<Vec<_>>(),
+    )?;
+
     let mut objects = Vec::with_capacity(stamped.len());
     for (entry, audit) in stamped.iter().zip(audits) {
         let payload = catalog_entry::encode(entry)?;

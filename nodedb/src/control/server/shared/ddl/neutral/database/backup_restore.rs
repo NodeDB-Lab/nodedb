@@ -177,6 +177,12 @@ pub async fn restore_database(
             admit_restore_write_quota(state, &scope, *tenant_id, &stats.collection_rows)
                 .map_err(|e| failed(&e))?;
         }
+        super::super::audit_intent::record_action_intent(
+            state,
+            identity,
+            None,
+            &format!("RESTORE DATABASE {name} FROM '{}'", object.uri()),
+        )?;
         database::apply_database(&shared, &backup, force)
             .await
             .map_err(|e| failed(&e))?

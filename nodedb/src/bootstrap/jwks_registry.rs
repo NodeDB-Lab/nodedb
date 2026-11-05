@@ -29,6 +29,7 @@ pub async fn wire_jwks_registry(
     })?;
     let registry =
         Arc::new(JwksRegistry::init(jwt_config, Arc::clone(state.remote_sources.egress())).await?);
+    registry.spawn_refresh_loop(&state.loop_registry, &state.shutdown);
     let catalog_providers = state.credentials.catalog().list_oidc_providers()?;
     // The key fetches run detached, so an unreachable provider never holds
     // up boot. A token that arrives first fetches its keys itself.

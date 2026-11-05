@@ -37,7 +37,9 @@ pub mod undrop_detail;
 pub mod wal_sink;
 
 pub use auth::AuditAuth;
-pub use chain::{ChainReport, checkpoint_detail, verify_chain};
+#[cfg(test)]
+pub use chain::verify_chain;
+pub use chain::{ChainReport, ChainVerifier, checkpoint_detail};
 pub use ddl_detail::DdlAuditDetail;
 pub use emitter::{ArcAuditEmitter, AuditEmitContext, AuditEmitter, NoopAuditEmitter};
 pub use entry::AuditEntry;
@@ -45,6 +47,7 @@ pub use event::AuditEvent;
 pub use export_sink::AuditExportSink;
 pub use flush_control::{
     AuditFlushControl, BACKPRESSURE_MULTIPLE, DEFAULT_BACKPRESSURE_WAIT, DEFAULT_FLUSH_BOUND,
+    HARD_BOUND_MULTIPLE,
 };
 pub use guard::{AuditLogGuard, lock_audit_log};
 pub use level::AuditLevel;

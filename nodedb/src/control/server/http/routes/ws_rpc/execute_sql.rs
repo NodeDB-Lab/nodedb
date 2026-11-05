@@ -43,6 +43,11 @@ pub async fn execute_sql(
     let tenant_id = identity.tenant_id;
     let emitter = ArcAuditEmitter(Arc::clone(&shared.audit));
     authorize_database(identity, database_id, &emitter)?;
+    // The statement's DDL proposals carry its text. Array DDL is the DDL this route runs.
+    let _audit = crate::control::server::shared::session::audit_context::AuditScope::statement(
+        identity,
+        sql.trim(),
+    );
 
     // Quota enforcement — reject before planning or dispatch.
     shared.check_tenant_quota(tenant_id)?;

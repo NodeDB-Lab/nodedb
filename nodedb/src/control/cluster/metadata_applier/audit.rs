@@ -81,11 +81,7 @@ pub(super) fn emit_ddl_audit(
 
     // A consumer offset commit and a backup schedule mark are progress, not
     // a schema change.
-    if matches!(
-        stamped,
-        catalog_entry::CatalogEntry::CommitConsumerOffsets(_)
-            | catalog_entry::CatalogEntry::PutBackupScheduleMark(_)
-    ) {
+    if stamped.is_progress_mark() {
         return;
     }
 
@@ -130,7 +126,7 @@ pub(super) fn emit_ddl_audit(
     // The record's payload is fully built above and needs nothing further from
     // the apply loop, so deferring the emit keeps the compliance row (no silent
     // drop) while letting the loop advance. Hash-chain integrity is unaffected:
-    // `record_with_auth` allocates the sequence number under the same mutex, so
+    // `stage_batch` allocates the sequence number under the same mutex, so
     // chain order follows lock-acquisition order exactly as it does for every
     // other audit writer.
     let audit = std::sync::Arc::clone(&shared.audit);

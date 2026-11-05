@@ -157,6 +157,7 @@ impl SharedState {
             credentials,
             audit,
             audit_recorder: std::sync::OnceLock::new(),
+            bearer_refusal_throttle: Default::default(),
             api_keys,
             roles,
             permissions,

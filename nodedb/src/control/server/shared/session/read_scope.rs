@@ -50,11 +50,24 @@ tokio::task_local! {
 }
 
 /// Run `future`, one request of a session-less protocol, at `consistency`.
+///
+/// The request gets connection slots of its own, as a connection does.
+/// So the statement's DDL audit context follows it across every `.await`.
+/// These protocols have no frame for a statement notice, so a notice left at the end is logged.
 pub fn with_request_consistency<F: Future>(
     consistency: ReadConsistency,
     future: F,
 ) -> impl Future<Output = F::Output> {
-    REQUEST_CONSISTENCY.scope(consistency, future)
+    REQUEST_CONSISTENCY.scope(
+        consistency,
+        super::conn_scope::scoped(async move {
+            let output = future.await;
+            for notice in super::statement_notice::take() {
+                tracing::warn!(notice = %notice, "statement notice on a session-less request");
+            }
+            output
+        }),
+    )
 }
 
 /// Whether a read of the running statement confirms leadership first.

@@ -115,16 +115,12 @@ pub async fn set_permission_tree(
         .map_err(|e| DdlError::from_error(&e))?;
 
     // Audit.
-    state
-        .audit
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .record(
-            crate::control::security::audit::AuditEvent::AdminAction,
-            Some(tenant_id),
-            &identity.username,
-            &format!("SET PERMISSION_TREE on '{collection}'"),
-        );
+    state.audit_record(
+        crate::control::security::audit::AuditEvent::AdminAction,
+        Some(tenant_id),
+        &identity.username,
+        &format!("SET PERMISSION_TREE on '{collection}'"),
+    );
 
     Ok(status("ALTER COLLECTION"))
 }
@@ -194,16 +190,12 @@ pub async fn drop_permission_tree(
             collection.clone(),
         ));
 
-    state
-        .audit
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .record(
-            crate::control::security::audit::AuditEvent::AdminAction,
-            Some(tenant_id),
-            &identity.username,
-            &format!("DROP PERMISSION_TREE on '{collection}'"),
-        );
+    state.audit_record(
+        crate::control::security::audit::AuditEvent::AdminAction,
+        Some(tenant_id),
+        &identity.username,
+        &format!("DROP PERMISSION_TREE on '{collection}'"),
+    );
 
     Ok(status("ALTER COLLECTION"))
 }

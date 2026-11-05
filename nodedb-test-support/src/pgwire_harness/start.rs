@@ -248,6 +248,12 @@ impl TestServer {
             // Inject a fixed test KEK so backup tests produce encrypted envelopes.
             // Deterministic 32-byte key — same value every test run.
             s.backup_kek = Some(Arc::new([0x42u8; 32]));
+            // A fixed credential key, so `CREATE CREDENTIAL` runs as on a configured server.
+            s.remote_sources.credential_kek = Some(Arc::new(
+                nodedb::control::security::source_credential::CredentialKek::from_bytes(
+                    [0x43u8; 32],
+                ),
+            ));
             s.governor = init_test_memory_governor();
             s.tuning.graph = graph_tuning.clone();
             if let Some(promql_tuning) = cfg.promql_tuning {

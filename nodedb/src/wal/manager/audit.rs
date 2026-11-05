@@ -68,6 +68,19 @@ impl WalManager {
         }
     }
 
+    /// Visit every audit WAL record in LSN order, one at a time, until the visitor breaks.
+    ///
+    /// The visitor gets `(data_lsn, audit_entry_bytes)`. It can see a record twice.
+    pub fn scan_audit_entries(
+        &self,
+        visit: impl FnMut(u64, &[u8]) -> crate::Result<std::ops::ControlFlow<()>>,
+    ) -> crate::Result<()> {
+        match self.audit_wal {
+            Some(ref audit_wal) => audit_wal.scan(visit),
+            None => Ok(()),
+        }
+    }
+
     /// Drop every audit WAL record at or below `audit_lsn`.
     ///
     /// The caller must pass only an LSN whose record, and every earlier one, the catalog has committed.

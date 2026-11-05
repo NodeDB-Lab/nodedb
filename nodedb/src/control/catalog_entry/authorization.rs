@@ -10,6 +10,14 @@
 use super::entry::CatalogEntry;
 
 impl CatalogEntry {
+    /// Whether this entry records progress, not a schema change. It gets no DDL audit row.
+    pub fn is_progress_mark(&self) -> bool {
+        matches!(
+            self,
+            Self::CommitConsumerOffsets(_) | Self::PutBackupScheduleMark(_)
+        )
+    }
+
     /// Whether applying this entry can change what a statement is allowed to
     /// read or write.
     pub fn bears_authorization(&self) -> bool {

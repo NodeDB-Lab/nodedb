@@ -71,6 +71,7 @@ impl SharedState {
     /// Returns an error if the durable audit WAL write fails.
     /// A buffer past its backpressure point makes this wait for a flush, with a time bound.
     /// The wait holds no lock, and this call never runs a flush itself.
+    /// A full buffer refuses the record, so the caller refuses the audited action.
     pub fn audit_record_with_db_strict(
         &self,
         event: crate::control::security::audit::AuditEvent,
@@ -79,15 +80,35 @@ impl SharedState {
         source: &str,
         detail: &str,
     ) -> crate::Result<()> {
-        self.audit_record_with_backpressure(
+        let auth = crate::control::security::audit::AuditAuth::default();
+        self.audit_record_batch_strict([crate::control::security::audit::AuditRecordInput {
             event,
             tenant_id,
             database_id,
             source,
             detail,
-            &crate::control::security::audit::AuditAuth::default(),
-        )
-        .0
+            auth: &auth,
+        }])
+    }
+
+    /// Record every input with one sync, and return only when all of them are durable.
+    ///
+    /// This is the strict path, with the same rules as [`Self::audit_record_with_db_strict`].
+    pub fn audit_record_batch_strict<'a>(
+        &self,
+        inputs: impl IntoIterator<Item = crate::control::security::audit::AuditRecordInput<'a>>,
+    ) -> crate::Result<()> {
+        if crate::control::security::audit::lock_audit_log(&self.audit).is_full() {
+            return Err(crate::Error::Storage {
+                engine: "audit_log".into(),
+                detail: "audit record refused: the audit buffer is full because the catalog \
+                         refuses flushes; fix the catalog under the data directory and retry"
+                    .into(),
+            });
+        }
+        crate::control::security::audit::record_batch_concurrent(&self.audit, inputs)?;
+        self.await_audit_backpressure();
+        Ok(())
     }
 
     /// Record an audit event, then wait for a flush when the buffer is past its backpressure point.
@@ -165,6 +186,7 @@ impl SharedState {
             crate::control::security::audit::lock_audit_log(&self.audit).needs_backpressure();
         match outcome {
             Ok(seqs) => (Ok(()), seqs.first().copied().unwrap_or(0), backpressure),
+            // A full buffer whose WAL refused the entry gives the entry no seq.
             Err(e) => {
                 let seq = crate::control::security::audit::lock_audit_log(&self.audit).last_seq();
                 (Err(e), seq, backpressure)
@@ -175,9 +197,13 @@ impl SharedState {
     /// Record a batch of Event Plane audit records with one WAL sync, with no backpressure wait.
     ///
     /// Runs on the recorder's blocking task, never on the Event Plane.
-    /// `commit` is marked once the batch is staged in the log, under the audit lock.
+    /// `commit` is marked staged under the audit lock, once the batch is in the log.
     /// The sync wait then runs with the lock released, and the batch is published after it.
-    /// A panic before staging returns the whole batch. A panic after it returns nothing.
+    /// `commit` is marked durable only when the sync covered the batch.
+    ///
+    /// A full buffer refuses the batch and leaves `commit` unmarked.
+    /// A panic before staging leaves it unmarked too, so the sender records the batch again.
+    /// A failed append or sync leaves it staged, so the sender waits for a flush to commit the batch.
     pub fn record_pending_batch(
         &self,
         records: &[crate::control::security::audit::PendingAudit],
@@ -186,6 +212,14 @@ impl SharedState {
         let auth = crate::control::security::audit::AuditAuth::default();
         let staged = {
             let mut log = crate::control::security::audit::lock_audit_log(&self.audit);
+            if log.is_full() {
+                warn!(
+                    count = records.len(),
+                    "audit buffer is full, the Event Plane batch stays unrecorded"
+                );
+                log.flush_control().request_flush();
+                return;
+            }
             let staged = log.stage_batch(records.iter().map(|record| {
                 crate::control::security::audit::AuditRecordInput {
                     event: record.event.clone(),
@@ -196,7 +230,9 @@ impl SharedState {
                     auth: &auth,
                 }
             }));
-            commit.mark_committed();
+            if let Some(last) = staged.last_seq() {
+                commit.mark_staged(last);
+            }
             staged
         };
         let last = staged.last_seq();
@@ -205,27 +241,47 @@ impl SharedState {
         if let Some(last) = last {
             crate::control::security::audit::lock_audit_log(&self.audit).publish_through(last);
         }
-        if let Err(e) = durable {
-            error!(
-                error = %e,
-                seq,
-                count = records.len(),
-                "audit WAL write failed — batch recorded in-memory only"
-            );
-            crate::diag::audit_wal_append_failed(&e, seq);
+        match durable {
+            Ok(()) => commit.mark_durable(),
+            Err(e) => {
+                error!(
+                    error = %e,
+                    seq,
+                    count = records.len(),
+                    "audit WAL write failed, the Event Plane holds its watermark until a flush \
+                     commits the batch"
+                );
+                crate::diag::audit_wal_append_failed(&e, seq);
+            }
         }
     }
 
-    /// Record Event Plane audit records with one WAL sync, then apply the backpressure wait once.
-    pub fn record_pending_audits(&self, records: &[crate::control::security::audit::PendingAudit]) {
-        let commit = crate::control::security::audit::recorder::BatchCommit::default();
-        self.record_pending_batch(records, &commit);
+    /// [`Self::record_pending_batch`] for a batch the recorder task did not record, with the
+    /// backpressure wait after it.
+    pub fn record_pending_audits(
+        &self,
+        records: &[crate::control::security::audit::PendingAudit],
+        commit: &crate::control::security::audit::recorder::BatchCommit,
+    ) {
+        self.record_pending_batch(records, commit);
         self.await_audit_backpressure();
+    }
+
+    /// Commit every published entry through `through_seq` to the catalog.
+    ///
+    /// Returns whether the catalog holds the entry at `through_seq`.
+    /// This is the durable path for a batch whose WAL append or sync failed.
+    /// Publishing first covers a batch whose recorder panicked in its sync wait.
+    pub fn settle_audit_through(&self, through_seq: u64) -> bool {
+        crate::control::security::audit::lock_audit_log(&self.audit).publish_through(through_seq);
+        self.flush_audit_log();
+        crate::control::security::audit::lock_audit_log(&self.audit).is_persisted(through_seq)
     }
 
     /// Wait for a flush when the buffer is past its backpressure point, with a time bound.
     ///
     /// The wait holds no lock. With no flush executor running it returns at once.
+    /// An async caller's worker keeps running other tasks during the wait.
     fn await_audit_backpressure(&self) {
         let control = {
             let log = crate::control::security::audit::lock_audit_log(&self.audit);
@@ -234,9 +290,36 @@ impl SharedState {
             }
             log.flush_control()
         };
-        if control.executor_attached() && !control.await_flush() {
-            warn!("audit flush did not finish within the backpressure wait, entries stay buffered");
+        if control.executor_attached()
+            && !crate::control::security::audit::log_commit::hand_off_worker(|| {
+                control.await_flush()
+            })
+        {
+            warn!("no audit flush committed within the backpressure wait, entries stay recorded");
         }
+    }
+
+    /// Close the bearer refusal window: write one `AuthFailure` row per peer past its row limit.
+    pub fn close_bearer_refusal_window(&self) {
+        let summaries = self.bearer_refusal_throttle.close_window();
+        if summaries.is_empty() {
+            return;
+        }
+        let details: Vec<String> = summaries.iter().map(|summary| summary.detail()).collect();
+        let auth = crate::control::security::audit::AuditAuth::default();
+        crate::control::security::audit::record_batch_best_effort(
+            &self.audit,
+            summaries.iter().zip(&details).map(|(summary, detail)| {
+                crate::control::security::audit::AuditRecordInput {
+                    event: crate::control::security::audit::AuditEvent::AuthFailure,
+                    tenant_id: None,
+                    database_id: None,
+                    source: &summary.source,
+                    detail,
+                    auth: &auth,
+                }
+            }),
+        );
     }
 
     /// The Control Plane recorder for Event Plane audit records. The first call spawns it.
@@ -289,9 +372,21 @@ impl SharedState {
 
     /// Record an audit event with strict durability.
     ///
-    /// Returns an error if the durable audit WAL write fails. Callers that
-    /// guard data mutations MUST use this and abort on failure — the accounting
-    /// standard requires: "If the audit write fails, the data write also fails."
+    /// Returns an error if the durable audit WAL write fails.
+    /// A caller that guards a mutation records first, and refuses the action on the error.
+    /// So a failed audit write fails the data write, and a durable row precedes the commit.
+    ///
+    /// What each path guarantees:
+    /// - Catalog DDL from a statement, credentials and grants included: a durable `ActionIntent`
+    ///   row before the proposal, at the three chokepoints in `metadata_proposer` and `ddl_flush`.
+    ///   Its `DdlChange` row follows the apply on every replica, and that row is best-effort.
+    /// - Store and engine actions outside the catalog: a durable `ActionIntent` row before the
+    ///   mutation, through `neutral::audit_intent`. Their result row is best-effort.
+    /// - Internal catalog proposals with no statement: a `DdlChange` row after the apply only.
+    /// - Row DML: its row follows the commit. The Event Plane watermark holds until the row is
+    ///   durable, and WAL catch-up delivers it again after a crash.
+    /// - Actions that remove access, such as a blacklist entry, a kill, or a lockdown:
+    ///   best-effort, because an audit outage must not block a security response.
     pub fn audit_record_strict(
         &self,
         event: crate::control::security::audit::AuditEvent,

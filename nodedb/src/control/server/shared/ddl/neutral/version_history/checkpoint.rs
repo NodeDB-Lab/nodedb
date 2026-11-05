@@ -94,16 +94,12 @@ pub async fn create_checkpoint(
     }
     super::replicate::propose_put(state, &record).await?;
 
-    state
-        .audit
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .record(
-            crate::control::security::audit::AuditEvent::AdminAction,
-            Some(tenant_id),
-            &identity.username,
-            &format!("CREATE CHECKPOINT '{checkpoint_name}' on {collection}/{doc_id}"),
-        );
+    state.audit_record(
+        crate::control::security::audit::AuditEvent::AdminAction,
+        Some(tenant_id),
+        &identity.username,
+        &format!("CREATE CHECKPOINT '{checkpoint_name}' on {collection}/{doc_id}"),
+    );
 
     Ok(vec![DdlResult::Status {
         command: "CREATE CHECKPOINT".to_string(),
@@ -142,16 +138,12 @@ pub async fn drop_checkpoint(
     }
     super::replicate::propose_delete(state, doc, &checkpoint_name).await?;
 
-    state
-        .audit
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .record(
-            crate::control::security::audit::AuditEvent::AdminAction,
-            Some(tenant_id),
-            &identity.username,
-            &format!("DROP CHECKPOINT '{checkpoint_name}' on {collection}/{doc_id}"),
-        );
+    state.audit_record(
+        crate::control::security::audit::AuditEvent::AdminAction,
+        Some(tenant_id),
+        &identity.username,
+        &format!("DROP CHECKPOINT '{checkpoint_name}' on {collection}/{doc_id}"),
+    );
 
     Ok(vec![DdlResult::Status {
         command: "DROP CHECKPOINT".to_string(),

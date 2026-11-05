@@ -12,7 +12,7 @@ use nodedb_types::DatabaseId;
 use super::database::{DatabaseCounters, DatabaseMetricsRegistry};
 
 /// Escape a label value per the Prometheus text format.
-fn escape_label(v: &str) -> String {
+pub(crate) fn escape_label(v: &str) -> String {
     v.replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('\n', "\\n")

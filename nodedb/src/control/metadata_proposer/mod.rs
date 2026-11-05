@@ -32,6 +32,7 @@
 //!    nothing was proposed. A forward with no answer returns
 //!    `Error::DeadlineExceeded`: the outcome is unknown.
 
+pub(crate) mod audit_intent;
 pub mod catalog;
 pub mod catalog_batch;
 pub mod ddl_owner;

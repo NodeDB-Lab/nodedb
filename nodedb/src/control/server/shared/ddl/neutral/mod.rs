@@ -9,6 +9,7 @@
 
 pub mod alert;
 pub mod apikey;
+pub mod audit_intent;
 pub mod auth_key;
 mod auth_support;
 pub mod auth_user;

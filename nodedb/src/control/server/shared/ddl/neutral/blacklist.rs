@@ -231,6 +231,13 @@ fn lift(
         &crate::control::security::blacklist::store::BlacklistStore,
     ) -> crate::Result<bool>,
 ) -> Result<Vec<DdlResult>, DdlError> {
+    // Lifting a block restores access, so its record comes first.
+    super::audit_intent::record_action_intent(
+        state,
+        identity,
+        Some(identity.tenant_id),
+        &format!("UNBLACKLIST {kind} '{key}'"),
+    )?;
     let removed = remove(&state.blacklist).map_err(|e| DdlError::from_error(&e))?;
     if !removed {
         return Err(err(

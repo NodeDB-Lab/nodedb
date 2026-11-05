@@ -20,13 +20,16 @@
 //! forensic audit event records the session, principal, target, reason, and
 //! payload hash. Authorization/RLS denials use typed `DeltaReject` responses.
 
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 use tracing::warn;
 
 use super::wire::DeltaPushMsg;
-use crate::control::security::audit::{AuditEvent, AuditLog};
+use crate::control::security::audit::{
+    AuditAuth, AuditEvent, AuditLog, AuditRecordInput, record_concurrent,
+};
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::security::jwt::{JwtConfig, JwtError, JwtValidator};
 use crate::control::security::util::base64_url_decode;
@@ -135,7 +138,7 @@ impl std::fmt::Display for SyncRejectionReason {
 /// No DeltaReject frame is sent to the client — this prevents information
 /// leakage about which policies exist or what conditions triggered rejection.
 pub fn log_silent_rejection(
-    audit_log: &mut AuditLog,
+    audit_log: &Mutex<AuditLog>,
     session_id: &str,
     identity: &AuthenticatedIdentity,
     delta: &DeltaPushMsg,
@@ -156,11 +159,16 @@ pub fn log_silent_rejection(
         delta.delta.len(),
     );
 
-    audit_log.record(
-        AuditEvent::AuthzDenied,
-        Some(identity.tenant_id),
-        session_id,
-        &detail,
+    record_concurrent(
+        audit_log,
+        AuditRecordInput {
+            event: AuditEvent::AuthzDenied,
+            tenant_id: Some(identity.tenant_id),
+            database_id: None,
+            source: session_id,
+            detail: &detail,
+            auth: &AuditAuth::default(),
+        },
     );
 
     warn!(
@@ -226,13 +234,14 @@ mod tests {
 
     #[test]
     fn silent_rejection_logs_audit() {
-        let mut audit_log = AuditLog::new(100);
+        let audit_log = Mutex::new(AuditLog::new(100));
         let identity = test_identity(1, "alice");
         let delta = make_delta("orders", "o1", &serde_json::json!({"x": 1}));
         let reason = SyncRejectionReason::RateLimited { retry_after_ms: 25 };
 
-        log_silent_rejection(&mut audit_log, "sess-1", &identity, &delta, &reason);
+        log_silent_rejection(&audit_log, "sess-1", &identity, &delta, &reason);
 
+        let audit_log = audit_log.lock().expect("audit lock");
         assert_eq!(audit_log.len(), 1);
         let entry = &audit_log.all()[0];
         assert_eq!(entry.event, AuditEvent::AuthzDenied);
@@ -251,10 +260,7 @@ mod tests {
         let identity = test_identity(1, "carol");
         let delta = make_delta("orders", "o2", &serde_json::json!({"x": 2}));
         let reason = SyncRejectionReason::RateLimited { retry_after_ms: 10 };
-        {
-            let mut log = audit.lock().expect("audit lock");
-            log_silent_rejection(&mut log, "sess-crash", &identity, &delta, &reason);
-        }
+        log_silent_rejection(&audit, "sess-crash", &identity, &delta, &reason);
         drop(audit);
 
         let replayed = replay_after_crash(&wal);

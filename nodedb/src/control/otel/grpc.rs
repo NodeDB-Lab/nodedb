@@ -61,7 +61,7 @@ async fn grpc_metrics(
 ) -> impl IntoResponse {
     let identity = match authenticate_otel(&headers, &shared, &peer.to_string()).await {
         Ok(identity) => identity,
-        Err(message) => return grpc_error(StatusCode::UNAUTHORIZED, &message),
+        Err(error) => return grpc_error(StatusCode::UNAUTHORIZED, &error.to_string()),
     };
     let payload = grpc_decode(&body);
     let Ok(req) = proto::ExportMetricsServiceRequest::decode(&payload[..]) else {
@@ -81,7 +81,7 @@ async fn grpc_traces(
 ) -> impl IntoResponse {
     let identity = match authenticate_otel(&headers, &shared, &peer.to_string()).await {
         Ok(identity) => identity,
-        Err(message) => return grpc_error(StatusCode::UNAUTHORIZED, &message),
+        Err(error) => return grpc_error(StatusCode::UNAUTHORIZED, &error.to_string()),
     };
     let payload = grpc_decode(&body);
     let Ok(req) = proto::ExportTraceServiceRequest::decode(&payload[..]) else {
@@ -101,7 +101,7 @@ async fn grpc_logs(
 ) -> impl IntoResponse {
     let identity = match authenticate_otel(&headers, &shared, &peer.to_string()).await {
         Ok(identity) => identity,
-        Err(message) => return grpc_error(StatusCode::UNAUTHORIZED, &message),
+        Err(error) => return grpc_error(StatusCode::UNAUTHORIZED, &error.to_string()),
     };
     let payload = grpc_decode(&body);
     let Ok(req) = proto::ExportLogsServiceRequest::decode(&payload[..]) else {

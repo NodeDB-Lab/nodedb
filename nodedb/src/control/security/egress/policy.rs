@@ -54,6 +54,16 @@ pub struct EgressPolicy {
     pub cidrs: Vec<Cidr>,
 }
 
+/// The host of `url`, the only part of a configured URL a log line can show.
+///
+/// A webhook URL carries secrets in its path, query or user info.
+pub fn url_host_for_log(url: &str) -> String {
+    Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_string))
+        .unwrap_or_else(|| "<no host>".to_string())
+}
+
 impl EgressPolicy {
     /// No relaxation: https, DNS names, global unicast addresses.
     pub fn strict() -> Self {
@@ -129,6 +139,13 @@ mod tests {
         let hosts: Vec<String> = hosts.iter().map(|h| (*h).to_string()).collect();
         let cidrs: Vec<String> = cidrs.iter().map(|c| (*c).to_string()).collect();
         EgressPolicy::from_parts(http, &hosts, &cidrs).expect("valid allow-list")
+    }
+
+    #[test]
+    fn a_log_line_shows_the_host_and_no_secret() {
+        let host = url_host_for_log("https://user:pw@hooks.example.com/T00/s3cret?token=abc#frag");
+        assert_eq!(host, "hooks.example.com");
+        assert_eq!(url_host_for_log("not a url s3cret"), "<no host>");
     }
 
     #[test]

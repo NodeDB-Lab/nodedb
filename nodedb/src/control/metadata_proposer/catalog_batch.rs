@@ -126,6 +126,14 @@ async fn propose_replicated(
         else {
             return Ok::<_, Error>(None);
         };
+        let audit = crate::control::server::shared::session::audit_context::current();
+        super::audit_intent::record_ddl_intents(
+            shared,
+            &entries
+                .iter()
+                .map(|entry| (entry, audit.as_ref()))
+                .collect::<Vec<_>>(),
+        )?;
         let mut wrapped = Vec::with_capacity(entries.len());
         for entry in &entries {
             wrapped.push(catalog_ddl_entry(entry)?);

@@ -10,6 +10,7 @@
 
 use nodedb::config::auth::{JwtAuthConfig, JwtProviderConfig};
 use nodedb::control::security::audit::{AuditEntry, AuditEvent};
+use nodedb::control::security::bearer::refusal_throttle::REFUSAL_ROWS_PER_WINDOW;
 use nodedb::control::security::oidc::verify_bearer_token;
 use nodedb::control::security::ratelimit::limiter::LoginRateLimitOutcome;
 use nodedb::control::server::session_auth::authenticate_bearer_jwt;
@@ -184,13 +185,26 @@ async fn bearer_refusals_never_feed_lockout_or_login_rate_limits() {
     ddl_ok(&state, &su, "CREATE USER alice WITH PASSWORD 'pass'").await;
     create_catalog_provider(&state, "lockout_idp", issuer, "audit-api", &jwks_uri, "*").await;
 
-    for _ in 0..25 {
+    let limit = REFUSAL_ROWS_PER_WINDOW as usize;
+    for _ in 0..limit + 5 {
         verify_bearer_token(&state, &forged_token, PEER, SESSION)
             .await
             .expect_err("a forged token must be refused");
     }
 
-    assert_eq!(bearer_entries(&state, AuditEvent::AuthFailure).len(), 25);
+    assert_eq!(bearer_entries(&state, AuditEvent::AuthFailure).len(), limit);
+    state.close_bearer_refusal_window();
+    let refusals = bearer_entries(&state, AuditEvent::AuthFailure);
+    assert_eq!(
+        refusals.len(),
+        limit + 1,
+        "one summary row closes the window"
+    );
+    let summary = refusals.last().expect("summary row");
+    assert!(
+        summary.detail.contains("5 more refusals"),
+        "the summary counts the refusals with no row: {summary:?}"
+    );
     state
         .credentials
         .check_lockout("alice")

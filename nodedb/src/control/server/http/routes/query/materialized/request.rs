@@ -65,6 +65,12 @@ async fn query_at_consistency(
     authorize_database(&identity, database_id, &emitter).map_err(crate::Error::from)?;
 
     let sql = body.sql.as_str();
+    // The statement's DDL proposals carry its text. A credential statement
+    // installs its redacted text.
+    let _audit = crate::control::server::shared::session::audit_context::AuditScope::statement(
+        &identity,
+        sql.trim(),
+    );
 
     // Request-selected database is authoritative for RLS vars; passing it as the
     // session database makes `scope.database_id()` resolve to `database_id`.

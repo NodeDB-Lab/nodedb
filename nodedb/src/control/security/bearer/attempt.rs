@@ -13,6 +13,9 @@
 //! The `sub` of a refused token is unverified text the client chose.
 //! Counting it against the account of that name lets anyone lock out or suspend any account.
 //! A refusal after signature checks is a policy refusal, and policy refusals never count either.
+//!
+//! The audit row of a refusal is bounded per peer, see [`super::refusal_throttle`].
+//! The caller's answer to the client does not depend on it.
 
 use crate::control::security::audit::{AuditAuth, AuditEvent};
 use crate::control::security::escalation::{
@@ -88,21 +91,23 @@ impl<'a> BearerAttempt<'a> {
         }
     }
 
-    /// Record the refusal as one `AuthFailure`.
+    /// Record the refusal as one `AuthFailure`, or count it when its peer is past its row limit.
     pub fn refuse(&self, state: &SharedState, reason: &str) {
-        let detail = format!(
-            "bearer login refused: {} reason={reason:?}",
-            self.fields(self.claimed_sub.as_deref())
-        );
-        record_auth_violation(
-            state,
-            AuthViolation {
-                subject: ViolationSubject::AuditOnly,
-                tenant_id: self.tenant_id,
-                source: self.peer_addr,
-                detail: &detail,
-            },
-        );
+        if state.bearer_refusal_throttle.admit(self.peer_addr) {
+            let detail = format!(
+                "bearer login refused: {} reason={reason:?}",
+                self.fields(self.claimed_sub.as_deref())
+            );
+            record_auth_violation(
+                state,
+                AuthViolation {
+                    subject: ViolationSubject::AuditOnly,
+                    tenant_id: self.tenant_id,
+                    source: self.peer_addr,
+                    detail: &detail,
+                },
+            );
+        }
         state.auth_metrics.record_auth_failure(METRICS_METHOD);
     }
 
@@ -272,6 +277,59 @@ mod tests {
         }
         assert_eq!(state.escalation.tracked_users(), 0);
         assert_eq!(state.auth_users.get_status("42"), None);
+    }
+
+    #[test]
+    fn a_flood_of_refusals_aggregates_and_never_touches_a_login_row() {
+        use crate::control::security::bearer::refusal_throttle::REFUSAL_ROWS_PER_WINDOW;
+
+        let (state, _dir) = state();
+        let peer = "203.0.113.7:9000";
+        let flood = REFUSAL_ROWS_PER_WINDOW as usize + 30;
+        for _ in 0..flood {
+            BearerAttempt::new(BearerMethod::JwtBearer, peer, "").refuse(&state, "bad token");
+        }
+        assert_eq!(
+            entries(&state, AuditEvent::AuthFailure).len(),
+            REFUSAL_ROWS_PER_WINDOW as usize,
+            "the rows of one peer stop at its limit"
+        );
+        assert!(
+            state
+                .auth_metrics
+                .auth_failure_jwt
+                .load(std::sync::atomic::Ordering::Relaxed)
+                >= flood as u64,
+            "the metrics still count every refusal"
+        );
+
+        // A login from the flooding peer always writes its row.
+        for _ in 0..3 {
+            BearerAttempt::new(BearerMethod::JwtBearer, peer, "s").accept(
+                &state,
+                &identity(),
+                "alice",
+            );
+        }
+        assert_eq!(entries(&state, AuditEvent::AuthSuccess).len(), 3);
+
+        state.close_bearer_refusal_window();
+        let failures = entries(&state, AuditEvent::AuthFailure);
+        assert_eq!(failures.len(), REFUSAL_ROWS_PER_WINDOW as usize + 1);
+        let summary = failures.last().expect("the summary row");
+        assert_eq!(summary.source, "203.0.113.7");
+        assert!(
+            summary.detail.contains("30 more refusals"),
+            "{}",
+            summary.detail
+        );
+
+        state.close_bearer_refusal_window();
+        assert_eq!(
+            entries(&state, AuditEvent::AuthFailure).len(),
+            REFUSAL_ROWS_PER_WINDOW as usize + 1,
+            "an empty window writes no row"
+        );
     }
 
     #[test]

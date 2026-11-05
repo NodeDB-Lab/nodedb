@@ -138,6 +138,9 @@ pub enum AuditEvent {
     DatabaseIdleTimeoutChanged = 45,
     /// An OIDC provider was created, altered, or dropped.
     OidcProviderChanged = 46,
+    /// A statement's durable record of intent, written before its mutation commits.
+    /// A record that fails refuses the action, so a row here does not prove the action ran.
+    ActionIntent = 47,
 }
 
 impl AuditEvent {
@@ -194,6 +197,7 @@ impl AuditEvent {
             Self::DatabaseAuditDmlChanged => 44,
             Self::DatabaseIdleTimeoutChanged => 45,
             Self::OidcProviderChanged => 46,
+            Self::ActionIntent => 47,
         }
     }
 
@@ -246,7 +250,8 @@ impl AuditEvent {
             | Self::DmlAudit
             | Self::DatabaseAuditDmlChanged
             | Self::DatabaseIdleTimeoutChanged
-            | Self::OidcProviderChanged => false,
+            | Self::OidcProviderChanged
+            | Self::ActionIntent => false,
         }
     }
 
@@ -302,6 +307,7 @@ impl AuditEvent {
             Self::DatabaseAuditDmlChanged => "database_audit_dml_changed",
             Self::DatabaseIdleTimeoutChanged => "database_idle_timeout_changed",
             Self::OidcProviderChanged => "oidc_provider_changed",
+            Self::ActionIntent => "action_intent",
         }
     }
 
@@ -354,7 +360,8 @@ impl AuditEvent {
             | Self::DatabaseRestored
             | Self::DatabaseAuditDmlChanged
             | Self::DatabaseIdleTimeoutChanged
-            | Self::OidcProviderChanged => AuditLevel::Standard,
+            | Self::OidcProviderChanged
+            | Self::ActionIntent => AuditLevel::Standard,
             Self::DmlAudit => AuditLevel::Forensic,
         }
     }

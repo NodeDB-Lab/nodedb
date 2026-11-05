@@ -97,11 +97,13 @@ async fn propose_and_apply_locally(
     let proposed = async {
         drain_prior_version(shared, entry, &mut drains).await?;
         let (stamped, targets) = stamp(shared, entry)?;
+        let audit = crate::control::server::shared::session::audit_context::current();
+        super::audit_intent::record_ddl_intents(shared, &[(&stamped, audit.as_ref())])?;
         let log_index = propose_prepared(
             shared,
             handle.as_ref(),
             lease.token(),
-            catalog_ddl_entry(&stamped)?,
+            catalog_ddl_entry_with(&stamped, audit)?,
             StatementDeadline::of_statement(shared).instant(),
         )
         .await?;

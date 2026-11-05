@@ -181,9 +181,9 @@ fn spawn_security_loops(shared: &Arc<SharedState>) {
     crate::control::security::sessions::spawn_idle_sweep_loop(shared);
     info!("idle session sweep loop running");
 
-    // Ships the audit/auth events buffered by `audit_record_with_db_strict`
-    // to the configured webhook. No task when no SIEM destination is
-    // configured.
+    // Ships the audit and auth events the audit log's export sink buffers to
+    // the configured webhook. Every published entry reaches that sink. No task
+    // runs when no SIEM destination is configured.
     crate::control::security::siem::spawn_export_loop(shared);
 }
 

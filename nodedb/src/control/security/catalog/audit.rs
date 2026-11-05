@@ -207,6 +207,32 @@ impl SystemCatalog {
         Ok(newest_first)
     }
 
+    /// Visit the persisted entries at or below `through_seq`, in ascending seq order, one at a time.
+    ///
+    /// One read transaction covers the scan, so a prune during it changes nothing the scan sees.
+    pub fn scan_audit_entries(
+        &self,
+        through_seq: u64,
+        mut visit: impl FnMut(AuditEntry) -> crate::Result<()>,
+    ) -> crate::Result<()> {
+        let read_txn = self
+            .db
+            .begin_read()
+            .map_err(|e| catalog_err("read txn", e))?;
+        let table = read_txn
+            .open_table(AUDIT_LOG)
+            .map_err(|e| catalog_err("open audit_log", e))?;
+        for row in table.range(..).map_err(|e| catalog_err("range audit", e))? {
+            let (_, value) = row.map_err(|e| catalog_err("read audit", e))?;
+            let entry = decode_entry(value.value())?;
+            if entry.seq > through_seq {
+                break;
+            }
+            visit(entry)?;
+        }
+        Ok(())
+    }
+
     /// Count total audit entries (for diagnostics).
     pub fn audit_entry_count(&self) -> crate::Result<u64> {
         let read_txn = self

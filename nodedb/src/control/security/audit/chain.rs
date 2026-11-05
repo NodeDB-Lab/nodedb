@@ -57,57 +57,133 @@ pub struct ChainReport {
     pub last_hash: String,
 }
 
+/// Verifies the chain one entry at a time, holding no entry.
+///
+/// It keeps the checkpoint anchors, one per prune, and the last hash.
+/// Feed the whole log in ascending seq order with one entry per seq.
+/// Entries before `from_seq` still feed the link of the first entry in range.
+pub struct ChainVerifier<'a> {
+    from_seq: u64,
+    to_seq: u64,
+    /// The live log's last hash. It covers the newest entry, which no successor checks.
+    tail_hash: &'a str,
+    /// A later checkpoint can anchor the oldest entry, so that link is judged at the end.
+    anchors: HashMap<u64, String>,
+    /// The oldest entry's seq and `prev_hash`.
+    oldest: Option<(u64, String)>,
+    /// The hash the next entry must link to.
+    expected: Option<String>,
+    newest_seq: Option<u64>,
+    /// Link checks ended: a link broke, or an entry passed `to_seq`.
+    stopped: bool,
+    report: ChainReport,
+    /// Highest seq fed that lies in the requested range.
+    last_in_range: Option<u64>,
+}
+
+impl<'a> ChainVerifier<'a> {
+    /// A verifier that reports on the seqs in `from_seq..=to_seq`.
+    pub fn new(from_seq: u64, to_seq: u64, tail_hash: &'a str) -> Self {
+        Self {
+            from_seq,
+            to_seq,
+            tail_hash,
+            anchors: HashMap::new(),
+            oldest: None,
+            expected: None,
+            newest_seq: None,
+            stopped: false,
+            report: ChainReport {
+                checked: 0,
+                broken_at: None,
+                last_hash: String::new(),
+            },
+            last_in_range: None,
+        }
+    }
+
+    /// Feed the next entry.
+    pub fn push(&mut self, entry: &AuditEntry) {
+        if let Some((seq, hash)) = checkpoint_anchor(entry) {
+            self.anchors.insert(seq, hash.to_string());
+        }
+        self.newest_seq = Some(entry.seq);
+        if (self.from_seq..=self.to_seq).contains(&entry.seq) {
+            self.last_in_range = Some(entry.seq);
+        }
+        if self.stopped {
+            return;
+        }
+        if entry.seq > self.to_seq {
+            self.stopped = true;
+            return;
+        }
+        let linked = match &self.expected {
+            Some(prev) => entry.prev_hash == *prev,
+            None => {
+                self.oldest = Some((entry.seq, entry.prev_hash.clone()));
+                true
+            }
+        };
+        let hash = hash_entry(entry);
+        if entry.seq >= self.from_seq {
+            if !linked {
+                self.report.broken_at = Some(entry.seq);
+                self.stopped = true;
+                return;
+            }
+            self.report.checked += 1;
+            self.report.last_hash.clone_from(&hash);
+        }
+        self.expected = Some(hash);
+    }
+
+    /// The highest seq fed that lies in the requested range.
+    pub fn last_in_range(&self) -> Option<u64> {
+        self.last_in_range
+    }
+
+    /// End the scan and report.
+    pub fn finish(self) -> ChainReport {
+        // The oldest entry is either the genesis entry or a pruned head with a recorded anchor.
+        if let Some((seq, prev_hash)) = &self.oldest
+            && *seq >= self.from_seq
+            && !((*seq == 1 && prev_hash.is_empty())
+                || self.anchors.get(seq).is_some_and(|hash| hash == prev_hash))
+        {
+            return ChainReport {
+                checked: 0,
+                broken_at: Some(*seq),
+                last_hash: String::new(),
+            };
+        }
+        let mut report = self.report;
+        if !self.stopped
+            && let Some(newest) = self.newest_seq
+            && newest >= self.from_seq
+            && report.last_hash != self.tail_hash
+        {
+            report.broken_at = Some(newest);
+        }
+        report
+    }
+}
+
 /// Verify the chain over `entries` and report on the seqs in `from_seq..=to_seq`.
 ///
 /// `entries` must be the whole log in ascending seq order with one entry per seq.
-/// Entries before `from_seq` still feed the link of the first entry in range.
-/// `tail_hash` is the live log's last hash.
-/// It covers the newest entry, which has no successor to detect an edit to it.
+#[cfg(test)]
 pub fn verify_chain(
     entries: &[AuditEntry],
     from_seq: u64,
     to_seq: u64,
     tail_hash: &str,
 ) -> ChainReport {
-    let anchors: HashMap<u64, &str> = entries.iter().filter_map(checkpoint_anchor).collect();
-    let mut report = ChainReport {
-        checked: 0,
-        broken_at: None,
-        last_hash: String::new(),
-    };
-    let mut expected: Option<String> = None;
-
+    let mut verifier = ChainVerifier::new(from_seq, to_seq, tail_hash);
     for entry in entries {
-        if entry.seq > to_seq {
-            return report;
-        }
-        let linked = match &expected {
-            Some(prev) => entry.prev_hash == *prev,
-            // The oldest entry is either the genesis entry or a pruned head with a recorded anchor.
-            None => {
-                (entry.seq == 1 && entry.prev_hash.is_empty())
-                    || anchors.get(&entry.seq) == Some(&entry.prev_hash.as_str())
-            }
-        };
-        let hash = hash_entry(entry);
-        if entry.seq >= from_seq {
-            if !linked {
-                report.broken_at = Some(entry.seq);
-                return report;
-            }
-            report.checked += 1;
-            report.last_hash.clone_from(&hash);
-        }
-        expected = Some(hash);
+        verifier.push(entry);
     }
-
-    if let Some(newest) = entries.last()
-        && newest.seq >= from_seq
-        && report.last_hash != tail_hash
-    {
-        report.broken_at = Some(newest.seq);
-    }
-    report
+    verifier.finish()
 }
 
 #[cfg(test)]

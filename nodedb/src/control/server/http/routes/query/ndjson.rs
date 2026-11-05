@@ -89,6 +89,10 @@ async fn ndjson_at_consistency(
     if sql.is_empty() {
         return (StatusCode::BAD_REQUEST, "empty SQL").into_response();
     }
+    // The statement's DDL proposals carry its text. Array DDL is the DDL this route runs.
+    let _audit = crate::control::server::shared::session::audit_context::AuditScope::statement(
+        &identity, sql,
+    );
 
     let tenant_id = identity.tenant_id;
 

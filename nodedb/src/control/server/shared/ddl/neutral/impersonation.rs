@@ -51,6 +51,12 @@ pub fn impersonate(
     }
     let target_id = parts[3].trim_matches('\'');
 
+    super::audit_intent::record_action_intent(
+        state,
+        identity,
+        Some(identity.tenant_id),
+        &format!("{} impersonating {target_id}", identity.username),
+    )?;
     state
         .impersonation
         .start_impersonation(

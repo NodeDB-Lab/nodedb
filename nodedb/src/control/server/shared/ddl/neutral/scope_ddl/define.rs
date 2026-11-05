@@ -68,6 +68,12 @@ pub fn define_scope(
         }
     }
 
+    super::super::audit_intent::record_action_intent(
+        state,
+        identity,
+        Some(identity.tenant_id),
+        &format!("DEFINE SCOPE '{scope_name}'"),
+    )?;
     state
         .scope_defs
         .define(scope_name, grants, includes, &identity.username)
@@ -97,6 +103,12 @@ pub fn drop_scope(
     }
     let name = parts[2].trim_matches('\'');
 
+    super::super::audit_intent::record_action_intent(
+        state,
+        identity,
+        Some(identity.tenant_id),
+        &format!("DROP SCOPE '{name}'"),
+    )?;
     let found = state
         .scope_defs
         .drop_scope(name)
