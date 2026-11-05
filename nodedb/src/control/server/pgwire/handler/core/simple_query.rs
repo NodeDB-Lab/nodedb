@@ -31,7 +31,7 @@ impl SimpleQueryHandler for NodeDbPgHandler {
 
         // Keep this statement ineligible for idle teardown until every exit
         // path completes and the guard stamps the session's last activity.
-        let _in_flight = InFlightGuard::new(&self.sessions, session_id);
+        let _in_flight = InFlightGuard::new(&self.sessions, session_id, "simple_query");
 
         // Pin this statement's deadline before any work is planned or
         // dispatched. Every Control -> Data envelope the statement fans out

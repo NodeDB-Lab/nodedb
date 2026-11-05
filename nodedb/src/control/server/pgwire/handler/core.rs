@@ -189,7 +189,7 @@ impl ExtendedQueryHandler for NodeDbPgHandler {
     {
         let session_id = self.session_id;
         // Keep long-running prepared statements ineligible for idle teardown.
-        let _in_flight = InFlightGuard::new(&self.sessions, session_id);
+        let _in_flight = InFlightGuard::new(&self.sessions, session_id, "extended_query");
 
         // Same statement scope the simple-query path installs: one pinned
         // deadline for every request this statement fans out into.

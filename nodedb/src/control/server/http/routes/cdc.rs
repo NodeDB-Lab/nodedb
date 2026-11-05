@@ -23,6 +23,7 @@ use crate::control::change_stream::{
 };
 use crate::control::security::audit::ArcAuditEmitter;
 use crate::control::security::identity::Permission;
+use crate::control::security::sessions::{SessionBindRequest, bind_session, stream_until_ended};
 use crate::control::server::shared::authorization::{authorize_collection, authorize_database};
 
 #[derive(Deserialize, Default)]
@@ -94,6 +95,11 @@ pub async fn sse_stream(
         .query_changes_in_database(tenant_id, database_id, Some(&collection), start, usize::MAX)
         .map_err(reset_error)?;
     let mut cursor = snapshot.cursor;
+    let binding = bind_session(
+        &shared,
+        SessionBindRequest::new(&identity.0, "sse", peer.as_str()).in_database(database_id),
+    )
+    .map_err(ApiError::from)?;
     let stream = async_stream::stream! {
         for replayed in snapshot.events { yield Ok(format_sse_event(&replayed.event, &replayed.cursor)); }
         loop {
@@ -116,7 +122,7 @@ pub async fn sse_stream(
             }
         }
     };
-    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+    Ok(Sse::new(stream_until_ended(stream, binding)).keep_alive(KeepAlive::default()))
 }
 
 pub async fn poll_changes(

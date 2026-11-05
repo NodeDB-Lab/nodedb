@@ -262,6 +262,7 @@ mod secret_audit_text;
 mod serial_sequence_rollback_no_leak;
 mod session_database_ddl;
 mod session_handle_security;
+mod session_kill_resp_ilp;
 mod session_plan_cache_permission_tree_revoke;
 mod session_plan_cache_rls_revoke;
 mod session_statement_timeout;

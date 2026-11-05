@@ -2,7 +2,7 @@
 
 //! WebSocket RPC upgrade handler and connection lifecycle.
 //!
-//! Accepts WebSocket connections at `/ws`. Clients send JSON requests
+//! Accepts WebSocket connections at `/v1/ws`. Clients send JSON requests
 //! and receive JSON responses. Supports SQL query execution, live query
 //! subscriptions, and ping/pong.
 //!
@@ -34,11 +34,13 @@ use tracing::{debug, warn};
 
 use crate::control::change_stream::LiveSubscriptionSet;
 use crate::control::security::audit::ArcAuditEmitter;
+use crate::control::security::sessions::{SessionBindRequest, SessionBinding, bind_session};
 use crate::control::server::http::auth::{AppState, ResolvedIdentity};
 use crate::control::server::shared::authorization::authorize_database;
 use crate::control::server::shared::{ConnectionFutureOutcome, isolate_connection_future};
 use crate::types::DatabaseId;
 
+use super::format;
 use super::process_message::{MessageContext, process_message};
 
 /// WebSocket upgrade handler.
@@ -85,15 +87,28 @@ pub async fn ws_handler(
         )
         .into_response();
     }
+    // The bind comes before the upgrade, so a session cap refuses the handshake.
+    let binding = match bind_session(
+        &state.shared,
+        SessionBindRequest::new(&identity, "websocket", &peer_addr).in_database(database_id),
+    ) {
+        Ok(binding) => binding,
+        Err(error) => {
+            return crate::control::server::http::auth::ApiError::from(error).into_response();
+        }
+    };
     let trace_id = crate::control::trace_context::extract_from_headers(&headers);
     ws.on_upgrade(move |socket| async move {
         match isolate_connection_future(handle_ws_connection(
             socket,
             state,
-            identity,
-            database_id,
-            trace_id,
-            peer_addr,
+            WsSession {
+                identity,
+                binding,
+                database_id,
+                trace_id,
+                peer_addr,
+            },
         ))
         .await
         {
@@ -153,29 +168,28 @@ impl Drop for AbortOnDropJoinHandle {
 fn handle_ws_connection(
     socket: WebSocket,
     state: AppState,
+    session: WsSession,
+) -> BoxFuture<'static, ()> {
+    Box::pin(serve_ws_connection(socket, state, session))
+}
+
+/// What one upgraded connection serves under.
+struct WsSession {
     identity: crate::control::security::identity::AuthenticatedIdentity,
+    binding: SessionBinding,
     database_id: DatabaseId,
     trace_id: nodedb_types::TraceId,
     peer_addr: String,
-) -> BoxFuture<'static, ()> {
-    Box::pin(serve_ws_connection(
-        socket,
-        state,
-        identity,
+}
+
+async fn serve_ws_connection(socket: WebSocket, state: AppState, session: WsSession) {
+    let WsSession {
+        mut identity,
+        mut binding,
         database_id,
         trace_id,
         peer_addr,
-    ))
-}
-
-async fn serve_ws_connection(
-    socket: WebSocket,
-    state: AppState,
-    identity: crate::control::security::identity::AuthenticatedIdentity,
-    database_id: DatabaseId,
-    trace_id: nodedb_types::TraceId,
-    peer_addr: String,
-) {
+    } = session;
     let (mut sender, mut receiver) = socket.split();
     let shared = Arc::clone(&state.shared);
 
@@ -205,9 +219,32 @@ async fn serve_ws_connection(
     let mut resume_set = LiveSubscriptionSet::new();
     let mut resume_authenticated = false;
 
-    while let Some(Ok(msg)) = receiver.next().await {
+    loop {
+        // The kill races only the read. A message in progress finishes, because
+        // a dropped statement can stay half done.
+        let msg = tokio::select! {
+            biased;
+            ended = binding.ended() => {
+                debug!(error = %ended, "ws-rpc session killed; closing connection");
+                let frame = format::error_response(serde_json::Value::Null, &ended.to_string());
+                let _ = live_tx.send(frame).await;
+                break;
+            }
+            msg = receiver.next() => match msg {
+                Some(Ok(msg)) => msg,
+                Some(Err(_)) | None => break,
+            },
+        };
         match msg {
             Message::Text(text) => {
+                // A credential change reaches this message's identity.
+                if let Err(error) = binding.refresh(&shared, &mut identity) {
+                    let frame = format::error_response(serde_json::Value::Null, &error.to_string());
+                    let _ = live_tx.send(frame).await;
+                    break;
+                }
+                binding.touch(text.len() as u64, 0);
+                binding.set_statement("websocket_request");
                 let context = MessageContext {
                     shared: Arc::clone(&shared),
                     query_ctx: &state.query_ctx,
@@ -226,6 +263,13 @@ async fn serve_ws_connection(
                 )
                 .await;
                 resume_authenticated |= authenticated;
+                binding.touch(0, response.len() as u64);
+                // A quiet socket with a live subscription is not idle.
+                if live_set.is_empty() && resume_set.is_empty() {
+                    binding.clear_statement();
+                } else {
+                    binding.set_statement("live_subscription");
+                }
 
                 if let Err(e) = live_tx.send(response).await {
                     debug!("response channel closed: {e}; dropping connection");

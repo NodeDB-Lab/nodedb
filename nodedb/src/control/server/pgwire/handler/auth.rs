@@ -19,6 +19,7 @@ use crate::control::server::shared::session::{SessionId, SessionStore};
 use crate::control::state::SharedState;
 use nodedb_physical::physical_task::PhysicalTask;
 
+use super::super::types::error_to_sqlstate;
 use super::core::NodeDbPgHandler;
 
 /// Resolve the identity shared by pgwire Parse and Execute paths.
@@ -37,6 +38,16 @@ pub(super) fn resolve_session_identity<C: ClientInfo>(
         .get("user")
         .cloned()
         .unwrap_or_else(|| "unknown".to_string());
+
+    // A killed session runs no new statement. The `FATAL` closes the connection.
+    let binding = sessions.binding(*session_id);
+    if let Some(binding) = &binding {
+        binding.check().map_err(|error| {
+            let (_, code, message) = error_to_sqlstate(&error);
+            fatal(code, message)
+        })?;
+        binding.touch(0, 0);
+    }
 
     let authenticated_identity = match auth_mode {
         AuthMode::Trust => {
@@ -66,12 +77,14 @@ pub(super) fn resolve_session_identity<C: ClientInfo>(
                 })?
         }
         AuthMode::Password | AuthMode::Certificate => {
-            stored_user_identity(state, &username, AuthMethod::ScramSha256).ok_or_else(|| {
-                PgWireError::UserError(Box::new(ErrorInfo::new(
-                    "FATAL".to_owned(),
-                    "28000".to_owned(),
+            // The user id must match the one bound at startup: a DROP followed
+            // by same-name recreation must not inherit this socket.
+            let bound_user_id = binding.as_ref().map(|binding| binding.user_id());
+            bound_password_identity(state, &username, bound_user_id).ok_or_else(|| {
+                fatal(
+                    "28000",
                     format!("authenticated user '{username}' not found in credential store"),
-                )))
+                )
             })?
         }
     };
@@ -98,6 +111,25 @@ pub(super) fn resolve_session_identity<C: ClientInfo>(
     sessions.set_identity(*session_id, identity.clone());
 
     Ok(identity)
+}
+
+/// The stored identity of `username`, only while it is the user this connection
+/// bound at startup. `None` for no binding, a dropped user, or a recreated name.
+fn bound_password_identity(
+    state: &SharedState,
+    username: &str,
+    bound_user_id: Option<u64>,
+) -> Option<AuthenticatedIdentity> {
+    stored_user_identity(state, username, AuthMethod::ScramSha256)
+        .filter(|current_identity| Some(current_identity.user_id) == bound_user_id)
+}
+
+fn fatal(code: &str, message: String) -> PgWireError {
+    PgWireError::UserError(Box::new(ErrorInfo::new(
+        "FATAL".to_owned(),
+        code.to_owned(),
+        message,
+    )))
 }
 
 /// Enforce the TLS policy for a pgwire connection.
@@ -184,4 +216,42 @@ pub(super) fn pgwire_authorization_error(error: AuthorizationError) -> PgWireErr
         "42501".to_owned(),
         crate::Error::from(error).to_string(),
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::bridge::dispatch::Dispatcher;
+    use crate::control::security::identity::Role;
+    use crate::types::TenantId;
+    use crate::wal::WalManager;
+
+    /// The kill normally closes such a socket first. This holds with no kill,
+    /// so a statement that passes the kill check still cannot act as the new user.
+    #[test]
+    fn a_recreated_name_does_not_match_the_bound_user_id() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal = Arc::new(WalManager::open_for_testing(&dir.path().join("t.wal")).expect("wal"));
+        let (dispatcher, _) = Dispatcher::new(1, 64);
+        let state = SharedState::new(dispatcher, wal).expect("state");
+        let create = || {
+            state
+                .credentials
+                .create_user("reborn", "pw", TenantId::new(1), vec![Role::ReadOnly])
+                .expect("create user")
+        };
+        let first_id = create();
+        assert!(bound_password_identity(&state, "reborn", Some(first_id)).is_some());
+
+        state.credentials.drop_user("reborn").expect("drop user");
+        assert!(bound_password_identity(&state, "reborn", Some(first_id)).is_none());
+
+        let second_id = create();
+        assert_ne!(first_id, second_id);
+        assert!(bound_password_identity(&state, "reborn", Some(first_id)).is_none());
+        assert!(bound_password_identity(&state, "reborn", Some(second_id)).is_some());
+        assert!(bound_password_identity(&state, "reborn", None).is_none());
+    }
 }

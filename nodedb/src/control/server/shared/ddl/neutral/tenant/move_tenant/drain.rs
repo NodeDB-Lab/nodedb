@@ -11,16 +11,15 @@
 //! The drain is owned by this move ([`move_tenant_drain_owner`]) and covers
 //! every descriptor version, so a DDL on a moving collection neither ends it
 //! nor escapes it by bumping the version. It stays active until the cutover's
-//! catalog entry applies, which ends it on every node, or until [`release`]
-//! ends it.
+//! catalog entry applies, which ends it on every node, or until its holds drop
+//! or [`release`] ends it. A dropped statement strands no drain.
 
 use std::time::{Duration, Instant};
 
 use crate::control::lease::{
-    drain_for_owner_async, end_drain_async, move_source_descriptor, move_tenant_drain_owner,
+    DrainHolds, drain_for_owner_async, end_drain_async, move_source_descriptor,
+    move_tenant_drain_owner,
 };
-use crate::control::security::audit::AuditEvent;
-use crate::control::security::sessions::KillReason;
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TenantId};
 use nodedb_cluster::DescriptorId;
@@ -31,12 +30,16 @@ use nodedb_types::NodeDbError;
 /// A drain that does not finish within `timeout`, or a catalog read or
 /// propose error, ends every drain this phase started and fails with the
 /// retryable drain-timeout error. The source is left untouched.
-pub async fn run(
-    state: &SharedState,
+///
+/// The returned [`DrainHolds`] own the drains from before each start. Dropping
+/// them or this future, as a killed connection does, ends the drains in the
+/// background. The caller calls [`DrainHolds::keep`] once the cutover commits.
+pub(crate) async fn run<'a>(
+    state: &'a SharedState,
     tenant_id: TenantId,
     source_db_id: DatabaseId,
     timeout: Duration,
-) -> Result<(), NodeDbError> {
+) -> Result<DrainHolds<'a>, NodeDbError> {
     let timed_out = || {
         NodeDbError::move_tenant_drain_timeout(
             tenant_id.as_u64().to_string(),
@@ -44,32 +47,20 @@ pub async fn run(
         )
     };
 
-    let killed = state
-        .session_registry
-        .kill_sessions_for_tenant(tenant_id.as_u64(), KillReason::AdminKill);
-    state.audit_record(
-        AuditEvent::SessionRevoked,
-        Some(tenant_id),
-        "move_tenant",
-        &format!(
-            "tenant_id={} source_db={} sessions_killed={killed}",
-            tenant_id.as_u64(),
-            source_db_id.as_u64()
-        ),
-    );
-
     let descriptors = source_descriptors(state, source_db_id)
         .map_err(|e| timed_out().with_cause(crate::error_classify::classify(&e)))?;
     let owner = move_tenant_drain_owner(tenant_id.as_u64(), source_db_id.as_u64());
     let deadline = Instant::now() + timeout;
+    let mut holds = DrainHolds::new(state);
     for id in descriptors {
+        holds.hold(id.clone(), owner.clone());
         let remaining = deadline.saturating_duration_since(Instant::now());
         if let Err(e) = drain_for_owner_async(state, id, owner.clone(), remaining).await {
-            release(state, tenant_id, source_db_id).await;
+            holds.end().await;
             return Err(timed_out().with_cause(crate::error_classify::classify(&e)));
         }
     }
-    Ok(())
+    Ok(holds)
 }
 
 /// End the drain on every live collection of the source database.
@@ -122,58 +113,39 @@ fn source_descriptors(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::*;
-    use crate::bridge::dispatch::Dispatcher;
-    use crate::control::security::sessions::SessionParams;
-    use crate::wal::WalManager;
+    use crate::control::security::catalog::StoredCollection;
 
-    fn session_in_tenant(user_id: u64, tenant_id: u64) -> SessionParams {
-        SessionParams {
-            user_id,
-            username: format!("user{user_id}"),
-            db_user: format!("user{user_id}"),
-            peer_addr: "127.0.0.1:5555".to_string(),
-            protocol: "native".to_string(),
-            auth_method: "password".to_string(),
-            tenant_id,
-            credential_version: 0,
-            current_database: None,
-            token_expiry_ms: None,
+    /// A killed connection drops the statement future, and the holds with it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dropping_the_holds_ends_the_move_drain() {
+        let cluster = crate::control::cluster::test_one_node::boot().await;
+        let state = &cluster.state;
+        let source = DatabaseId::new(70);
+        let mut orders = StoredCollection::stamped_for_test(5, "orders", "mover");
+        orders.database_id = source;
+        state
+            .credentials
+            .catalog()
+            .put_collection(source, &orders)
+            .expect("seed the source collection");
+        let id = move_source_descriptor(source.as_u64(), 5, "orders");
+
+        let holds = run(state, TenantId::new(5), source, Duration::from_secs(5))
+            .await
+            .expect("an unleased collection drains at once");
+        assert!(state.lease_drain.is_draining(&id, 1));
+
+        drop(holds);
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while state.lease_drain.is_draining(&id, 1) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "a dropped statement left its drain in force"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
-    }
-
-    /// The tenant's sessions end. A user whose id equals the tenant's number keeps
-    /// its session, and the user-keyed bus carries no event for that number.
-    #[tokio::test]
-    async fn the_drain_phase_ends_the_moved_tenants_sessions_only() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let wal =
-            Arc::new(WalManager::open_for_testing(&dir.path().join("test.wal")).expect("wal"));
-        let (dispatcher, _) = Dispatcher::new(1, 64);
-        let state = SharedState::new(dispatcher, wal).expect("state");
-        let mut si_rx = state.credentials.subscribe_session_invalidation();
-        let moved = state
-            .session_registry
-            .register("moved", &session_in_tenant(5, 7))
-            .expect("register");
-        let other = state
-            .session_registry
-            .register("other", &session_in_tenant(7, 8))
-            .expect("register");
-
-        run(
-            &state,
-            TenantId::new(7),
-            DatabaseId::new(70),
-            Duration::from_secs(1),
-        )
-        .await
-        .expect("a source database with no collections drains at once");
-
-        assert_eq!(*moved.borrow(), KillReason::AdminKill);
-        assert_eq!(*other.borrow(), KillReason::Alive);
-        assert!(si_rx.try_recv().is_err());
+        cluster.shutdown().await;
     }
 }

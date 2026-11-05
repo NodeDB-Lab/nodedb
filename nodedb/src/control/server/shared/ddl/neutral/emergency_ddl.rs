@@ -133,7 +133,7 @@ pub fn bulk_blacklist(
             blacklisted_count += 1;
 
             if kill_sessions {
-                killed_count += state.session_registry.kill_sessions_for_username(
+                killed_count += state.session_registry.kill_sessions_for_principal(
                     &user.id,
                     crate::control::security::sessions::KillReason::AdminKill,
                 );

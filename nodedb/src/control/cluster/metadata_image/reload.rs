@@ -53,6 +53,17 @@ pub(super) async fn reload_registries(
     shared.scope_grants.reload_from_catalog(catalog)?;
     shared.quota_manager.load_from(catalog)?;
     reload_tenants(shared, before, after);
+    // An image carries a `MOVE TENANT` cutover as finished state, so no post-apply
+    // ended the moved sessions on this node.
+    for (database, tenant) in before.moved_tenant_scopes(after) {
+        shared
+            .session_registry
+            .kill_sessions_for_tenant_in_database(
+                tenant,
+                crate::types::DatabaseId::new(database),
+                crate::control::security::sessions::KillReason::AdminKill,
+            );
+    }
 
     // DDL objects.
     triggers::repair_triggers(&shared.trigger_registry, catalog)?;

@@ -76,6 +76,10 @@ pub(crate) async fn open_and_wire_state(
         nodedb::control::state::OpenConfig {
             auth: &config.auth,
             egress: Arc::new(config.egress.checked_policy()?),
+            max_active_sessions: config
+                .cluster
+                .as_ref()
+                .map_or(0, |cluster| cluster.max_active_sessions),
         },
         config.tuning.clone(),
         is_cluster,

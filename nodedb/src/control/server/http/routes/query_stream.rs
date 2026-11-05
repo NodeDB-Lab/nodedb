@@ -23,6 +23,9 @@ use futures::StreamExt;
 use crate::control::gateway::core::QueryContext;
 use crate::control::security::audit::ArcAuditEmitter;
 use crate::control::security::identity::AuthenticatedIdentity;
+use crate::control::security::sessions::{
+    SessionBindRequest, SessionBinding, bind_session, stream_until_ended,
+};
 use crate::control::server::exchange::streamable::streamable_gather_child;
 use crate::control::server::response_shape::cell::row_to_wire_json;
 use crate::control::server::response_shape::compose::shape_decoded_rows;
@@ -127,6 +130,28 @@ pub(super) struct NdjsonBody {
     /// The database charged for a mid-stream error.
     pub database_id: nodedb_types::DatabaseId,
     pub meter_guard: Option<DetachedMeterGuard>,
+}
+
+/// Register a streamed response in the session registry, ahead of its body.
+pub(super) fn stream_binding(
+    state: &crate::control::state::SharedState,
+    identity: &AuthenticatedIdentity,
+    peer_addr: &str,
+    database_id: crate::types::DatabaseId,
+) -> crate::Result<SessionBinding> {
+    bind_session(
+        state,
+        SessionBindRequest::new(identity, "http_stream", peer_addr).in_database(database_id),
+    )
+}
+
+/// [`ndjson_body_stream`] that ends at its next batch when `binding` is killed.
+/// This is the path a client disconnect takes, and the binding lives with the body.
+pub(super) fn bound_ndjson_body(
+    body: NdjsonBody,
+    binding: SessionBinding,
+) -> impl futures::Stream<Item = Result<Bytes, std::io::Error>> {
+    stream_until_ended(ndjson_body_stream(body), binding)
 }
 
 /// Build a lazy NDJSON byte stream from a [`ResultStream`].

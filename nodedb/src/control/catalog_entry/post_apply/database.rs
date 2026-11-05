@@ -30,8 +30,13 @@ pub fn delete(db_id: u64, shared: Arc<SharedState>) {
     shared.mirror.fence.remove(database_id);
 }
 
-/// Post-apply for `PutDatabaseGrant`.
-pub fn put_grant(_db_id: u64, _user_id: u64, _privilege: String, _shared: Arc<SharedState>) {}
+/// Post-apply for `PutDatabaseGrant`. A session-lifetime identity copies the
+/// grant set, so open sessions rebuild it at their next request.
+pub fn put_grant(_db_id: u64, user_id: u64, _privilege: String, shared: Arc<SharedState>) {
+    shared.credentials.mark_identity_changed(user_id);
+}
 
-/// Post-apply for `DeleteDatabaseGrant`.
-pub fn delete_grant(_db_id: u64, _user_id: u64, _privilege: String, _shared: Arc<SharedState>) {}
+/// Post-apply for `DeleteDatabaseGrant`. See [`put_grant`].
+pub fn delete_grant(_db_id: u64, user_id: u64, _privilege: String, shared: Arc<SharedState>) {
+    shared.credentials.mark_identity_changed(user_id);
+}

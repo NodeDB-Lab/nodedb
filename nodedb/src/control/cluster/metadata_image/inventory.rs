@@ -17,6 +17,7 @@ use crate::types::TenantId;
 pub(super) type ObjectKey = (u64, u64, String);
 
 /// Catalog objects whose change the Data Plane or a live registry must see.
+#[derive(Default)]
 pub(super) struct Inventory {
     pub(super) collections: HashMap<ObjectKey, StoredCollection>,
     pub(super) arrays: HashMap<ObjectKey, ArrayCatalogEntry>,
@@ -53,6 +54,32 @@ pub(super) fn now_ms() -> u64 {
 }
 
 impl Inventory {
+    /// The `(database, tenant)` pairs a `MOVE TENANT` emptied between `self` and
+    /// `after`.
+    ///
+    /// A cutover the image carries leaves no entry to apply, so the move shows as
+    /// an object that left its database while its tenant holds the same name in
+    /// another one. A drop in that window with the same name elsewhere reads the
+    /// same way, and costs that tenant's sessions in the database a reconnect.
+    pub(super) fn moved_tenant_scopes(&self, after: &Inventory) -> HashSet<(u64, u64)> {
+        let names_after: HashSet<(u64, &str)> = after
+            .collections
+            .keys()
+            .chain(after.arrays.keys())
+            .map(|(_, tenant, name)| (*tenant, name.as_str()))
+            .collect();
+        self.collections
+            .keys()
+            .chain(self.arrays.keys())
+            .filter(|key| {
+                !after.collections.contains_key(*key)
+                    && !after.arrays.contains_key(*key)
+                    && names_after.contains(&(key.1, key.2.as_str()))
+            })
+            .map(|(database, tenant, _)| (*database, *tenant))
+            .collect()
+    }
+
     /// Read the inventory from `catalog`.
     pub(super) fn read(catalog: &SystemCatalog) -> crate::Result<Self> {
         let collections = catalog
@@ -157,5 +184,39 @@ impl Inventory {
             tenant_quotas,
             preauthorizations,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn inventory_of(objects: &[(u64, u64, &str)]) -> Inventory {
+        let mut inventory = Inventory::default();
+        for (database, tenant, name) in objects {
+            inventory.collections.insert(
+                (*database, *tenant, (*name).to_string()),
+                StoredCollection::stamped_for_test(*tenant, name, "owner"),
+            );
+        }
+        inventory
+    }
+
+    #[test]
+    fn an_object_that_changed_database_marks_its_source_scope() {
+        let before = inventory_of(&[(70, 5, "orders"), (70, 6, "users"), (72, 5, "kept")]);
+        let after = inventory_of(&[(71, 5, "orders"), (70, 6, "users"), (72, 5, "kept")]);
+
+        let scopes = before.moved_tenant_scopes(&after);
+
+        assert_eq!(scopes, HashSet::from([(70, 5)]));
+    }
+
+    #[test]
+    fn a_plain_drop_marks_no_scope() {
+        let before = inventory_of(&[(70, 5, "orders")]);
+        let after = inventory_of(&[]);
+
+        assert!(before.moved_tenant_scopes(&after).is_empty());
     }
 }

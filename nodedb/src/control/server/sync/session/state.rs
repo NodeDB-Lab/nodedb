@@ -23,6 +23,9 @@ pub struct SyncSession {
     pub identity: Option<AuthenticatedIdentity>,
     /// Whether the handshake completed successfully.
     pub authenticated: bool,
+    /// The registry row and kill signal of the handshake's identity. A handshake
+    /// clears it and binds its own identity ahead of the `HandshakeAck`.
+    pub binding: Option<crate::control::security::sessions::SessionBinding>,
     /// Client's vector clock per collection.
     pub client_clock: HashMap<String, HashMap<String, u64>>,
     /// Server's vector clock per collection (latest LSN).
@@ -110,6 +113,7 @@ impl SyncSession {
             username: None,
             identity: None,
             authenticated: false,
+            binding: None,
             client_clock: HashMap::new(),
             server_clock: HashMap::new(),
             subscribed_shapes: Vec::new(),

@@ -102,6 +102,8 @@ pub fn sweep_once(session_registry: &Arc<SessionRegistry>, global_idle_secs: u64
         };
         // last_active is stored in seconds; convert to ms for deadline arithmetic.
         let last_active_ms = entry.last_active_secs * 1_000;
+        // A busy session is not idle, so only its token expiry applies.
+        let idle_secs = if entry.busy { 0 } else { idle_secs };
         let deadline = next_close_deadline_ms(entry.token_expiry_ms, last_active_ms, idle_secs);
         let Some(dl) = deadline else {
             continue;
@@ -112,6 +114,17 @@ pub fn sweep_once(session_registry: &Arc<SessionRegistry>, global_idle_secs: u64
                 let _ = session_registry.kill_session_by_id(&entry.session_id, reason);
             }
         }
+    }
+}
+
+/// Copy each session's database idle cap from the cache into its row, so an
+/// `ALTER DATABASE` reaches open sessions at the next tick.
+fn refresh_idle_caps(state: &SharedState) {
+    for entry in state.session_registry.sweep_snapshot() {
+        state.session_registry.set_idle_timeout_secs(
+            &entry.session_id,
+            state.idle_timeout_cache.get(entry.current_database),
+        );
     }
 }
 
@@ -136,6 +149,7 @@ pub fn spawn_idle_sweep_loop(shared: &Arc<SharedState>) {
                 if shutdown.is_cancelled() {
                     break;
                 }
+                refresh_idle_caps(&shared_sweep);
                 let global_idle = shared_sweep.idle_timeout_secs();
                 sweep_once(&shared_sweep.session_registry, global_idle);
             }
@@ -199,5 +213,69 @@ mod tests {
         let now = 100_000u64;
         let reason = kill_reason_for(9_999_000, 1_000_000, 300, now);
         assert_eq!(reason, KillReason::Alive);
+    }
+
+    fn registered(
+        registry: &SessionRegistry,
+        session_id: &str,
+    ) -> tokio::sync::watch::Receiver<KillReason> {
+        registry
+            .register(
+                session_id,
+                &crate::control::security::sessions::SessionParams {
+                    user_id: 1,
+                    username: "u".to_string(),
+                    db_user: "u".to_string(),
+                    peer_addr: "127.0.0.1:1".to_string(),
+                    protocol: "test".to_string(),
+                    auth_method: "password".to_string(),
+                    tenant_id: 1,
+                    credential_version: 0,
+                    current_database: None,
+                    token_expiry_ms: None,
+                    api_key_id: None,
+                },
+            )
+            .expect("register")
+    }
+
+    #[test]
+    fn the_sweep_ends_an_expired_token_session_and_skips_nothing_else() {
+        let registry = Arc::new(SessionRegistry::new());
+        let expired = registered(&registry, "expired");
+        let current = registered(&registry, "current");
+        registry.set_token_expiry("expired", 1);
+
+        sweep_once(&registry, 0);
+
+        assert_eq!(*expired.borrow(), KillReason::TokenExpired);
+        assert_eq!(*current.borrow(), KillReason::Alive);
+    }
+
+    /// The last-active clock has one-second steps, so the idle case waits it out.
+    #[test]
+    fn the_sweep_ends_an_idle_session_and_spares_a_busy_one() {
+        let registry = Arc::new(SessionRegistry::new());
+        let idle = registered(&registry, "idle");
+        let busy = registered(&registry, "busy");
+        registry.set_current_statement("busy", "stream".to_string());
+
+        std::thread::sleep(Duration::from_millis(2_100));
+        sweep_once(&registry, 1);
+
+        assert_eq!(*idle.borrow(), KillReason::IdleTimeout);
+        assert_eq!(*busy.borrow(), KillReason::Alive);
+    }
+
+    #[test]
+    fn a_database_idle_cap_overrides_the_global_cap() {
+        let registry = Arc::new(SessionRegistry::new());
+        let capped = registered(&registry, "capped");
+        registry.set_idle_timeout_secs("capped", 1);
+
+        std::thread::sleep(Duration::from_millis(2_100));
+        sweep_once(&registry, 3_600);
+
+        assert_eq!(*capped.borrow(), KillReason::IdleTimeout);
     }
 }

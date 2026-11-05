@@ -2,6 +2,7 @@
 
 use std::fmt::Debug;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::sink::Sink;
@@ -17,8 +18,10 @@ use crate::control::security::escalation::{
     AuthViolation, ViolationSubject, record_auth_violation,
 };
 use crate::control::security::identity::{AuthMethod, AuthenticatedIdentity};
+use crate::control::security::sessions::{KillReason, SessionBindRequest, bind_session};
 use crate::control::server::admission::{AdmissionError, ScopedConnectionPermit};
 use crate::control::server::session_auth::identity::stored_user_identity;
+use crate::control::server::shared::session::{SessionId, now_unix_ms};
 use crate::control::state::SharedState;
 
 use super::super::handler::NodeDbPgHandler;
@@ -123,6 +126,72 @@ fn admit_connection(
     Ok(())
 }
 
+/// How often a killed connection re-checks that its last statement finished.
+const KILL_POLL: Duration = Duration::from_millis(50);
+/// How long a killed connection stays silent before it closes, so pgwire flushes
+/// the response of the statement that just finished.
+const KILL_FLUSH_GRACE_MS: u64 = 200;
+
+/// Register this connection in the session registry and close it on a kill.
+///
+/// pgwire owns the read loop, and the listener closes a connection by dropping
+/// that loop's future. A dropped statement can lose work that follows a committed
+/// proposal, such as an audit row. So the watch task closes the connection only
+/// with no statement in flight.
+/// `resolve_session_identity` refuses new statements of a killed session, so the
+/// in-flight count reaches zero. The task exits with the registry row.
+fn bind_connection<C: ClientInfo>(
+    client: &C,
+    handler: &NodeDbPgHandler,
+    identity: &AuthenticatedIdentity,
+) -> PgWireResult<()> {
+    let db_id = handler
+        .sessions
+        .get_current_database(handler.session_id)
+        .unwrap_or(crate::types::DatabaseId::DEFAULT);
+    let peer = client.socket_addr().to_string();
+    let binding = bind_session(
+        &handler.state,
+        SessionBindRequest::new(identity, "pgwire", &peer).in_database(db_id),
+    )
+    .map_err(|error| {
+        let (_, code, message) = error_to_sqlstate(&error);
+        startup_refusal(code, message)
+    })?;
+    let binding = Arc::new(binding);
+    let mut kill = binding.kill_signal();
+    if !handler.sessions.set_binding(handler.session_id, binding) {
+        return Err(startup_refusal(
+            nodedb_types::error::sqlstate::INTERNAL_ERROR,
+            "internal error: connection session is not registered".to_owned(),
+        ));
+    }
+
+    let SessionId::Connection(connection_id) = handler.session_id else {
+        return Err(startup_refusal(
+            nodedb_types::error::sqlstate::INTERNAL_ERROR,
+            "internal error: pgwire session has no connection id".to_owned(),
+        ));
+    };
+    let sessions = Arc::clone(&handler.sessions);
+    let registry = Arc::clone(&handler.registry);
+    tokio::spawn(async move {
+        while *kill.borrow_and_update() == KillReason::Alive {
+            if kill.changed().await.is_err() {
+                return;
+            }
+        }
+        while kill.has_changed().is_ok() {
+            if sessions.idle_eligible(connection_id, KILL_FLUSH_GRACE_MS, now_unix_ms()) {
+                registry.request_cancel(connection_id);
+                return;
+            }
+            tokio::time::sleep(KILL_POLL).await;
+        }
+    });
+    Ok(())
+}
+
 /// pgwire refusal for an exhausted connection cap.
 ///
 /// `FATAL` closes the connection. The SQLSTATE and the message are the ones the
@@ -185,6 +254,7 @@ impl StartupHandler for AuthStartup {
                     // above, so admission runs here — still ahead of
                     // AuthenticationOk, for the same reason.
                     admit_connection(handler, &identity)?;
+                    bind_connection(client, handler, &identity)?;
                     pgwire::api::auth::finish_authentication(
                         client,
                         &super::provider::nodedb_parameter_provider(),
@@ -280,6 +350,7 @@ impl StartupHandler for AuthStartup {
                             )))
                         })?;
                         admit_connection(handler, &identity)?;
+                        bind_connection(client, handler, &identity)?;
                     }
                     Err(_) if was_in_auth => {
                         // SCRAM failed. This is the single place the lockout

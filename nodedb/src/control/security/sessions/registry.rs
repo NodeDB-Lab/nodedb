@@ -2,14 +2,12 @@
 
 //! Active session registry.
 //!
-//! Tracks every authenticated connection (native, pgwire, HTTP) with its
-//! kill signal and credential version at bind time.  Provides:
+//! Tracks every long-lived authenticated session with its kill signal and
+//! credential version at bind time.  Provides:
 //!
 //! - Bounded capacity (`max_active_sessions`; 0 = unlimited).  Over-cap
 //!   returns [`SessionCapExceeded`] — no LRU eviction of live sessions.
-//! - Per-user hard-revoke (`kill_sessions_for_user`) for DROP USER /
-//!   deactivation paths.
-//! - Per-IP kill for IP blacklist.
+//! - Kill signals by user, tenant, API key, principal, IP and id (`kill.rs`).
 //! - `list_all` for `SHOW SESSIONS`.
 
 use std::collections::HashMap;
@@ -39,6 +37,22 @@ pub enum KillReason {
     AdminKill,
 }
 
+impl KillReason {
+    /// The error a session reports to its client. `None` for a live session.
+    pub fn as_error(self) -> Option<crate::Error> {
+        match self {
+            Self::Alive => None,
+            Self::UserDropped => Some(crate::Error::SessionUserDropped),
+            Self::IdleTimeout => Some(crate::Error::SessionIdleTimeout),
+            Self::TokenExpired => Some(crate::Error::SessionTokenExpired),
+            Self::AdminKill => Some(crate::Error::SessionKilledByAdmin),
+        }
+    }
+}
+
+/// The `SessionParams::auth_method` label of an OIDC bearer session.
+pub const AUTH_METHOD_OIDC: &str = "oidc_bearer";
+
 /// Error returned when `register` would exceed `max_active_sessions`.
 #[derive(Debug, thiserror::Error)]
 #[error("max_active_sessions ({cap}) exceeded — rejecting new login")]
@@ -61,20 +75,24 @@ pub struct SessionParams {
     pub current_database: Option<DatabaseId>,
     /// OIDC token expiry in milliseconds since epoch (0 = no token-bound expiry).
     pub token_expiry_ms: Option<u64>,
+    /// The API key that authenticated the session.
+    pub api_key_id: Option<String>,
 }
 
 /// A registered session.
-struct RegisteredSession {
-    user_id: u64,
-    db_user: String,
-    peer_addr: String,
+pub(super) struct RegisteredSession {
+    pub(super) user_id: u64,
+    pub(super) db_user: String,
+    pub(super) peer_addr: String,
     protocol: String,
-    auth_method: String,
-    tenant_id: u64,
+    pub(super) auth_method: String,
+    pub(super) tenant_id: u64,
+    /// The API key that authenticated the session.
+    pub(super) api_key_id: Option<String>,
     connected_at: u64,
     last_active: AtomicU64,
     /// Kill signal carrying the reason for termination.
-    kill_tx: watch::Sender<KillReason>,
+    pub(super) kill_tx: watch::Sender<KillReason>,
     /// Credential version at bind time; used for `SHOW SESSIONS`.
     credential_version: u64,
     /// The database this session is currently bound to (0 = unbound).
@@ -91,10 +109,16 @@ struct RegisteredSession {
     current_statement_digest: RwLock<Option<String>>,
 }
 
+impl RegisteredSession {
+    pub(super) fn current_database(&self) -> DatabaseId {
+        DatabaseId::new(self.current_database.load(Ordering::Relaxed))
+    }
+}
+
 /// Thread-safe registry of active authenticated sessions.
 pub struct SessionRegistry {
     /// session_id → registered session.
-    sessions: RwLock<HashMap<String, RegisteredSession>>,
+    pub(super) sessions: RwLock<HashMap<String, RegisteredSession>>,
     /// 0 = unlimited.
     max_sessions: usize,
 }
@@ -137,6 +161,7 @@ impl SessionRegistry {
             protocol: params.protocol.clone(),
             auth_method: params.auth_method.clone(),
             tenant_id: params.tenant_id,
+            api_key_id: params.api_key_id.clone(),
             connected_at: now,
             last_active: AtomicU64::new(now),
             kill_tx,
@@ -163,76 +188,6 @@ impl SessionRegistry {
     pub fn unregister(&self, session_id: &str) {
         let mut sessions = self.sessions.write().unwrap_or_else(|p| p.into_inner());
         sessions.remove(session_id);
-    }
-
-    /// Kill all sessions for a specific user (hard revoke).
-    /// Returns the number of sessions signalled.
-    pub fn kill_sessions_for_user(&self, user_id: u64, reason: KillReason) -> usize {
-        let sessions = self.sessions.read().unwrap_or_else(|p| p.into_inner());
-        let mut killed = 0;
-        for s in sessions.values() {
-            if s.user_id == user_id {
-                let _ = s.kill_tx.send(reason);
-                killed += 1;
-            }
-        }
-        killed
-    }
-
-    /// Kill all sessions of a tenant. Returns the number of sessions signalled.
-    pub fn kill_sessions_for_tenant(&self, tenant_id: u64, reason: KillReason) -> usize {
-        let sessions = self.sessions.read().unwrap_or_else(|p| p.into_inner());
-        let mut killed = 0;
-        for s in sessions.values() {
-            if s.tenant_id == tenant_id {
-                let _ = s.kill_tx.send(reason);
-                killed += 1;
-            }
-        }
-        killed
-    }
-
-    /// Kill all sessions matching a username string (for blacklist / emergency
-    /// paths that identify users by name rather than numeric ID).
-    pub fn kill_sessions_for_username(&self, username: &str, reason: KillReason) -> usize {
-        let sessions = self.sessions.read().unwrap_or_else(|p| p.into_inner());
-        let mut killed = 0;
-        for s in sessions.values() {
-            if s.db_user == username {
-                let _ = s.kill_tx.send(reason);
-                killed += 1;
-            }
-        }
-        killed
-    }
-
-    /// Kill all sessions matching a peer-address prefix (IP blacklist).
-    pub fn kill_sessions_for_ip(&self, peer_addr_prefix: &str, reason: KillReason) -> usize {
-        let sessions = self.sessions.read().unwrap_or_else(|p| p.into_inner());
-        let mut killed = 0;
-        for s in sessions.values() {
-            if s.peer_addr.starts_with(peer_addr_prefix) {
-                let _ = s.kill_tx.send(reason);
-                killed += 1;
-            }
-        }
-        killed
-    }
-
-    /// Kill a specific session by ID and return its current database for audit.
-    ///
-    /// Returns `Some(db_id)` if the session was found and signalled.
-    /// Returns `None` if the session does not exist.
-    /// The session row is NOT removed here — the session's own drop path calls `unregister`.
-    pub fn kill_session_by_id(&self, session_id: &str, reason: KillReason) -> Option<DatabaseId> {
-        let sessions = self.sessions.read().unwrap_or_else(|p| p.into_inner());
-        if let Some(s) = sessions.get(session_id) {
-            let db_id = DatabaseId::new(s.current_database.load(Ordering::Relaxed));
-            let _ = s.kill_tx.send(reason);
-            Some(db_id)
-        } else {
-            None
-        }
     }
 
     /// Look up a session's bound database without signalling kill_tx.
@@ -333,6 +288,10 @@ impl SessionRegistry {
                 current_database: DatabaseId::new(s.current_database.load(Ordering::Relaxed)),
                 tenant_id: s.tenant_id,
                 db_user: s.db_user.clone(),
+                busy: s
+                    .current_statement_digest
+                    .read()
+                    .map_or(true, |digest| digest.is_some()),
             })
             .collect()
     }
@@ -395,6 +354,8 @@ pub struct SweepEntry {
     pub current_database: DatabaseId,
     pub tenant_id: u64,
     pub db_user: String,
+    /// The session runs a statement or serves a stream, so it is not idle.
+    pub busy: bool,
 }
 
 impl From<SessionCapExceeded> for crate::Error {
@@ -452,7 +413,102 @@ mod tests {
             credential_version: 0,
             current_database: None,
             token_expiry_ms: None,
+            api_key_id: None,
         }
+    }
+
+    #[test]
+    fn a_stored_user_kill_leaves_an_oidc_session_with_an_equal_number() {
+        let reg = SessionRegistry::new();
+        let stored = reg
+            .register("s1", &params(7, "10.0.0.1:1", "native"))
+            .unwrap();
+        let mut external = params(7, "10.0.0.2:1", "native");
+        external.auth_method = AUTH_METHOD_OIDC.to_string();
+        let external = reg.register("s2", &external).unwrap();
+
+        assert_eq!(
+            reg.kill_sessions_for_stored_user(7, KillReason::UserDropped),
+            1
+        );
+
+        assert_eq!(*stored.borrow(), KillReason::UserDropped);
+        assert_eq!(*external.borrow(), KillReason::Alive);
+    }
+
+    #[test]
+    fn an_api_key_kill_ends_the_sessions_of_that_key_only() {
+        let reg = SessionRegistry::new();
+        let mut first = params(7, "10.0.0.1:1", "native");
+        first.api_key_id = Some("key-a".to_string());
+        let mut second = params(7, "10.0.0.1:2", "native");
+        second.api_key_id = Some("key-b".to_string());
+        let first = reg.register("s1", &first).unwrap();
+        let second = reg.register("s2", &second).unwrap();
+
+        assert_eq!(
+            reg.kill_sessions_for_api_key("key-a", KillReason::AdminKill),
+            1
+        );
+
+        assert_eq!(*first.borrow(), KillReason::AdminKill);
+        assert_eq!(*second.borrow(), KillReason::Alive);
+    }
+
+    #[test]
+    fn a_principal_kill_matches_the_id_and_the_name() {
+        let reg = SessionRegistry::new();
+        let by_id = reg
+            .register("s1", &params(42, "10.0.0.1:1", "native"))
+            .unwrap();
+        let mut named = params(43, "10.0.0.1:2", "native");
+        named.db_user = "alice".to_string();
+        let named = reg.register("s2", &named).unwrap();
+
+        assert_eq!(
+            reg.kill_sessions_for_principal("42", KillReason::AdminKill),
+            1
+        );
+        assert_eq!(*by_id.borrow(), KillReason::AdminKill);
+        assert_eq!(*named.borrow(), KillReason::Alive);
+
+        assert_eq!(
+            reg.kill_sessions_for_principal("alice", KillReason::AdminKill),
+            1
+        );
+        assert_eq!(*named.borrow(), KillReason::AdminKill);
+    }
+
+    #[test]
+    fn a_tenant_in_database_kill_leaves_the_tenants_other_databases() {
+        let reg = SessionRegistry::new();
+        let mut moved = params(1, "10.0.0.1:1", "native");
+        moved.current_database = Some(DatabaseId::new(70));
+        let mut elsewhere = params(2, "10.0.0.1:2", "native");
+        elsewhere.current_database = Some(DatabaseId::new(71));
+        let moved = reg.register("s1", &moved).unwrap();
+        let elsewhere = reg.register("s2", &elsewhere).unwrap();
+
+        let killed =
+            reg.kill_sessions_for_tenant_in_database(1, DatabaseId::new(70), KillReason::AdminKill);
+
+        assert_eq!(killed, 1);
+        assert_eq!(*moved.borrow(), KillReason::AdminKill);
+        assert_eq!(*elsewhere.borrow(), KillReason::Alive);
+    }
+
+    #[test]
+    fn an_ip_kill_compares_the_whole_ip() {
+        let reg = SessionRegistry::new();
+        let near = reg
+            .register("s1", &params(1, "10.0.0.12:1", "native"))
+            .unwrap();
+
+        assert_eq!(
+            reg.kill_sessions_for_ip(KillReason::AdminKill, |ip| ip == "10.0.0.1"),
+            0
+        );
+        assert_eq!(*near.borrow(), KillReason::Alive);
     }
 
     #[test]
@@ -533,7 +589,7 @@ mod tests {
             .register("s3", &params(3, "192.168.1.1:5000", "http"))
             .unwrap();
 
-        let killed = reg.kill_sessions_for_ip("10.0.0.1", KillReason::AdminKill);
+        let killed = reg.kill_sessions_for_ip(KillReason::AdminKill, |ip| ip == "10.0.0.1");
         assert_eq!(killed, 2);
     }
 

@@ -67,7 +67,8 @@ pub struct ClusterSettings {
     #[serde(default)]
     pub tls: Option<TlsPaths>,
 
-    /// Maximum number of simultaneously active authenticated sessions cluster-wide.
+    /// Maximum number of simultaneously active authenticated sessions on this node.
+    /// Each node counts its own sessions and shares no count with its peers.
     /// 0 = unlimited (default).  Over-cap new logins are rejected with a
     /// `SESSION_CAP_EXCEEDED` error; existing sessions are never evicted.
     #[serde(default)]

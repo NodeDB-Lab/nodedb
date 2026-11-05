@@ -51,6 +51,9 @@ impl NodeDbPgHandler {
         for stmt in statements {
             // Each statement's DDL proposals carry that statement's own text.
             let _audit = AuditScope::statement(identity, &stmt);
+            if let Some(binding) = self.sessions.binding(session_id) {
+                binding.set_statement_text(&stmt);
+            }
             let mut resp = self
                 .execute_single_sql(identity, session_id, &stmt, requested)
                 .await?;

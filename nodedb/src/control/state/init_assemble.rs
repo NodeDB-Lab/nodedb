@@ -6,7 +6,6 @@
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
-use crate::control::security::buses::{SessionInvalidationBus, UserChangeBus};
 use crate::control::security::tenant::{TenantIsolation, TenantQuota};
 use crate::control::server::sync::dlq::{DlqConfig, SyncDlq};
 
@@ -76,13 +75,12 @@ impl SharedState {
             bus_consumer_handle,
             permission_cache,
         } = buses;
-        // Credential mutations publish to the same buses the state holds.
-        credentials.set_buses(
-            Arc::new(SessionInvalidationBus::from_existing(si_bus.sender())),
-            Arc::new(UserChangeBus::from_existing(uc_bus.sender())),
+        super::buses_init::connect_credential_store(
+            &credentials,
+            &si_bus,
+            &uc_bus,
+            &session_registry,
         );
-        // A hard revoke ends sessions in the registry the state holds.
-        credentials.set_session_registry(Arc::clone(&session_registry));
         let AuthInputs {
             metering_config,
             siem,

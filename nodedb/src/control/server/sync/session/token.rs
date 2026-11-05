@@ -99,6 +99,11 @@ impl SyncSession {
                     }
                 }
                 self.username = Some(new_identity.username.clone());
+                if let (Some(binding), Some(expiry_ms)) =
+                    (self.binding.as_ref(), new_identity.token_expiry_ms)
+                {
+                    binding.set_token_expiry_ms(expiry_ms);
+                }
                 self.identity = Some(new_identity);
                 info!(
                     session = %self.session_id,

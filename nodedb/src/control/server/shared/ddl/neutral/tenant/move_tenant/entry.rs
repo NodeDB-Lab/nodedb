@@ -116,12 +116,16 @@ pub async fn handle_move_tenant(
         .map_err(|e| DdlError::from_error_in_context("journal write", &e))?;
 
     // ── Phase 2: Drain ────────────────────────────────────────────────────────
-    let drain_result = drain::run(state, tenant_id, source_db_id, DRAIN_TIMEOUT).await;
-    if let Err(ref e) = drain_result {
-        // Compensate: remove journal entry so state is clean.
-        journal::delete_journal_entry_logged(catalog, tenant_id);
-        return Err(DdlError::move_tenant_drain_timeout(e.message()).with_cause_of(e));
-    }
+    // The holds end the drain on every exit but a committed cutover, including
+    // a dropped statement future.
+    let drain_holds = match drain::run(state, tenant_id, source_db_id, DRAIN_TIMEOUT).await {
+        Ok(holds) => holds,
+        Err(ref e) => {
+            // Compensate: remove journal entry so state is clean.
+            journal::delete_journal_entry_logged(catalog, tenant_id);
+            return Err(DdlError::move_tenant_drain_timeout(e.message()).with_cause_of(e));
+        }
+    };
 
     // Update journal to Snapshot phase.
     let journal_entry = journal_entry.with_phase(MovePhase::Snapshot);
@@ -134,7 +138,7 @@ pub async fn handle_move_tenant(
         Ok(capture) => capture,
         Err(ref e) => {
             // Compensate: release drain, remove journal.
-            drain::release(state, tenant_id, source_db_id).await;
+            drain_holds.end().await;
             journal::delete_journal_entry_logged(catalog, tenant_id);
             return Err(DdlError::move_tenant_snapshot_failed(e.message()).with_cause_of(e));
         }
@@ -154,11 +158,12 @@ pub async fn handle_move_tenant(
     if let Err(ref e) = cutover_result {
         // Cutover failed: single-proposal failure is all-or-nothing; source intact.
         // Release drain; clean up snapshot; remove journal.
-        drain::release(state, tenant_id, source_db_id).await;
+        drain_holds.end().await;
         let _ = snapshot::delete_temp(state, &temp_key).await;
         journal::delete_journal_entry_logged(catalog, tenant_id);
         return Err(DdlError::move_tenant_cutover_failed(e.message()).with_cause_of(e));
     }
+    drain_holds.keep();
 
     // ── Phase 5: Resume ───────────────────────────────────────────────────────
     // Drain is already released by cutover (tenant now lives in target).

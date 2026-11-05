@@ -60,7 +60,8 @@ impl RespClient {
         self.read_reply().await
     }
 
-    async fn read_reply(&mut self) -> Reply {
+    /// Read one reply the server sends with no command in front of it.
+    pub async fn read_reply(&mut self) -> Reply {
         loop {
             if let Some((reply, consumed)) = parse(&self.buf) {
                 self.buf.drain(..consumed);

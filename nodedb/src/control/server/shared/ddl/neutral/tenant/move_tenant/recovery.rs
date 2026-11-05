@@ -109,16 +109,20 @@ pub async fn resume_or_compensate(
 
             // Cutover proposal did not apply. Re-run the drain, the snapshot
             // and the cutover: the capture needs the drain's write gate.
-            if let Err(ref e) = drain::run(state, tenant_id, source_db_id, DRAIN_TIMEOUT).await {
-                journal::delete_journal_entry_logged(catalog, tenant_id);
-                return Err(DdlError::move_tenant_drain_timeout(e.message()).with_cause_of(e));
-            }
+            let drain_holds = match drain::run(state, tenant_id, source_db_id, DRAIN_TIMEOUT).await
+            {
+                Ok(holds) => holds,
+                Err(ref e) => {
+                    journal::delete_journal_entry_logged(catalog, tenant_id);
+                    return Err(DdlError::move_tenant_drain_timeout(e.message()).with_cause_of(e));
+                }
+            };
             let snapshot_result =
                 snapshot::run(state, tenant_id, source_db_id, SNAPSHOT_TIMEOUT).await;
             let capture = match snapshot_result {
                 Ok(capture) => capture,
                 Err(ref e) => {
-                    drain::release(state, tenant_id, source_db_id).await;
+                    drain_holds.end().await;
                     journal::delete_journal_entry_logged(catalog, tenant_id);
                     return Err(DdlError::move_tenant_snapshot_failed(e.message()).with_cause_of(e));
                 }
@@ -128,13 +132,14 @@ pub async fn resume_or_compensate(
                 cutover::run(state, tenant_id, source_db_id, target_db_id, capture).await;
 
             if let Err(ref e) = cutover_result {
-                drain::release(state, tenant_id, source_db_id).await;
+                drain_holds.end().await;
                 if let Some(ref key) = entry.temp_snapshot_key {
                     let _ = snapshot::delete_temp(state, key).await;
                 }
                 journal::delete_journal_entry_logged(catalog, tenant_id);
                 return Err(DdlError::move_tenant_cutover_failed(e.message()).with_cause_of(e));
             }
+            drain_holds.keep();
 
             if let Some(ref key) = entry.temp_snapshot_key {
                 let _ = snapshot::delete_temp(state, key).await;
@@ -234,16 +239,18 @@ pub async fn recover_all(state: &SharedState) {
                 } else {
                     // Re-attempt the cutover behind a fresh drain. A failed
                     // drain ends its own drains and leaves the source intact.
-                    if drain::run(state, tenant_id, source_db_id, DRAIN_TIMEOUT)
-                        .await
-                        .is_ok()
-                        && let Ok(capture) =
-                            snapshot::run(state, tenant_id, source_db_id, SNAPSHOT_TIMEOUT).await
+                    if let Ok(drain_holds) =
+                        drain::run(state, tenant_id, source_db_id, DRAIN_TIMEOUT).await
                     {
-                        let _ = cutover::run(state, tenant_id, source_db_id, target_db_id, capture)
-                            .await;
+                        if let Ok(capture) =
+                            snapshot::run(state, tenant_id, source_db_id, SNAPSHOT_TIMEOUT).await
+                        {
+                            let _ =
+                                cutover::run(state, tenant_id, source_db_id, target_db_id, capture)
+                                    .await;
+                        }
+                        drain_holds.end().await;
                     }
-                    drain::release(state, tenant_id, source_db_id).await;
                 }
 
                 if let Some(ref key) = entry.temp_snapshot_key {

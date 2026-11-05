@@ -45,6 +45,7 @@ fn sample_params(user_id: u64, username: &str) -> SessionParams {
         credential_version: 0,
         current_database: None,
         token_expiry_ms: None,
+        api_key_id: None,
     }
 }
 
@@ -222,6 +223,36 @@ fn drop_user_ends_sessions_with_no_bus_consumer() {
     state
         .credentials
         .drop_user("ivy")
+        .expect("drop_user failed");
+
+    assert_eq!(*kill_rx.borrow(), KillReason::UserDropped);
+}
+
+/// A state that adopts a supplied store connects that store to its registry.
+#[test]
+fn drop_user_ends_sessions_on_a_supplied_credential_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let wal = Arc::new(WalManager::open_for_testing(&dir.path().join("test.wal")).unwrap());
+    let (dispatcher, _) = Dispatcher::new(1, 64);
+    let credentials = Arc::new(
+        nodedb::control::security::credential::CredentialStore::open(
+            &dir.path().join("system.redb"),
+        )
+        .unwrap(),
+    );
+    let state = SharedState::new_with_credentials(dispatcher, wal, credentials, false).unwrap();
+    let user_id = state
+        .credentials
+        .create_user("supplied", "pw666", TenantId::new(1), vec![Role::ReadOnly])
+        .expect("create_user failed");
+    let kill_rx = state
+        .session_registry
+        .register("supplied-1", &sample_params(user_id, "supplied"))
+        .expect("register failed");
+
+    state
+        .credentials
+        .drop_user("supplied")
         .expect("drop_user failed");
 
     assert_eq!(*kill_rx.borrow(), KillReason::UserDropped);

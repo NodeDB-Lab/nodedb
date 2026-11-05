@@ -25,6 +25,7 @@
 
 use crate::types::TenantId;
 
+use super::super::super::buses::SessionInvalidationReason;
 use super::super::super::catalog::StoredUser;
 use super::super::super::identity::Role;
 use super::super::record::UserRecord;
@@ -156,25 +157,27 @@ impl CredentialStore {
             users.insert(stored.username.clone(), record);
         }
         let user_id = stored.user_id;
-        if let Err(error) = self.bump_version(user_id) {
-            tracing::error!(user_id, error = %error, "replicated user version update failed");
-        }
+        self.bump_version(user_id);
         self.publish_user_mutation(user_id, stored.is_active, invalidation);
     }
 
-    /// Remove a replicated dropped user from the in-memory cache and
-    /// publish `UserDropped` so open sessions are hard-revoked.
+    /// Remove a replicated dropped user from the in-memory cache and end its
+    /// sessions.
     ///
-    /// The redb delete is also performed by the catalog applier;
-    /// `purge_user`'s catalog delete is idempotent, so a double
-    /// delete is harmless.
+    /// The catalog applier owns the redb delete: `apply::user::delete` runs ahead
+    /// of this post-apply, and its error halts the applier at this entry. This
+    /// step does no I/O, so it has no error to raise.
     pub fn install_replicated_drop(&self, username: &str) {
         let record = {
             let mut users = write_lock(&self.users);
             users.remove(username)
         };
         if let Some(record) = record {
-            let _ = self.purge_user(&record);
+            self.end_sessions_on_hard_revoke(
+                record.user_id,
+                &SessionInvalidationReason::UserDropped,
+            );
+            self.announce_user_gone(record.user_id);
         }
     }
 }
@@ -210,6 +213,7 @@ mod tests {
                     credential_version: 0,
                     current_database: None,
                     token_expiry_ms: None,
+                    api_key_id: None,
                 },
             )
             .expect("register session")

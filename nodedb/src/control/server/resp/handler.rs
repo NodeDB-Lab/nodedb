@@ -178,6 +178,19 @@ fn handle_auth(cmd: &RespCommand, session: &mut RespSession, state: &SharedState
             ) {
                 return RespValue::err(format!("NOPERM {e}"));
             }
+            let binding = match crate::control::security::sessions::bind_session(
+                state,
+                crate::control::security::sessions::SessionBindRequest::new(
+                    &identity,
+                    "resp",
+                    &session.peer_addr,
+                )
+                .in_database(DatabaseId::DEFAULT),
+            ) {
+                Ok(binding) => binding,
+                Err(e) => return RespValue::from_error(&e),
+            };
+            session.binding = Some(binding);
             session.tenant_id = identity.tenant_id;
             session.identity = Some(identity);
             state.auth_metrics.record_auth_success("resp_password");

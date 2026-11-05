@@ -182,6 +182,7 @@ mod security;
 mod segment_encryption;
 mod segment_encryption_g13;
 mod session_handle_fingerprint_wire;
+mod session_kill;
 mod session_lifecycle;
 mod shutdown_abort_offender;
 mod shutdown_budget;

@@ -19,9 +19,17 @@ pub(crate) struct InFlightGuard<'a> {
 }
 
 impl<'a> InFlightGuard<'a> {
-    /// Begin a request: increment the connection's in-flight counter.
-    pub(crate) fn new(sessions: &'a SessionStore, session_id: SessionId) -> Self {
+    /// Begin a request: increment the connection's in-flight counter and show
+    /// `statement_kind` in `SHOW SESSIONS`.
+    pub(crate) fn new(
+        sessions: &'a SessionStore,
+        session_id: SessionId,
+        statement_kind: &str,
+    ) -> Self {
         sessions.begin_request(session_id);
+        if let Some(binding) = sessions.binding(session_id) {
+            binding.set_statement(statement_kind);
+        }
         Self {
             sessions,
             session_id,
@@ -33,5 +41,11 @@ impl Drop for InFlightGuard<'_> {
     fn drop(&mut self) {
         // Decrement in-flight and stamp last-activity on every exit path.
         self.sessions.end_request(self.session_id);
+        if let Some(binding) = self.sessions.binding(self.session_id) {
+            if let Some(database) = self.sessions.get_current_database(self.session_id) {
+                binding.set_database(database);
+            }
+            binding.clear_statement();
+        }
     }
 }

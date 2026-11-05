@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use super::super::super::buses::{SessionInvalidated, SessionInvalidationReason, UserChanged};
+use super::super::super::buses::SessionInvalidationReason;
 use super::super::super::catalog::SystemCatalog;
 use super::super::record::{UserRecord, validate_stored_user_credentials};
 use super::core::{CredentialStore, read_lock, write_lock};
@@ -57,19 +57,10 @@ impl CredentialStore {
         // revoke inside the image takes effect here.
         for dropped in changes.dropped {
             self.end_sessions_on_hard_revoke(dropped, &SessionInvalidationReason::UserDropped);
-            write_lock(&self.versions).remove(&dropped);
-            if let Some(bus) = self.uc_bus.get() {
-                bus.publish(UserChanged { user_id: dropped });
-            }
-            if let Some(bus) = self.si_bus.get() {
-                bus.publish(SessionInvalidated {
-                    user_id: dropped,
-                    reason: SessionInvalidationReason::UserDropped,
-                });
-            }
+            self.announce_user_gone(dropped);
         }
         for changed in changes.changed {
-            self.bump_version(changed.user_id)?;
+            self.bump_version(changed.user_id);
             self.publish_user_mutation(
                 changed.user_id,
                 changed.is_active,
@@ -169,6 +160,7 @@ mod tests {
             credential_version: 0,
             current_database: None,
             token_expiry_ms: None,
+            api_key_id: None,
         }
     }
 

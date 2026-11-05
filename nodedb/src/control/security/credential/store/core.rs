@@ -254,7 +254,7 @@ impl CredentialStore {
             return;
         }
         if let Some(registry) = self.session_registry.get() {
-            registry.kill_sessions_for_user(user_id, KillReason::UserDropped);
+            registry.kill_sessions_for_stored_user(user_id, KillReason::UserDropped);
         }
     }
 
@@ -286,15 +286,12 @@ impl CredentialStore {
 
     /// Bump the per-user version counter, inserting the slot if absent.
     /// Returns the new version value.
-    pub(in crate::control::security::credential) fn bump_version(
-        &self,
-        user_id: u64,
-    ) -> crate::Result<u64> {
+    pub(in crate::control::security::credential) fn bump_version(&self, user_id: u64) -> u64 {
         // Fast path: slot already exists — just fetch_add.
         {
             let map = read_lock(&self.versions);
             if let Some(ctr) = map.get(&user_id) {
-                return Ok(ctr.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1);
+                return ctr.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             }
         }
         // Slow path: insert under write-lock (double-checked).
@@ -302,7 +299,13 @@ impl CredentialStore {
         let ctr = map
             .entry(user_id)
             .or_insert_with(|| Arc::new(AtomicU64::new(0)));
-        Ok(ctr.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1)
+        ctr.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+    }
+
+    /// Move a user's version for a change kept outside the user record, such as
+    /// a database grant. Open sessions rebuild their identity at the next request.
+    pub fn mark_identity_changed(&self, user_id: u64) {
+        self.bump_version(user_id);
     }
 
     /// Return the current version for a user.  Returns 0 if the user has
@@ -339,7 +342,7 @@ impl CredentialStore {
         self.persist_user(record)?;
 
         // 2. Version bump.
-        self.bump_version(user_id)?;
+        self.bump_version(user_id);
 
         self.publish_user_mutation(user_id, record.is_active, invalidation);
         Ok(())
@@ -381,7 +384,7 @@ impl CredentialStore {
     ///    missing key is a harmless no-op).
     /// 3. Publish `UserChanged` on the user-change bus.
     /// 4. Publish `SessionInvalidated` with `UserDropped` for the audit log.
-    /// 5. Discard the per-user version counter — the username may be
+    /// 5. Discard the per-user version counter. The username can be
     ///    recreated later under a fresh `user_id`.
     ///
     /// The caller must have already removed the in-memory cache entry.
@@ -397,23 +400,24 @@ impl CredentialStore {
         // 2. Delete from the persistent catalog.
         self.catalog.delete_user(&record.username)?;
 
-        // 3. UserChanged.
+        // 3-5.
+        self.announce_user_gone(user_id);
+
+        Ok(())
+    }
+
+    /// Publish a user's removal for the audit log and discard its version counter.
+    pub(in crate::control::security::credential) fn announce_user_gone(&self, user_id: u64) {
         if let Some(bus) = self.uc_bus.get() {
             bus.publish(crate::control::security::buses::UserChanged { user_id });
         }
-
-        // 4. SessionInvalidated.
         if let Some(bus) = self.si_bus.get() {
             bus.publish(crate::control::security::buses::SessionInvalidated {
                 user_id,
                 reason: SessionInvalidationReason::UserDropped,
             });
         }
-
-        // 5. Discard the per-user version counter.
         write_lock(&self.versions).remove(&user_id);
-
-        Ok(())
     }
 }
 

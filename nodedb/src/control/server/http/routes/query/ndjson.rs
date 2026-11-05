@@ -32,7 +32,7 @@ use super::super::super::peer::PeerAddr;
 use super::super::super::transport::ClientTransport;
 use super::super::atomic_statement::{RoutedStatement, route_http_statement};
 use super::super::ndjson_error::error_line;
-use super::super::query_stream::{NdjsonBody, ndjson_body_stream, try_open_stream};
+use super::super::query_stream::{NdjsonBody, bound_ndjson_body, stream_binding, try_open_stream};
 use super::super::result_shape::append_ndjson_payload;
 use super::ndjson_response::{ndjson_response, quota_rejection};
 use super::{DatabaseQueryParam, resolve_database_id};
@@ -218,9 +218,14 @@ async fn ndjson_at_consistency(
             } else {
                 None
             };
+            let binding = match stream_binding(&state.shared, &identity, peer.as_str(), database_id)
+            {
+                Ok(binding) => binding,
+                Err(error) => return ApiError::from(error).into_response(),
+            };
             let mut response = Response::builder()
                 .header("Content-Type", "application/x-ndjson")
-                .body(axum::body::Body::from_stream(ndjson_body_stream(
+                .body(axum::body::Body::from_stream(bound_ndjson_body(
                     NdjsonBody {
                         stream,
                         limit,
@@ -239,6 +244,7 @@ async fn ndjson_at_consistency(
                         database_id,
                         meter_guard: stream_meter_guard,
                     },
+                    binding,
                 )))
                 .unwrap_or_else(|_| {
                     (StatusCode::INTERNAL_SERVER_ERROR, "encoding error").into_response()

@@ -127,6 +127,14 @@ impl NativeSession {
             }
         }
 
+        // A killed session stops here, and a credential change reaches this
+        // request's identity. The run loop closes the connection after a kill.
+        if let (Some(binding), Some(identity)) = (self.binding.as_mut(), self.identity.as_mut())
+            && let Err(e) = binding.refresh(&self.state, identity)
+        {
+            return SqlOutcome::Response(Box::new(dispatch::error_to_native(seq, &e)));
+        }
+
         let identity = match self.identity.as_ref() {
             Some(id) => id,
             None => {
@@ -138,9 +146,9 @@ impl NativeSession {
             }
         };
 
-        // The identity resolved above is session-lifetime and server-issued
-        // (tenant, roles, superuser) — it is never re-derived from the
-        // token. `verified_jwt`, in contrast, is the raw claim payload of an
+        // The identity resolved above is server-issued (tenant, roles,
+        // superuser) — it is never re-derived from the token. `verified_jwt`,
+        // in contrast, is the raw claim payload of an
         // OIDC bearer token, retained only to re-derive claim-driven
         // `$auth.*` enrichment on every request. `exp` on those claims was
         // checked exactly once, at the Auth frame that established the

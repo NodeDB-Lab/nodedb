@@ -151,6 +151,7 @@ mod retention_policy_cross_node;
 mod routing_leader_hint_follows_election;
 mod routing_redirect_hint_unhosted_group;
 mod scope_quota_cross_node;
+mod session_revoke_cross_node;
 mod shuffle_aggregate_cost_model;
 mod shuffle_aggregate_cross_node;
 mod shuffle_aggregate_e2e;

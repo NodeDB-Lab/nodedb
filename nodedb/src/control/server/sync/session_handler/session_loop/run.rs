@@ -10,13 +10,34 @@ use futures::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{info, warn};
 
+use crate::control::security::sessions::session_ended;
 use crate::control::server::sync::listener::{SyncListenerState, SyncRegistrationCleanupGuard};
+use crate::control::server::sync::session::SyncSession;
 use crate::control::server::sync::wire::SyncFrame;
 use crate::control::state::SharedState;
 
 use super::channels::{Flow, SessionChannels};
 use super::inbound::{InboundCtx, handle_frame};
 use super::outbound::{pump_deliveries, register_channels};
+
+/// Check the kill and bring the identity up to date for the next frame.
+fn refresh_binding(
+    session: &mut SyncSession,
+    shared: &Option<Arc<SharedState>>,
+    bytes_in: u64,
+) -> crate::Result<()> {
+    let (Some(state), Some(binding), Some(identity)) = (
+        shared.as_ref(),
+        session.binding.as_mut(),
+        session.identity.as_mut(),
+    ) else {
+        return Ok(());
+    };
+    binding.refresh(state, identity)?;
+    binding.touch(bytes_in, 0);
+    session.tenant_id = Some(identity.tenant_id);
+    Ok(())
+}
 
 /// Handle one sync session with full RLS, audit, DLQ wired in.
 ///
@@ -64,9 +85,15 @@ async fn run_sync_session(
         // arrives first.  Without this select! the handler will block on
         // ws.next() indefinitely when no client traffic is expected, starving
         // the server-push delivery path.
+        //
+        // The kill races only this wait, so a frame in progress finishes.
         let msg_result = if let Some(ref mut rx) = channels.definition_sync_rx {
             tokio::select! {
                 biased;
+                ended = session_ended(&mut session.binding) => {
+                    info!(session = %session_id, error = %ended, "sync: session killed, closing");
+                    break;
+                }
                 ws_msg = ws.next() => {
                     match ws_msg {
                         Some(r) => r,
@@ -86,15 +113,26 @@ async fn run_sync_session(
                 }
             }
         } else {
-            match ws.next().await {
-                Some(r) => r,
-                None => break,
+            tokio::select! {
+                biased;
+                ended = session_ended(&mut session.binding) => {
+                    info!(session = %session_id, error = %ended, "sync: session killed, closing");
+                    break;
+                }
+                ws_msg = ws.next() => match ws_msg {
+                    Some(r) => r,
+                    None => break,
+                },
             }
         };
 
         match msg_result {
             Ok(Message::Binary(data)) => {
                 if let Some(frame) = SyncFrame::from_bytes(&data) {
+                    if let Err(error) = refresh_binding(&mut session, &shared, data.len() as u64) {
+                        info!(session = %session_id, %error, "sync: session ended, closing");
+                        break;
+                    }
                     let ctx = InboundCtx {
                         session: &mut session,
                         channels: &mut channels,

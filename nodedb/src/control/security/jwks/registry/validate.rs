@@ -45,7 +45,8 @@ impl JwksRegistry {
         let mut claims = decoded.claims;
         self.apply_claim_policy(&mut claims)?;
         let kid = decoded.header.kid.as_deref().unwrap_or("");
-        let identity = build_identity(&claims, provider.tenant_id);
+        let identity = build_identity(&claims, provider.tenant_id)
+            .with_token_expiry_ms(self.expiry_ms_of(&claims));
 
         debug!(
             username = %identity.username,
@@ -137,6 +138,21 @@ impl JwksRegistry {
     /// re-applied indefinitely. Reuses [`validate_time_claims`] with this
     /// registry's configured clock-skew tolerance — the exact comparison and
     /// skew allowance the original authentication used.
+    pub(crate) fn session_expiry_ms(&self, verified: &VerifiedJwtClaims) -> u64 {
+        self.expiry_ms_of(verified.claims())
+    }
+
+    /// The first millisecond [`validate_time_claims`] refuses these claims as
+    /// expired. That is one second past `exp` plus the clock skew, because the
+    /// check compares whole seconds with `>`.
+    fn expiry_ms_of(&self, claims: &JwtClaims) -> u64 {
+        claims
+            .exp
+            .saturating_add(self.config.clock_skew_secs)
+            .saturating_add(1)
+            .saturating_mul(1_000)
+    }
+
     pub(crate) fn check_not_expired(&self, verified: &VerifiedJwtClaims) -> Result<(), JwtError> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -318,6 +334,30 @@ mod tests {
     /// `check_not_expired` must apply the registry's own configured clock
     /// skew — the same tolerance `verify_signature_and_time` used at
     /// authentication — not a hand-rolled or zero tolerance.
+    /// The sweep's deadline and the per-request check apply one rule: the skew
+    /// keeps a just-expired token alive for both.
+    #[tokio::test]
+    async fn the_session_expiry_includes_the_configured_clock_skew() {
+        let registry = JwksRegistry::init(
+            JwtAuthConfig {
+                clock_skew_secs: 120,
+                ..JwtAuthConfig::default()
+            },
+            strict(),
+        )
+        .await
+        .expect("registry with no configured providers must still initialize");
+        let now = now_secs();
+        let just_expired = VerifiedJwtClaims(claims(now - 200, now - 60));
+
+        assert_eq!(registry.check_not_expired(&just_expired), Ok(()));
+        assert!(registry.session_expiry_ms(&just_expired) > now * 1_000);
+        assert_eq!(
+            registry.session_expiry_ms(&just_expired),
+            (now - 60 + 120 + 1) * 1_000
+        );
+    }
+
     #[tokio::test]
     async fn check_not_expired_honors_configured_clock_skew() {
         let registry = JwksRegistry::init(

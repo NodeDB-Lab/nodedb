@@ -13,6 +13,7 @@ use tokio::sync::OwnedSemaphorePermit;
 use tracing::{debug, warn};
 
 use crate::config::auth::AuthMode;
+use crate::control::security::sessions::{SessionBindRequest, SessionBinding, bind_session};
 use crate::control::server::conn_stream::ConnStream;
 use crate::control::server::ilp_auth::AuthenticatedIlpContext;
 use crate::control::state::SharedState;
@@ -66,7 +67,7 @@ async fn serve_ilp_connection(
     // The native Hello/Auth prelude must finish before line parsing, tenant
     // accounting, or any ingest side effect. Authentication failures consume
     // no ILP bytes and the dropped stream cannot enter the ingest loop.
-    let authenticated_context = crate::control::server::ilp_auth::authenticate_ilp_connection(
+    let mut authenticated_context = crate::control::server::ilp_auth::authenticate_ilp_connection(
         &mut stream,
         state,
         auth_mode,
@@ -110,6 +111,27 @@ async fn serve_ilp_connection(
             });
         }
     };
+    let mut binding = match bind_session(
+        state,
+        SessionBindRequest::new(
+            authenticated_context.identity(),
+            "ilp",
+            authenticated_context.peer_addr(),
+        )
+        .in_database(authenticated_context.database_id()),
+    ) {
+        Ok(binding) => binding,
+        Err(_) => {
+            crate::control::server::ilp_auth::write_ilp_auth_failure(
+                &mut stream,
+                &authenticated_context,
+            )
+            .await;
+            return Err(crate::Error::BadRequest {
+                detail: "ILP authentication failed".into(),
+            });
+        }
+    };
     crate::control::server::ilp_auth::write_ilp_auth_success(&mut stream, &authenticated_context)
         .await
         .map_err(|_| crate::Error::BadRequest {
@@ -132,6 +154,12 @@ async fn serve_ilp_connection(
 
     loop {
         tokio::select! {
+            // A killed session's buffered lines are refused, not flushed: their
+            // author no longer has the right to write them.
+            ended = binding.ended() => {
+                report_killed_session_lines(peer, &authenticated_context, &ended, line_count);
+                return Err(ended);
+            }
             // Read next line with an enforced byte-length cap.
             result = read_bounded_ilp_line(&mut reader, &mut line_buf, MAX_ILP_LINE_BYTES) => {
                 match result {
@@ -176,6 +204,14 @@ async fn serve_ilp_connection(
                             > MAX_ILP_BATCH_BYTES
                         {
                             let flushed = line_count;
+                            prepare_flush(
+                                &mut binding,
+                                state,
+                                &mut authenticated_context,
+                                peer,
+                                &batch,
+                                line_count,
+                            )?;
                             total_ingested +=
                                 flush_ilp_batch(state, &authenticated_context, &batch).await?;
                             batch.clear();
@@ -202,6 +238,14 @@ async fn serve_ilp_connection(
                         // Flush when batch reaches adaptive target.
                         if line_count >= batch_target {
                             let flushed = line_count;
+                            prepare_flush(
+                                &mut binding,
+                                state,
+                                &mut authenticated_context,
+                                peer,
+                                &batch,
+                                line_count,
+                            )?;
                             total_ingested +=
                                 flush_ilp_batch(state, &authenticated_context, &batch).await?;
                             batch.clear();
@@ -245,6 +289,14 @@ async fn serve_ilp_connection(
             _ = window.tick() => {
                 if !batch.is_empty() {
                     let flushed = line_count;
+                    prepare_flush(
+                        &mut binding,
+                        state,
+                        &mut authenticated_context,
+                        peer,
+                        &batch,
+                        line_count,
+                    )?;
                     total_ingested +=
                         flush_ilp_batch(state, &authenticated_context, &batch).await?;
                     batch.clear();
@@ -266,6 +318,14 @@ async fn serve_ilp_connection(
 
     // Flush remaining.
     if !batch.is_empty() {
+        prepare_flush(
+            &mut binding,
+            state,
+            &mut authenticated_context,
+            peer,
+            &batch,
+            line_count,
+        )?;
         total_ingested += flush_ilp_batch(state, &authenticated_context, &batch).await?;
     }
 
@@ -276,6 +336,43 @@ async fn serve_ilp_connection(
         "ILP connection closed"
     );
     Ok(())
+}
+
+/// Check the kill and bring the identity up to date ahead of a batch flush, and
+/// mark the activity. ILP works per batch, so this keeps the per-line path clear
+/// of the registry lock.
+fn prepare_flush(
+    binding: &mut SessionBinding,
+    state: &SharedState,
+    context: &mut AuthenticatedIlpContext,
+    peer: SocketAddr,
+    batch: &str,
+    buffered_lines: u64,
+) -> crate::Result<()> {
+    if let Err(ended) = binding.refresh(state, context.identity_mut()) {
+        report_killed_session_lines(peer, context, &ended, buffered_lines);
+        return Err(ended);
+    }
+    binding.touch(batch.len() as u64, 0);
+    Ok(())
+}
+
+/// ILP acks nothing, so the client cannot learn that lines were refused. The
+/// report is the one record of them.
+fn report_killed_session_lines(
+    peer: SocketAddr,
+    context: &AuthenticatedIlpContext,
+    ended: &crate::Error,
+    buffered_lines: u64,
+) {
+    warn!(%peer, buffered_lines, error = %ended, "ILP session killed; buffered lines refused");
+    if buffered_lines > 0 {
+        crate::diag::ilp_killed_session_lines_refused(
+            &peer.to_string(),
+            context.database_id().as_u64(),
+            buffered_lines,
+        );
+    }
 }
 
 /// Connection-scoped tenant accounting and quota permits.

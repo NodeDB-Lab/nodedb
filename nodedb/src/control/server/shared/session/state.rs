@@ -242,6 +242,9 @@ pub struct ConnSession {
     /// is idle-eligible only when this is zero — a legitimately long-running
     /// statement (in flight) must never be idle-killed.
     pub in_flight: AtomicU32,
+    /// The pgwire connection's registry row and kill signal. Set at startup,
+    /// after authentication. Removing the session entry removes the row.
+    pub binding: Option<std::sync::Arc<crate::control::security::sessions::SessionBinding>>,
     /// Database- and tenant-scoped connection slots this session holds.
     ///
     /// pgwire takes them during the startup handshake, once the bound database
@@ -335,6 +338,7 @@ impl ConnSession {
             sequence_values: Arc::new(crate::control::sequence::SessionSequenceValues::new()),
             last_activity_ms: AtomicU64::new(now_unix_ms()),
             in_flight: AtomicU32::new(0),
+            binding: None,
             admission_permit: None,
         }
     }

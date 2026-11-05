@@ -4,7 +4,9 @@
 //!
 //! ```sql
 //! BLACKLIST AUTH USER 'user_42' [UNTIL '2026-12-31T00:00:00Z'] REASON 'spam'
+//! BLACKLIST AUTH USER 'user_42' REASON 'spam' WITH KILL SESSIONS
 //! BLACKLIST IP '192.168.1.100' REASON 'abuse'
+//! BLACKLIST IP '192.168.1.100' REASON 'abuse' WITH KILL SESSIONS
 //! BLACKLIST IP '10.0.0.0/8' REASON 'blocked network'
 //! UNBLACKLIST AUTH USER 'user_42'
 //! UNBLACKLIST IP '10.0.0.0/8'
@@ -96,7 +98,7 @@ fn handle_blacklist_user(
     let kill_sessions = parts.iter().any(|p| p.to_uppercase() == "KILL");
     let mut killed = 0;
     if kill_sessions {
-        killed = state.session_registry.kill_sessions_for_username(
+        killed = state.session_registry.kill_sessions_for_principal(
             user_id,
             crate::control::security::sessions::KillReason::AdminKill,
         );
@@ -139,11 +141,22 @@ fn handle_blacklist_ip(
         .blacklist_ip(addr, &reason, &identity.username, expires_at)
         .map_err(|e| DdlError::from_error(&e))?;
 
+    // WITH KILL SESSIONS ends the sessions the entry refuses. An expired entry
+    // never matches, and a CIDR entry matches its whole range.
+    let killed = if parts.iter().any(|p| p.eq_ignore_ascii_case("KILL")) {
+        state.session_registry.kill_sessions_for_ip(
+            crate::control::security::sessions::KillReason::AdminKill,
+            |ip| state.blacklist.check_ip(ip).is_some(),
+        )
+    } else {
+        0
+    };
+
     state.audit_record(
         crate::control::security::audit::AuditEvent::AdminAction,
         Some(identity.tenant_id),
         &identity.username,
-        &format!("blacklisted IP '{addr}': {reason}"),
+        &format!("blacklisted IP '{addr}': {reason}, killed {killed} session(s)"),
     );
 
     Ok(status("BLACKLIST"))

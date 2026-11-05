@@ -100,6 +100,13 @@ impl SharedState {
             // restart never raises its marks again.
             s.tenant_marks =
                 crate::control::state::tenant_marks::TenantMarks::load(credentials.catalog())?;
+            // The new store replaces the one `new_inner` connected.
+            super::buses_init::connect_credential_store(
+                &credentials,
+                &s.session_invalidation_bus,
+                &s.user_change_bus,
+                &s.session_registry,
+            );
             s.credentials = credentials;
             // The metadata group restarts above its durable applied floor and
             // never applies the entries below it again. Every registry their

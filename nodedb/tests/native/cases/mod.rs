@@ -21,6 +21,7 @@ mod native_multi_search_txn_overlay;
 mod native_primary_key_nullability;
 mod native_protocol;
 mod native_result_projection;
+mod native_session_kill;
 mod native_session_parameters;
 mod native_show_dispatch;
 mod native_sorted_index_range;

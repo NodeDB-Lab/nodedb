@@ -76,6 +76,7 @@ pub(super) async fn emit_sql_stream(
     format: FrameFormat,
     state: &crate::control::state::SharedState,
     database_id: crate::types::DatabaseId,
+    binding: Option<&crate::control::security::sessions::SessionBinding>,
 ) -> crate::Result<()> {
     let SqlStream {
         seq,
@@ -91,6 +92,15 @@ pub(super) async fn emit_sql_stream(
     let mut last_lsn: u64 = 0;
 
     while emitted < limit {
+        // A killed session gets no more rows. The terminal error frame tells the
+        // client the result is incomplete, and the run loop then closes.
+        if let Some(Err(e)) = binding.map(|binding| binding.check()) {
+            let err = dispatch::error_to_native(seq, &e);
+            let bytes = codec::encode_response(&err, format)?;
+            codec::write_frame(stream, &bytes).await?;
+            return Ok(());
+        }
+
         // A lease this node loses mid-stream ends the stream with a
         // retryable error rather than more rows from a stale descriptor.
         let next = match &lease_scope {
@@ -280,6 +290,7 @@ mod tests {
                 FrameFormat::MessagePack,
                 state.as_ref(),
                 crate::types::DatabaseId::DEFAULT,
+                None,
             )
             .await
             .expect("emit");

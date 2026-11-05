@@ -5,6 +5,7 @@
 use nodedb_types::id::DatabaseId;
 use smallvec::SmallVec;
 
+use crate::control::security::apikey::ApiKeyRecord;
 use crate::control::security::audit::AuditEvent;
 use crate::control::security::credential::record::UserRecord;
 use crate::control::security::escalation::{
@@ -94,18 +95,11 @@ pub fn stored_user_identity(
     Some(identity)
 }
 
-/// Verify an API key token and build an authenticated identity.
-///
-/// Shared by native protocol and HTTP API authentication paths.
-/// Returns `None` if the token is invalid or the owner user is not found.
-pub fn verify_api_key_identity(
+/// Build the identity of a verified API key from its owner's current record.
+fn api_key_record_identity(
     state: &SharedState,
-    token: &str,
-    peer_addr: &str,
-    protocol: &str,
+    key_record: &ApiKeyRecord,
 ) -> Option<AuthenticatedIdentity> {
-    let key_record = state.api_keys.verify_key(token)?;
-
     let user = state.credentials.get_user(&key_record.username)?;
 
     let owner_set = build_owner_database_set(state, &user);
@@ -125,9 +119,46 @@ pub fn verify_api_key_identity(
     let mut identity =
         state
             .api_keys
-            .to_identity(&key_record, user.roles, user.is_superuser, effective);
+            .to_identity(key_record, user.roles, user.is_superuser, effective);
     identity.default_database =
         (user.default_database_id != 0).then(|| DatabaseId::new(user.default_database_id));
+    Some(identity)
+}
+
+/// The current form of a session's identity, or `None` when it no longer stands.
+///
+/// `None` covers a dropped or inactive user, a name that returned under a new
+/// id, and a revoked or expired API key. Not for an OIDC identity, which has no
+/// credential-store record.
+pub fn rebuild_session_identity(
+    state: &SharedState,
+    identity: &AuthenticatedIdentity,
+) -> Option<AuthenticatedIdentity> {
+    let current = match &identity.api_key_id {
+        Some(key_id) => {
+            let key_record = state
+                .api_keys
+                .get_key(key_id)
+                .filter(ApiKeyRecord::is_valid)?;
+            api_key_record_identity(state, &key_record)?
+        }
+        None => stored_user_identity(state, &identity.username, identity.auth_method.clone())?,
+    };
+    (current.user_id == identity.user_id).then_some(current)
+}
+
+/// Verify an API key token and build an authenticated identity.
+///
+/// Shared by native protocol and HTTP API authentication paths.
+/// Returns `None` if the token is invalid or the owner user is not found.
+pub fn verify_api_key_identity(
+    state: &SharedState,
+    token: &str,
+    peer_addr: &str,
+    protocol: &str,
+) -> Option<AuthenticatedIdentity> {
+    let key_record = state.api_keys.verify_key(token)?;
+    let identity = api_key_record_identity(state, &key_record)?;
 
     state.audit_record(
         AuditEvent::AuthSuccess,

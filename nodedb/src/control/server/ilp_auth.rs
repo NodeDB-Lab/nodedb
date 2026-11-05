@@ -42,6 +42,12 @@ impl AuthenticatedIlpContext {
         &self.identity
     }
 
+    /// The identity, for the session binding's refresh. It rebuilds the identity
+    /// from the credential store and keeps the same user id.
+    pub(crate) fn identity_mut(&mut self) -> &mut AuthenticatedIdentity {
+        &mut self.identity
+    }
+
     pub(crate) fn database_id(&self) -> DatabaseId {
         self.database_id
     }
