@@ -336,14 +336,27 @@ pub(crate) async fn handle_direct_op(
 
         // A delete or update on an edge-bearing collection commits its edge
         // cleanup in the same Calvin transaction, as the SQL path's does.
-        use super::edge_recon_gate::{EdgeReconResult, try_edge_recon_dispatch};
+        use super::edge_recon_gate::{
+            EdgeReconResult, try_edge_recon_dispatch, try_settled_recon_dispatch,
+        };
         let (tasks, authorized_tasks) =
-            match try_edge_recon_dispatch(ctx, seq, tasks, authorized_tasks).await {
+            match try_edge_recon_dispatch(ctx, seq, tasks, authorized_tasks, &sum_target_reads)
+                .await
+            {
+                EdgeReconResult::Outcome(outcome) => return outcome.into_response(),
+                EdgeReconResult::NotFired(tasks, authorized) => (tasks, authorized),
+            };
+        // A zero-net settlement on one vShard ships no task, and its reads
+        // still guard the balance. A predicate write takes the coordinator.
+        let (tasks, authorized_tasks) =
+            match try_settled_recon_dispatch(ctx, seq, tasks, authorized_tasks, &sum_target_reads)
+                .await
+            {
                 EdgeReconResult::Outcome(outcome) => return outcome.into_response(),
                 EdgeReconResult::NotFired(tasks, authorized) => (tasks, authorized),
             };
 
-        if tasks.len() == 1 {
+        if tasks.len() == 1 && sum_target_reads.is_empty() {
             // No-edge fast path. Local-path WAL append lives inside `dispatch_single_task`,
             // shared with the single-shard edge loop.
             let task = match authorized_tasks.into_tasks().into_iter().next() {
@@ -369,11 +382,14 @@ pub(crate) async fn handle_direct_op(
                 Ok(vshards) => vshards,
                 Err(error) => return error_to_native(seq, &error),
             };
-        // A block's writes returned above, so these tasks apply autocommit.
-        let route_to_calvin = matches!(
-            classify_dispatch(&tasks, &sum_read_vshards),
-            DispatchClass::MultiShard { .. }
-        );
+        // A block's writes returned above, so these tasks apply autocommit. A
+        // set with settlement reads commits through Calvin on any vShard count:
+        // the per-task loop checks no read.
+        let route_to_calvin = !sum_target_reads.is_empty()
+            || matches!(
+                classify_dispatch(&tasks, &sum_read_vshards),
+                DispatchClass::MultiShard { .. }
+            );
         if route_to_calvin {
             let plans: Vec<PhysicalPlan> = tasks.iter().map(|task| task.plan.clone()).collect();
             match dispatch_authorized_tasks_to_calvin(

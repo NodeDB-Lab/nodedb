@@ -11,7 +11,10 @@ use nodedb_types::protocol::NativeResponse;
 use crate::control::server::response_shape::calvin_fold::CalvinFoldCtx;
 use crate::control::server::shared::authorization::AuthorizedTaskSet;
 use crate::control::server::shared::session::TransactionState;
-use crate::control::server::shared::statement_exec::{EdgeRecon, try_edge_recon};
+use crate::control::server::shared::session::read_set::ReadSetEntry;
+use crate::control::server::shared::statement_exec::{
+    EdgeRecon, try_edge_recon, try_settled_recon,
+};
 use nodedb_physical::physical_task::PhysicalTask;
 
 use super::sql_loop::session_sequences;
@@ -25,11 +28,51 @@ pub(super) async fn try_edge_recon_dispatch(
     seq: u64,
     tasks: Vec<PhysicalTask>,
     authorized: AuthorizedTaskSet,
+    reads: &[ReadSetEntry],
 ) -> EdgeReconResult {
-    // The native `handle_begin` / `handle_commit` / `handle_rollback` drive
-    // the same `SessionStore` state machine pgwire uses.
-    let in_txn_block = ctx.sessions.transaction_state(ctx.peer_addr) == TransactionState::InBlock;
-    match try_edge_recon(ctx.state, ctx.identity, in_txn_block, tasks, authorized).await {
+    let routed = try_edge_recon(
+        ctx.state,
+        ctx.identity,
+        in_txn_block(ctx),
+        tasks,
+        authorized,
+        reads,
+    )
+    .await;
+    outcome(ctx, seq, routed)
+}
+
+/// Route `tasks` through the OLLP/Calvin coordinator when they hold a recon
+/// plan and settlement reads on one vShard. The caller returns a fired outcome
+/// at once: the tasks are consumed.
+pub(super) async fn try_settled_recon_dispatch(
+    ctx: &DispatchCtx<'_>,
+    seq: u64,
+    tasks: Vec<PhysicalTask>,
+    authorized: AuthorizedTaskSet,
+    reads: &[ReadSetEntry],
+) -> EdgeReconResult {
+    let routed = try_settled_recon(
+        ctx.state,
+        ctx.identity,
+        in_txn_block(ctx),
+        tasks,
+        authorized,
+        reads,
+    )
+    .await;
+    outcome(ctx, seq, routed)
+}
+
+/// Whether the session holds an open block. The native `handle_begin` /
+/// `handle_commit` / `handle_rollback` drive the same `SessionStore` state
+/// machine pgwire uses.
+fn in_txn_block(ctx: &DispatchCtx<'_>) -> bool {
+    ctx.sessions.transaction_state(ctx.peer_addr) == TransactionState::InBlock
+}
+
+fn outcome(ctx: &DispatchCtx<'_>, seq: u64, routed: crate::Result<EdgeRecon>) -> EdgeReconResult {
+    match routed {
         Ok(EdgeRecon::NotFired(tasks, authorized)) => EdgeReconResult::NotFired(tasks, authorized),
         // A RETURNING dependent write surfaces its deleted or updated rows. A
         // plain write reports the count its own mutation returned.

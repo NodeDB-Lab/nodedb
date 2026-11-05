@@ -13,7 +13,10 @@
 //!    together at its end, through Calvin when they span vShards.
 //! 2. A dependent predicate on an edge-bearing collection runs through the
 //!    implicit-edge OLLP/Calvin coordinator.
-//! 3. A write that spans vShards commits through the Calvin sequencer, so a
+//! 3. A statement on one vShard that holds settlement reads commits through
+//!    the Calvin sequencer: a recon plan through the coordinator, any other
+//!    write as a static transaction. Its stage checks the reads.
+//! 4. A write that spans vShards commits through the Calvin sequencer, so a
 //!    derived task (a cross-shard balance move, an implicit edge) commits
 //!    with the user's write.
 
@@ -41,7 +44,7 @@ use crate::control::server::shared::write_admission::all_writes_bufferable;
 use crate::control::trigger::statement_txn::in_block;
 
 use super::answer::StatementAnswer;
-use super::edge_recon::{CalvinApplied, EdgeRecon, try_edge_recon};
+use super::edge_recon::{CalvinApplied, EdgeRecon, try_edge_recon, try_settled_recon};
 use super::error::StatementError;
 use super::task_loop::{PlannedStatement, StatementExec, run_implicit_statement};
 
@@ -114,22 +117,67 @@ pub(crate) async fn route_atomic_statement(
         return Ok(AtomicRoute::Implicit(answer));
     }
 
-    let (tasks, authorized) =
-        match try_edge_recon(state, exec.identity, in_txn_block, tasks, authorized)
-            .await
-            .map_err(StatementError::Error)?
-        {
-            EdgeRecon::Applied(applied) => {
-                meter_applied(exec, &applied);
-                return Ok(AtomicRoute::Calvin(applied));
-            }
-            EdgeRecon::NotFired(tasks, authorized) => (tasks, authorized),
-        };
+    let (tasks, authorized) = match try_edge_recon(
+        state,
+        exec.identity,
+        in_txn_block,
+        tasks,
+        authorized,
+        &sum_target_reads,
+    )
+    .await
+    .map_err(StatementError::Error)?
+    {
+        EdgeRecon::Applied(applied) => {
+            meter_applied(exec, &applied);
+            return Ok(AtomicRoute::Calvin(applied));
+        }
+        EdgeRecon::NotFired(tasks, authorized) => (tasks, authorized),
+    };
+    let (tasks, authorized) = match try_settled_recon(
+        state,
+        exec.identity,
+        in_txn_block,
+        tasks,
+        authorized,
+        &sum_target_reads,
+    )
+    .await
+    .map_err(StatementError::Error)?
+    {
+        EdgeRecon::Applied(applied) => {
+            meter_applied(exec, &applied);
+            return Ok(AtomicRoute::Calvin(applied));
+        }
+        EdgeRecon::NotFired(tasks, authorized) => (tasks, authorized),
+    };
 
     // An autocommit statement has no session read set to widen with. The
     // reads to widen with are those materialized-sum settlement stamped.
     let sum_read_vshards = read_vshards_of(&sum_target_reads).map_err(StatementError::Error)?;
     match classify_dispatch(&tasks, &sum_read_vshards) {
+        // A zero-net settlement on one vShard. The per-task loop checks no read.
+        DispatchClass::SingleShard { .. } if !in_txn_block && !sum_target_reads.is_empty() => {
+            let plans = tasks.iter().map(|task| task.plan.clone()).collect();
+            let apply_result = dispatch_authorized_tasks_to_calvin(
+                state,
+                authorized,
+                exec.tenant_id(),
+                session.sessions.cross_shard_txn_mode(session.session_id),
+                TxnDispatchPosition::Autocommit,
+                &sum_target_reads,
+                None,
+            )
+            .await
+            .map_err(StatementError::Error)?;
+            let applied = CalvinApplied {
+                apply_result,
+                plans,
+                database_id: exec.database_id,
+            };
+            meter_applied(exec, &applied);
+            return Ok(AtomicRoute::Calvin(applied));
+        }
         DispatchClass::SingleShard { .. } => {}
         DispatchClass::MultiShard { .. } => {
             // Calvin applies the statement durably at statement time,

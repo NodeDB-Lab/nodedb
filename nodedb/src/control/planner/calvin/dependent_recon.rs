@@ -23,7 +23,7 @@ use crate::Error;
 use crate::control::cluster::calvin::executor::ollp::error::OllpError;
 use crate::control::planner::calvin::preexec::PreexecScan;
 use crate::control::planner::calvin::{
-    DependentOutcome, DependentRetryArgs, build_single_vshard_predicted_tx_class,
+    DependentOutcome, DependentRetryArgs, TxnReads, build_single_vshard_predicted_tx_class,
     is_dependent_predicate, predicate_class_for_filters, run_dependent_with_retry,
     submit_calvin_routed_assign,
 };
@@ -31,6 +31,7 @@ use crate::control::planner::implicit_edges::{
     EdgeUpdateCtx, append_implicit_edge_delete_tasks, append_implicit_edge_update_tasks,
 };
 use crate::control::server::shared::session::StatementDeadline;
+use crate::control::server::shared::session::read_set::ReadSetEntry;
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TenantId, TraceId};
 use nodedb_physical::physical_plan::OllpPredictedEdge;
@@ -59,6 +60,15 @@ pub struct DependentReconOutcome {
     /// Applied Data-Plane response for the RETURNING doc write, if any. `None`
     /// for a plain (non-RETURNING) dependent write.
     pub apply_result: Option<crate::bridge::envelope::Response>,
+}
+
+/// The settlement reads a recon route carries into its transaction, with the
+/// snapshot ordinal its stages validate them at.
+#[derive(Clone, Copy)]
+pub(super) struct SettledReads<'a> {
+    pub reads: &'a [ReadSetEntry],
+    /// `None` when `reads` is empty.
+    pub snapshot_ordinal: Option<i64>,
 }
 
 /// Detect whether `tasks` carry a dependent predicate or a TRUNCATE on an
@@ -151,12 +161,18 @@ pub fn is_edge_recon_plan(plan: &nodedb_physical::physical_plan::PhysicalPlan) -
 /// guard and edges all home on one vShard is a legitimate one-vShard
 /// transaction, and so is a contended single-collection predicate write
 /// routed here by the write-admission gate.
+///
+/// `reads` are the images materialized-sum settlement folded the tasks' balance
+/// deltas from, each at its own cut. Every attempt carries them unchanged and
+/// validates them at the lowest cut. A fresh reconnaissance cannot refresh them:
+/// the shipped deltas stay the ones folded from those images.
 pub async fn dispatch_authorized_dependent_edge_recon(
     state: &SharedState,
     authorized: crate::control::server::shared::authorization::AuthorizedTaskSet,
     identity: &crate::control::security::identity::AuthenticatedIdentity,
     tenant_id: TenantId,
     database_id: DatabaseId,
+    reads: &[ReadSetEntry],
 ) -> crate::Result<DependentReconOutcome> {
     let tasks = authorized
         .into_tasks()
@@ -171,6 +187,7 @@ pub async fn dispatch_authorized_dependent_edge_recon(
         tenant_id,
         database_id,
         user_roles,
+        reads,
     )
     .await
 }
@@ -185,7 +202,8 @@ pub(crate) async fn dispatch_dependent_edge_recon(
     database_id: DatabaseId,
     user_roles: Vec<String>,
 ) -> crate::Result<DependentReconOutcome> {
-    dispatch_dependent_edge_recon_inner(state, tasks, None, tenant_id, database_id, user_roles)
+    // The caller settled no materialized sum, so it holds no read to carry.
+    dispatch_dependent_edge_recon_inner(state, tasks, None, tenant_id, database_id, user_roles, &[])
         .await
 }
 
@@ -196,11 +214,26 @@ async fn dispatch_dependent_edge_recon_inner(
     tenant_id: TenantId,
     database_id: DatabaseId,
     user_roles: Vec<String>,
+    reads: &[ReadSetEntry],
 ) -> crate::Result<DependentReconOutcome> {
+    // A stage validates nothing without a snapshot ordinal, so every route
+    // below stamps this one on its transaction.
+    let snapshot_ordinal = TxnReads::autocommit(reads)?.snapshot_ordinal;
+    let settled = SettledReads {
+        reads,
+        snapshot_ordinal,
+    };
     // A TRUNCATE empties the collection and tombstones its edges on every
     // vShard, in one transaction.
-    if let Some(truncated) =
-        super::edge_truncate::dispatch_truncate(state, &tasks, identity, tenant_id).await?
+    if let Some(truncated) = super::edge_truncate::dispatch_truncate(
+        state,
+        &tasks,
+        identity,
+        tenant_id,
+        &user_roles,
+        settled,
+    )
+    .await?
     {
         return Ok(DependentReconOutcome {
             tasks_dispatched: tasks.len() as u64,
@@ -215,6 +248,8 @@ async fn dispatch_dependent_edge_recon_inner(
             identity,
             tenant_id,
             database_id,
+            &user_roles,
+            settled,
         )
         .await?
     {
@@ -376,6 +411,8 @@ async fn dispatch_dependent_edge_recon_inner(
                     .collect();
             }
 
+            #[cfg(feature = "failpoints")]
+            crate::control::fail_gate::before_recon_submit(state.node_id).await;
             orc.submit_with_retry_via(
                 pred_class,
                 tenant_id,
@@ -400,11 +437,12 @@ async fn dispatch_dependent_edge_recon_inner(
                         tenant_id,
                         dep_collection,
                         &surrogates,
-                        &[],
+                        reads,
                     )
                     .map_err(|e| OllpError::Terminal(Box::new(e)))?;
                     if let Some(class) = tx_class.as_mut() {
                         class.set_user_roles(user_roles.to_vec());
+                        class.set_snapshot_ordinal(snapshot_ordinal);
                     }
                     Ok(tx_class)
                 },

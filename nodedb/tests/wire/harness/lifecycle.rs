@@ -32,6 +32,21 @@ impl TestServer {
         Self::connect_and_build(spawned, dir, AuthMode::Trust).await
     }
 
+    /// [`Self::start_with_failpoints`] with `cores` Data Plane cores, for a
+    /// test whose collections must land on different cores.
+    #[cfg(feature = "failpoints")]
+    pub async fn start_multicores_with_failpoints(cores: usize, spec: &str) -> Self {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spawned = process::spawn_with_failpoints(
+            dir.path(),
+            AuthMode::Trust,
+            TuningOverrides::none(),
+            cores,
+            Some(spec),
+        );
+        Self::connect_and_build(spawned, dir, AuthMode::Trust).await
+    }
+
     /// Spawn a single-core server whose version cleanup runs every 200 ms
     /// with a history window of about 12 s (`TuningOverrides`).
     pub async fn start_with_fast_version_cleanup() -> Self {

@@ -1,0 +1,98 @@
+// SPDX-License-Identifier: BUSL-1.1
+
+//! TRUNCATE of the source of a cross-shard materialized sum over pgwire, on a
+//! collection without edges, with the source changed between settlement and
+//! the TRUNCATE's transaction.
+//!
+//! Settlement ships the balance delta of the removed rows from the source
+//! images it reads. Only the settlement reads, validated at their cut, guard
+//! the delta against a source row that moves afterwards.
+//!
+//! The `recon::before_submit` gate parks the TRUNCATE after settlement. The
+//! test commits the source change while it is parked, then releases it.
+
+#![cfg(feature = "failpoints")]
+
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use super::materialized_sum_cross_shard_expanders::{FIXTURE_CORES, balance, sum_fixture_on};
+use crate::harness::TestServer;
+
+/// The concurrent change: `e2` joins `acc`, which goes from 15 to 22.
+const MOVE_SOURCE: &str = "INSERT INTO ptv_post (id, account_id, amount) VALUES ('e2', 'acc', '7')";
+
+/// A server whose recon writes park at `recon::before_submit` until
+/// `release` exists, with the sum fixture created.
+async fn parked_fixture(release: &Path) -> TestServer {
+    let spec = format!("recon::before_submit=wait_file({})", release.display());
+    let server = TestServer::start_multicores_with_failpoints(FIXTURE_CORES, &spec).await;
+    sum_fixture_on(server).await
+}
+
+/// Wait until the gate reports a write parked.
+async fn wait_parked(release: &Path) {
+    let mut marker = release.as_os_str().to_owned();
+    marker.push(".parked");
+    let marker = PathBuf::from(marker);
+    for _ in 0..600 {
+        if marker.exists() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("the TRUNCATE never reached recon::before_submit");
+}
+
+/// The sum of the `acc` postings, read from the source rows.
+async fn source_sum(server: &TestServer) -> i64 {
+    server
+        .query_text("SELECT amount FROM ptv_post WHERE account_id = 'acc'")
+        .await
+        .expect("read the source postings")
+        .iter()
+        .map(|amount| amount.parse::<i64>().expect("a numeric amount"))
+        .sum()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pgwire_truncate_keeps_the_sum_when_a_settled_source_row_moved() {
+    let gate_dir = tempfile::tempdir().expect("gate tempdir");
+    let release = gate_dir.path().join("release-truncate");
+    let server = parked_fixture(&release).await;
+
+    let (writer, _writer_handle) = server
+        .connect_as("nodedb", "nodedb")
+        .await
+        .expect("connect the parked writer");
+    let parked = tokio::spawn(async move {
+        writer
+            .simple_query("TRUNCATE ptv_post")
+            .await
+            .map(|_| ())
+            .map_err(|e| e.code().map(|code| code.code().to_owned()))
+    });
+
+    wait_parked(&release).await;
+    tokio::time::timeout(Duration::from_secs(30), server.exec(MOVE_SOURCE))
+        .await
+        .expect("the concurrent source change did not return while the TRUNCATE was parked")
+        .expect("the concurrent source change");
+    assert_eq!(
+        balance(&server, "acc").await,
+        "22",
+        "the concurrent change settles its own delta"
+    );
+    std::fs::write(&release, b"release").expect("release the parked TRUNCATE");
+
+    assert_eq!(
+        parked.await.expect("the parked TRUNCATE task"),
+        Err(Some("40001".to_owned())),
+        "a stale settlement read aborts the TRUNCATE"
+    );
+    assert_eq!(
+        balance(&server, "acc").await,
+        source_sum(&server).await.to_string(),
+        "the balance must equal the source sum"
+    );
+}

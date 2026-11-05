@@ -215,12 +215,24 @@ async fn dispatch_planned(
 
     let sum_read_vshards = crate::control::planner::calvin::read_vshards_of(&sum_target_reads)
         .map_err(|error| DdlError::from_error(&error))?;
+    // A statement with settlement reads commits through Calvin on any vShard
+    // count: the per-task route below checks no read.
     if !in_txn_block
-        && matches!(
-            crate::control::planner::calvin::classify_dispatch(&tasks, &sum_read_vshards),
-            crate::control::planner::calvin::DispatchClass::MultiShard { .. }
-        )
+        && (!sum_target_reads.is_empty()
+            || matches!(
+                crate::control::planner::calvin::classify_dispatch(&tasks, &sum_read_vshards),
+                crate::control::planner::calvin::DispatchClass::MultiShard { .. }
+            ))
     {
+        // A Calvin dispatch returns no per-task payload here, so there is no
+        // stored row to project. Refused before the write commits.
+        if has_returning {
+            return Err(ddl_err(
+                "0A000",
+                "RETURNING is not supported on a write that commits through Calvin on this \
+                 route; remove the RETURNING clause",
+            ));
+        }
         crate::control::planner::calvin::dispatch_authorized_tasks_to_calvin(
             state,
             authorized_tasks,
@@ -235,15 +247,6 @@ async fn dispatch_planned(
             let (_, sqlstate, message) = error_to_sqlstate(&error);
             ddl_err(sqlstate, message)
         })?;
-        // A cross-shard Calvin dispatch returns no per-task payload here, so
-        // there is no stored row to project. Refused rather than answered with
-        // an empty row set, which will read as "the write matched nothing".
-        if has_returning {
-            return Err(ddl_err(
-                "0A000",
-                "RETURNING is not supported on a write that spans multiple shards",
-            ));
-        }
         return Ok(Vec::new());
     }
 
