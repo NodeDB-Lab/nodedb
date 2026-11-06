@@ -11,6 +11,7 @@ use std::sync::Arc;
 use pgwire::api::results::{Response, Tag};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 
+use crate::control::mirror::source::sync::{await_mirror_sync, sync_database_of};
 use crate::control::planner::calvin::{DispatchClass, classify_dispatch};
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::shared::session::{SessionId, TransactionState};
@@ -154,6 +155,13 @@ impl NodeDbPgHandler {
             return Err(sql_error(&revoked));
         }
         let read_only = tasks.iter().all(|task| !plan_is_write(&task.plan));
+        // A statement in a block waits at its COMMIT.
+        let sync_database =
+            if self.sessions.transaction_state(session_id) == TransactionState::InBlock {
+                None
+            } else {
+                sync_database_of(&self.state, &tasks)
+            };
         let guard_scope = Arc::clone(&plan_lease_scope);
         let body = async {
             if tasks.is_empty() {
@@ -370,7 +378,13 @@ impl NodeDbPgHandler {
                 Err(revoked) => Err(sql_error(&revoked)),
             }
         } else {
-            body.await
+            let responses = body.await?;
+            if let Some(database) = sync_database {
+                await_mirror_sync(&self.state, database)
+                    .await
+                    .map_err(|error| sql_error(&error))?;
+            }
+            Ok(responses)
         }
     }
 }

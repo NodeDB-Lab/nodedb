@@ -2,7 +2,7 @@
 
 //! Snapshot export and import for a tenant's per-collection CRDT state.
 
-use super::core::TenantCrdtEngine;
+use super::core::{TenantCrdtEngine, loro_root};
 
 impl TenantCrdtEngine {
     /// Export one collection's CRDT state as binary snapshot bytes.
@@ -32,7 +32,7 @@ impl TenantCrdtEngine {
     /// document's collection. `None` when the collection or row is absent.
     pub fn read_snapshot(&self, collection: &str, row_id: &str) -> crate::Result<Option<Vec<u8>>> {
         match self.collections.get(collection) {
-            Some(state) if state.row_exists(collection, row_id) => {
+            Some(state) if state.row_exists(loro_root(collection), row_id) => {
                 Ok(Some(state.export_snapshot().map_err(crate::Error::Crdt)?))
             }
             _ => Ok(None),

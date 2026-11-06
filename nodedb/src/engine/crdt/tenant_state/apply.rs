@@ -8,7 +8,7 @@ use nodedb_types::columnar::schema::TS_SYSTEM;
 use nodedb_crdt::pre_validate::{self, PreValidationResult};
 use nodedb_crdt::validator::ProposedChange;
 
-use super::core::{TenantCrdtEngine, TenantRowLookup};
+use super::core::{TenantCrdtEngine, TenantRowLookup, loro_root};
 
 impl TenantCrdtEngine {
     /// Pre-validate a proposed change (fast-reject before Raft).
@@ -88,15 +88,16 @@ impl TenantCrdtEngine {
             .map(|(k, v)| (k.as_str(), v.clone()))
             .collect();
 
+        let root = loro_root(&change.collection);
         let state = self.state_mut(&change.collection)?;
         if is_bitemporal {
             fields.push((TS_SYSTEM, LoroValue::I64(now_ms)));
             state
-                .upsert_versioned(&change.collection, &change.row_id, &fields)
+                .upsert_versioned(root, &change.row_id, &fields)
                 .map_err(crate::Error::Crdt)
         } else {
             state
-                .upsert(&change.collection, &change.row_id, &fields)
+                .upsert(root, &change.row_id, &fields)
                 .map_err(crate::Error::Crdt)
         }
     }

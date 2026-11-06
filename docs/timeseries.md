@@ -15,7 +15,13 @@ Timeseries is a **columnar profile**. It extends the [Columnar engine](columnar.
 - **Cascading compression** — ALP + FastLanes + FSST + Pcodec + rANS + LZ4. Achieves 20-40x compression on typical telemetry, compared to 3-5x from single-pass approaches.
 - **ILP ingest** — InfluxDB Line Protocol for high-throughput metric ingestion with adaptive batching and per-series core routing.
 - **Continuous aggregation** — Incrementally maintained per-bucket state, folded from flushed partitions. No full re-scan on refresh.
-- **Retention policies** — Automatic expiry of old data by time partition.
+- **Retention policies** — Automatic expiry of old data by time partition. A pass drops the partitions older than `decided time - max age`.
+  - A partition with an interval expires once its whole interval ended at or before the cutoff. Its rows leave at one moment on every replica.
+  - A partition with no interval expires once its newest row is older than the cutoff.
+  - A bitemporal collection expires a partition once its newest write is older than the cutoff.
+  - On a bitemporal collection, a row past the cutoff can leave one replica while another holds it beside a newer row.
+  - Every row newer than the cutoff stays on every replica.
+  - The held row leaves at the first pass past its partition's newest write.
 - **Approximate aggregation** — HyperLogLog (cardinality), t-digest (percentiles), SpaceSaving (top-K), Count-Min Sketch (frequency). All mergeable across shards and usable in continuous aggregation.
 - **Block-level skip** — Sparse primary index with min/max statistics per block. Queries skip irrelevant time ranges without decompression.
 - **PromQL** — Full Prometheus query engine (Tier 1+2+3 functions) at `/obsv/api`. Point Grafana at NodeDB directly.

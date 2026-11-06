@@ -199,8 +199,9 @@ async fn hello_source(
     state: &SharedState,
     source_cluster: &str,
     source_database: &str,
+    mode: MirrorMode,
 ) -> Result<(MirrorHelloAck, MirrorSourceClient), DdlError> {
-    let link = open_source_link(state, source_cluster, source_database)
+    let link = open_source_link(state, source_cluster, source_database, mode)
         .map_err(|e| DdlError::from_error_in_context("MIRROR DATABASE", &e))?;
     let client = MirrorSourceClient::new(link);
     let deadline = StatementDeadline::of_statement(state).tokio_instant();
@@ -256,7 +257,7 @@ pub async fn mirror_database(
         .map_err(|e| DdlError::from_error_in_context("catalog lookup failed", &e))?;
     refuse_second_mirror(&databases, source_cluster, source_database)?;
 
-    let (ack, client) = hello_source(state, source_cluster, source_database).await?;
+    let (ack, client) = hello_source(state, source_cluster, source_database, mode).await?;
     let db_id = match check_hello_ack(
         &ack,
         cluster_id,

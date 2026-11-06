@@ -33,6 +33,7 @@ use super::super::transfer;
 use super::super::weighted_pick;
 use super::helpers::{extract_last_value_args, extract_last_values_arg};
 use super::route_tokens::{RouteTokens, mentions};
+use super::sync_wait::{confirmed, confirmed_unless_staged};
 
 pub(super) async fn try_string(
     state: &SharedState,
@@ -76,10 +77,12 @@ pub(super) async fn try_string(
 
     // Atomic transfer functions.
     if upper.starts_with("SELECT TRANSFER(") || upper.starts_with("SELECT TRANSFER (") {
-        return Some(transfer::transfer(state, identity, database_id, sql, txn_ctx).await);
+        let result = transfer::transfer(state, identity, database_id, sql, txn_ctx).await;
+        return Some(confirmed_unless_staged(state, database_id, txn_ctx, result).await);
     }
     if upper.starts_with("SELECT TRANSFER_ITEM(") || upper.starts_with("SELECT TRANSFER_ITEM (") {
-        return Some(transfer::transfer_item(state, identity, database_id, sql, txn_ctx).await);
+        let result = transfer::transfer_item(state, identity, database_id, sql, txn_ctx).await;
+        return Some(confirmed_unless_staged(state, database_id, txn_ctx, result).await);
     }
 
     // Sorted index DDL.
@@ -121,19 +124,24 @@ pub(super) async fn try_string(
 
     // KV_INCR / KV_DECR / KV_INCR_FLOAT / KV_CAS / KV_GETSET — atomic KV operations.
     if upper.starts_with("SELECT KV_INCR(") || upper.starts_with("SELECT KV_INCR (") {
-        return Some(kv_atomic::kv_incr(state, identity, database_id, sql, false, txn_ctx).await);
+        let result = kv_atomic::kv_incr(state, identity, database_id, sql, false, txn_ctx).await;
+        return Some(confirmed_unless_staged(state, database_id, txn_ctx, result).await);
     }
     if upper.starts_with("SELECT KV_DECR(") || upper.starts_with("SELECT KV_DECR (") {
-        return Some(kv_atomic::kv_incr(state, identity, database_id, sql, true, txn_ctx).await);
+        let result = kv_atomic::kv_incr(state, identity, database_id, sql, true, txn_ctx).await;
+        return Some(confirmed_unless_staged(state, database_id, txn_ctx, result).await);
     }
     if upper.starts_with("SELECT KV_INCR_FLOAT(") || upper.starts_with("SELECT KV_INCR_FLOAT (") {
-        return Some(kv_atomic::kv_incr_float(state, identity, database_id, sql, txn_ctx).await);
+        let result = kv_atomic::kv_incr_float(state, identity, database_id, sql, txn_ctx).await;
+        return Some(confirmed_unless_staged(state, database_id, txn_ctx, result).await);
     }
     if upper.starts_with("SELECT KV_CAS(") || upper.starts_with("SELECT KV_CAS (") {
-        return Some(kv_atomic::kv_cas(state, identity, database_id, sql, txn_ctx).await);
+        let result = kv_atomic::kv_cas(state, identity, database_id, sql, txn_ctx).await;
+        return Some(confirmed_unless_staged(state, database_id, txn_ctx, result).await);
     }
     if upper.starts_with("SELECT KV_GETSET(") || upper.starts_with("SELECT KV_GETSET (") {
-        return Some(kv_atomic::kv_getset(state, identity, database_id, sql, txn_ctx).await);
+        let result = kv_atomic::kv_getset(state, identity, database_id, sql, txn_ctx).await;
+        return Some(confirmed_unless_staged(state, database_id, txn_ctx, result).await);
     }
 
     // Timeseries: CREATE TIMESERIES, ALTER TIMESERIES, REWRITE PARTITIONS.
@@ -286,7 +294,8 @@ pub(super) async fn try_string(
             return Some(Err(crdt_transaction_error()));
         }
         let parts: Vec<&str> = sql.split_whitespace().collect();
-        return Some(dsl::crdt_merge(state, identity, database_id, &parts).await);
+        let result = dsl::crdt_merge(state, identity, database_id, &parts).await;
+        return Some(confirmed(state, database_id, result).await);
     }
     // `SELECT crdt_state(...)` / `SELECT crdt_apply(...)` CRDT DSL functions —
     // string-recognized (they parse into no typed DDL variant). The router
@@ -298,7 +307,8 @@ pub(super) async fn try_string(
         if crdt_apply_forbidden_in_transaction(txn_ctx) {
             return Some(Err(crdt_transaction_error()));
         }
-        return Some(crdt_ops::crdt_apply(state, identity, database_id, sql).await);
+        let result = crdt_ops::crdt_apply(state, identity, database_id, sql).await;
+        return Some(confirmed(state, database_id, result).await);
     }
 
     // `NDB_CHUNK_TEXT(...)` table-valued function, `SHOW CHANGES FOR …`

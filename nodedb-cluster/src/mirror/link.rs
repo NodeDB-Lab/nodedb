@@ -46,6 +46,8 @@ pub struct MirrorLinkConfig {
     pub mirror_cluster_id: u64,
     /// The link's id on the source.
     pub link_id: u64,
+    /// Whether a write on the source waits for this mirror.
+    pub mode: nodedb_types::MirrorMode,
     /// The source's mirror listeners. A link moves on when a replica cannot
     /// answer.
     pub seeds: Vec<SocketAddr>,
@@ -167,6 +169,7 @@ impl CrossClusterLink {
             link_id: self.config.link_id,
             protocol_version: MIRROR_PROTOCOL_VERSION,
             fresh: self.fresh.load(Ordering::Acquire),
+            mode: self.config.mode,
         });
         match exchange_on(&connection, &hello).await? {
             MirrorResponse::Hello(ack) => {

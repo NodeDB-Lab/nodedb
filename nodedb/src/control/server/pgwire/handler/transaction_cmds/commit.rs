@@ -53,8 +53,27 @@ impl NodeDbPgHandler {
         session_id: SessionId,
     ) -> PgWireResult<Vec<Response>> {
         let dp = PgwireTxnDp { handler: self };
+        let sync_database = crate::control::mirror::source::sync::commit_sync_database(
+            &self.state,
+            &self.sessions,
+            session_id,
+        );
         match commit::run_commit(&self.sessions, session_id, identity, &self.state, &dp).await {
-            CommitOutcome::Committed => Ok(vec![Response::Execution(Tag::new("COMMIT"))]),
+            CommitOutcome::Committed => {
+                if let Some(database) = sync_database {
+                    crate::control::mirror::source::sync::await_mirror_sync(&self.state, database)
+                        .await
+                        .map_err(|error| {
+                            let (severity, code, message) = error_to_sqlstate(&error);
+                            PgWireError::UserError(Box::new(ErrorInfo::new(
+                                severity.to_owned(),
+                                code.to_owned(),
+                                message,
+                            )))
+                        })?;
+                }
+                Ok(vec![Response::Execution(Tag::new("COMMIT"))])
+            }
             CommitOutcome::Aborted { reason } => Err(commit_abort_to_pgerror(&reason)),
         }
     }

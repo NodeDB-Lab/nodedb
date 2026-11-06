@@ -13,7 +13,7 @@ use nodedb_crdt::validator::{ValidationOutcome, Violation};
 use nodedb_types::sync::violation::ViolationType;
 
 use super::apply_target::ApplyTarget;
-use super::core::TenantCrdtEngine;
+use super::core::{TenantCrdtEngine, loro_root};
 
 /// Server-derived signing context for an externally synchronized delta.
 pub struct DeltaSigningAdmission {
@@ -162,12 +162,19 @@ impl TenantCrdtEngine {
             Ok(write_set) => write_set,
             Err(fault) => return self.reject_shape_fault(collection, delta, peer_id, &fault),
         };
+        let root = loro_root(collection);
         if write_set
             .iter()
-            .any(|(written, row)| written != collection || !target.admits_row(row))
+            .any(|(written, row)| written != root || !target.admits_row(row))
         {
             return ValidatedApplyOutcome::Malformed;
         }
+        // A delta names its root. The engine and its callers name the stored
+        // collection, so the write-set leaves here under that name.
+        let write_set: Vec<(String, String)> = write_set
+            .into_iter()
+            .map(|(_, row)| (collection.to_owned(), row))
+            .collect();
 
         // Install the candidate only while validation reads it. Keep the exact
         // previous state available for a no-fail rollback on rejection.
@@ -490,6 +497,95 @@ mod tests {
         doc.set_peer_id(peer).unwrap();
         write(&doc);
         doc.export(loro::ExportMode::Snapshot).unwrap()
+    }
+
+    /// A client's delta names the bare collection, in any database. The engine
+    /// stores it under the qualified name, and reads it back there.
+    #[test]
+    fn a_named_database_applies_a_delta_that_names_the_bare_collection() {
+        const STORED: &str = "7/users";
+        let mut engine = TenantCrdtEngine::new(TenantId::new(1), 0, ConstraintSet::new()).unwrap();
+        let delta = row_delta(5, "u1", "a@x", "A");
+
+        let preview = engine.preview_delta(STORED, "u1", &delta).unwrap();
+        assert!(preview.imported_ops > 0);
+        let outcome = engine.apply_committed_delta_validated(
+            STORED,
+            &delta,
+            ApplyTarget::Collection,
+            5,
+            &nodedb_crs::CrsContext::builtin_only(),
+        );
+        match outcome {
+            ValidatedApplyOutcome::Clean { write_set, .. } => {
+                assert_eq!(write_set, vec![(STORED.to_string(), "u1".to_string())]);
+            }
+            other => panic!("expected Clean, got {other:?}"),
+        }
+        assert!(engine.row_exists(STORED, "u1"));
+        assert!(engine.read_row(STORED, "u1").is_some());
+    }
+
+    /// A delta that names the qualified form writes another root. A client
+    /// never needs that form, and the engine refuses it.
+    #[test]
+    fn a_named_database_refuses_a_delta_that_names_the_qualified_collection() {
+        const STORED: &str = "7/users";
+        let engine = TenantCrdtEngine::new(TenantId::new(1), 0, ConstraintSet::new()).unwrap();
+        let delta = raw_delta(5, |doc| {
+            let row = doc
+                .get_map(STORED)
+                .insert_container("u1", loro::LoroMap::new())
+                .unwrap();
+            row.insert("email", "a@x").unwrap();
+        });
+        let error = engine
+            .preview_delta(STORED, "u1", &delta)
+            .expect_err("the delta writes a root other than the collection's");
+        assert!(
+            matches!(
+                error,
+                crate::Error::Crdt(nodedb_crdt::CrdtError::PreviewTargetMismatch { .. })
+            ),
+            "{error:?}"
+        );
+    }
+
+    /// The catalog derives a constraint under the bare name. It still holds a
+    /// named database's writes, and a server-built row shares the delta's root.
+    #[test]
+    fn a_named_database_enforces_the_constraints_it_installed() {
+        const STORED: &str = "7/users";
+        let mut engine = TenantCrdtEngine::new(TenantId::new(1), 0, ConstraintSet::new()).unwrap();
+        engine.set_collection_policy_typed(STORED, CollectionPolicy::strict());
+        assert!(engine.set_collection_constraints(
+            STORED,
+            1,
+            vec![nodedb_crdt::Constraint {
+                name: "users_email_unique".into(),
+                collection: "users".into(),
+                field: "email".into(),
+                kind: nodedb_crdt::ConstraintKind::Unique,
+            }],
+        ));
+        assert_eq!(engine.constraints_for_collection(STORED).len(), 1);
+        engine
+            .doc_upsert(STORED, "u1", &[("email", LoroValue::String("a@x".into()))])
+            .unwrap();
+
+        let outcome = engine.apply_committed_delta_validated(
+            STORED,
+            &row_delta(5, "u2", "a@x", "B"),
+            ApplyTarget::Collection,
+            5,
+            &nodedb_crs::CrsContext::builtin_only(),
+        );
+        assert!(
+            matches!(outcome, ValidatedApplyOutcome::Rejected(_)),
+            "{outcome:?}"
+        );
+        assert!(!engine.row_exists(STORED, "u2"));
+        assert!(engine.row_exists(STORED, "u1"));
     }
 
     #[test]

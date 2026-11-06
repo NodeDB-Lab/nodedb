@@ -209,16 +209,13 @@ async fn alter_database_promote_superuser_allowed() {
     let state = make_state_with_catalog();
     setup_foo_db(&state).await;
     let su = superuser();
-    // foo is not a mirror; PROMOTE may return Ok (idempotent no-op) or 0A000
-    // (not a mirror) depending on the descriptor state. Either way the gate
-    // passed — the only thing this test must reject is SQLSTATE 42501.
-    let result = try_ddl(&state, &su, "ALTER DATABASE foo PROMOTE").await;
-    if let Err(err) = result {
-        assert!(
-            !err.contains("42501"),
-            "superuser must pass the gate; got: {err}"
-        );
-    }
+    // foo never was a mirror. The superuser passes the gate, and the statement
+    // refuses with 0A000.
+    let err = ddl_err(&state, &su, "ALTER DATABASE foo PROMOTE").await;
+    assert!(
+        err.contains("0A000") && err.contains("is not a mirror database"),
+        "superuser must pass the gate and get the typed refusal; got: {err}"
+    );
 }
 
 #[tokio::test]

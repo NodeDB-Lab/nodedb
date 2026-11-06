@@ -326,7 +326,7 @@ All resource consumption is observable via Prometheus metrics prefixed `nodedb_`
 - `bridge_queue_depth` — Pending requests in SPSC bridge virtual queue
 - `wal_commit_latency_p99_us` — 99th percentile WAL commit latency (microseconds)
 - `maintenance_lease_seconds_total` — Cumulative wall seconds holding a maintenance lease
-- `mirror_lag_ms` — Replication lag to follower replicas (distributed deployments)
+- `mirror_lag_ms` — A mirror database's lag behind its source cluster. Zero for other databases and for a promoted mirror. See [Databases](databases.md#mirror)
 
 **Per-Tenant Metrics in a Database** (`nodedb_tenant_*{tenant_id="<id>", database="<name>"}`):
 

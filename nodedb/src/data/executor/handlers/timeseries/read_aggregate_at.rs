@@ -243,12 +243,7 @@ impl CoreLoop {
             return;
         };
         let view = memtable.flush_view();
-        let src = crate::engine::timeseries::continuous_agg::RefreshSource {
-            schema: view.schema,
-            columns: view.columns,
-            symbol_dicts: view.symbol_dicts,
-            row_count: usize::try_from(view.row_count).unwrap_or(usize::MAX),
-        };
+        let src = crate::engine::timeseries::continuous_agg::RefreshSource::of_view(&view);
         let keep_all = |_: i64| true;
         let cut = RowCut {
             at: read.at,

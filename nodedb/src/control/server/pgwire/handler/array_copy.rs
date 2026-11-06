@@ -17,6 +17,7 @@ use nodedb_sql::ddl_ast::statement::{MiscStmt, NodedbStatement};
 use pgwire::api::results::{CopyResponse, Response};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 
+use crate::control::mirror::source::sync::await_database_sync;
 use crate::control::planner::context::{BulkLoadRoute, QueryContext};
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::shared::ddl::DdlError;
@@ -224,7 +225,8 @@ pub(super) async fn feed_array_copy(conn: &ArrayCopyConn<'_>, data: &[u8]) -> Pg
 }
 
 /// Finish an array COPY: load its last record and pending chunks. Returns
-/// the rows loaded.
+/// the rows loaded, once every sync mirror holds them. A COPY in a block
+/// waits at its COMMIT.
 pub(super) async fn finish_array_copy(
     state: &SharedState,
     sessions: &SessionStore,
@@ -247,10 +249,20 @@ pub(super) async fn finish_array_copy(
         txn_ctx: &txn_ctx,
     };
     let _request = state.tenant_request_guard(identity.tenant_id);
-    loader
+    let rows = loader
         .finish(&ctx)
         .await
-        .map_err(|e| refused(sessions, session_id, e))
+        .map_err(|e| refused(sessions, session_id, e))?;
+    if sessions.transaction_state(session_id) != TransactionState::InBlock {
+        await_database_sync(state, database_id)
+            .await
+            .map_err(|error| {
+                let (_, code, message) =
+                    crate::control::server::pgwire::types::error_to_sqlstate(&error);
+                user_error(code, message)
+            })?;
+    }
+    Ok(rows)
 }
 
 /// The pgwire error of a refused load. A refusal inside a transaction block

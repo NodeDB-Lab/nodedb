@@ -840,6 +840,14 @@ pub enum Error {
     #[error("database '{database}' is a read-only mirror; promote it before writing")]
     MirrorReadOnly { database: String },
 
+    /// A write committed on a source, and a sync mirror did not confirm it in
+    /// time. The row stays on the source.
+    #[error(
+        "the write committed on database '{database}', and its sync mirror did not confirm it \
+         within {waited_ms} ms; do not retry it as a failed write"
+    )]
+    MirrorSyncTimeout { database: String, waited_ms: u64 },
+
     /// A strong-consistency read was attempted on a mirror database. Mirrors
     /// aren't the Raft leader for the source's commit log.
     #[error(

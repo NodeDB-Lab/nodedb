@@ -21,9 +21,13 @@ mod test_promotion_durability;
 mod test_read_consistency_selector;
 #[path = "mirror/test_read_only_protocols.rs"]
 mod test_read_only_protocols;
+#[path = "mirror/test_recovery_refusals.rs"]
+mod test_recovery_refusals;
 #[path = "mirror/test_restart_resume.rs"]
 mod test_restart_resume;
 #[path = "mirror/test_simulated_latency.rs"]
 mod test_simulated_latency;
 #[path = "mirror/test_strong_read_rejected.rs"]
 mod test_strong_read_rejected;
+#[path = "mirror/test_sync_write_paths.rs"]
+mod test_sync_write_paths;

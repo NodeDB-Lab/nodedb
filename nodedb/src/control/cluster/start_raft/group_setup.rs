@@ -335,7 +335,8 @@ fn build_envelope_handler(
     let cross_shard_dedup = Arc::new(crate::event::cross_shard::CrossShardDedup::open(data_dir)?);
     cross_shard_dedup.restore_from_wal(&shared.wal)?;
     shared
-        .cross_shard_dedup
+        .cross_shard
+        .dedup
         .set(Arc::clone(&cross_shard_dedup))
         .map_err(|_| crate::Error::Internal {
             detail: "the cross-shard dedup store was already installed".into(),

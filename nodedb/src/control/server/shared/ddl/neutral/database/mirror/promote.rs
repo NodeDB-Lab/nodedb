@@ -11,7 +11,6 @@
 use nodedb_types::MirrorStatus;
 
 use crate::control::mirror::applier::{finish_promote, seal_mirror};
-use crate::control::security::catalog::database_types::DatabaseStatus;
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::state::SharedState;
 
@@ -57,9 +56,8 @@ pub async fn promote_database(
         .as_ref()
         .map(|origin| &origin.status)
     {
-        None if descriptor.status == DatabaseStatus::Active => {
-            return Ok(status("ALTER DATABASE"));
-        }
+        // A promoted mirror keeps its origin row, so a real promotion never
+        // lands here: a repeat takes the `Promoted` arm.
         None => {
             return Err(ddl_err(
                 "0A000",

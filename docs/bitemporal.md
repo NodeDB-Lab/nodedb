@@ -332,21 +332,24 @@ O(1) lookup is preserved by the unique index. Temporal history comes from the Do
 
 ## GDPR and Data Minimization
 
-Use `audit_retain_ms` to enforce automatic purge of old versions:
+An array's `audit_retain_ms` purges old versions automatically:
 
 ```sql
--- Columnar table with 30-day retention (GDPR compliance)
-CREATE COLLECTION user_activity (
-    user_id UUID,
-    action VARCHAR,
-    ts TIMESTAMP TIME_KEY
-) WITH (engine='columnar', audit_retain_ms=2592000000);  -- 30 days
-
--- Tiles/versions older than 30 days are purged during compaction
--- Historical queries beyond retention window will raise an error or return no rows
+CREATE ARRAY user_activity
+  DIMS (x INT64 [0..1023])
+  ATTRS (action INT64)
+  TILE_EXTENTS (64)
+  WITH (audit_retain_ms = 2592000000);  -- 30 days
 ```
 
-Once purged, historical queries beyond the retention window cannot access that data.
+- Audit retention reaches arrays only. A `WITH (bitemporal=true)` document, columnar, edge or CRDT collection keeps its history until a user removes it. `CREATE RETENTION POLICY` takes timeseries collections alone.
+- The metadata leader decides each purge once, and the decision enters the log of every data group, so every replica and mirror removes the same versions.
+- A core holds rows of every group it hosts. The first group's entry removes the versions, and later entries find none past the cutoff.
+- The cutoff sits below the cleanup horizon, so no read tells the entry positions apart. Every replica ends with the same versions.
+- A mirror decides no purge. It applies the source's purge with the cutoff lowered to its own history floor. The next purge removes the rest.
+- A promoted mirror decides its own purges, and its `audit_retain_ms` window runs from the `PROMOTE`.
+- The cutoff is the older of `now - audit_retain_ms` and the cleanup horizon. An open snapshot therefore reads what it read before.
+- The version a cell shows at the cutoff stays. A read at or after the cutoff answers as before. A read below it can answer nothing.
 
 ## Performance Considerations
 

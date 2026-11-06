@@ -64,6 +64,9 @@ pub(super) struct StartConfig {
     /// When `Some`, the PromQL tuning of `SharedState`. `None` keeps the
     /// defaults.
     pub promql_tuning: Option<nodedb_types::config::tuning::PromqlTuning>,
+    /// When `Some`, how long a committed write waits for a sync mirror. `None`
+    /// keeps the default.
+    pub mirror_sync_timeout_ms: Option<u64>,
 }
 
 impl Default for StartConfig {
@@ -80,6 +83,7 @@ impl Default for StartConfig {
             backup_root: false,
             graph_tuning: None,
             promql_tuning: None,
+            mirror_sync_timeout_ms: None,
         }
     }
 }
@@ -198,6 +202,17 @@ impl TestServer {
         .await
     }
 
+    /// Spawn a single-core NodeDB server whose committed write waits
+    /// `sync_timeout_ms` for a sync mirror, so a test of each write path stays
+    /// short. All other settings stay at their defaults.
+    pub async fn start_with_mirror_sync_timeout(sync_timeout_ms: u64) -> Self {
+        Self::start_with_config(StartConfig {
+            mirror_sync_timeout_ms: Some(sync_timeout_ms),
+            ..Default::default()
+        })
+        .await
+    }
+
     /// Spawn a single-core NodeDB server and connect via pgwire.
     pub(super) async fn start_with_config(cfg: StartConfig) -> Self {
         let graph_tuning = cfg.graph_tuning.clone().unwrap_or_default();
@@ -258,6 +273,9 @@ impl TestServer {
             s.tuning.graph = graph_tuning.clone();
             if let Some(promql_tuning) = cfg.promql_tuning {
                 s.tuning.promql = promql_tuning;
+            }
+            if let Some(sync_timeout_ms) = cfg.mirror_sync_timeout_ms {
+                s.tuning.mirror.sync_timeout_ms = sync_timeout_ms;
             }
             s.jwks_registry = cfg.jwks_registry;
             if let Some(metering) = cfg.metering {

@@ -39,7 +39,7 @@ impl StatementExecutor<'_> {
         let Some((key, _)) = self.commit_key() else {
             return Ok(false);
         };
-        match self.state.cross_shard_dedup.get() {
+        match self.state.cross_shard.dedup.get() {
             Some(dedup) => dedup.is_applied(&key),
             None => Ok(false),
         }

@@ -171,10 +171,9 @@ pub(crate) async fn apply_delta_and_finalize(
     let audit = ArcAuditEmitter(std::sync::Arc::clone(&shared.audit));
     // RLS write policies are stored keyed by `db_qualified(database_id,
     // collection)`, so the policy is handed that same key or it silently
-    // misses a policy on a non-default database. `delta_msg.collection`
-    // itself stays bare everywhere else below: it feeds the catalog lookup,
-    // vShard routing, and the dispatched op's own collection field, which
-    // must stay mutually consistent.
+    // misses a policy on a non-default database. The admission addresses the
+    // Data Plane by the same key. `delta_msg.collection` stays bare for the
+    // catalog lookup and vShard routing.
     let qualified_collection = crate::control::planner::sql_plan_convert::convert::db_qualified(
         database_id,
         &delta_msg.collection,
@@ -422,7 +421,7 @@ pub(crate) async fn apply_delta_and_finalize(
             Ok(authorized) => {
                 super::super::super::raft_dispatch::dispatch_sync_bytes(
                     shared,
-                    &delta_msg.collection,
+                    &qualified_collection,
                     authorized,
                     deadline,
                     crate::event::EventSource::CrdtSync,

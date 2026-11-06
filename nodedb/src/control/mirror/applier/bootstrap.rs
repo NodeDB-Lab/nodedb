@@ -160,7 +160,8 @@ impl Session<'_> {
             tracing::warn!(%error, "mirror bootstrap: a cut state read failed");
             SessionEnd::LostLeadership
         })?;
-        self.ack(BOOTSTRAP_CUT, state.positions.clone()).await?;
+        // A capture confirms no cap: the first tail cut does.
+        self.ack(BOOTSTRAP_CUT, 0, state.positions.clone()).await?;
         Ok(state)
     }
 

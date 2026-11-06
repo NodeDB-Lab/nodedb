@@ -288,6 +288,10 @@ pub enum ErrorDetails {
     /// Operation requires the database to be a promoted mirror.
     #[serde(rename = "mirror_not_promoted")]
     MirrorNotPromoted { database: String },
+    /// The write committed on the source. A sync mirror did not confirm it in
+    /// time, so a client must not retry it as a failed write.
+    #[serde(rename = "mirror_sync_timeout")]
+    MirrorSyncTimeout { database: String },
     /// `DROP DATABASE` targeted the built-in `default` database.
     #[serde(rename = "cannot_drop_default_database")]
     CannotDropDefaultDatabase,

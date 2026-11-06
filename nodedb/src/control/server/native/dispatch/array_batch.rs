@@ -21,6 +21,7 @@ use crate::control::server::shared::ddl::neutral::collection::copy_from::{
 use crate::control::server::shared::session::DmlTxnCtx;
 
 use super::batch_admission::{batch_size_refusal, decode_batch};
+use super::sql_planned::{autocommit_sync_database, mirror_confirmed};
 use super::{DispatchCtx, ddl_result_to_native};
 
 /// The cells of `batch`: the length of its longest column. A batch whose
@@ -73,7 +74,8 @@ pub(crate) async fn handle_array_put_batch(
             rows_affected: Some(rows),
         }]
     });
-    ddl_result_to_native(seq, result)
+    let sync_database = autocommit_sync_database(ctx);
+    mirror_confirmed(ctx, seq, sync_database, ddl_result_to_native(seq, result)).await
 }
 
 #[cfg(test)]

@@ -115,6 +115,7 @@ pub async fn execute_sql(
         RoutedStatement::PerTask(statement) => statement,
     };
 
+    let sync_database = crate::control::mirror::source::sync::sync_database_of(shared, &tasks);
     let read_only = tasks
         .iter()
         .all(|task| !crate::control::server::shared::write_admission::plan_is_write(&task.plan));
@@ -460,7 +461,11 @@ pub async fn execute_sql(
     if read_only {
         lease_scope.guard(body).await?
     } else {
-        body.await
+        let answer = body.await?;
+        if let Some(database) = sync_database {
+            crate::control::mirror::source::sync::await_mirror_sync(shared, database).await?;
+        }
+        Ok(answer)
     }
 }
 

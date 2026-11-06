@@ -15,6 +15,7 @@ use crate::control::server::shared::ddl::neutral::graph_ops::{edge_delete, edge_
 use crate::control::server::shared::session::DmlTxnCtx;
 
 use super::batch_admission::{batch_size_refusal, decode_batch};
+use super::sql_planned::{autocommit_sync_database, mirror_confirmed};
 use super::{DispatchCtx, ddl_result_to_native, error_to_native};
 
 /// The name a request over `max_batch_size` is refused under.
@@ -72,7 +73,8 @@ pub(crate) async fn handle_edge_put_batch(
         }
         Err(e) => Err(e),
     };
-    ddl_result_to_native(seq, result)
+    let sync_database = autocommit_sync_database(ctx);
+    mirror_confirmed(ctx, seq, sync_database, ddl_result_to_native(seq, result)).await
 }
 
 /// Delete the request's edges from the collection it names.
@@ -102,5 +104,6 @@ pub(crate) async fn handle_edge_delete_batch(
         &txn_ctx,
     )
     .await;
-    ddl_result_to_native(seq, result)
+    let sync_database = autocommit_sync_database(ctx);
+    mirror_confirmed(ctx, seq, sync_database, ddl_result_to_native(seq, result)).await
 }

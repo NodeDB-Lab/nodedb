@@ -374,6 +374,10 @@ impl<'a> FromMessagePack<'a> for ErrorDetails {
                 let (database,) = read1_str(reader, field_count)?;
                 Ok(ErrorDetails::MirrorNotPromoted { database })
             }
+            TAG_MIRROR_SYNC_TIMEOUT => {
+                let (database,) = read1_str(reader, field_count)?;
+                Ok(ErrorDetails::MirrorSyncTimeout { database })
+            }
             TAG_UNDEFINED_OBJECT => {
                 let (object,) = read1_str(reader, field_count)?;
                 Ok(ErrorDetails::UndefinedObject { object })

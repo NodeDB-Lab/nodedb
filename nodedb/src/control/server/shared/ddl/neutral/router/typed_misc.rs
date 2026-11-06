@@ -17,6 +17,7 @@ use super::super::cluster;
 use super::super::collection;
 use super::super::credential;
 use super::super::spatial_ref_sys;
+use super::sync_wait;
 
 pub(super) async fn try_typed(
     state: &SharedState,
@@ -35,8 +36,8 @@ pub(super) async fn try_typed(
             delimiter,
             header,
             raster,
-        }) => Some(
-            collection::copy_from_file(
+        }) => {
+            let result = collection::copy_from_file(
                 state,
                 identity,
                 collection,
@@ -50,8 +51,9 @@ pub(super) async fn try_typed(
                 database_id,
                 txn_ctx,
             )
-            .await,
-        ),
+            .await;
+            Some(sync_wait::confirmed_unless_staged(state, database_id, txn_ctx, result).await)
+        }
 
         // `COPY <name> FROM STDIN` needs the pgwire COPY sub-protocol, which
         // opens an array load before the router runs. Every statement that

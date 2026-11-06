@@ -193,6 +193,7 @@ impl RetryableSchemaChange for Error {
             | Error::RoleInheritanceDepthExceeded { .. }
             | Error::OllpExhausted { .. }
             | Error::MirrorReadOnly { .. }
+            | Error::MirrorSyncTimeout { .. }
             | Error::StaleReadNotLeader { .. } => None,
         }
     }

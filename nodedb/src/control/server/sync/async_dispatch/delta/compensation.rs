@@ -170,7 +170,8 @@ pub(super) fn compensation_hint_for_dispatch_error(e: &crate::Error) -> Compensa
         | crate::Error::StorageQuotaExceeded { .. }
         | crate::Error::RoleInheritanceCycle { .. }
         | crate::Error::RoleInheritanceDepthExceeded { .. }
-        | crate::Error::MirrorReadOnly { .. }) => CompensationHint::Custom {
+        | crate::Error::MirrorReadOnly { .. }
+        | crate::Error::MirrorSyncTimeout { .. }) => CompensationHint::Custom {
             constraint: "apply_failed".into(),
             detail: other.to_string(),
         },

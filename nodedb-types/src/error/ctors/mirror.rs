@@ -61,6 +61,21 @@ impl NodeDbError {
             cause: None,
         }
     }
+
+    /// A write committed on the source, and a sync mirror did not confirm it
+    /// within `waited_ms`.
+    pub fn mirror_sync_timeout(database: impl Into<String>, waited_ms: u64) -> Self {
+        let database = database.into();
+        Self {
+            code: ErrorCode::MIRROR_SYNC_TIMEOUT,
+            message: format!(
+                "the write committed on database '{database}', and its sync mirror did not \
+                 confirm it within {waited_ms} ms; do not retry it as a failed write"
+            ),
+            details: ErrorDetails::MirrorSyncTimeout { database },
+            cause: None,
+        }
+    }
 }
 
 #[cfg(test)]

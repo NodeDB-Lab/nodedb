@@ -19,6 +19,10 @@ fn default_max_pin_age_secs() -> u64 {
     24 * 60 * 60
 }
 
+fn default_sync_timeout_ms() -> u64 {
+    10_000
+}
+
 /// Tuning of a source cluster's mirror links.
 ///
 /// A pinned Raft log stays in memory, so the two bounds protect the source's
@@ -38,6 +42,11 @@ pub struct MirrorTuning {
     /// seconds.
     #[serde(default = "default_max_pin_age_secs")]
     pub max_pin_age_secs: u64,
+
+    /// How long a committed write waits for a sync mirror's confirmation before
+    /// it answers `MIRROR_SYNC_TIMEOUT`, in milliseconds.
+    #[serde(default = "default_sync_timeout_ms")]
+    pub sync_timeout_ms: u64,
 }
 
 impl Default for MirrorTuning {
@@ -46,6 +55,7 @@ impl Default for MirrorTuning {
             cut_interval_ms: default_cut_interval_ms(),
             max_pinned_bytes_per_group: default_max_pinned_bytes_per_group(),
             max_pin_age_secs: default_max_pin_age_secs(),
+            sync_timeout_ms: default_sync_timeout_ms(),
         }
     }
 }
@@ -54,5 +64,10 @@ impl MirrorTuning {
     /// The interval between cuts. A zero reads as one millisecond.
     pub fn cut_interval(&self) -> Duration {
         Duration::from_millis(self.cut_interval_ms.max(1))
+    }
+
+    /// How long a committed write waits for a sync mirror.
+    pub fn sync_timeout(&self) -> Duration {
+        Duration::from_millis(self.sync_timeout_ms)
     }
 }

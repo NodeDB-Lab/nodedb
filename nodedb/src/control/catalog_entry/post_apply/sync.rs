@@ -27,12 +27,10 @@ use crate::control::catalog_entry::entry::CatalogEntry;
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TenantId};
 
-/// Run every **synchronous** post-apply side effect inline. Must be
-/// called from the metadata applier BEFORE the watcher bump so
-/// readers of the applied index see every in-memory cache update
-/// that entry triggered. Best-effort per variant: the whole thing
-/// is infallible today (all typed functions log on failure and
-/// return).
+/// Run every **synchronous** post-apply side effect inline. Must be called from the metadata
+/// applier BEFORE the watcher bump so readers of the applied index see every in-memory cache
+/// update that entry triggered. Best-effort per variant: the whole thing is infallible today
+/// (all typed functions log on failure and return).
 pub fn apply_post_apply_side_effects_sync(entry: &CatalogEntry, shared: &Arc<SharedState>) {
     // Gateway plan-cache invalidation: on any descriptor mutation, evict
     // stale cached plans that reference the changed descriptor.
@@ -47,13 +45,11 @@ pub fn apply_post_apply_side_effects_sync(entry: &CatalogEntry, shared: &Arc<Sha
             collection::queue_tree_def_sync(stored, shared);
         }
         CatalogEntry::PutCollectionIfAbsent(stored) => {
-            // Install owner from the CANONICAL catalog collection, not the
-            // carried entry: a no-op re-announce must not overwrite the
-            // pre-existing owner. Post-apply the collection always exists,
-            // so the read-back is Some; the carried entry is only a
-            // best-effort fallback if the redb write silently failed.
-            // Owner record install is sync; Data Plane register is
-            // the async part, handled by `run_post_apply_async_side_effects`.
+            // Install owner from the CANONICAL catalog collection, not the carried entry: a no-op
+            // re-announce must not overwrite the pre-existing owner. Post-apply the collection
+            // always exists, so the read-back is Some; the carried entry is only a best-effort
+            // fallback if the redb write silently failed. Owner record install is sync; Data Plane
+            // register is the async part, handled by `run_post_apply_async_side_effects`.
             let canonical = shared
                 .credentials
                 .catalog()

@@ -27,6 +27,10 @@ use super::rewrite::{CatalogCheck, DescriptorRule, rewrite_entry};
 use super::session::{FIRST_RETRY_BACKOFF, FenceError, MAX_RETRY_BACKOFF, Session};
 use super::shares::{split_by_mirror_group, surrogate_floor};
 
+/// The gate between a cut's commit in its groups and its raise. A test kills a
+/// group's leader there.
+pub const CUT_RAISE_FAIL_POINT: &str = "mirror_cut::before_raise";
+
 /// How long one attempt of one cut can take in one group.
 const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -71,6 +75,15 @@ impl Session<'_> {
         };
         let resume = positions(&self.cursors, &self.metadata);
         let seals = self.commit_batch(&batch).await?;
+        #[cfg(feature = "failpoints")]
+        if !crate::control::fail_gate::before_mirror_cut_raise(
+            self.state.node_id,
+            self.state.shutdown.raw_receiver(),
+        )
+        .await
+        {
+            return Err(SessionEnd::LostLeadership);
+        }
         self.raise_surrogate_floor(&batch).await?;
         self.raise_cut(&batch, catalog, resume.clone()).await?;
         self.ready_cut = batch.cut;
@@ -81,7 +94,7 @@ impl Session<'_> {
             cap_ordinal: batch.mark.cap_ordinal,
             seals,
         });
-        self.ack(batch.cut, resume).await
+        self.ack(batch.cut, batch.mark.cap_ordinal, resume).await
     }
 
     /// Raise every node's surrogate floor above the cut, ahead of its `MirrorCut`.
@@ -380,11 +393,13 @@ impl Session<'_> {
     pub(super) async fn ack(
         &self,
         cut: u64,
+        cap_ordinal: i64,
         resume: Vec<MirrorGroupPosition>,
     ) -> Result<(), SessionEnd> {
         let ack = MirrorAck {
             link_id: self.link_id,
             cut,
+            cap_ordinal,
             positions: resume,
         };
         match self.client.ack(&ack).await {

@@ -15,9 +15,7 @@ use crate::control::server::response_shape::request::MaterializedShapeRequest;
 use crate::control::server::response_shape::types::describe_plan;
 use crate::control::server::shared::authorization::authorize_database;
 use crate::control::server::shared::cluster_array_dispatch::{is_cluster_array, run_cluster_array};
-use crate::control::server::shared::metering::{
-    DetachedMeterGuard, PlanMeteringInfo, meter_dispatch,
-};
+use crate::control::server::shared::metering::{PlanMeteringInfo, meter_dispatch};
 use crate::control::server::shared::plan_admission::{
     PlanAdmissionRequest, plan_authorize_and_admit,
 };
@@ -34,7 +32,9 @@ use super::super::atomic_statement::{RoutedStatement, route_http_statement};
 use super::super::ndjson_error::error_line;
 use super::super::query_stream::{NdjsonBody, bound_ndjson_body, stream_binding, try_open_stream};
 use super::super::result_shape::append_ndjson_payload;
-use super::ndjson_response::{ndjson_response, quota_rejection};
+use super::ndjson_response::{
+    ndjson_response, quota_rejection, rows_to_ndjson, stream_meter_guard, sync_timeout_line,
+};
 use super::{DatabaseQueryParam, resolve_database_id};
 
 /// POST /v1/query/stream — execute SQL, return results as NDJSON.
@@ -177,12 +177,7 @@ async fn ndjson_at_consistency(
     let (tasks, lease_scope) = match routed {
         Ok(RoutedStatement::PerTask(statement)) => (statement.tasks, statement.lease_scope),
         Ok(RoutedStatement::Answered(rows)) => {
-            let mut ndjson = String::new();
-            for row in rows {
-                ndjson.push_str(&row.to_string());
-                ndjson.push('\n');
-            }
-            return ndjson_response(ndjson, rate_limit_headers);
+            return ndjson_response(rows_to_ndjson(rows), rate_limit_headers);
         }
         // A statement that stopped answers one error line, as a task that
         // stopped in the loop below does.
@@ -212,16 +207,7 @@ async fn ndjson_at_consistency(
                 })
                 .into_response();
             };
-            // Streaming body owns the guard, so only rows actually sent are billed;
-            // see `DetachedMeterGuard`.
-            let stream_meter_guard = if state.shared.metering_config.enabled
-                && let [task] = tasks.as_slice()
-            {
-                let info = PlanMeteringInfo::extract(&task.plan);
-                DetachedMeterGuard::new(&state.shared, &scope, &info)
-            } else {
-                None
-            };
+            let stream_meter_guard = stream_meter_guard(&state.shared, &scope, &tasks);
             let binding = match stream_binding(&state.shared, &identity, peer.as_str(), database_id)
             {
                 Ok(binding) => binding,
@@ -267,6 +253,8 @@ async fn ndjson_at_consistency(
         })
         .into_response();
     };
+    let sync_database =
+        crate::control::mirror::source::sync::sync_database_of(&state.shared, &tasks);
     let mut ndjson = String::new();
     let mut failed = false;
     // Checked once, not per task: keeps per-task extraction a no-op when metering is
@@ -492,6 +480,10 @@ async fn ndjson_at_consistency(
                 failed = true;
             }
         }
+    }
+    if !failed && let Some(line) = sync_timeout_line(&state.shared, sync_database).await {
+        ndjson.push_str(&line);
+        failed = true;
     }
     if failed {
         state.shared.database_metrics.record_error(database_id);

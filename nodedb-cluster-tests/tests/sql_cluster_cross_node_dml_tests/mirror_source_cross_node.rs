@@ -98,6 +98,7 @@ async fn open_link(cluster: &TestCluster) -> Vec<u64> {
                 link_id: LINK,
                 protocol_version: MIRROR_PROTOCOL_VERSION,
                 fresh: false,
+                mode: nodedb_types::MirrorMode::Async,
             },
         )
         .await
@@ -219,6 +220,7 @@ async fn a_tail_holds_its_database_and_a_barrier_in_every_group() {
             MirrorAck {
                 link_id: LINK,
                 cut: seq,
+                cap_ordinal: 1,
                 positions: vec![MirrorGroupPosition {
                     group_id: group,
                     log_index: 1,

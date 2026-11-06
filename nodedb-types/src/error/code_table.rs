@@ -178,6 +178,7 @@ error_code_table! {
         source_cluster: String::new(),
     },
     MIRROR_NOT_PROMOTED => MirrorNotPromoted { database: String::new() },
+    MIRROR_SYNC_TIMEOUT => MirrorSyncTimeout { database: String::new() },
     CANNOT_DROP_DEFAULT_DATABASE => CannotDropDefaultDatabase,
 
     // Move Tenant DDL.

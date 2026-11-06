@@ -339,7 +339,7 @@ pub async fn run_event_action_sql(
     trigger_name: &str,
     applied_key: crate::wal::CrossShardAppliedKey,
 ) -> Result<(), TriggerActionError> {
-    if let Some(dedup) = shared.cross_shard_dedup.get()
+    if let Some(dedup) = shared.cross_shard.dedup.get()
         && dedup
             .is_applied(&applied_key)
             .map_err(|source| TriggerActionError::AppliedLookup { source })?

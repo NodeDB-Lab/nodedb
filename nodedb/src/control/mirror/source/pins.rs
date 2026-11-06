@@ -83,6 +83,8 @@ pub fn pins_to_expire(
 #[derive(Debug, Default)]
 pub struct MirrorPinTable {
     inner: RwLock<PinState>,
+    /// Wakes every sync write when a pin changes.
+    changes: tokio::sync::Notify,
 }
 
 #[derive(Debug, Default)]
@@ -126,6 +128,7 @@ impl MirrorPinTable {
             .map_or_else(|| pin.clone(), |held| held.merged(pin));
         state.pins.insert(pin.link_id, next);
         state.publish();
+        self.changes.notify_waiters();
     }
 
     /// Follow one applied pin removal.
@@ -133,6 +136,7 @@ impl MirrorPinTable {
         let mut state = self.write();
         state.pins.remove(&link_id);
         state.publish();
+        self.changes.notify_waiters();
     }
 
     /// Follow one applied database drop.
@@ -144,6 +148,7 @@ impl MirrorPinTable {
             }
         }
         state.publish();
+        self.changes.notify_waiters();
     }
 
     /// Replace the table with what `catalog` holds.
@@ -163,6 +168,28 @@ impl MirrorPinTable {
     /// Every pin on this node.
     pub fn all(&self) -> Vec<MirrorPin> {
         self.read().pins.values().cloned().collect()
+    }
+
+    /// Whether a committed write on `database` waits for a sync mirror.
+    pub fn holds_sync(&self, database: u64) -> bool {
+        self.read()
+            .pins
+            .values()
+            .any(|pin| pin.database == database && pin.holds_sync())
+    }
+
+    /// Whether every sync mirror of `database` confirmed `ordinal`.
+    pub fn sync_confirmed(&self, database: u64, ordinal: i64) -> bool {
+        self.read()
+            .pins
+            .values()
+            .filter(|pin| pin.database == database && pin.holds_sync())
+            .all(|pin| pin.acked_ordinal >= ordinal)
+    }
+
+    /// Resolves at the next pin change.
+    pub fn changed(&self) -> tokio::sync::futures::Notified<'_> {
+        self.changes.notified()
     }
 
     /// Whether any link holds a live pin.
@@ -212,7 +239,39 @@ mod tests {
                 .collect(),
             acked_ms,
             state: MirrorPinState::Live,
+            mode: nodedb_types::MirrorMode::Async,
+            acked_ordinal: 0,
         }
+    }
+
+    /// A sync link joins the wait at its first cut, stays after it expires, and
+    /// leaves when its source drops.
+    #[test]
+    fn a_sync_pin_holds_writes_from_its_first_cut() {
+        let table = MirrorPinTable::default();
+        let sync = MirrorPin {
+            mode: nodedb_types::MirrorMode::Sync,
+            ..pin(1, &[], 5)
+        };
+        table.apply(&sync);
+        assert!(!table.holds_sync(1024), "no cut to confirm with yet");
+        table.apply(&MirrorPin {
+            acked_ordinal: 100,
+            ..sync.clone()
+        });
+        assert!(table.holds_sync(1024));
+        assert!(table.sync_confirmed(1024, 100));
+        assert!(!table.sync_confirmed(1024, 101));
+        assert!(!table.holds_sync(2048));
+
+        table.apply(&MirrorPin {
+            state: MirrorPinState::Expired,
+            ..sync
+        });
+        assert!(table.holds_sync(1024), "no silent downgrade");
+        assert!(!table.sync_confirmed(1024, 101));
+        table.source_dropped(1024);
+        assert!(!table.holds_sync(1024));
     }
 
     fn status(group_id: u64, retained_bytes: u64, entries: u64, last_applied: u64) -> GroupStatus {
@@ -238,6 +297,7 @@ mod tests {
             cut_interval_ms: 1_000,
             max_pinned_bytes_per_group: max_bytes,
             max_pin_age_secs: 100,
+            sync_timeout_ms: 1_000,
         }
     }
 

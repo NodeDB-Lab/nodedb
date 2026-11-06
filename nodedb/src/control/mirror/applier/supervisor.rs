@@ -72,6 +72,7 @@ fn supervise(shared: &Arc<SharedState>, supervised: &mut Supervised) {
             shared,
             &decision.source_cluster,
             &decision.source_database_name,
+            decision.mode,
         ) {
             Ok(link) => {
                 tracing::info!(
@@ -135,6 +136,7 @@ mod tests {
             database_name: format!("db{id}"),
             source_cluster: "source".to_string(),
             source_database_name: format!("db{id}"),
+            mode: nodedb_types::MirrorMode::Async,
             status,
             ready_cut: 0,
             positions: Vec::new(),

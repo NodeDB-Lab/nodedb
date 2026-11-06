@@ -379,6 +379,10 @@ pub(crate) fn classify(e: &Error) -> NodeDbError {
             reason,
         ),
         Error::MirrorReadOnly { database } => NodeDbError::mirror_read_only(database.clone()),
+        Error::MirrorSyncTimeout {
+            database,
+            waited_ms,
+        } => NodeDbError::mirror_sync_timeout(database.clone(), *waited_ms),
         Error::StaleReadNotLeader {
             database,
             source_cluster,

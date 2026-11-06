@@ -35,8 +35,14 @@ impl CoreLoop {
     /// position.
     ///
     /// The memtable flushes first, so a row past the cutoff never stays on one
-    /// replica after it left another. Bitemporal collections use
-    /// `max_system_ts` as the retention axis.
+    /// replica after it left another.
+    ///
+    /// A bitemporal collection expires on `max_system_ts`, a partition's newest
+    /// write. A replica's flush moments decide which rows share a partition. So a
+    /// row past the cutoff can leave one replica while another holds it beside a
+    /// newer row. Every row newer than the cutoff stays on every replica, and the
+    /// held row leaves at the first pass whose cutoff passes its partition's
+    /// newest write.
     ///
     /// `aggregates` lists the continuous aggregates the catalog roots at
     /// `collection`. An expiring partition folds into each of them before it

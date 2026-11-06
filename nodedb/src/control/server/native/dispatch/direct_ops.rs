@@ -173,6 +173,9 @@ pub(crate) async fn handle_direct_op(
     // Inside a transaction block every write runs through the statement
     // loop the SQL path uses, which stages it into the block or refuses it.
     let in_txn_block = ctx.sessions.transaction_state(ctx.peer_addr) == TransactionState::InBlock;
+    let sync_database = plan_is_write(&plan)
+        .then(|| super::sql_planned::autocommit_sync_database(ctx))
+        .flatten();
 
     // False for `dispatch_single_task`, which meters itself — re-metering here
     // will double-bill a `Staged` dispatch and wrongly bill a `Buffered` one.
@@ -476,5 +479,5 @@ pub(crate) async fn handle_direct_op(
             .or(response.rows_affected);
         meter_dispatch(ctx.state, &ctx.scope, info, rows);
     }
-    response
+    super::sql_planned::mirror_confirmed(ctx, seq, sync_database, response).await
 }

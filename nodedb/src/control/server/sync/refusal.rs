@@ -206,6 +206,7 @@ pub(super) fn retryable_refusal_reason(error: &crate::Error) -> Option<&str> {
         | crate::Error::RoleInheritanceDepthExceeded { .. }
         | crate::Error::OllpExhausted { .. }
         | crate::Error::MirrorReadOnly { .. }
+        | crate::Error::MirrorSyncTimeout { .. }
         | crate::Error::StaleReadNotLeader { .. } => None,
     }
 }
@@ -358,7 +359,8 @@ fn is_indeterminate(error: &crate::Error) -> bool {
         | crate::Error::StorageQuotaExceeded { .. }
         | crate::Error::RoleInheritanceCycle { .. }
         | crate::Error::RoleInheritanceDepthExceeded { .. }
-        | crate::Error::MirrorReadOnly { .. } => false,
+        | crate::Error::MirrorReadOnly { .. }
+        | crate::Error::MirrorSyncTimeout { .. } => false,
     }
 }
 

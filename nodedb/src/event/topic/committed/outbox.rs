@@ -170,7 +170,7 @@ fn refused(
     if refusals < MAX_REFUSALS {
         return OutboxDelivery::Retry;
     }
-    let Some(dlq) = state.cross_shard_dlq.as_ref() else {
+    let Some(dlq) = state.cross_shard.dlq.as_ref() else {
         return OutboxDelivery::Retry;
     };
     let enqueued = dlq

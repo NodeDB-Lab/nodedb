@@ -227,73 +227,236 @@ SHOW DATABASE LINEAGE FOR my_clone;
 
 ## Mirror
 
-`MIRROR DATABASE` creates a continuously-updated read-only replica of a source database in a different region or cluster. The mirror is a Raft observer of the source: it applies the source's log entries under its own catalog but does not participate in quorum. Promotion to writable is one-way and permanent.
-
-### Basic Mirror
-
-```sql
-MIRROR DATABASE prod_eu FROM prod_us MODE = async;
-MIRROR DATABASE prod_eu FROM prod_us MODE = sync;
-```
-
-Modes:
-
-- `async` — mirror trails source asynchronously; lag is observable via metrics
-- `sync` — source waits for mirror acknowledgment before commit (latency cost; not recommended cross-region)
+`MIRROR DATABASE` creates a read-only copy of a source database in another cluster. The mirror cluster runs its own Raft groups. An applier on its metadata leader fetches the source's committed log over an mTLS listener, and proposes each entry into the mirror's own groups. `ALTER DATABASE ... PROMOTE` makes the copy writable. It is one-way and permanent.
 
 Uses:
 
-- **Disaster recovery**: read-only replica in a different region; promote on regional failure
-- **Reporting**: offload analytics to a replica
-- **Testing**: read-only staging environment that auto-updates with production data
+- **Disaster recovery**: a copy in another region. Promote it when the source region fails.
+- **Reporting**: analytics on a copy.
+- **Testing**: a read-only environment that follows production.
+
+### Config
+
+Each cluster names its peers in `[mirror]`. The source runs the listener and an allowlist. The mirror names its sources.
+
+```toml
+# The source cluster
+[mirror]
+cluster_name = "prod-us"
+listen = "0.0.0.0:9500"
+
+[mirror.tls]
+cert = "/etc/nodedb/mirror/node.pem"
+key = "/etc/nodedb/mirror/node.key"
+ca = "/etc/nodedb/mirror/clients-ca.pem"
+
+[mirror.clients.dr-eu]
+spki = "<64 hex digits: SHA-256 of the client certificate's SubjectPublicKeyInfo>"
+databases = ["orders"]
+```
+
+```toml
+# The mirror cluster
+[mirror]
+cluster_name = "dr-eu"
+
+[mirror.sources.prod-us]
+seeds = ["10.0.0.1:9500", "10.0.0.2:9500", "10.0.0.3:9500"]
+server_name = "nodedb"
+tls = { cert = "/etc/nodedb/mirror/client.pem", key = "/etc/nodedb/mirror/client.key", ca = "/etc/nodedb/mirror/source-ca.pem" }
+```
+
+- The listener has no insecure mode. It authenticates the client certificate against `[mirror.clients]` before any log read.
+- A client reads only the databases its entry names. The source filters its log before an entry leaves.
+- List every source replica in `seeds`. A fetch tries the next replica before it reports the log truncated.
+- A node with no `listen` serves no mirror. A `listen` needs `cluster_name`, `[mirror.tls]` and at least one `[mirror.clients]` entry.
+- Each `spki` holds 64 hex digits, and no two clients share one. Each client names at least one database.
+- Each `[mirror.sources]` entry needs at least one seed. The server refuses to start on any of these config errors.
+
+`[tuning.mirror]` on the source:
+
+| Key | Default | Effect |
+|---|---|---|
+| `cut_interval_ms` | `1000` | Interval between cuts while any link holds a pin |
+| `max_pinned_bytes_per_group` | 1 GiB | Log memory one replica of one group holds for pins |
+| `max_pin_age_secs` | 86400 | Time a link can go without an ack before its pin expires |
+| `sync_timeout_ms` | `10000` | Time a committed write waits for a sync mirror |
+
+### Create a Mirror
+
+```sql
+MIRROR DATABASE orders_eu FROM prod-us.orders;
+MIRROR DATABASE orders_eu FROM prod-us.orders MODE = sync;
+```
+
+The statement requires `Superuser`. It connects to the source and creates the local database with the source's database id. Then it runs in two parts:
+
+1. **Bootstrap.** The source captures the database at one cut. The mirror fetches the capture in chunks, installs the catalog, re-issues every row, and checks the rows against the capture.
+2. **Follow.** The source places a cut in every data group each `cut_interval_ms`. The mirror commits the log between two cuts in its own groups, then raises the cut, and every node reads it.
+
+A mirror's nodes hold every value the source issued: surrogates and sequences continue above them after a promotion. A continuous aggregate arrives as state, so its reads match the source at the cut.
 
 ### Read Consistency
 
-- `BoundedStaleness` — served at mirror's `last_applied` LSN
-- `Strong` — returns `STALE_READ_NOT_LEADER` with source endpoint hint
-- `Eventual` — served immediately
+A mirror answers reads at its newest ready cut.
+
+- Every level returns `STALE_READ_NOT_LEADER` while the mirror is `bootstrapping`, because it holds no cut yet.
+- `strong` returns `STALE_READ_NOT_LEADER`. Strong is the default, so a session sets another level.
+- `eventual` answers at once once the first cut is ready.
+- `bounded_staleness:<secs>` answers while the lag is within the bound. It returns `STALE_READ_NOT_LEADER` before the mirror applied a cut, or when the lag passes the bound.
+- A promoted mirror serves every level locally.
 
 ```sql
-SET default_read_consistency = 'bounded_staleness:5s';
-SELECT * FROM orders;  -- served from mirror when its lag is within 5 seconds
+SET default_read_consistency = 'bounded_staleness:5';
+SELECT * FROM orders;
 ```
 
-### Bootstrap and Lag
+- A pgwire or native session uses `SET default_read_consistency`.
+- An HTTP request uses the body field `read_consistency` on `POST /v1/query` and `POST /v1/query/stream`: `{"sql": "...", "read_consistency": "eventual"}`.
+- A WebSocket RPC `query` uses `params.read_consistency`: `{"id": 1, "method": "query", "params": {"sql": "...", "read_consistency": "bounded_staleness:5"}}`.
+- `read_consistency` takes `strong`, `eventual` or `bounded_staleness:<secs>`. Any other value is refused.
 
-Bootstrap transfers a snapshot from source to mirror over QUIC, then log-streams changes. Lag is observable:
+### Status
 
 ```sql
-SHOW DATABASE MIRROR STATUS FOR prod_eu;
--- Output: status=following, lag_ms=150, ready_cut=12346, applied_cut=12345, mode=async
+SHOW DATABASE MIRROR STATUS FOR orders_eu;
 ```
 
-### Promotion (Irreversible)
+The statement requires a tenant admin. The columns are `name`, `source_cluster`, `source_database`, `source_database_name`, `mode`, `status`, `failure`, `bytes_done`, `bytes_total`, `lag_ms`, `ready_cut`, `applied_cut` and `applied_cut_hlc_ns`.
+
+`failure` holds the failure's message while the status is `failed`, and is empty otherwise. `bytes_done` and `bytes_total` are zero outside `bootstrapping`.
+
+| Status | Meaning |
+|---|---|
+| `bootstrapping` | The capture is in transfer or install. `bytes_done` and `bytes_total` report it |
+| `following` | The mirror applies cuts within normal lag |
+| `degraded` | The mirror receives entries, and its lag passed the threshold |
+| `disconnected` | The source is unreachable. The mirror serves its last cut, and the lag grows |
+| `promoting` | `PROMOTE` fixed the last cut. The database stays read-only until every group applied it |
+| `failed` | The link stopped at its last ready cut. `failure` states why. Reads and `PROMOTE` stay available |
+| `promoted` | The database is writable and follows nothing |
+
+### Recover a Failed Mirror
 
 ```sql
-ALTER DATABASE prod_eu PROMOTE;
+ALTER DATABASE orders_eu MIRROR RESUME;
+ALTER DATABASE orders_eu MIRROR REBOOTSTRAP;
 ```
 
-Promotion:
+- Both statements require `Superuser`. Both return SQLSTATE `55000` on a mirror that is not `failed`.
+- `RESUME` retries the link from its replicated positions, after an operator fixed the cause. It refuses a failure that leaves no good position, and a mirror that failed before its first cut. Each error names `MIRROR REBOOTSTRAP`.
+- `REBOOTSTRAP` removes every object in the database and takes a new capture. The database's grants stay. A read sees no row until the new bootstrap's first cut.
 
-- Stops observing the source
-- Becomes a normal Raft group with its own leader election
-- Starts accepting writes
-- Is one-way and permanent (no DEMOTE)
+| `failure` | Cause | Action |
+|---|---|---|
+| `LogTruncated` | The source compacted past the mirror's position, or expired its pin | `REBOOTSTRAP` |
+| `SourceTimelineChanged` | The source restored to another log timeline | `REBOOTSTRAP` |
+| `BootstrapFailed` | A capture did not install, or its install stopped part way | `REBOOTSTRAP` |
+| `BootstrapOutrun` | The source's retention bound passed before the bootstrap ended | `REBOOTSTRAP` |
+| `SourceDropped` | The source database was dropped. The mirror keeps its data | `PROMOTE` or `DROP DATABASE` |
+| `ApplyError`, `SchemaMismatch`, `PoisonEntry`, `UnsupportedSourceOp` | A source entry did not apply, or the source ran what a mirror cannot follow | Fix the cause, then `RESUME` or `REBOOTSTRAP` as its error says |
 
-To re-mirror after promotion: drop the database and `CLONE DATABASE` from source.
+### Promote (Irreversible)
 
-### Constraints
+```sql
+ALTER DATABASE orders_eu PROMOTE;
+```
 
-- A mirror cannot be cloned (rejected with `CANNOT_CLONE_MIRROR`); promote first if needed
-- A clone can be mirrored
-- Pre-promotion writes and object DDL return `MIRROR_READ_ONLY` on every protocol
-- `DROP DATABASE`, `ALTER DATABASE`, `PROMOTE`, grants, quotas and consumer offsets stay allowed
-- A strong read returns `STALE_READ_NOT_LEADER` on every protocol. Strong is the default
-- A pgwire or native session reads a mirror after `SET default_read_consistency = 'eventual'` or `'bounded_staleness:<secs>'`
-- An HTTP request reads a mirror with the body field `read_consistency` on `POST /v1/query` and `POST /v1/query/stream`: `{"sql": "...", "read_consistency": "eventual"}`
-- A WebSocket RPC `query` reads a mirror with `params.read_consistency`: `{"id": 1, "method": "query", "params": {"sql": "...", "read_consistency": "bounded_staleness:5"}}`
-- `read_consistency` takes `strong`, `eventual` or `bounded_staleness:<secs>`. Any other value is refused
-- `bounded_staleness` is refused until the mirror applied an entry, and whenever its lag exceeds the bound
+`PROMOTE` fixes the last cut at the newest ready cut. Every group applies that cut, and each row of it stays. The database then takes writes on every node, and its link gives back the source's pin. There is no demote. A later source row never arrives.
+
+`PROMOTE` requires `Superuser`. It also works on a `failed` mirror that applied a cut, and on one whose source is gone. A repeat succeeds and changes nothing.
+
+`PROMOTE` returns SQLSTATE `55000` while the mirror is `bootstrapping`. Wait for the first cut, or run `DROP DATABASE`.
+
+`PROMOTE` returns SQLSTATE `55000` on a mirror that failed before its first cut, because it holds no cut to end at. The error names `MIRROR REBOOTSTRAP`.
+
+`PROMOTE` returns SQLSTATE `0A000` on a database that never was a mirror.
+
+To follow a source again, drop the database and run `MIRROR DATABASE`.
+
+### Sync Mode
+
+`MODE = sync` makes a write on the source wait for its mirror.
+
+- The write commits on the source first, as any write does. Then it waits until the mirror's groups committed a cut that holds it.
+- A statement in a transaction block waits at its `COMMIT`. Every other write in the first list below waits at its own answer.
+- A write that gets no confirmation within `sync_timeout_ms` returns `MIRROR_SYNC_TIMEOUT`, SQLSTATE `55M01`.
+
+**A `MIRROR_SYNC_TIMEOUT` means the write committed.** Its row is on the source. A client must not retry it as a failed write. There is no silent downgrade to async: every write times out while the mirror stays stopped.
+
+- Latency is at least the time to the next cut, plus the mirror's commit. Sync mode is not recommended cross-region.
+- A link joins the wait at its first cut. A write during a bootstrap or a `REBOOTSTRAP` does not wait, because the mirror has no cut to confirm with.
+- The wait continues after a pin expires. It ends when the link's row leaves the source's catalog: at the mirror's `PROMOTE`, at its `DROP`, or at twice `max_pin_age_secs` after the last ack. A dropped source database ends it too.
+- These writes wait:
+  - SQL DML in any form, including `UPSERT` and the `{ }` object forms of `INSERT` and `UPSERT`
+  - `GRAPH INSERT EDGE`, `GRAPH DELETE EDGE`, `GRAPH LABEL` and `GRAPH UNLABEL`
+  - `COPY ... FROM '<path>'` and `COPY <array> FROM STDIN`
+  - `KV_INCR`, `KV_DECR`, `KV_INCR_FLOAT`, `KV_CAS`, `KV_GETSET`, `TRANSFER` and `TRANSFER_ITEM`
+  - `crdt_apply`, `CRDT MERGE` and `RESTORE ... SET VERSION`
+  - `PUBLISH TO`
+  - `CALL`, whatever its body does, because the catalog does not record whether a body writes
+  - Every native write op, including `ArrayPutBatch`, `EdgePutBatch`, `EdgeDeleteBatch`, `DocumentBatchInsert` and `VectorBatchInsert`
+  - RESP write commands
+  - `POST /v1/collections/{name}/crdt/apply` and Prometheus remote write. Each answers HTTP `409` on a timeout, and a remote-write client does not retry a `409`.
+- These writes do not wait, because a timeout cannot reach a client that can act on it:
+  - ILP: the line protocol sends no reply to any write, on any database, so a client learns nothing from a wait.
+  - CRDT sync sessions: a device reads a refused delta as a reason to compensate or retry, while the row stays committed.
+  - Event-plane writes, such as trigger bodies: no client waits on them.
+- These statements do not wait, because they write no client row:
+  - DDL
+  - Maintenance statements, such as `REFRESH MATERIALIZED VIEW`, `CONVERT COLLECTION` and `REWRITE PARTITIONS`
+  - `RATE_CHECK` and `RATE_RESET`, whose counters are not client rows
+  - `COMMIT OFFSET`, because a consumer's position is this cluster's own
+
+### Refusals
+
+`MIRROR DATABASE`, and a link's first exchange, refuse:
+
+| Refusal | SQLSTATE |
+|---|---|
+| A local name that exists | `42P04` |
+| A source name `[mirror.sources]` does not hold, on the mirror | `42704` |
+| A source that is this cluster | `0A000` |
+| The source's `default` database | `0A000` |
+| A source database that is a mirror, unless promoted | `0A000` |
+| A database that is an unmaterialized clone, or holds a collection that is one: `ALTER DATABASE ... MATERIALIZE` first | `0A000` |
+| A database the client's `[mirror.clients]` entry does not name | `42501` |
+| A database the source does not hold | `3D000` |
+| A source database id that a local database uses | `42710` |
+| A second live mirror of one source database on one cluster | `42710` |
+| Another mirror protocol version, or another cluster name | `08004` |
+| A source that does not answer before the statement deadline | `08001` |
+| Any other source refusal, such as an expired pin | `08006` |
+
+On the mirror before `PROMOTE`:
+
+- Writes and object DDL return `MIRROR_READ_ONLY`, SQLSTATE `25006`, on every protocol.
+- `DROP DATABASE`, `ALTER DATABASE`, `PROMOTE`, grants, quotas and consumer offsets stay allowed.
+- A mirror cannot be cloned: `CANNOT_CLONE_MIRROR`, SQLSTATE `0A000`. Promote it first.
+
+### Metrics
+
+| Metric | Meaning |
+|---|---|
+| `nodedb_database_mirror_lag_ms{database}` | Wall-clock now minus the last apply. Zero for other databases and for a promoted mirror |
+
+`SHOW DATABASE MIRROR STATUS` reports the cut numbers. A stopped link files a diagnostic report under `<data_dir>/diagnostics`.
+
+### Retention on a Mirror
+
+A mirror decides no retention. Each decision enters the source's log, and the mirror applies it at the same position.
+
+- A partition drop reaches every copy. The rows stay in a continuous aggregate that folded them.
+- An audit purge can come to the mirror with its cutoff lowered, so the mirror keeps the versions a read at its cut still needs. The next decision takes the rest. After `PROMOTE` the mirror's own loop decides, and the retention window runs from then.
+
+### Known Limits
+
+- **Capture memory.** A capture sits in the source replica's memory until the mirror fetched its last chunk, or until it idles out. A capture also stays on the replica that took it. A mirror that moves to another replica starts the transfer over.
+- **DDL lease.** A capture holds the DDL lease across its catalog read and its cut, so schema changes on the source wait that long. A capture past the lease's bound lets a DDL through, and the mirror applies that DDL from the tail.
+- **Cuts pause shared data groups.** A cut commits and raises as one step. Each mirror group holds a cut's batch while it commits, and a source's barrier orders in each data group. A database's cuts affect every database in the groups they share.
+- **Pinned log memory.** A pin keeps its log in memory on every source replica, up to `max_pinned_bytes_per_group`. A pin past a bound expires, and its mirror fails with `LogTruncated`.
+- **Current reads can mix two cuts.** A read at the current scope reads each group at what that group applied. Across groups it can see one group at a cut and another at the cut before. A transaction block reads one snapshot, so its reads never mix.
+- **Lag has a floor.** Rows become readable at a cut, so a mirror trails by at least `cut_interval_ms`.
 
 ## Move Tenant
 
@@ -433,6 +596,7 @@ See [Roles & Permissions](security/rbac.md) for full role definitions.
 | `COLLECTION_NOT_FOUND`          | Collection in another database, or truly absent        | Open a second connection to the other database if needed |
 | `MIRROR_READ_ONLY`              | Writing to a pre-promotion mirror                      | Promote the mirror first, or write to source             |
 | `STALE_READ_NOT_LEADER`         | `Strong` consistency requested on non-leader mirror    | Use `BoundedStaleness` or read from source               |
+| `MIRROR_SYNC_TIMEOUT`           | The write committed, and a sync mirror did not confirm it | Do not retry the write as failed; check the mirror    |
 | `CLONE_DEPTH_EXCEEDED`          | Clone tree exceeds 8 levels                            | Materialize clones to flatten the lineage                |
 | `CANNOT_CLONE_MIRROR`           | Attempting to clone from a mirror before promotion     | Promote the mirror first                                 |
 | `CLONE_DEPENDENCY`              | Cannot drop source while clones depend on it           | Use `DROP DATABASE source FORCE` or drop clones first    |

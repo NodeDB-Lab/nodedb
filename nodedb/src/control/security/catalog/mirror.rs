@@ -269,6 +269,8 @@ mod tests {
             }],
             acked_ms: 5,
             state: MirrorPinState::Live,
+            mode: nodedb_types::MirrorMode::Async,
+            acked_ordinal: 0,
         }
     }
 

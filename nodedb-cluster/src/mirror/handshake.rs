@@ -39,6 +39,8 @@ pub struct MirrorHello {
     /// The mirror holds no place in the source's log and takes a new capture.
     /// The source replaces an expired pin of this link with a new one.
     pub fresh: bool,
+    /// Whether a write on the source waits for this mirror. A new pin keeps it.
+    pub mode: nodedb_types::MirrorMode,
 }
 
 /// What the source tells a mirror it accepted.

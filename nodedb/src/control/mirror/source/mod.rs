@@ -10,6 +10,7 @@
 //! - `bootstrap` — one capture per link, served in chunks.
 //! - [`service`] — answers an authenticated client's hello, fetch and ack.
 //! - [`listener`] — starts the mTLS listener from the `[mirror]` config.
+//! - [`sync`] — a committed write's wait for its sync mirrors.
 
 mod bootstrap;
 mod catalog_image;
@@ -18,3 +19,4 @@ pub mod filter;
 pub mod listener;
 pub mod pins;
 pub mod service;
+pub mod sync;

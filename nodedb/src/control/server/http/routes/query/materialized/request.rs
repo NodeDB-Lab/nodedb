@@ -198,6 +198,8 @@ async fn query_at_consistency(
         RoutedStatement::PerTask(statement) => statement,
     };
 
+    let sync_database =
+        crate::control::mirror::source::sync::sync_database_of(&state.shared, &tasks);
     let read_only = tasks
         .iter()
         .all(|task| !crate::control::server::shared::write_admission::plan_is_write(&task.plan));
@@ -216,7 +218,13 @@ async fn query_at_consistency(
     let result_rows = if read_only {
         lease_scope.guard(run).await.map_err(ApiError::from)??
     } else {
-        run.await?
+        let rows = run.await?;
+        if let Some(database) = sync_database {
+            crate::control::mirror::source::sync::await_mirror_sync(&state.shared, database)
+                .await
+                .map_err(ApiError::from)?;
+        }
+        rows
     };
 
     Ok((

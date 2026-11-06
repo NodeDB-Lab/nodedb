@@ -91,17 +91,31 @@ pub async fn seal_mirror(state: &SharedState, database: DatabaseId) -> crate::Re
             let cut = state.credentials.catalog().get_mirror_cut_state(database)?;
             Ok(cut.map_or(0, |cut| cut.ready_cut))
         }
+        // A failed mirror with no ready cut reaches no first cut on its own.
+        MirrorStatus::Failed { failure } => Err(no_ready_cut(
+            database,
+            format!(
+                "stopped on: {failure}; run ALTER DATABASE ... MIRROR REBOOTSTRAP, or DROP DATABASE"
+            ),
+        )),
         MirrorStatus::Bootstrapping { .. }
         | MirrorStatus::Following
         | MirrorStatus::Degraded
-        | MirrorStatus::Disconnected
-        | MirrorStatus::Failed { .. } => Err(crate::Error::Internal {
-            detail: format!(
-                "PROMOTE: database {} has no ready cut to end at, and holds status {status:?}; \
-                 wait for its first cut",
-                database.as_u64()
-            ),
-        }),
+        | MirrorStatus::Disconnected => Err(no_ready_cut(
+            database,
+            format!("holds status {status:?}; wait for its first cut, or DROP DATABASE"),
+        )),
+    }
+}
+
+/// The refusal of a PROMOTE the mirror's state cannot serve, as `55000`.
+fn no_ready_cut(database: DatabaseId, next_action: String) -> crate::Error {
+    crate::Error::ObjectNotInPrerequisiteState {
+        object: format!("mirror database {}", database.as_u64()),
+        detail: format!(
+            "mirror database {} has no ready cut to end at: it {next_action}",
+            database.as_u64()
+        ),
     }
 }
 

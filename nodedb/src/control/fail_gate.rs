@@ -238,6 +238,22 @@ pub(crate) async fn before_mirror_cut_barrier(
     .await
 }
 
+/// The gate between a mirror cut's commit in its groups and its raise, named
+/// [`crate::control::mirror::applier::CUT_RAISE_FAIL_POINT`].
+///
+/// Returns `false` when the node shuts down while parked.
+pub(crate) async fn before_mirror_cut_raise(
+    node_id: u64,
+    shutdown: tokio::sync::watch::Receiver<bool>,
+) -> bool {
+    delivery_gate(
+        node_id,
+        crate::control::mirror::applier::CUT_RAISE_FAIL_POINT,
+        shutdown,
+    )
+    .await
+}
+
 /// Park on gate `name` of node `node_id` until it is released or the node
 /// shuts down.
 async fn delivery_gate(

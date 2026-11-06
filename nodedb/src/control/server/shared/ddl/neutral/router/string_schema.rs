@@ -15,6 +15,7 @@ use super::super::permission_tree;
 use super::super::procedure;
 use super::super::typeguard;
 use super::route_tokens::{RouteTokens, mentions};
+use super::sync_wait;
 
 pub(super) async fn try_string(
     state: &SharedState,
@@ -38,7 +39,11 @@ pub(super) async fn try_string(
         return Some(procedure::show_procedures(state, identity, database_id));
     }
     if upper.starts_with("CALL ") {
-        return Some(procedure::call_procedure(state, identity, database_id, sql).await);
+        // A body commits in its own system transaction, even inside a client's
+        // block. The catalog does not record whether a body writes, so every
+        // successful CALL waits.
+        let result = procedure::call_procedure(state, identity, database_id, sql).await;
+        return Some(sync_wait::confirmed(state, database_id, result).await);
     }
 
     // User-defined functions. None of `CREATE [OR REPLACE] [AGGREGATE] FUNCTION`,

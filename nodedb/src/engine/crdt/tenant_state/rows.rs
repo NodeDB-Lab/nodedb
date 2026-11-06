@@ -4,21 +4,21 @@
 
 use loro::LoroValue;
 
-use super::core::TenantCrdtEngine;
+use super::core::{TenantCrdtEngine, loro_root};
 
 impl TenantCrdtEngine {
     /// Read a single row's fields as a `LoroValue`, or `None` if absent.
     pub fn read_row(&self, collection: &str, row_id: &str) -> Option<LoroValue> {
         self.collections
             .get(collection)
-            .and_then(|state| state.read_row(collection, row_id))
+            .and_then(|state| state.read_row(loro_root(collection), row_id))
     }
 
     /// Check if a row exists in a collection's document store.
     pub fn row_exists(&self, collection: &str, row_id: &str) -> bool {
         self.collections
             .get(collection)
-            .is_some_and(|state| state.row_exists(collection, row_id))
+            .is_some_and(|state| state.row_exists(loro_root(collection), row_id))
     }
 
     /// Read the row as it was at `asof_ms` (system-time). Returns `None` when
@@ -31,7 +31,7 @@ impl TenantCrdtEngine {
     ) -> Option<LoroValue> {
         self.collections
             .get(collection)
-            .and_then(|state| state.read_row_as_of(collection, row_id, asof_ms))
+            .and_then(|state| state.read_row_as_of(loro_root(collection), row_id, asof_ms))
     }
 
     /// Count archived (superseded) bitemporal versions for a row.
@@ -39,7 +39,7 @@ impl TenantCrdtEngine {
     pub fn archive_version_count(&self, collection: &str, row_id: &str) -> usize {
         self.collections
             .get(collection)
-            .map(|state| state.archive_version_count(collection, row_id))
+            .map(|state| state.archive_version_count(loro_root(collection), row_id))
             .unwrap_or(0)
     }
 
@@ -54,7 +54,7 @@ impl TenantCrdtEngine {
     ) -> crate::Result<usize> {
         match self.collections.get(collection) {
             Some(state) => state
-                .purge_history_before(collection, cutoff_system_ms)
+                .purge_history_before(loro_root(collection), cutoff_system_ms)
                 .map_err(crate::Error::Crdt),
             None => Ok(0),
         }

@@ -245,6 +245,7 @@ impl DdlError {
 /// retriable deadline code.
 pub fn code_for_sqlstate(sqlstate_str: &str) -> ErrorCode {
     match sqlstate_str {
+        sqlstate::MIRROR_SYNC_TIMEOUT => ErrorCode::MIRROR_SYNC_TIMEOUT,
         sqlstate::UNDEFINED_TABLE => ErrorCode::COLLECTION_NOT_FOUND,
         sqlstate::INVALID_CATALOG_NAME => ErrorCode::DATABASE_NOT_FOUND,
         sqlstate::INSUFFICIENT_PRIVILEGE => ErrorCode::AUTHORIZATION_DENIED,

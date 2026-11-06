@@ -83,6 +83,7 @@ mod command_complete_tag_conformance;
 mod continuous_aggregate_restart;
 mod continuous_aggregate_serving;
 mod continuous_aggregate_snapshot;
+mod crdt_apply_named_database;
 mod crdt_delta_state_transition;
 mod crdt_restore_non_default_database;
 mod crdt_write_rls_database_scope;

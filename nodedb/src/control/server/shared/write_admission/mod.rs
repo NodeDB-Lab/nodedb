@@ -6,6 +6,7 @@
 //! its propose. An uncontended write holds its per-vShard deterministic locks;
 //! a contended write routes to the Calvin scheduler or waits.
 pub mod admission_keys;
+pub mod entry_scope;
 pub mod entry_storage;
 pub mod gate;
 pub mod holds;

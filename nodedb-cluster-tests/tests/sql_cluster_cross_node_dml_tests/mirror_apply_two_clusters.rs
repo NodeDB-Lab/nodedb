@@ -148,6 +148,7 @@ async fn pair(source: TestCluster) -> Pair {
                 .copied()
                 .expect("mirror cluster id"),
             link_id: LINK,
+            mode: nodedb_types::MirrorMode::Async,
             seeds,
             server_name: SNI_HOSTNAME.to_string(),
         },

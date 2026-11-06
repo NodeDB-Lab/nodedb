@@ -21,7 +21,7 @@ The `DRAFT-` prefix signals this is not an externally-issued number. The app enf
 
 3. **Origin assigns official number:** A BEFORE INSERT trigger or application logic on Origin:
    - Validates the customer exists, credit limit is OK
-   - Calls `nextval('invoice_seq')` to get the gap-free sequential number
+   - Calls `nextval('invoice_seq')` to get the next number. A sequence can leave a gap at a rollback or a node stop, and `CREATE SEQUENCE ... GAP_FREE` is refused. A legal gap-free series takes its number from a counter row the same transaction updates
    - Replaces the provisional `DRAFT-*` identifier with the official number (e.g., `INV-26-04-00024`)
    - Posts GL entries atomically
 

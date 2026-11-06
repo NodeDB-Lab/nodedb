@@ -43,7 +43,7 @@ pub(crate) fn record_cross_shard_key(
     }
     if let (Some(key), Some(dedup)) = (
         payload.redo.cross_shard_applied.as_ref(),
-        state.cross_shard_dedup.get(),
+        state.cross_shard.dedup.get(),
     ) && let Err(error) = dedup.record_applied(key)
     {
         tracing::error!(

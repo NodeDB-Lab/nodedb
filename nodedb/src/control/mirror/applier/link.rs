@@ -15,6 +15,7 @@ pub fn open_source_link(
     state: &SharedState,
     source_cluster: &str,
     source_database: &str,
+    mode: nodedb_types::MirrorMode,
 ) -> crate::Result<Arc<CrossClusterLink>> {
     let source = state
         .mirror
@@ -43,6 +44,7 @@ pub fn open_source_link(
             source_database: source_database.to_string(),
             mirror_cluster_id,
             link_id: derive_link_id(mirror_cluster_id, source_database),
+            mode,
             seeds: source.seeds.clone(),
             server_name: source.server_name.clone(),
         },

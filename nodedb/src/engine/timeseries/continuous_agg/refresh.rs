@@ -20,7 +20,7 @@ use nodedb_types::timeseries::SymbolDictionary;
 use super::definition::ContinuousAggregateDef;
 use super::partial::{ColumnLayout, GroupCell, PartialAggregate};
 use crate::engine::timeseries::columnar_memtable::{
-    ColumnData, ColumnType, ColumnarDrainResult, ColumnarSchema, TimeKind,
+    ColumnData, ColumnType, ColumnarDrainResult, ColumnarFlushView, ColumnarSchema, TimeKind,
 };
 use crate::engine::timeseries::time_bucket;
 
@@ -45,6 +45,16 @@ impl<'a> RefreshSource<'a> {
             columns: &drain.columns,
             symbol_dicts: &drain.symbol_dicts,
             row_count: usize::try_from(drain.row_count).unwrap_or(usize::MAX),
+        }
+    }
+
+    /// The rows a live memtable holds.
+    pub fn of_view(view: &ColumnarFlushView<'a>) -> Self {
+        Self {
+            schema: view.schema,
+            columns: view.columns,
+            symbol_dicts: view.symbol_dicts,
+            row_count: usize::try_from(view.row_count).unwrap_or(usize::MAX),
         }
     }
 

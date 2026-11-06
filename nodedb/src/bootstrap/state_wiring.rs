@@ -315,16 +315,16 @@ pub fn wire_cluster_handle(
     state.migration_tracker = Some(Arc::clone(&handle.migration_tracker));
 
     let cross_shard_metrics = Arc::new(crate::event::cross_shard::CrossShardMetrics::new());
-    state.cross_shard_dispatcher = Some(Arc::new(
+    state.cross_shard.dispatcher = Some(Arc::new(
         crate::event::cross_shard::CrossShardDispatcher::new(
             handle.node_id,
             Arc::clone(&cross_shard_metrics),
         ),
     ));
-    state.cross_shard_dlq = Some(Arc::new(std::sync::Mutex::new(
+    state.cross_shard.dlq = Some(Arc::new(std::sync::Mutex::new(
         crate::event::cross_shard::CrossShardDlq::open(data_dir)?,
     )));
-    state.cross_shard_metrics = Some(cross_shard_metrics);
+    state.cross_shard.metrics = Some(cross_shard_metrics);
     Ok(())
 }
 

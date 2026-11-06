@@ -9,7 +9,7 @@
 use crate::control::wal_replication::decode::decode_parsed_entry;
 use crate::control::wal_replication::{ReplicatedEntry, ReplicatedWrite};
 
-use super::leader_gate::{EntryScope, entry_scope};
+use super::entry_scope::{EntryScope, entry_scope};
 use super::predicate::{plan_adds_storage, plan_is_write};
 
 /// Whether `entry` writes its database, for the mirror gate.

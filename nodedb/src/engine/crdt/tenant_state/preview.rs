@@ -25,7 +25,7 @@ impl TenantCrdtEngine {
         state
             .preview_delta(
                 delta,
-                collection,
+                super::core::loro_root(collection),
                 document_id,
                 nodedb_crdt::CrdtDeltaPreviewLimits::default(),
             )

@@ -21,6 +21,7 @@ pub mod engine;
 pub mod error;
 mod error_classify;
 mod error_from;
+mod error_from_cluster;
 mod error_from_columnar;
 mod error_from_data_plane;
 mod error_from_eval;

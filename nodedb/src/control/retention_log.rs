@@ -2,18 +2,25 @@
 
 //! Retention decisions: one clock read, in the log, on every replica and mirror.
 //!
-//! The metadata leader's loops decide. Each decision enters every data group's
-//! log, so the drop lands at one position against the group's writes on each
-//! replica. A mirror's tail carries the entry, and a mirror decides nothing. A
-//! node with no cluster runs the decision here.
+//! The metadata leader's loops decide. Each decision enters a data group's log,
+//! so the drop lands at one position against the group's writes on each replica.
+//! A mirror's tail carries the entry, and a mirror decides nothing. A node with no
+//! cluster runs the decision here.
 //!
-//! A core holds rows of every group it hosts. The first group's entry drops them
-//! all, and each later group's entry finds nothing past the cutoff.
+//! A timeseries collection lives on one vShard, so its decision enters that one
+//! group's log, and its rows leave at that position alone.
+//!
+//! A decision with rows in every group enters every group's log. A core holds rows
+//! of every group it hosts, so the first group's entry drops them all, and each
+//! later group's entry finds nothing past the cutoff. An audit purge's cutoff sits
+//! below the cleanup horizon, so no read tells the two positions apart. A bucket
+//! pass can reach a replica's reads one entry early, and every replica ends with
+//! the same buckets.
 
 use std::time::Duration;
 
 use futures::future::join_all;
-use nodedb_types::{DatabaseId, TenantId};
+use nodedb_types::{CollectionKey, DatabaseId, TenantId};
 
 use crate::control::server::exchange::gather::gather_all_cores;
 use crate::control::server::shared::ddl::neutral::tenant::purge::data_groups;
@@ -37,7 +44,26 @@ pub fn decides_retention(state: &SharedState) -> bool {
     state.cluster_topology.is_none() || state.is_singleton_worker()
 }
 
-/// Put one decision into effect: in every group's log, or here with no cluster.
+/// The one vShard that holds what `op` drops, for a decision with rows in one
+/// group.
+fn home_vshard(op: &RetentionOp, database_id: DatabaseId) -> Option<u32> {
+    match op {
+        RetentionOp::TimeseriesPartitions { collection, .. } => Some(
+            CollectionKey::from_bare(database_id, collection)
+                .vshard()
+                .as_u32(),
+        ),
+        RetentionOp::ContinuousAggregates { .. }
+        | RetentionOp::TemporalEdges { .. }
+        | RetentionOp::TemporalDocumentStrict { .. }
+        | RetentionOp::TemporalColumnar { .. }
+        | RetentionOp::TemporalCrdt { .. }
+        | RetentionOp::TemporalArray { .. } => None,
+    }
+}
+
+/// Put one decision into effect: in each log that holds its rows, or here with no
+/// cluster.
 pub async fn enact_retention(
     state: &SharedState,
     tenant_id: TenantId,
@@ -49,7 +75,11 @@ pub async fn enact_retention(
     }
     let proposer = state.async_raft_proposer()?;
     let deadline = tokio::time::Instant::now() + PROPOSE_TIMEOUT;
-    let proposals = data_groups(state)?.into_values().filter_map(|vshards| {
+    let shares: Vec<Vec<u32>> = match home_vshard(&op, database_id) {
+        Some(home) => vec![vec![home]],
+        None => data_groups(state)?.into_values().collect(),
+    };
+    let proposals = shares.into_iter().filter_map(|vshards| {
         let vshard_id = vshards.first().copied()?;
         let entry = ReplicatedEntry::new(
             tenant_id.as_u64(),

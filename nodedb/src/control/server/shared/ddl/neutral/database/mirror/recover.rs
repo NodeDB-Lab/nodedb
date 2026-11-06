@@ -65,7 +65,26 @@ pub async fn resume_mirror(
     db_id: DatabaseId,
 ) -> Result<Vec<DdlResult>, DdlError> {
     match gated_status(state, identity, name, db_id, "RESUME")? {
-        MirrorStatus::Failed { failure } if failure.is_resumable() => {}
+        MirrorStatus::Failed { failure } if failure.is_resumable() => {
+            // `Resume` needs a ready cut to return to. Without one the step
+            // leaves the status `failed`, so a success answer would be false.
+            let ready_cut = state
+                .credentials
+                .catalog()
+                .get_mirror_cut_state(db_id)
+                .map_err(|e| DdlError::from_error_in_context("catalog read failed", &e))?
+                .map_or(0, |cut| cut.ready_cut);
+            if ready_cut == 0 {
+                return Err(ddl_err(
+                    "55000",
+                    format!(
+                        "mirror database '{name}' stopped on: {failure}, before its first cut, \
+                         and holds no cut to resume from; run ALTER DATABASE {name} MIRROR \
+                         REBOOTSTRAP"
+                    ),
+                ));
+            }
+        }
         MirrorStatus::Failed { failure } => {
             return Err(ddl_err(
                 "55000",

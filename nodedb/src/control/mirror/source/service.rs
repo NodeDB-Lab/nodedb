@@ -20,7 +20,7 @@ use nodedb_cluster::mirror::{
     MirrorTailEntry, MirrorTailRequest,
 };
 use nodedb_cluster::{ClusterError, METADATA_GROUP_ID, WaitOutcome};
-use nodedb_types::{DatabaseId, MirrorPin, MirrorPinState};
+use nodedb_types::{DatabaseId, MirrorMode, MirrorPin, MirrorPinState};
 
 use crate::control::catalog_entry::CatalogEntry;
 use crate::control::metadata_proposer::propose_catalog_entry_async;
@@ -324,6 +324,8 @@ impl MirrorSourceService for SourceService {
                     positions: Vec::new(),
                     acked_ms: now_ms(),
                     state: MirrorPinState::Live,
+                    mode: hello.mode,
+                    acked_ordinal: 0,
                 })
                 .await?;
                 super::cut_loop::install_pin_ceilings(&self.state);
@@ -414,12 +416,15 @@ impl MirrorSourceService for SourceService {
                 link_id: ack.link_id,
             });
         };
-        if !self.pin_write_due(ack.link_id) {
+        // A sync write waits on every node for this row, so each ack writes it.
+        let sync = matches!(pin.mode, MirrorMode::Sync);
+        if !self.pin_write_due(ack.link_id) && !sync {
             return Ok(());
         }
         self.propose_pin(MirrorPin {
             positions: ack.positions,
             acked_ms: now_ms(),
+            acked_ordinal: ack.cap_ordinal,
             ..pin
         })
         .await
@@ -497,6 +502,7 @@ mod tests {
             link_id: 7,
             protocol_version: MIRROR_PROTOCOL_VERSION,
             fresh: false,
+            mode: MirrorMode::Async,
         }
     }
 
@@ -508,6 +514,8 @@ mod tests {
             positions: Vec::new(),
             acked_ms: 0,
             state,
+            mode: MirrorMode::Async,
+            acked_ordinal: 0,
         }
     }
 

@@ -165,7 +165,7 @@ pub async fn crdt_apply(
     // — lost to followers and entirely on leader failover.
     let _request = state.shared.tenant_request_guard(identity.tenant_id);
     // RLS write policies are stored keyed by `db_qualified(database_id,
-    // collection)`.
+    // collection)`, and the admission addresses the Data Plane by that key.
     let qualified_collection =
         crate::control::planner::sql_plan_convert::convert::db_qualified(database_id, &collection);
     let crs_set = crate::control::crs_context::crs_set_for(&state.shared);
@@ -187,7 +187,7 @@ pub async fn crdt_apply(
         &state.shared,
         crate::control::crdt_admission::AuthorizedCrdtApplyAdmissionRequest {
             authorized,
-            collection: &collection,
+            collection: &qualified_collection,
             deadline: crate::control::server::shared::session::StatementDeadline::of_statement(
                 &state.shared,
             ),
@@ -198,6 +198,9 @@ pub async fn crdt_apply(
     .await;
 
     result.map_err(ApiError::from)?;
+    crate::control::mirror::source::sync::await_database_sync(&state.shared, database_id)
+        .await
+        .map_err(ApiError::from)?;
 
     Ok((
         rate_limit_headers,

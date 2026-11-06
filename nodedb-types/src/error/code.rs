@@ -140,6 +140,9 @@ error_codes! {
     STALE_READ_NOT_LEADER = 1701;
     /// Operation requires the mirror to be promoted, but it has not been.
     MIRROR_NOT_PROMOTED = 1702;
+    /// A write on a source committed, and a sync mirror did not confirm it in
+    /// time. A client must not retry the write as a failed one.
+    MIRROR_SYNC_TIMEOUT = 1703;
     /// `DROP DATABASE` targeted the built-in `default` database, which is
     /// immutable. Shares SQLSTATE `0A000` with `SQL_NOT_ENABLED` and
     /// `CANNOT_CLONE_MIRROR`, so it must be constructed explicitly rather

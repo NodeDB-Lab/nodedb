@@ -343,6 +343,7 @@ mod tests {
                 source_database: "orders".to_string(),
                 mirror_cluster_id: 2,
                 link_id: 7,
+                mode: nodedb_types::MirrorMode::Async,
                 seeds,
                 server_name: SNI_HOSTNAME.to_string(),
             },

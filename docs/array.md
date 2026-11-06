@@ -581,12 +581,13 @@ System time–based retention enables GDPR and data minimization compliance:
 
 ```sql
 ALTER ARRAY spatial_grid SET (audit_retain_ms = 86400000);  -- keep 1 day
-
--- Tiles older than now - 1 day are candidates for purge
--- Purge is automatic during compaction
 ```
 
-Purged tiles are irreversibly removed; historical queries beyond the retention window will see gaps.
+- The metadata leader decides each purge once per retention pass. The decision enters the log, so every replica and mirror removes the same versions.
+- A purge flushes the array's memtable first, so a version below the cutoff leaves even with no write behind it.
+- The cell's version at the cutoff stays. A read at or after the cutoff answers as before.
+
+Purged tiles are irreversibly removed. A read below the cutoff can answer nothing.
 
 ## Related
 

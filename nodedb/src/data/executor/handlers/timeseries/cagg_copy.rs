@@ -57,12 +57,7 @@ impl CoreLoop {
             }
             if let Some(memtable) = self.columnar_memtables.get(&key) {
                 let view = memtable.flush_view();
-                let src = RefreshSource {
-                    schema: view.schema,
-                    columns: view.columns,
-                    symbol_dicts: view.symbol_dicts,
-                    row_count: usize::try_from(view.row_count).unwrap_or(usize::MAX),
-                };
+                let src = RefreshSource::of_view(&view);
                 mgr.absorb_unfolded(database_id, tenant_id, entry, &src);
             }
         }

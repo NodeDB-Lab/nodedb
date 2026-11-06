@@ -10,7 +10,7 @@
 //!
 //! A mirror with no ready cut starts from bootstrap.
 
-use nodedb_types::{DatabaseId, MirrorGroupPosition, MirrorStatus};
+use nodedb_types::{DatabaseId, MirrorGroupPosition, MirrorMode, MirrorStatus};
 
 use crate::control::security::catalog::SystemCatalog;
 
@@ -23,6 +23,7 @@ pub struct MirrorRestartDecision {
     /// The name `[mirror.sources]` knows the source cluster by.
     pub source_cluster: String,
     pub source_database_name: String,
+    pub mode: MirrorMode,
     pub status: MirrorStatus,
     /// The newest source cut that committed in every mirror group.
     pub ready_cut: u64,
@@ -68,6 +69,7 @@ pub fn enumerate_resumable_mirrors(
             database_name: db.name,
             source_cluster: origin.source_cluster,
             source_database_name: origin.source_database_name,
+            mode: origin.mode,
             status: origin.status,
             ready_cut: cut_state.ready_cut,
             needs_bootstrap: cut_state.ready_cut == 0,

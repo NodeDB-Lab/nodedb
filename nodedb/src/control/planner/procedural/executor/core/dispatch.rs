@@ -617,7 +617,8 @@ mod origination_tests {
     /// one-node cluster homes every collection here, so it never holds one.
     fn pending(state: &SharedState) -> usize {
         state
-            .cross_shard_dispatcher
+            .cross_shard
+            .dispatcher
             .as_ref()
             .expect("the cluster wiring installs the dispatcher")
             .total_pending()

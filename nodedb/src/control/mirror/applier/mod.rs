@@ -31,6 +31,7 @@ mod shares;
 pub mod supervisor;
 
 pub use bootstrap::REISSUE_FAIL_POINT;
+pub use cut::CUT_RAISE_FAIL_POINT;
 pub use driver::{MirrorStop, run_mirror_applier, spawn_mirror_applier};
 pub use link::open_source_link;
 pub use promote::{PROMOTE_FINISH_FAIL_POINT, finish_promote, seal_mirror};

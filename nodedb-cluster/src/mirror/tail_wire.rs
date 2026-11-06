@@ -138,6 +138,8 @@ pub struct MirrorTailBatch {
 pub struct MirrorAck {
     pub link_id: u64,
     pub cut: u64,
+    /// The newest source ordinal `cut` holds in full. `0` for a capture.
+    pub cap_ordinal: i64,
     pub positions: Vec<MirrorGroupPosition>,
 }
 
@@ -361,6 +363,7 @@ mod tests {
             link_id: 7,
             protocol_version: 1,
             fresh: false,
+            mode: nodedb_types::MirrorMode::Async,
         })
     }
 
@@ -453,6 +456,7 @@ mod tests {
             MirrorRequest::Ack(MirrorAck {
                 link_id: 1,
                 cut: 1,
+                cap_ordinal: 1,
                 positions: vec![
                     MirrorGroupPosition {
                         group_id: 1,
