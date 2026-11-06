@@ -14,5 +14,5 @@ pub struct MirrorState {
     /// `ALTER DATABASE PROMOTE` and `DROP DATABASE` tear one down.
     pub links: Arc<MirrorLinkRegistry>,
     /// The databases that refuse client writes.
-    pub fence: MirrorFence,
+    pub fence: Arc<MirrorFence>,
 }

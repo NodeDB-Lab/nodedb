@@ -269,6 +269,45 @@ mod tests {
         }
     }
 
+    /// Planning a write to a mirror proposes no binding: the gate refuses it
+    /// ahead of the home, so no key stays bound with no row behind it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_write_to_a_mirror_is_refused_before_its_keys_bind() {
+        let credentials = Arc::new(CredentialStore::new().expect("in-memory credential store"));
+        let assigner = cluster_assigner_on(Arc::clone(&credentials));
+        let home = Arc::new(CountingHome {
+            bound: Mutex::new(HashMap::new()),
+            local: credentials,
+        });
+        assigner.install_home_authority(home.clone());
+        let fence = Arc::new(crate::control::mirror::MirrorFence::new());
+        fence.mark_read_only_for_test(DatabaseId::DEFAULT, "mirror_db");
+        assigner.install_mirror_fence(fence);
+        let mut ctx = cluster_ctx(&assigner);
+        let plans = vec![SqlPlan::Update {
+            collection: "cache".to_string(),
+            engine: EngineType::KeyValue,
+            assignments: vec![("v".to_string(), SqlExpr::Literal(SqlValue::Int(1)))],
+            filters: Vec::new(),
+            target_keys: vec![SqlValue::String("k1".to_string())],
+            returning: false,
+        }];
+
+        let refused = convert_bound(&plans, TENANT, &mut ctx).await;
+
+        assert!(
+            matches!(refused, Err(crate::Error::MirrorReadOnly { ref database }) if database == "mirror_db"),
+            "{refused:?}"
+        );
+        assert!(
+            home.bound
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .is_empty(),
+            "the home received a bind"
+        );
+    }
+
     /// A keyed write whose keys the up-front read misses asks the keys' home
     /// through an awaited request on a current-thread runtime, and plans with
     /// the home's values.

@@ -8,11 +8,13 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
+use nodedb_types::CollectionKey;
 use tokio::sync::{Notify, oneshot};
 
 use super::super::super::registry::SurrogateRegistry;
 use super::super::super::wal_appender::SurrogateWalAppender;
 use super::home::HomeSurrogateAuthority;
+use crate::control::mirror::MirrorFence;
 use crate::control::security::credential::CredentialStore;
 use crate::control::state::SharedState;
 
@@ -75,6 +77,9 @@ pub struct SurrogateAssigner {
     /// is built. Unset on a single node, which is every key's home.
     pub(in crate::control::surrogate::assign) home_authority:
         std::sync::OnceLock<Arc<dyn HomeSurrogateAuthority>>,
+    /// The databases that refuse client writes. Installed when the node's
+    /// state is assembled, on a single node and a cluster node alike.
+    mirror_fence: std::sync::OnceLock<Arc<MirrorFence>>,
 }
 
 impl SurrogateAssigner {
@@ -94,6 +99,32 @@ impl SurrogateAssigner {
             refill_notify: Arc::new(Notify::new()),
             batch_ready: Notify::new(),
             home_authority: std::sync::OnceLock::new(),
+            mirror_fence: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Install the fence [`Self::refuse_mirror_bind`] reads.
+    pub fn install_mirror_fence(&self, fence: Arc<MirrorFence>) {
+        let _ = self.mirror_fence.set(fence);
+    }
+
+    /// Refuse a new binding for a write to a mirror that is not promoted.
+    ///
+    /// A client write binds its keys while it plans, ahead of every write
+    /// gate. The gate then refuses the write and the binding stays, with no
+    /// row behind it, on a database that holds only what its source wrote.
+    /// So a write path runs this before it binds. The mirror applier binds
+    /// nothing here: its bindings arrive in replicated entries.
+    pub fn refuse_mirror_bind(&self, key: CollectionKey<'_>) -> crate::Result<()> {
+        let read_only = self
+            .mirror_fence
+            .get()
+            .and_then(|fence| fence.read_only_name(key.database_id()));
+        match read_only {
+            Some(database) => Err(crate::Error::MirrorReadOnly {
+                database: database.to_string(),
+            }),
+            None => Ok(()),
         }
     }
 

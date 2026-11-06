@@ -72,6 +72,8 @@ impl SharedState {
                 Arc::clone(&credentials),
                 wal_appender,
             ));
+            s.surrogate_assigner
+                .install_mirror_fence(Arc::clone(&s.mirror.fence));
             // Catalog-backed security stores, rebuilt for the same reason the
             // surrogate watermark above is: this constructor's whole purpose
             // is to resume a durable catalog, and a memory-only store here

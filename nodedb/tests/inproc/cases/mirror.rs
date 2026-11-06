@@ -9,6 +9,8 @@ mod helpers;
 mod test_clone_from_mirror_rejected;
 #[path = "mirror/test_eventual_read_serves_local.rs"]
 mod test_eventual_read_serves_local;
+#[path = "mirror/test_fresh_draw_doors.rs"]
+mod test_fresh_draw_doors;
 #[path = "mirror/test_full_lifecycle.rs"]
 mod test_full_lifecycle;
 #[path = "mirror/test_lag_transitions.rs"]

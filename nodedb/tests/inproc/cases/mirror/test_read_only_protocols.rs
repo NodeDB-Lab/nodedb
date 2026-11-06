@@ -25,7 +25,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 use super::helpers::{assert_sqlstate, mark_database_mirror};
 
-const READ_ONLY: &str = "read-only mirror";
+pub(super) const READ_ONLY: &str = "read-only mirror";
 const STRONG_READ: &str = "redirect strong reads";
 const INSERT: &str = "INSERT INTO docs (id, v) VALUES ('b', 2)";
 pub(super) const SELECT: &str = "SELECT v FROM docs WHERE id = 'a'";
@@ -52,7 +52,7 @@ pub(super) async fn fixture() -> (TestServer, String) {
 }
 
 /// A native session authenticated into `database`.
-async fn native_session(server: &TestServer, database: &str) -> TcpStream {
+pub(super) async fn native_session(server: &TestServer, database: &str) -> TcpStream {
     let username = server
         .shared
         .credentials
@@ -80,7 +80,7 @@ async fn native_session(server: &TestServer, database: &str) -> TcpStream {
     stream
 }
 
-fn assert_native_refused(response: &NativeResponse, expected: &str) {
+pub(super) fn assert_native_refused(response: &NativeResponse, expected: &str) {
     assert_eq!(response.status, ResponseStatus::Error, "{response:?}");
     let text = format!("{response:?}");
     assert!(text.contains(expected), "{text}");
@@ -154,6 +154,15 @@ async fn pgwire_writes_are_refused_with_the_read_only_sqlstate() {
         )
         .await;
     }
+}
+
+/// The refused INSERT draws no surrogate, so no binding stays behind.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_insert_binds_no_surrogate() {
+    let (server, _name) = fixture().await;
+    let before = server.shared.surrogate_assigner.current_hwm();
+    assert_sqlstate(&server.client, INSERT, sqlstate::READ_ONLY_SQL_TRANSACTION).await;
+    assert_eq!(server.shared.surrogate_assigner.current_hwm(), before);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
