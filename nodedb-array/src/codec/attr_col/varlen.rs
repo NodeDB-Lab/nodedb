@@ -2,6 +2,7 @@
 
 // String and Bytes attr payload: per non-null value, [u32 LE len][bytes].
 
+use crate::codec::frame::{take_bytes, take_len};
 use crate::codec::limits::{MAX_COLUMN_ENTRIES, checked_capacity};
 use crate::error::{ArrayError, ArrayResult};
 use crate::schema::attr_spec::AttrType;
@@ -41,20 +42,13 @@ pub(super) fn decode_varlen(
     let mut values = Vec::with_capacity(capacity);
     let mut pos = 0usize;
     for _ in 0..expected {
-        let len_bytes = body
-            .get(pos..pos + 4)
-            .ok_or_else(|| ArrayError::SegmentCorruption {
-                detail: "attr col varlen: truncated entry len".into(),
-            })?;
-        let len =
-            u32::from_le_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]]) as usize;
-        pos += 4;
-        let bytes = body
-            .get(pos..pos + len)
-            .ok_or_else(|| ArrayError::SegmentCorruption {
-                detail: "attr col varlen: truncated entry bytes".into(),
-            })?;
-        pos += len;
+        let len = take_len(body, &mut pos, "attr col varlen: truncated entry len")?;
+        let bytes = take_bytes(
+            body,
+            &mut pos,
+            len,
+            "attr col varlen: truncated entry bytes",
+        )?;
         let value = match dtype {
             AttrType::String => {
                 let s = std::str::from_utf8(bytes).map_err(|e| ArrayError::SegmentCorruption {
@@ -85,4 +79,49 @@ pub(super) fn decode_varlen(
         });
     }
     Ok(values)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_corrupt(body: &[u8], expected: usize) {
+        assert!(matches!(
+            decode_varlen(body, AttrType::Bytes, expected),
+            Err(ArrayError::SegmentCorruption { .. })
+        ));
+    }
+
+    #[test]
+    fn a_hostile_entry_length_is_corruption() {
+        assert_corrupt(&u32::MAX.to_le_bytes(), 1);
+    }
+
+    #[test]
+    fn a_hostile_length_after_a_good_entry_is_corruption() {
+        let mut body = 1u32.to_le_bytes().to_vec();
+        body.push(b'a');
+        body.extend_from_slice(&u32::MAX.to_le_bytes());
+        assert_corrupt(&body, 2);
+    }
+
+    #[test]
+    fn a_truncated_entry_length_is_corruption() {
+        let mut body = 1u32.to_le_bytes().to_vec();
+        body.push(b'a');
+        body.extend_from_slice(&[0, 0, 0]);
+        assert_corrupt(&body, 2);
+    }
+
+    #[test]
+    fn entries_decode_in_order() {
+        let mut body = 1u32.to_le_bytes().to_vec();
+        body.push(b'a');
+        body.extend_from_slice(&0u32.to_le_bytes());
+        let values = decode_varlen(&body, AttrType::Bytes, 2).unwrap();
+        assert_eq!(
+            values,
+            vec![CellValue::Bytes(vec![b'a']), CellValue::Bytes(vec![])]
+        );
+    }
 }

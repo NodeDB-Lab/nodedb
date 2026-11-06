@@ -137,12 +137,7 @@ pub(super) fn read_string_vec<'a, R: Read<'a>>(
 ) -> zerompk::Result<Vec<String>> {
     expect_fields(field_count, 1)?;
     reader.read_u8()?;
-    let len = reader.read_array_len()?;
-    let mut out = Vec::with_capacity(len);
-    for _ in 0..len {
-        out.push(reader.read_string()?.into_owned());
-    }
-    Ok(out)
+    Vec::<String>::read(reader)
 }
 
 /// Read `SegmentCorrupted` fields: (segment_id: u64, corruption: String, detail: String).

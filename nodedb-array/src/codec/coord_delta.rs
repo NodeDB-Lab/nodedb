@@ -14,6 +14,7 @@
 //   [u32 LE] index count (= cell count)
 //   [zigzag-varint deltas ...] index deltas (first value as-is, then deltas)
 
+use crate::codec::frame::{take_bytes, take_len};
 use crate::codec::limits::{
     MAX_CELLS_PER_TILE, MAX_DICT_CARDINALITY, check_decoded_size, checked_capacity,
 };
@@ -130,122 +131,74 @@ pub fn encode_coord_axis(dict: &DimDict, out: &mut Vec<u8>) -> ArrayResult<()> {
 /// Decode one axis from `data[pos..]`, advancing `pos` past consumed bytes.
 pub fn decode_coord_axis(data: &[u8], pos: &mut usize) -> ArrayResult<DimDict> {
     // Dict entries — tag-dispatched.
-    if *pos >= data.len() {
-        return Err(ArrayError::SegmentCorruption {
+    let dict_tag = *data
+        .get(*pos)
+        .ok_or_else(|| ArrayError::SegmentCorruption {
             detail: "coord axis: truncated dict tag".into(),
-        });
-    }
-    let dict_tag = data[*pos];
+        })?;
     *pos += 1;
 
-    let dict_values: Vec<CoordValue> =
-        match dict_tag {
-            DICT_TAG_MSGPACK => {
-                if *pos + 4 > data.len() {
-                    return Err(ArrayError::SegmentCorruption {
-                        detail: "coord axis: truncated dict count".into(),
-                    });
-                }
-                let dict_count = u32::from_le_bytes(
-                    data[*pos..*pos + 4]
-                        .try_into()
-                        .expect("invariant: preceding bounds check guarantees 4 bytes available"),
-                ) as usize;
-                *pos += 4;
-                let capacity = checked_capacity(
-                    dict_count,
-                    MAX_DICT_CARDINALITY,
-                    data.len() - *pos,
-                    4,
-                    "coord_delta dict_count",
-                )?;
+    let dict_values: Vec<CoordValue> = match dict_tag {
+        DICT_TAG_MSGPACK => {
+            let dict_count = take_len(data, pos, "coord axis: truncated dict count")?;
+            let capacity = checked_capacity(
+                dict_count,
+                MAX_DICT_CARDINALITY,
+                data.len() - *pos,
+                4,
+                "coord_delta dict_count",
+            )?;
 
-                let mut out: Vec<CoordValue> = Vec::with_capacity(capacity);
-                for _ in 0..dict_count {
-                    if *pos + 4 > data.len() {
-                        return Err(ArrayError::SegmentCorruption {
-                            detail: "coord axis: truncated dict entry len".into(),
-                        });
-                    }
-                    let len =
-                        u32::from_le_bytes(data[*pos..*pos + 4].try_into().expect(
-                            "invariant: preceding bounds check guarantees 4 bytes available",
-                        )) as usize;
-                    *pos += 4;
-                    if *pos + len > data.len() {
-                        return Err(ArrayError::SegmentCorruption {
-                            detail: "coord axis: truncated dict entry bytes".into(),
-                        });
-                    }
-                    let cv: CoordValue =
-                        zerompk::from_msgpack(&data[*pos..*pos + len]).map_err(|e| {
-                            ArrayError::SegmentCorruption {
-                                detail: format!("coord dict decode: {e}"),
-                            }
-                        })?;
-                    *pos += len;
-                    out.push(cv);
-                }
-                out
-            }
-            DICT_TAG_INT64_FASTLANES => {
-                if *pos + 8 > data.len() {
-                    return Err(ArrayError::SegmentCorruption {
-                        detail: "coord axis: truncated int64-dict header".into(),
-                    });
-                }
-                let dict_count = u32::from_le_bytes(data[*pos..*pos + 4].try_into().expect(
-                    "invariant: preceding bounds check guarantees 8 bytes available; first 4",
-                )) as usize;
-                *pos += 4;
-                check_decoded_size(
-                    dict_count,
-                    MAX_DICT_CARDINALITY,
-                    "coord_delta int64-dict count",
-                )?;
-                let payload_len = u32::from_le_bytes(data[*pos..*pos + 4].try_into().expect(
-                    "invariant: preceding bounds check guarantees 8 bytes available; second 4",
-                )) as usize;
-                *pos += 4;
-                if *pos + payload_len > data.len() {
-                    return Err(ArrayError::SegmentCorruption {
-                        detail: "coord axis: truncated int64-dict payload".into(),
-                    });
-                }
-                let ints = nodedb_codec::fastlanes::decode(&data[*pos..*pos + payload_len])
-                    .map_err(|e| ArrayError::SegmentCorruption {
-                        detail: format!("coord dict fastlanes decode: {e}"),
+            let mut out: Vec<CoordValue> = Vec::with_capacity(capacity);
+            for _ in 0..dict_count {
+                let len = take_len(data, pos, "coord axis: truncated dict entry len")?;
+                let entry = take_bytes(data, pos, len, "coord axis: truncated dict entry bytes")?;
+                let cv: CoordValue =
+                    zerompk::from_msgpack(entry).map_err(|e| ArrayError::SegmentCorruption {
+                        detail: format!("coord dict decode: {e}"),
                     })?;
-                *pos += payload_len;
-                if ints.len() != dict_count {
-                    return Err(ArrayError::SegmentCorruption {
-                        detail: format!(
-                            "coord dict count mismatch: declared {dict_count}, decoded {}",
-                            ints.len()
-                        ),
-                    });
-                }
-                ints.into_iter().map(CoordValue::Int64).collect()
+                out.push(cv);
             }
-            other => {
+            out
+        }
+        DICT_TAG_INT64_FASTLANES => {
+            let dict_count = take_len(data, pos, "coord axis: truncated int64-dict header")?;
+            check_decoded_size(
+                dict_count,
+                MAX_DICT_CARDINALITY,
+                "coord_delta int64-dict count",
+            )?;
+            let payload_len = take_len(data, pos, "coord axis: truncated int64-dict header")?;
+            let payload = take_bytes(
+                data,
+                pos,
+                payload_len,
+                "coord axis: truncated int64-dict payload",
+            )?;
+            let ints = nodedb_codec::fastlanes::decode(payload).map_err(|e| {
+                ArrayError::SegmentCorruption {
+                    detail: format!("coord dict fastlanes decode: {e}"),
+                }
+            })?;
+            if ints.len() != dict_count {
                 return Err(ArrayError::SegmentCorruption {
-                    detail: format!("coord axis: unknown dict tag {other:#04x}"),
+                    detail: format!(
+                        "coord dict count mismatch: declared {dict_count}, decoded {}",
+                        ints.len()
+                    ),
                 });
             }
-        };
+            ints.into_iter().map(CoordValue::Int64).collect()
+        }
+        other => {
+            return Err(ArrayError::SegmentCorruption {
+                detail: format!("coord axis: unknown dict tag {other:#04x}"),
+            });
+        }
+    };
 
     // Index stream.
-    if *pos + 4 > data.len() {
-        return Err(ArrayError::SegmentCorruption {
-            detail: "coord axis: truncated index count".into(),
-        });
-    }
-    let idx_count = u32::from_le_bytes(
-        data[*pos..*pos + 4]
-            .try_into()
-            .expect("invariant: preceding bounds check guarantees 4 bytes available"),
-    ) as usize;
-    *pos += 4;
+    let idx_count = take_len(data, pos, "coord axis: truncated index count")?;
     let capacity = checked_capacity(
         idx_count,
         MAX_CELLS_PER_TILE,
@@ -263,8 +216,15 @@ pub fn decode_coord_axis(data: &[u8], pos: &mut usize) -> ArrayResult<DimDict> {
             })?;
         *pos += consumed;
         let delta = zigzag_decode(zz);
-        let cur = prev + delta;
-        indices.push(cur as u32);
+        let cur = prev
+            .checked_add(delta)
+            .ok_or_else(|| ArrayError::SegmentCorruption {
+                detail: "coord axis: index delta overflows".into(),
+            })?;
+        let index = u32::try_from(cur).map_err(|_| ArrayError::SegmentCorruption {
+            detail: format!("coord axis: index {cur} is outside the u32 range"),
+        })?;
+        indices.push(index);
         prev = cur;
     }
 
@@ -301,6 +261,65 @@ mod tests {
             }
         }
         d
+    }
+
+    /// A dict of one msgpack entry whose length is `len`.
+    fn msgpack_dict_of_entry_len(len: u32) -> Vec<u8> {
+        let mut data = vec![DICT_TAG_MSGPACK];
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(&len.to_le_bytes());
+        data
+    }
+
+    /// An empty msgpack dict, then an index stream of `deltas`.
+    fn index_stream(deltas: &[i64]) -> Vec<u8> {
+        let mut data = vec![DICT_TAG_MSGPACK];
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&(deltas.len() as u32).to_le_bytes());
+        for &delta in deltas {
+            write_varint(&mut data, zigzag_encode(delta));
+        }
+        data
+    }
+
+    fn assert_corrupt(data: &[u8]) {
+        assert!(matches!(
+            decode_coord_axis(data, &mut 0),
+            Err(ArrayError::SegmentCorruption { .. })
+        ));
+    }
+
+    #[test]
+    fn a_hostile_dict_entry_length_is_corruption() {
+        assert_corrupt(&msgpack_dict_of_entry_len(u32::MAX));
+    }
+
+    #[test]
+    fn a_hostile_fastlanes_payload_length_is_corruption() {
+        let mut data = vec![DICT_TAG_INT64_FASTLANES];
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(&u32::MAX.to_le_bytes());
+        assert_corrupt(&data);
+    }
+
+    #[test]
+    fn index_deltas_that_overflow_are_corruption() {
+        assert_corrupt(&index_stream(&[1, i64::MAX]));
+    }
+
+    #[test]
+    fn an_index_outside_u32_is_corruption() {
+        assert_corrupt(&index_stream(&[-1]));
+        assert_corrupt(&index_stream(&[i64::MIN]));
+        assert_corrupt(&index_stream(&[i64::MAX]));
+        assert_corrupt(&index_stream(&[i64::from(u32::MAX) + 1]));
+    }
+
+    #[test]
+    fn the_largest_u32_index_decodes() {
+        let mut pos = 0;
+        let dict = decode_coord_axis(&index_stream(&[i64::from(u32::MAX)]), &mut pos).unwrap();
+        assert_eq!(dict.indices, vec![u32::MAX]);
     }
 
     #[test]
