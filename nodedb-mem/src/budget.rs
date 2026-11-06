@@ -132,11 +132,23 @@ impl Budget {
     /// The caller already holds this memory — a denial here would only
     /// hide it from the budget, not free it. Returns the shared `Arc` so
     /// the caller can release it on drop, same as `try_reserve_arc`.
+    ///
+    /// The counter saturates at `usize::MAX`. A wrap would read as an idle
+    /// engine, and report the wrong peak.
     pub(crate) fn credit_arc(&self, size: usize) -> Arc<AtomicUsize> {
-        let new_allocated = self
-            .allocated
-            .fetch_add(size, Ordering::AcqRel)
-            .saturating_add(size);
+        let mut current = self.allocated.load(Ordering::Relaxed);
+        let new_allocated = loop {
+            let new_val = current.saturating_add(size);
+            match self.allocated.compare_exchange_weak(
+                current,
+                new_val,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break new_val,
+                Err(actual) => current = actual,
+            }
+        };
         self.raise_peak(new_allocated);
         Arc::clone(&self.allocated)
     }
@@ -220,6 +232,17 @@ mod tests {
         assert!(!budget.try_reserve(2));
         assert_eq!(budget.allocated(), usize::MAX - 1);
         assert_eq!(budget.rejections(), 1);
+    }
+
+    /// `fetch_add` wraps: the counter then reads as nearly idle while the peak
+    /// reads as full. The credit must saturate the counter itself.
+    #[test]
+    fn credit_saturates_the_counter_and_never_wraps() {
+        let budget = Budget::new(1024);
+        budget.allocated.store(usize::MAX - 1, Ordering::Relaxed);
+        let _counter = budget.credit_arc(8);
+        assert_eq!(budget.allocated(), usize::MAX);
+        assert_eq!(budget.peak(), usize::MAX);
     }
 
     #[test]
