@@ -338,8 +338,7 @@ fn make_uqv(codes: &[u8], dim: u16) -> UnifiedQuantizedVector {
         outlier_bitmask: 0,
         reserved: [0; 8],
     };
-    UnifiedQuantizedVector::new(header, codes, &[])
-        .expect("make_uqv: layout construction must not fail for valid inputs")
+    UnifiedQuantizedVector::without_outliers(header, codes)
 }
 
 // ── VectorCodec wrapper types ─────────────────────────────────────────────────

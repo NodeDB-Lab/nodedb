@@ -99,19 +99,23 @@ impl PkIndex {
         old_segment_id: u64,
         remap_fn: impl Fn(u32) -> Option<RowLocation>,
     ) {
-        let keys_to_remap: Vec<Vec<u8>> = self
+        let to_remap: Vec<(Vec<u8>, u32)> = self
             .inner
             .iter()
             .filter(|(_, loc)| loc.segment_id == old_segment_id)
-            .map(|(k, _)| k.clone())
+            .map(|(k, loc)| (k.clone(), loc.row_index))
             .collect();
 
-        for key in keys_to_remap {
-            let old_loc = self.inner.remove(&key).expect("key exists from filter");
-            if let Some(new_loc) = remap_fn(old_loc.row_index) {
-                self.inner.insert(key, new_loc);
+        for (key, old_row_index) in to_remap {
+            match remap_fn(old_row_index) {
+                Some(new_loc) => {
+                    self.inner.insert(key, new_loc);
+                }
+                None => {
+                    // The row was deleted during compaction: drop the entry.
+                    self.inner.remove(&key);
+                }
             }
-            // If remap_fn returns None, the entry is dropped (row was deleted).
         }
     }
 

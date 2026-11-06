@@ -73,6 +73,8 @@ impl CsrIndex {
     ///
     /// Returns [`GraphError::MemoryBudget`] if a memory governor is installed
     /// and the serialization buffer would exceed the `Graph` engine budget.
+    /// Returns [`GraphError::CheckpointSerialize`] if rkyv cannot serialize
+    /// the snapshot.
     pub fn checkpoint_to_bytes(&self) -> Result<Vec<u8>, GraphError> {
         let snapshot = CsrSnapshotRkyv {
             nodes: self.id_to_node.clone(),
@@ -98,8 +100,11 @@ impl CsrIndex {
             buffer_out_weights: self.buffer_out_weights.clone(),
             buffer_in_weights: self.buffer_in_weights.clone(),
         };
-        let rkyv_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&snapshot)
-            .expect("CSR rkyv serialization should not fail");
+        let rkyv_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&snapshot).map_err(|e| {
+            GraphError::CheckpointSerialize {
+                detail: e.to_string(),
+            }
+        })?;
         let buf_capacity = RKYV_MAGIC.len() + 1 + rkyv_bytes.len();
         let _budget_guard = self.memory.reserve(buf_capacity * size_of::<u8>())?;
         let mut buf = Vec::with_capacity(buf_capacity);

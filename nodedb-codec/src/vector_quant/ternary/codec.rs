@@ -76,8 +76,7 @@ impl VectorCodec for TernaryCodec {
             outlier_bitmask: 0,
             reserved: [0; 8],
         };
-        let uqv = UnifiedQuantizedVector::new(header, &hot, &[])
-            .expect("ternary encode: layout must be valid");
+        let uqv = UnifiedQuantizedVector::without_outliers(header, &hot);
         TernaryQuantized(uqv)
     }
 
