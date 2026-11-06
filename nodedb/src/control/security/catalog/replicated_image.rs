@@ -315,6 +315,7 @@ impl SystemCatalog {
         }
         txn.commit()
             .map_err(|e| catalog_err("replicated image: commit", e))?;
+        self.note_relations_written();
         self.reload_event_definitions()?;
         Ok(())
     }

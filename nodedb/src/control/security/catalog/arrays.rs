@@ -56,7 +56,9 @@ impl SystemCatalog {
                 .insert(key.as_str(), bytes.as_slice())
                 .map_err(|e| catalog_err("insert array", e))?;
         }
-        write_txn.commit().map_err(|e| catalog_err("commit", e))
+        write_txn.commit().map_err(|e| catalog_err("commit", e))?;
+        self.note_relations_written();
+        Ok(())
     }
 
     /// Fetch an array by its explicit tenant/database identity.
@@ -105,6 +107,7 @@ impl SystemCatalog {
                 .is_some();
         }
         write_txn.commit().map_err(|e| catalog_err("commit", e))?;
+        self.note_relations_written();
         Ok(existed)
     }
 
@@ -194,6 +197,7 @@ impl SystemCatalog {
         write_txn
             .commit()
             .map_err(|e| catalog_err("commit array/surrogate delete", e))?;
+        self.note_relations_written();
         Ok(existed)
     }
 

@@ -27,6 +27,15 @@ pub(crate) struct SamplerState {
     lease_secs: HashMap<DatabaseId, f64>,
     /// WAL commit histogram counts at the previous sample.
     wal_commit: HashMap<DatabaseId, HistogramSnapshot>,
+    /// What the published collection and tenant counts were read at.
+    relations_counted: Option<RelationsCounted>,
+}
+
+/// The catalog generation and the database set of the last relation scan.
+#[derive(Debug)]
+struct RelationsCounted {
+    generation: u64,
+    databases: HashSet<DatabaseId>,
 }
 
 /// Publish one sample of every per-database gauge and counter delta.
@@ -56,7 +65,33 @@ pub(crate) fn sample_once(shared: &SharedState, prev: &mut SamplerState) -> crat
     publish_wal_commit_p99(shared, &ids, prev);
     publish_lease_deltas(shared, prev);
 
+    publish_relation_counts(shared, &ids, prev).map(|_| ())
+}
+
+/// Publish each database's collection and tenant counts. Returns whether it
+/// read the catalog.
+///
+/// A count changes only when a collection or array row does, so the catalog
+/// scan runs only when the catalog's generation moved or the database set
+/// changed. The gauges keep their values between scans. A catalog error keeps
+/// nothing cached, so the next tick scans again.
+fn publish_relation_counts(
+    shared: &SharedState,
+    ids: &[DatabaseId],
+    prev: &mut SamplerState,
+) -> crate::Result<bool> {
+    let registry = &shared.database_metrics;
     let catalog = shared.credentials.catalog();
+    let generation = catalog.relations_generation();
+    let databases: HashSet<DatabaseId> = ids.iter().copied().collect();
+    if prev
+        .relations_counted
+        .as_ref()
+        .is_some_and(|counted| counted.generation == generation && counted.databases == databases)
+    {
+        return Ok(false);
+    }
+    prev.relations_counted = None;
     let mut array_tenants: HashMap<DatabaseId, HashSet<u64>> = HashMap::new();
     for a in catalog.load_all_arrays()? {
         array_tenants
@@ -65,7 +100,7 @@ pub(crate) fn sample_once(shared: &SharedState, prev: &mut SamplerState) -> crat
             .insert(a.array_id.tenant_id.as_u64());
     }
     let mut first_error = None;
-    for &id in &ids {
+    for &id in ids {
         match catalog.load_all_collections(id) {
             Ok(collections) => {
                 let active = collections.iter().filter(|c| c.is_active).count();
@@ -81,7 +116,16 @@ pub(crate) fn sample_once(shared: &SharedState, prev: &mut SamplerState) -> crat
             }
         }
     }
-    first_error.map_or(Ok(()), Err)
+    match first_error {
+        Some(error) => Err(error),
+        None => {
+            prev.relations_counted = Some(RelationsCounted {
+                generation,
+                databases,
+            });
+            Ok(true)
+        }
+    }
 }
 
 /// Publish the WAL commit P99 of the window since the previous sample.
@@ -243,6 +287,37 @@ mod tests {
         hold_lease(&shared, a);
         sample_once(&shared, &mut prev).expect("fourth sample");
         assert!(load(&counters_a.maintenance_lease_micros_total) > third);
+    }
+
+    #[test]
+    fn relation_counts_scan_only_when_the_catalog_or_the_database_set_moved() {
+        let (shared, _dir) = make_state();
+        let db = DatabaseId::new(41);
+        let catalog = shared.credentials.catalog();
+        shared.database_metrics.ensure_database(db);
+        let mut prev = SamplerState::default();
+        let ids = |shared: &SharedState| shared.database_metrics.database_ids();
+
+        assert!(publish_relation_counts(&shared, &ids(&shared), &mut prev).expect("first"));
+        assert!(!publish_relation_counts(&shared, &ids(&shared), &mut prev).expect("unchanged"));
+
+        let stored =
+            crate::control::security::catalog::StoredCollection::stamped_for_test(7, "c", "admin");
+        catalog.put_collection(db, &stored).expect("put");
+        assert!(publish_relation_counts(&shared, &ids(&shared), &mut prev).expect("moved"));
+        let counters = shared.database_metrics.get(db).expect("entry");
+        let load = |v: &std::sync::atomic::AtomicU64| v.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(load(&counters.collections), 1);
+        assert_eq!(load(&counters.tenants), 1);
+        assert!(!publish_relation_counts(&shared, &ids(&shared), &mut prev).expect("unchanged"));
+
+        catalog.delete_collection(db, 7, "c").expect("delete");
+        assert!(publish_relation_counts(&shared, &ids(&shared), &mut prev).expect("deleted"));
+        assert_eq!(load(&counters.collections), 0);
+
+        // A database added since the last scan draws a scan with no catalog write.
+        shared.database_metrics.ensure_database(DatabaseId::new(42));
+        assert!(publish_relation_counts(&shared, &ids(&shared), &mut prev).expect("new database"));
     }
 
     #[test]
