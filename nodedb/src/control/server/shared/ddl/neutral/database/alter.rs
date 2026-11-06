@@ -209,6 +209,14 @@ pub async fn alter_database(
             return super::materialize::alter_database_materialize(state, identity, name).await;
         }
 
+        AlterDatabaseOperation::MirrorResume => {
+            return super::mirror::recover::resume_mirror(state, identity, name, db_id).await;
+        }
+
+        AlterDatabaseOperation::MirrorRebootstrap => {
+            return super::mirror::recover::rebootstrap_mirror(state, identity, name, db_id).await;
+        }
+
         AlterDatabaseOperation::Promote => {
             return super::mirror::promote::promote_database(state, identity, name).await;
         }

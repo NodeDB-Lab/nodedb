@@ -221,6 +221,9 @@ impl TestClusterNode {
             // `[tuning]` section. A walk coordinator's visit cap reads it.
             state.tuning.graph = graph_tuning.clone();
             state.tuning.query = query_tuning.clone();
+            if let Some(network) = &config.network_tuning {
+                state.tuning.network = network.clone();
+            }
             // Fixed test KEK so backup tests produce encrypted envelopes.
             state.backup_kek = Some(Arc::new([0x42u8; 32]));
             state.backup_storage = config.backup_storage.clone().map(Arc::new);

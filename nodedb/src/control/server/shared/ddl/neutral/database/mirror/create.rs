@@ -151,18 +151,61 @@ fn check_source_config(state: &SharedState, source_cluster: &str) -> Result<(), 
     Ok(())
 }
 
+/// Whether the catalog read back `claim` itself. The first statement in the log
+/// wrote its own row, with its own name and WAL position.
+fn claim_won(row: Option<&DatabaseDescriptor>, claim: &DatabaseDescriptor) -> bool {
+    row.is_some_and(|row| {
+        row.name == claim.name
+            && row.created_at_lsn == claim.created_at_lsn
+            && row
+                .mirror_origin
+                .as_ref()
+                .map(|origin| &origin.source_database_name)
+                == claim
+                    .mirror_origin
+                    .as_ref()
+                    .map(|origin| &origin.source_database_name)
+    })
+}
+
+/// Whether any live mirror on this cluster follows the source database.
+fn mirrors_source(
+    databases: &[DatabaseDescriptor],
+    source_cluster: &str,
+    source_database: &str,
+) -> bool {
+    refuse_second_mirror(databases, source_cluster, source_database).is_err()
+}
+
+/// Give back the pin of a hello whose statement was refused. The source's pin
+/// expiry covers a release that does not arrive.
+async fn release_stray_pin(
+    client: &MirrorSourceClient,
+    source_cluster: &str,
+    source_database: &str,
+) {
+    if let Err(error) = client.release(client.link_id()).await {
+        tracing::warn!(
+            source = %source_cluster,
+            database = %source_database,
+            %error,
+            "MIRROR DATABASE: the refused hello's pin stays until it expires"
+        );
+    }
+}
+
 /// Say hello through a new link, until the statement deadline.
 async fn hello_source(
     state: &SharedState,
     source_cluster: &str,
     source_database: &str,
-) -> Result<MirrorHelloAck, DdlError> {
+) -> Result<(MirrorHelloAck, MirrorSourceClient), DdlError> {
     let link = open_source_link(state, source_cluster, source_database)
         .map_err(|e| DdlError::from_error_in_context("MIRROR DATABASE", &e))?;
     let client = MirrorSourceClient::new(link);
     let deadline = StatementDeadline::of_statement(state).tokio_instant();
     match tokio::time::timeout_at(deadline, client.hello()).await {
-        Ok(Ok(ack)) => Ok(ack),
+        Ok(Ok(ack)) => Ok((ack, client)),
         Ok(Err(error)) => Err(hello_error(&error)),
         Err(_) => Err(ddl_err(
             "08001",
@@ -213,14 +256,24 @@ pub async fn mirror_database(
         .map_err(|e| DdlError::from_error_in_context("catalog lookup failed", &e))?;
     refuse_second_mirror(&databases, source_cluster, source_database)?;
 
-    let ack = hello_source(state, source_cluster, source_database).await?;
-    let db_id = check_hello_ack(
+    let (ack, client) = hello_source(state, source_cluster, source_database).await?;
+    let db_id = match check_hello_ack(
         &ack,
         cluster_id,
         &databases,
         source_cluster,
         source_database,
-    )?;
+    ) {
+        Ok(db_id) => db_id,
+        Err(refusal) => {
+            // The hello took a pin this mirror never uses. A mirror of the same
+            // source shares the link, so its pin stays.
+            if !mirrors_source(&databases, source_cluster, source_database) {
+                release_stray_pin(&client, source_cluster, source_database).await;
+            }
+            return Err(refusal);
+        }
+    };
     let created_at_lsn = state.wal.next_lsn().as_u64();
 
     let descriptor = DatabaseDescriptor {
@@ -244,10 +297,26 @@ pub async fn mirror_database(
         idle_session_timeout_secs: 0,
     };
 
-    // Propose through the metadata proposer.
-    propose_catalog_entry_async(state, &CatalogEntry::PutDatabase(Box::new(descriptor)))
-        .await
-        .map_err(|e| DdlError::from_error_in_context("catalog propose failed", &e))?;
+    // The log decides between two statements that both passed their checks.
+    propose_catalog_entry_async(
+        state,
+        &CatalogEntry::ClaimMirrorDatabase(Box::new(descriptor.clone())),
+    )
+    .await
+    .map_err(|e| DdlError::from_error_in_context("catalog propose failed", &e))?;
+    let row = catalog
+        .get_database(db_id)
+        .map_err(|e| DdlError::from_error_in_context("catalog read failed", &e))?;
+    if !claim_won(row.as_ref(), &descriptor) {
+        return Err(ddl_err(
+            "42710",
+            format!(
+                "MIRROR DATABASE: another statement took '{local_name}' or \
+                 {source_cluster}.{source_database} first; a cluster holds one mirror per source \
+                 database"
+            ),
+        ));
+    }
 
     state.audit_record_with_db(
         crate::control::security::audit::AuditEvent::DatabaseMirrored,
@@ -345,6 +414,21 @@ mod tests {
         );
         assert!(refuse_second_mirror(&held, "source", "other_db").is_ok());
         assert!(refuse_second_mirror(&held, "elsewhere", "source_db").is_ok());
+    }
+
+    /// A statement that lost the log's race reads another statement's row.
+    #[test]
+    fn only_the_statement_that_wrote_the_row_won() {
+        let mut claim = mirror_descriptor(1600, "first", MirrorStatus::Following);
+        claim.created_at_lsn = 7;
+        assert!(claim_won(Some(&claim), &claim));
+        let mut other = claim.clone();
+        other.name = "second".to_string();
+        assert!(!claim_won(Some(&other), &claim));
+        let mut later = claim.clone();
+        later.created_at_lsn = 8;
+        assert!(!claim_won(Some(&later), &claim));
+        assert!(!claim_won(None, &claim));
     }
 
     #[test]

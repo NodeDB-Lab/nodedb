@@ -20,6 +20,7 @@ use crate::control::lease::QueryLeaseScope;
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::security::request_scope::RequestAuthScope;
 use crate::control::sequence::SessionSequenceAccess;
+use crate::control::sequence::error_map::sequence_error_to_error;
 use crate::control::server::response_shape::schema::OutputSchema;
 use crate::control::server::response_shape::types::{describe_plan, replaced_write_outcome};
 use crate::control::server::shared::cluster_array_dispatch::{
@@ -240,11 +241,16 @@ pub(crate) async fn run_statement_loop(
         // TRUNCATE RESTART IDENTITY. Autocommit only: a buffered truncate
         // restarts its sequences at COMMIT.
         if let Some((collection, true)) = plan.truncate_target() {
-            state.sequence_registry.restart_sequences_for_collection(
-                task_database_id.as_u64(),
-                exec.tenant_id().as_u64(),
-                collection.as_str(),
-            );
+            state
+                .sequence_registry
+                .restart_sequences_for_collection(
+                    task_database_id.as_u64(),
+                    exec.tenant_id().as_u64(),
+                    collection.as_str(),
+                )
+                .map_err(|error| {
+                    StatementError::Error(sequence_error_to_error(collection.as_str(), error))
+                })?;
         }
 
         fold.last_lsn = task_response.watermark_lsn.as_u64();

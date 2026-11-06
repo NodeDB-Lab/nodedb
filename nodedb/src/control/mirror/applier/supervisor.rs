@@ -4,7 +4,7 @@
 //!
 //! The catalog decides: a restart and a new `MIRROR DATABASE` take one path, on
 //! every node. An applier that stopped on a failure stays stopped until an
-//! operator acts, so the supervisor starts each database once per drop. A
+//! operator acts: the failure shows in the status, which wants no applier. A
 //! database that leaves the catalog clears its place.
 
 use std::collections::HashSet;
@@ -55,6 +55,11 @@ fn supervise(shared: &Arc<SharedState>, supervised: &mut Supervised) {
     if shared.mirror.cluster_id.get().is_none() || shared.mirror.raft.get().is_none() {
         return;
     }
+    // An applier that ended removed its link. It starts again once the catalog
+    // shows it has work: a `RESUME` or a `REBOOTSTRAP` moved the status.
+    supervised
+        .started
+        .retain(|database| shared.mirror.links.get(*database).is_some());
     let decisions = match enumerate_resumable_mirrors(shared.credentials.catalog()) {
         Ok(decisions) => decisions,
         Err(error) => {

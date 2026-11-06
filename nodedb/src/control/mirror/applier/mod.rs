@@ -3,6 +3,7 @@
 //! What a mirror cluster does to follow its source.
 //!
 //! - [`rewrite`] — what the applier checks and changes on each source entry.
+//! - `shares` — one entry's shares across the mirror's groups, and a cut's floor.
 //! - [`batch`] — each source group's tail, cut into batches.
 //! - [`propose`] — the raw commit-wait propose.
 //! - [`progress`] — the applier's epoch, and which cuts the groups applied.
@@ -26,10 +27,12 @@ pub mod promote;
 pub mod propose;
 mod rewrite;
 mod session;
+mod shares;
 pub mod supervisor;
 
+pub use bootstrap::REISSUE_FAIL_POINT;
 pub use driver::{MirrorStop, run_mirror_applier, spawn_mirror_applier};
 pub use link::open_source_link;
-pub use promote::{finish_promote, seal_mirror};
+pub use promote::{PROMOTE_FINISH_FAIL_POINT, finish_promote, seal_mirror};
 pub use propose::MirrorRaft;
 pub use supervisor::spawn_mirror_supervisor;

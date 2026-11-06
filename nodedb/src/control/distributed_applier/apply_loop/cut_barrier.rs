@@ -294,6 +294,7 @@ mod tests {
                         seq: 7,
                         cap_ordinal: 6,
                         metadata_index: 0,
+                        surrogate_hwm: 0,
                     },
                     calvin_floors: Vec::new(),
                 }),

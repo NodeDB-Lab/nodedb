@@ -10,4 +10,5 @@
 
 pub mod create;
 pub mod promote;
+pub mod recover;
 pub mod show;

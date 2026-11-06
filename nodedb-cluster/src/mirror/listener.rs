@@ -62,6 +62,9 @@ pub trait MirrorSourceService: Send + Sync + 'static {
         client: &MirrorClient,
         request: MirrorBootstrapRequest,
     ) -> Result<Option<CrossClusterSnapshotEnvelope>, MirrorRefusal>;
+
+    /// Remove the pin of a link its owner no longer follows.
+    async fn release(&self, client: &MirrorClient, link_id: u64) -> Result<(), MirrorRefusal>;
 }
 
 /// Bind the listener's endpoint at `addr`.
@@ -214,6 +217,10 @@ async fn answer<R: tokio::io::AsyncRead + Unpin>(
             .bootstrap(client, request)
             .await
             .map(|chunk| MirrorResponse::Bootstrap(chunk.map(Box::new))),
+        MirrorRequest::Release { link_id } => service
+            .release(client, link_id)
+            .await
+            .map(|()| MirrorResponse::Ack),
     };
     answered.unwrap_or_else(MirrorResponse::Refused)
 }
@@ -295,6 +302,15 @@ mod tests {
         ) -> Result<Option<CrossClusterSnapshotEnvelope>, MirrorRefusal> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(None)
+        }
+
+        async fn release(
+            &self,
+            _client: &MirrorClient,
+            _link_id: u64,
+        ) -> Result<(), MirrorRefusal> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
         }
     }
 
@@ -484,6 +500,7 @@ mod tests {
             mirror_cluster_id: 2,
             link_id: 7,
             protocol_version: MIRROR_PROTOCOL_VERSION,
+            fresh: false,
         });
         let payload = encode_frame(&request, MAX_REQUEST_FRAME).expect("encode");
         let mut bytes = Vec::new();

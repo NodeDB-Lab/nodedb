@@ -97,6 +97,7 @@ async fn open_link(cluster: &TestCluster) -> Vec<u64> {
                 mirror_cluster_id: MIRROR_CLUSTER,
                 link_id: LINK,
                 protocol_version: MIRROR_PROTOCOL_VERSION,
+                fresh: false,
             },
         )
         .await

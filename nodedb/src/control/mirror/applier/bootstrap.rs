@@ -21,6 +21,10 @@
 //! The installed cut with no applied report marks a stopped re-issue. A partial
 //! re-issue plus a newer capture leaves rows the source deleted, so a new leader
 //! stops there, and only an operator's rebuild clears it.
+//!
+//! A re-issue with `restore_id = 0` has no retry proof: nothing dedupes its
+//! writes against a second run, and the rows of a stopped run stay. So any
+//! failure during it stays fatal, and `REBOOTSTRAP` removes everything first.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -31,7 +35,9 @@ use nodedb_cluster::mirror::{
     MirrorBootstrapReceiver, MirrorError, MirrorRefusal, ProgressCallback,
 };
 use nodedb_types::backup_envelope::VerificationPhase;
-use nodedb_types::{DatabaseId, MirrorCutAdvance, MirrorCutState, MirrorFailure, MirrorStatus};
+use nodedb_types::{
+    DatabaseId, MirrorCutAdvance, MirrorCutState, MirrorFailure, MirrorStatus, MirrorStatusStep,
+};
 
 use crate::control::backup::restore::reissue_mirror_capture;
 use crate::control::backup::verify::destination::verify_destination;
@@ -44,7 +50,7 @@ use crate::types::TenantDataSnapshot;
 
 use super::conversions::install_conversions;
 use super::driver::{MirrorStop, SessionEnd, follows};
-use super::rewrite::CatalogCheck;
+use super::rewrite::{CatalogCheck, DescriptorRule};
 use super::session::{FIRST_RETRY_BACKOFF, MAX_RETRY_BACKOFF, Session};
 
 /// The cut a capture installs as. It is never 0, the number of a mirror that
@@ -57,6 +63,10 @@ const CAPTURE_POLL: Duration = Duration::from_millis(200);
 /// How many times one metadata proposal of a bootstrap can fail. Each attempt
 /// waits up to the statement deadline.
 const MAX_LAND_ATTEMPTS: u32 = 8;
+
+/// The fail point that stops a bootstrap after a tenant's re-issue. A test arms
+/// it on the node that runs the applier.
+pub const REISSUE_FAIL_POINT: &str = "mirror_bootstrap::after_reissue";
 
 /// How far a former leader took the bootstrap.
 #[derive(Debug, PartialEq, Eq)]
@@ -145,7 +155,7 @@ impl Session<'_> {
             }
             BootstrapPhase::Installed => {}
         }
-        self.move_status(MirrorStatus::Following).await?;
+        self.move_status(MirrorStatusStep::Installed).await?;
         let state = self.cut_state().map_err(|error| {
             tracing::warn!(%error, "mirror bootstrap: a cut state read failed");
             SessionEnd::LostLeadership
@@ -256,7 +266,11 @@ impl Session<'_> {
     /// Install the catalog, the rows, and the report that they applied.
     async fn install(&self, image: MirrorBootstrapImage) -> Result<(), SessionEnd> {
         {
-            let mut check = CatalogCheck::new(self.state.credentials.catalog(), self.database);
+            let mut check = CatalogCheck::new(
+                self.state.credentials.catalog(),
+                self.database,
+                DescriptorRule::Image,
+            );
             for payload in &image.catalog {
                 check.check(payload, 0)?;
             }
@@ -266,6 +280,7 @@ impl Session<'_> {
                 cut: BOOTSTRAP_CUT,
                 epoch: self.epoch,
                 positions: image.positions.clone(),
+                source_timeline: Some(self.source_timeline),
                 ..MirrorCutAdvance::default()
             },
             image.catalog,
@@ -286,6 +301,7 @@ impl Session<'_> {
                 applied_cut_hlc_ns: image.cut_hlc_ns,
                 cap_ordinal: image.cap_ordinal,
                 positions: Vec::new(),
+                source_timeline: None,
             },
             Vec::new(),
             |state| state.applied_cut >= BOOTSTRAP_CUT,
@@ -318,6 +334,12 @@ impl Session<'_> {
         let stats = reissue_mirror_capture(self.state, tenant, database, snap)
             .await
             .map_err(failed)?;
+        // Stops a bootstrap with rows in place and no applied report.
+        crate::fail_point_err!(
+            crate::fail_point::FailScope::Node(self.state.node_id),
+            REISSUE_FAIL_POINT,
+            |detail: String| failed(detail)
+        );
         tracing::info!(
             database = database.as_u64(),
             tenant,
@@ -398,44 +420,46 @@ impl Session<'_> {
         }
     }
 
-    /// Write `status` on the descriptor, while the mirror still bootstraps.
-    async fn write_status(&self, status: MirrorStatus) -> crate::Result<()> {
-        let Some(mut descriptor) = self
-            .state
-            .credentials
-            .catalog()
-            .get_database(self.database)?
-        else {
-            return Ok(());
-        };
-        let Some(origin) = descriptor.mirror_origin.as_mut() else {
-            return Ok(());
-        };
-        if !matches!(origin.status, MirrorStatus::Bootstrapping { .. }) {
-            return Ok(());
-        }
-        origin.status = status;
-        propose_catalog_entry_async(self.state, &CatalogEntry::PutDatabase(Box::new(descriptor)))
-            .await
-            .map(drop)
+    /// Propose `step`. It acts only while the mirror still bootstraps.
+    async fn write_status(&self, step: MirrorStatusStep) -> crate::Result<()> {
+        propose_catalog_entry_async(
+            self.state,
+            &CatalogEntry::StepMirrorStatus {
+                database_id: self.database.as_u64(),
+                step,
+            },
+        )
+        .await
+        .map(drop)
     }
 
     /// Show how far the transfer got. The next report repeats the same field.
     async fn report_progress(&self, status: MirrorStatus) {
-        if let Err(error) = self.write_status(status).await {
+        let MirrorStatus::Bootstrapping {
+            bytes_done,
+            bytes_total,
+        } = status
+        else {
+            return;
+        };
+        let step = MirrorStatusStep::Progress {
+            bytes_done,
+            bytes_total,
+        };
+        if let Err(error) = self.write_status(step).await {
             tracing::warn!(%error, "mirror bootstrap: a progress report did not land");
         }
     }
 
     /// Move the status, while this node leads. A later leader finds the rows
     /// installed and moves it again.
-    async fn move_status(&self, status: MirrorStatus) -> Result<(), SessionEnd> {
+    async fn move_status(&self, step: MirrorStatusStep) -> Result<(), SessionEnd> {
         let mut backoff = FIRST_RETRY_BACKOFF;
         for attempt in 1..=MAX_LAND_ATTEMPTS {
             if !self.still_leads() {
                 return Err(SessionEnd::LostLeadership);
             }
-            match self.write_status(status.clone()).await {
+            match self.write_status(step.clone()).await {
                 Ok(()) => return Ok(()),
                 Err(error) => {
                     self.note_unlanded("the status move", attempt, &error.to_string())?;

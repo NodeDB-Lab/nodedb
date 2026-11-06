@@ -10,19 +10,21 @@
 //! the write's HLC are the source's, and each carried surrogate installs as it
 //! came. The applier mints no surrogate: nothing here draws from the assigner.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{HashMap, HashSet};
 
-use nodedb_types::{CollectionType, DatabaseId, DocumentMode, MirrorEntryStamp, MirrorFailure};
+use nodedb_cluster::calvin::types::IncarnationKind;
+use nodedb_types::{
+    CollectionKey, CollectionType, DatabaseId, DocumentMode, MirrorEntryStamp, MirrorFailure,
+};
 
-use crate::control::catalog_entry::{self, CatalogEntry};
+use crate::control::catalog_entry::{self, CatalogEntry, descriptor_validate};
+use crate::control::cluster::metadata_applier::describe_entry;
+use crate::control::gateway::version_set::catalog_name;
 use crate::control::security::catalog::{StoredCollection, SystemCatalog};
 use crate::control::wal_replication::decode::{DecodedTransactionRedo, decode_transaction_redo};
 use crate::control::wal_replication::types::{MirrorBarrier, ReplicatedEventSource};
 use crate::control::wal_replication::{ReplicatedEntry, ReplicatedWrite};
 use crate::event::EventSource;
-
-/// The odd step between two groups' purge share keys.
-const PURGE_SHARE_KEY_STEP: u64 = 0x9E37_79B9_7F4A_7C15;
 
 /// What one source entry is to the applier.
 #[derive(Debug, PartialEq, Eq)]
@@ -46,6 +48,9 @@ pub(super) fn classify_write(write: &ReplicatedWrite) -> WriteClass<'_> {
         ReplicatedWrite::CalvinReadResult { .. } => WriteClass::Refused("a Calvin read result"),
         ReplicatedWrite::CalvinReadTimeout { .. } => WriteClass::Refused("a Calvin read timeout"),
         ReplicatedWrite::MirrorSeal { .. } => WriteClass::Refused("another mirror's seal"),
+        ReplicatedWrite::TimeseriesAggregateImage { .. } => {
+            WriteClass::Refused("another mirror's aggregate image")
+        }
         ReplicatedWrite::PointPut { .. }
         | ReplicatedWrite::PointInsert { .. }
         | ReplicatedWrite::PointDelete { .. }
@@ -131,7 +136,8 @@ pub(super) fn classify_write(write: &ReplicatedWrite) -> WriteClass<'_> {
         | ReplicatedWrite::RedoChunk { .. }
         | ReplicatedWrite::RedoAbandon { .. }
         | ReplicatedWrite::TenantPurge { .. }
-        | ReplicatedWrite::CollectionConvert { .. } => WriteClass::Applies,
+        | ReplicatedWrite::CollectionConvert { .. }
+        | ReplicatedWrite::RetentionDrop { .. } => WriteClass::Applies,
     }
 }
 
@@ -145,7 +151,7 @@ pub(super) enum CheckedEntry {
     },
 }
 
-fn poison(group: u64, index: u64, detail: impl Into<String>) -> MirrorFailure {
+pub(super) fn poison(group: u64, index: u64, detail: impl Into<String>) -> MirrorFailure {
     MirrorFailure::PoisonEntry {
         source_group: group,
         source_index: index,
@@ -227,12 +233,36 @@ pub(super) fn rewrite_entry(
     entry.mirror = Some(stamp);
 }
 
+fn catalog_read_failure(group: u64, index: u64, error: &crate::Error) -> MirrorFailure {
+    MirrorFailure::ApplyError {
+        source_group: group,
+        source_index: index,
+        detail: format!("the mirror's catalog did not read: {error}"),
+    }
+}
+
 /// Checks a cut's catalog entries against the mirror's catalog, in log order.
 pub(super) struct CatalogCheck<'a> {
     catalog: &'a SystemCatalog,
     database: DatabaseId,
     /// Each collection's incarnation and type as this batch left them.
     seen: HashMap<(u64, String), HeldCollection>,
+    /// The collections this batch purged, by tenant.
+    purged: HashSet<(u64, String)>,
+    /// The rule for the descriptors this batch carries.
+    descriptors: DescriptorRule,
+    /// Each descriptor whose version this batch already checked. A later entry
+    /// of one descriptor follows the first, whose row the catalog does not hold.
+    checked: HashSet<(&'static str, String)>,
+}
+
+/// How a batch's catalog entries relate to the mirror's catalog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DescriptorRule {
+    /// A tail's entries: each is the next of its descriptor's log.
+    Log,
+    /// A capture's rows: each starts its descriptor's history.
+    Image,
 }
 
 #[derive(Clone)]
@@ -268,54 +298,85 @@ fn storage_family(collection_type: &CollectionType) -> u8 {
     }
 }
 
-/// Split a tenant purge along the mirror's groups. The source lists its own
-/// group's vShards, and each mirror group takes its share at this log position.
-///
-/// A vShard belongs to one source group, so each share keeps its place against
-/// every other write of its vShards. Each share of a split takes its own key, and
-/// a re-proposal of that share derives the same one.
-pub(super) fn split_tenant_purge(
-    entry: &ReplicatedEntry,
-    group_of: impl Fn(u32) -> crate::Result<u64>,
-) -> crate::Result<Vec<ReplicatedEntry>> {
-    let ReplicatedWrite::TenantPurge { vshards, .. } = &entry.write else {
-        return Ok(vec![entry.clone()]);
-    };
-    let mut shares: BTreeMap<u64, Vec<u32>> = BTreeMap::new();
-    for vshard in vshards {
-        shares.entry(group_of(*vshard)?).or_default().push(*vshard);
-    }
-    if shares.len() <= 1 {
-        return Ok(vec![entry.clone()]);
-    }
-    Ok(shares
-        .into_iter()
-        .filter_map(|(group, vshards)| {
-            let mut share = entry.clone();
-            share.vshard_id = vshards.first().copied()?;
-            share.idempotency_key = entry
-                .idempotency_key
-                .wrapping_add(group.wrapping_mul(PURGE_SHARE_KEY_STEP))
-                | 1;
-            // The clone holds the collections. Only the vShards differ.
-            if let ReplicatedWrite::TenantPurge {
-                vshards: shared, ..
-            } = &mut share.write
-            {
-                *shared = vshards;
-            }
-            Some(share)
-        })
-        .collect())
-}
-
 impl<'a> CatalogCheck<'a> {
-    pub(super) fn new(catalog: &'a SystemCatalog, database: DatabaseId) -> Self {
+    pub(super) fn new(
+        catalog: &'a SystemCatalog,
+        database: DatabaseId,
+        descriptors: DescriptorRule,
+    ) -> Self {
         Self {
             catalog,
             database,
             seen: HashMap::new(),
+            purged: HashSet::new(),
+            descriptors,
+            checked: HashSet::new(),
         }
+    }
+
+    /// Refuse a source entry that names a collection the mirror's catalog does
+    /// not hold, once this batch's catalog entries are counted. A collection the
+    /// batch purged or a former purge removed is an entry that lost its race with
+    /// the purge: it applies as no row. An array drop leaves no durable record,
+    /// so an array name passes: the entry applies as no cell.
+    pub(super) fn check_entry_schema(
+        &self,
+        entry: &ReplicatedEntry,
+        group: u64,
+        index: u64,
+    ) -> Result<(), MirrorFailure> {
+        for named in &entry.incarnations {
+            match named.kind {
+                IncarnationKind::Collection => {}
+                IncarnationKind::Array => continue,
+            }
+            let bare = catalog_name(self.database, &named.collection)
+                .map_or(named.collection.as_str(), |(_, bare)| bare);
+            let key = (entry.tenant_id, bare.to_string());
+            if self.seen.contains_key(&key) || self.purged.contains(&key) {
+                continue;
+            }
+            let held = self
+                .catalog
+                .get_collection(self.database, entry.tenant_id, bare)
+                .map_err(|error| catalog_read_failure(group, index, &error))?;
+            if held.is_some() {
+                continue;
+            }
+            let tombstones = self
+                .catalog
+                .load_wal_tombstones()
+                .map_err(|error| catalog_read_failure(group, index, &error))?;
+            let key = CollectionKey::from_bare(self.database, bare);
+            if tombstones.purge_lsn(key, entry.tenant_id).is_none() {
+                return Err(MirrorFailure::SchemaMismatch {
+                    collection: bare.to_string(),
+                    source_group: group,
+                    source_index: index,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Run the check the metadata applier runs on `entry`, so a descriptor that
+    /// cannot apply stops this link, with the entry outside the log.
+    fn check_descriptor(&mut self, entry: &CatalogEntry, index: u64) -> Result<(), MirrorFailure> {
+        let (name, _, _) = describe_entry(entry);
+        if !self.checked.insert((entry.kind(), name)) {
+            return Ok(());
+        }
+        let verdict = match self.descriptors {
+            DescriptorRule::Log => descriptor_validate::validate(entry, self.catalog),
+            DescriptorRule::Image => descriptor_validate::validate_image_row(entry, self.catalog),
+        };
+        verdict
+            .map(drop)
+            .map_err(|error| MirrorFailure::ApplyError {
+                source_group: nodedb_cluster::METADATA_GROUP_ID,
+                source_index: index,
+                detail: error.to_string(),
+            })
     }
 
     /// Check one source catalog payload.
@@ -334,6 +395,13 @@ impl<'a> CatalogCheck<'a> {
             return Err(MirrorFailure::UnsupportedSourceOp {
                 detail: "MOVE TENANT names this database".to_string(),
             });
+        }
+        self.check_descriptor(&entry, index)?;
+        if let CatalogEntry::PurgeCollection {
+            tenant_id, name, ..
+        } = &entry
+        {
+            self.purged.insert((*tenant_id, name.clone()));
         }
         if let CatalogEntry::PutCollection(stored) | CatalogEntry::PutCollectionIfAbsent(stored) =
             &entry
@@ -385,6 +453,7 @@ impl<'a> CatalogCheck<'a> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::shares::split_by_mirror_group;
     use super::*;
     use crate::control::wal_replication::types::MirrorCalvinFloor;
 
@@ -500,6 +569,7 @@ mod tests {
             seq: 11,
             cap_ordinal: 12,
             metadata_index: 13,
+            surrogate_hwm: 14,
         };
         let entry = ReplicatedEntry::new(
             0,
@@ -558,7 +628,7 @@ mod tests {
     fn check_second_row(mutate: impl FnOnce(&mut StoredCollection)) -> Result<(), MirrorFailure> {
         let dir = tempfile::tempdir().expect("tempdir");
         let catalog = SystemCatalog::open(&dir.path().join("system.redb")).expect("catalog");
-        let mut check = CatalogCheck::new(&catalog, DB);
+        let mut check = CatalogCheck::new(&catalog, DB, DescriptorRule::Log);
         let first = StoredCollection::stamped_for_test(1, "c", "owner");
         check.check(&row_payload(&first), 1).expect("first row");
         let mut second = first;
@@ -612,7 +682,7 @@ mod tests {
     fn a_schema_change_inside_one_family_passes() {
         let dir = tempfile::tempdir().expect("tempdir");
         let catalog = SystemCatalog::open(&dir.path().join("system.redb")).expect("catalog");
-        let mut check = CatalogCheck::new(&catalog, DB);
+        let mut check = CatalogCheck::new(&catalog, DB, DescriptorRule::Log);
         let mut row = StoredCollection::stamped_for_test(1, "c", "owner");
         row.collection_type = strict_type();
         check.check(&row_payload(&row), 1).expect("first row");
@@ -657,7 +727,8 @@ mod tests {
     fn a_purge_splits_along_the_mirror_groups() {
         let entry = purge(vec![1, 2, 3, 4]);
         let original = entry.idempotency_key;
-        let shares = split_tenant_purge(&entry, |vshard| Ok(u64::from(vshard % 2))).expect("split");
+        let shares =
+            split_by_mirror_group(&entry, |vshard| Ok(u64::from(vshard % 2))).expect("split");
         assert_eq!(shares.len(), 2);
         assert_eq!(share_vshards(&shares[0]), vec![2, 4]);
         assert_eq!(shares[0].vshard_id, 2);
@@ -672,8 +743,8 @@ mod tests {
     #[test]
     fn a_split_derives_the_same_keys_each_time() {
         let entry = purge(vec![1, 2]);
-        let first = split_tenant_purge(&entry, |vshard| Ok(u64::from(vshard))).expect("split");
-        let second = split_tenant_purge(&entry, |vshard| Ok(u64::from(vshard))).expect("split");
+        let first = split_by_mirror_group(&entry, |vshard| Ok(u64::from(vshard))).expect("split");
+        let second = split_by_mirror_group(&entry, |vshard| Ok(u64::from(vshard))).expect("split");
         for (one, other) in first.iter().zip(&second) {
             assert_eq!(one.idempotency_key, other.idempotency_key);
         }
@@ -683,7 +754,7 @@ mod tests {
     fn a_purge_inside_one_group_stays_whole() {
         let entry = purge(vec![1, 2]);
         let original = entry.idempotency_key;
-        let shares = split_tenant_purge(&entry, |_| Ok(5)).expect("split");
+        let shares = split_by_mirror_group(&entry, |_| Ok(5)).expect("split");
         assert_eq!(shares.len(), 1);
         assert_eq!(shares[0].idempotency_key, original);
         assert_eq!(share_vshards(&shares[0]), vec![1, 2]);
@@ -691,7 +762,7 @@ mod tests {
 
     #[test]
     fn any_other_write_passes_through() {
-        let shares = split_tenant_purge(&put(DB.as_u64()), |_| {
+        let shares = split_by_mirror_group(&put(DB.as_u64()), |_| {
             Err(crate::Error::Internal {
                 detail: "no routing is consulted".into(),
             })
@@ -704,7 +775,7 @@ mod tests {
     fn a_dropped_source_and_a_tenant_move_stop_the_link() {
         let dir = tempfile::tempdir().expect("tempdir");
         let catalog = SystemCatalog::open(&dir.path().join("system.redb")).expect("catalog");
-        let mut check = CatalogCheck::new(&catalog, DB);
+        let mut check = CatalogCheck::new(&catalog, DB, DescriptorRule::Log);
         let drop = catalog_entry::encode(&CatalogEntry::DeleteDatabase { db_id: DB.as_u64() })
             .expect("encode");
         assert_eq!(check.check(&drop, 4), Err(MirrorFailure::SourceDropped));
@@ -712,5 +783,52 @@ mod tests {
             check.check(b"not a payload", 4),
             Err(MirrorFailure::PoisonEntry { .. })
         ));
+    }
+
+    /// A row past its descriptor's next version halts the metadata applier, so
+    /// the check stops the link first. A capture's row starts its history.
+    #[test]
+    fn a_descriptor_gap_stops_the_link_outside_the_log() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let catalog = SystemCatalog::open(&dir.path().join("system.redb")).expect("catalog");
+        let mut row = StoredCollection::stamped_for_test(1, "c", "owner");
+        row.descriptor_version = 9;
+        let payload = row_payload(&row);
+        let mut tail = CatalogCheck::new(&catalog, DB, DescriptorRule::Log);
+        assert!(matches!(
+            tail.check(&payload, 7),
+            Err(MirrorFailure::ApplyError {
+                source_index: 7,
+                ..
+            })
+        ));
+        let mut image = CatalogCheck::new(&catalog, DB, DescriptorRule::Image);
+        assert!(image.check(&payload, 7).is_ok());
+    }
+
+    /// An entry that names a collection neither the catalog nor the cut holds
+    /// never enters the log. One the cut creates or purges passes.
+    #[test]
+    fn an_entry_of_an_unknown_collection_is_a_schema_mismatch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let catalog = SystemCatalog::open(&dir.path().join("system.redb")).expect("catalog");
+        let mut check = CatalogCheck::new(&catalog, DB, DescriptorRule::Log);
+        let mut entry = put(DB.as_u64());
+        entry.incarnations = vec![crate::control::wal_replication::CollectionIncarnation {
+            collection: format!("{}/c", DB.as_u64()),
+            incarnation: nodedb_types::Hlc::ZERO,
+            kind: IncarnationKind::Collection,
+        }];
+        assert_eq!(
+            check.check_entry_schema(&entry, 3, 11),
+            Err(MirrorFailure::SchemaMismatch {
+                collection: "c".to_string(),
+                source_group: 3,
+                source_index: 11,
+            })
+        );
+        let row = StoredCollection::stamped_for_test(entry.tenant_id, "c", "owner");
+        check.check(&row_payload(&row), 2).expect("the row");
+        assert!(check.check_entry_schema(&entry, 3, 11).is_ok());
     }
 }

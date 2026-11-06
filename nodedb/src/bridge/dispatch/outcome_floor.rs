@@ -240,6 +240,7 @@ impl OutcomeFloor {
     }
 
     /// Open a window before the write mints its LSN.
+    #[track_caller]
     pub fn open_write(self: &Arc<Self>) -> WriteWindow {
         let ticket = {
             let mut windows = self.lock();
@@ -251,6 +252,7 @@ impl OutcomeFloor {
 
     /// Open a window for a request that carries `lsn` as it enters the
     /// dispatcher.
+    #[track_caller]
     pub fn open_dispatched(self: &Arc<Self>, lsn: Lsn) -> WriteWindow {
         let ticket = {
             let mut windows = self.lock();
@@ -275,6 +277,7 @@ impl OutcomeFloor {
     /// - the floor passed `lsn`, so its outcome is final;
     /// - a live or held window owns it, and carries it to its outcome;
     /// - a window that owned it closed, so its outcome is final.
+    #[track_caller]
     pub fn open_existing(self: &Arc<Self>, lsn: Lsn) -> Result<WriteWindow, ResendRefusal> {
         let ticket = {
             let mut windows = self.lock();
@@ -359,8 +362,9 @@ impl OutcomeFloor {
         }
     }
 
-    /// Count a leaked window and report it. The window stays open.
-    fn leak(&self, ticket: u64) {
+    /// Count a leaked window and report it, naming the site that opened it.
+    /// The window stays open.
+    fn leak(&self, ticket: u64, opened_by: &std::panic::Location<'static>) {
         self.leaked.fetch_add(1, Ordering::Relaxed);
         let (horizon, open_for) = self
             .lock()
@@ -373,6 +377,7 @@ impl OutcomeFloor {
             ticket,
             horizon,
             open_for_ms = u64::try_from(open_for.as_millis()).unwrap_or(u64::MAX),
+            opened_by = %opened_by,
             "a write window was dropped before its outcome was final; the outcome \
              floor stays below it until restart"
         );
@@ -389,14 +394,18 @@ pub struct WriteWindow {
     owner: Arc<OutcomeFloor>,
     ticket: u64,
     closed: bool,
+    /// The site that opened the window. A leak report names it.
+    opened_by: &'static std::panic::Location<'static>,
 }
 
 impl WriteWindow {
+    #[track_caller]
     fn new(owner: Arc<OutcomeFloor>, ticket: u64) -> Self {
         Self {
             owner,
             ticket,
             closed: false,
+            opened_by: std::panic::Location::caller(),
         }
     }
 
@@ -442,7 +451,7 @@ impl WriteWindow {
 impl Drop for WriteWindow {
     fn drop(&mut self) {
         if !self.closed {
-            self.owner.leak(self.ticket);
+            self.owner.leak(self.ticket, self.opened_by);
         }
     }
 }

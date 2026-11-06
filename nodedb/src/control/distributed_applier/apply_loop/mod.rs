@@ -58,6 +58,7 @@
 //! - [`collection_route`]: applies a collection write only while each
 //!   collection it names holds the incarnation its proposer planned against.
 
+mod aggregate_image;
 mod array_cell_route;
 mod barrier_prefold;
 mod bookkeeping;
@@ -78,6 +79,7 @@ mod panicked;
 mod pipeline;
 mod proposal_gate;
 mod redo_chunk;
+mod retention_drop;
 mod settle;
 mod snapshot_gate;
 mod start;

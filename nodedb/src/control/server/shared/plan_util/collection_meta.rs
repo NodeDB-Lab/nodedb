@@ -106,6 +106,7 @@ pub(super) fn meta_collection(op: &MetaOp) -> Option<&str> {
         MetaOp::QueryStorageBytes { .. } => None,
         // The continuous-aggregate registry: no row is read or written.
         MetaOp::RegisterContinuousAggregate { .. }
+        | MetaOp::InstallAggregateImage { .. }
         | MetaOp::UnregisterContinuousAggregate { .. }
         | MetaOp::ListContinuousAggregates
         | MetaOp::ContinuousAggregatesRegistered
@@ -293,6 +294,7 @@ mod tests {
                 PhysicalPlan::Meta(MetaOp::EnforceTimeseriesRetention {
                     collection: docs(),
                     max_age_ms: 0,
+                    decided_ms: 0,
                     aggregates: Vec::new(),
                 }),
                 PhysicalPlan::Meta(MetaOp::TemporalPurgeEdgeStore {
@@ -309,6 +311,7 @@ mod tests {
                     tenant_id: 1,
                     collection: docs(),
                     cutoff_system_ms: 0,
+                    decided_ms: 0,
                     aggregates: Vec::new(),
                 }),
                 PhysicalPlan::Meta(MetaOp::TemporalPurgeCrdt {

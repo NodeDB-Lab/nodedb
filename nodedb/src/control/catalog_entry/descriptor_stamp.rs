@@ -236,6 +236,7 @@ pub fn stamp(
         entry @ (CatalogEntry::PutStreamingMaterializedView(_)
         | CatalogEntry::DeleteStreamingMaterializedView { .. }
         | CatalogEntry::PutSequenceState(_)
+        | CatalogEntry::ReserveSequenceRange { .. }
         | CatalogEntry::PutSchedule(_)
         | CatalogEntry::DeleteSchedule { .. }
         | CatalogEntry::PutUser(_)
@@ -295,6 +296,7 @@ pub fn stamp(
         | CatalogEntry::PutBackupScheduleMark(_)
         | CatalogEntry::PutMirrorCutState { .. }
         | CatalogEntry::StepMirrorStatus { .. }
+        | CatalogEntry::ClaimMirrorDatabase(_)
         | CatalogEntry::PutMirrorPin(_)
         | CatalogEntry::DeleteMirrorPin { .. }
         | CatalogEntry::PutSpatialRefSys(_)

@@ -96,6 +96,8 @@ pub fn apply_post_apply_side_effects_sync(entry: &CatalogEntry, shared: &Arc<Sha
         CatalogEntry::PutSequenceState(state) => {
             sequence::put_state((**state).clone(), Arc::clone(shared));
         }
+        // The row is the record. The winning node installs its own range.
+        CatalogEntry::ReserveSequenceRange { .. } => {}
         CatalogEntry::PutTrigger(stored) => {
             trigger::put((**stored).clone(), shared);
         }
@@ -329,7 +331,7 @@ pub fn apply_post_apply_side_effects_sync(entry: &CatalogEntry, shared: &Arc<Sha
         } => {
             custom_type::delete(*database_id, *tenant_id, name.clone(), Arc::clone(shared));
         }
-        CatalogEntry::PutDatabase(stored) => {
+        CatalogEntry::PutDatabase(stored) | CatalogEntry::ClaimMirrorDatabase(stored) => {
             database::put((**stored).clone(), Arc::clone(shared));
         }
         CatalogEntry::DeleteDatabase { db_id } => {
@@ -488,8 +490,8 @@ pub fn apply_post_apply_side_effects_sync(entry: &CatalogEntry, shared: &Arc<Sha
         CatalogEntry::PutMirrorCutState { .. }
         | CatalogEntry::PutMirrorPin(_)
         | CatalogEntry::DeleteMirrorPin { .. } => database::follow_mirror_row(entry, shared),
-        CatalogEntry::StepMirrorStatus { database_id, .. } => {
-            database::follow_mirror_status(*database_id, shared);
+        CatalogEntry::StepMirrorStatus { database_id, step } => {
+            database::follow_mirror_status(*database_id, step, shared);
         }
         // Apply swapped the catalog's in-memory set. The cores receive it in
         // the async post-apply.

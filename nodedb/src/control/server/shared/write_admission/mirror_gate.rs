@@ -134,7 +134,8 @@ fn source_is_gated(source: EventSource) -> bool {
 /// Refuse a catalog commit that changes objects in a mirror.
 ///
 /// A commit that drops the database passes for that database: `DROP DATABASE`
-/// carries a delete for each object inside it, ahead of the descriptor's.
+/// carries a delete for each object inside it, ahead of the descriptor's. A
+/// `REBOOTSTRAP` carries the same deletes and its status step.
 pub(crate) fn check_mirror_ddl(state: &SharedState, entries: &[CatalogEntry]) -> crate::Result<()> {
     decide_ddl(&state.mirror.fence, entries)
 }
@@ -156,8 +157,16 @@ fn decide_ddl(fence: &MirrorFence, entries: &[CatalogEntry]) -> crate::Result<()
 }
 
 fn drops_database(entries: &[CatalogEntry], database_id: DatabaseId) -> bool {
+    let id = database_id.as_u64();
     entries.iter().any(|entry| {
-        matches!(entry, CatalogEntry::DeleteDatabase { db_id } if *db_id == database_id.as_u64())
+        matches!(entry, CatalogEntry::DeleteDatabase { db_id } if *db_id == id)
+            || matches!(
+                entry,
+                CatalogEntry::StepMirrorStatus {
+                    database_id: stepped,
+                    step: nodedb_types::MirrorStatusStep::Rebootstrap,
+                } if *stepped == id
+            )
     })
 }
 

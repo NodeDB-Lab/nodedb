@@ -340,6 +340,7 @@ pub fn wire_cluster_handle(
 ///
 /// A second call is a wiring bug and returns `Error::Internal`.
 pub fn install_gateway(shared: &Arc<SharedState>) -> crate::Result<()> {
+    crate::control::sequence::install_range_reserver(shared);
     let gateway = Arc::new(crate::control::gateway::Gateway::new(Arc::clone(shared)));
     let invalidator = Arc::new(crate::control::gateway::PlanCacheInvalidator::new(
         &gateway.plan_cache,

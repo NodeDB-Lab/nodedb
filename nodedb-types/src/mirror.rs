@@ -138,6 +138,50 @@ pub enum MirrorStatusStep {
     Seal,
     /// PROMOTE ends: the database becomes writable.
     Promote,
+    /// A bootstrap reports how far its transfer got.
+    Progress { bytes_done: u64, bytes_total: u64 },
+    /// A bootstrap installed its capture, and the mirror follows its source.
+    Installed,
+    /// The link stopped on a failure an operator acts on.
+    Fail { failure: MirrorFailure },
+    /// `ALTER DATABASE ... MIRROR RESUME`: the link retries from its positions.
+    Resume,
+    /// `ALTER DATABASE ... MIRROR REBOOTSTRAP`: the mirror starts over. Apply
+    /// also clears the cut state, keeping only the fence.
+    Rebootstrap,
+}
+
+impl MirrorFailure {
+    /// The failure's kind, without its per-occurrence detail.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::ApplyError { .. } => "apply_error",
+            Self::SchemaMismatch { .. } => "schema_mismatch",
+            Self::PoisonEntry { .. } => "poison_entry",
+            Self::LogTruncated { .. } => "log_truncated",
+            Self::SourceTimelineChanged => "source_timeline_changed",
+            Self::SourceDropped => "source_dropped",
+            Self::UnsupportedSourceOp { .. } => "unsupported_source_op",
+            Self::BootstrapOutrun => "bootstrap_outrun",
+            Self::BootstrapFailed { .. } => "bootstrap_failed",
+        }
+    }
+
+    /// Whether the replicated positions still name a state the link can resume
+    /// from. Any other failure leaves only `REBOOTSTRAP`.
+    pub fn is_resumable(&self) -> bool {
+        match self {
+            Self::ApplyError { .. }
+            | Self::SchemaMismatch { .. }
+            | Self::PoisonEntry { .. }
+            | Self::UnsupportedSourceOp { .. } => true,
+            Self::LogTruncated { .. }
+            | Self::SourceTimelineChanged
+            | Self::SourceDropped
+            | Self::BootstrapOutrun
+            | Self::BootstrapFailed { .. } => false,
+        }
+    }
 }
 
 impl MirrorStatusStep {
@@ -145,6 +189,46 @@ impl MirrorStatusStep {
     /// or `None` when the step changes nothing.
     pub fn next(&self, current: &MirrorStatus, ready_cut: u64) -> Option<MirrorStatus> {
         match self {
+            Self::Progress {
+                bytes_done,
+                bytes_total,
+            } => matches!(current, MirrorStatus::Bootstrapping { .. }).then_some(
+                MirrorStatus::Bootstrapping {
+                    bytes_done: *bytes_done,
+                    bytes_total: *bytes_total,
+                },
+            ),
+            Self::Installed => matches!(current, MirrorStatus::Bootstrapping { .. })
+                .then_some(MirrorStatus::Following),
+            Self::Fail { failure } => match current {
+                MirrorStatus::Bootstrapping { .. }
+                | MirrorStatus::Following
+                | MirrorStatus::Degraded
+                | MirrorStatus::Disconnected => Some(MirrorStatus::Failed {
+                    failure: failure.clone(),
+                }),
+                MirrorStatus::Promoting { .. }
+                | MirrorStatus::Failed { .. }
+                | MirrorStatus::Promoted => None,
+            },
+            Self::Resume => match current {
+                MirrorStatus::Failed { failure } if failure.is_resumable() && ready_cut > 0 => {
+                    Some(MirrorStatus::Following)
+                }
+                MirrorStatus::Bootstrapping { .. }
+                | MirrorStatus::Following
+                | MirrorStatus::Degraded
+                | MirrorStatus::Disconnected
+                | MirrorStatus::Promoting { .. }
+                | MirrorStatus::Failed { .. }
+                | MirrorStatus::Promoted => None,
+            },
+            Self::Rebootstrap => matches!(current, MirrorStatus::Failed { .. }).then_some(
+                MirrorStatus::Bootstrapping {
+                    bytes_done: 0,
+                    bytes_total: 0,
+                },
+            ),
             Self::Lag { from, to } => {
                 (from == current && is_lag_status(from) && is_lag_status(to)).then(|| to.clone())
             }
@@ -310,6 +394,9 @@ pub struct MirrorCutState {
     /// The newest applier epoch the metadata log took. A lower epoch never
     /// raises `ready_cut`.
     pub fence_epoch: u64,
+    /// The source's metadata timeline when its capture was taken. `None` until
+    /// a capture installs. Another timeline means the source restored.
+    pub source_timeline: Option<u64>,
 }
 
 /// The cuts from `first_cut` up to the next range's start, and the applier
@@ -363,6 +450,8 @@ pub struct MirrorCutAdvance {
     pub cap_ordinal: i64,
     /// Where each source group resumes after `cut`.
     pub positions: Vec<MirrorGroupPosition>,
+    /// The source's metadata timeline, on a bootstrap's first cut.
+    pub source_timeline: Option<u64>,
 }
 
 /// What a source's cut tells its mirrors, in the cut's Calvin marker and in
@@ -387,6 +476,8 @@ pub struct MirrorCutMark {
     pub cap_ordinal: i64,
     /// The source's metadata index the cut's schema covers.
     pub metadata_index: u64,
+    /// The source's surrogate high-water mark when it took the cut.
+    pub surrogate_hwm: u32,
 }
 
 /// Whether a retention pin still holds the source's log.
@@ -544,6 +635,9 @@ impl MirrorCutState {
             next.applied_cut = advance.applied_cut;
             next.applied_cut_hlc_ns = advance.applied_cut_hlc_ns;
             next.cap_ordinal = advance.cap_ordinal;
+        }
+        if advance.source_timeline.is_some() {
+            next.source_timeline = advance.source_timeline;
         }
         (next != *self).then_some(next)
     }
@@ -704,6 +798,7 @@ mod tests {
                 epoch: 2,
             }],
             fence_epoch: 2,
+            source_timeline: Some(3),
         }
     }
 
@@ -975,6 +1070,104 @@ mod tests {
             MirrorStatusStep::Seal.next(&MirrorStatus::Promoted, 9),
             None
         );
+    }
+
+    #[test]
+    fn a_bootstrap_alone_reports_progress_and_installs() {
+        let bootstrapping = MirrorStatus::Bootstrapping {
+            bytes_done: 1,
+            bytes_total: 2,
+        };
+        let progress = MirrorStatusStep::Progress {
+            bytes_done: 2,
+            bytes_total: 2,
+        };
+        assert_eq!(
+            progress.next(&bootstrapping, 0),
+            Some(MirrorStatus::Bootstrapping {
+                bytes_done: 2,
+                bytes_total: 2,
+            })
+        );
+        assert_eq!(
+            MirrorStatusStep::Installed.next(&bootstrapping, 0),
+            Some(MirrorStatus::Following)
+        );
+        for status in [
+            MirrorStatus::Following,
+            MirrorStatus::Promoting { final_cut: 3 },
+            MirrorStatus::Promoted,
+            failed(),
+        ] {
+            assert_eq!(progress.next(&status, 3), None, "{status:?}");
+            assert_eq!(MirrorStatusStep::Installed.next(&status, 3), None);
+        }
+    }
+
+    #[test]
+    fn a_failure_keeps_the_first_and_never_undoes_a_seal() {
+        let step = MirrorStatusStep::Fail {
+            failure: MirrorFailure::SourceTimelineChanged,
+        };
+        assert_eq!(
+            step.next(&MirrorStatus::Following, 3),
+            Some(MirrorStatus::Failed {
+                failure: MirrorFailure::SourceTimelineChanged,
+            })
+        );
+        assert_eq!(step.next(&failed(), 3), None);
+        assert_eq!(
+            step.next(&MirrorStatus::Promoting { final_cut: 3 }, 3),
+            None
+        );
+        assert_eq!(step.next(&MirrorStatus::Promoted, 3), None);
+    }
+
+    #[test]
+    fn resume_needs_a_resumable_failure_and_a_ready_cut() {
+        let resumable = MirrorStatus::Failed {
+            failure: MirrorFailure::UnsupportedSourceOp {
+                detail: "a move".to_string(),
+            },
+        };
+        assert_eq!(
+            MirrorStatusStep::Resume.next(&resumable, 3),
+            Some(MirrorStatus::Following)
+        );
+        assert_eq!(MirrorStatusStep::Resume.next(&resumable, 0), None);
+        for fatal in [
+            MirrorFailure::SourceDropped,
+            MirrorFailure::SourceTimelineChanged,
+            MirrorFailure::LogTruncated {
+                group: 1,
+                first_available: 9,
+            },
+            MirrorFailure::BootstrapFailed {
+                detail: "a stop".to_string(),
+            },
+        ] {
+            let status = MirrorStatus::Failed { failure: fatal };
+            assert_eq!(MirrorStatusStep::Resume.next(&status, 3), None);
+            assert_eq!(
+                MirrorStatusStep::Rebootstrap.next(&status, 3),
+                Some(MirrorStatus::Bootstrapping {
+                    bytes_done: 0,
+                    bytes_total: 0,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_failed_mirror_rebuilds() {
+        for status in [
+            MirrorStatus::Following,
+            MirrorStatus::Degraded,
+            MirrorStatus::Promoting { final_cut: 3 },
+            MirrorStatus::Promoted,
+        ] {
+            assert_eq!(MirrorStatusStep::Rebootstrap.next(&status, 3), None);
+        }
     }
 
     #[test]

@@ -2,7 +2,8 @@
 
 //! `ALTER DATABASE <name> { RENAME TO <new> | SET QUOTA (...) | SET DEFAULT |
 //!                          SET AUDIT_DML = <mode> | SET IDLE_TIMEOUT = <secs> |
-//!                          MATERIALIZE | PROMOTE }`.
+//!                          MATERIALIZE | PROMOTE | MIRROR RESUME |
+//!                          MIRROR REBOOTSTRAP }`.
 
 use nodedb_types::AuditDmlMode;
 
@@ -42,6 +43,17 @@ pub(super) fn parse_alter_database(
         AlterDatabaseOperation::Materialize
     } else if c.eat_keyword("PROMOTE") {
         AlterDatabaseOperation::Promote
+    } else if c.eat_keyword("MIRROR") {
+        if c.eat_keyword("RESUME") {
+            AlterDatabaseOperation::MirrorResume
+        } else if c.eat_keyword("REBOOTSTRAP") {
+            AlterDatabaseOperation::MirrorRebootstrap
+        } else {
+            return Err(c.error(format!(
+                "MIRROR takes RESUME or REBOOTSTRAP, not {}",
+                c.describe_next()
+            )));
+        }
     } else {
         return Err(c.error(format!("unknown operation {}", c.describe_next())));
     };

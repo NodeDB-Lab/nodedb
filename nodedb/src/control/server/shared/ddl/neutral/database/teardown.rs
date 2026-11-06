@@ -18,10 +18,33 @@ use crate::control::security::permission::parse_scoped_target;
 
 /// Build the teardown of `db_id` from the catalog as it stands.
 ///
-/// Dependents come before the objects they name, collections come after
-/// every object defined over them, and `DeleteDatabase` comes last. Fenced
-/// deletes carry an unstamped target: the proposer freezes it.
+/// `DeleteDatabase` comes last, after every entry of
+/// [`plan_database_objects_teardown`].
 pub fn plan_database_teardown(
+    catalog: &SystemCatalog,
+    db_id: DatabaseId,
+) -> crate::Result<Vec<CatalogEntry>> {
+    let mut plan = plan_database_objects_teardown(catalog, db_id)?;
+    for grant in catalog.list_database_grants(db_id)? {
+        plan.push(CatalogEntry::DeleteDatabaseGrant {
+            db_id: db_id.as_u64(),
+            user_id: grant.user_id,
+            privilege: grant.privilege,
+        });
+    }
+    plan.push(CatalogEntry::DeleteDatabase {
+        db_id: db_id.as_u64(),
+    });
+    Ok(plan)
+}
+
+/// The deletes of every object inside `db_id`, keeping the database's own row
+/// and its grants. `REBOOTSTRAP` uses this: a mirror's grants are this cluster's.
+///
+/// Dependents come before the objects they name, and collections come after
+/// every object defined over them. Fenced deletes carry an unstamped target:
+/// the proposer freezes it.
+pub fn plan_database_objects_teardown(
     catalog: &SystemCatalog,
     db_id: DatabaseId,
 ) -> crate::Result<Vec<CatalogEntry>> {
@@ -229,14 +252,6 @@ pub fn plan_database_teardown(
             permission: grant.permission,
         });
     }
-    for grant in catalog.list_database_grants(db_id)? {
-        plan.push(CatalogEntry::DeleteDatabaseGrant {
-            db_id: db,
-            user_id: grant.user_id,
-            privilege: grant.privilege,
-        });
-    }
-    plan.push(CatalogEntry::DeleteDatabase { db_id: db });
     Ok(plan)
 }
 

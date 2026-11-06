@@ -43,6 +43,7 @@ pub fn data_entry_leaves(data: &[u8], database: u64) -> bool {
         ReplicatedWrite::CalvinReadResult { .. }
             | ReplicatedWrite::CalvinReadTimeout { .. }
             | ReplicatedWrite::MirrorSeal { .. }
+            | ReplicatedWrite::TimeseriesAggregateImage { .. }
     );
     !stays_home && entry.database_id == database
 }
@@ -170,6 +171,7 @@ mod tests {
             seq: 1,
             cap_ordinal: 1,
             metadata_index: 1,
+            surrogate_hwm: 1,
         };
         assert!(data_entry_leaves(
             &barrier(Some(MirrorBarrier {

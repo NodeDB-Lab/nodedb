@@ -1021,6 +1021,25 @@ pub enum ReplicatedWrite {
         /// The collection incarnation the conversion rewrites.
         incarnation: nodedb_types::Hlc,
     },
+    /// One retention decision in one data group's log. The leader read the clock
+    /// once and the entry carries the result, so every replica and every mirror
+    /// drops the same rows at this log position. One entry goes to each group.
+    RetentionDrop {
+        op: super::retention_op::RetentionOp,
+        /// The vShards of this entry's group.
+        vshards: Vec<u32>,
+    },
+    /// A mirror bootstrap's aggregate state for the root `collection`. It
+    /// follows every re-issued row of the root in the group's log. Each replica
+    /// flushes the root at this position, counts every partition it holds as
+    /// folded, and takes the image's buckets. The entry stays in the mirror's
+    /// cluster: a source's tail never ships it.
+    TimeseriesAggregateImage {
+        /// The root, as the Data Plane stores it.
+        collection: String,
+        /// The encoded image. Its buckets count every row of the root.
+        image: Vec<u8>,
+    },
 }
 
 #[cfg(test)]
@@ -1199,6 +1218,18 @@ mod tests {
                 target_storage_mode: nodedb_physical::physical_plan::StorageMode::Schemaless,
                 generation: 1,
                 incarnation: nodedb_types::Hlc::new(7, 0),
+            },
+            ReplicatedWrite::RetentionDrop {
+                op: super::super::retention_op::RetentionOp::TimeseriesPartitions {
+                    collection: "metrics".into(),
+                    max_age_ms: 60_000,
+                    decided_ms: 1_700_000_000_000,
+                },
+                vshards: vec![0, 1],
+            },
+            ReplicatedWrite::TimeseriesAggregateImage {
+                collection: "metrics".into(),
+                image: vec![1, 2, 3],
             },
         ];
 

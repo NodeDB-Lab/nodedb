@@ -83,6 +83,7 @@ pub(super) fn apply_meta(ctx: &PermCtx<'_>, op: &mut MetaOp) -> crate::Result<()
         | MetaOp::Compact
         | MetaOp::Checkpoint
         | MetaOp::RegisterContinuousAggregate { .. }
+        | MetaOp::InstallAggregateImage { .. }
         | MetaOp::UnregisterContinuousAggregate { .. }
         | MetaOp::ListContinuousAggregates
         | MetaOp::ContinuousAggregatesRegistered

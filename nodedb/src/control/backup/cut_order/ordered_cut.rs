@@ -213,6 +213,7 @@ mod tests {
             seq: 9,
             cap_ordinal: 5,
             metadata_index: 4,
+            surrogate_hwm: 3,
         };
         let cut = OrderedCut {
             hlc: 7,

@@ -147,6 +147,7 @@ impl CoreLoop {
             columnar_flushed_surrogates: HashMap::new(),
             ts_replay: super::ts_replay_state::TsReplayState::default(),
             last_ts_ingest: None,
+            array_retention_floors: HashMap::new(),
             ts_last_value_caches: HashMap::new(),
             ts_series_catalogs: HashMap::new(),
             ts_registries: HashMap::new(),

@@ -31,6 +31,9 @@ use crate::control::state::SharedState;
 
 use super::pins::{PIN_CEILING, pins_to_expire};
 
+/// The gate between a cut's mark and its barriers.
+pub const CUT_BARRIER_FAIL_POINT: &str = "mirror_cut::before_barrier";
+
 /// How often each node judges the pins against its replicas.
 const PIN_PASS_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -79,7 +82,23 @@ pub async fn take_mirror_cut(state: &SharedState, seq: u64) -> crate::Result<Mir
         seq,
         cap_ordinal: cap.cap,
         metadata_index,
+        // The mirror's nodes raise their floor to it. A later mint on a promoted
+        // mirror then carves above every value this source issued.
+        surrogate_hwm: state.surrogate_assigner.current_hwm(),
     };
+    // Holds a cut between its mark and its barriers, so a test can write what
+    // the mark's metadata index does not cover.
+    #[cfg(feature = "failpoints")]
+    if !crate::control::fail_gate::before_mirror_cut_barrier(
+        state.node_id,
+        state.shutdown.raw_receiver(),
+    )
+    .await
+    {
+        return Err(crate::Error::Internal {
+            detail: "mirror cut: this node shut down before its barriers".to_string(),
+        });
+    }
     let watermark = state.hlc_clock.now().wall_ns;
     let deadline = StatementDeadline::of_statement(state).tokio_instant();
     cut_for_mirror(state, watermark, mark, deadline).await?;

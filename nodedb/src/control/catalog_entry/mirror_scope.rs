@@ -44,6 +44,7 @@ impl CatalogEntry {
             }
             Self::PutSequence(stored) => raw(stored.database_id),
             Self::PutSequenceState(stored) => raw(stored.database_id),
+            Self::ReserveSequenceRange { next, .. } => raw(next.database_id),
             Self::PutTrigger(stored) => one(stored.database_id),
             Self::PutFunction(stored) => one(stored.database_id),
             Self::PutProcedure(stored) => one(stored.database_id),
@@ -150,7 +151,7 @@ impl CatalogEntry {
             Self::PutMirrorCutState { .. } => UNSCOPED,
 
             // The mirror's own status: the applier's, the monitor's or PROMOTE's.
-            Self::StepMirrorStatus { .. } => UNSCOPED,
+            Self::StepMirrorStatus { .. } | Self::ClaimMirrorDatabase(_) => UNSCOPED,
 
             // A link's hold on this cluster's logs: the source's own row.
             Self::PutMirrorPin(_) | Self::DeleteMirrorPin { .. } => UNSCOPED,

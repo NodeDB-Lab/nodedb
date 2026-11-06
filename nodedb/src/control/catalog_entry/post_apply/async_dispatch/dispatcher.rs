@@ -354,6 +354,7 @@ pub async fn run_post_apply_async_side_effects(
         | CatalogEntry::PutSequence(_)
         | CatalogEntry::DeleteSequence { .. }
         | CatalogEntry::PutSequenceState(_)
+        | CatalogEntry::ReserveSequenceRange { .. }
         | CatalogEntry::PutTrigger(_)
         | CatalogEntry::DeleteTrigger { .. }
         | CatalogEntry::PutFunction(_)
@@ -435,6 +436,7 @@ pub async fn run_post_apply_async_side_effects(
         | CatalogEntry::PutMirrorCutState { .. }
         // A mirror status step takes effect in the synchronous post-apply.
         | CatalogEntry::StepMirrorStatus { .. }
+        | CatalogEntry::ClaimMirrorDatabase(_)
         // A retention pin takes effect in the synchronous post-apply.
         | CatalogEntry::PutMirrorPin(_)
         | CatalogEntry::DeleteMirrorPin { .. }

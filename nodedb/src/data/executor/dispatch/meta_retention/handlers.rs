@@ -31,10 +31,8 @@ impl CoreLoop {
         task: &ExecutionTask,
         op: &MetaOp,
     ) -> Response {
-        // An audit purge stays at or below the cleanup horizon: no open
-        // snapshot and no commit any replica still applies reads below it.
-        let safe_ms = self.maintenance.version_purge.cap_cutoff_ms(i64::MAX);
-        let cap = |cutoff_ms: &i64| (*cutoff_ms).min(safe_ms);
+        // The cutoff is one decision, below a horizon its decider computed, so
+        // every replica purges the same versions here.
         match op {
             MetaOp::TemporalPurgeEdgeStore {
                 tenant_id,
@@ -44,7 +42,7 @@ impl CoreLoop {
                 task,
                 *tenant_id,
                 collection.as_str(),
-                cap(cutoff_system_ms),
+                *cutoff_system_ms,
             ),
             MetaOp::TemporalPurgeDocumentStrict {
                 tenant_id,
@@ -54,18 +52,20 @@ impl CoreLoop {
                 task,
                 *tenant_id,
                 collection.as_str(),
-                cap(cutoff_system_ms),
+                *cutoff_system_ms,
             ),
             MetaOp::TemporalPurgeColumnar {
                 tenant_id,
                 collection,
                 cutoff_system_ms,
+                decided_ms,
                 aggregates,
             } => self.meta_temporal_purge_columnar(
                 task,
                 *tenant_id,
                 collection.as_str(),
-                cap(cutoff_system_ms),
+                *cutoff_system_ms,
+                *decided_ms,
                 aggregates,
             ),
             MetaOp::TemporalPurgeCrdt {
@@ -76,13 +76,13 @@ impl CoreLoop {
                 task,
                 *tenant_id,
                 collection.as_str(),
-                cap(cutoff_system_ms),
+                *cutoff_system_ms,
             ),
             MetaOp::TemporalPurgeArray {
                 tenant_id,
                 array_id,
                 cutoff_system_ms,
-            } => self.meta_temporal_purge_array(task, *tenant_id, array_id, cap(cutoff_system_ms)),
+            } => self.meta_temporal_purge_array(task, *tenant_id, array_id, *cutoff_system_ms),
             other => self.response_error(
                 task,
                 ErrorCode::Internal {
@@ -96,18 +96,21 @@ impl CoreLoop {
     pub(in crate::data::executor::dispatch) fn meta_apply_continuous_agg_retention(
         &mut self,
         task: &ExecutionTask,
-        skip_databases: &[u64],
+        decided_ms: i64,
     ) -> Response {
-        let now_ms = now_ms();
         // A snapshot read below this ordinal finds the removed buckets gone
-        // and refuses rather than answer without them.
+        // and refuses rather than answer without them. The ordinal comes from
+        // the leader's clock read, so every replica records one rewrite.
         let ordinal = self.ts_batch_ordinal(
-            crate::data::executor::handlers::timeseries::TimeseriesApplyMode::Immediate,
-            now_ms,
+            crate::data::executor::handlers::timeseries::TimeseriesApplyMode::Replay,
+            decided_ms,
         );
-        let removed = self
-            .continuous_agg_mgr
-            .apply_retention(now_ms, ordinal, skip_databases);
+        let removed = self.continuous_agg_mgr.apply_retention(
+            decided_ms,
+            ordinal,
+            task.request.database_id.as_u64(),
+            task.request.tenant_id.as_u64(),
+        );
         tracing::debug!(removed, "continuous aggregate retention applied");
         self.response_ok(task)
     }
@@ -181,36 +184,8 @@ impl CoreLoop {
         collection: &str,
         cutoff_system_ms: i64,
     ) -> Response {
-        match self.sparse.purge_superseded_document_versions(
-            task.request.database_id.as_u64(),
-            tenant_id,
-            collection,
-            cutoff_system_ms,
-        ) {
+        match self.purge_document_history(task, tenant_id, collection, cutoff_system_ms) {
             Ok((docs, idx)) => {
-                if docs + idx > 0 {
-                    tracing::info!(
-                        tenant = tenant_id,
-                        collection,
-                        doc_versions_purged = docs,
-                        index_versions_purged = idx,
-                        cutoff_ms = cutoff_system_ms,
-                        "document_strict: temporal purge complete"
-                    );
-                    // The purged versions leave the tenant's history charge.
-                    if let Err(e) = self.recharge_document_history(
-                        task.request.database_id,
-                        crate::types::TenantId::new(tenant_id),
-                    ) {
-                        crate::diag::history_charge_stale(&e, "audit purge");
-                        tracing::warn!(
-                            tenant = tenant_id,
-                            collection,
-                            error = %e,
-                            "document history recharge after purge failed; the prior charge stays"
-                        );
-                    }
-                }
                 let mut payload = Vec::with_capacity(16);
                 payload.extend_from_slice(&(docs as u64).to_le_bytes());
                 payload.extend_from_slice(&(idx as u64).to_le_bytes());
@@ -220,12 +195,52 @@ impl CoreLoop {
         }
     }
 
-    /// `MetaOp::TemporalPurgeCrdt`: drop archived row versions from the
-    /// tenant's CRDT (Loro) engine for `collection` whose `_ts_system <
-    /// cutoff_system_ms`. The live row is never touched. Returns a u64 LE
-    /// count of archive entries deleted. A missing tenant CRDT engine is
-    /// a no-op (returns 0) — the retention registry may outlive the
-    /// engine when every bitemporal row has been purged.
+    /// Remove the document versions and index entries of `collection` that no
+    /// read at or above the cutoff sees. Returns `(versions, index entries)`.
+    fn purge_document_history(
+        &mut self,
+        task: &ExecutionTask,
+        tenant_id: u64,
+        collection: &str,
+        cutoff_system_ms: i64,
+    ) -> crate::Result<(usize, usize)> {
+        let (docs, idx) = self.sparse.purge_superseded_document_versions(
+            task.request.database_id.as_u64(),
+            tenant_id,
+            collection,
+            cutoff_system_ms,
+        )?;
+        if docs + idx > 0 {
+            tracing::info!(
+                tenant = tenant_id,
+                collection,
+                doc_versions_purged = docs,
+                index_versions_purged = idx,
+                cutoff_ms = cutoff_system_ms,
+                "document history: temporal purge complete"
+            );
+            // The purged versions leave the tenant's history charge.
+            if let Err(e) = self.recharge_document_history(
+                task.request.database_id,
+                crate::types::TenantId::new(tenant_id),
+            ) {
+                crate::diag::history_charge_stale(&e, "audit purge");
+                tracing::warn!(
+                    tenant = tenant_id,
+                    collection,
+                    error = %e,
+                    "document history recharge after purge failed; the prior charge stays"
+                );
+            }
+        }
+        Ok((docs, idx))
+    }
+
+    /// `MetaOp::TemporalPurgeCrdt`: remove a CRDT collection's history below
+    /// `cutoff_system_ms`. The history has two homes: the Loro archive, and
+    /// the sparse row versions a write materializes, which `AS OF SYSTEM TIME`
+    /// reads. The live row stays in both. Returns a u64 LE count of the entries
+    /// removed. A tenant with no CRDT engine still has sparse versions to purge.
     pub(in crate::data::executor::dispatch) fn meta_temporal_purge_crdt(
         &mut self,
         task: &ExecutionTask,
@@ -234,7 +249,7 @@ impl CoreLoop {
         cutoff_system_ms: i64,
     ) -> Response {
         let tid = TenantId::new(tenant_id);
-        let purged = match self.crdt_engines.get(&(task.request.database_id, tid)) {
+        let archived = match self.crdt_engines.get(&(task.request.database_id, tid)) {
             Some(engine) => match engine.purge_history_before(collection, cutoff_system_ms) {
                 Ok(n) => n as u64,
                 Err(e) => {
@@ -243,6 +258,12 @@ impl CoreLoop {
             },
             None => 0,
         };
+        let versions =
+            match self.purge_document_history(task, tenant_id, collection, cutoff_system_ms) {
+                Ok((docs, idx)) => (docs + idx) as u64,
+                Err(e) => return self.response_error(task, ErrorCode::from(e)),
+            };
+        let purged = archived + versions;
         if purged > 0 {
             tracing::info!(
                 tenant = tenant_id,
@@ -280,6 +301,17 @@ impl CoreLoop {
         if let Err(resp) = self.open_array_if_cataloged(task, &id) {
             return resp;
         }
+        // The purge plans over segments, so a version still in the memtable
+        // stays past its cutoff until a flush. A mirror holds its re-issued
+        // cells there, and an array with few writes reaches no flush threshold.
+        if self.array_engine.is_open(&id)
+            && let Err(e) = self.flush_array(&id)
+        {
+            return self.response_error(task, ErrorCode::from(e));
+        }
+        // A later compaction's window ends here: it reads no local clock.
+        let floor = self.array_retention_floors.entry(id).or_insert(i64::MIN);
+        *floor = (*floor).max(cutoff_system_ms);
         match self.array_engine.purge_array_versions_below(
             tenant,
             task.request.database_id,
@@ -326,6 +358,7 @@ impl CoreLoop {
         tenant_id: u64,
         collection: &str,
         cutoff_system_ms: i64,
+        decided_ms: i64,
         aggregates: &[AggregateIncarnation],
     ) -> Response {
         let tid = TenantId::new(tenant_id);
@@ -334,10 +367,10 @@ impl CoreLoop {
         // Timeseries profile: reuse partition-level retention with
         // max_age derived from the cutoff.
         if self.ts_registries.contains_key(&key) {
-            let now = now_ms();
-            let max_age_ms = (now - cutoff_system_ms).max(0);
-            return self
-                .meta_enforce_timeseries_retention(task, collection, max_age_ms, aggregates);
+            let max_age_ms = decided_ms.saturating_sub(cutoff_system_ms);
+            return self.meta_enforce_timeseries_retention(
+                task, collection, max_age_ms, decided_ms, aggregates,
+            );
         }
 
         // Plain columnar profile: row-version purge at the cutoff's ordinal.
@@ -355,16 +388,6 @@ impl CoreLoop {
         let payload = (n as u64).to_le_bytes().to_vec();
         self.response_with_payload(task, payload)
     }
-}
-
-pub(super) fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_else(|e| {
-            tracing::warn!("system clock before UNIX_EPOCH: {e}; using epoch as now");
-            std::time::Duration::ZERO
-        })
-        .as_millis() as i64
 }
 
 #[cfg(test)]

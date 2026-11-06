@@ -76,7 +76,7 @@ pub(in crate::diag) use lease::{
     DdlCleanupNotCompleted, DescriptorDrainNotEnded, DescriptorLeaseNotRenewed,
     DescriptorLeaseReleaseDropped,
 };
-pub(in crate::diag) use mirror::MirrorStatusUnread;
+pub(in crate::diag) use mirror::{MirrorLinkStopped, MirrorStatusUnread};
 pub(in crate::diag) use outcome_floor::{WriteWindowHeld, WriteWindowLeaked};
 pub use quota::{DATABASE_SCOPE, TENANT_SCOPE};
 pub(in crate::diag) use quota::{
@@ -91,7 +91,7 @@ pub(in crate::diag) use recovery::{ReplayRecordUnapplied, WalArchivalFailedTrunc
 pub(in crate::diag) use redo_stream::{
     RedoAbandonGivenUp, RedoSnapshotDebtNotRecorded, RedoStreamLostHere,
 };
-pub(in crate::diag) use retention::RetentionAutowireOrphaned;
+pub(in crate::diag) use retention::{RetentionAutowireOrphaned, SequenceRestartFailed};
 pub(in crate::diag) use storage_bytes::{
     StorageBytesResidue, StorageBytesSampleFailed, StorageBytesUnderflow, StorageSharePeerSkipped,
 };

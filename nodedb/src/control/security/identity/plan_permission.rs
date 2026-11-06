@@ -256,6 +256,7 @@ pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Perm
 
         PhysicalPlan::Meta(
             MetaOp::RegisterContinuousAggregate { .. }
+            | MetaOp::InstallAggregateImage { .. }
             | MetaOp::UnregisterContinuousAggregate { .. }
             | MetaOp::ListContinuousAggregates
             | MetaOp::ContinuousAggregatesRegistered

@@ -38,6 +38,9 @@ use super::progress::{PendingCut, every_group_applied};
 use super::propose::{GroupProposal, MirrorRaft, SealAt, propose_group};
 use super::rewrite::rewrite_entry;
 
+/// The gate each node parks at before it finishes a sealed PROMOTE.
+pub const PROMOTE_FINISH_FAIL_POINT: &str = "mirror_promote::before_finish";
+
 /// How long one group gets to commit its last seal.
 const SEAL_COMMIT_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long every group gets to apply its last seal.
@@ -105,6 +108,20 @@ pub async fn seal_mirror(state: &SharedState, database: DatabaseId) -> crate::Re
 /// Finish a PROMOTE the row shows sealed: seal every group, wait for each to
 /// apply, and open writes. A mirror already promoted answers at once.
 pub async fn finish_promote(state: &SharedState, database: DatabaseId) -> crate::Result<()> {
+    // Holds a sealed mirror sealed, so a test can restart the cluster with the
+    // row at `Promoting`.
+    #[cfg(feature = "failpoints")]
+    if !crate::control::fail_gate::before_promote_finish(
+        state.node_id,
+        state.shutdown.raw_receiver(),
+    )
+    .await
+    {
+        return Err(crate::Error::Internal {
+            detail: "PROMOTE: this node shut down before it finished; a later leader finishes"
+                .to_string(),
+        });
+    }
     let final_cut = match status_of(state, database)? {
         MirrorStatus::Promoting { final_cut } => final_cut,
         MirrorStatus::Promoted => return Ok(()),

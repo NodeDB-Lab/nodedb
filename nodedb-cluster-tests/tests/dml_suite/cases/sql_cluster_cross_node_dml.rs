@@ -81,6 +81,11 @@ mod mirror_bootstrap_fixture;
 mod mirror_bootstrap_promote;
 #[path = "../../sql_cluster_cross_node_dml_tests/mirror_bootstrap_purge_convert.rs"]
 mod mirror_bootstrap_purge_convert;
+#[cfg(feature = "failpoints")]
+#[path = "../../sql_cluster_cross_node_dml_tests/mirror_bootstrap_recover.rs"]
+mod mirror_bootstrap_recover;
+#[path = "../../sql_cluster_cross_node_dml_tests/mirror_bootstrap_retention.rs"]
+mod mirror_bootstrap_retention;
 #[path = "../../sql_cluster_cross_node_dml_tests/mirror_bootstrap_two_clusters.rs"]
 mod mirror_bootstrap_two_clusters;
 #[path = "../../sql_cluster_cross_node_dml_tests/mirror_read_only_cross_node.rs"]

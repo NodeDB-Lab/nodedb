@@ -225,6 +225,10 @@ pub enum MirrorRequest {
     Tail(MirrorTailRequest),
     Ack(MirrorAck),
     Bootstrap(MirrorBootstrapRequest),
+    /// Give back the link's pin.
+    Release {
+        link_id: u64,
+    },
 }
 
 impl MirrorRequest {
@@ -251,7 +255,7 @@ impl MirrorRequest {
                 "an ack of {} positions passes the bound of {MAX_ACK_POSITIONS}",
                 ack.positions.len()
             )),
-            Self::Ack(_) | Self::Bootstrap(_) => Ok(()),
+            Self::Ack(_) | Self::Bootstrap(_) | Self::Release { .. } => Ok(()),
         }
     }
 }
@@ -356,6 +360,7 @@ mod tests {
             mirror_cluster_id: 2,
             link_id: 7,
             protocol_version: 1,
+            fresh: false,
         })
     }
 

@@ -48,8 +48,13 @@ pub fn entry_adds_storage(entry: &ReplicatedEntry) -> crate::Result<bool> {
         // A put binds a cell surrogate. A delete or erasure names none.
         ReplicatedWrite::ArrayOp { cell_surrogate, .. } => return Ok(cell_surrogate.is_some()),
         // A purge removes rows, and it must pass at any tenant size. A
-        // conversion rewrites the rows the tenant already holds.
-        ReplicatedWrite::TenantPurge { .. } | ReplicatedWrite::CollectionConvert { .. } => {
+        // conversion rewrites the rows the tenant already holds. A retention
+        // drop removes rows. An aggregate image comes from a bootstrap, which
+        // the mirror's tenant limits do not stop midway.
+        ReplicatedWrite::TenantPurge { .. }
+        | ReplicatedWrite::CollectionConvert { .. }
+        | ReplicatedWrite::RetentionDrop { .. }
+        | ReplicatedWrite::TimeseriesAggregateImage { .. } => {
             return Ok(false);
         }
         _ => {}

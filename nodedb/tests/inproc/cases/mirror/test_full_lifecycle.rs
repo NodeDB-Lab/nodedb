@@ -11,7 +11,7 @@
 
 use std::time::Duration;
 
-use nodedb_types::{DatabaseId, MirrorMode, MirrorOrigin, MirrorStatus};
+use nodedb_types::{DatabaseId, MirrorMode, MirrorOrigin, MirrorStatus, MirrorStatusStep};
 use tempfile::TempDir;
 
 use nodedb::control::catalog_entry::CatalogEntry;
@@ -111,13 +111,16 @@ fn mirror_full_lifecycle() {
     // ── Phase 4: PROMOTE ──────────────────────────────────────────────────
     // Apply what PROMOTE proposes. The apply keeps the cut state, which a
     // replica behind the promotion still reads.
-    let mut desc = desc.clone();
-    desc.status = DatabaseStatus::Active;
-    if let Some(ref mut o) = desc.mirror_origin {
-        o.status = MirrorStatus::Promoted;
+    for step in [MirrorStatusStep::Seal, MirrorStatusStep::Promote] {
+        apply_to(
+            &CatalogEntry::StepMirrorStatus {
+                database_id: db_id.as_u64(),
+                step,
+            },
+            &catalog,
+        )
+        .expect("PROMOTE: apply the step");
     }
-    apply_to(&CatalogEntry::PutDatabase(Box::new(desc)), &catalog)
-        .expect("PROMOTE: apply descriptor");
     assert!(
         catalog
             .get_mirror_cut_state(db_id)

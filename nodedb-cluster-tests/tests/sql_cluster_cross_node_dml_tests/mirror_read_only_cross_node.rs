@@ -96,6 +96,7 @@ async fn every_node_answers_a_mirror_write_with_the_read_only_refusal() {
         }],
         epochs: Vec::new(),
         fence_epoch: 0,
+        source_timeline: None,
     };
     propose_catalog_entry_async(
         shared,

@@ -5,18 +5,14 @@
 //! Runs on the Event Plane (Tokio, `Send + Sync`). Every tick:
 //!
 //! 1. Snapshot the [`BitemporalRetentionRegistry`].
-//! 2. For each entry with `audit_retain_ms > 0`, compute
-//!    `cutoff_system_ms = now - audit_retain_ms`.
-//! 3. Dispatch the appropriate `MetaOp::TemporalPurge{EdgeStore,
-//!    DocumentStrict, Columnar}` to the owning Data Plane core via the
-//!    shared `sync_dispatch` async path.
-//! 4. On success, parse the returned purge count from the response
-//!    payload and append a `RecordType::TemporalPurge` record to the
-//!    WAL for durable audit.
+//! 2. On the metadata leader, for each entry with `audit_retain_ms > 0`,
+//!    compute the cutoff once: `now - audit_retain_ms`, at or below the cleanup
+//!    horizon.
+//! 3. Put the decision into every data group's log. Every replica and mirror
+//!    runs the purge at that position and writes the WAL audit record there.
 //!
 //! NEVER does storage I/O directly — all physical work happens in the
-//! Data Plane. The only persistent side-effect emitted from this loop
-//! is the WAL audit record.
+//! Data Plane.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,19 +21,13 @@ use tokio::sync::watch;
 use tracing::{info, warn};
 
 use super::registry::{BitemporalEngineKind, BitemporalRetentionRegistry, Entry};
-use crate::bridge::envelope::PhysicalPlan;
+use crate::control::retention_log::{AuditPurge, decides_retention, enact_audit_retention};
 use crate::control::state::SharedState;
-use crate::engine::timeseries::retention_policy::rooted_aggregates::aggregates_rooted_at;
-use nodedb_physical::physical_plan::MetaOp;
 
 /// Default tick interval when no shorter deadline is needed. One hour
 /// matches the timeseries retention loop's default; operators can lower
 /// by providing a shorter `tick_interval`.
 const DEFAULT_TICK_MS: u64 = 3_600_000;
-
-/// Dispatch deadline per purge op. Purges can scan many segments /
-/// redb ranges; a 30-second bound matches the existing retention path.
-const DISPATCH_DEADLINE_SECS: u64 = 30;
 
 /// Startup delay so the loop doesn't race the Data Plane warm-up.
 const STARTUP_DELAY_SECS: u64 = 10;
@@ -98,139 +88,28 @@ async fn run_one(state: &Arc<SharedState>, entry: &Entry) {
     if audit_ms == 0 {
         return; // "retain forever" — no purge.
     }
-    // A read-only mirror purges no history on its own clock. The window runs
-    // from the database's PROMOTE.
-    if state.mirror.fence.is_read_only(entry.database_id) {
+    // A mirror decides nothing: its purges arrive through the log. The window
+    // runs from the database's PROMOTE.
+    if !decides_retention(state) || state.mirror.fence.is_read_only(entry.database_id) {
         return;
     }
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64;
-    let cutoff_system_ms = now_ms.saturating_sub(audit_ms as i64);
-
-    let tenant_id = entry.tenant_id;
-    let plan = match entry.engine {
-        BitemporalEngineKind::EdgeStore => PhysicalPlan::Meta(MetaOp::TemporalPurgeEdgeStore {
-            tenant_id: tenant_id.as_u64(),
-            collection: nodedb_types::QualifiedCollection::new(
-                entry.database_id,
-                &entry.collection,
-            ),
-            cutoff_system_ms,
-        }),
-        BitemporalEngineKind::DocumentStrict => {
-            PhysicalPlan::Meta(MetaOp::TemporalPurgeDocumentStrict {
-                tenant_id: tenant_id.as_u64(),
-                collection: nodedb_types::QualifiedCollection::new(
-                    entry.database_id,
-                    &entry.collection,
-                ),
-                cutoff_system_ms,
-            })
-        }
-        BitemporalEngineKind::Columnar => {
-            // A timeseries purge removes partitions, so it carries the
-            // aggregates that must hold them first, as raw retention does.
-            let aggregates = match aggregates_rooted_at(
-                state,
-                &state.retention_policy_registry,
-                entry.database_id.as_u64(),
-                tenant_id.as_u64(),
-                &entry.collection,
-            ) {
-                Ok(aggregates) => aggregates,
-                Err(e) => {
-                    warn!(
-                        tenant = tenant_id.as_u64(),
-                        collection = %entry.collection,
-                        error = %e,
-                        "skipping temporal purge: the aggregates rooted at the collection \
-                         could not be read; the next pass retries"
-                    );
-                    return;
-                }
-            };
-            PhysicalPlan::Meta(MetaOp::TemporalPurgeColumnar {
-                tenant_id: tenant_id.as_u64(),
-                collection: nodedb_types::QualifiedCollection::new(
-                    entry.database_id,
-                    &entry.collection,
-                ),
-                cutoff_system_ms,
-                aggregates,
-            })
-        }
-        BitemporalEngineKind::Crdt => PhysicalPlan::Meta(MetaOp::TemporalPurgeCrdt {
-            tenant_id: tenant_id.as_u64(),
-            collection: nodedb_types::QualifiedCollection::new(
-                entry.database_id,
-                &entry.collection,
-            ),
-            cutoff_system_ms,
-        }),
-        // For Array entries `entry.collection` carries the array_id (see
-        // hydration in main.rs — registered under the catalog `name` field).
-        BitemporalEngineKind::Array => PhysicalPlan::Meta(MetaOp::TemporalPurgeArray {
-            tenant_id: tenant_id.as_u64(),
-            array_id: entry.collection.clone(),
-            cutoff_system_ms,
-        }),
+    // For Array entries `entry.collection` carries the array_id (see hydration in
+    // main.rs — registered under the catalog `name` field).
+    let purge = AuditPurge {
+        tenant_id: entry.tenant_id,
+        database_id: entry.database_id,
+        engine: entry.engine,
+        object: &entry.collection,
+        retain_ms: audit_ms as i64,
     };
-
-    match crate::control::server::shared::ddl::sync_dispatch::dispatch_system(
-        state,
-        crate::control::server::shared::ddl::sync_dispatch::SystemTask::new(
-            crate::control::server::shared::ddl::sync_dispatch::SystemReason::RetentionEnforcement,
-            tenant_id,
-            nodedb_types::CollectionKey::from_bare(entry.database_id, &entry.collection),
-            plan,
-        ),
-        Duration::from_secs(DISPATCH_DEADLINE_SECS),
-    )
-    .await
-    {
-        Ok(payload) => {
-            let purged = parse_count_from_payload(entry.engine, &payload);
-            if purged > 0
-                && let Err(e) = state
-                    .wal
-                    .appender(crate::wal::manager::NO_APPLY_KEY)
-                    .append_temporal_purge(
-                        tenant_id,
-                        entry.engine.wire_tag(),
-                        &entry.collection,
-                        cutoff_system_ms,
-                        purged,
-                    )
-            {
-                warn!(
-                    tenant = tenant_id.as_u64(),
-                    collection = %entry.collection,
-                    error = %e,
-                    "temporal-purge wal append failed"
-                );
-            }
-            if purged > 0 {
-                info!(
-                    tenant = tenant_id.as_u64(),
-                    collection = %entry.collection,
-                    engine = ?entry.engine,
-                    purged,
-                    cutoff_ms = cutoff_system_ms,
-                    "bitemporal audit-retention purge"
-                );
-            }
-        }
-        Err(e) => {
-            warn!(
-                tenant = tenant_id.as_u64(),
-                collection = %entry.collection,
-                engine = ?entry.engine,
-                error = %e,
-                "bitemporal temporal-purge dispatch failed"
-            );
-        }
+    if let Err(e) = enact_audit_retention(state, purge).await {
+        warn!(
+            tenant = entry.tenant_id.as_u64(),
+            collection = %entry.collection,
+            engine = ?entry.engine,
+            error = %e,
+            "bitemporal temporal purge did not land; the next pass decides again"
+        );
     }
 }
 
@@ -240,7 +119,7 @@ async fn run_one(state: &Arc<SharedState>, entry: &Entry) {
 /// DocumentStrict → 16 bytes: docs LE u64 ++ index-entries LE u64; we
 ///   sum them for the audit-record count so operators see total rows
 ///   reclaimed across the two versioned tables.
-fn parse_count_from_payload(engine: BitemporalEngineKind, payload: &[u8]) -> u64 {
+pub(crate) fn parse_count_from_payload(engine: BitemporalEngineKind, payload: &[u8]) -> u64 {
     match engine {
         BitemporalEngineKind::EdgeStore
         | BitemporalEngineKind::Columnar

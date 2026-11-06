@@ -335,6 +335,7 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             | MetaOp::Compact
             | MetaOp::Checkpoint
             | MetaOp::RegisterContinuousAggregate { .. }
+            | MetaOp::InstallAggregateImage { .. }
             | MetaOp::UnregisterContinuousAggregate { .. }
             | MetaOp::ListContinuousAggregates
             | MetaOp::ContinuousAggregatesRegistered
@@ -2024,6 +2025,7 @@ mod tests {
             PhysicalPlan::Meta(MetaOp::EnforceTimeseriesRetention {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 max_age_ms: 0,
+                decided_ms: 0,
                 aggregates: Vec::new(),
             }),
             PhysicalPlan::Meta(MetaOp::TemporalPurgeEdgeStore {
@@ -2040,6 +2042,7 @@ mod tests {
                 tenant_id: 1,
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 cutoff_system_ms: 0,
+                decided_ms: 0,
                 aggregates: Vec::new(),
             }),
             PhysicalPlan::Meta(MetaOp::TemporalPurgeCrdt {
@@ -2058,9 +2061,7 @@ mod tests {
                 minimum_audit_retain_ms: None,
                 schema_msgpack: None,
             }),
-            PhysicalPlan::Meta(MetaOp::ApplyContinuousAggRetention {
-                skip_databases: Vec::new(),
-            }),
+            PhysicalPlan::Meta(MetaOp::ApplyContinuousAggRetention { decided_ms: 0 }),
             PhysicalPlan::Meta(MetaOp::QueryAggregateWatermark {
                 aggregate_name: "agg".into(),
             }),

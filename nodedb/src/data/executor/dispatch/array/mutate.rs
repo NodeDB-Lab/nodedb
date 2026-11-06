@@ -289,22 +289,19 @@ impl CoreLoop {
     ) -> Response {
         // The array's stored tiles change wholesale.
         self.forget_newest_ordinals();
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
-        // The audit window keeps history back to `now - audit_retain_ms`:
-        // the merge collapses what that millisecond's last ordinal
-        // supersedes. It stays at or below the cleanup horizon, so no open
-        // snapshot and no commit a replica still applies reads below it.
+        // The audit window ends at the cutoff the log's newest purge named: the
+        // merge collapses what that millisecond's last ordinal supersedes. Every
+        // replica then keeps one history. With no purge seen since boot the merge
+        // keeps it all. The window stays at or below the cleanup horizon, so no
+        // open snapshot and no commit a replica still applies reads below it.
         let safe_horizon = under_floor(
             &self.maintenance.version_purge.mirror_floors,
             array_id.database_id.as_u64(),
             self.maintenance.version_purge.safe_horizon,
         );
-        let horizon = audit_retain_ms.map(|retain_ms| {
-            nodedb_types::ms_to_ordinal_upper(now_ms.saturating_sub(retain_ms)).min(safe_horizon)
-        });
+        let horizon = audit_retain_ms
+            .and(self.array_retention_floors.get(array_id))
+            .map(|floor| nodedb_types::ms_to_ordinal_upper(*floor).min(safe_horizon));
         let merged = match self.array_engine.maybe_compact(array_id, horizon) {
             Ok(m) => m,
             Err(e) => {

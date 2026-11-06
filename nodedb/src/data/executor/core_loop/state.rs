@@ -275,6 +275,11 @@ pub struct CoreLoop {
     /// flushes all non-empty memtables to disk partitions.
     pub(in crate::data::executor) last_ts_ingest: Option<std::time::Instant>,
 
+    /// Each array's newest audit-purge cutoff from the log. A compaction's window
+    /// ends here, so it reads no local clock.
+    pub(in crate::data::executor) array_retention_floors:
+        HashMap<nodedb_array::types::ArrayId, i64>,
+
     /// Per-collection last-value caches for O(1) recent value lookup.
     /// Key: (DatabaseId, TenantId, collection).
     pub(in crate::data::executor) ts_last_value_caches: HashMap<

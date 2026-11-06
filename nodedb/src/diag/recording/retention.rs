@@ -33,3 +33,21 @@ pub fn retention_autowire_orphaned(
     .with_backtrace()
     .emit();
 }
+
+/// Report a committed `TRUNCATE ... RESTART IDENTITY` whose sequence kept its
+/// counter. Called from the commit, which cannot fail by then.
+pub fn sequence_restart_failed(detail: &str, database_id: u64, tenant_id: u64, collection: &str) {
+    let ctx = context::SequenceRestartFailed {
+        database_id,
+        tenant_id,
+        collection,
+        detail,
+    };
+    let _ = Capture::new(
+        EventKind::Error,
+        "truncate: the commit held, and a sequence did not restart",
+    )
+    .domain(&ctx)
+    .with_backtrace()
+    .emit();
+}

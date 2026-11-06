@@ -76,6 +76,7 @@ type Parts = (WriteWindow, Vec<RecordedAppend>, Option<Lsn>);
 
 impl MintedRecords {
     /// Open the window. Call it before the first record is appended.
+    #[track_caller]
     pub(crate) fn open(floor: &Arc<OutcomeFloor>) -> Self {
         Self::with_window(floor.open_write(), None)
     }
@@ -84,6 +85,7 @@ impl MintedRecords {
     /// Refused, with the reason, when its outcome is final or a live or held
     /// window carries it to one: a second apply will land below the floor,
     /// or apply the record twice.
+    #[track_caller]
     pub(crate) fn resend(floor: &Arc<OutcomeFloor>, lsn: Lsn) -> Result<Self, ResendRefusal> {
         let window = floor.open_existing(lsn)?;
         Ok(Self::with_window(window, Some(lsn)))

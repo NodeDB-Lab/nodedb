@@ -386,6 +386,17 @@ pub(super) fn entry_scope(
                 })
                 .collect(),
         ),
+        ReplicatedWrite::TimeseriesAggregateImage { collection, .. } => {
+            EntryScope::Collections(vec![collection.clone()])
+        }
+        ReplicatedWrite::RetentionDrop { op, .. } => match op.object() {
+            Some(object) => EntryScope::Collections(vec![
+                QualifiedCollection::new(database_id, object)
+                    .as_str()
+                    .to_owned(),
+            ]),
+            None => EntryScope::Exempt,
+        },
         ReplicatedWrite::PointPut { .. }
         | ReplicatedWrite::PointInsert { .. }
         | ReplicatedWrite::PointDelete { .. }

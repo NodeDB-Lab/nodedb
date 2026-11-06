@@ -119,6 +119,8 @@ impl ReplicatedWrite {
             // under the system time it holds.
             | Self::TenantPurge { .. }
             | Self::CollectionConvert { .. }
+            | Self::RetentionDrop { .. }
+            | Self::TimeseriesAggregateImage { .. }
             | Self::SetVectorParams { .. }
             | Self::DropVectorIndex { .. }
             | Self::KvRegisterSortedIndex { .. }

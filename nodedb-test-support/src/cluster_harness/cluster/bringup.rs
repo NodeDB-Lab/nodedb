@@ -12,6 +12,29 @@ use super::types::{ClusterSpawnConfig, DEFAULT_NUM_GROUPS};
 use crate::cluster_harness::node::TestClusterNode;
 
 impl TestCluster {
+    /// Spawn a 3-node cluster whose Control Planes run `network`. A test shortens
+    /// the snapshot hold with it, as an operator's `[tuning.network]` section does.
+    pub async fn spawn_three_with_network_tuning(
+        network: nodedb_types::config::tuning::NetworkTuning,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Self::spawn_three_with_config(ClusterSpawnConfig {
+            tuning: super::types::fast_cluster_tuning(),
+            graph_tuning: nodedb_types::config::tuning::GraphTuning::default(),
+            query_tuning: nodedb_types::config::tuning::QueryTuning::default(),
+            num_cores: 1,
+            log_compaction_threshold: None,
+            replication_factor: 3,
+            num_groups: DEFAULT_NUM_GROUPS,
+            single_node_calvin: false,
+            backup_storage: None,
+            pitr: None,
+            node_timeseries_tuning: std::collections::HashMap::new(),
+            redo_chunk_limits: None,
+            network_tuning: Some(network),
+        })
+        .await
+    }
+
     /// Shared 3-node spawn body. Threads an optional Raft
     /// `log_compaction_threshold` and a Raft `replication_factor` into
     /// every node's spawn; all public `spawn_three_*` entry points funnel
@@ -37,6 +60,7 @@ impl TestCluster {
             pitr: None,
             node_timeseries_tuning: std::collections::HashMap::new(),
             redo_chunk_limits: None,
+            network_tuning: None,
         };
         Self::spawn_three_with_config(config).await
     }
@@ -62,6 +86,7 @@ impl TestCluster {
             pitr: None,
             node_timeseries_tuning: std::collections::HashMap::new(),
             redo_chunk_limits: None,
+            network_tuning: None,
         })
         .await
     }
@@ -86,6 +111,7 @@ impl TestCluster {
             pitr: None,
             node_timeseries_tuning: std::collections::HashMap::new(),
             redo_chunk_limits: None,
+            network_tuning: None,
         })
         .await
     }
@@ -110,6 +136,7 @@ impl TestCluster {
             pitr: None,
             node_timeseries_tuning: std::collections::HashMap::from([(node_id, timeseries_tuning)]),
             redo_chunk_limits: None,
+            network_tuning: None,
         })
         .await
     }
@@ -136,6 +163,7 @@ impl TestCluster {
             pitr: None,
             node_timeseries_tuning: std::collections::HashMap::new(),
             redo_chunk_limits: None,
+            network_tuning: None,
         })
         .await
     }
@@ -159,6 +187,7 @@ impl TestCluster {
             pitr: Some(pitr),
             node_timeseries_tuning: std::collections::HashMap::new(),
             redo_chunk_limits: None,
+            network_tuning: None,
         })
         .await
     }
@@ -183,6 +212,7 @@ impl TestCluster {
             backup_storage: None,
             pitr: None,
             node_timeseries_tuning: std::collections::HashMap::new(),
+            network_tuning: None,
             redo_chunk_limits: Some(
                 nodedb::control::wal_replication::transaction_redo::chunks::RedoChunkLimits {
                     max_entry_bytes,

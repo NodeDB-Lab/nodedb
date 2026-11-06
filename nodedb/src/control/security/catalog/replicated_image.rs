@@ -363,6 +363,7 @@ mod tests {
             positions: Vec::new(),
             epochs: Vec::new(),
             fence_epoch: 0,
+            source_timeline: None,
         };
         source.raise_mirror_cut_state(db, &state).unwrap();
 

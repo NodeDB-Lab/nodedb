@@ -285,6 +285,31 @@ fn prepare_replicated<'a>(
                 vshards,
             },
         ),
+        ReplicatedWrite::TimeseriesAggregateImage { collection, image } => {
+            super::aggregate_image::prepare_aggregate_image_entry(
+                ctx,
+                pos,
+                super::aggregate_image::AggregateImageEntry {
+                    database_id: entry_database,
+                    tenant_id,
+                    vshard_id: replicated.vshard_id,
+                    collection,
+                    image,
+                },
+            )
+        }
+        ReplicatedWrite::RetentionDrop { op, .. } => {
+            super::retention_drop::prepare_retention_drop_entry(
+                ctx,
+                pos,
+                super::retention_drop::RetentionDropEntry {
+                    database_id: entry_database,
+                    tenant_id,
+                    vshard_id: replicated.vshard_id,
+                    op,
+                },
+            )
+        }
         ReplicatedWrite::CollectionConvert {
             collection,
             target_type,

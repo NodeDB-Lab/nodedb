@@ -139,8 +139,8 @@ pub(in crate::data::executor) struct VersionPurgeState {
     /// nanoseconds. Every node runs one value.
     pub commit_window_ns: i64,
     /// The newest cleanup horizon this core received, `0` before the first.
-    /// Every purge on the core, the audit-retention ones included, stays at
-    /// or below it.
+    /// Every purge this core decides stays at or below it. A logged audit purge
+    /// carries a cutoff its decider held below a horizon of its own.
     pub safe_horizon: i64,
     /// Each read-only mirror's limit on `safe_horizon`, as the newest request
     /// named it.
@@ -179,13 +179,6 @@ impl VersionPurgeState {
             index_charges: std::collections::HashMap::new(),
             vector_compaction_due: std::collections::HashSet::new(),
         }
-    }
-
-    /// The last millisecond whose every ordinal sits at or below the safe
-    /// horizon. An audit cutoff past it is lowered to it.
-    pub(in crate::data::executor) fn cap_cutoff_ms(&self, cutoff_ms: i64) -> i64 {
-        let safe_ms = nodedb_types::ordinal_to_ms(self.safe_horizon.saturating_add(1)) - 1;
-        cutoff_ms.min(safe_ms)
     }
 }
 
@@ -280,19 +273,5 @@ mod tests {
             pass(vec![retained("audit", Some(40)), retained("keep", None)]).tenant_horizon(3, 1),
             None
         );
-    }
-
-    #[test]
-    fn an_audit_cutoff_is_capped_at_the_safe_horizon() {
-        let mut state = VersionPurgeState::new();
-        assert!(
-            nodedb_types::ms_to_ordinal_upper(state.cap_cutoff_ms(5_000)) <= 0,
-            "no horizon received yet purges nothing"
-        );
-        state.safe_horizon = nodedb_types::ms_to_ordinal_upper(7);
-        assert_eq!(state.cap_cutoff_ms(5_000), 7);
-        assert_eq!(state.cap_cutoff_ms(3), 3);
-        state.safe_horizon = nodedb_types::ms_to_ordinal_upper(7) - 1;
-        assert_eq!(state.cap_cutoff_ms(5_000), 6, "ms 7 is not wholly below");
     }
 }

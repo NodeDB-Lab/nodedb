@@ -50,6 +50,10 @@ pub(super) struct Session<'a> {
     pub(super) epoch: u64,
     mint: EpochMint,
     pub(super) ready_cut: u64,
+    /// The source's metadata timeline, as its newest hello named it.
+    pub(super) source_timeline: u64,
+    /// The highest surrogate floor this session landed.
+    pub(super) surrogate_floor: u32,
     pub(super) cursors: Vec<GroupCursor>,
     pub(super) metadata: MetadataCursor,
     pub(super) applied: AppliedTracker,
@@ -74,6 +78,8 @@ impl<'a> Session<'a> {
             epoch: 0,
             mint: EpochMint::default(),
             ready_cut: 0,
+            source_timeline: 0,
+            surrogate_floor: 0,
             cursors: Vec::new(),
             metadata: MetadataCursor::new(0),
             applied: AppliedTracker::default(),
@@ -122,6 +128,11 @@ impl<'a> Session<'a> {
     }
 
     pub(super) async fn run(mut self) -> SessionEnd {
+        // A mirror with no cut holds no place in the source's log. Its hello
+        // replaces an expired pin, so a rebuild can start past a truncation.
+        let starts_over = matches!(follows(self.state, self.database), Ok(Some(false)))
+            && self.cut_state().is_ok_and(|state| state.ready_cut == 0);
+        self.client.set_fresh(starts_over);
         let mut state = match self.start().await {
             Ok(state) => state,
             Err(end) => return end,
@@ -132,6 +143,7 @@ impl<'a> Session<'a> {
                 Err(end) => return end,
             };
         }
+        self.client.set_fresh(false);
         self.resume(&state);
         loop {
             if !self.still_leads() {
@@ -204,6 +216,15 @@ impl<'a> Session<'a> {
             }
         };
         self.last_hello = Instant::now();
+        self.source_timeline = ack.timeline;
+        // A restored source rewrote the log this mirror's positions name.
+        if self.cut_state().is_ok_and(|state| {
+            state
+                .source_timeline
+                .is_some_and(|held| held != ack.timeline)
+        }) {
+            return Err(MirrorFailure::SourceTimelineChanged.into());
+        }
         if ack.source_database_id != self.database.as_u64() {
             return Err(MirrorFailure::UnsupportedSourceOp {
                 detail: format!(
@@ -350,6 +371,31 @@ impl<'a> Session<'a> {
                     "mirror applier: a source request failed; the next round retries it"
                 );
                 Ok(())
+            }
+        }
+    }
+
+    /// Ask the source how far its metadata log committed, as its leader confirms
+    /// it, and keep what the answer carries. Never below `target`.
+    pub(super) async fn metadata_horizon(&mut self, target: u64) -> Result<u64, SessionEnd> {
+        loop {
+            if !self.still_leads() {
+                return Err(SessionEnd::LostLeadership);
+            }
+            let request = MirrorTailRequest {
+                wait_ms: 0,
+                ..self.request(METADATA_GROUP_ID, self.metadata.next_index)
+            };
+            match self.client.tail(&request).await {
+                Ok(batch) => {
+                    let horizon = batch.commit_index.max(target);
+                    self.metadata.ingest(batch);
+                    return Ok(horizon);
+                }
+                Err(error) => {
+                    self.note_source_error(error)?;
+                    tokio::time::sleep(IDLE_POLL).await;
+                }
             }
         }
     }

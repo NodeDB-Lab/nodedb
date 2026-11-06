@@ -11,9 +11,11 @@ use nodedb_cluster::calvin::SEQUENCER_GROUP_ID;
 use nodedb_cluster::mirror::MirrorAck;
 use nodedb_types::{MirrorCutAdvance, MirrorEntryStamp, MirrorGroupPosition};
 
-use crate::control::metadata_proposer::propose_mirror_cut;
+use crate::control::metadata_proposer::{propose_mirror_cut, propose_surrogate_hwm};
+use crate::control::read_cut::snapshot_max_hold;
 use crate::control::security::auth_fence::cluster::{group_of_vshard, routed_groups};
 use crate::control::state::SharedState;
+use crate::control::version_cleanup::horizon::mirror_floor;
 use crate::control::wal_replication::types::MirrorCalvinFloor;
 use crate::control::wal_replication::{ReplicatedEntry, ReplicatedWrite};
 
@@ -21,8 +23,9 @@ use super::batch::{CutBatch, positions};
 use super::driver::{MirrorStop, SessionEnd, follows};
 use super::progress::PendingCut;
 use super::propose::{GroupProposal, SealAt, propose_group};
-use super::rewrite::{CatalogCheck, rewrite_entry, split_tenant_purge};
+use super::rewrite::{CatalogCheck, DescriptorRule, rewrite_entry};
 use super::session::{FIRST_RETRY_BACKOFF, FenceError, MAX_RETRY_BACKOFF, Session};
+use super::shares::{split_by_mirror_group, surrogate_floor};
 
 /// How long one attempt of one cut can take in one group.
 const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -48,13 +51,27 @@ pub(super) fn seal_vshard(state: &SharedState, group: u64) -> crate::Result<u32>
 impl Session<'_> {
     pub(super) async fn apply_cut(&mut self, batch: CutBatch) -> Result<(), SessionEnd> {
         let target = batch.metadata_target.max(self.metadata.position);
-        self.fetch_metadata(target).await?;
+        // The barriers are in hand, so every reservation behind a value of this
+        // cut committed at or below this answer. The cut waits for it, and a
+        // source that cannot answer raises no cut.
+        let horizon = self.metadata_horizon(target).await?;
+        self.fetch_metadata(horizon).await?;
         let catalog = {
-            let mut check = CatalogCheck::new(self.state.credentials.catalog(), self.database);
-            self.metadata.take_through(target, &mut check)?
+            let mut check = CatalogCheck::new(
+                self.state.credentials.catalog(),
+                self.database,
+                DescriptorRule::Log,
+            );
+            let mut payloads = self.metadata.take_through(target, &mut check)?;
+            for source in &batch.entries {
+                check.check_entry_schema(&source.entry, source.group, source.index)?;
+            }
+            payloads.extend(self.metadata.counters_through(horizon)?);
+            payloads
         };
         let resume = positions(&self.cursors, &self.metadata);
         let seals = self.commit_batch(&batch).await?;
+        self.raise_surrogate_floor(&batch).await?;
         self.raise_cut(&batch, catalog, resume.clone()).await?;
         self.ready_cut = batch.cut;
         self.last_raise = Instant::now();
@@ -65,6 +82,45 @@ impl Session<'_> {
             seals,
         });
         self.ack(batch.cut, resume).await
+    }
+
+    /// Raise every node's surrogate floor above the cut, ahead of its `MirrorCut`.
+    ///
+    /// A node reads the cut ready only after it applied the floor, in log order.
+    /// So every node's mint on a promoted mirror carves above each carried value.
+    async fn raise_surrogate_floor(&mut self, batch: &CutBatch) -> Result<(), SessionEnd> {
+        let floor = surrogate_floor(
+            batch.mark.surrogate_hwm,
+            batch.entries.iter().map(|source| &source.entry),
+        );
+        if floor <= self.surrogate_floor {
+            return Ok(());
+        }
+        let mut backoff = FIRST_RETRY_BACKOFF;
+        loop {
+            if !self.still_leads() {
+                return Err(SessionEnd::LostLeadership);
+            }
+            match propose_surrogate_hwm(self.state, floor).await {
+                Ok(_) => {
+                    self.surrogate_floor = floor;
+                    return Ok(());
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        cut = batch.cut,
+                        floor,
+                        %error,
+                        "mirror applier: the surrogate floor did not land"
+                    );
+                    if let Some(failure) = self.halted_apply() {
+                        return Err(failure.into());
+                    }
+                }
+            }
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(MAX_RETRY_BACKOFF);
+        }
     }
 
     /// Commit the cut's entries and seals in every mirror group. A failed
@@ -135,6 +191,7 @@ impl Session<'_> {
         // This node's own catalog, which holds the mirror. Every replica waits
         // for it, so none reads "unknown database" as "dropped".
         let metadata_floor = self.state.applied_index_watcher(METADATA_GROUP_ID).floor();
+        let history_floor_ms = self.history_floor_ms()?;
         let mut proposals: Vec<GroupProposal> = routed_groups(self.state)
             .into_iter()
             .filter(|group| *group != SEQUENCER_GROUP_ID && *group != METADATA_GROUP_ID)
@@ -145,8 +202,11 @@ impl Session<'_> {
             .collect();
         for source in &batch.entries {
             let shares =
-                split_tenant_purge(&source.entry, |vshard| group_of_vshard(self.state, vshard))?;
+                split_by_mirror_group(&source.entry, |vshard| group_of_vshard(self.state, vshard))?;
             for mut entry in shares {
+                if let ReplicatedWrite::RetentionDrop { op, .. } = &mut entry.write {
+                    op.lower_cutoff(history_floor_ms);
+                }
                 rewrite_entry(
                     &mut entry,
                     MirrorEntryStamp {
@@ -193,6 +253,24 @@ impl Session<'_> {
             proposal.entries.push((vshard, seal.encode()?));
         }
         Ok(proposals)
+    }
+
+    /// The newest millisecond an audit purge reaches on this mirror.
+    ///
+    /// A mirror's reads run at its applied cut's cap, however far that trails the
+    /// source. A source's purge can name a cutoff past it. The applier lowers the
+    /// cutoff in the entry, so every replica of the mirror purges one set, and a
+    /// later decision takes the rest.
+    fn history_floor_ms(&self) -> crate::Result<i64> {
+        let cap = self
+            .state
+            .credentials
+            .catalog()
+            .get_mirror_cut_state(self.database)?
+            .map_or(0, |state| state.cap_ordinal);
+        let window = i64::try_from(snapshot_max_hold(self.state).as_nanos()).unwrap_or(i64::MAX);
+        let floor = mirror_floor(cap, window);
+        Ok(nodedb_types::ordinal_to_ms(floor.saturating_add(1)).saturating_sub(1))
     }
 
     fn floors_of(&self, batch: &CutBatch, group: u64) -> crate::Result<Vec<MirrorCalvinFloor>> {

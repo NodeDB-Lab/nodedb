@@ -24,7 +24,7 @@ use nodedb_types::{DatabaseId, MirrorPin, MirrorPinState};
 
 use crate::control::catalog_entry::CatalogEntry;
 use crate::control::metadata_proposer::propose_catalog_entry_async;
-use crate::control::security::auth_fence::cluster::routed_groups;
+use crate::control::security::auth_fence::cluster::{confirmed_read_index, routed_groups};
 use crate::control::state::SharedState;
 
 use super::bootstrap::{CaptureAnswer, CaptureSlots, start_capture};
@@ -33,6 +33,9 @@ use super::filter::{data_entry_leaves, metadata_payloads};
 /// How often an ack moves the replicated pin. An ack between two of these moves
 /// nothing, so a busy link never churns the metadata log.
 const PIN_WRITE_INTERVAL: Duration = Duration::from_secs(10);
+
+/// How long a metadata tail waits for its leader's confirmed commit.
+const METADATA_HORIZON_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Refuse a hello the catalog never needs to see.
 fn check_hello(
@@ -224,6 +227,13 @@ impl SourceService {
             .map_err(unavailable)
     }
 
+    async fn remove_pin(&self, link_id: u64) -> Result<(), MirrorRefusal> {
+        propose_catalog_entry_async(&self.state, &CatalogEntry::DeleteMirrorPin { link_id })
+            .await
+            .map(drop)
+            .map_err(unavailable)
+    }
+
     /// Wait until this replica applied `from_index`, or `wait` passes.
     async fn await_entry(&self, group: u64, from_index: u64, wait: Duration) {
         if wait.is_zero() {
@@ -290,9 +300,23 @@ impl MirrorSourceService for SourceService {
             });
         }
         self.refuse_clone(&hello.source_database, database)?;
-        match self.state.mirror.pins.get(hello.link_id) {
-            Some(pin) => check_rehello(client, hello.link_id, database.as_u64(), &pin)?,
-            None => {
+        let held = self.state.mirror.pins.get(hello.link_id);
+        let replaces = hello.fresh
+            && held.as_ref().is_some_and(|pin| {
+                pin.client == client.name
+                    && pin.database == database.as_u64()
+                    && matches!(pin.state, MirrorPinState::Expired)
+            });
+        match held {
+            Some(pin) if !replaces => {
+                check_rehello(client, hello.link_id, database.as_u64(), &pin)?;
+            }
+            Some(_) | None => {
+                // A pin's row never moves back to live, so a rebuild's pin
+                // replaces the expired one.
+                if replaces {
+                    self.remove_pin(hello.link_id).await?;
+                }
                 self.propose_pin(MirrorPin {
                     link_id: hello.link_id,
                     client: client.name.clone(),
@@ -360,10 +384,23 @@ impl MirrorSourceService for SourceService {
         }
         let (entries, next_index) =
             filtered_batch(request.group, database, request.from_index, read.entries);
+        // A metadata answer names the group's commit as its leader confirms it. A
+        // lagging replica's own view can sit below an entry another node applied.
+        let commit_index =
+            if request.group == METADATA_GROUP_ID && self.state.raft_read_gate.get().is_some() {
+                confirmed_read_index(&self.state, METADATA_GROUP_ID, METADATA_HORIZON_TIMEOUT)
+                    .await
+                    .map_err(|error| MirrorRefusal::Unavailable {
+                        detail: error.to_string(),
+                    })?
+                    .max(read.commit_index)
+            } else {
+                read.commit_index
+            };
         Ok(MirrorTailBatch {
             entries,
             next_index,
-            commit_index: read.commit_index,
+            commit_index,
             source_hlc_ns: self.state.hlc_clock.now().wall_ns,
             first_available: read.first_available,
         })
@@ -386,6 +423,20 @@ impl MirrorSourceService for SourceService {
             ..pin
         })
         .await
+    }
+
+    /// Only the owner gives back a pin, whatever state it holds. A pin already
+    /// gone answers as released, so a repeat is safe.
+    async fn release(&self, client: &MirrorClient, link_id: u64) -> Result<(), MirrorRefusal> {
+        let Some(pin) = self.state.mirror.pins.get(link_id) else {
+            return Ok(());
+        };
+        if pin.client != client.name {
+            return Err(MirrorRefusal::LinkNotOwned { link_id });
+        }
+        self.remove_pin(link_id).await?;
+        super::cut_loop::install_pin_ceilings(&self.state);
+        Ok(())
     }
 
     /// The pin names the database, so the request cannot name one of its own.
@@ -445,6 +496,7 @@ mod tests {
             mirror_cluster_id: 2,
             link_id: 7,
             protocol_version: MIRROR_PROTOCOL_VERSION,
+            fresh: false,
         }
     }
 

@@ -2,8 +2,11 @@
 
 //! Sequence runtime types.
 
+use std::collections::VecDeque;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+
+use super::reserve::ReservedRange;
 
 /// Lock-free handle for a single sequence's counter on this node.
 ///
@@ -20,6 +23,11 @@ pub struct SequenceHandle {
     /// Current period key for reset scope tracking. Protected by mutex
     /// because period transitions are rare but must be atomic with counter reset.
     period_key: Mutex<String>,
+    /// The ranges this node reserved and has not handed out, oldest first.
+    reserved: Mutex<VecDeque<ReservedRange>>,
+    /// Rises each time the reserved ranges end. A reservation that started
+    /// before the rise installs nothing.
+    range_generation: AtomicU64,
 }
 
 impl SequenceHandle {
@@ -50,7 +58,93 @@ impl SequenceHandle {
             called: AtomicBool::new(called),
             def,
             period_key: Mutex::new(period_key),
+            reserved: Mutex::new(VecDeque::new()),
+            range_generation: AtomicU64::new(0),
         }
+    }
+
+    /// Hand out the next reserved value. `None` means no range holds one.
+    pub(super) fn take_reserved(&self) -> Option<i64> {
+        let mut ranges = self.reserved.lock().unwrap_or_else(|p| p.into_inner());
+        let front = ranges.front_mut()?;
+        let value = front.next;
+        if value == front.last {
+            ranges.pop_front();
+        } else {
+            front.next = value + self.def.increment;
+        }
+        self.counter.store(value, Ordering::Relaxed);
+        self.called.store(true, Ordering::Relaxed);
+        Some(value)
+    }
+
+    /// The generation a reservation names when it installs its range.
+    pub(super) fn range_generation(&self) -> u64 {
+        self.range_generation.load(Ordering::Acquire)
+    }
+
+    /// Add `range`, unless the ranges ended since `generation`.
+    pub(super) fn install_range(&self, range: ReservedRange, generation: u64) {
+        let mut ranges = self.reserved.lock().unwrap_or_else(|p| p.into_inner());
+        if self.range_generation.load(Ordering::Acquire) != generation {
+            return;
+        }
+        *self.period_key.lock().unwrap_or_else(|p| p.into_inner()) = range.period_key.clone();
+        ranges.push_back(range);
+    }
+
+    /// End the reserved ranges.
+    fn end_ranges(&self) {
+        let mut ranges = self.reserved.lock().unwrap_or_else(|p| p.into_inner());
+        ranges.clear();
+        self.range_generation.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// End the reserved ranges of a period older than `period_key`.
+    pub(super) fn turn_period(&self, period_key: &str) {
+        if period_key.is_empty() {
+            return;
+        }
+        let behind = self
+            .period_key
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_str()
+            < period_key;
+        if behind {
+            self.end_ranges();
+        }
+    }
+
+    /// Refuse a value outside the sequence's bounds.
+    pub(super) fn check_in_range(&self, value: i64) -> Result<(), SequenceError> {
+        if value < self.def.min_value || value > self.def.max_value {
+            return Err(SequenceError::OutOfRange {
+                name: self.def.name.clone(),
+                value,
+                min: self.def.min_value,
+                max: self.def.max_value,
+            });
+        }
+        Ok(())
+    }
+
+    /// Take a replicated counter, as `new` reads a row.
+    pub(super) fn install_state(
+        &self,
+        state: &crate::control::security::catalog::sequence_types::SequenceState,
+    ) {
+        self.end_ranges();
+        let counter = if state.is_called {
+            state.current_value
+        } else {
+            state.current_value.saturating_sub(self.def.increment)
+        };
+        self.counter.store(counter, Ordering::Relaxed);
+        self.called.store(state.is_called, Ordering::Relaxed);
+        state
+            .period_key
+            .clone_into(&mut self.period_key.lock().unwrap_or_else(|p| p.into_inner()));
     }
 
     /// Advance to the next value (lock-free).
@@ -299,6 +393,10 @@ pub enum SequenceError {
     FormatParse { detail: String },
     /// Invalid reset scope.
     InvalidResetScope { detail: String },
+    /// The sequence belongs to a mirror that is not promoted.
+    ReadOnlyMirror { name: String },
+    /// No range landed, and a later call can succeed.
+    Unavailable { name: String, detail: String },
 }
 
 impl std::fmt::Display for SequenceError {
@@ -338,6 +436,15 @@ impl std::fmt::Display for SequenceError {
             }
             SequenceError::InvalidResetScope { detail } => {
                 write!(f, "invalid reset scope: {detail}")
+            }
+            SequenceError::ReadOnlyMirror { name } => {
+                write!(
+                    f,
+                    "sequence \"{name}\" belongs to a read-only mirror; promote it before nextval"
+                )
+            }
+            SequenceError::Unavailable { name, detail } => {
+                write!(f, "sequence \"{name}\" reserved no values: {detail}")
             }
         }
     }

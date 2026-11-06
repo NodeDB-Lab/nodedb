@@ -33,6 +33,9 @@ pub fn apply_to(
     catalog: &SystemCatalog,
 ) -> Result<ApplyOutcome, crate::Error> {
     let outcome = match entry {
+        CatalogEntry::ClaimMirrorDatabase(descriptor) => {
+            mirror_cut::claim_mirror(descriptor, catalog)?
+        }
         CatalogEntry::PutTenantWithAdmin { tenant, admin } => {
             if tenant::put_with_admin(tenant, admin, catalog)? {
                 ApplyOutcome::Applied
@@ -123,6 +126,9 @@ fn apply_to_inner(entry: &CatalogEntry, catalog: &SystemCatalog) -> crate::Resul
             ..
         } => sequence::delete(*database_id, *tenant_id, name, catalog),
         CatalogEntry::PutSequenceState(state) => sequence::put_state(state, catalog),
+        CatalogEntry::ReserveSequenceRange { expected, next } => {
+            sequence::reserve_range(expected.as_deref(), next, catalog)
+        }
         CatalogEntry::PutTrigger(stored) => trigger::put(stored, catalog),
         CatalogEntry::DeleteTrigger {
             database_id,
@@ -191,7 +197,7 @@ fn apply_to_inner(entry: &CatalogEntry, catalog: &SystemCatalog) -> crate::Resul
         } => continuous_aggregate::delete(*database_id, *tenant_id, name, catalog),
         CatalogEntry::PutTenant(stored) => tenant::put(stored, catalog),
         // Applied by `apply_to` so its commit outcome can suppress post-apply.
-        CatalogEntry::PutTenantWithAdmin { .. } => Ok(()),
+        CatalogEntry::PutTenantWithAdmin { .. } | CatalogEntry::ClaimMirrorDatabase(_) => Ok(()),
         CatalogEntry::DeleteTenant { tenant_id } => tenant::delete(*tenant_id, catalog),
         CatalogEntry::PutRlsPolicy(stored) => rls::put(stored, catalog),
         CatalogEntry::DeleteRlsPolicy {

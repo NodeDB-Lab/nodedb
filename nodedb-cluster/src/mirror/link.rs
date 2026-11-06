@@ -7,6 +7,7 @@
 //! bidi stream, so a long poll on one group never blocks another.
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use rand::RngExt as _;
@@ -78,6 +79,8 @@ pub struct CrossClusterLink {
     client_config: quinn::ClientConfig,
     endpoint: quinn::Endpoint,
     state: Mutex<LinkState>,
+    /// Whether each hello asks for a new pin: the mirror starts over.
+    fresh: AtomicBool,
     /// Bytes-in-flight throttle of a bootstrap's transfer.
     pub throttle: SendThrottle,
 }
@@ -94,8 +97,14 @@ impl CrossClusterLink {
             client_config,
             endpoint,
             state: Mutex::new(LinkState::default()),
+            fresh: AtomicBool::new(false),
             throttle,
         }
+    }
+
+    /// Say whether each later hello asks for a new pin.
+    pub fn set_fresh(&self, fresh: bool) {
+        self.fresh.store(fresh, Ordering::Release);
     }
 
     /// A link that dials from its own client endpoint, as `creds` identify it.
@@ -157,6 +166,7 @@ impl CrossClusterLink {
             mirror_cluster_id: self.config.mirror_cluster_id,
             link_id: self.config.link_id,
             protocol_version: MIRROR_PROTOCOL_VERSION,
+            fresh: self.fresh.load(Ordering::Acquire),
         });
         match exchange_on(&connection, &hello).await? {
             MirrorResponse::Hello(ack) => {

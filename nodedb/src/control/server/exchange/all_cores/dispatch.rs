@@ -210,6 +210,7 @@ pub(crate) async fn execute_plan_all_local_cores(
             | MetaOp::Compact
             | MetaOp::Checkpoint
             | MetaOp::RegisterContinuousAggregate { .. }
+            | MetaOp::InstallAggregateImage { .. }
             | MetaOp::UnregisterContinuousAggregate { .. }
             | MetaOp::ListContinuousAggregates
             | MetaOp::ContinuousAggregatesRegistered

@@ -477,6 +477,7 @@ mod tests {
                 ],
             }],
             cagg_image: Vec::new(),
+            cagg_copy_image: Vec::new(),
         }
     }
 

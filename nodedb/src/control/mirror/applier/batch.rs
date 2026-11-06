@@ -22,10 +22,11 @@ use nodedb_types::{DatabaseId, MirrorCutMark, MirrorFailure, MirrorGroupPosition
 use nodedb_cluster::METADATA_GROUP_ID;
 use nodedb_cluster::mirror::{MirrorTailBatch, MirrorTailEntry};
 
+use crate::control::catalog_entry::{self, CatalogEntry};
 use crate::control::wal_replication::ReplicatedEntry;
 use crate::control::wal_replication::types::MirrorCalvinFloor;
 
-use super::rewrite::{CatalogCheck, CheckedEntry, check_data_entry};
+use super::rewrite::{CatalogCheck, CheckedEntry, check_data_entry, poison};
 
 /// One source entry, with where it came from.
 #[derive(Debug)]
@@ -167,6 +168,29 @@ impl MetadataCursor {
         self.position = self.position.max(target);
         Ok(payloads)
     }
+
+    /// The sequence counter entries past the taken position, through `horizon`.
+    /// They stay held, so they apply again in their log place.
+    ///
+    /// A source node hands out a value only once its reservation applied, and a
+    /// mark reads its metadata index ahead of the barriers. So a cut can hold a
+    /// value whose reservation sits past the mark. Each cut carries these entries,
+    /// and a promoted mirror reserves above every value its final cut holds.
+    pub(super) fn counters_through(&self, horizon: u64) -> Result<Vec<Vec<u8>>, MirrorFailure> {
+        let split = self.held.partition_point(|entry| entry.index <= horizon);
+        let mut payloads = Vec::new();
+        for entry in &self.held[..split] {
+            let decoded = catalog_entry::decode(&entry.data)
+                .map_err(|error| poison(METADATA_GROUP_ID, entry.index, error.to_string()))?;
+            if matches!(
+                decoded,
+                CatalogEntry::ReserveSequenceRange { .. } | CatalogEntry::PutSequenceState(_)
+            ) {
+                payloads.push(entry.data.clone());
+            }
+        }
+        Ok(payloads)
+    }
 }
 
 /// The newest barrier any group showed.
@@ -298,6 +322,7 @@ mod tests {
                         seq,
                         cap_ordinal: 5,
                         metadata_index,
+                        surrogate_hwm: 0,
                     },
                     calvin_floors: vec![MirrorCalvinFloor {
                         vshard: 2,

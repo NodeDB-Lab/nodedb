@@ -264,5 +264,13 @@ fn to_physical_plan(
             detail: "CollectionConvert reached to_physical_plan (should have been intercepted)"
                 .into(),
         }),
+        ReplicatedWrite::RetentionDrop { .. } => Err(crate::Error::Internal {
+            detail: "RetentionDrop reached to_physical_plan (should have been intercepted)".into(),
+        }),
+        ReplicatedWrite::TimeseriesAggregateImage { .. } => Err(crate::Error::Internal {
+            detail: "TimeseriesAggregateImage reached to_physical_plan (should have been \
+                intercepted)"
+                .into(),
+        }),
     }
 }

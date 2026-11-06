@@ -5,14 +5,17 @@
 //! Spawned on the Event Plane alongside the cron scheduler. On each evaluation
 //! cycle, iterates all enabled retention policies and for each:
 //!
-//! 1. Dispatches `EnforceTimeseriesRetention` to drop expired raw partitions
-//!    (only if the next tier's aggregate covers that time range).
-//! 2. Dispatches `ApplyContinuousAggRetention` to drop expired aggregate buckets.
+//! 1. Drops expired raw partitions (only if the next tier's aggregate covers that
+//!    time range).
+//! 2. Drops expired aggregate buckets.
 //! 3. Archives partitions to S3 for tiers with `ARCHIVE TO` (future: not yet wired).
 //!
-//! Runs on the Event Plane (Send + Sync, Tokio). NEVER does storage I/O directly —
-//! all enforcement is dispatched to the Data Plane via MetaOp.
+//! The metadata leader decides, on one clock read per pass. Each decision enters
+//! every data group's log, and every replica and mirror drops at that position.
+//!
+//! Runs on the Event Plane (Send + Sync, Tokio). NEVER does storage I/O directly.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,9 +23,10 @@ use tokio::sync::watch;
 use tracing::{info, warn};
 
 use crate::bridge::envelope::PhysicalPlan;
+use crate::control::retention_log::{decides_retention, enact_retention};
 use crate::control::state::SharedState;
+use crate::control::wal_replication::types::RetentionOp;
 use crate::engine::timeseries::retention_policy::RetentionPolicyRegistry;
-use crate::engine::timeseries::retention_policy::rooted_aggregates::aggregates_rooted_at;
 use crate::types::{DatabaseId, TenantId};
 use nodedb_physical::physical_plan::MetaOp;
 
@@ -69,18 +73,17 @@ async fn enforcement_loop(
         }
 
         let policies = registry.list_all_enabled();
-        if policies.is_empty() {
+        if policies.is_empty() || !decides_retention(&state) {
             continue;
         }
 
+        let decided_ms = nodedb_types::ordinal_to_ms(nodedb_types::wall_now_ns_i64());
+        let mut bucket_passes: BTreeSet<(u64, u64)> = BTreeSet::new();
         for policy in &policies {
-            // A read-only mirror drops no partition on its own clock. The
+            // A mirror decides nothing: its drops arrive through the log. The
             // policy runs from the database's PROMOTE.
-            if state
-                .mirror
-                .fence
-                .is_read_only(DatabaseId::new(policy.database_id))
-            {
+            let database = DatabaseId::new(policy.database_id);
+            if state.mirror.fence.is_read_only(database) {
                 continue;
             }
             let tenant_id = TenantId::new(policy.tenant_id);
@@ -97,60 +100,21 @@ async fn enforcement_loop(
                     true // No downsample tiers — safe to drop raw unconditionally.
                 };
 
-                let aggregates = if safe_to_drop {
-                    match aggregates_rooted_at(
-                        &state,
-                        &registry,
-                        policy.database_id,
-                        policy.tenant_id,
-                        &policy.collection,
-                    ) {
-                        Ok(aggregates) => Some(aggregates),
-                        Err(e) => {
-                            warn!(
-                                policy = policy.name,
-                                collection = policy.collection,
-                                error = %e,
-                                "skipping raw retention: the aggregates rooted at the \
-                                 collection could not be read; the next pass retries"
-                            );
-                            None
-                        }
-                    }
-                } else {
-                    None
-                };
-                if let Some(aggregates) = aggregates {
-                    let plan = PhysicalPlan::Meta(MetaOp::EnforceTimeseriesRetention {
-                        collection: nodedb_types::QualifiedCollection::new(
-                            DatabaseId::new(policy.database_id),
-                            &policy.collection,
-                        ),
+                if safe_to_drop {
+                    let op = RetentionOp::TimeseriesPartitions {
+                        collection: policy.collection.clone(),
                         max_age_ms: raw_tier.retain_ms as i64,
-                        aggregates,
-                    });
-
-                    if let Err(e) =
-                        crate::control::server::shared::ddl::sync_dispatch::dispatch_system(
-                            &state,
-                            crate::control::server::shared::ddl::sync_dispatch::SystemTask::new(
-                                crate::control::server::shared::ddl::sync_dispatch::SystemReason::RetentionEnforcement,
-                                tenant_id,
-                                nodedb_types::CollectionKey::from_bare(DatabaseId::new(policy.database_id), &policy.collection),
-                                plan,
-                            ),
-                            Duration::from_secs(30),
-                        )
-                        .await
-                    {
+                        decided_ms,
+                    };
+                    if let Err(e) = enact_retention(&state, tenant_id, database, op).await {
                         warn!(
                             policy = policy.name,
                             collection = policy.collection,
                             error = %e,
-                            "failed to enforce raw tier retention"
+                            "raw tier retention did not land; the next pass decides again"
                         );
                     }
-                } else if !safe_to_drop {
+                } else {
                     warn!(
                         policy = policy.name,
                         collection = policy.collection,
@@ -159,27 +123,17 @@ async fn enforcement_loop(
                 }
             }
 
-            // Apply retention to continuous aggregate buckets.
-            let plan = PhysicalPlan::Meta(MetaOp::ApplyContinuousAggRetention {
-                skip_databases: state.mirror.fence.read_only_ids(),
-            });
-            if let Err(e) = crate::control::server::shared::ddl::sync_dispatch::dispatch_system(
-                &state,
-                crate::control::server::shared::ddl::sync_dispatch::SystemTask::new(
-                    crate::control::server::shared::ddl::sync_dispatch::SystemReason::RetentionEnforcement,
-                    tenant_id,
-                    nodedb_types::CollectionKey::from_bare(DatabaseId::new(policy.database_id), &policy.collection),
-                    plan,
-                ),
-                Duration::from_secs(30),
-            )
-            .await
-            {
-                warn!(
-                    policy = policy.name,
-                    error = %e,
-                    "failed to apply continuous aggregate retention"
-                );
+            // Apply retention to the tenant's continuous aggregate buckets, once
+            // per pass however many policies it holds.
+            if bucket_passes.insert((policy.database_id, policy.tenant_id)) {
+                let op = RetentionOp::ContinuousAggregates { decided_ms };
+                if let Err(e) = enact_retention(&state, tenant_id, database, op).await {
+                    warn!(
+                        policy = policy.name,
+                        error = %e,
+                        "continuous aggregate retention did not land; the next pass decides again"
+                    );
+                }
             }
         }
     }

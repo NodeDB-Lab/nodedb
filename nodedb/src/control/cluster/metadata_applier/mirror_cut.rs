@@ -4,7 +4,9 @@
 //! raise the mirror's cut state.
 
 use nodedb_cluster::MetadataEntry;
-use nodedb_types::{DatabaseId, MirrorCutAdvance, MirrorStatus};
+use nodedb_types::{
+    DatabaseId, MirrorCutAdvance, MirrorCutState, MirrorFailure, MirrorStatus, MirrorStatusStep,
+};
 use tracing::debug;
 
 use super::catalog_ddl::DescriptorCheck;
@@ -91,7 +93,15 @@ impl MetadataCommitApplier {
                 let ddl = MetadataEntry::CatalogDdl {
                     payload: payload.clone(),
                 };
-                self.apply_catalog_ddl_as(&ddl, raft_index, check).await?;
+                match self.apply_catalog_ddl_as(&ddl, raft_index, check).await {
+                    Ok(()) => {}
+                    Err(error @ crate::Error::DescriptorVersionAnomaly { .. }) => {
+                        return self
+                            .stop_link_on_anomaly(database, advance, &current, &error, raft_index)
+                            .await;
+                    }
+                    Err(error) => return Err(error),
+                }
             }
         }
         let state = MetadataEntry::CatalogDdl {
@@ -101,6 +111,45 @@ impl MetadataCommitApplier {
             })?,
         };
         self.apply_catalog_ddl(&state, raft_index).await
+    }
+
+    /// Stop one link on a descriptor the cut carries that cannot apply.
+    ///
+    /// The applier's check runs before the propose, so a race reaches this path.
+    /// Every replica reads the same row in log order and takes this path too.
+    /// The fence skips the epoch's held entries, and the metadata group moves on.
+    async fn stop_link_on_anomaly(
+        &self,
+        database: u64,
+        advance: &MirrorCutAdvance,
+        current: &MirrorCutState,
+        error: &crate::Error,
+        raft_index: u64,
+    ) -> Result<(), crate::Error> {
+        let mut fenced = current.clone();
+        fenced.fence_epoch = current.fence_epoch.max(advance.epoch.saturating_add(1));
+        let failure = MirrorFailure::ApplyError {
+            source_group: nodedb_cluster::METADATA_GROUP_ID,
+            source_index: 0,
+            detail: error.to_string(),
+        };
+        let entries = [
+            CatalogEntry::PutMirrorCutState {
+                database_id: database,
+                state: Box::new(fenced),
+            },
+            CatalogEntry::StepMirrorStatus {
+                database_id: database,
+                step: MirrorStatusStep::Fail { failure },
+            },
+        ];
+        for entry in &entries {
+            let ddl = MetadataEntry::CatalogDdl {
+                payload: catalog_entry::encode(entry)?,
+            };
+            self.apply_catalog_ddl(&ddl, raft_index).await?;
+        }
+        Ok(())
     }
 }
 
@@ -144,6 +193,7 @@ mod tests {
                     group_id: 1,
                     log_index: cut * 10,
                 }],
+                source_timeline: None,
             },
             catalog,
         })
@@ -211,19 +261,40 @@ mod tests {
     }
 
     /// Once the mirror follows, a cut carries a log, and a gap there is
-    /// divergence. The check that catches it stays on.
+    /// divergence. The gap stops this link. The metadata group moves on.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_following_mirrors_cut_keeps_the_gap_check() {
+    async fn a_descriptor_gap_stops_the_link_and_never_the_metadata_group() {
         let (applier, state, _tmp) = following_mirror().await;
         assert_eq!(
             applier
                 .apply(&[(2, cut(1, 3, vec![collection_row(2)]))])
                 .await,
-            0,
-            "a halted entry applies nothing in its batch"
+            2,
         );
         assert_eq!(collection_version(&state), None);
-        assert!(state.metadata_apply_wedge.is_wedged());
+        assert!(!state.metadata_apply_wedge.is_wedged());
+        let catalog = state.credentials.catalog();
+        let origin = catalog
+            .get_database(mirror_id())
+            .expect("read")
+            .expect("the row")
+            .mirror_origin
+            .expect("a mirror");
+        assert!(matches!(
+            origin.status,
+            MirrorStatus::Failed {
+                failure: MirrorFailure::ApplyError { .. }
+            }
+        ));
+        let row = catalog
+            .get_mirror_cut_state(mirror_id())
+            .expect("read")
+            .expect("the row");
+        assert_eq!(row.ready_cut, 0);
+        assert_eq!(
+            row.fence_epoch, 4,
+            "the fence skips the epoch's held entries"
+        );
     }
 
     /// The catalog entries and the raised cut land at one log index, and the
@@ -320,9 +391,10 @@ mod tests {
     async fn a_sealed_mirror_takes_no_cut() {
         let (applier, state, _tmp) = following_mirror().await;
         assert_eq!(applier.apply(&[(2, cut(1, 4, Vec::new()))]).await, 2);
-        let seal = ddl(&CatalogEntry::PutDatabase(Box::new(descriptor(
-            MirrorStatus::Promoting { final_cut: 1 },
-        ))));
+        let seal = ddl(&CatalogEntry::StepMirrorStatus {
+            database_id: DB,
+            step: nodedb_types::MirrorStatusStep::Seal,
+        });
         assert_eq!(applier.apply(&[(3, seal)]).await, 3);
         assert_eq!(applier.apply(&[(4, cut(2, 4, Vec::new()))]).await, 4);
 

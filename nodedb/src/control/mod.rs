@@ -49,6 +49,7 @@ pub mod propose_outcome;
 pub mod read_cut;
 pub mod relation_name;
 pub mod request_tracker;
+pub mod retention_log;
 pub mod rolling_upgrade;
 pub mod router;
 pub mod security;

@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::control::security::catalog::sequence_types::{SequenceState, StoredSequence};
 use crate::control::state::SharedState;
@@ -20,7 +20,16 @@ pub fn put(stored: StoredSequence, shared: Arc<SharedState>) {
         &stored.owner,
         &shared,
     );
-    if let Err(e) = shared.sequence_registry.create(stored.clone()) {
+    // A capture's image installs the counter row ahead of its definition.
+    let held = shared
+        .credentials
+        .catalog()
+        .get_sequence_state(stored.database_id, stored.tenant_id, &stored.name)
+        .unwrap_or_else(|e| {
+            warn!(sequence = %stored.name, error = %e, "catalog_entry: sequence row did not read");
+            None
+        });
+    if let Err(e) = shared.sequence_registry.create_at(stored.clone(), held) {
         debug!(
             sequence = %stored.name,
             database = stored.database_id,
@@ -50,21 +59,8 @@ pub fn delete(database_id: u64, tenant_id: u64, name: String, shared: Arc<Shared
 }
 
 pub fn put_state(state: SequenceState, shared: Arc<SharedState>) {
-    // ALTER SEQUENCE RESTART ships a fresh `SequenceState`;
-    // replicate the counter into the in-memory registry handle so
-    // `NEXTVAL` on every node returns from the new value.
-    if let Err(e) = shared.sequence_registry.restart(
-        state.database_id,
-        state.tenant_id,
-        &state.name,
-        state.current_value,
-    ) {
-        debug!(
-            sequence = %state.name,
-            database = state.database_id,
-            tenant = state.tenant_id,
-            error = %e,
-            "catalog_entry: sequence_registry restart (ignored — sequence may be missing on fresh follower)"
-        );
-    }
+    // ALTER SEQUENCE RESTART and setval ship a fresh `SequenceState`. Every node
+    // takes the counter and ends its ranges, so `nextval` continues from it. A
+    // definition that arrives later reads the row.
+    shared.sequence_registry.install_state(&state);
 }

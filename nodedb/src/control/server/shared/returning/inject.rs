@@ -388,6 +388,7 @@ pub fn inject_returning_spec(plan: &mut PhysicalPlan, spec: ReturningSpec) {
             | MetaOp::Compact
             | MetaOp::Checkpoint
             | MetaOp::RegisterContinuousAggregate { .. }
+            | MetaOp::InstallAggregateImage { .. }
             | MetaOp::UnregisterContinuousAggregate { .. }
             | MetaOp::ListContinuousAggregates
             | MetaOp::ContinuousAggregatesRegistered

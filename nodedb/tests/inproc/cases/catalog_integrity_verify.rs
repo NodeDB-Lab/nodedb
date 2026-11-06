@@ -195,6 +195,7 @@ fn classify(entry: &CatalogEntry) -> VariantClass {
         CatalogEntry::DeleteIndexRecord { .. } => VariantClass::Exempt,
 
         CatalogEntry::PutSequenceState(_) => VariantClass::Exempt,
+        CatalogEntry::ReserveSequenceRange { .. } => VariantClass::Exempt,
         CatalogEntry::PutUser(_) => VariantClass::Exempt,
         CatalogEntry::DropUser { .. } => VariantClass::Exempt,
         CatalogEntry::PutRole(_) => VariantClass::Exempt,
@@ -316,6 +317,8 @@ fn classify(entry: &CatalogEntry) -> VariantClass {
         // A status step moves one database's status. It names no owned catalog
         // object.
         CatalogEntry::StepMirrorStatus { .. } => VariantClass::Exempt,
+        // A database descriptor carries no ownership invariant.
+        CatalogEntry::ClaimMirrorDatabase(_) => VariantClass::Exempt,
         // A retention pin is a link's hold on the Raft logs. It names no owned
         // catalog object.
         CatalogEntry::PutMirrorPin(_) | CatalogEntry::DeleteMirrorPin { .. } => {

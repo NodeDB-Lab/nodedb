@@ -12,7 +12,28 @@ use nodedb_types::{DatabaseId, Hlc};
 ///
 /// A promoted mirror keeps its cut state. A replica whose data group lags the
 /// promotion still decides each held entry from that row.
+///
+/// A `PutDatabase` never moves a mirror's status: the entry was planned against
+/// an older read, and `StepMirrorStatus` owns the status. The row's own status
+/// survives, whatever the entry carries.
 pub fn put(descriptor: &DatabaseDescriptor, catalog: &SystemCatalog) -> crate::Result<()> {
+    let held = catalog.get_database(descriptor.id).map_err(|e| {
+        catalog_err(
+            &format!("get_database (database {})", descriptor.id.as_u64()),
+            e,
+        )
+    })?;
+    let mut descriptor = descriptor.clone();
+    if let Some(held) = held
+        && let (Some(row), Some(origin)) = (
+            held.mirror_origin.as_ref(),
+            descriptor.mirror_origin.as_mut(),
+        )
+    {
+        origin.status = row.status.clone();
+        descriptor.status = held.status;
+    }
+    let descriptor = &descriptor;
     catalog.put_database(descriptor).map_err(|e| {
         catalog_err(
             &format!(
@@ -377,6 +398,7 @@ mod tests {
             positions: Vec::new(),
             epochs: Vec::new(),
             fence_epoch: 0,
+            source_timeline: None,
         };
         catalog
             .raise_mirror_cut_state(db, &state)

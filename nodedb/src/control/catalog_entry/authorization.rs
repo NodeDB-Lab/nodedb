@@ -59,10 +59,12 @@ impl CatalogEntry {
             | Self::PutDatabaseGrant { .. }
             | Self::DeleteDatabaseGrant { .. }
             | Self::CloneDatabase { .. }
-            | Self::StepMirrorStatus { .. } => true,
+            | Self::StepMirrorStatus { .. }
+            | Self::ClaimMirrorDatabase(_) => true,
             Self::PutSequence(_)
             | Self::DeleteSequence { .. }
             | Self::PutSequenceState(_)
+            | Self::ReserveSequenceRange { .. }
             | Self::PutTrigger(_)
             | Self::DeleteTrigger { .. }
             | Self::PutFunction(_)

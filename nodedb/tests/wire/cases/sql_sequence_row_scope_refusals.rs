@@ -25,6 +25,16 @@ async fn seed(server: &TestServer) {
         .unwrap();
 }
 
+/// A rollback or a node stop leaves a gap, so `GAP_FREE` refuses rather than make
+/// a promise it breaks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_gap_free_sequence_is_refused() {
+    let server = TestServer::start().await;
+    server
+        .expect_error("CREATE SEQUENCE no_gaps GAP_FREE", "0A000")
+        .await;
+}
+
 /// `ORDER BY` sorts before the SELECT list is materialized, so the accessor
 /// there would decide row order from side-effecting state.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

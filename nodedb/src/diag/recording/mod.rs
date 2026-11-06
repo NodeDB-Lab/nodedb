@@ -75,7 +75,7 @@ pub use lease::{
     ddl_cleanup_not_completed, descriptor_drain_not_ended, descriptor_lease_not_renewed,
     descriptor_lease_release_dropped,
 };
-pub use mirror::mirror_status_unread;
+pub use mirror::{mirror_link_stopped, mirror_status_unread};
 pub use outcome_floor::{write_window_held, write_window_leaked};
 pub use quota::{
     quota_row_invalid, quota_row_undecodable, quota_row_write_failed, quota_scope_purge_incomplete,
@@ -94,7 +94,7 @@ pub use recovery::{
 pub use redo_stream::{
     redo_abandon_given_up, redo_snapshot_debt_not_recorded, redo_stream_lost_here,
 };
-pub use retention::retention_autowire_orphaned;
+pub use retention::{retention_autowire_orphaned, sequence_restart_failed};
 pub use shared::entry_kind;
 pub use storage_bytes::{
     storage_bytes_residue, storage_bytes_sample_failed, storage_bytes_underflow,

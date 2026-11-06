@@ -206,6 +206,38 @@ pub(crate) async fn action_firing(
     delivery_gate(node_id, &format!("trigger::{point}"), shutdown).await
 }
 
+/// The gate before a node finishes a sealed PROMOTE, named
+/// [`crate::control::mirror::applier::PROMOTE_FINISH_FAIL_POINT`].
+///
+/// Returns `false` when the node shuts down while parked.
+pub(crate) async fn before_promote_finish(
+    node_id: u64,
+    shutdown: tokio::sync::watch::Receiver<bool>,
+) -> bool {
+    delivery_gate(
+        node_id,
+        crate::control::mirror::applier::PROMOTE_FINISH_FAIL_POINT,
+        shutdown,
+    )
+    .await
+}
+
+/// The gate between a source cut's mark and its barriers, named
+/// [`crate::control::mirror::source::cut_loop::CUT_BARRIER_FAIL_POINT`].
+///
+/// Returns `false` when the node shuts down while parked.
+pub(crate) async fn before_mirror_cut_barrier(
+    node_id: u64,
+    shutdown: tokio::sync::watch::Receiver<bool>,
+) -> bool {
+    delivery_gate(
+        node_id,
+        crate::control::mirror::source::cut_loop::CUT_BARRIER_FAIL_POINT,
+        shutdown,
+    )
+    .await
+}
+
 /// Park on gate `name` of node `node_id` until it is released or the node
 /// shuts down.
 async fn delivery_gate(

@@ -84,6 +84,7 @@ pub(super) fn inject_meta(ctx: &RlsCtx<'_>, op: &mut MetaOp) -> crate::Result<()
         | MetaOp::Compact
         | MetaOp::Checkpoint
         | MetaOp::RegisterContinuousAggregate { .. }
+        | MetaOp::InstallAggregateImage { .. }
         | MetaOp::UnregisterContinuousAggregate { .. }
         | MetaOp::ListContinuousAggregates
         | MetaOp::ContinuousAggregatesRegistered

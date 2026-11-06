@@ -180,7 +180,7 @@ pub(super) async fn read_mirror(mirror: &TestCluster, name: &str) {
 }
 
 /// Each row of `messages`, its cells joined, sorted.
-fn joined_rows(messages: &[tokio_postgres::SimpleQueryMessage]) -> Vec<String> {
+pub(super) fn joined_rows(messages: &[tokio_postgres::SimpleQueryMessage]) -> Vec<String> {
     let mut out: Vec<String> = messages
         .iter()
         .filter_map(|message| match message {

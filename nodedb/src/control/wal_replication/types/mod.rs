@@ -24,6 +24,7 @@ mod aliases;
 mod redo_chunk_wire;
 mod replicated_entry;
 mod replicated_write;
+mod retention_op;
 mod system_span;
 mod transaction_redo_wire;
 mod wire_shapes;
@@ -35,6 +36,7 @@ pub use aliases::{
 pub use redo_chunk_wire::{RedoBody, RedoContent};
 pub use replicated_entry::{CollectionIncarnation, ReplicatedEntry};
 pub use replicated_write::ReplicatedWrite;
+pub use retention_op::RetentionOp;
 pub(crate) use system_span::columnar_rows;
 pub use transaction_redo_wire::{CalvinRedoMeta, ReplicatedEventSource, ReplicatedIdentity};
 pub use wire_shapes::{

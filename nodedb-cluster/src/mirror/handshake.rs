@@ -36,6 +36,9 @@ pub struct MirrorHello {
     pub link_id: u64,
     /// Wire protocol version for this link.
     pub protocol_version: u16,
+    /// The mirror holds no place in the source's log and takes a new capture.
+    /// The source replaces an expired pin of this link with a new one.
+    pub fresh: bool,
 }
 
 /// What the source tells a mirror it accepted.

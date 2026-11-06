@@ -303,6 +303,7 @@ fn meta_read_key(op: &MetaOp) -> ReadKey {
         | MetaOp::Compact
         | MetaOp::Checkpoint
         | MetaOp::RegisterContinuousAggregate { .. }
+        | MetaOp::InstallAggregateImage { .. }
         | MetaOp::UnregisterContinuousAggregate { .. }
         | MetaOp::ListContinuousAggregates
         | MetaOp::ContinuousAggregatesRegistered

@@ -124,6 +124,24 @@ async fn mirror_database_refuses_what_it_cannot_follow() {
         "uses on this cluster",
     )
     .await;
+    // The hello pinned the source's log. The refusal releases the pin.
+    wait_for(
+        "the refused statement leaves no pin on the source",
+        Duration::from_secs(30),
+        Duration::from_millis(100),
+        || {
+            !source.nodes.iter().any(|node| {
+                node.shared
+                    .credentials
+                    .catalog()
+                    .list_mirror_pins()
+                    .expect("pins")
+                    .iter()
+                    .any(|pin| pin.database == taken_id.as_u64())
+            })
+        },
+    )
+    .await;
 
     // A second mirror of one source database.
     mirror

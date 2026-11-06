@@ -108,15 +108,15 @@ pub async fn purge_tenant(
 
 /// Each data group's vShards, by group. A group with no vShard holds no user
 /// data, as the metadata group does.
-fn data_groups(state: &SharedState) -> crate::Result<BTreeMap<u64, Vec<u32>>> {
+pub(crate) fn data_groups(state: &SharedState) -> crate::Result<BTreeMap<u64, Vec<u32>>> {
     let routing = state
         .cluster_routing
         .as_ref()
         .ok_or_else(|| crate::Error::Internal {
-            detail: "PURGE TENANT: this node has no cluster routing table".into(),
+            detail: "this node has no cluster routing table".into(),
         })?;
     let table = routing.read().map_err(|_| crate::Error::Internal {
-        detail: "PURGE TENANT: the cluster routing table lock is poisoned".into(),
+        detail: "the cluster routing table lock is poisoned".into(),
     })?;
     Ok(table
         .group_ids()

@@ -50,6 +50,10 @@ impl CoreLoop {
                 self.response_ok(task)
             }
 
+            MetaOp::InstallAggregateImage { root, image } => {
+                self.execute_cagg_copy_install(task, root, image)
+            }
+
             MetaOp::UnregisterContinuousAggregate { name } => {
                 self.continuous_agg_mgr.unregister(
                     task.request.database_id.as_u64(),
@@ -210,15 +214,17 @@ impl CoreLoop {
             MetaOp::EnforceTimeseriesRetention {
                 collection,
                 max_age_ms,
+                decided_ms,
                 aggregates,
             } => self.meta_enforce_timeseries_retention(
                 task,
                 collection.as_str(),
                 *max_age_ms,
+                *decided_ms,
                 aggregates,
             ),
-            MetaOp::ApplyContinuousAggRetention { skip_databases } => {
-                self.meta_apply_continuous_agg_retention(task, skip_databases)
+            MetaOp::ApplyContinuousAggRetention { decided_ms } => {
+                self.meta_apply_continuous_agg_retention(task, *decided_ms)
             }
             MetaOp::QueryAggregateWatermark { aggregate_name } => {
                 self.meta_query_aggregate_watermark(task, aggregate_name)

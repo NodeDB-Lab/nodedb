@@ -227,14 +227,24 @@ impl CoreLoop {
         tid: crate::types::TenantId,
     ) -> crate::Result<Vec<TsFlushedCollectionBlob>> {
         let now_ms = self.ingest_now_ms();
-        let mut images: Vec<(String, Vec<u8>)> = Vec::new();
+        let mut images: Vec<(String, Vec<u8>, Vec<u8>)> = Vec::new();
         for (db, root_tid, root) in self.continuous_agg_mgr.root_sources() {
             if db != database_id || root_tid != tid.as_u64() {
                 continue;
             }
+            // Only the owning core holds the root's state. Every other core
+            // holds empty entries, and their blob names the same key as the
+            // owner's: a re-issue keeps one blob per key.
+            if !self.owns_cagg_root(db, &root) {
+                continue;
+            }
+            // Every applied cut folds first, so the image holds no pending
+            // partition, whose name means nothing to a copy.
+            self.complete_cagg_root(db, root_tid, &root, now_ms)?;
             let image = self.capture_cagg_image(db, root_tid, &root, now_ms)?;
             if !image.is_empty() {
-                images.push((format!("{db}:{root_tid}:{root}"), image));
+                let copy_image = self.cagg_copy_image(db, root_tid, &root, &image)?;
+                images.push((format!("{db}:{root_tid}:{root}"), image, copy_image));
             }
         }
 
@@ -311,20 +321,25 @@ impl CoreLoop {
                     collection_key,
                     partitions: partition_blobs,
                     cagg_image: Vec::new(),
+                    cagg_copy_image: Vec::new(),
                 });
             }
         }
 
-        for (collection_key, image) in images {
+        for (collection_key, image, copy_image) in images {
             match result
                 .iter_mut()
                 .find(|blob| blob.collection_key == collection_key)
             {
-                Some(blob) => blob.cagg_image = image,
+                Some(blob) => {
+                    blob.cagg_image = image;
+                    blob.cagg_copy_image = copy_image;
+                }
                 None => result.push(TsFlushedCollectionBlob {
                     collection_key,
                     partitions: Vec::new(),
                     cagg_image: image,
+                    cagg_copy_image: copy_image,
                 }),
             }
         }

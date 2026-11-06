@@ -359,6 +359,12 @@ pub struct TsFlushedCollectionBlob {
     /// so the image and the partitions stay in step. It carries the buckets
     /// folded from partitions raw retention has removed.
     pub cagg_image: Vec<u8>,
+    /// The same aggregates for a copy that re-issues the collection's rows,
+    /// or empty when no aggregate is rooted here. A re-issue keeps no partition
+    /// name, so this image names none. A `Manual` or `Periodic` aggregate
+    /// parks the rows it has not folded until its next cut. Any other holds
+    /// them in its buckets.
+    pub cagg_copy_image: Vec<u8>,
 }
 
 /// Wire blob for one flushed partition directory.
@@ -431,6 +437,7 @@ mod tests {
             collection_key: "1:42:metrics".to_string(),
             partitions: vec![partition],
             cagg_image: vec![1, 2, 3],
+            cagg_copy_image: vec![4, 5],
         };
 
         let bytes = zerompk::to_msgpack_vec(&blob).expect("encode blob");

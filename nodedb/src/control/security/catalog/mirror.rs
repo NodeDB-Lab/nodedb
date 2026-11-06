@@ -160,6 +160,34 @@ impl SystemCatalog {
         Ok(raised)
     }
 
+    /// Forget every cut and position of a mirror that starts over, keeping only
+    /// its fence. A copy of a former epoch then skips on every replica.
+    pub fn reset_mirror_cut_state(&self, mirror_db_id: DatabaseId) -> crate::Result<()> {
+        let fence_epoch = self
+            .get_mirror_cut_state(mirror_db_id)?
+            .map_or(0, |state| state.fence_epoch);
+        let state = MirrorCutState {
+            fence_epoch,
+            ..MirrorCutState::default()
+        };
+        let bytes = zerompk::to_msgpack_vec(&state)
+            .map_err(|e| catalog_err("serialize mirror_cut_state (reset)", e))?;
+        let txn = self
+            .db
+            .begin_write()
+            .map_err(|e| catalog_err("mirror_cut_state begin_write (reset)", e))?;
+        {
+            let mut table = txn
+                .open_table(MIRROR_CUT_STATE)
+                .map_err(|e| catalog_err("open mirror_cut_state (reset)", e))?;
+            table
+                .insert(mirror_db_id.as_u64(), bytes.as_slice())
+                .map_err(|e| catalog_err("insert mirror_cut_state (reset)", e))?;
+        }
+        txn.commit()
+            .map_err(|e| catalog_err("mirror_cut_state reset commit", e))
+    }
+
     /// Remove the cut state of a database that no longer follows a source.
     pub fn delete_mirror_cut_state(&self, mirror_db_id: DatabaseId) -> crate::Result<()> {
         let txn = self
@@ -205,7 +233,29 @@ mod tests {
             }],
             epochs: Vec::new(),
             fence_epoch: 0,
+            source_timeline: None,
         }
+    }
+
+    /// A rebuild forgets every position and cut, and keeps the fence.
+    #[test]
+    fn a_reset_keeps_only_the_fence() {
+        let tmp = TempDir::new().unwrap();
+        let catalog = open_tmp_catalog(&tmp);
+        let db = DatabaseId::new(1300);
+        let held = MirrorCutState {
+            fence_epoch: 7,
+            ..state(5, 4)
+        };
+        catalog.raise_mirror_cut_state(db, &held).unwrap();
+        catalog.reset_mirror_cut_state(db).unwrap();
+        assert_eq!(
+            catalog.get_mirror_cut_state(db).unwrap(),
+            Some(MirrorCutState {
+                fence_epoch: 7,
+                ..MirrorCutState::default()
+            })
+        );
     }
 
     fn pin(link_id: u64, database: u64, log_index: u64) -> MirrorPin {

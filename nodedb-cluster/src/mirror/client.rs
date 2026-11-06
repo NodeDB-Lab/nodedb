@@ -90,6 +90,34 @@ impl MirrorSourceClient {
         self.link.connect().await
     }
 
+    /// Say whether each later hello asks for a new pin.
+    pub fn set_fresh(&self, fresh: bool) {
+        self.link.set_fresh(fresh);
+    }
+
+    /// The link's id on the source.
+    pub fn link_id(&self) -> u64 {
+        self.link.link_id()
+    }
+
+    /// Give back the link's pin on the source. Any replica answers: the removal
+    /// replicates.
+    pub async fn release(&self, link_id: u64) -> Result<(), MirrorError> {
+        match self
+            .link
+            .exchange(&MirrorRequest::Release { link_id })
+            .await?
+        {
+            MirrorResponse::Ack => Ok(()),
+            MirrorResponse::Refused(refusal) => Err(MirrorError::Refused(refusal)),
+            MirrorResponse::Hello(_) | MirrorResponse::Tail(_) | MirrorResponse::Bootstrap(_) => {
+                Err(MirrorError::Refused(MirrorRefusal::Malformed {
+                    detail: "the source answered a release with another response".to_string(),
+                }))
+            }
+        }
+    }
+
     /// Fetch the batch `request` names from the first replica that can answer.
     pub async fn tail(&self, request: &MirrorTailRequest) -> Result<MirrorTailBatch, MirrorError> {
         let wire = MirrorRequest::Tail(request.clone());
@@ -241,6 +269,14 @@ mod tests {
             _request: MirrorBootstrapRequest,
         ) -> Result<Option<CrossClusterSnapshotEnvelope>, MirrorRefusal> {
             Ok(None)
+        }
+
+        async fn release(
+            &self,
+            _client: &MirrorClient,
+            _link_id: u64,
+        ) -> Result<(), MirrorRefusal> {
+            Ok(())
         }
     }
 

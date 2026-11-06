@@ -41,8 +41,9 @@
 use nodedb_physical::physical_plan::MirrorHistoryFloor;
 
 use crate::control::cluster::linearizable_read::groups_hosted_here;
-use crate::control::read_cut::close::close_group_cuts;
+use crate::control::read_cut::close::{close_group_cuts, close_leader_cuts};
 use crate::control::read_cut::{snapshot_max_hold, statement_cap};
+use crate::control::server::shared::ddl::neutral::tenant::purge::data_groups;
 use crate::control::server::shared::session::StatementDeadline;
 use crate::control::state::SharedState;
 
@@ -71,6 +72,31 @@ pub async fn cleanup_horizon(state: &SharedState) -> crate::Result<CleanupHorizo
     let cap = statement_cap(state, nodedb_types::ordinal_to_ms(now_ns)).await?;
     let deadline = StatementDeadline::of_statement(state);
     close_group_cuts(state, &groups_hosted_here(state), cap.cap, deadline).await?;
+    let window = i64::try_from(max_hold.as_nanos()).unwrap_or(i64::MAX);
+    Ok(horizon_of(board, cap.cap, window))
+}
+
+/// Compute the horizon a logged retention decision caps its cutoff at. Closes a
+/// cut at the clock on the leader of every data group, hosted here or not, with
+/// no wait for this node's own replicas.
+///
+/// A logged purge applies at one position of each group's log. So a replica needs
+/// no horizon of its own: every commit after the entry stamps above the closed cut,
+/// and every earlier commit concluded before it.
+pub async fn decided_cleanup_horizon(state: &SharedState) -> crate::Result<CleanupHorizon> {
+    let max_hold = snapshot_max_hold(state);
+    let now_ns = nodedb_types::wall_now_ns_i64();
+    let board =
+        state
+            .read_cut
+            .board()
+            .horizon(state.node_id, cluster_members(state), now_ns, max_hold);
+    let cap = statement_cap(state, nodedb_types::ordinal_to_ms(now_ns)).await?;
+    if state.cluster_routing.is_some() {
+        let groups: Vec<u64> = data_groups(state)?.into_keys().collect();
+        let deadline = StatementDeadline::of_statement(state);
+        close_leader_cuts(state, &groups, cap.cap, deadline).await?;
+    }
     let window = i64::try_from(max_hold.as_nanos()).unwrap_or(i64::MAX);
     Ok(horizon_of(board, cap.cap, window))
 }
@@ -115,7 +141,7 @@ pub fn mirror_floors(state: &SharedState) -> crate::Result<Vec<MirrorHistoryFloo
 
 /// The floor of a mirror whose applied cut caps at `cap`, with the snapshot hold
 /// `window_ns`. A floor is never negative: it purges nothing.
-fn mirror_floor(cap: i64, window_ns: i64) -> i64 {
+pub(crate) fn mirror_floor(cap: i64, window_ns: i64) -> i64 {
     cap.saturating_sub(window_ns).max(0)
 }
 

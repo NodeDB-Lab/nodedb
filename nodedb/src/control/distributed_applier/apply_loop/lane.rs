@@ -109,7 +109,9 @@ impl QueuedEntry {
             | ReplicatedWrite::SurrogateBind { .. }
             | ReplicatedWrite::RedoChunk { .. }
             | ReplicatedWrite::RedoAbandon { .. } => false,
-            ReplicatedWrite::TenantPurge { .. } | ReplicatedWrite::CollectionConvert { .. } => true,
+            ReplicatedWrite::TenantPurge { .. }
+            | ReplicatedWrite::CollectionConvert { .. }
+            | ReplicatedWrite::RetentionDrop { .. } => true,
             _ => matches!(
                 decode_replicated_entry(&self.entry.data),
                 Ok(Some((_, _, plan, _))) if plan_writes_user_data(&plan)
@@ -127,7 +129,8 @@ impl QueuedEntry {
     /// abandon changes the stream a later entry of its group reads. A mirror
     /// seal records that every earlier entry of the group concluded. A tenant
     /// purge and a conversion act on every earlier entry's rows, and no later
-    /// entry reaches a core before their WAL barrier is durable.
+    /// entry reaches a core before their WAL barrier is durable. A retention
+    /// drop flushes and removes every earlier entry's expired rows.
     pub fn is_exclusive(&self) -> bool {
         self.decoded.as_ref().is_some_and(|e| {
             matches!(
@@ -143,6 +146,7 @@ impl QueuedEntry {
                     | ReplicatedWrite::RedoAbandon { .. }
                     | ReplicatedWrite::TenantPurge { .. }
                     | ReplicatedWrite::CollectionConvert { .. }
+                    | ReplicatedWrite::RetentionDrop { .. }
             )
         })
     }

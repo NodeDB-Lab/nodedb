@@ -9,19 +9,26 @@
 
 use std::sync::Arc;
 
-use nodedb_types::DatabaseId;
+use nodedb_types::{DatabaseId, MirrorStatusStep};
 
 use crate::control::catalog_entry::CatalogEntry;
 
 use crate::control::security::catalog::database_types::DatabaseDescriptor;
 use crate::control::state::SharedState;
 
-/// Post-apply for `PutDatabase` — create the database metrics entry and follow
-/// the descriptor's mirror status.
+/// Post-apply for `PutDatabase` and `ClaimMirrorDatabase` — create the database
+/// metrics entry and follow the row's mirror status. The entry can carry an
+/// older status than the row keeps, so the row decides.
 pub fn put(descriptor: DatabaseDescriptor, shared: Arc<SharedState>) {
     shared.database_metrics.ensure_database(descriptor.id);
-    shared.mirror.fence.apply_descriptor(&descriptor);
-    shared.mirror.cuts.apply_descriptor(&descriptor);
+    match shared.credentials.catalog().get_database(descriptor.id) {
+        Ok(Some(row)) => {
+            shared.mirror.fence.apply_descriptor(&row);
+            shared.mirror.cuts.apply_descriptor(&row);
+        }
+        Ok(None) => {}
+        Err(error) => crate::diag::mirror_status_unread(&error, descriptor.id.as_u64()),
+    }
 }
 
 /// Synchronous post-apply for `DeleteDatabase` — release the quota caps and
@@ -57,12 +64,23 @@ pub fn follow_mirror_row(entry: &CatalogEntry, shared: &SharedState) {
 ///
 /// A row that does not read leaves the fence and the verdicts at the last row
 /// they followed. The report names it, and a restart rebuilds both.
-pub fn follow_mirror_status(database_id: u64, shared: &SharedState) {
+///
+/// A rebuild also moves the verdicts back to the row it reset, and forgets the
+/// mirror's seals and Calvin floors.
+pub fn follow_mirror_status(database_id: u64, step: &MirrorStatusStep, shared: &SharedState) {
     let id = DatabaseId::new(database_id);
-    match shared.credentials.catalog().get_database(id) {
+    let catalog = shared.credentials.catalog();
+    match catalog.get_database(id) {
         Ok(Some(descriptor)) => {
             shared.mirror.fence.apply_descriptor(&descriptor);
             shared.mirror.cuts.apply_descriptor(&descriptor);
+            if matches!(step, MirrorStatusStep::Rebootstrap) {
+                match catalog.get_mirror_cut_state(id) {
+                    Ok(state) => shared.mirror.cuts.restart(id, &state.unwrap_or_default()),
+                    Err(error) => crate::diag::mirror_status_unread(&error, database_id),
+                }
+                shared.calvin.applied.remove_mirror_database(database_id);
+            }
         }
         Ok(None) => {}
         Err(error) => crate::diag::mirror_status_unread(&error, database_id),

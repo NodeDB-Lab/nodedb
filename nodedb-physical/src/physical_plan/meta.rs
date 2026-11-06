@@ -54,6 +54,11 @@ pub enum MetaOp {
     /// Register a continuous aggregate definition on this core's manager.
     RegisterContinuousAggregate { def: ContinuousAggregateDef },
 
+    /// Replace the state of every aggregate rooted at `root` with `image`, an
+    /// encoded image whose buckets count every row this replica holds. Only
+    /// the core that owns `root` acts on it.
+    InstallAggregateImage { root: String, image: Vec<u8> },
+
     /// Remove a continuous aggregate from this core's manager.
     UnregisterContinuousAggregate { name: String },
 
@@ -256,16 +261,18 @@ pub enum MetaOp {
     VerifyHashChain { collection: QualifiedCollection },
 
     /// Enforce retention on a timeseries collection: drop segments older than
-    /// the cutoff. Called by the retention policy enforcement loop.
+    /// `decided_ms - max_age_ms`. `decided_ms` is the one clock read the leader
+    /// took, so every replica drops at one cutoff.
     ///
     /// `aggregates` lists every continuous aggregate the catalog roots at
     /// `collection`. Retention folds an expiring partition into those
     /// aggregates before it removes it, so the core refuses the pass while
-    /// one of them is not registered on it at that incarnation. The loop
-    /// retries on its next pass.
+    /// one of them is not registered on it at that incarnation. The pass
+    /// retries.
     EnforceTimeseriesRetention {
         collection: QualifiedCollection,
         max_age_ms: i64,
+        decided_ms: i64,
         aggregates: Vec<super::timeseries::AggregateIncarnation>,
     },
 
@@ -307,10 +314,12 @@ pub enum MetaOp {
     /// collection's purge removes partitions, so the core refuses it while
     /// one of them is not registered on it at that incarnation. A plain
     /// columnar collection roots no aggregate, and its list is empty.
+    /// `decided_ms` is the one clock read the leader took.
     TemporalPurgeColumnar {
         tenant_id: u64,
         collection: QualifiedCollection,
         cutoff_system_ms: i64,
+        decided_ms: i64,
         aggregates: Vec<super::timeseries::AggregateIncarnation>,
     },
 
@@ -364,9 +373,9 @@ pub enum MetaOp {
 
     /// Apply retention to continuous aggregate buckets managed by
     /// the aggregate manager. Drops materialized buckets older than
-    /// each aggregate's configured retention_period_ms. `skip_databases` names
-    /// the read-only mirrors: their buckets arrive through the log.
-    ApplyContinuousAggRetention { skip_databases: Vec<u64> },
+    /// each aggregate's configured retention_period_ms, for the request's
+    /// database and tenant. `decided_ms` is the one clock read the leader took.
+    ApplyContinuousAggRetention { decided_ms: i64 },
 
     /// Query the watermark for a named continuous aggregate.
     /// Returns JSON-serialized `WatermarkState`.

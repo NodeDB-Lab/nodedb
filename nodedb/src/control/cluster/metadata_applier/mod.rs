@@ -62,6 +62,7 @@ mod test_fixture;
 mod types;
 mod wedge;
 
+pub(crate) use audit_describe::describe_entry;
 pub use boot_seed::{seed_host_tables, seed_metadata_cache};
 pub use catalog_ddl::BACKUP_MARK_FAIL_POINT;
 pub use dispatch::METADATA_APPLY_HOLD_POINT;

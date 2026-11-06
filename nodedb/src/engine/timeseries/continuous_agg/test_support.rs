@@ -135,9 +135,9 @@ pub fn materialized(mgr: &ContinuousAggregateManager, name: &str) -> Vec<(i64, V
 pub fn loaded_manager(defs: Vec<ContinuousAggregateDef>) -> ContinuousAggregateManager {
     let mut mgr = ContinuousAggregateManager::new();
     for def in defs {
-        let name = def.name.clone();
+        let key = (def.database_id, 1, def.name.clone());
         mgr.register(1, def);
-        mgr.loaded.insert((0, 1, name));
+        mgr.loaded.insert(key);
     }
     mgr
 }

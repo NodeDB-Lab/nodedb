@@ -20,13 +20,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nodedb_cluster::mirror::{CrossClusterLink, MirrorRefusal, MirrorSourceClient};
-use nodedb_types::{DatabaseId, MirrorFailure, MirrorStatus};
+use nodedb_types::{DatabaseId, MirrorFailure, MirrorStatus, MirrorStatusStep};
 
+use crate::control::catalog_entry::CatalogEntry;
+use crate::control::metadata_proposer::propose_catalog_entry_async;
 use crate::control::mirror::source::cut_loop::metadata_term;
 use crate::control::shutdown::{ShutdownPhase, spawn_loop};
 use crate::control::state::SharedState;
 
-use super::session::Session;
+use super::session::{FIRST_RETRY_BACKOFF, FenceError, MAX_RETRY_BACKOFF, Session};
 
 /// How long a node that does not lead waits before it looks again.
 pub(super) const IDLE_POLL: Duration = Duration::from_millis(250);
@@ -76,7 +78,7 @@ pub(super) fn follows(state: &SharedState, database: DatabaseId) -> crate::Resul
 pub async fn run_mirror_applier(
     state: Arc<SharedState>,
     database: DatabaseId,
-    client: MirrorSourceClient,
+    client: &MirrorSourceClient,
     link_id: u64,
 ) -> MirrorStop {
     loop {
@@ -93,11 +95,142 @@ pub async fn run_mirror_applier(
             tokio::time::sleep(IDLE_POLL).await;
             continue;
         };
-        let session = Session::open(&state, database, &client, link_id, term);
+        let session = Session::open(&state, database, client, link_id, term);
         match session.run().await {
             SessionEnd::LostLeadership => {}
-            SessionEnd::Stop(stop) => return stop,
+            SessionEnd::Stop(MirrorStop::Ended) => return MirrorStop::Ended,
+            SessionEnd::Stop(stop) => {
+                if record_failure(&state, database, client, link_id, term, &stop).await {
+                    return stop;
+                }
+            }
         }
+    }
+}
+
+/// What an operator sees for a link that stopped.
+fn failure_of(stop: &MirrorStop) -> Option<MirrorFailure> {
+    match stop {
+        MirrorStop::Ended => None,
+        MirrorStop::Failed(failure) => Some(failure.clone()),
+        MirrorStop::Refused(refusal) => Some(match refusal {
+            MirrorRefusal::LogTruncated {
+                group,
+                first_available,
+            } => MirrorFailure::LogTruncated {
+                group: *group,
+                first_available: *first_available,
+            },
+            // The source expires a pin when the log it holds grows past a bound.
+            MirrorRefusal::PinExpired { .. } => MirrorFailure::LogTruncated {
+                group: 0,
+                first_available: 0,
+            },
+            MirrorRefusal::SourceDropped { .. } | MirrorRefusal::DatabaseUnknown { .. } => {
+                MirrorFailure::SourceDropped
+            }
+            MirrorRefusal::BadVersion { .. }
+            | MirrorRefusal::WrongCluster { .. }
+            | MirrorRefusal::SameCluster
+            | MirrorRefusal::DatabaseNotAllowed { .. }
+            | MirrorRefusal::DefaultDatabase
+            | MirrorRefusal::SourceIsMirror { .. }
+            | MirrorRefusal::LinkNotOwned { .. }
+            | MirrorRefusal::LinkUnknown { .. }
+            | MirrorRefusal::GroupNotTailed { .. }
+            | MirrorRefusal::NotHosted { .. }
+            | MirrorRefusal::FrameTooLarge { .. }
+            | MirrorRefusal::Malformed { .. }
+            | MirrorRefusal::Unavailable { .. }
+            | MirrorRefusal::UnmaterializedClone { .. }
+            | MirrorRefusal::BootstrapFailed { .. }
+            | MirrorRefusal::BootstrapRestart { .. } => MirrorFailure::UnsupportedSourceOp {
+                detail: refusal.to_string(),
+            },
+        }),
+    }
+}
+
+/// Fence, then propose the failure, while this node leads. Answers true once
+/// the row shows the failure. With no leadership, a later leader's session
+/// meets the failure itself.
+///
+/// The fence comes first: an entry this applier left above `ready_cut` holds its
+/// lane until a verdict skips it, and no later cut comes to raise it. A failure
+/// is reported once per occurrence through the capture's grouping key.
+async fn record_failure(
+    state: &SharedState,
+    database: DatabaseId,
+    client: &MirrorSourceClient,
+    link_id: u64,
+    term: u64,
+    stop: &MirrorStop,
+) -> bool {
+    let Some(failure) = failure_of(stop) else {
+        return true;
+    };
+    crate::diag::mirror_link_stopped(database.as_u64(), &failure);
+    let mut fence = Session::open(state, database, client, link_id, term);
+    let mut backoff = FIRST_RETRY_BACKOFF;
+    loop {
+        if !fence.still_leads() {
+            return false;
+        }
+        let fenced = fence.fence().await;
+        if let Err(FenceError::Lost) = fenced {
+            return false;
+        }
+        let step = CatalogEntry::StepMirrorStatus {
+            database_id: database.as_u64(),
+            step: MirrorStatusStep::Fail {
+                failure: failure.clone(),
+            },
+        };
+        match propose_catalog_entry_async(state, &step).await {
+            Ok(_) if fenced.is_ok() => {
+                if matches!(follows(state, database), Ok(None)) {
+                    return true;
+                }
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(
+                    database = database.as_u64(),
+                    %error,
+                    "mirror applier: the failure did not land; it is proposed again"
+                );
+            }
+        }
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(MAX_RETRY_BACKOFF);
+    }
+}
+
+/// Give back the source's pin when this mirror follows nothing: it was promoted
+/// or dropped, and no later fetch needs the log. Only the metadata leader asks.
+/// The source's pin expiry covers an ask that does not arrive.
+async fn release_ended_link(
+    state: &SharedState,
+    database: DatabaseId,
+    client: &MirrorSourceClient,
+    link_id: u64,
+) {
+    let follows_nothing = match state.credentials.catalog().get_database(database) {
+        Ok(Some(descriptor)) => descriptor
+            .mirror_origin
+            .is_none_or(|origin| matches!(origin.status, MirrorStatus::Promoted)),
+        Ok(None) => true,
+        Err(_) => false,
+    };
+    if !follows_nothing || metadata_term(state).is_none() {
+        return;
+    }
+    if let Err(error) = client.release(link_id).await {
+        tracing::info!(
+            database = database.as_u64(),
+            %error,
+            "mirror applier: the source's pin stays until it expires"
+        );
     }
 }
 
@@ -120,16 +253,22 @@ pub fn spawn_mirror_applier(
         move |mut shutdown| async move {
             tokio::select! {
                 _ = shutdown.wait_cancelled() => {}
-                stop = run_mirror_applier(Arc::clone(&state), database, client, link_id) => {
-                    tracing::warn!(
-                        database = database.as_u64(),
-                        ?stop,
-                        "mirror applier stopped"
-                    );
-                    // A mirror that follows nothing keeps no link on any node.
-                    if matches!(stop, MirrorStop::Ended) {
-                        state.mirror.links.teardown_link(database);
+                stop = run_mirror_applier(Arc::clone(&state), database, &client, link_id) => {
+                    match stop {
+                        MirrorStop::Ended => tracing::info!(
+                            database = database.as_u64(),
+                            "mirror applier ended"
+                        ),
+                        MirrorStop::Failed(_) | MirrorStop::Refused(_) => tracing::warn!(
+                            database = database.as_u64(),
+                            ?stop,
+                            "mirror applier stopped on a failure"
+                        ),
                     }
+                    release_ended_link(&state, database, &client, link_id).await;
+                    // The supervisor starts this database again from the catalog,
+                    // once it shows an applier has work.
+                    state.mirror.links.teardown_link(database);
                 }
             }
         },

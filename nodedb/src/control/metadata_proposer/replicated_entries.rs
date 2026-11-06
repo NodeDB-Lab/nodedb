@@ -197,6 +197,25 @@ pub async fn propose_database_id_reserve(
     .await
 }
 
+/// Propose a sequence counter entry and wait until this node applied it.
+///
+/// A counter stamps no descriptor version, so it takes no DDL preparation lease.
+/// A node that dies holding that lease then never stalls a `nextval`.
+pub async fn propose_sequence_entry(
+    shared: &SharedState,
+    entry: &crate::control::catalog_entry::CatalogEntry,
+) -> Result<u64, Error> {
+    let payload = crate::control::catalog_entry::encode(entry).map_err(|e| Error::Config {
+        detail: format!("sequence_counter encode: {e}"),
+    })?;
+    propose_and_wait(
+        shared,
+        &MetadataEntry::CatalogDdl { payload },
+        "sequence_counter",
+    )
+    .await
+}
+
 /// Propose a mirror's next cut state and wait until this node applied it. A
 /// source's catalog entries travel inside it, frozen as the source stamped them.
 pub async fn propose_mirror_cut(

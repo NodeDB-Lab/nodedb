@@ -175,6 +175,25 @@ impl MirrorCutWatch {
         self.wake();
     }
 
+    /// Take `state` as a rebuild left it, though it sits behind the row this
+    /// mirror held, and forget every seal. Its fence skips each former copy.
+    pub fn restart(&self, database_id: DatabaseId, state: &MirrorCutState) {
+        {
+            let mut mirrors = self
+                .mirrors
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(mirror) = mirrors.get_mut(&database_id) {
+                mirror.state.clone_from(state);
+            }
+        }
+        self.seals
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|(database, _), _| *database != database_id);
+        self.wake();
+    }
+
     /// Follow one applied database drop.
     pub fn remove(&self, database_id: DatabaseId) {
         self.mirrors
