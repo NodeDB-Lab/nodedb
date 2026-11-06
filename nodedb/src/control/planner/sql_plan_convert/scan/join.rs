@@ -302,7 +302,122 @@ pub(in crate::control::planner::sql_plan_convert) fn convert_join(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, RwLock};
+
+    use nodedb_sql::types::{EngineType, JoinType};
+    use nodedb_sql::{TemporalScope, ValidTime};
+
     use super::*;
+    use crate::control::planner::sql_plan_convert::{ConvertContext, PlanningPurpose};
+    use crate::control::security::credential::CredentialStore;
+    use crate::control::surrogate::SurrogateAssigner;
+    use crate::control::surrogate::registry::SurrogateRegistry;
+    use crate::control::surrogate::wal_appender::NoopWalAppender;
+    use crate::types::TenantId;
+
+    fn context() -> ConvertContext {
+        let credentials = Arc::new(CredentialStore::new().expect("in-memory credential store"));
+        ConvertContext {
+            purpose: PlanningPurpose::Execute,
+            retention_registry: None,
+            array_catalog: None,
+            credentials: None,
+            surrogate_assigner: Arc::new(SurrogateAssigner::new(
+                Arc::new(RwLock::new(SurrogateRegistry::new())),
+                credentials,
+                Arc::new(NoopWalAppender),
+            )),
+            bitemporal_retention_registry: None,
+            max_vector_dim: 0,
+            database_id: DatabaseId::DEFAULT,
+            tenant_id: TenantId::new(1),
+            force_shuffle_join: false,
+            shuffle_num_parts: 0,
+            force_shuffle_agg: false,
+            shuffle_agg_num_parts: 0,
+            broadcast_threshold_bytes: 0,
+            shuffle_agg_threshold: 0,
+            prefetched: Default::default(),
+            reads_txn_snapshot: false,
+        }
+    }
+
+    /// The join an equi-correlated LATERAL with no LIMIT lowers to. The
+    /// statement's one temporal scope sits on both sides.
+    fn lateral_join(valid_time: ValidTime) -> SqlPlan {
+        let temporal = TemporalScope {
+            valid_time,
+            ..TemporalScope::default()
+        };
+        let scan = |name: &str| SqlPlan::Scan {
+            collection: name.to_string(),
+            alias: Some(name.to_string()),
+            engine: EngineType::DocumentStrict,
+            filters: Vec::new(),
+            projection: Vec::new(),
+            sort_keys: Vec::new(),
+            limit: None,
+            offset: 0,
+            distinct: false,
+            window_functions: Vec::new(),
+            temporal,
+        };
+        SqlPlan::Join {
+            left: Box::new(scan("outer_side")),
+            right: Box::new(scan("inner_side")),
+            on: vec![("outer_side.k".to_string(), "inner_side.k".to_string())],
+            join_type: JoinType::Inner,
+            condition: None,
+            limit: None,
+            projection: Vec::new(),
+            filters: Vec::new(),
+        }
+    }
+
+    /// The valid time the side's engine scan reads at.
+    fn side_valid_at(side: &Option<Box<PhysicalPlan>>) -> Option<i64> {
+        let mut plan = side.as_deref().expect("a temporal side lowers to a child");
+        if let PhysicalPlan::Query(QueryOp::Exchange(ExchangeOp { child, .. })) = plan {
+            plan = child.as_ref();
+        }
+        match plan {
+            PhysicalPlan::Document(DocumentOp::Scan { valid_at_ms, .. }) => *valid_at_ms,
+            other => panic!("expected a document scan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn both_sides_of_a_lowered_lateral_read_the_statement_valid_time() {
+        let tasks = convert_one(
+            &lateral_join(ValidTime::At(5)),
+            TenantId::new(1),
+            &context(),
+        )
+        .expect("a valid-time instant converts");
+        let PhysicalPlan::Query(QueryOp::HashJoin {
+            left_input,
+            right_input,
+            ..
+        }) = &tasks[0].plan
+        else {
+            panic!("expected a hash join, got {:?}", tasks[0].plan);
+        };
+        assert_eq!(side_valid_at(left_input), Some(5));
+        assert_eq!(side_valid_at(right_input), Some(5));
+    }
+
+    #[test]
+    fn a_lowered_lateral_refuses_a_valid_time_range() {
+        let refused = convert_one(
+            &lateral_join(ValidTime::Range(1, 5)),
+            TenantId::new(1),
+            &context(),
+        );
+        assert!(
+            matches!(refused, Err(crate::Error::FeatureNotSupported { .. })),
+            "{refused:?}"
+        );
+    }
 
     #[test]
     fn shuffle_rejects_join_tail_semantics() {

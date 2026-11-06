@@ -117,6 +117,11 @@ pub fn plan_lateral_join(args: LateralJoinArgs<'_>) -> Result<SqlPlan> {
         // WHERE; the outer alias never leaks into inner name resolution. The join
         // executor scans the inner collection by name, so the join key columns
         // are available on the merged rows.
+        //
+        // Both sides carry the statement's one temporal scope. A side under a
+        // qualifier lowers to its own engine scan, which reads it. The system
+        // time and the valid time therefore reach both sides, and a valid-time
+        // range is refused on each.
         let inner_plan = build_inner_scan(InnerScanArgs {
             select,
             residual_where: analysis.remaining,

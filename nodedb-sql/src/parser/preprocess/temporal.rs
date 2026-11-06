@@ -120,6 +120,11 @@ pub fn extract_bounded(
         working = rewritten;
         scope.valid_time = vt;
         any = true;
+        if strip_valid_time(&working)?.is_some() {
+            return Err(TemporalParseError(
+                "multiple FOR VALID_TIME clauses in one statement".into(),
+            ));
+        }
     }
     // AS OF VALID TIME <expr> (array read style)
     if let Some((rewritten, ms)) = strip_as_of_valid_time(&working, boundary)? {
@@ -131,6 +136,11 @@ pub fn extract_bounded(
         working = rewritten;
         scope.valid_time = ValidTime::At(ms);
         any = true;
+        if strip_as_of_valid_time(&working, boundary)?.is_some() {
+            return Err(TemporalParseError(
+                "multiple valid-time AS OF clauses in one statement".into(),
+            ));
+        }
     }
 
     if any {
@@ -489,6 +499,22 @@ fn parse_trailing_i64(sql: &str, offset: usize) -> Result<(i64, usize), Temporal
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One statement holds one valid-time qualifier, read by every relation.
+    /// A second clause, on a LATERAL inner side say, is refused.
+    #[test]
+    fn a_second_valid_time_clause_is_refused() {
+        for sql in [
+            "SELECT * FROM a FOR VALID_TIME CONTAINS 1 JOIN LATERAL \
+             (SELECT * FROM b FOR VALID_TIME CONTAINS 2 WHERE b.k = a.k) x ON true",
+            "SELECT * FROM a AS OF VALID TIME 1 JOIN LATERAL \
+             (SELECT * FROM b AS OF VALID TIME 2 WHERE b.k = a.k) x ON true",
+            "SELECT * FROM a FOR VALID_TIME CONTAINS 1 JOIN LATERAL \
+             (SELECT * FROM b AS OF VALID TIME 2 WHERE b.k = a.k) x ON true",
+        ] {
+            assert!(extract(sql).is_err(), "{sql}");
+        }
+    }
 
     #[test]
     fn passthrough_no_temporal() {
