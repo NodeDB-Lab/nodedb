@@ -15,7 +15,7 @@
 use nodedb_physical::physical_task::PhysicalTask;
 use nodedb_types::SystemTimeScope;
 
-use crate::control::gateway::version_set::touched_collections;
+use crate::control::gateway::version_set::{catalog_name, touched_collections};
 use crate::control::planner::plan_children::children;
 use crate::control::planner::system_cut::plan_scopes;
 use crate::control::state::SharedState;
@@ -27,9 +27,13 @@ use crate::control::state::SharedState;
 /// Returns true when a task reads such a collection at any pinned cut: the
 /// read then depends on when it runs, so its plan never enters a plan
 /// cache.
+///
+/// A malformed plan name is an error. A fallback to the raw name would miss
+/// the catalog row, and read as a collection the catalog does not hold, with
+/// no refusal.
 pub fn check_history_window(state: &SharedState, tasks: &[PhysicalTask]) -> crate::Result<bool> {
     let limit = std::time::Duration::from_secs(state.tuning.network.txn_snapshot_max_age_secs);
-    let limit_ns = i64::try_from(limit.as_nanos()).unwrap_or(i64::MAX);
+    let limit_ns = window_nanos(limit)?;
     let now_ns = nodedb_types::wall_now_ns_i64();
     let floor = now_ns.saturating_sub(limit_ns);
     let mut time_bound = false;
@@ -42,16 +46,12 @@ pub fn check_history_window(state: &SharedState, tasks: &[PhysicalTask]) -> crat
         names.sort();
         names.dedup();
         for name in names {
-            let bare =
-                match nodedb_types::CollectionKey::from_qualified_str(task.database_id, &name) {
-                    Ok(key) => key.name().to_string(),
-                    Err(_) => name.clone(),
-                };
-            let Some(collection) = state.credentials.catalog().get_collection(
-                task.database_id,
-                task.tenant_id.as_u64(),
-                &bare,
-            )?
+            let (owner, bare) = catalog_name(task.database_id, &name)?;
+            let Some(collection) =
+                state
+                    .credentials
+                    .catalog()
+                    .get_collection(owner, task.tenant_id.as_u64(), bare)?
             else {
                 continue;
             };
@@ -59,7 +59,7 @@ pub fn check_history_window(state: &SharedState, tasks: &[PhysicalTask]) -> crat
                 continue;
             }
             if oldest < floor {
-                return Err(refusal(&bare, now_ns.saturating_sub(oldest), limit));
+                return Err(refusal(bare, now_ns.saturating_sub(oldest), limit));
             }
             time_bound = true;
         }
@@ -85,7 +85,7 @@ pub fn check_graph_history_window(
     cut: i64,
 ) -> crate::Result<()> {
     let limit = std::time::Duration::from_secs(state.tuning.network.txn_snapshot_max_age_secs);
-    let limit_ns = i64::try_from(limit.as_nanos()).unwrap_or(i64::MAX);
+    let limit_ns = window_nanos(limit)?;
     let now_ns = nodedb_types::wall_now_ns_i64();
     if cut >= now_ns.saturating_sub(limit_ns) {
         return Ok(());
@@ -112,6 +112,18 @@ pub fn check_graph_history_window(
         Some(name) => Err(refusal(&name, now_ns.saturating_sub(cut), limit)),
         None => Ok(()),
     }
+}
+
+/// The snapshot age limit in ordinal units. A limit past the ordinal range is
+/// an error: a saturated limit would refuse no read at any age.
+fn window_nanos(limit: std::time::Duration) -> crate::Result<i64> {
+    i64::try_from(limit.as_nanos()).map_err(|_| crate::Error::Config {
+        detail: format!(
+            "txn_snapshot_max_age_secs {} exceeds the system-time ordinal range; set a lower \
+             value",
+            limit.as_secs()
+        ),
+    })
 }
 
 /// The oldest pinned historical cut `plan` reads at, `None` for none.
@@ -147,5 +159,28 @@ fn refusal(collection: &str, age_ns: i64, limit: std::time::Duration) -> crate::
              WITH (bitemporal=true) to keep its history",
             limit.as_millis()
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_limit_past_the_ordinal_range_is_an_error_and_never_saturates() {
+        assert_eq!(
+            window_nanos(std::time::Duration::from_secs(5)).expect("in range"),
+            5_000_000_000
+        );
+        let refused = window_nanos(std::time::Duration::from_secs(u64::MAX));
+        assert!(matches!(refused, Err(crate::Error::Config { .. })));
+    }
+
+    /// A malformed name is an error here. It never reads as a collection the
+    /// catalog does not hold, which skips the refusal.
+    #[test]
+    fn a_malformed_plan_name_is_an_error() {
+        let database = crate::types::DatabaseId::new(7);
+        assert!(catalog_name(database, "x/orders").is_err());
     }
 }

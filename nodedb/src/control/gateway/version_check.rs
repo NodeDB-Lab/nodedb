@@ -76,7 +76,9 @@ where
         if collection.starts_with('\0') {
             continue;
         }
-        match catalog.get_collection(database_id, tenant_id, collection) {
+        let looked_up = super::version_set::catalog_name(database_id, collection)
+            .and_then(|(owner, name)| catalog.get_collection(owner, tenant_id, name));
+        match looked_up {
             Ok(Some(stored)) => {
                 // A collection created before the metadata applier stamped it
                 // still carries 0 in the catalog; planning floors that to 1, so
@@ -174,6 +176,31 @@ mod tests {
     use crate::control::security::catalog::StoredCollection;
 
     const TENANT: u64 = 7;
+
+    /// A plan names a collection of a non-default database by its qualified
+    /// name. The check still finds the row, so a stale plan draws a mismatch.
+    #[test]
+    fn a_qualified_name_is_fenced_against_its_catalog_row() {
+        let database = DatabaseId::new(9);
+        let catalog = SystemCatalog::open_in_memory().expect("in-memory catalog");
+        let mut stored = StoredCollection::stamped_for_test(TENANT, "orders", "owner");
+        stored.descriptor_version = 4;
+        catalog
+            .put_collection(database, &stored)
+            .expect("store collection");
+
+        let check_at = |version: u64| {
+            check_descriptor_versions(&catalog, database, TENANT, [("9/orders", version)])
+        };
+        assert!(check_at(4).is_ok());
+        assert!(matches!(
+            check_at(3),
+            Err(DescriptorCheckError::VersionMismatch {
+                actual_version: 4,
+                ..
+            })
+        ));
+    }
 
     fn catalog_with(collections: &[(&str, u64)]) -> SystemCatalog {
         let catalog = SystemCatalog::open_in_memory().expect("in-memory catalog");
