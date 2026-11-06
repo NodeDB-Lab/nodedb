@@ -86,6 +86,11 @@ impl CrossClusterLink {
         &self.config.source_cluster
     }
 
+    /// The link's id on the source.
+    pub fn link_id(&self) -> u64 {
+        self.config.link_id
+    }
+
     /// How many replicas this link can try.
     pub fn seed_count(&self) -> usize {
         self.config.seeds.len()

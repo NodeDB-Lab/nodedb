@@ -59,6 +59,14 @@ test-threads = "num-cpus"
 # The combined effect: cluster tests run strictly serially AND
 # strictly alone, and the rest of the suite gets full parallelism
 # the moment the cluster test finishes.
+#
+# A test of a mirror runs two whole clusters in one process, so it takes two
+# bring-ups and a cross-cluster catch-up. It keeps the group below. Settings
+# resolve per key by first match, so only its ceiling moves.
+[[profile.default.overrides]]
+filter = 'package(nodedb-cluster-tests) & test(mirror_apply_two_clusters)'
+slow-timeout = { period = "30s", terminate-after = 12 }
+
 [[profile.default.overrides]]
 filter = 'package(nodedb-cluster-tests)'
 test-group = 'cluster'

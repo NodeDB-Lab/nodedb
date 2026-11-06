@@ -12,9 +12,11 @@
 //!   returns the set that need their observer link re-established.
 //! - [`cut_watch`] — [`MirrorCutWatch`]: each mirror's cut state and the
 //!   verdict it gives a held entry.
+//! - [`applier`] — what this cluster does to follow a source.
 //! - [`source`] — what this cluster does for the mirrors that follow it.
 //! - [`state`] — [`MirrorState`]: what `SharedState` holds for its mirrors.
 
+pub mod applier;
 pub mod cut_watch;
 pub mod fence;
 pub mod observer;

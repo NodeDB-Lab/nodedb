@@ -45,7 +45,7 @@ pub mod rpc_dispatch;
 pub mod sequencer_cut_floor;
 pub mod status;
 
-pub use committed_read::CommittedRead;
+pub use committed_read::{CommittedRead, LogProbeView};
 pub use core::{MultiRaft, MultiRaftReady, SnapshotRequirement};
 pub use leader_board::LeaderBoard;
 pub use mount::{GroupMountSpec, OpenedGroup};

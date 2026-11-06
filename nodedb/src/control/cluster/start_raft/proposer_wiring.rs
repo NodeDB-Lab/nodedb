@@ -30,6 +30,7 @@ pub(super) fn wire_proposers(
     install_applied_index_sink(shared, raft_loop);
     install_apply_gates(shared, raft_loop);
     install_async_proposer(shared, raft_loop, &tracker)?;
+    super::mirror_raft::install_mirror_raft(shared, raft_loop);
     spawn_apply_loop(shared, tracker, apply_rx);
     Ok(())
 }

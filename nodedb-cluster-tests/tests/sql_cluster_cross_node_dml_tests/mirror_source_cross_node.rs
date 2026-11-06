@@ -4,13 +4,13 @@
 //! filter, the pin, and a Calvin transaction's place around a cut. These call
 //! the service the listener calls, with the client the listener would name.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nodedb::control::catalog_entry::CatalogEntry;
 use nodedb::control::metadata_proposer::propose_catalog_entry_async;
-use nodedb::control::mirror::source::cut_loop::take_mirror_cut;
+use nodedb::control::mirror::source::cut_loop::{pin_pass, take_mirror_cut};
 use nodedb::control::mirror::source::service::SourceService;
 use nodedb::control::wal_replication::decode::{DecodedTransactionRedo, decode_transaction_redo};
 use nodedb::control::wal_replication::{ReplicatedEntry, ReplicatedWrite};
@@ -79,7 +79,7 @@ async fn tail_group(cluster: &TestCluster, group: u64) -> Vec<MirrorTailEntry> {
     panic!("no node hosts group {group}");
 }
 
-fn barrier_seq(entry: &ReplicatedEntry) -> Option<u64> {
+pub(super) fn barrier_seq(entry: &ReplicatedEntry) -> Option<u64> {
     let ReplicatedWrite::CutBarrier { mirror, .. } = &entry.write else {
         return None;
     };
@@ -290,10 +290,87 @@ async fn a_tail_holds_its_database_and_a_barrier_in_every_group() {
     cluster.shutdown().await;
 }
 
-/// Where each Calvin position sits among `group`'s cuts: the number of the
-/// first cut after it.
-fn calvin_places(entries: &[MirrorTailEntry]) -> Vec<((u64, u32), Option<u64>)> {
-    let mut places: Vec<((u64, u32), Option<u64>)> = Vec::new();
+/// A pin that stops holding frees the log with no write behind it: the cut pass
+/// has stopped, so the pin pass is the one trigger an idle group gets.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn an_expired_pin_compacts_an_idle_group() {
+    const THRESHOLD: u64 = 64;
+    const ROWS: usize = 200;
+    let cluster = TestCluster::spawn_three_with_compaction_threshold(THRESHOLD)
+        .await
+        .expect("3-node cluster");
+    seed_databases(&cluster).await;
+    use_database(&cluster, DATABASE).await;
+    let groups = open_link(&cluster).await;
+    cluster
+        .exec_ddl_on_any_leader("CREATE COLLECTION docs (id TEXT PRIMARY KEY, v INT)")
+        .await
+        .expect("create collection");
+    for row in 0..ROWS {
+        cluster.nodes[0]
+            .exec(&format!("INSERT INTO docs (id, v) VALUES ('row{row}', 1)"))
+            .await
+            .expect("insert");
+    }
+    let shared = &cluster.nodes[0].shared;
+    let group_state = |group: u64| {
+        let multi_raft = shared
+            .multi_raft
+            .get()
+            .expect("raft")
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        (
+            multi_raft.commit_index_for(group).unwrap_or(0),
+            multi_raft.first_available_index(group).unwrap_or(0),
+        )
+    };
+    let busy = groups
+        .iter()
+        .copied()
+        .filter(|group| *group != 0)
+        .max_by_key(|group| group_state(*group).0)
+        .expect("a data group");
+    let (commit, held_start) = group_state(busy);
+    assert!(
+        commit > 2 * THRESHOLD,
+        "the group retains past the threshold"
+    );
+
+    let mut expired = shared.mirror.pins.get(LINK).expect("the pin");
+    expired.state = MirrorPinState::Expired;
+    propose_catalog_entry_async(shared, &CatalogEntry::PutMirrorPin(Box::new(expired)))
+        .await
+        .expect("expire");
+    let ceiling = shared.mirror.pins.ceiling_for(busy);
+    wait_for(
+        "the expiry released the hold",
+        Duration::from_secs(10),
+        Duration::from_millis(50),
+        || ceiling.load(std::sync::atomic::Ordering::Acquire) == u64::MAX,
+    )
+    .await;
+
+    // No cut runs with no live pin, and this group takes no new write.
+    // The harness spawns no background pin loop, so this test runs the pass itself.
+    pin_pass(shared).await;
+    wait_for(
+        "the pin pass freed the log an expired pin held",
+        Duration::from_secs(10),
+        Duration::from_millis(100),
+        || group_state(busy).1 > held_start,
+    )
+    .await;
+
+    cluster.shutdown().await;
+}
+
+/// A Calvin `(epoch, position)`, and the number of the first cut after it.
+pub(super) type CalvinPlace = ((u64, u32), Option<u64>);
+
+/// Where each Calvin position sits among `group`'s cuts.
+pub(super) fn calvin_places(entries: &[MirrorTailEntry]) -> Vec<CalvinPlace> {
+    let mut places: Vec<CalvinPlace> = Vec::new();
     for entry in entries {
         let Some(decoded) = ReplicatedEntry::from_bytes(&entry.data) else {
             continue;
@@ -315,11 +392,33 @@ fn calvin_places(entries: &[MirrorTailEntry]) -> Vec<((u64, u32), Option<u64>)> 
     places
 }
 
+/// Require each slice of one Calvin position to sit before the same next cut in
+/// every group, and at least one position to span two groups: `places` holds one
+/// group's `calvin_places` per group. A position that never left one group
+/// proves nothing about a cut across groups.
+pub(super) fn assert_no_straddle(places: Vec<(u64, Vec<CalvinPlace>)>) {
+    let mut seen: BTreeMap<(u64, u32), (Option<u64>, BTreeSet<u64>)> = BTreeMap::new();
+    for (group, group_places) in places {
+        for (position, next_cut) in group_places {
+            let held = seen.entry(position).or_insert((next_cut, BTreeSet::new()));
+            assert_eq!(
+                held.0, next_cut,
+                "Calvin position {position:?} straddles a cut in group {group}"
+            );
+            held.1.insert(group);
+        }
+    }
+    assert!(
+        seen.values().any(|(_, groups)| groups.len() > 1),
+        "no Calvin transaction touched more than one group: {seen:?}"
+    );
+}
+
 /// Each slice of one Calvin transaction sits between the same two cuts in every
 /// group, with cuts and transactions running at once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn no_calvin_transaction_straddles_a_mirror_cut() {
-    const COLLECTIONS: usize = 8;
+    const COLLECTIONS: usize = 16;
     let cluster = TestCluster::spawn_three().await.expect("3-node cluster");
     seed_databases(&cluster).await;
     use_database(&cluster, DATABASE).await;
@@ -354,20 +453,12 @@ async fn no_calvin_transaction_straddles_a_mirror_cut() {
         cut.expect("cut");
     }
 
-    let mut seen: BTreeMap<(u64, u32), Option<u64>> = BTreeMap::new();
-    let mut slices = 0usize;
+    let mut places = Vec::new();
     for group in groups.iter().copied().filter(|group| *group != 0) {
-        for (position, next_cut) in calvin_places(&await_barrier(&cluster, group, last_seq).await) {
-            slices += 1;
-            if let Some(held) = seen.insert(position, next_cut) {
-                assert_eq!(
-                    held, next_cut,
-                    "Calvin position {position:?} straddles a cut in group {group}"
-                );
-            }
-        }
+        let entries = await_barrier(&cluster, group, last_seq).await;
+        places.push((group, calvin_places(&entries)));
     }
-    assert!(slices > seen.len(), "no transaction spanned two slices");
+    assert_no_straddle(places);
 
     cluster.shutdown().await;
 }

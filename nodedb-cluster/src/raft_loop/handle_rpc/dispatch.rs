@@ -47,6 +47,8 @@ impl<A: CommitApplier, P: PlanExecutor> RaftRpcHandler for RaftLoop<A, P> {
             RaftRpc::LeaderStatusRequest(req) => Ok(RaftRpc::LeaderStatusResponse(
                 self.leader_status(req.group_id),
             )),
+            // What this node's replica of a group committed.
+            RaftRpc::LogProbeRequest(req) => self.handle_log_probe_rpc(req),
             // A group leader's ordinal floor exchange.
             RaftRpc::OrdinalFloorRequest(req) => self.handle_ordinal_floor_rpc(req).await,
             // Authorization lease renewal and barrier, answered by the host hook.

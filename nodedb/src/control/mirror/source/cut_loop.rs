@@ -57,7 +57,7 @@ impl CutNumbers {
 }
 
 /// This node's term as the metadata group's leader, while it leads.
-fn metadata_term(state: &SharedState) -> Option<u64> {
+pub(crate) fn metadata_term(state: &SharedState) -> Option<u64> {
     state
         .multi_raft
         .get()?
@@ -122,10 +122,46 @@ pub(crate) fn bind_boot_ceilings(
     }
 }
 
-/// One pin pass: bind new groups, expire what passed a bound, and on the
-/// metadata leader remove what stopped holding long ago.
-async fn pin_pass(state: &SharedState) {
+/// Run compaction on every group this node hosts, at its durable applied index.
+///
+/// A group compacts when its floor moves, and that check finds nothing to do
+/// while a ceiling holds the log. A ceiling that rises later moves no floor. So
+/// a released log stays held until the group's next write, and an idle group has
+/// none: the cut pass stops once no pin is live. A log's memory is what a pin's
+/// byte bound protects, so an expiry has to free it with no write behind it.
+///
+/// The compactor applies each group's own holds, and it finds nothing to do
+/// under a group's threshold. The sequencer's compaction runs on its own path.
+fn compact_released_logs(state: &SharedState) {
+    let (Some(multi_raft), Some(compactor)) = (state.multi_raft.get(), state.raft_compactor.get())
+    else {
+        return;
+    };
+    let floors: Vec<(u64, u64)> = {
+        let multi_raft = multi_raft.lock().unwrap_or_else(|p| p.into_inner());
+        multi_raft
+            .group_ids()
+            .into_iter()
+            .filter(|group| *group != SEQUENCER_GROUP_ID)
+            .filter_map(|group| {
+                multi_raft
+                    .log_probe_view(group, None)
+                    .map(|view| (group, view.durable_applied))
+            })
+            .collect()
+    };
+    for (group, floor) in floors {
+        if let Err(error) = compactor(group, floor) {
+            tracing::warn!(group, floor, %error, "mirror source: a released log did not compact");
+        }
+    }
+}
+
+/// One pin pass: bind new groups, expire what passed a bound, free what a pin
+/// released, and on the metadata leader remove what stopped holding long ago.
+pub async fn pin_pass(state: &SharedState) {
     install_pin_ceilings(state);
+    compact_released_logs(state);
     let Some(multi_raft) = state.multi_raft.get() else {
         return;
     };

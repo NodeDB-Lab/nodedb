@@ -156,6 +156,10 @@ pub const RPC_CALVIN_PARTS_RESP: u8 = 55;
 /// Raft state, with no quorum round, in one `RPC_LEADER_STATUS_RESP`.
 pub const RPC_LEADER_STATUS_REQ: u8 = 56;
 pub const RPC_LEADER_STATUS_RESP: u8 = 57;
+/// Log probe: a node asks a replica what it committed in `RPC_LOG_PROBE_REQ`,
+/// and the replica answers from its own log in one `RPC_LOG_PROBE_RESP`.
+pub const RPC_LOG_PROBE_REQ: u8 = 62;
+pub const RPC_LOG_PROBE_RESP: u8 = 63;
 /// The answer to a request frame the receiver's replay window refused. The
 /// sender retries the request under a fresh sequence number.
 pub const RPC_FRAME_REFUSAL: u8 = 58;

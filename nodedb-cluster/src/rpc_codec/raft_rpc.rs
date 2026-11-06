@@ -24,6 +24,7 @@ use super::execute::{ExecuteRequest, ExecuteResponse, ExecuteStreamChunk, Execut
 use super::frame_refusal::FrameRefusal;
 use super::header::HEADER_SIZE;
 use super::leader_status::{LeaderStatusRequest, LeaderStatusResponse};
+use super::log_probe::{self, LogProbeRequest, LogProbeResponse};
 use super::metadata::{MetadataProposeRequest, MetadataProposeResponse};
 use super::ordinal_floor::{OrdinalFloorRequest, OrdinalFloorResponse};
 use super::read_index::{ReadIndexRequest, ReadIndexResponse};
@@ -167,6 +168,10 @@ pub enum RaftRpc {
     // the receiver answers from its own Raft state, with no quorum round.
     LeaderStatusRequest(LeaderStatusRequest),
     LeaderStatusResponse(LeaderStatusResponse),
+    // Log probe. A node asks a replica what it committed, and compares the
+    // entries it proposed against the replica's log.
+    LogProbeRequest(LogProbeRequest),
+    LogProbeResponse(LogProbeResponse),
     // Ordinal floor exchange. A group's leader sends its system-time floor;
     // a voter at its term raises its own and answers the floor it holds.
     OrdinalFloorRequest(OrdinalFloorRequest),
@@ -259,6 +264,8 @@ pub fn encode(rpc: &RaftRpc, epoch: &crate::cluster_epoch::ClusterEpochState) ->
         RaftRpc::ReadIndexResponse(m) => read_index::encode_read_index_resp(m, &mut out),
         RaftRpc::LeaderStatusRequest(m) => leader_status::encode_leader_status_req(m, &mut out),
         RaftRpc::LeaderStatusResponse(m) => leader_status::encode_leader_status_resp(m, &mut out),
+        RaftRpc::LogProbeRequest(m) => log_probe::encode_log_probe_req(m, &mut out),
+        RaftRpc::LogProbeResponse(m) => log_probe::encode_log_probe_resp(m, &mut out),
         RaftRpc::OrdinalFloorRequest(m) => ordinal_floor::encode_ordinal_floor_req(m, &mut out),
         RaftRpc::OrdinalFloorResponse(m) => ordinal_floor::encode_ordinal_floor_resp(m, &mut out),
         RaftRpc::AuthLeaseRenewRequest(m) => auth_lease::encode_renew_req(m, &mut out),
@@ -356,6 +363,8 @@ pub fn decode(data: &[u8], epoch: &crate::cluster_epoch::ClusterEpochState) -> R
         RPC_READ_INDEX_RESP => read_index::decode_read_index_resp(payload),
         RPC_LEADER_STATUS_REQ => leader_status::decode_leader_status_req(payload),
         RPC_LEADER_STATUS_RESP => leader_status::decode_leader_status_resp(payload),
+        RPC_LOG_PROBE_REQ => log_probe::decode_log_probe_req(payload),
+        RPC_LOG_PROBE_RESP => log_probe::decode_log_probe_resp(payload),
         RPC_ORDINAL_FLOOR_REQ => ordinal_floor::decode_ordinal_floor_req(payload),
         RPC_ORDINAL_FLOOR_RESP => ordinal_floor::decode_ordinal_floor_resp(payload),
         RPC_AUTH_LEASE_RENEW_REQ => auth_lease::decode_renew_req(payload),

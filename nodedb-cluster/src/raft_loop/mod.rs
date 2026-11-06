@@ -28,6 +28,7 @@ pub mod join;
 mod leader_balance;
 mod leadership_transfer;
 mod lease_gc;
+mod log_probe;
 pub mod loop_core;
 mod membership_convergence;
 mod ordinal_floor;

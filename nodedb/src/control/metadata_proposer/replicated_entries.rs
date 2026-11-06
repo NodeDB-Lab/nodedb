@@ -197,6 +197,26 @@ pub async fn propose_database_id_reserve(
     .await
 }
 
+/// Propose a mirror's next cut state and wait until this node applied it. A
+/// source's catalog entries travel inside it, frozen as the source stamped them.
+pub async fn propose_mirror_cut(
+    shared: &SharedState,
+    database: u64,
+    advance: nodedb_types::MirrorCutAdvance,
+    catalog: Vec<Vec<u8>>,
+) -> Result<u64, Error> {
+    propose_and_wait(
+        shared,
+        &MetadataEntry::MirrorCut {
+            database,
+            advance,
+            catalog,
+        },
+        "mirror_cut",
+    )
+    .await
+}
+
 /// Propose a consumer offset commit and wait until this node applied it.
 ///
 /// Every node raises each offset to the highest one committed, so commits

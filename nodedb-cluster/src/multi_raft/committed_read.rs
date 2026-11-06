@@ -20,7 +20,38 @@ pub struct CommittedRead {
     pub first_available: u64,
 }
 
+/// One replica's progress, and a copy of the committed entries a probe compares.
+#[derive(Debug, Clone)]
+pub struct LogProbeView {
+    pub commit_index: u64,
+    /// The highest index whose apply is durable on this node.
+    pub durable_applied: u64,
+    /// The committed entries of the range this replica still holds.
+    pub entries: Vec<nodedb_raft::message::LogEntry>,
+}
+
 impl MultiRaft {
+    /// What this node's replica of `group_id` holds of `range`, or `None` when
+    /// it hosts no replica. Without a range the view holds no entries.
+    pub fn log_probe_view(&self, group_id: u64, range: Option<(u64, u64)>) -> Option<LogProbeView> {
+        let node = self.groups.get(&group_id)?;
+        let entries = range.map_or_else(Vec::new, |(lo, hi)| {
+            let start = lo.max(node.first_available_index());
+            if start > hi {
+                return Vec::new();
+            }
+            // A read the log cannot serve leaves the probe with no entry to
+            // vouch for, which it answers as a mismatch.
+            node.log_entries_range(start, hi)
+                .map_or_else(|_| Vec::new(), <[_]>::to_vec)
+        });
+        Some(LogProbeView {
+            commit_index: node.commit_index(),
+            durable_applied: node.durable_applied_index(),
+            entries,
+        })
+    }
+
     /// Read committed entries of `group_id` from `lo`, whose data sums to at
     /// most `max_bytes`. A start below this replica's log returns no entries.
     pub fn read_committed_within(

@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use std::sync::OnceLock;
 
+use super::applier::MirrorRaft;
 use super::cut_watch::MirrorCutWatch;
 use super::fence::MirrorFence;
 use super::registry::MirrorLinkRegistry;
@@ -27,6 +28,8 @@ pub struct MirrorState {
     pub pins: Arc<MirrorPinTable>,
     /// This cluster's id, once Raft started. A mirror verifies it at hello.
     pub cluster_id: OnceLock<u64>,
+    /// The Raft operations this node's appliers use, once Raft started.
+    pub raft: OnceLock<Arc<dyn MirrorRaft>>,
 }
 
 impl MirrorState {
