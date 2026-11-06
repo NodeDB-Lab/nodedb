@@ -51,7 +51,9 @@ impl RedoRecord {
     /// its apply, and stays as it is.
     ///
     /// `Err` when a stamped sub-record does not re-encode, or a columnar
-    /// image row is not an object.
+    /// image row is not an object. `Err` too when a sub-record of a stamped
+    /// kind does not decode: its stamp would stay below the floor, and a read
+    /// cut at the floor would miss the version.
     pub fn raise_stamps_to(&mut self, floor: i64) -> crate::Result<bool> {
         let mut moved = false;
         for sub in &mut self.ops {
@@ -70,14 +72,16 @@ fn raised_payload(sub: &RedoSubRecord, floor: i64) -> crate::Result<Option<Vec<u
     let payload = sub.payload.as_slice();
     match RecordType::from_raw(sub.record_type & !ENCRYPTED_FLAG) {
         // A document put is a positional tuple, an edge put a map: neither
-        // decodes as the other, and a KV put (a tuple of another arity)
-        // decodes as neither.
+        // decodes as the other. A KV sub-record opens with its `kv_` tag and
+        // stamps at its apply. Anything else is a damaged record.
         Some(RecordType::Put) => match DocumentPutRedo::decode(payload) {
             Some(put) => raised_document_put(put, floor),
+            None if opens_with_kv_tag(payload) => Ok(None),
             None => raised_edge_put(payload, floor),
         },
         Some(RecordType::Delete) => match DocumentDeleteRedo::decode(payload) {
             Some(delete) => raised_document_delete(delete, floor),
+            None if opens_with_kv_tag(payload) => Ok(None),
             None => raised_edge_delete(payload, floor),
         },
         Some(RecordType::GraphNodeLabelSet | RecordType::GraphNodeLabelRemove) => {
@@ -88,6 +92,50 @@ fn raised_payload(sub: &RedoSubRecord, floor: i64) -> crate::Result<Option<Vec<u
         Some(RecordType::ColumnarTruncate) => raised_columnar_truncate(payload, floor),
         // Every other sub-record stamps the record's ordinal at its apply.
         _ => Ok(None),
+    }
+}
+
+/// Whether `payload` is a MessagePack array whose first element is a string
+/// starting `kv_`: the form of every KV sub-record.
+fn opens_with_kv_tag(payload: &[u8]) -> bool {
+    let tag_at = match payload.first() {
+        Some(0x90..=0x9f) => 1,
+        Some(0xdc) => 3,
+        Some(0xdd) => 5,
+        _ => return false,
+    };
+    let text_at = match payload.get(tag_at) {
+        Some(0xa0..=0xbf) => tag_at + 1,
+        Some(0xd9) => tag_at + 2,
+        _ => return false,
+    };
+    payload
+        .get(text_at..)
+        .is_some_and(|text| text.starts_with(b"kv_"))
+}
+
+/// Whether `payload` opens as a columnar image: a map whose first field is
+/// the kind tag. Every other timeseries sub-record opens another way.
+fn opens_as_columnar_image(payload: &[u8]) -> crate::Result<bool> {
+    // A two-element tuple encodes the same field and value bytes as the map
+    // does, after a one-byte header in each.
+    let tag = zerompk::to_msgpack_vec(&("kind", COLUMNAR_IMAGE_KIND))
+        .map_err(|e| undecodable("columnar image", e))?;
+    Ok(matches!(payload.first(), Some(0x80..=0x8f))
+        && payload
+            .get(1..)
+            .is_some_and(|rest| rest.starts_with(tag.get(1..).unwrap_or_default())))
+}
+
+/// The error for a stamped sub-record that does not decode. It carries the
+/// decode detail and no payload bytes.
+fn undecodable(what: &str, detail: impl std::fmt::Display) -> crate::Error {
+    crate::Error::Serialization {
+        format: "msgpack".into(),
+        detail: format!(
+            "redo {what} sub-record does not decode, so its version stamp cannot rise to the \
+             record's ordinal; the session commit is refused: {detail}"
+        ),
     }
 }
 
@@ -155,9 +203,8 @@ fn raised_edge_stamps(
 }
 
 fn raised_edge_put(payload: &[u8], floor: i64) -> crate::Result<Option<Vec<u8>>> {
-    let Ok(mut edge) = zerompk::from_msgpack::<EdgePutRedo>(payload) else {
-        return Ok(None);
-    };
+    let mut edge = zerompk::from_msgpack::<EdgePutRedo>(payload)
+        .map_err(|e| undecodable("put (document or edge)", e))?;
     let Some((system_from, applied)) = raised_edge_stamps(edge.system_from, edge.applied, floor)
     else {
         return Ok(None);
@@ -168,9 +215,8 @@ fn raised_edge_put(payload: &[u8], floor: i64) -> crate::Result<Option<Vec<u8>>>
 }
 
 fn raised_edge_delete(payload: &[u8], floor: i64) -> crate::Result<Option<Vec<u8>>> {
-    let Ok(mut edge) = zerompk::from_msgpack::<EdgeDeleteRedo>(payload) else {
-        return Ok(None);
-    };
+    let mut edge = zerompk::from_msgpack::<EdgeDeleteRedo>(payload)
+        .map_err(|e| undecodable("delete (document or edge)", e))?;
     let Some((system_from, applied)) = raised_edge_stamps(edge.system_from, edge.applied, floor)
     else {
         return Ok(None);
@@ -181,9 +227,8 @@ fn raised_edge_delete(payload: &[u8], floor: i64) -> crate::Result<Option<Vec<u8
 }
 
 fn raised_node_label(payload: &[u8], floor: i64) -> crate::Result<Option<Vec<u8>>> {
-    let Ok(mut label) = zerompk::from_msgpack::<NodeLabelRedo>(payload) else {
-        return Ok(None);
-    };
+    let mut label = zerompk::from_msgpack::<NodeLabelRedo>(payload)
+        .map_err(|e| undecodable("graph node label", e))?;
     let Some(system_from) = label.system_from.and_then(|stamp| below(stamp, floor)) else {
         return Ok(None);
     };
@@ -193,6 +238,13 @@ fn raised_node_label(payload: &[u8], floor: i64) -> crate::Result<Option<Vec<u8>
 
 fn raised_columnar_image(payload: &[u8], floor: i64) -> crate::Result<Option<Vec<u8>>> {
     let Ok(mut record) = zerompk::from_msgpack::<ColumnarImageWalRecord>(payload) else {
+        // Every other timeseries sub-record stamps at its apply.
+        if opens_as_columnar_image(payload)? {
+            return Err(undecodable(
+                "columnar image",
+                "the kind tag reads and the record does not",
+            ));
+        }
         return Ok(None);
     };
     if record.kind != COLUMNAR_IMAGE_KIND {
@@ -248,9 +300,8 @@ fn image_with_system_time(
 }
 
 fn raised_columnar_truncate(payload: &[u8], floor: i64) -> crate::Result<Option<Vec<u8>>> {
-    let Ok(mut record) = zerompk::from_msgpack::<ColumnarTruncateWalRecord>(payload) else {
-        return Ok(None);
-    };
+    let mut record = zerompk::from_msgpack::<ColumnarTruncateWalRecord>(payload)
+        .map_err(|e| undecodable("columnar truncate", e))?;
     let Some(system_from) = record.system_from.and_then(|stamp| below(stamp, floor)) else {
         return Ok(None);
     };
@@ -376,6 +427,63 @@ mod tests {
             zerompk::to_msgpack_vec(&("c", "d1", vec![7u8], none, 3u32)).expect("encode"),
         );
         let ops = vec![kv_put, plain_put];
+        let mut redo = record(ops.clone());
+        assert!(!redo.raise_stamps_to(FLOOR).expect("raise"));
+        assert_eq!(redo.ops, ops);
+    }
+
+    /// Skipping a damaged record leaves its stamp below the floor, so a read
+    /// cut at the floor misses the version. Each stamped kind refuses instead.
+    #[test]
+    fn a_stamped_kind_that_does_not_decode_is_refused() {
+        let garbage = vec![0xc1, 0x00];
+        let image_tag_only = {
+            let mut bytes = vec![0x84];
+            let tag = zerompk::to_msgpack_vec(&("kind", COLUMNAR_IMAGE_KIND)).expect("encode");
+            bytes.extend_from_slice(&tag[1..]);
+            bytes
+        };
+        for sub_record in [
+            sub(RecordType::Put, garbage.clone()),
+            sub(RecordType::Delete, garbage.clone()),
+            sub(RecordType::GraphNodeLabelSet, garbage.clone()),
+            sub(RecordType::GraphNodeLabelRemove, garbage.clone()),
+            sub(RecordType::ColumnarTruncate, garbage.clone()),
+            sub(RecordType::TimeseriesBatch, image_tag_only),
+        ] {
+            let mut redo = record(vec![sub_record.clone()]);
+            assert!(
+                matches!(
+                    redo.raise_stamps_to(FLOOR),
+                    Err(crate::Error::Serialization { .. })
+                ),
+                "{sub_record:?}"
+            );
+        }
+    }
+
+    /// The encoded image opens the way the corruption test assumes.
+    #[test]
+    fn a_columnar_image_opens_with_its_kind_tag() {
+        let image = zerompk::to_msgpack_vec(&ColumnarImageWalRecord {
+            kind: COLUMNAR_IMAGE_KIND.to_string(),
+            collection: "m".into(),
+            schema_bytes: Vec::new(),
+            rows: Vec::new(),
+        })
+        .expect("encode");
+        assert!(opens_as_columnar_image(&image).expect("sniff"));
+    }
+
+    /// A KV sub-record and a plain timeseries batch stamp at their apply.
+    #[test]
+    fn a_kv_delete_and_a_plain_timeseries_batch_stay() {
+        let kv_delete = sub(
+            RecordType::Delete,
+            zerompk::to_msgpack_vec(&("kv_delete", "c", vec![vec![1u8]])).expect("encode"),
+        );
+        let batch = sub(RecordType::TimeseriesBatch, b"metric v=1".to_vec());
+        let ops = vec![kv_delete, batch];
         let mut redo = record(ops.clone());
         assert!(!redo.raise_stamps_to(FLOOR).expect("raise"));
         assert_eq!(redo.ops, ops);
