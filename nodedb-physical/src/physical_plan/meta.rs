@@ -397,8 +397,7 @@ pub enum MetaOp {
         /// Wall-clock ms read once on the sequencer leader at epoch creation.
         /// Used by engine handlers as the deterministic time anchor (bitemporal
         /// sys_from, KV TTL expire_at, timeseries system_ms) instead of reading
-        /// the wall clock independently. Wire-additive: defaults to 0 on decode
-        /// of older entries.
+        /// the wall clock independently.
         epoch_system_ms: i64,
         /// The transaction's read-set from the replicated `TxClass`. Each
         /// participant checks its own vShard's reads at stage and votes
@@ -599,8 +598,7 @@ pub enum MetaOp {
     /// every op and to discover which collections' overlay entries to serialize.
     /// An op class whose resolve serializer is not yet built raises a typed
     /// error rather than being silently omitted (a dropped op class would lose
-    /// those rows on install). Wire-additive: appended last so older log entries
-    /// decode unchanged.
+    /// those rows on install).
     ResolveTxn {
         txn_id: nodedb_types::id::TxnId,
         plans: Vec<super::PhysicalPlan>,
