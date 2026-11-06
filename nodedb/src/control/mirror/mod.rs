@@ -20,8 +20,7 @@ pub mod state;
 
 pub use fence::MirrorFence;
 pub use observer::{
-    LAG_DEGRADED_MS, LAG_DISCONNECTED_MS, LagTransition, compute_lag_transition, record_apply,
-    update_lag_status,
+    LAG_DEGRADED_MS, LAG_DISCONNECTED_MS, LagTransition, compute_lag_transition, update_lag_status,
 };
 pub use registry::MirrorLinkRegistry;
 pub use restart::{MirrorRestartDecision, enumerate_resumable_mirrors};

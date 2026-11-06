@@ -7,13 +7,13 @@
 //! because a clone-from-stale-source creates ambiguous bitemporal lineage.
 //! The operator must promote the mirror first, then clone.
 
-use nodedb_types::{DatabaseId, Lsn, MirrorMode, MirrorOrigin, MirrorStatus};
+use nodedb_types::{DatabaseId, MirrorMode, MirrorOrigin, MirrorStatus};
 use tempfile::TempDir;
 
 use nodedb::control::security::catalog::SystemCatalog;
 use nodedb::control::security::catalog::database_types::{DatabaseDescriptor, DatabaseStatus};
 
-use super::helpers::{TEST_SOURCE_CLUSTER, open_tmp_catalog};
+use super::helpers::{TEST_SOURCE_CLUSTER, TEST_SOURCE_DATABASE, open_tmp_catalog};
 
 /// Simulate the clone-source validation check that lives in the clone handler.
 /// Returns `true` if the source is a mirror (clone must be rejected).
@@ -49,8 +49,8 @@ fn clone_from_following_mirror_rejected() {
         mirror_origin: Some(MirrorOrigin {
             source_cluster: TEST_SOURCE_CLUSTER.to_string(),
             source_database: DatabaseId::new(0),
+            source_database_name: TEST_SOURCE_DATABASE.to_string(),
             mode: MirrorMode::Async,
-            last_applied: Lsn::new(50),
             status: MirrorStatus::Following,
         }),
         audit_dml: nodedb_types::AuditDmlMode::None,
@@ -80,9 +80,9 @@ fn clone_from_degraded_mirror_rejected() {
         mirror_origin: Some(MirrorOrigin {
             source_cluster: TEST_SOURCE_CLUSTER.to_string(),
             source_database: DatabaseId::new(0),
+            source_database_name: TEST_SOURCE_DATABASE.to_string(),
             mode: MirrorMode::Async,
-            last_applied: Lsn::new(20),
-            status: MirrorStatus::Degraded { lag_ms: 9_000 },
+            status: MirrorStatus::Degraded,
         }),
         audit_dml: nodedb_types::AuditDmlMode::None,
         idle_session_timeout_secs: 0,
@@ -112,8 +112,8 @@ fn clone_from_promoted_mirror_allowed() {
         mirror_origin: Some(MirrorOrigin {
             source_cluster: TEST_SOURCE_CLUSTER.to_string(),
             source_database: DatabaseId::new(0),
+            source_database_name: TEST_SOURCE_DATABASE.to_string(),
             mode: MirrorMode::Async,
-            last_applied: Lsn::new(100),
             status: MirrorStatus::Promoted,
         }),
         audit_dml: nodedb_types::AuditDmlMode::None,

@@ -293,6 +293,7 @@ pub fn stamp(
         | CatalogEntry::MoveTenantCutover { .. }
         | CatalogEntry::CommitConsumerOffsets(_)
         | CatalogEntry::PutBackupScheduleMark(_)
+        | CatalogEntry::PutMirrorCutState { .. }
         | CatalogEntry::PutSpatialRefSys(_)
         | CatalogEntry::DropSpatialRefSys { .. }
         | CatalogEntry::PutCredential(_)

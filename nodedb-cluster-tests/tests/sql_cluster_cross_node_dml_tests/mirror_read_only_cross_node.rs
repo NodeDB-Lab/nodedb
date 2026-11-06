@@ -9,7 +9,9 @@ use std::time::Duration;
 use nodedb::control::catalog_entry::CatalogEntry;
 use nodedb::control::metadata_proposer::propose_catalog_entry_async;
 use nodedb::control::security::catalog::database_types::DatabaseStatus;
-use nodedb_types::{DatabaseId, Lsn, MirrorMode, MirrorOrigin, MirrorStatus};
+use nodedb_types::{
+    DatabaseId, MirrorCutState, MirrorGroupPosition, MirrorMode, MirrorOrigin, MirrorStatus,
+};
 
 use crate::common::cluster_harness::{TestCluster, wait_for};
 
@@ -46,8 +48,8 @@ async fn every_node_answers_a_mirror_write_with_the_read_only_refusal() {
     descriptor.mirror_origin = Some(MirrorOrigin {
         source_cluster: "source".to_string(),
         source_database: DatabaseId::new(0),
+        source_database_name: "source_db".to_string(),
         mode: MirrorMode::Async,
-        last_applied: Lsn::new(1),
         status: MirrorStatus::Following,
     });
     propose_catalog_entry_async(shared, &CatalogEntry::PutDatabase(Box::new(descriptor)))
@@ -81,6 +83,66 @@ async fn every_node_answers_a_mirror_write_with_the_read_only_refusal() {
             "node {index} answered: {refusal}"
         );
     }
+
+    // The cut state reaches every node through the metadata log.
+    let cut_state = MirrorCutState {
+        ready_cut: 7,
+        applied_cut: 7,
+        applied_cut_hlc_ns: 1,
+        cap_ordinal: 1,
+        positions: vec![MirrorGroupPosition {
+            group_id: 1,
+            log_index: 40,
+        }],
+    };
+    propose_catalog_entry_async(
+        shared,
+        &CatalogEntry::PutMirrorCutState {
+            database_id: database_id.as_u64(),
+            state: Box::new(cut_state.clone()),
+        },
+    )
+    .await
+    .expect("propose the cut state");
+    wait_for(
+        "every node applied the cut state",
+        Duration::from_secs(10),
+        Duration::from_millis(50),
+        || {
+            cluster.nodes.iter().all(|node| {
+                node.shared
+                    .credentials
+                    .catalog()
+                    .get_mirror_cut_state(database_id)
+                    .expect("read the cut state")
+                    .as_ref()
+                    == Some(&cut_state)
+            })
+        },
+    )
+    .await;
+
+    // PROMOTE removes it on every node, the ones that ran no statement too.
+    cluster
+        .exec_ddl_on_any_leader(&format!("ALTER DATABASE {DATABASE} PROMOTE"))
+        .await
+        .expect("promote the mirror");
+    wait_for(
+        "every node removed the cut state",
+        Duration::from_secs(10),
+        Duration::from_millis(50),
+        || {
+            cluster.nodes.iter().all(|node| {
+                node.shared
+                    .credentials
+                    .catalog()
+                    .get_mirror_cut_state(database_id)
+                    .expect("read the cut state")
+                    .is_none()
+            })
+        },
+    )
+    .await;
 
     cluster.shutdown().await;
 }

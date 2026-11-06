@@ -360,23 +360,12 @@ pub(super) const CLONE_LINEAGE: TableDefinition<u64, &[u8]> =
 
 // ── Mirror catalog ────────────────────────────────────────────────────
 
-/// Table: `(mirror_database_id: u64, source_collection_name: &str)` →
-/// `local_collection_name: &str` (MessagePack bytes).
+/// Table: `database_id (u64)` → MessagePack-serialized `MirrorCutState`.
 ///
-/// Maps source-side collection names to this mirror's local collection names.
-/// In typical deployments the names match; the map exists so a future
-/// `RENAME COLLECTION ON MIRROR` can decouple them without breaking replication.
-/// Updated atomically when a DDL entry from the source is applied.
-pub(super) const MIRROR_COLLECTION_MAP: TableDefinition<(u64, &str), &[u8]> =
-    TableDefinition::new("_system.mirror_collection_map");
-
-/// Table: `database_id (u64)` → MessagePack-serialized `MirrorLagRecord`.
-///
-/// Stores the last-applied LSN and apply-timestamp for each mirror database.
-/// Read by the metrics collector to produce the `mirror_lag_ms` gauge and by
-/// the `SHOW DATABASE MIRROR STATUS` handler.
-pub(super) const MIRROR_LAG: TableDefinition<u64, &[u8]> =
-    TableDefinition::new("_system.mirror_lag");
+/// How far each mirror database followed its source. The metadata group
+/// replicates it, so every node reads the same row.
+pub(super) const MIRROR_CUT_STATE: TableDefinition<u64, &[u8]> =
+    TableDefinition::new("_system.mirror_cut_state");
 
 // ── Vector model + checkpoints ────────────────────────────────────────
 

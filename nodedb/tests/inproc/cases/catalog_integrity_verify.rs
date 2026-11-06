@@ -310,6 +310,9 @@ fn classify(entry: &CatalogEntry) -> VariantClass {
         // A scheduled backup's mark is scheduler state keyed by the schedule's
         // config incarnation. It names no catalog object.
         CatalogEntry::PutBackupScheduleMark { .. } => VariantClass::Exempt,
+        // A mirror's cut state is progress of one database's link. It names
+        // no owned catalog object.
+        CatalogEntry::PutMirrorCutState { .. } => VariantClass::Exempt,
 
         // OIDC providers are cluster-level identity-provider config; no
         // per-object owner row required.

@@ -264,7 +264,7 @@ Bootstrap transfers a snapshot from source to mirror over QUIC, then log-streams
 
 ```sql
 SHOW DATABASE MIRROR STATUS FOR prod_eu;
--- Output: status=Following, lag_ms=150, last_applied=12345, mode=async
+-- Output: status=following, lag_ms=150, ready_cut=12346, applied_cut=12345, mode=async
 ```
 
 ### Promotion (Irreversible)

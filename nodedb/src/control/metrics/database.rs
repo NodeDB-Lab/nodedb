@@ -47,7 +47,7 @@ pub struct DatabaseCounters {
     pub wal_commit_latency_p99_us: AtomicU64,
     /// Cumulative wall microseconds spent holding a maintenance lease.
     pub maintenance_lease_micros_total: AtomicU64,
-    /// Mirror replication lag in milliseconds (`now_ms - last_apply_ms`).
+    /// Mirror replication lag in milliseconds (`now_ms - applied_cut_ms`).
     /// Zero for non-mirror databases or a promoted mirror.
     pub mirror_lag_ms: AtomicU64,
 }
@@ -231,7 +231,7 @@ impl DatabaseMetricsRegistry {
     store_setter!(
         /// Set the mirror replication lag in milliseconds.
         ///
-        /// Computed as `now_ms - last_apply_ms` on the wall clock, the same
+        /// Computed as `now_ms - applied_cut_ms` on the wall clock, the same
         /// basis as the bounded-staleness read rejection.
         set_mirror_lag_ms, mirror_lag_ms
     );

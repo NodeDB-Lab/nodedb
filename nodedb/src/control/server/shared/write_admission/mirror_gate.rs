@@ -169,7 +169,7 @@ pub(crate) async fn await_entry_metadata_floor(
 
 #[cfg(test)]
 mod tests {
-    use nodedb_types::{Lsn, MirrorMode, MirrorOrigin, MirrorStatus};
+    use nodedb_types::{MirrorMode, MirrorOrigin, MirrorStatus};
 
     use super::*;
     use crate::control::security::catalog::database_types::{DatabaseDescriptor, DatabaseStatus};
@@ -188,8 +188,8 @@ mod tests {
             mirror_origin: Some(MirrorOrigin {
                 source_cluster: "source".to_string(),
                 source_database: DatabaseId::new(0),
+                source_database_name: "source_db".to_string(),
                 mode: MirrorMode::Async,
-                last_applied: Lsn::new(0),
                 status,
             }),
             audit_dml: nodedb_types::AuditDmlMode::None,

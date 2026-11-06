@@ -668,6 +668,15 @@ pub enum CatalogEntry {
     /// config incarnation, and apply only raises it, so a replay is a no-op.
     PutBackupScheduleMark(Box<StoredBackupScheduleMark>),
 
+    // ── Mirror followers ───────────────────────────────────────────
+    /// How far a mirror database followed its source, on every node. Apply
+    /// never moves the row back, and a database that follows nothing writes
+    /// nothing, so a replay is a no-op.
+    PutMirrorCutState {
+        database_id: u64,
+        state: Box<nodedb_types::MirrorCutState>,
+    },
+
     // ── User-defined CRSs ──────────────────────────────────────────
     /// `CREATE SPATIAL_REF_SYS`: one user-defined CRS. Apply defines it in
     /// the catalog's set, and leaves the set unchanged when the code is live

@@ -6,7 +6,7 @@
 //!
 //! 1. **Catalog-only fixtures** (used by most tests in this directory):
 //!    [`open_tmp_catalog`], [`make_mirror_descriptor`], [`inject_mirror`],
-//!    [`inject_lag_record_for_id`]. These fabricate `SystemCatalog` state
+//!    [`inject_cut_state_for_id`]. These fabricate `SystemCatalog` state
 //!    on a temp dir without standing up a server.
 //!
 //! 2. **Two-server pgwire fixtures** ([`inject_mirror_descriptor`],
@@ -26,10 +26,13 @@ use nodedb::control::metadata_proposer::propose_catalog_entry_async;
 use nodedb::control::security::catalog::SystemCatalog;
 use nodedb::control::security::catalog::database_types::{DatabaseDescriptor, DatabaseStatus};
 pub use nodedb_test_support::pgwire_harness::TestServer;
-use nodedb_types::{DatabaseId, Lsn, MirrorLagRecord, MirrorMode, MirrorOrigin, MirrorStatus};
+use nodedb_types::{DatabaseId, MirrorCutState, MirrorMode, MirrorOrigin, MirrorStatus};
 
 /// Default source cluster id used by every fixture in this module.
 pub const TEST_SOURCE_CLUSTER: &str = "prod-us-test";
+
+/// Default source database name used by every fixture in this module.
+pub const TEST_SOURCE_DATABASE: &str = "orders_test";
 
 /// Open a fresh `SystemCatalog` rooted at `dir/system.redb`.
 ///
@@ -45,12 +48,7 @@ pub fn open_tmp_catalog(dir: &TempDir) -> SystemCatalog {
 /// `DatabaseStatus` is derived from `status`: `Promoted` ⇒ `Active`,
 /// everything else ⇒ `Mirroring`. The `source_database` is `DatabaseId::new(0)`
 /// and the source cluster is [`TEST_SOURCE_CLUSTER`].
-pub fn make_mirror_descriptor(
-    id: u64,
-    name: &str,
-    status: MirrorStatus,
-    last_applied_lsn: u64,
-) -> DatabaseDescriptor {
+pub fn make_mirror_descriptor(id: u64, name: &str, status: MirrorStatus) -> DatabaseDescriptor {
     DatabaseDescriptor {
         id: DatabaseId::new(id),
         name: name.to_string(),
@@ -58,8 +56,10 @@ pub fn make_mirror_descriptor(
             MirrorStatus::Promoted => DatabaseStatus::Active,
             MirrorStatus::Bootstrapping { .. }
             | MirrorStatus::Following
-            | MirrorStatus::Degraded { .. }
-            | MirrorStatus::Disconnected => DatabaseStatus::Mirroring,
+            | MirrorStatus::Degraded
+            | MirrorStatus::Disconnected
+            | MirrorStatus::Promoting { .. }
+            | MirrorStatus::Failed { .. } => DatabaseStatus::Mirroring,
         },
         created_at_lsn: 0,
         quota_ref: 0,
@@ -67,8 +67,8 @@ pub fn make_mirror_descriptor(
         mirror_origin: Some(MirrorOrigin {
             source_cluster: TEST_SOURCE_CLUSTER.to_string(),
             source_database: DatabaseId::new(0),
+            source_database_name: TEST_SOURCE_DATABASE.to_string(),
             mode: MirrorMode::Async,
-            last_applied: Lsn::new(last_applied_lsn),
             status,
         }),
         audit_dml: nodedb_types::AuditDmlMode::None,
@@ -79,27 +79,33 @@ pub fn make_mirror_descriptor(
 /// Persist a mirror descriptor in `catalog`. Convenience over
 /// [`make_mirror_descriptor`] + [`SystemCatalog::put_database`].
 pub fn inject_mirror(catalog: &SystemCatalog, db_id: DatabaseId, name: &str, status: MirrorStatus) {
-    let descriptor = make_mirror_descriptor(db_id.as_u64(), name, status, 0);
+    let descriptor = make_mirror_descriptor(db_id.as_u64(), name, status);
     catalog
         .put_database(&descriptor)
         .expect("inject mirror descriptor");
 }
 
-/// Write a `MirrorLagRecord` for `db_id` directly via the catalog handle.
-/// `last_apply_ms` is computed as `now_ms - lag_offset_ms`.
-pub fn inject_lag_record_for_id(
+/// A cut state whose newest applied cut `cut` is `lag_offset_ms` old at `now`.
+pub fn applied_cut_state(cut: u64, now: u64, lag_offset_ms: u64) -> MirrorCutState {
+    MirrorCutState {
+        ready_cut: cut,
+        applied_cut: cut,
+        applied_cut_hlc_ns: now.saturating_sub(lag_offset_ms).saturating_mul(1_000_000),
+        ..MirrorCutState::default()
+    }
+}
+
+/// Write the cut state of `db_id` directly via the catalog handle. Its applied
+/// cut `cut` is `lag_offset_ms` old.
+pub fn inject_cut_state_for_id(
     catalog: &SystemCatalog,
     db_id: DatabaseId,
     lag_offset_ms: u64,
-    lsn: u64,
+    cut: u64,
 ) {
-    let record = MirrorLagRecord {
-        last_applied_lsn: Lsn::new(lsn),
-        last_apply_ms: now_ms().saturating_sub(lag_offset_ms),
-    };
     catalog
-        .put_mirror_lag(db_id, &record)
-        .expect("inject lag record");
+        .raise_mirror_cut_state(db_id, &applied_cut_state(cut, now_ms(), lag_offset_ms))
+        .expect("inject cut state");
 }
 
 /// Propose `descriptor` through the metadata group, so the catalog and every
@@ -117,16 +123,11 @@ async fn propose_descriptor(server: &TestServer, descriptor: DatabaseDescriptor)
 /// issued.
 ///
 /// `status` must be one of `MirrorStatus::Following`, `Degraded`, etc.
-pub async fn inject_mirror_descriptor(
-    server: &TestServer,
-    name: &str,
-    status: MirrorStatus,
-    last_applied_lsn: u64,
-) {
+pub async fn inject_mirror_descriptor(server: &TestServer, name: &str, status: MirrorStatus) {
     let db_id = nodedb::control::database::allocate_database_id(&server.shared)
         .await
         .expect("allocate mirror database id");
-    let descriptor = make_mirror_descriptor(db_id.as_u64(), name, status, last_applied_lsn);
+    let descriptor = make_mirror_descriptor(db_id.as_u64(), name, status);
     propose_descriptor(server, descriptor).await;
 }
 
@@ -147,16 +148,16 @@ pub async fn mark_database_mirror(server: &TestServer, name: &str, status: Mirro
     descriptor.mirror_origin = Some(MirrorOrigin {
         source_cluster: TEST_SOURCE_CLUSTER.to_string(),
         source_database: DatabaseId::new(0),
+        source_database_name: TEST_SOURCE_DATABASE.to_string(),
         mode: MirrorMode::Async,
-        last_applied: Lsn::new(1),
         status,
     });
     propose_descriptor(server, descriptor).await;
 }
 
-/// Write a `MirrorLagRecord` for `db_name` in `server`'s catalog with
-/// `last_apply_ms` set to `now_ms - lag_offset_ms`.
-pub fn inject_lag_record(server: &TestServer, db_name: &str, lag_offset_ms: u64, lsn: u64) {
+/// Write the cut state of `db_name` in `server`'s catalog. Its applied cut
+/// `cut` is `lag_offset_ms` old.
+pub fn inject_cut_state(server: &TestServer, db_name: &str, lag_offset_ms: u64, cut: u64) {
     let catalog = server.shared.credentials.catalog();
 
     let db_id = catalog
@@ -164,7 +165,7 @@ pub fn inject_lag_record(server: &TestServer, db_name: &str, lag_offset_ms: u64,
         .expect("catalog lookup")
         .expect("db not found");
 
-    inject_lag_record_for_id(catalog, db_id, lag_offset_ms, lsn);
+    inject_cut_state_for_id(catalog, db_id, lag_offset_ms, cut);
 }
 
 /// Assert that a pgwire query returns a specific SQLSTATE error code.

@@ -5,8 +5,8 @@
 //! The catalog lookup, superuser gate (after db-id resolution), idempotent
 //! already-promoted short-circuit, not-a-mirror rejection, observer-link
 //! teardown BEFORE the descriptor mutation, status flip, Raft propose /
-//! single-node fallback, mirror-only catalog cleanup, and `DatabasePromoted`
-//! audit run here. The result is the protocol-neutral [`DdlResult`].
+//! single-node fallback, and `DatabasePromoted` audit run here. The result is
+//! the protocol-neutral [`DdlResult`].
 
 use nodedb_types::MirrorStatus;
 
@@ -90,35 +90,14 @@ pub async fn promote_database(
 
     // Persist atomically through Raft. On restart the descriptor is reloaded
     // with status=Active + origin.status=Promoted, so the database remains
-    // writable without any further intervention.
+    // writable without any further intervention. Every node's apply of this
+    // entry removes the cut state. `mirror_origin` stays as lineage.
     propose_catalog_entry_async(
         state,
         &CatalogEntry::PutDatabase(Box::new(descriptor.clone())),
     )
     .await
     .map_err(|e| DdlError::from_error_in_context("catalog propose failed", &e))?;
-
-    // The database is writable. Clear the mirror-only catalog state so
-    // it does not linger as stale data:
-    //   - mirror_collection_map: source→local collection name routing used
-    //     by the observer-side DDL applier; meaningless once writes are local.
-    //   - mirror_lag: replication lag observed against the source; no longer
-    //     advancing once the observer link is gone.
-    // The descriptor's `mirror_origin` is intentionally retained as historical
-    // lineage (origin cluster, mode, last applied LSN at promotion). DROP
-    // DATABASE relies on this cleanup having happened — see drop.rs.
-    if let Err(e) = catalog.delete_mirror_collection_map(db_id) {
-        return Err(DdlError::from_error_in_context(
-            "PROMOTE: failed to clear mirror_collection_map",
-            &e,
-        ));
-    }
-    if let Err(e) = catalog.delete_mirror_lag(db_id) {
-        return Err(DdlError::from_error_in_context(
-            "PROMOTE: failed to clear mirror_lag",
-            &e,
-        ));
-    }
 
     state.audit_record_with_db(
         crate::control::security::audit::AuditEvent::DatabasePromoted,

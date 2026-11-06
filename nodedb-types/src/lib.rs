@@ -117,7 +117,9 @@ pub use json_msgpack::{
 };
 pub use kv::{KV_DEFAULT_INLINE_THRESHOLD, KvConfig, KvTtlPolicy, is_valid_kv_key_type};
 pub use lsn::Lsn;
-pub use mirror::{MirrorLagRecord, MirrorMode, MirrorOrigin, MirrorStatus};
+pub use mirror::{
+    MirrorCutState, MirrorFailure, MirrorGroupPosition, MirrorMode, MirrorOrigin, MirrorStatus,
+};
 pub use multi_vector::{MultiVector, MultiVectorError, MultiVectorScoreMode};
 pub use namespace::Namespace;
 pub use path_component::is_plain_path_component;

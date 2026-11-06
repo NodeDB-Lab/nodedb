@@ -431,6 +431,8 @@ pub async fn run_post_apply_async_side_effects(
         | CatalogEntry::CommitConsumerOffsets(_)
         // A backup schedule mark is its catalog row alone.
         | CatalogEntry::PutBackupScheduleMark(_)
+        // A mirror cut state is its catalog row alone.
+        | CatalogEntry::PutMirrorCutState { .. }
         // Checkpoints have no in-memory mirror at all.
         // CompactHistory has its own async branch above; it does not appear
         // here.

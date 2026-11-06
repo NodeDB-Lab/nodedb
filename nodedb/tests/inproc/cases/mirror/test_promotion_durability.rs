@@ -9,17 +9,19 @@
 //! path that the production server uses at boot. Restart-recovery is separately
 //! exercised by `enumerate_resumable_mirrors` in `test_restart_resume.rs`.
 
-use nodedb_types::{DatabaseId, Lsn, MirrorMode, MirrorOrigin, MirrorStatus};
+use nodedb_types::{DatabaseId, MirrorMode, MirrorOrigin, MirrorStatus};
 use tempfile::TempDir;
 
 use nodedb::control::mirror::enumerate_resumable_mirrors;
 use nodedb::control::security::catalog::SystemCatalog;
 use nodedb::control::security::catalog::database_types::{DatabaseDescriptor, DatabaseStatus};
 
-use super::helpers::{TEST_SOURCE_CLUSTER, make_mirror_descriptor, open_tmp_catalog};
+use super::helpers::{
+    TEST_SOURCE_CLUSTER, TEST_SOURCE_DATABASE, make_mirror_descriptor, open_tmp_catalog,
+};
 
 fn inject_following_mirror(catalog: &SystemCatalog, db_id: DatabaseId, db_name: &str) {
-    let descriptor = make_mirror_descriptor(db_id.as_u64(), db_name, MirrorStatus::Following, 42);
+    let descriptor = make_mirror_descriptor(db_id.as_u64(), db_name, MirrorStatus::Following);
     catalog.put_database(&descriptor).expect("inject mirror");
 }
 
@@ -144,8 +146,8 @@ fn mirror_restart_does_not_reconnect_promoted() {
             mirror_origin: Some(MirrorOrigin {
                 source_cluster: TEST_SOURCE_CLUSTER.to_string(),
                 source_database: DatabaseId::new(0),
+                source_database_name: TEST_SOURCE_DATABASE.to_string(),
                 mode: MirrorMode::Async,
-                last_applied: Lsn::new(50),
                 status: MirrorStatus::Promoted,
             }),
             audit_dml: nodedb_types::AuditDmlMode::None,

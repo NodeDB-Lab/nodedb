@@ -7,7 +7,7 @@
 //! single-node fallback, and `DatabaseMirrored` audit run here. The result is
 //! the protocol-neutral [`DdlResult`].
 
-use nodedb_types::{DatabaseId, Lsn, MirrorMode, MirrorOrigin, MirrorStatus};
+use nodedb_types::{DatabaseId, MirrorMode, MirrorOrigin, MirrorStatus};
 
 use crate::control::catalog_entry::entry::CatalogEntry;
 use crate::control::metadata_proposer::propose_catalog_entry_async;
@@ -84,8 +84,8 @@ pub async fn mirror_database(
     let mirror_origin = MirrorOrigin {
         source_cluster: source_cluster.to_string(),
         source_database: source_db_id,
+        source_database_name: source_database.to_string(),
         mode,
-        last_applied: Lsn::new(0),
         status: MirrorStatus::Bootstrapping {
             bytes_done: 0,
             bytes_total: 0,

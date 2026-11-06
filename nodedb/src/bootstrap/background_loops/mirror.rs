@@ -29,7 +29,7 @@ pub fn log_mirror_restart_decisions(shared: &Arc<SharedState>) {
             for d in &decisions {
                 tracing::info!(
                     database = %d.database_name,
-                    resume_lsn = d.resume_from_lsn,
+                    ready_cut = d.ready_cut,
                     needs_bootstrap = d.needs_bootstrap,
                     "mirror restart: observer link will resume"
                 );
@@ -43,7 +43,7 @@ pub fn log_mirror_restart_decisions(shared: &Arc<SharedState>) {
 
 /// Mirror lag monitor.
 ///
-/// Reads `_system.mirror_lag` for every active mirror and updates the
+/// Reads `_system.mirror_cut_state` for every active mirror and updates the
 /// `nodedb_database_mirror_lag_ms` metric. Also drives status transitions
 /// (Following → Degraded → Disconnected) and clears the metric when a
 /// mirror is promoted.
@@ -92,7 +92,7 @@ fn sample_mirror_lag(shared: &SharedState) {
         // Read the real receive timestamp from the link registry. `None`
         // means no link is registered for this database (the cluster layer
         // has not yet (re)established it after restart). `update_lag_status`
-        // falls back to the catalog's apply time in that case, so the
+        // falls back to the applied cut's time in that case, so the
         // disconnect timer still advances.
         let last_received = shared.mirror.links.last_received_ms(db.id);
         crate::control::mirror::update_lag_status(
@@ -101,7 +101,6 @@ fn sample_mirror_lag(shared: &SharedState) {
             &db.name,
             &origin.status,
             last_received,
-            false,
             &shared.database_metrics,
         );
     }

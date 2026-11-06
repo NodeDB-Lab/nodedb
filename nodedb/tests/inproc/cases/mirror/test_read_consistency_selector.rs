@@ -11,7 +11,7 @@ use nodedb_test_support::pgwire_harness::TestServer;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
-use super::helpers::inject_lag_record;
+use super::helpers::inject_cut_state;
 use super::test_read_only_protocols::{DATABASE_HEADER, SELECT, fixture};
 
 const NAMES_THE_FIELD: &str = "read_consistency";
@@ -118,7 +118,7 @@ async fn http_bounded_reads_follow_the_mirror_lag() {
         let unapplied = http_read(&server, route, &name, Some("bounded_staleness:60")).await;
         assert!(unapplied.contains(NAMES_THE_FIELD), "{route}: {unapplied}");
     }
-    inject_lag_record(&server, &name, 0, 1);
+    inject_cut_state(&server, &name, 0, 1);
     for route in HTTP_ROUTES {
         assert_http_served(&http_read(&server, route, &name, Some("bounded_staleness:60")).await);
     }
@@ -146,7 +146,7 @@ async fn websocket_reads_follow_the_request_field() {
         &ws_read(&server, &name, Some("bounded_staleness:60")).await,
         NAMES_THE_FIELD,
     );
-    inject_lag_record(&server, &name, 0, 1);
+    inject_cut_state(&server, &name, 0, 1);
     assert_ws_served(&ws_read(&server, &name, Some("bounded_staleness:60")).await);
     assert_ws_refused(
         &ws_read(&server, &name, Some("sometimes")).await,

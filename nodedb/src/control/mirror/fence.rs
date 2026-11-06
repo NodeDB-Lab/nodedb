@@ -31,8 +31,10 @@ fn read_only_name(descriptor: &DatabaseDescriptor) -> Option<Arc<str>> {
         MirrorStatus::Promoted => None,
         MirrorStatus::Bootstrapping { .. }
         | MirrorStatus::Following
-        | MirrorStatus::Degraded { .. }
-        | MirrorStatus::Disconnected => Some(Arc::from(descriptor.name.as_str())),
+        | MirrorStatus::Degraded
+        | MirrorStatus::Disconnected
+        | MirrorStatus::Promoting { .. }
+        | MirrorStatus::Failed { .. } => Some(Arc::from(descriptor.name.as_str())),
     }
 }
 
@@ -106,7 +108,7 @@ impl MirrorFence {
 mod tests {
     use std::path::PathBuf;
 
-    use nodedb_types::{Lsn, MirrorMode, MirrorOrigin};
+    use nodedb_types::{MirrorFailure, MirrorMode, MirrorOrigin};
     use tempfile::TempDir;
 
     use super::*;
@@ -123,8 +125,8 @@ mod tests {
             mirror_origin: status.map(|status| MirrorOrigin {
                 source_cluster: "source".to_string(),
                 source_database: DatabaseId::new(0),
+                source_database_name: "source_db".to_string(),
                 mode: MirrorMode::Async,
-                last_applied: Lsn::new(0),
                 status,
             }),
             audit_dml: nodedb_types::AuditDmlMode::None,
@@ -144,8 +146,18 @@ mod tests {
                 },
             ),
             (12, MirrorStatus::Following),
-            (13, MirrorStatus::Degraded { lag_ms: 1 }),
+            (13, MirrorStatus::Degraded),
             (14, MirrorStatus::Disconnected),
+            (15, MirrorStatus::Promoting { final_cut: 3 }),
+            (
+                16,
+                MirrorStatus::Failed {
+                    failure: MirrorFailure::LogTruncated {
+                        group: 1,
+                        first_available: 2,
+                    },
+                },
+            ),
         ] {
             fence.apply_descriptor(&descriptor(id, Some(status)));
             assert_eq!(

@@ -345,6 +345,9 @@ pub(crate) fn invalidate_gateway_cache_for_entry(entry: &CatalogEntry, shared: &
         CatalogEntry::PutBackupScheduleMark(_) => {
             // no-op: a backup schedule mark never enters a query plan.
         }
+        CatalogEntry::PutMirrorCutState { .. } => {
+            // no-op: the read gate reads the row when a statement runs.
+        }
         CatalogEntry::PutSpatialRefSys(_) => {
             // no-op: no cached plan resolved a code before it was defined.
         }

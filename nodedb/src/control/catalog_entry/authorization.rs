@@ -14,7 +14,9 @@ impl CatalogEntry {
     pub fn is_progress_mark(&self) -> bool {
         matches!(
             self,
-            Self::CommitConsumerOffsets(_) | Self::PutBackupScheduleMark(_)
+            Self::CommitConsumerOffsets(_)
+                | Self::PutBackupScheduleMark(_)
+                | Self::PutMirrorCutState { .. }
         )
     }
 
@@ -113,6 +115,7 @@ impl CatalogEntry {
             | Self::DeleteVectorIndexParams { .. }
             | Self::CommitConsumerOffsets(_)
             | Self::PutBackupScheduleMark(_)
+            | Self::PutMirrorCutState { .. }
             | Self::PutSpatialRefSys(_)
             | Self::DropSpatialRefSys { .. }
             | Self::PutCredential(_)

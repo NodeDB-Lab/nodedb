@@ -113,8 +113,8 @@ impl MirrorLinkRegistry {
     /// or `None` if no link is registered.
     ///
     /// `None` means "no link in registry" — the lag monitor must treat that
-    /// as "no signal" and fall back to the apply-time stored in the catalog
-    /// `mirror_lag` record.
+    /// as "no signal" and fall back to the applied cut's time in the catalog
+    /// `mirror_cut_state` row.
     pub fn last_received_ms(&self, db_id: DatabaseId) -> Option<u64> {
         let r = self.entries.read().unwrap_or_else(|p| p.into_inner());
         r.get(&db_id.as_u64())

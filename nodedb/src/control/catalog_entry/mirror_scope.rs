@@ -146,6 +146,9 @@ impl CatalogEntry {
             | Self::PutTenantQuota { .. }
             | Self::DeleteTenantQuota { .. } => UNSCOPED,
 
+            // How far the mirror followed its source: the applier's own row.
+            Self::PutMirrorCutState { .. } => UNSCOPED,
+
             // Reader state.
             Self::PutConsumerGroupIfAbsent(_)
             | Self::DeleteConsumerGroup { .. }

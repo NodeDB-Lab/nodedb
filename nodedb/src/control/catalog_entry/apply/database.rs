@@ -5,10 +5,11 @@
 use crate::control::security::catalog::auth_types::object_type;
 use crate::control::security::catalog::database_types::{DatabaseDescriptor, ParentCloneRef};
 use crate::control::security::catalog::{SystemCatalog, catalog_err};
-use nodedb_types::{DatabaseId, Hlc};
+use nodedb_types::{DatabaseId, Hlc, MirrorStatus};
 
 /// Apply a `PutDatabase` entry — upsert the descriptor into
-/// `_system.databases` and `_system.databases_by_name`.
+/// `_system.databases` and `_system.databases_by_name`. A promoted mirror
+/// follows nothing, so every node that applies it removes its cut state.
 pub fn put(descriptor: &DatabaseDescriptor, catalog: &SystemCatalog) -> crate::Result<()> {
     catalog.put_database(descriptor).map_err(|e| {
         catalog_err(
@@ -19,26 +20,38 @@ pub fn put(descriptor: &DatabaseDescriptor, catalog: &SystemCatalog) -> crate::R
             ),
             e,
         )
-    })
+    })?;
+    let promoted = descriptor
+        .mirror_origin
+        .as_ref()
+        .is_some_and(|origin| matches!(origin.status, MirrorStatus::Promoted));
+    if promoted {
+        catalog
+            .delete_mirror_cut_state(descriptor.id)
+            .map_err(|e| {
+                catalog_err(
+                    &format!(
+                        "delete_mirror_cut_state (database {})",
+                        descriptor.id.as_u64()
+                    ),
+                    e,
+                )
+            })?;
+    }
+    Ok(())
 }
 
 /// Apply a `DeleteDatabase` entry — remove the descriptor, its
 /// reverse-lookup row, the quota rows of the dropped scope, and its mirror
-/// collection map and lag rows.
+/// cut state.
 pub fn delete(db_id: u64, catalog: &SystemCatalog) -> crate::Result<()> {
     let id = DatabaseId::new(db_id);
     catalog
         .delete_database(id)
         .map_err(|e| catalog_err(&format!("delete_database (database {db_id})"), e))?;
-    catalog.delete_mirror_collection_map(id).map_err(|e| {
-        catalog_err(
-            &format!("delete_mirror_collection_map (database {db_id})"),
-            e,
-        )
-    })?;
     catalog
-        .delete_mirror_lag(id)
-        .map_err(|e| catalog_err(&format!("delete_mirror_lag (database {db_id})"), e))?;
+        .delete_mirror_cut_state(id)
+        .map_err(|e| catalog_err(&format!("delete_mirror_cut_state (database {db_id})"), e))?;
     // A stale quota row keeps consuming the sum-of-quotas ceiling.
     super::quota::purge_database_scope(db_id, catalog)
 }
@@ -363,26 +376,79 @@ mod tests {
         assert!(catalog.get_database(child).expect("read").is_none());
     }
 
-    /// `DeleteDatabase` removes the mirror rows on every node that applies
-    /// it, and a replay of it is a no-op.
+    fn seed_cut_state(catalog: &SystemCatalog, db: DatabaseId) {
+        let state = nodedb_types::MirrorCutState {
+            ready_cut: 5,
+            applied_cut: 5,
+            applied_cut_hlc_ns: 7,
+            cap_ordinal: 7,
+            positions: Vec::new(),
+        };
+        catalog
+            .raise_mirror_cut_state(db, &state)
+            .expect("seed cut state");
+    }
+
+    fn mirror_descriptor(db: DatabaseId, status: MirrorStatus) -> DatabaseDescriptor {
+        DatabaseDescriptor {
+            id: db,
+            name: "mirror_db".to_string(),
+            status: DatabaseStatus::Mirroring,
+            created_at_lsn: 0,
+            quota_ref: 0,
+            parent_clone: None,
+            mirror_origin: Some(nodedb_types::MirrorOrigin {
+                source_cluster: "source".to_string(),
+                source_database: db,
+                source_database_name: "orders".to_string(),
+                mode: nodedb_types::MirrorMode::Async,
+                status,
+            }),
+            audit_dml: nodedb_types::AuditDmlMode::None,
+            idle_session_timeout_secs: 0,
+        }
+    }
+
+    /// `DeleteDatabase` removes the cut state on every node that applies it,
+    /// and a replay of it is a no-op.
     #[test]
-    fn delete_removes_mirror_rows_and_replays_cleanly() {
+    fn delete_removes_the_cut_state_and_replays_cleanly() {
         let (credentials, _tmp) = open_catalog();
         let catalog = credentials.catalog();
         let db = DatabaseId::new(1030);
-        catalog
-            .apply_ddl_entry_atomic(db, nodedb_types::Lsn::new(5), 7, "src", "local")
-            .expect("seed mirror rows");
+        seed_cut_state(catalog, db);
         let entry = CatalogEntry::DeleteDatabase { db_id: db.as_u64() };
         for _ in 0..2 {
             apply_to(&entry, catalog).expect("delete database applies");
-            assert!(catalog.get_mirror_lag(db).expect("read lag").is_none());
-            assert!(
-                catalog
-                    .get_mirror_collection_mapping(db, "src")
-                    .expect("read map")
-                    .is_none()
-            );
+            assert!(catalog.get_mirror_cut_state(db).expect("read").is_none());
         }
+    }
+
+    /// The apply removes a promoted mirror's cut state, so a node that did
+    /// not run the statement drops it too, and a replay is a no-op.
+    #[test]
+    fn a_promotion_removes_the_cut_state_in_its_apply() {
+        let (credentials, _tmp) = open_catalog();
+        let catalog = credentials.catalog();
+        let db = DatabaseId::new(1031);
+        seed_cut_state(catalog, db);
+        let entry =
+            CatalogEntry::PutDatabase(Box::new(mirror_descriptor(db, MirrorStatus::Promoted)));
+        for _ in 0..2 {
+            apply_to(&entry, catalog).expect("promotion applies");
+            assert!(catalog.get_mirror_cut_state(db).expect("read").is_none());
+        }
+    }
+
+    #[test]
+    fn a_following_descriptor_keeps_the_cut_state() {
+        let (credentials, _tmp) = open_catalog();
+        let catalog = credentials.catalog();
+        let db = DatabaseId::new(1032);
+        seed_cut_state(catalog, db);
+        let entry =
+            CatalogEntry::PutDatabase(Box::new(mirror_descriptor(db, MirrorStatus::Following)));
+        apply_to(&entry, catalog).expect("descriptor applies");
+        assert!(catalog.get_mirror_cut_state(db).expect("read").is_some());
     }
 }
