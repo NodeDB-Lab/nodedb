@@ -122,6 +122,14 @@ pub async fn create_sorted_index(
             rows_affected: None,
         }]
     } else {
+        // The engine builds the tree before the catalog entry, so the catalog
+        // chokepoint comes too late to refuse the build.
+        super::super::audit_intent::record_action_intent(
+            state,
+            identity,
+            Some(tenant_id),
+            &format!("CREATE SORTED INDEX {index_name} ON {collection}"),
+        )?;
         register_in_engine(
             state,
             &SortedIndexTarget {
@@ -244,6 +252,12 @@ pub async fn drop_sorted_index(
     };
     let in_transaction = ddl_buffer::is_active();
     if !in_transaction {
+        super::super::audit_intent::record_action_intent(
+            state,
+            identity,
+            Some(tenant_id),
+            &format!("DROP SORTED INDEX {index_name} ON {collection}"),
+        )?;
         drop_in_engine(state, &target, &index_name).await?;
     }
 

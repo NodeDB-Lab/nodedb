@@ -127,6 +127,14 @@ pub async fn drop_index(
     // own entries: a ROLLBACK TO SAVEPOINT then discards them together.
     let in_transaction = ddl_buffer::is_active();
     if !in_transaction {
+        // The engine teardown precedes the catalog entries, so the catalog
+        // chokepoint comes too late to refuse it.
+        super::super::super::audit_intent::record_action_intent(
+            state,
+            identity,
+            Some(tenant_id),
+            &format!("DROP INDEX {index_name} ON {}", record.collection),
+        )?;
         super::teardown::teardown(state, &record, database_id, tenant_id).await?;
     }
 

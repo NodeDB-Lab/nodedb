@@ -216,13 +216,9 @@ pub async fn drop_collection(
         }
     }
 
-    // Audit the user's intent BEFORE mutating the catalog. Ordering
-    // is load-bearing for forensic completeness: if the process
-    // crashes between the audit durable-write and the catalog row
-    // delete, restart leaves the audit record present + the row
-    // still present, so the purge can be retried cleanly with full
-    // history. The alternative (audit after delete) loses the trail
-    // on a crash window.
+    // Best-effort operator trail: this row is buffered and can be lost in a
+    // crash. The durable record is the proposer's `ActionIntent` row, which
+    // syncs before the propose below and refuses the statement if it fails.
     let action = if purge {
         format!("requested purge of collection '{name}'")
     } else {

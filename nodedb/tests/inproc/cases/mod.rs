@@ -23,6 +23,8 @@ mod array_sql_relation;
 mod array_sync_gc;
 mod array_sync_system_catalog;
 mod array_vector_prefilter_multicore;
+mod audit_intent_refusal;
+mod audit_intent_refusal_ddl;
 mod auth_admin_ddl_gating;
 mod auth_apikey_database_scope;
 mod auth_concurrent_login;

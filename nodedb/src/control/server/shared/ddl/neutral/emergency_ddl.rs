@@ -81,6 +81,14 @@ pub fn emergency_unlock(
         return Err(err("42501", "permission denied: requires superuser"));
     }
 
+    // An unlock restores access, so its record comes first.
+    // A lockdown removes access, so it runs even when the audit log is down.
+    super::audit_intent::record_action_intent(
+        state,
+        identity,
+        Some(identity.tenant_id),
+        "EMERGENCY UNLOCK",
+    )?;
     state.emergency.unlock();
 
     state.audit_record(

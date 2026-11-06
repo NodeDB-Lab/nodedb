@@ -89,6 +89,15 @@ pub async fn handle_move_tenant(
         ));
     }
 
+    // The journal write, the drain, and the re-issued rows all precede the
+    // cutover's catalog entry, so the catalog chokepoint comes too late.
+    super::super::super::audit_intent::record_action_intent(
+        state,
+        identity,
+        Some(tenant_id),
+        &format!("MOVE TENANT {tenant_name} FROM {from_db} TO {to_db}"),
+    )?;
+
     // Check for an in-progress journal entry — resume or compensate.
     if let Some(entry) = journal::load_journal_entry(catalog, tenant_id)
         .map_err(|e| DdlError::from_error_in_context("journal read", &e))?

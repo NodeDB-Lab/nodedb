@@ -54,6 +54,22 @@ pub async fn run_scheduled_backup(
     // A former coordinator whose lease lapsed during the capture writes no
     // envelope.
     crate::event::scheduler::coordinator::ensure_system_coordinator(state)?;
+    // The record is durable before the envelope exists, and a failed record fails the run.
+    // The audit sync runs on the blocking pool. The failed minute stays due.
+    let intent = format!(
+        "scheduled BACKUP DATABASE {} TO '{}'",
+        schedule.database, schedule.target
+    );
+    let intent_state = Arc::clone(state);
+    off_runtime("scheduled backup audit intent", move || {
+        intent_state.audit_record_strict(
+            crate::control::security::audit::AuditEvent::ActionIntent,
+            None,
+            "_system_scheduler",
+            &intent,
+        )
+    })
+    .await?;
     let run = write_and_retain(
         schedule,
         state.backup_storage.as_deref(),

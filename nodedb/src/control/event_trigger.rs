@@ -12,6 +12,7 @@ use std::sync::Arc;
 use tracing::{debug, error, info, trace};
 
 use crate::control::event_action_error::{TriggerActionError, TriggerRenderError};
+use crate::control::event_trigger_audit::{record_action_intent, record_action_result};
 use crate::control::planner::context::QueryContext;
 use crate::control::state::SharedState;
 use crate::event::action::{
@@ -132,12 +133,7 @@ pub async fn process_write_event(
                 ),
             ),
         };
-        shared.audit_record(
-            crate::control::security::audit::AuditEvent::AdminAction,
-            Some(event.tenant_id),
-            source,
-            &detail,
-        );
+        record_action_result(&shared, event.database_id, event.tenant_id, source, detail).await;
         if let Err(error) = outcome {
             error!(
                 trigger = event_def.name,
@@ -374,6 +370,8 @@ pub async fn run_event_action_sql(
         )
         .await
         .map_err(|source| TriggerActionError::Plan { source })?;
+
+    record_action_intent(&shared, database_id, tenant_id, trigger_name, sql).await?;
 
     // Keep the Arc and lease scope alive through the whole action. Admission
     // is fail-closed while a descriptor drains.

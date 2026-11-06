@@ -104,6 +104,14 @@ pub async fn drop_database(
         // retain their `Materializing { .. }` status and finish on restart.
         // The original DROP command is retried by the caller, which will
         // succeed once the dependents are fully materialized.
+        //
+        // The copies precede the drop's catalog entry, so they need their own record.
+        super::super::audit_intent::record_action_intent(
+            state,
+            identity,
+            None,
+            &format!("DROP DATABASE {name} materializes its dependent clones"),
+        )?;
         for dep_id in &dependent_ids {
             let handle = CloneMaterializerHandle::new(*dep_id);
             // Awaited on this handler's runtime.
@@ -159,9 +167,10 @@ pub async fn drop_database(
         ));
     }
 
-    // Emit audit BEFORE the catalog mutation so the record is durable even
-    // if the catalog delete fails (the database still exists in that case,
-    // but the attempt is documented).
+    // Best-effort operator trail of the attempt: this row is buffered and can
+    // be lost in a crash. The durable record is the proposer's `ActionIntent`
+    // row, which syncs before the propose below and refuses the statement if
+    // it fails.
     state.audit_record_with_db(
         crate::control::security::audit::AuditEvent::DatabaseDropped,
         None,

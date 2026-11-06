@@ -155,7 +155,7 @@ async fn ws_rpc(server: &TestServer, sql: &str) -> serde_json::Value {
 }
 
 /// An audit WAL that takes no entry, as a full disk does.
-struct RefusingSink;
+pub(super) struct RefusingSink;
 
 impl AuditWalSink for RefusingSink {
     fn append_batch(&self, _entries: &[AuditEntry]) -> nodedb::Result<Vec<u64>> {

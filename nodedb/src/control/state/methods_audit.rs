@@ -382,11 +382,21 @@ impl SharedState {
     ///   Its `DdlChange` row follows the apply on every replica, and that row is best-effort.
     /// - Store and engine actions outside the catalog: a durable `ActionIntent` row before the
     ///   mutation, through `neutral::audit_intent`. Their result row is best-effort.
+    /// - Statements whose first effect precedes their catalog entry: the same row, before that
+    ///   effect. These are a row copy, a move, a backup, an engine index change, and a purge.
+    /// - The JWT key exchange, the session tenant override, and a scheduled backup: a durable
+    ///   `ActionIntent` row from this call, before the mutation.
+    /// - A restore of a hard-deleted collection: one `ActionIntent` row per collection, before
+    ///   the restore's first write.
+    /// - A DEFINE EVENT action: a durable `ActionIntent` row through the Control Plane recorder,
+    ///   because the Event Plane does no storage I/O. A failed record queues the action's retry.
     /// - Internal catalog proposals with no statement: a `DdlChange` row after the apply only.
     /// - Row DML: its row follows the commit. The Event Plane watermark holds until the row is
     ///   durable, and WAL catch-up delivers it again after a crash.
-    /// - Actions that remove access, such as a blacklist entry, a kill, or a lockdown:
-    ///   best-effort, because an audit outage must not block a security response.
+    /// - Actions that remove access: best-effort, because an audit outage must not block a
+    ///   security response. These are a blacklist entry, a kill, a lockdown, a deactivated user,
+    ///   a non-Active status, a stopped impersonation, and a revoked delegation.
+    /// - A TLS reload: best-effort too. An audit outage must not let a certificate expire.
     pub fn audit_record_strict(
         &self,
         event: crate::control::security::audit::AuditEvent,

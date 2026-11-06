@@ -23,6 +23,7 @@ pub mod database;
 pub mod distributed_applier;
 pub mod event_action_error;
 pub mod event_trigger;
+pub mod event_trigger_audit;
 pub mod exec_receiver;
 #[cfg(feature = "failpoints")]
 pub(crate) mod fail_gate;
