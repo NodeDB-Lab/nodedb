@@ -21,13 +21,12 @@ use nodedb_types::{Surrogate, SurrogateBitmap, TenantId};
 
 use super::core::InvertedIndex;
 use super::doc_fields;
-use super::doc_terms;
+use super::doc_image::tokens_from_postings;
 use super::errors::inverted_err;
 use super::indexing::IndexDocScope;
 use crate::engine::sparse::btree::storage_bytes::SPARSE_COUNTER;
 use crate::engine::sparse::fts_redb::backend::history_rows::{self, EndedVersion};
-use crate::engine::sparse::fts_redb::backend::posting_rows;
-use crate::engine::sparse::fts_redb::tables::{POSTINGS, TEXT_ENDED, TEXT_LIVE_BY_FROM};
+use crate::engine::sparse::fts_redb::tables::{TEXT_ENDED, TEXT_LIVE_BY_FROM};
 use crate::engine::storage_bytes::StorageDelta;
 
 /// The ordinal of a write that changes no history: it records no ended
@@ -63,7 +62,8 @@ impl InvertedIndex {
         if live_from == Some(doc.ordinal) {
             return Ok(());
         }
-        let tokens = stored_tokens(txn, doc, index, doc_len)?;
+        // A damaged index errors here. The history never stores a shorter text.
+        let tokens = tokens_from_postings(txn, doc, index, doc_len)?;
         history_rows::clear_live(txn, doc.database_id, t, index, doc.surrogate, delta)?;
         history_rows::put_ended(
             txn,
@@ -246,41 +246,6 @@ impl InvertedIndex {
     }
 }
 
-/// The analyzed tokens of `doc`'s indexed version in `index`, in order,
-/// rebuilt from its postings: each term's positions place it in the
-/// sequence.
-fn stored_tokens(
-    txn: &WriteTransaction,
-    doc: IndexDocScope<'_>,
-    index: IndexScope<'_>,
-    doc_len: u32,
-) -> crate::Result<Vec<String>> {
-    let terms = doc_terms::occupied_terms(txn, doc, index, true)?;
-    let postings = txn
-        .open_table(POSTINGS)
-        .map_err(|e| inverted_err("open postings", e))?;
-    let mut tokens: Vec<String> = vec![String::new(); doc_len as usize];
-    for term in terms {
-        let Some(posting) = posting_rows::read_one(
-            &postings,
-            doc.database_id,
-            doc.tid.as_u64(),
-            index,
-            &term,
-            doc.surrogate,
-        )?
-        else {
-            continue;
-        };
-        for position in posting.positions {
-            if let Some(slot) = tokens.get_mut(position as usize) {
-                slot.clone_from(&term);
-            }
-        }
-    }
-    Ok(tokens)
-}
-
 /// The field keys of `collection` holding a version of `surrogate` that
 /// ended at `ordinal`. The whole-document index's key is empty.
 fn ended_field_keys(
@@ -382,6 +347,44 @@ mod tests {
         assert_eq!(hits_at(&idx, "alpha", 25), vec![2]);
         assert_eq!(hits_at(&idx, "beta", 25), vec![1]);
         assert!(hits_at(&idx, "beta", 35).is_empty(), "deleted at 30");
+    }
+
+    /// The history stores the tokens this rebuild returns. A length the
+    /// postings do not cover is an error, and never a text with empty tokens.
+    #[test]
+    fn a_length_the_postings_do_not_cover_is_refused() {
+        use nodedb_fts::IndexScope;
+
+        use crate::engine::sparse::inverted::doc_image::tokens_from_postings;
+        use crate::engine::sparse::inverted::indexing::IndexDocScope;
+
+        let (idx, _dir) = open_temp();
+        let s = Surrogate::new(1);
+        idx.index_document_at(DB, T, "docs", s, &body("alpha words"), 10)
+            .unwrap();
+        let doc = IndexDocScope {
+            database_id: DB,
+            tid: T,
+            collection: "docs",
+            surrogate: s,
+            ordinal: 20,
+        };
+        let index = IndexScope::document("docs");
+        let txn = idx.inner.backend().db().begin_write().unwrap();
+
+        let tokens = tokens_from_postings(&txn, doc, index, 2).expect("covered");
+        assert_eq!(tokens.len(), 2);
+        assert!(tokens.iter().all(|token| !token.is_empty()));
+
+        assert!(tokens_from_postings(&txn, doc, index, 3).is_err(), "gap");
+        assert!(
+            tokens_from_postings(&txn, doc, index, 1).is_err(),
+            "past end"
+        );
+        assert!(
+            tokens_from_postings(&txn, doc, index, u32::MAX).is_err(),
+            "a corrupt length allocates nothing"
+        );
     }
 
     /// A WAL replay of the write that indexed a version ends nothing.
