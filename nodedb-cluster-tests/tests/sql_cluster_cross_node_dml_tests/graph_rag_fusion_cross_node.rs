@@ -12,13 +12,14 @@
 //! - the native `GraphRagFusion` opcode (two-source).
 //!
 //! Results compare exactly: node, RRF score, vector rank and distance, hop
-//! distance. The run metadata travels as a notice, which these tests do not
-//! read.
+//! distance. The run metadata travels as a notice. Only the single-node
+//! reference is read for it.
 
 use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
 
 use nodedb_test_support::native_harness::{open_trust_session, send_request};
+use nodedb_test_support::pgwire_harness::raw_pgwire::{RawPgConn, notice_messages};
 use nodedb_types::id::VShardId;
 use nodedb_types::protocol::{NativeResponse, OpCode, ResponseStatus, TextFields};
 use tokio::net::TcpStream;
@@ -361,6 +362,25 @@ async fn rag_fusion_across_shards_matches_a_single_node() {
         "the visit cap cuts the walk: {} hits capped, {} uncapped",
         hit_count(CAPPED),
         hit_count(UNCAPPED)
+    );
+    // The run metadata reaches a client as a NOTICE. A walk that hits
+    // `MAX_VISITED` earns the truncation notice, and a walk far under the
+    // default cap earns none. The reference is one node, so both are fixed.
+    let mut raw = RawPgConn::connect(reference.pg_port, SUPERUSER, "default").await;
+    let capped_notices = notice_messages(&raw.simple_query(&sql[CAPPED]).await);
+    assert_eq!(
+        capped_notices.len(),
+        1,
+        "the capped reference fusion emits one notice: {capped_notices:?}"
+    );
+    assert!(
+        capped_notices[0].contains("the expansion stopped at MAX_VISITED"),
+        "the capped reference fusion reports its truncation: {capped_notices:?}"
+    );
+    let uncapped_notices = notice_messages(&raw.simple_query(&sql[UNCAPPED]).await);
+    assert!(
+        uncapped_notices.is_empty(),
+        "the uncapped reference fusion is complete: {uncapped_notices:?}"
     );
     let mut single = native_session(reference.native_port).await;
     let expected_opcode =
