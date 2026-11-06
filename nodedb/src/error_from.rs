@@ -63,6 +63,15 @@ impl From<crate::engine::timeseries::ilp::IlpError> for Error {
     }
 }
 
+impl From<crate::engine::timeseries::merge::MergeIncompatibility> for Error {
+    fn from(e: crate::engine::timeseries::merge::MergeIncompatibility) -> Self {
+        Self::Storage {
+            engine: "timeseries".into(),
+            detail: e.to_string(),
+        }
+    }
+}
+
 impl From<crate::engine::timeseries::columnar_segment::SegmentError> for Error {
     fn from(e: crate::engine::timeseries::columnar_segment::SegmentError) -> Self {
         Self::Storage {

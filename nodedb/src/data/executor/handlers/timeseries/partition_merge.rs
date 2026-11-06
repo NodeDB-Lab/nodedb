@@ -320,7 +320,7 @@ fn stage_merge(
     if let Some(reason) = schema_incompatibility(&schema_refs) {
         tracing::debug!(
             collection = %ts_dir.display(),
-            reason,
+            %reason,
             "timeseries partitions left unmerged"
         );
         return Ok(None);
@@ -353,7 +353,7 @@ fn stage_merge(
         MergeOutcome::Incompatible(reason) => {
             tracing::debug!(
                 collection = %ts_dir.display(),
-                reason,
+                %reason,
                 "timeseries partitions left unmerged"
             );
             return Ok(None);
