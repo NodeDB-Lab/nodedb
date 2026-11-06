@@ -19,7 +19,7 @@ pub mod subdivide;
 pub mod tile;
 
 pub use boolean::{difference, intersection, sym_difference, union};
-pub use buffer::buffer;
+pub use buffer::{MAX_BUFFER_SEGMENTS, buffer};
 pub use closest::closest_point;
 pub use hull::{Hull, hull};
 pub use linear::{

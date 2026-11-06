@@ -334,6 +334,32 @@ mod tests {
     }
 
     #[test]
+    fn buffer_segments_over_the_cap_are_a_typed_error() {
+        let point = utm(Geometry::point(500_000.0, 100_000.0));
+        let over = nodedb_spatial::ops::MAX_BUFFER_SEGMENTS as i64 + 1;
+        for segments in [Value::Integer(over), Value::Float(1e300)] {
+            assert!(matches!(
+                eval("st_buffer", &[point.clone(), Value::Float(100.0), segments],),
+                Some(Err(EvalError::Geometry {
+                    source: nodedb_spatial::SpatialError::BufferSegments { .. },
+                    ..
+                }))
+            ));
+        }
+    }
+
+    #[test]
+    fn buffer_of_null_stays_null_whatever_the_segments() {
+        assert!(matches!(
+            eval(
+                "st_buffer",
+                &[Value::Null, Value::Float(100.0), Value::Float(1e300)],
+            ),
+            Some(Ok(Value::Null))
+        ));
+    }
+
+    #[test]
     fn multi_buffer_is_not_a_bbox() {
         let multi = Value::Geometry(SridGeometry::wgs84(Geometry::MultiPoint {
             coordinates: vec![[0.0, 0.0], [0.1, 0.0]],
