@@ -345,6 +345,7 @@ pub struct LateralTopKVisitArgs<'a> {
     pub lateral_alias: &'a str,
     pub projection: &'a [Projection],
     pub left_join: bool,
+    pub temporal: crate::temporal::TemporalScope,
 }
 
 /// Parameters for [`super::trait_def::PlanVisitor::lateral_loop`].

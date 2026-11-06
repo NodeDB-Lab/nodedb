@@ -120,6 +120,57 @@ async fn lateral_top_k_limit_1_per_user() {
     );
 }
 
+/// A CTE on the outer side of a top-k LATERAL reads the CTE's rows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lateral_top_k_outer_side_reads_a_cte() {
+    let server = TestServer::start().await;
+    setup_users_events(&server).await;
+
+    let rows = server
+        .query_text(
+            "WITH c AS (SELECT * FROM lat_users) \
+             SELECT c.id \
+             FROM c, \
+                  LATERAL (\
+                      SELECT e.id FROM lat_events e \
+                      WHERE e.user_id = c.id \
+                      ORDER BY e.score DESC \
+                      LIMIT 1\
+                  ) best",
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        rows.len(),
+        2,
+        "the outer CTE holds both users, each with one best event: {rows:?}"
+    );
+}
+
+/// A set-operation CTE on the outer side has no one plan to run. The join
+/// refuses it. Taking its first branch drops the other branch's rows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lateral_outer_set_operation_cte_is_refused() {
+    let server = TestServer::start().await;
+    setup_users_events(&server).await;
+
+    server
+        .expect_error(
+            "WITH c AS (SELECT id FROM lat_users UNION ALL SELECT id FROM lat_users) \
+             SELECT c.id \
+             FROM c, \
+                  LATERAL (\
+                      SELECT e.id FROM lat_events e \
+                      WHERE e.user_id = c.id \
+                      ORDER BY e.score DESC \
+                      LIMIT 1\
+                  ) best",
+            "physical tasks",
+        )
+        .await;
+}
+
 // ---------------------------------------------------------------------------
 // 3. LATERAL with ORDER BY + LIMIT 3 (top-3 per outer row)
 // ---------------------------------------------------------------------------

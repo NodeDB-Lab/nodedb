@@ -255,6 +255,7 @@ fn walk_plan(
             lateral_alias,
             mut projection,
             left_join,
+            temporal,
         }) => {
             for filter in &mut inner_filters {
                 fold_filter(filter, catalog, database_id, tenant_id);
@@ -272,6 +273,7 @@ fn walk_plan(
                 lateral_alias,
                 projection,
                 left_join,
+                temporal,
             })
         }
 

@@ -165,6 +165,7 @@ pub(super) fn dispatch_rest<V: PlanVisitor>(
             lateral_alias,
             projection,
             left_join,
+            temporal,
         }) => visitor.lateral_top_k(LateralTopKVisitArgs {
             outer,
             outer_alias: outer_alias.as_deref(),
@@ -176,6 +177,7 @@ pub(super) fn dispatch_rest<V: PlanVisitor>(
             lateral_alias,
             projection,
             left_join: *left_join,
+            temporal: *temporal,
         }),
         SqlPlan::LateralLoop(LateralLoopPlan {
             outer,

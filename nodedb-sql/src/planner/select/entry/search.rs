@@ -12,6 +12,7 @@ use crate::planner::select::array_cell_geom::rewrite_cell_read_query;
 use crate::planner::select::limit::apply_limit;
 use crate::planner::select::order_by::{apply_order_by, try_hybrid_from_projection};
 use crate::planner::select::query_tail::QueryTail;
+use crate::planner::select::relation_leaf::refuse_leaf_over_statement_relation;
 use crate::planner::select::select_stmt::{has_aggregation, plan_select};
 use crate::temporal::TemporalScope;
 use crate::types::{Projection, SqlCatalog, SqlPlan};
@@ -115,6 +116,7 @@ pub(super) fn plan_select_query(
             _ => upgraded_leaf,
         };
     }
+    refuse_leaf_over_statement_relation(&plan, catalog)?;
     apply_vector_pk_prefilter(&mut plan, catalog)?;
     apply_vector_index_prefilter(&mut plan, catalog)?;
     apply_vector_payload(

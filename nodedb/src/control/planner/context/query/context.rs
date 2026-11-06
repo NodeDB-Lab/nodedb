@@ -33,8 +33,7 @@ pub struct QueryContext {
     pub(super) array_catalog: Option<crate::control::array_catalog::ArrayCatalogHandle>,
     /// The node a statement's `AS OF SYSTEM TIME` cut is pinned against
     /// (`statement_cut`). `None` before the node installs its gateway: a
-    /// cut then stays unpinned, and the Data Plane reads it at the last
-    /// ordinal of its millisecond.
+    /// statement that names a cut is then refused.
     pub(super) cut_state: Option<std::sync::Weak<crate::control::state::SharedState>>,
     /// The node's surrogate assigner. Every write the planner lowers binds
     /// its rows through it.

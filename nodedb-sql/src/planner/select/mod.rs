@@ -19,6 +19,7 @@ mod limit;
 mod order_by;
 mod post_process;
 mod query_tail;
+mod relation_leaf;
 mod select_stmt;
 mod text_call;
 mod text_options;

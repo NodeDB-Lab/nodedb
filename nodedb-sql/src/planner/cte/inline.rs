@@ -200,8 +200,60 @@ pub fn inline_cte(plan: &SqlPlan, cte_name: &str, cte_plan: &SqlPlan) -> SqlPlan
             })
         }
 
-        // No CTE reference — return as-is.
-        _ => plan.clone(),
+        // A LATERAL plan side recurses. A top-k inner side is a collection
+        // name, and the planner refuses a CTE there.
+        SqlPlan::LateralTopK(top_k) => {
+            let mut top_k = top_k.clone();
+            top_k.outer = Box::new(inline_cte(&top_k.outer, cte_name, cte_plan));
+            SqlPlan::LateralTopK(top_k)
+        }
+        SqlPlan::LateralLoop(lateral_loop) => {
+            let mut lateral_loop = lateral_loop.clone();
+            lateral_loop.outer = Box::new(inline_cte(&lateral_loop.outer, cte_name, cte_plan));
+            lateral_loop.inner = Box::new(inline_cte(&lateral_loop.inner, cte_name, cte_plan));
+            SqlPlan::LateralLoop(lateral_loop)
+        }
+
+        // No nested plan to recurse into. Listed in full so a new plan
+        // variant fails to compile here. A `Scan` of another name lands here.
+        SqlPlan::ConstantResult { .. }
+        | SqlPlan::Scan { .. }
+        | SqlPlan::PointGet { .. }
+        | SqlPlan::DocumentIndexLookup(_)
+        | SqlPlan::RangeScan(_)
+        | SqlPlan::Insert(_)
+        | SqlPlan::KvInsert(_)
+        | SqlPlan::Upsert(_)
+        | SqlPlan::Update { .. }
+        | SqlPlan::Delete { .. }
+        | SqlPlan::Truncate { .. }
+        | SqlPlan::TimeseriesScan(_)
+        | SqlPlan::TimeseriesIngest(_)
+        | SqlPlan::VectorSearch { .. }
+        | SqlPlan::MultiVectorSearch { .. }
+        | SqlPlan::SparseSearch { .. }
+        | SqlPlan::TextSearch(_)
+        | SqlPlan::HybridSearch(_)
+        | SqlPlan::HybridSearchTriple(_)
+        | SqlPlan::SpatialScan { .. }
+        | SqlPlan::RecursiveScan(_)
+        | SqlPlan::RecursiveValue(_)
+        | SqlPlan::CreateArray(_)
+        | SqlPlan::DropArray { .. }
+        | SqlPlan::AlterArray(_)
+        | SqlPlan::InsertArray(_)
+        | SqlPlan::DeleteArray(_)
+        | SqlPlan::ArraySlice(_)
+        | SqlPlan::ArrayAgg(_)
+        | SqlPlan::ArrayElementwise(_)
+        | SqlPlan::ArrayFlush { .. }
+        | SqlPlan::ArrayCompact { .. }
+        | SqlPlan::VectorPrimaryInsert(_)
+        | SqlPlan::VectorPrimaryDelete(_)
+        | SqlPlan::VectorPrimaryTruncate(_)
+        | SqlPlan::VectorPrimaryUpdate(_)
+        | SqlPlan::CreateIndex(_)
+        | SqlPlan::DropIndex(_) => plan.clone(),
     }
 }
 
@@ -860,6 +912,54 @@ mod tests {
                 assert_eq!(projection.len(), 1);
             }
             other => panic!("expected Subquery, got {other:?}"),
+        }
+    }
+
+    /// The outer side of a top-k LATERAL reads the CTE body, never a
+    /// collection named after the CTE.
+    #[test]
+    fn a_lateral_top_k_outer_side_reads_the_cte_body() {
+        let plan = SqlPlan::LateralTopK(crate::types::LateralTopKPlan {
+            outer: Box::new(scan_on_cte(Vec::new(), None)),
+            outer_alias: Some("knn".to_string()),
+            inner_collection: "events".to_string(),
+            inner_filters: Vec::new(),
+            inner_order_by: Vec::new(),
+            inner_limit: 1,
+            correlation_keys: vec![("id".to_string(), "user_id".to_string())],
+            lateral_alias: "best".to_string(),
+            projection: Vec::new(),
+            left_join: false,
+            temporal: crate::TemporalScope::default(),
+        });
+        match inline_cte(&plan, "knn", &vector_search_body()) {
+            SqlPlan::LateralTopK(top_k) => {
+                assert!(matches!(*top_k.outer, SqlPlan::VectorSearch { .. }));
+                assert_eq!(top_k.inner_collection, "events");
+            }
+            other => panic!("expected LateralTopK, got {other:?}"),
+        }
+    }
+
+    /// Both plans of a LATERAL loop resolve the CTE.
+    #[test]
+    fn a_lateral_loop_reads_the_cte_body_on_both_sides() {
+        let plan = SqlPlan::LateralLoop(crate::types::LateralLoopPlan {
+            outer: Box::new(scan_on_cte(Vec::new(), None)),
+            outer_alias: Some("knn".to_string()),
+            inner: Box::new(scan_on_cte(Vec::new(), None)),
+            correlation_predicates: Vec::new(),
+            lateral_alias: "recent".to_string(),
+            projection: Vec::new(),
+            outer_row_cap: 10,
+            left_join: false,
+        });
+        match inline_cte(&plan, "knn", &vector_search_body()) {
+            SqlPlan::LateralLoop(lateral_loop) => {
+                assert!(matches!(*lateral_loop.outer, SqlPlan::VectorSearch { .. }));
+                assert!(matches!(*lateral_loop.inner, SqlPlan::VectorSearch { .. }));
+            }
+            other => panic!("expected LateralLoop, got {other:?}"),
         }
     }
 

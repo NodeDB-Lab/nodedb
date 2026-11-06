@@ -8,8 +8,10 @@ use crate::types::*;
 use super::params::ScanParams;
 
 /// Attempt to rewrite `ScanParams` into a [`SqlPlan::DocumentIndexLookup`]
-/// when exactly one of the filters is an equality predicate on a `Ready`
-/// indexed field. Returns `None` to fall through to a generic `Scan`.
+/// when a filter holds an equality conjunct on a `Ready` indexed field. The
+/// first such equality drives the lookup, and each equality on another `Ready`
+/// index narrows it (`also`). Every other filter stays a post-filter. Returns
+/// `None` to fall through to a generic `Scan`.
 ///
 /// Shared by the schemaless and strict document engines so the
 /// index-rewrite rule has one source of truth. Normalizes strict column

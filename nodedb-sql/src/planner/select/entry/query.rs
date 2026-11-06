@@ -10,6 +10,7 @@ use crate::error::{Result, SqlError};
 use crate::functions::registry::FunctionRegistry;
 use crate::planner::select::cte_catalog::CteCatalog;
 use crate::planner::select::rekey_join_output;
+use crate::planner::select::relation_leaf::refuse_leaf_over_statement_relation;
 use crate::reserved::check_ast_identifier;
 use crate::resolver::derived::{infer_subquery_relation, rename_output_columns};
 use crate::temporal::TemporalScope;
@@ -54,7 +55,9 @@ fn plan_query_at(
     if let Some(with) = &query.with
         && with.recursive
     {
-        return crate::planner::cte::plan_recursive_cte(query, catalog, functions, temporal);
+        let plan = crate::planner::cte::plan_recursive_cte(query, catalog, functions, temporal)?;
+        refuse_leaf_over_statement_relation(&plan, catalog)?;
+        return Ok(plan);
     }
     // Non-recursive CTEs: plan each CTE subquery and the outer query.
     if let Some(with) = &query.with

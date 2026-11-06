@@ -353,6 +353,7 @@ mod sql_join_row_level_security;
 mod sql_join_unqualified_columns;
 mod sql_json_path_ops;
 mod sql_lateral;
+mod sql_lateral_as_of;
 mod sql_limit_offset_bounds;
 mod sql_maintenance;
 mod sql_materialized_view_refresh;

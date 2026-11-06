@@ -16,8 +16,9 @@ use crate::planner::sort::{sort_ascending, sort_nulls_first};
 use crate::resolver::ColumnScope;
 use crate::resolver::columns::{ResolvedTable, TableScope};
 use crate::resolver::expr::convert_expr;
-use crate::temporal::TemporalScope;
+use crate::temporal::{TemporalScope, ValidTime};
 use crate::types::*;
+use nodedb_types::SystemTimeScope;
 
 /// The maximum outer-row count allowed for `LateralLoop` queries.
 pub const LATERAL_LOOP_CAP: usize = 100_000;
@@ -156,6 +157,7 @@ pub fn plan_lateral_join(args: LateralJoinArgs<'_>) -> Result<SqlPlan> {
         // not duplicated here. The subquery is not routed through `plan_query`
         // because its WHERE references the outer alias, which is not resolvable
         // in the inner FROM scope.
+        check_by_name_inner_side(catalog, temporal, &extract_inner_collection(select)?)?;
         let inner_plan = build_inner_scan(InnerScanArgs {
             select,
             residual_where: analysis.remaining,
@@ -179,6 +181,73 @@ pub fn plan_lateral_join(args: LateralJoinArgs<'_>) -> Result<SqlPlan> {
             outer_row_cap: LATERAL_LOOP_CAP,
             left_join,
         }))
+    }
+}
+
+/// Refuse a top-k or loop inner side the join cannot read at the statement's
+/// cut.
+///
+/// The Data Plane runs a document scan of that side by collection name, once
+/// per outer row, at the statement's system time and at no valid time.
+///
+/// - No collection holds a CTE's or a derived table's rows.
+/// - A document scan finds no row of a collection on another engine.
+/// - `AS OF VALID TIME` would apply to the outer side only.
+/// - `AS OF SYSTEM TIME NULL` reads every version, which is no one cut.
+fn check_by_name_inner_side(
+    catalog: &dyn SqlCatalog,
+    temporal: TemporalScope,
+    inner_collection: &str,
+) -> Result<()> {
+    if catalog.is_statement_relation(inner_collection) {
+        return Err(SqlError::Unsupported {
+            detail: format!(
+                "LATERAL reads its inner relation by collection name, and '{inner_collection}' \
+                 is a CTE or derived table; name a stored collection inside LATERAL"
+            ),
+        });
+    }
+    if let Some(info) =
+        catalog.resolve_relation(nodedb_types::DatabaseId::DEFAULT, inner_collection)?
+    {
+        match info.engine {
+            EngineType::DocumentSchemaless | EngineType::DocumentStrict => {}
+            EngineType::KeyValue
+            | EngineType::Columnar
+            | EngineType::Timeseries
+            | EngineType::Spatial
+            | EngineType::Array
+            | EngineType::ContinuousAggregate => {
+                return Err(SqlError::Unsupported {
+                    detail: format!(
+                        "LATERAL with LIMIT or a non-equality correlation scans its inner \
+                         relation as documents, and '{inner_collection}' is on the {:?} engine; \
+                         name a document collection inside LATERAL",
+                        info.engine
+                    ),
+                });
+            }
+        }
+    }
+    if !matches!(temporal.valid_time, ValidTime::Any) {
+        return Err(SqlError::Unsupported {
+            detail: format!(
+                "LATERAL on '{inner_collection}' cannot read FOR VALID_TIME / AS OF VALID TIME: \
+                 the inner scan reads no valid time; filter the valid-time columns in WHERE"
+            ),
+        });
+    }
+    match temporal.system_time {
+        SystemTimeScope::Current
+        | SystemTimeScope::AsOf(_)
+        | SystemTimeScope::Pinned { .. }
+        | SystemTimeScope::TxnSnapshot { .. } => Ok(()),
+        SystemTimeScope::AllVersions => Err(SqlError::Unsupported {
+            detail: format!(
+                "LATERAL on '{inner_collection}' cannot read AS OF SYSTEM TIME NULL: the join \
+                 reads one state of each side; name a system time"
+            ),
+        }),
     }
 }
 
@@ -284,6 +353,7 @@ fn plan_lateral_top_k(args: LateralTopKPlanArgs<'_>) -> Result<SqlPlan> {
     // Build a bare inner Scan without correlation filters (those are injected
     // at runtime per outer row).
     let inner_collection = extract_inner_collection(select)?;
+    check_by_name_inner_side(catalog, temporal, &inner_collection)?;
     catalog
         .resolve_relation(nodedb_types::DatabaseId::DEFAULT, &inner_collection)?
         .ok_or_else(|| SqlError::UnknownTable {
@@ -335,5 +405,6 @@ fn plan_lateral_top_k(args: LateralTopKPlanArgs<'_>) -> Result<SqlPlan> {
         lateral_alias: lateral_alias.to_string(),
         projection: outer_projection,
         left_join,
+        temporal,
     }))
 }

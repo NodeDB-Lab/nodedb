@@ -28,20 +28,45 @@ pub fn try_plan_array_maint_fn(
         _ => return Ok(None),
     };
     let fn_name = crate::parser::normalize::normalize_object_name_checked(&func.name)?;
-    let sql_name = match fn_name.as_str() {
-        "array_flush" => "ARRAY_FLUSH",
-        "array_compact" => "ARRAY_COMPACT",
-        _ => return Ok(None),
+    let Some(kind) = ArrayMaintFn::from_name(&fn_name) else {
+        return Ok(None);
     };
+    let sql_name = kind.sql_name();
     let arg_exprs = match &func.args {
         ast::FunctionArguments::List(list) => collect_args(&list.args, sql_name)?,
         _ => Vec::new(),
     };
     let name = require_array_name(&arg_exprs, 0, sql_name, catalog)?;
-    Ok(Some(match sql_name {
-        "ARRAY_FLUSH" => SqlPlan::ArrayFlush { name },
-        _ => SqlPlan::ArrayCompact { name },
+    Ok(Some(match kind {
+        ArrayMaintFn::Flush => SqlPlan::ArrayFlush { name },
+        ArrayMaintFn::Compact => SqlPlan::ArrayCompact { name },
     }))
+}
+
+/// The array maintenance functions, by name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArrayMaintFn {
+    Flush,
+    Compact,
+}
+
+impl ArrayMaintFn {
+    /// The function `fn_name` names. `None` is no maintenance function: the
+    /// name falls through to ordinary function resolution.
+    fn from_name(fn_name: &str) -> Option<Self> {
+        match fn_name {
+            "array_flush" => Some(Self::Flush),
+            "array_compact" => Some(Self::Compact),
+            _ => None,
+        }
+    }
+
+    fn sql_name(self) -> &'static str {
+        match self {
+            Self::Flush => "ARRAY_FLUSH",
+            Self::Compact => "ARRAY_COMPACT",
+        }
+    }
 }
 
 #[cfg(test)]
@@ -145,6 +170,25 @@ mod tests {
     fn compact_happy() {
         let p = plan_one("SELECT ARRAY_COMPACT('g')").unwrap();
         assert!(matches!(p, SqlPlan::ArrayCompact { .. }));
+    }
+
+    /// A name that is no maintenance function is never read as a compact.
+    #[test]
+    fn dispatch_names_each_function_and_no_other() {
+        use super::ArrayMaintFn;
+        assert_eq!(
+            ArrayMaintFn::from_name("array_flush"),
+            Some(ArrayMaintFn::Flush)
+        );
+        assert_eq!(
+            ArrayMaintFn::from_name("array_compact"),
+            Some(ArrayMaintFn::Compact)
+        );
+        assert_eq!(ArrayMaintFn::from_name("array_frobnicate"), None);
+        assert!(!matches!(
+            plan_one("SELECT ARRAY_FROBNICATE('g')"),
+            Ok(SqlPlan::ArrayCompact { .. })
+        ));
     }
 
     #[test]
