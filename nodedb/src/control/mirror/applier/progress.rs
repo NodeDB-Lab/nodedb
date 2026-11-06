@@ -90,7 +90,7 @@ impl AppliedTracker {
     }
 }
 
-async fn every_group_applied(
+pub(super) async fn every_group_applied(
     state: &SharedState,
     raft: &dyn MirrorRaft,
     database: DatabaseId,

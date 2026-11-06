@@ -15,7 +15,7 @@ use std::collections::{BTreeSet, VecDeque};
 
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::index_charge::IndexChargeKey;
-use crate::data::executor::core_loop::version_purge::{PurgePass, PurgeUnit};
+use crate::data::executor::core_loop::version_purge::{PurgePass, PurgeUnit, under_floor};
 use crate::types::{DatabaseId, TenantId};
 
 impl CoreLoop {
@@ -119,8 +119,11 @@ impl CoreLoop {
                 Ok(docs + index)
             }
             // KV keeps no audit window: every table purges at the pass
-            // horizon, and each table's charge follows its bytes.
-            PurgeUnit::Kv => Ok(self.kv_engine.purge_all_kv_versions_below(pass.horizon)),
+            // horizon, under a read-only mirror's floor, and each table's
+            // charge follows its bytes.
+            PurgeUnit::Kv => Ok(self.kv_engine.purge_all_kv_versions_below(|database_id| {
+                under_floor(&pass.mirror_floors, database_id, pass.horizon)
+            })),
             PurgeUnit::Columnar((db, tenant, collection)) => {
                 let Some(horizon) = pass.horizon_of(db.as_u64(), tenant.as_u64(), collection)
                 else {

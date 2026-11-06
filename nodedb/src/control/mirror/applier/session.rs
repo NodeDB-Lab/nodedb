@@ -175,6 +175,10 @@ impl<'a> Session<'a> {
                     if let Some(failure) = self.halted_apply() {
                         return Err(failure.into());
                     }
+                    // A sealed mirror takes no fence, so the session ends.
+                    if matches!(follows(self.state, self.database), Ok(None)) {
+                        return Err(SessionEnd::Stop(MirrorStop::Ended));
+                    }
                 }
             }
             tokio::time::sleep(backoff).await;

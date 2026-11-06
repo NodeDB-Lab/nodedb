@@ -78,7 +78,7 @@ pub(super) fn meta_collection(op: &MetaOp) -> Option<&str> {
         | MetaOp::CreateSnapshot
         | MetaOp::Compact
         | MetaOp::Checkpoint
-        | MetaOp::ApplyContinuousAggRetention => None,
+        | MetaOp::ApplyContinuousAggRetention { .. } => None,
         // These carry several plans or collections. A redo install names
         // its collections through `PhysicalPlan::named_collections`.
         MetaOp::TransactionBatch { .. }
@@ -98,6 +98,8 @@ pub(super) fn meta_collection(op: &MetaOp) -> Option<&str> {
         MetaOp::PurgeVersionsBelow { .. } => None,
         // Every KV collection's due expiries on the core, in every tenant.
         MetaOp::KvDueExpiries { .. } => None,
+        // Every collection of the tenant on the core.
+        MetaOp::ListTenantCollections { .. } => None,
         // Every graph CSR on the core, in every tenant.
         MetaOp::RefreshGraphCount { .. } => None,
         // Every collection's stored bytes on the core, in every tenant.

@@ -156,6 +156,9 @@ pub async fn sweep_once(shared: &SharedState, retention: Duration) -> crate::Res
         .load_all_collections_across_databases()?
         .into_iter()
         .filter(|collection| !collection.is_active)
+        // A read-only mirror purges a collection when its source's purge
+        // arrives through the log. Its retention clock starts at PROMOTE.
+        .filter(|collection| !shared.mirror.fence.is_read_only(collection.database_id))
         .collect();
 
     // Refresh the pending-purge gauge every pass, even when empty —

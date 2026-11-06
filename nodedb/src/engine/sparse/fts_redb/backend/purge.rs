@@ -13,7 +13,7 @@
 
 use nodedb_fts::IndexScope;
 use nodedb_types::Surrogate;
-use redb::{TableDefinition, WriteTransaction};
+use redb::{ReadableDatabase, TableDefinition, WriteTransaction};
 
 use super::core::RedbFtsBackend;
 use super::shared::redb_err;
@@ -98,6 +98,28 @@ pub(super) fn tenant(backend: &RedbFtsBackend, database_id: u64, tid: u64) -> cr
         KeyOwner::tenant(database_id, tid),
         MetaRows::All,
     )
+}
+
+/// Every collection of the tenant that holds index stats, each once.
+pub(super) fn tenant_collections(
+    backend: &RedbFtsBackend,
+    database_id: u64,
+    tid: u64,
+) -> crate::Result<Vec<String>> {
+    let read_txn = backend
+        .db
+        .begin_read()
+        .map_err(|e| redb_err("read txn", e))?;
+    let stats = read_txn
+        .open_table(STATS)
+        .map_err(|e| redb_err("open stats", e))?;
+    let mut collections: Vec<String> = scan::stats_keys(&stats, KeyOwner::tenant(database_id, tid))
+        .map_err(|e| redb_err("stats range", e))?
+        .into_iter()
+        .map(|(collection, _)| collection)
+        .collect();
+    collections.dedup();
+    Ok(collections)
 }
 
 /// Drop every row `owner` covers from every FTS table, with metadata rows

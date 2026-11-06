@@ -17,7 +17,7 @@ use nodedb_types::array_route::array_vshard_for_tile;
 
 use crate::data::executor::core_loop::CoreLoop;
 use crate::engine::array::export::ArrayCellVersion;
-use crate::types::ArrayCellsBlob;
+use crate::types::{ArrayCellsBlob, DatabaseId, TenantId};
 
 fn install_error(detail: String) -> crate::Error {
     crate::Error::Internal {
@@ -44,6 +44,43 @@ pub(super) fn routes_into_group(
 }
 
 impl CoreLoop {
+    /// Remove the cells of the tenant's arrays that `group` routes, on this core.
+    /// Each array keeps its definition. A later replay skips every removed cell:
+    /// the replacement carries the replay stamp.
+    pub(in crate::data::executor) fn clear_tenant_group_arrays(
+        &mut self,
+        database_id: DatabaseId,
+        tenant_id: TenantId,
+        group: &HashSet<u32>,
+    ) -> crate::Result<()> {
+        let entries = self
+            .array_catalog
+            .read()
+            .map_err(|_| install_error("array catalog lock poisoned".into()))?
+            .all_entries();
+        let stamp = self.floors.applied_prefix.stamp()?;
+        for entry in entries.into_iter().filter(|entry| {
+            entry.array_id.database_id == database_id && entry.array_id.tenant_id == tenant_id
+        }) {
+            let schema: ArraySchema = zerompk::from_msgpack(&entry.schema_msgpack)
+                .map_err(|e| install_error(format!("array '{}' schema: {e}", entry.name)))?;
+            let schema = Arc::new(schema);
+            let routes = Arc::clone(&schema);
+            let prefix_bits = entry.prefix_bits;
+            self.array_engine
+                .replace_cells(
+                    &entry.array_id,
+                    schema,
+                    entry.schema_hash,
+                    |coord: &[CoordValue]| routes_into_group(&routes, prefix_bits, group, coord),
+                    Vec::new(),
+                    stamp.clone(),
+                )
+                .map_err(|e| install_error(format!("array '{}': {e}", entry.name)))?;
+        }
+        Ok(())
+    }
+
     /// Replace the array cells of `vshards` on this core with `blobs`.
     /// Returns the versions installed.
     pub(in crate::data::executor) fn install_group_arrays(

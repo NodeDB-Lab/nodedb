@@ -85,7 +85,10 @@ pub async fn ensure_txn_snapshot(
         check_snapshot_age(state, snapshot.ordinal)?;
         return Ok(Some(snapshot));
     }
-    let (cap, registration) = open_txn_snapshot(state).await?;
+    let database = sessions
+        .get_current_database(session_id)
+        .unwrap_or(nodedb_types::DatabaseId::DEFAULT);
+    let (cap, registration) = open_txn_snapshot(state, database).await?;
     Ok(sessions.install_tx_snapshot(session_id, TxnSnapshotCut::of_cap(cap), Some(registration)))
 }
 

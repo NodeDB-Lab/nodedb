@@ -42,7 +42,10 @@ async fn due_on(node: &common::cluster_harness::TestClusterNode) -> Vec<DueExpir
         &node.shared,
         TenantId::new(0),
         DatabaseId::DEFAULT,
-        PhysicalPlan::Meta(MetaOp::KvDueExpiries { limit: 1024 }),
+        PhysicalPlan::Meta(MetaOp::KvDueExpiries {
+            limit: 1024,
+            skip_databases: Vec::new(),
+        }),
         TraceId::generate(),
     )
     .await

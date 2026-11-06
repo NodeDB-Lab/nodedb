@@ -98,6 +98,11 @@ async fn run_one(state: &Arc<SharedState>, entry: &Entry) {
     if audit_ms == 0 {
         return; // "retain forever" — no purge.
     }
+    // A read-only mirror purges no history on its own clock. The window runs
+    // from the database's PROMOTE.
+    if state.mirror.fence.is_read_only(entry.database_id) {
+        return;
+    }
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

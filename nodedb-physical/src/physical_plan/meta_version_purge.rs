@@ -25,6 +25,25 @@ pub struct RetainedHistory {
     pub horizon: Option<i64>,
 }
 
+/// One read-only mirror's limit on the cleanup horizon. A mirror's reads stay at
+/// or below its applied cut, however far that trails the clock, so no store of
+/// the database purges past this ordinal.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
+pub struct MirrorHistoryFloor {
+    pub database_id: u64,
+    pub floor: i64,
+}
+
 /// The key of the count of stores still due that every core answers a
 /// `MetaOp::PurgeVersionsBelow` with.
 pub const PURGE_REMAINING_KEY: &str = "remaining";

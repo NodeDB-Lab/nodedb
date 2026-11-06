@@ -96,6 +96,7 @@ impl CoreLoop {
     pub(in crate::data::executor::dispatch) fn meta_apply_continuous_agg_retention(
         &mut self,
         task: &ExecutionTask,
+        skip_databases: &[u64],
     ) -> Response {
         let now_ms = now_ms();
         // A snapshot read below this ordinal finds the removed buckets gone
@@ -104,7 +105,9 @@ impl CoreLoop {
             crate::data::executor::handlers::timeseries::TimeseriesApplyMode::Immediate,
             now_ms,
         );
-        let removed = self.continuous_agg_mgr.apply_retention(now_ms, ordinal);
+        let removed = self
+            .continuous_agg_mgr
+            .apply_retention(now_ms, ordinal, skip_databases);
         tracing::debug!(removed, "continuous aggregate retention applied");
         self.response_ok(task)
     }

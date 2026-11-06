@@ -39,6 +39,11 @@ pub struct RedbFtsBackend {
 }
 
 impl RedbFtsBackend {
+    /// Every collection of the tenant that holds index stats, each once.
+    pub fn tenant_collections(&self, database_id: u64, tid: u64) -> crate::Result<Vec<String>> {
+        super::purge::tenant_collections(self, database_id, tid)
+    }
+
     /// Open or create redb tables for FTS.
     pub fn open(db: Arc<GatedDatabase>) -> crate::Result<Self> {
         let write_txn = db.begin_write().map_err(|e| redb_err("init tables", e))?;

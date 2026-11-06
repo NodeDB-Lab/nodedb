@@ -58,7 +58,8 @@ impl CatalogEntry {
             | Self::DeleteDatabase { .. }
             | Self::PutDatabaseGrant { .. }
             | Self::DeleteDatabaseGrant { .. }
-            | Self::CloneDatabase { .. } => true,
+            | Self::CloneDatabase { .. }
+            | Self::StepMirrorStatus { .. } => true,
             Self::PutSequence(_)
             | Self::DeleteSequence { .. }
             | Self::PutSequenceState(_)

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! A source database's catalog, as the entries that would create it.
+//! A source database's catalog, as the entries that create it.
 //!
 //! The mirror installs these inside its first `MirrorCut`, frozen as the source
 //! stamped them. The filter is the mirror gate's own scope, so the image holds

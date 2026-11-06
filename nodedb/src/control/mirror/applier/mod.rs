@@ -12,6 +12,7 @@
 //! - `conversions` — the capture's conversion records, on every replica.
 //! - [`driver`] — one database's applier.
 //! - [`link`] — a link to a source the config names.
+//! - [`promote`] — end a mirror at its last ready cut.
 //! - [`supervisor`] — one applier per mirror the catalog holds.
 
 mod batch;
@@ -21,6 +22,7 @@ mod cut;
 pub mod driver;
 pub mod link;
 pub mod progress;
+pub mod promote;
 pub mod propose;
 mod rewrite;
 mod session;
@@ -28,5 +30,6 @@ pub mod supervisor;
 
 pub use driver::{MirrorStop, run_mirror_applier, spawn_mirror_applier};
 pub use link::open_source_link;
+pub use promote::{finish_promote, seal_mirror};
 pub use propose::MirrorRaft;
 pub use supervisor::spawn_mirror_supervisor;

@@ -6,7 +6,9 @@
 //! group in flight:
 //!
 //! 1. Every local core purges the tenant's data on the entry's vShards and
-//!    checkpoints its memory-only engines.
+//!    checkpoints its memory-only engines. The purge covers the collections the
+//!    entry names and each one a core's stores hold with no catalog row. A
+//!    store's name homes on one vShard, so only its group's replicas clear it.
 //! 2. One `CollectionTombstoned` record per collection of the tenant, fsynced.
 //!    Replay re-applies the redb-backed engines' records with no floor, so
 //!    without it a pre-purge record brings a purged row back at the next boot.
@@ -17,6 +19,7 @@
 //! A crash before step 3 leaves the entry unmarked, so its re-delivery purges
 //! again. The purge is idempotent, and no later entry of the group started.
 
+use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use nodedb_physical::physical_plan::{MetaOp, PhysicalPlan};
@@ -24,6 +27,8 @@ use nodedb_types::id::QualifiedCollection;
 
 use crate::control::array_sync::raft_apply::AppliedPosition;
 use crate::control::distributed_applier::propose_tracker::AppliedWrite;
+use crate::control::gateway::version_set::catalog_name;
+use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TenantId, TraceId, VShardId};
 use crate::wal::manager::NO_APPLY_KEY;
 
@@ -91,16 +96,50 @@ async fn apply_tenant_purge(
     }
 }
 
+/// The bare name of every collection the purge clears: the entry's, and each
+/// one this replica's stores hold for the tenant with no catalog row. A store
+/// name of another database stays out. The list is this replica's own: another
+/// replica clears what its own stores hold.
+async fn purged_collections(
+    state: &SharedState,
+    entry: &TenantPurgeEntry,
+) -> crate::Result<BTreeSet<String>> {
+    let response = crate::control::server::broadcast::broadcast_to_all_cores(
+        state,
+        entry.tenant_id,
+        entry.database_id,
+        PhysicalPlan::Meta(MetaOp::ListTenantCollections {
+            tenant_id: entry.tenant_id.as_u64(),
+        }),
+        TraceId::generate(),
+    )
+    .await?;
+    let stored: Vec<String> = zerompk::from_msgpack(response.payload.as_bytes()).map_err(|e| {
+        crate::Error::Serialization {
+            format: "msgpack".into(),
+            detail: format!("tenant collections: {e}"),
+        }
+    })?;
+    let mut names: BTreeSet<String> = entry.collections.iter().cloned().collect();
+    for name in &stored {
+        let (owner, bare) = catalog_name(entry.database_id, name)?;
+        if owner == entry.database_id {
+            names.insert(bare.to_string());
+        }
+    }
+    Ok(names)
+}
+
 async fn purge_and_mark(
     ctx: ApplyContext<'_>,
     pos: AppliedPosition,
     entry: &TenantPurgeEntry,
 ) -> crate::Result<()> {
     let state = ctx.state;
+    let collections = purged_collections(state, entry).await?;
     let plan = PhysicalPlan::Meta(MetaOp::PurgeTenant {
         tenant_id: entry.tenant_id.as_u64(),
-        collections: entry
-            .collections
+        collections: collections
             .iter()
             .map(|name| {
                 QualifiedCollection::new(entry.database_id, name)
@@ -123,7 +162,7 @@ async fn purge_and_mark(
 
     let barrier = state.wal.next_lsn().as_u64();
     let appender = state.wal.appender(NO_APPLY_KEY);
-    for name in &entry.collections {
+    for name in &collections {
         appender.append_collection_tombstone(entry.tenant_id, entry.database_id, name, barrier)?;
     }
     state.wal.sync()?;

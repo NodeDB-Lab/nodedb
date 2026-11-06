@@ -85,7 +85,7 @@ enum Slot {
         capture: Arc<ReadyCapture>,
         touched: Instant,
     },
-    Failed(String),
+    Failed(Error),
 }
 
 /// What a chunk request gets.
@@ -123,11 +123,10 @@ impl CaptureSlots {
             }
             None => CaptureAnswer::Restart,
             Some(Slot::Preparing) => CaptureAnswer::Wait,
-            Some(Slot::Failed(detail)) => {
-                let detail = std::mem::take(detail);
-                slots.remove(&link_id);
-                CaptureAnswer::Failed(detail)
-            }
+            Some(Slot::Failed(_)) => match slots.remove(&link_id) {
+                Some(Slot::Failed(error)) => CaptureAnswer::Failed(error.to_string()),
+                Some(Slot::Preparing | Slot::Ready { .. }) | None => CaptureAnswer::Restart,
+            },
             Some(Slot::Ready { capture, touched }) => {
                 *touched = Instant::now();
                 let Some(chunk) = capture.chunk(offset) else {
@@ -141,13 +140,13 @@ impl CaptureSlots {
         }
     }
 
-    fn finish(&self, link_id: u64, outcome: Result<ReadyCapture, String>) {
+    fn finish(&self, link_id: u64, outcome: Result<ReadyCapture, Error>) {
         let slot = match outcome {
             Ok(capture) => Slot::Ready {
                 capture: Arc::new(capture),
                 touched: Instant::now(),
             },
-            Err(detail) => Slot::Failed(detail),
+            Err(error) => Slot::Failed(error),
         };
         self.lock().insert(link_id, slot);
     }
@@ -299,11 +298,9 @@ pub(super) fn start_capture(
                 _ = shutdown.wait_cancelled() => return,
                 captured = capture_image(&shared, database) => captured,
             };
-            let outcome = outcome
-                .and_then(|image| ready_capture(source_cluster, &image))
-                .map_err(|error| error.to_string());
-            if let Err(detail) = &outcome {
-                tracing::warn!(link_id, %detail, "mirror source: a capture failed");
+            let outcome = outcome.and_then(|image| ready_capture(source_cluster, &image));
+            if let Err(error) = &outcome {
+                tracing::warn!(link_id, %error, "mirror source: a capture failed");
             }
             slots.finish(link_id, outcome);
             while slots.holds_after_expiry(link_id, CAPTURE_IDLE_TTL) {
@@ -349,11 +346,12 @@ mod tests {
     fn a_failure_answers_once_and_the_retry_starts_again() {
         let slots = CaptureSlots::default();
         slots.answer(LINK, 0);
-        slots.finish(LINK, Err("no quorum".to_string()));
-        assert_eq!(
-            slots.answer(LINK, 0),
-            CaptureAnswer::Failed("no quorum".to_string())
-        );
+        let error = Error::Dispatch {
+            detail: "no quorum".to_string(),
+        };
+        let expected = error.to_string();
+        slots.finish(LINK, Err(error));
+        assert_eq!(slots.answer(LINK, 0), CaptureAnswer::Failed(expected));
         assert_eq!(slots.answer(LINK, 0), CaptureAnswer::Start);
     }
 

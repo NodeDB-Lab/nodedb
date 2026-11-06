@@ -23,7 +23,7 @@ use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
-use super::helpers::{assert_sqlstate, mark_database_mirror};
+use super::helpers::{assert_sqlstate, inject_cut_state_for_id, mark_database_mirror};
 
 pub(super) const READ_ONLY: &str = "read-only mirror";
 const STRONG_READ: &str = "redirect strong reads";
@@ -368,6 +368,13 @@ async fn a_mirror_can_be_dropped_with_its_objects() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn promotion_opens_every_protocol() {
     let (server, name) = fixture().await;
+    // A followed mirror holds a cut, and PROMOTE seals at it.
+    let catalog = server.shared.credentials.catalog();
+    let database_id = catalog
+        .get_database_id_by_name(&name)
+        .expect("catalog lookup")
+        .expect("database exists");
+    inject_cut_state_for_id(catalog, database_id, 0, 5);
     server
         .exec(&format!("ALTER DATABASE {name} PROMOTE"))
         .await

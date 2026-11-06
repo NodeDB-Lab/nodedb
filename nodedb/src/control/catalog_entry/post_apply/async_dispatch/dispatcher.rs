@@ -433,6 +433,8 @@ pub async fn run_post_apply_async_side_effects(
         | CatalogEntry::PutBackupScheduleMark(_)
         // A mirror cut state is its catalog row alone.
         | CatalogEntry::PutMirrorCutState { .. }
+        // A mirror status step takes effect in the synchronous post-apply.
+        | CatalogEntry::StepMirrorStatus { .. }
         // A retention pin takes effect in the synchronous post-apply.
         | CatalogEntry::PutMirrorPin(_)
         | CatalogEntry::DeleteMirrorPin { .. }

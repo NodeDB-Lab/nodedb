@@ -149,6 +149,9 @@ impl CatalogEntry {
             // How far the mirror followed its source: the applier's own row.
             Self::PutMirrorCutState { .. } => UNSCOPED,
 
+            // The mirror's own status: the applier's, the monitor's or PROMOTE's.
+            Self::StepMirrorStatus { .. } => UNSCOPED,
+
             // A link's hold on this cluster's logs: the source's own row.
             Self::PutMirrorPin(_) | Self::DeleteMirrorPin { .. } => UNSCOPED,
 

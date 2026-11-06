@@ -363,8 +363,14 @@ mod tests {
         assert_eq!(rows.len(), 4);
         assert_exact(&engine);
 
-        engine.delete_all_versioned_for_tenant(0, 1).unwrap();
-        inverted.purge_tenant(0, TenantId::new(1)).unwrap();
+        for collection in ["c", "other"] {
+            engine
+                .delete_all_versioned_for_collection(0, 1, collection)
+                .unwrap();
+            inverted
+                .purge_collection(0, TenantId::new(1), collection)
+                .unwrap();
+        }
         let tenant = DroppedScope::Tenant {
             database_id: 0,
             tenant_id: 1,

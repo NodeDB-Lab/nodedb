@@ -275,22 +275,18 @@ fn storage_family(collection_type: &CollectionType) -> u8 {
 /// every other write of its vShards. Each share of a split takes its own key, and
 /// a re-proposal of that share derives the same one.
 pub(super) fn split_tenant_purge(
-    entry: ReplicatedEntry,
+    entry: &ReplicatedEntry,
     group_of: impl Fn(u32) -> crate::Result<u64>,
 ) -> crate::Result<Vec<ReplicatedEntry>> {
-    let ReplicatedWrite::TenantPurge {
-        collections,
-        vshards,
-    } = &entry.write
-    else {
-        return Ok(vec![entry]);
+    let ReplicatedWrite::TenantPurge { vshards, .. } = &entry.write else {
+        return Ok(vec![entry.clone()]);
     };
     let mut shares: BTreeMap<u64, Vec<u32>> = BTreeMap::new();
     for vshard in vshards {
         shares.entry(group_of(*vshard)?).or_default().push(*vshard);
     }
     if shares.len() <= 1 {
-        return Ok(vec![entry]);
+        return Ok(vec![entry.clone()]);
     }
     Ok(shares
         .into_iter()
@@ -301,10 +297,13 @@ pub(super) fn split_tenant_purge(
                 .idempotency_key
                 .wrapping_add(group.wrapping_mul(PURGE_SHARE_KEY_STEP))
                 | 1;
-            share.write = ReplicatedWrite::TenantPurge {
-                collections: collections.clone(),
-                vshards,
-            };
+            // The clone holds the collections. Only the vShards differ.
+            if let ReplicatedWrite::TenantPurge {
+                vshards: shared, ..
+            } = &mut share.write
+            {
+                *shared = vshards;
+            }
             Some(share)
         })
         .collect())
@@ -658,7 +657,7 @@ mod tests {
     fn a_purge_splits_along_the_mirror_groups() {
         let entry = purge(vec![1, 2, 3, 4]);
         let original = entry.idempotency_key;
-        let shares = split_tenant_purge(entry, |vshard| Ok(u64::from(vshard % 2))).expect("split");
+        let shares = split_tenant_purge(&entry, |vshard| Ok(u64::from(vshard % 2))).expect("split");
         assert_eq!(shares.len(), 2);
         assert_eq!(share_vshards(&shares[0]), vec![2, 4]);
         assert_eq!(shares[0].vshard_id, 2);
@@ -673,9 +672,8 @@ mod tests {
     #[test]
     fn a_split_derives_the_same_keys_each_time() {
         let entry = purge(vec![1, 2]);
-        let first =
-            split_tenant_purge(entry.clone(), |vshard| Ok(u64::from(vshard))).expect("split");
-        let second = split_tenant_purge(entry, |vshard| Ok(u64::from(vshard))).expect("split");
+        let first = split_tenant_purge(&entry, |vshard| Ok(u64::from(vshard))).expect("split");
+        let second = split_tenant_purge(&entry, |vshard| Ok(u64::from(vshard))).expect("split");
         for (one, other) in first.iter().zip(&second) {
             assert_eq!(one.idempotency_key, other.idempotency_key);
         }
@@ -685,7 +683,7 @@ mod tests {
     fn a_purge_inside_one_group_stays_whole() {
         let entry = purge(vec![1, 2]);
         let original = entry.idempotency_key;
-        let shares = split_tenant_purge(entry, |_| Ok(5)).expect("split");
+        let shares = split_tenant_purge(&entry, |_| Ok(5)).expect("split");
         assert_eq!(shares.len(), 1);
         assert_eq!(shares[0].idempotency_key, original);
         assert_eq!(share_vshards(&shares[0]), vec![1, 2]);
@@ -693,7 +691,7 @@ mod tests {
 
     #[test]
     fn any_other_write_passes_through() {
-        let shares = split_tenant_purge(put(DB.as_u64()), |_| {
+        let shares = split_tenant_purge(&put(DB.as_u64()), |_| {
             Err(crate::Error::Internal {
                 detail: "no routing is consulted".into(),
             })

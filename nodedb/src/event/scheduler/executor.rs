@@ -147,6 +147,15 @@ async fn scheduler_loop(
         }
 
         for sched in &schedules {
+            // A job's writes on a mirror come from the source's run of it. The
+            // schedule starts firing at PROMOTE, from that minute on.
+            if state
+                .mirror
+                .fence
+                .is_read_only(nodedb_types::id::DatabaseId::new(sched.database_id))
+            {
+                continue;
+            }
             // Parse cron expression.
             let cron = match CronExpr::parse(&sched.cron_expr) {
                 Ok(c) => c,

@@ -488,6 +488,9 @@ pub fn apply_post_apply_side_effects_sync(entry: &CatalogEntry, shared: &Arc<Sha
         CatalogEntry::PutMirrorCutState { .. }
         | CatalogEntry::PutMirrorPin(_)
         | CatalogEntry::DeleteMirrorPin { .. } => database::follow_mirror_row(entry, shared),
+        CatalogEntry::StepMirrorStatus { database_id, .. } => {
+            database::follow_mirror_status(*database_id, shared);
+        }
         // Apply swapped the catalog's in-memory set. The cores receive it in
         // the async post-apply.
         CatalogEntry::PutSpatialRefSys(_) | CatalogEntry::DropSpatialRefSys { .. } => {}

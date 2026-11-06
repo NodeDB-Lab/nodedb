@@ -34,7 +34,7 @@ pub async fn graph_read_scope(
     let (system, cut_marker) = match temporal.system_time {
         SystemTimeScope::Current => (GraphSystemCut::Live, 0),
         SystemTimeScope::AsOf(ms) => {
-            let cut = pin_historical_cut(state, ms).await?;
+            let cut = pin_historical_cut(state, history.database_id, ms).await?;
             check_graph_history_window(state, history, cut.ordinal)?;
             (GraphSystemCut::AtOrdinal(cut.ordinal), cut.marker)
         }

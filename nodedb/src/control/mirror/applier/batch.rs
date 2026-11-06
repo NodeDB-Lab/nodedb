@@ -179,7 +179,7 @@ pub(super) fn top_seq(cursors: &[GroupCursor]) -> u64 {
 }
 
 /// Whether `cursor` still has to fetch to reach the newest barrier any group
-/// showed. Fetching past it would only grow the batch.
+/// showed. A fetch past it only grows the batch.
 pub(super) fn wants_fetch(cursor: &GroupCursor, top: u64) -> bool {
     cursor.top_seq < top || top == 0 || cursor.barriers.is_empty()
 }

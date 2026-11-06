@@ -348,6 +348,9 @@ pub(crate) fn invalidate_gateway_cache_for_entry(entry: &CatalogEntry, shared: &
         CatalogEntry::PutMirrorCutState { .. } => {
             // no-op: the read gate reads the row when a statement runs.
         }
+        CatalogEntry::StepMirrorStatus { .. } => {
+            // no-op: every gate reads the fence or the row when a statement runs.
+        }
         CatalogEntry::PutMirrorPin(_) | CatalogEntry::DeleteMirrorPin { .. } => {
             // no-op: a retention pin never enters a query plan.
         }

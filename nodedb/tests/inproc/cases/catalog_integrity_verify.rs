@@ -313,6 +313,9 @@ fn classify(entry: &CatalogEntry) -> VariantClass {
         // A mirror's cut state is progress of one database's link. It names
         // no owned catalog object.
         CatalogEntry::PutMirrorCutState { .. } => VariantClass::Exempt,
+        // A status step moves one database's status. It names no owned catalog
+        // object.
+        CatalogEntry::StepMirrorStatus { .. } => VariantClass::Exempt,
         // A retention pin is a link's hold on the Raft logs. It names no owned
         // catalog object.
         CatalogEntry::PutMirrorPin(_) | CatalogEntry::DeleteMirrorPin { .. } => {

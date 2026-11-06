@@ -184,11 +184,17 @@ pub enum MetaOp {
     ///
     /// `collections` holds every collection of the tenant, by storage name.
     /// `vshards` holds the vShards of the group whose log carries the purge.
+    /// Each array keeps its definition, and loses the cells `vshards` routes.
     PurgeTenant {
         tenant_id: u64,
         collections: Vec<String>,
         vshards: Vec<u32>,
     },
+
+    /// Answer every collection this core stores rows of for the tenant, by
+    /// storage name, as one msgpack array. A tenant purge reads it first: a
+    /// store can hold a collection the catalog no longer names.
+    ListTenantCollections { tenant_id: u64 },
 
     /// Purge a single collection across every engine on this core.
     ///
@@ -358,8 +364,9 @@ pub enum MetaOp {
 
     /// Apply retention to continuous aggregate buckets managed by
     /// the aggregate manager. Drops materialized buckets older than
-    /// each aggregate's configured retention_period_ms.
-    ApplyContinuousAggRetention,
+    /// each aggregate's configured retention_period_ms. `skip_databases` names
+    /// the read-only mirrors: their buckets arrive through the log.
+    ApplyContinuousAggRetention { skip_databases: Vec<u64> },
 
     /// Query the watermark for a named continuous aggregate.
     /// Returns JSON-serialized `WatermarkState`.
@@ -694,17 +701,27 @@ pub enum MetaOp {
     /// collection each) per request and answers `{"remaining": n}`, the
     /// stores still due. The sender repeats the request until every core
     /// answers `0`. A request at another horizon starts another pass.
+    ///
+    /// `mirror_floors` limits each read-only mirror's stores, whatever the
+    /// horizon or the retained list says.
     PurgeVersionsBelow {
         horizon: i64,
         batch_units: u32,
         retained: Vec<super::RetainedHistory>,
+        mirror_floors: Vec<super::MirrorHistoryFloor>,
     },
 
     /// Read at most `limit` KV keys whose TTL passed on this core. The core
     /// first hands its expiry wheel's passed entries to its due set. It
     /// answers one msgpack array of `DueExpiry` and reaps nothing: the data
     /// group's leader proposes each reap through write admission.
-    KvDueExpiries { limit: u32 },
+    ///
+    /// `skip_databases` names the read-only mirrors. Their expiries arrive
+    /// through the log, so their due entries take no share of `limit`.
+    KvDueExpiries {
+        limit: u32,
+        skip_databases: Vec<u64>,
+    },
 
     /// Count this core's share of the graph node and edge gauges, and move
     /// the gauges by the change since the core's last count.

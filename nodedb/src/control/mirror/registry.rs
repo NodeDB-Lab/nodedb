@@ -148,9 +148,9 @@ impl MirrorLinkRegistry {
 ///
 /// Intentionally local to this module: the only callers are the registry's
 /// own timestamp updates. The observer module has its own copy because both
-/// the metric-update path and the status machine compute `now` independently
-/// (their results may diverge by a few ms; that is correct — the registry
-/// stamps the receive instant, the observer stamps the evaluation instant).
+/// the metric-update path and the status machine compute `now` independently.
+/// The two differ by a few ms: the registry stamps the receive instant, and the
+/// observer stamps the evaluation instant.
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

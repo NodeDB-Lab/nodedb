@@ -94,8 +94,10 @@ fn supervise(shared: &Arc<SharedState>, supervised: &mut Supervised) {
     }
 }
 
-/// Run the supervisor on this node until shutdown.
+/// Run the supervisor on this node until shutdown, and the pass that finishes
+/// any PROMOTE a former leader left.
 pub fn spawn_mirror_supervisor(shared: &Arc<SharedState>) {
+    super::promote::spawn_promote_finisher(shared);
     let state = Arc::clone(shared);
     spawn_loop(
         &shared.loop_registry,

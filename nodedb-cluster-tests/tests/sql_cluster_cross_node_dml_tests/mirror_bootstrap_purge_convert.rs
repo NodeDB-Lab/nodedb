@@ -25,6 +25,7 @@ const REPLICAS: usize = 3;
 const COMPACTION_THRESHOLD: u64 = 4_096;
 const CONVERT: &str = "CONVERT COLLECTION pc_docs TO document_strict \
                        (id TEXT PRIMARY KEY, name TEXT)";
+const ARRAY_READ: &str = "SELECT * FROM ARRAY_SLICE('pc_arr', '{x: [0, 0]}', ['v'], 10)";
 
 async fn source_cluster() -> TestCluster {
     let source = TestCluster::spawn_three_with_groups_compaction_threshold_and_rf(
@@ -44,6 +45,16 @@ async fn source_cluster() -> TestCluster {
         .await
         .expect("create database");
     use_database(&source, DATABASE).await;
+    source
+        .exec_ddl_on_any_leader(
+            "CREATE ARRAY pc_arr DIMS (x INT64 [0..15]) ATTRS (v INT64) TILE_EXTENTS (16)",
+        )
+        .await
+        .expect("create array");
+    source.nodes[0]
+        .exec("INSERT INTO ARRAY pc_arr COORDS (0) VALUES (10)")
+        .await
+        .expect("insert a cell");
     for collection in ["pc_docs", "pc_keep"] {
         source
             .exec_ddl_on_any_leader(&format!(
@@ -150,6 +161,12 @@ async fn a_convert_and_a_purge_reach_the_mirror_from_its_tail() {
     for collection in ["pc_docs", "pc_keep"] {
         await_mirror_reads(&mirror, &format!("SELECT id FROM {collection}"), &[]).await;
     }
+    // A purge removes array cells too, and the array stays defined.
+    assert!(
+        rows(&source.nodes[0], ARRAY_READ).await.is_empty(),
+        "the source's cells are gone"
+    );
+    await_mirror_reads(&mirror, ARRAY_READ, &[]).await;
 
     // Writes after the purge land on both clusters, and no purged row returns.
     source.nodes[0]

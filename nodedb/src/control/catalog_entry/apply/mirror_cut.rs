@@ -2,8 +2,9 @@
 
 //! Apply a mirror's cut state to `SystemCatalog` redb.
 
-use nodedb_types::{DatabaseId, MirrorCutState, MirrorStatus};
+use nodedb_types::{DatabaseId, MirrorCutState, MirrorStatus, MirrorStatusStep};
 
+use crate::control::security::catalog::database_types::DatabaseStatus;
 use crate::control::security::catalog::{SystemCatalog, catalog_err};
 
 /// Apply a `PutMirrorCutState` entry.
@@ -33,6 +34,42 @@ pub fn raise(
         .map_err(|e| catalog_err(&format!("put_mirror_cut_state (database {database_id})"), e))
 }
 
+/// Apply a `StepMirrorStatus` entry against the row this replica holds.
+///
+/// Metadata entries apply one at a time, so the reads and the write see one
+/// state: a `Seal` fixes the last cut at the `ready_cut` of that index, and no
+/// `MirrorCut` can land between them.
+pub fn step_status(
+    database_id: u64,
+    step: &MirrorStatusStep,
+    catalog: &SystemCatalog,
+) -> crate::Result<()> {
+    let id = DatabaseId::new(database_id);
+    let Some(mut descriptor) = catalog
+        .get_database(id)
+        .map_err(|e| catalog_err(&format!("get_database (database {database_id})"), e))?
+    else {
+        return Ok(());
+    };
+    let ready_cut = catalog
+        .get_mirror_cut_state(id)
+        .map_err(|e| catalog_err(&format!("get_mirror_cut_state (database {database_id})"), e))?
+        .map_or(0, |state| state.ready_cut);
+    let Some(origin) = descriptor.mirror_origin.as_mut() else {
+        return Ok(());
+    };
+    let Some(next) = step.next(&origin.status, ready_cut) else {
+        return Ok(());
+    };
+    origin.status = next;
+    if matches!(origin.status, MirrorStatus::Promoted) {
+        descriptor.status = DatabaseStatus::Active;
+    }
+    catalog
+        .put_database(&descriptor)
+        .map_err(|e| catalog_err(&format!("put_database (database {database_id})"), e))
+}
+
 #[cfg(test)]
 mod tests {
     use nodedb_types::{MirrorMode, MirrorOrigin};
@@ -40,7 +77,7 @@ mod tests {
     use super::*;
     use crate::control::catalog_entry::CatalogEntry;
     use crate::control::catalog_entry::apply::apply_to;
-    use crate::control::security::catalog::database_types::{DatabaseDescriptor, DatabaseStatus};
+    use crate::control::security::catalog::database_types::DatabaseDescriptor;
 
     const DB: u64 = 1040;
 

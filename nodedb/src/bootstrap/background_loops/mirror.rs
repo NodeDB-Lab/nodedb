@@ -5,8 +5,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use nodedb_types::MirrorStatusStep;
 use tracing::info;
 
+use crate::control::catalog_entry::CatalogEntry;
+use crate::control::metadata_proposer::propose_catalog_entry_async;
 use crate::control::shutdown::{ShutdownPhase, spawn_loop};
 use crate::control::state::SharedState;
 
@@ -36,7 +39,7 @@ pub fn spawn_mirror_lag_monitor(shared: &Arc<SharedState>) {
                 if shutdown.is_cancelled() {
                     break;
                 }
-                sample_mirror_lag(&shared_mirror);
+                sample_mirror_lag(&shared_mirror).await;
             }
         },
     );
@@ -44,7 +47,12 @@ pub fn spawn_mirror_lag_monitor(shared: &Arc<SharedState>) {
 }
 
 /// One lag sample across every mirror database that is not promoted.
-fn sample_mirror_lag(shared: &SharedState) {
+///
+/// Every node updates its metric. Only the metadata leader proposes a status:
+/// the applier runs there, so its receive timestamp is the one that moves. Each
+/// step names the status it read, so it cannot undo a later PROMOTE. A proposal
+/// that does not land leaves the status, and the next sample proposes it again.
+pub async fn sample_mirror_lag(shared: &SharedState) {
     let catalog = shared.credentials.catalog();
     let databases = match catalog.list_databases() {
         Ok(d) => d,
@@ -67,7 +75,7 @@ fn sample_mirror_lag(shared: &SharedState) {
         // falls back to the applied cut's time in that case, so the
         // disconnect timer still advances.
         let last_received = shared.mirror.links.last_received_ms(db.id);
-        crate::control::mirror::update_lag_status(
+        let next = crate::control::mirror::update_lag_status(
             catalog,
             db.id,
             &db.name,
@@ -75,5 +83,25 @@ fn sample_mirror_lag(shared: &SharedState) {
             last_received,
             &shared.database_metrics,
         );
+        let Some(next) = next else {
+            continue;
+        };
+        if !shared.is_singleton_worker() {
+            continue;
+        }
+        let step = CatalogEntry::StepMirrorStatus {
+            database_id: db.id.as_u64(),
+            step: MirrorStatusStep::Lag {
+                from: origin.status.clone(),
+                to: next,
+            },
+        };
+        if let Err(error) = propose_catalog_entry_async(shared, &step).await {
+            tracing::warn!(
+                database = %db.name,
+                %error,
+                "mirror_lag_monitor: the status step did not land; the next sample retries"
+            );
+        }
     }
 }

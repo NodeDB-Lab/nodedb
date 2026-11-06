@@ -77,6 +77,8 @@ mod mirror_apply_two_clusters;
 mod mirror_bootstrap_engines;
 #[path = "../../sql_cluster_cross_node_dml_tests/mirror_bootstrap_fixture.rs"]
 mod mirror_bootstrap_fixture;
+#[path = "../../sql_cluster_cross_node_dml_tests/mirror_bootstrap_promote.rs"]
+mod mirror_bootstrap_promote;
 #[path = "../../sql_cluster_cross_node_dml_tests/mirror_bootstrap_purge_convert.rs"]
 mod mirror_bootstrap_purge_convert;
 #[path = "../../sql_cluster_cross_node_dml_tests/mirror_bootstrap_two_clusters.rs"]

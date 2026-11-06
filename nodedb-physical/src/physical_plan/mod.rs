@@ -80,7 +80,7 @@ pub use meta_restore::{
 };
 pub use meta_restore_keys::{RestoredColumnarKey, RestoredVectorRow};
 pub use meta_snapshot::{CutCaptureRequest, DepartedCollection, SnapshotClearTarget};
-pub use meta_version_purge::{PURGE_REMAINING_KEY, RetainedHistory};
+pub use meta_version_purge::{MirrorHistoryFloor, PURGE_REMAINING_KEY, RetainedHistory};
 pub use plan::PhysicalPlan;
 pub use query::{AggregateSpec, GroupKeySpec, JoinProjection, QueryOp};
 pub use redo_origin::RedoOrigin;

@@ -7,6 +7,7 @@ use nodedb_types::sync::wire::SyncProvenance;
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::core_loop::version_purge::under_floor;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::array::wal::{ArrayDeleteCell, ArrayPutCell};
 
@@ -296,7 +297,11 @@ impl CoreLoop {
         // the merge collapses what that millisecond's last ordinal
         // supersedes. It stays at or below the cleanup horizon, so no open
         // snapshot and no commit a replica still applies reads below it.
-        let safe_horizon = self.maintenance.version_purge.safe_horizon;
+        let safe_horizon = under_floor(
+            &self.maintenance.version_purge.mirror_floors,
+            array_id.database_id.as_u64(),
+            self.maintenance.version_purge.safe_horizon,
+        );
         let horizon = audit_retain_ms.map(|retain_ms| {
             nodedb_types::ms_to_ordinal_upper(now_ms.saturating_sub(retain_ms)).min(safe_horizon)
         });

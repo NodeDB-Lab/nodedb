@@ -17,9 +17,11 @@
 //!   returns `STALE_READ_NOT_LEADER` with the actual lag in the error detail.
 //!   Otherwise the read is served locally.
 //!
-//! - `Eventual`: Reads are served from the local replica unconditionally.
-//!   This is the lowest-latency option and is correct for use cases that
-//!   accept CRDT-style monotonic convergence (e.g. mobile/edge workloads).
+//! - `Eventual`: Reads are served from the local replica. This is the
+//!   lowest-latency option and is correct for use cases that accept CRDT-style
+//!   monotonic convergence (e.g. mobile/edge workloads).
+//!
+//! A mirror still taking its first capture serves no level.
 
 use nodedb_types::error::sqlstate;
 use nodedb_types::{DatabaseId, MirrorOrigin, MirrorStatus};
@@ -66,6 +68,19 @@ pub fn check_mirror_read_consistency(
     // A promoted mirror is a normal writable database — serve all reads locally.
     if matches!(mirror_origin.status, MirrorStatus::Promoted) {
         return MirrorReadOutcome::ServeLocally;
+    }
+
+    // A first capture lands in pieces, so what it holds is no state the source
+    // ever had. Every level waits for the first cut.
+    if matches!(mirror_origin.status, MirrorStatus::Bootstrapping { .. }) {
+        return MirrorReadOutcome::Reject {
+            sqlstate_code: sqlstate::STALE_READ_NOT_LEADER,
+            message: format!(
+                "mirror database is taking its first capture and serves no reads until it \
+                 finishes; read source cluster '{}' or retry later",
+                mirror_origin.source_cluster
+            ),
+        };
     }
 
     match consistency {
@@ -199,6 +214,36 @@ mod tests {
                 );
             }
             MirrorReadOutcome::ServeLocally => panic!("Strong should be rejected on a mirror"),
+        }
+    }
+
+    /// A first capture lands in pieces, so no level reads it.
+    #[test]
+    fn a_bootstrapping_mirror_serves_no_level() {
+        let tmp = TempDir::new().unwrap();
+        let catalog = open_tmp_catalog(&tmp);
+        let origin = sample_origin(MirrorStatus::Bootstrapping {
+            bytes_done: 0,
+            bytes_total: 0,
+        });
+        for level in [
+            ReadConsistency::Strong,
+            ReadConsistency::Eventual,
+            ReadConsistency::BoundedStaleness(Duration::from_secs(600)),
+        ] {
+            assert!(
+                matches!(
+                    check_mirror_read_consistency(
+                        &catalog,
+                        DatabaseId::new(1030),
+                        &origin,
+                        level,
+                        now_ms()
+                    ),
+                    MirrorReadOutcome::Reject { .. }
+                ),
+                "{level:?}"
+            );
         }
     }
 

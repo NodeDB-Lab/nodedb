@@ -294,6 +294,7 @@ pub fn stamp(
         | CatalogEntry::CommitConsumerOffsets(_)
         | CatalogEntry::PutBackupScheduleMark(_)
         | CatalogEntry::PutMirrorCutState { .. }
+        | CatalogEntry::StepMirrorStatus { .. }
         | CatalogEntry::PutMirrorPin(_)
         | CatalogEntry::DeleteMirrorPin { .. }
         | CatalogEntry::PutSpatialRefSys(_)

@@ -303,12 +303,14 @@ impl ContinuousAggregateManager {
     /// Apply retention across every registered aggregate on this core:
     /// remove materialized buckets older than each aggregate's retention
     /// period. An aggregate that loses a bucket records `ordinal`, the
-    /// system time of the pass, as its rewrite.
-    pub fn apply_retention(&mut self, now_ms: i64, ordinal: i64) -> usize {
+    /// system time of the pass, as its rewrite. An aggregate of a database in
+    /// `skip_databases`, a read-only mirror, keeps every bucket.
+    pub fn apply_retention(&mut self, now_ms: i64, ordinal: i64, skip_databases: &[u64]) -> usize {
         let mut total_removed = 0;
         let defs: Vec<(AggKey, u64)> = self
             .definitions
             .iter()
+            .filter(|(key, _)| !skip_databases.contains(&key.0))
             .map(|(key, d)| (key.clone(), d.retention_period_ms))
             .collect();
 
@@ -561,7 +563,12 @@ mod tests {
             .get_materialized(0, 1, "v_1m")
             .expect("registered")
             .len();
-        let removed = mgr.apply_retention(T0 + 15 * 60_000, 1);
+        assert_eq!(
+            mgr.apply_retention(T0 + 15 * 60_000, 1, &[0]),
+            0,
+            "a read-only mirror keeps its buckets"
+        );
+        let removed = mgr.apply_retention(T0 + 15 * 60_000, 1, &[]);
         assert!(removed > 0);
         assert!(
             mgr.get_materialized(0, 1, "v_1m")

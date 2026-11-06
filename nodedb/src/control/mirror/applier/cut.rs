@@ -13,11 +13,12 @@ use nodedb_types::{MirrorCutAdvance, MirrorEntryStamp, MirrorGroupPosition};
 
 use crate::control::metadata_proposer::propose_mirror_cut;
 use crate::control::security::auth_fence::cluster::{group_of_vshard, routed_groups};
+use crate::control::state::SharedState;
 use crate::control::wal_replication::types::MirrorCalvinFloor;
 use crate::control::wal_replication::{ReplicatedEntry, ReplicatedWrite};
 
 use super::batch::{CutBatch, positions};
-use super::driver::SessionEnd;
+use super::driver::{MirrorStop, SessionEnd, follows};
 use super::progress::PendingCut;
 use super::propose::{GroupProposal, SealAt, propose_group};
 use super::rewrite::{CatalogCheck, rewrite_entry, split_tenant_purge};
@@ -25,6 +26,24 @@ use super::session::{FIRST_RETRY_BACKOFF, FenceError, MAX_RETRY_BACKOFF, Session
 
 /// How long one attempt of one cut can take in one group.
 const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The vShard every mirror seal of `group` lands on.
+pub(super) fn seal_vshard(state: &SharedState, group: u64) -> crate::Result<u32> {
+    state
+        .cluster_routing
+        .as_ref()
+        .and_then(|routing| {
+            routing
+                .read()
+                .unwrap_or_else(|p| p.into_inner())
+                .vshards_for_group(group)
+                .first()
+                .copied()
+        })
+        .ok_or_else(|| crate::Error::Internal {
+            detail: format!("mirror applier: group {group} homes no vShard"),
+        })
+}
 
 impl Session<'_> {
     pub(super) async fn apply_cut(&mut self, batch: CutBatch) -> Result<(), SessionEnd> {
@@ -87,6 +106,10 @@ impl Session<'_> {
                         if !self.still_leads() {
                             return Err(SessionEnd::LostLeadership);
                         }
+                        // A sealed mirror takes no fence, so this attempt ends.
+                        if matches!(follows(self.state, self.database), Ok(None)) {
+                            return Err(SessionEnd::Stop(MirrorStop::Ended));
+                        }
                     }
                 }
             }
@@ -121,9 +144,8 @@ impl Session<'_> {
             })
             .collect();
         for source in &batch.entries {
-            let shares = split_tenant_purge(source.entry.clone(), |vshard| {
-                group_of_vshard(self.state, vshard)
-            })?;
+            let shares =
+                split_tenant_purge(&source.entry, |vshard| group_of_vshard(self.state, vshard))?;
             for mut entry in shares {
                 rewrite_entry(
                     &mut entry,
@@ -148,7 +170,7 @@ impl Session<'_> {
             }
         }
         for proposal in &mut proposals {
-            let vshard = self.seal_vshard(proposal.group)?;
+            let vshard = seal_vshard(self.state, proposal.group)?;
             let mut seal = ReplicatedEntry::new(
                 0,
                 self.database.as_u64(),
@@ -171,23 +193,6 @@ impl Session<'_> {
             proposal.entries.push((vshard, seal.encode()?));
         }
         Ok(proposals)
-    }
-
-    fn seal_vshard(&self, group: u64) -> crate::Result<u32> {
-        self.state
-            .cluster_routing
-            .as_ref()
-            .and_then(|routing| {
-                routing
-                    .read()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .vshards_for_group(group)
-                    .first()
-                    .copied()
-            })
-            .ok_or_else(|| crate::Error::Internal {
-                detail: format!("mirror applier: group {group} homes no vShard"),
-            })
     }
 
     fn floors_of(&self, batch: &CutBatch, group: u64) -> crate::Result<Vec<MirrorCalvinFloor>> {

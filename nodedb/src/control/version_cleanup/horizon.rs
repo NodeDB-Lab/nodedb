@@ -38,6 +38,8 @@
 //! group's ordinal floor), and a restart (the window is a pure function of
 //! the commit's two ordinals).
 
+use nodedb_physical::physical_plan::MirrorHistoryFloor;
+
 use crate::control::cluster::linearizable_read::groups_hosted_here;
 use crate::control::read_cut::close::close_group_cuts;
 use crate::control::read_cut::{snapshot_max_hold, statement_cap};
@@ -83,6 +85,40 @@ pub fn horizon_of(board: i64, closed: i64, window_ns: i64) -> CleanupHorizon {
     }
 }
 
+/// Each read-only mirror's limit on the horizon: one snapshot hold below its
+/// applied cut's cap.
+///
+/// A mirror's reads run at or below that cap, however far it trails the clock
+/// (`read_cut::mirror_cap`). A version newer than the cap can supersede one a
+/// read still needs, so no store of the mirror purges past the floor. Cleanup
+/// stays on, and a stopped mirror stops only its own database's cleanup. A
+/// mirror with no applied cut has a floor of `0`, which purges nothing.
+pub fn mirror_floors(state: &SharedState) -> crate::Result<Vec<MirrorHistoryFloor>> {
+    let window = i64::try_from(snapshot_max_hold(state).as_nanos()).unwrap_or(i64::MAX);
+    let catalog = state.credentials.catalog();
+    state
+        .mirror
+        .fence
+        .read_only_ids()
+        .into_iter()
+        .map(|database_id| {
+            let cap = catalog
+                .get_mirror_cut_state(nodedb_types::DatabaseId::new(database_id))?
+                .map_or(0, |cut| cut.cap_ordinal);
+            Ok(MirrorHistoryFloor {
+                database_id,
+                floor: mirror_floor(cap, window),
+            })
+        })
+        .collect()
+}
+
+/// The floor of a mirror whose applied cut caps at `cap`, with the snapshot hold
+/// `window_ns`. A floor is never negative: it purges nothing.
+fn mirror_floor(cap: i64, window_ns: i64) -> i64 {
+    cap.saturating_sub(window_ns).max(0)
+}
+
 /// Every node of the cluster topology, this one included. Empty on a node
 /// with no topology.
 fn cluster_members(state: &SharedState) -> Vec<u64> {
@@ -102,6 +138,14 @@ fn cluster_members(state: &SharedState) -> Vec<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A lagging mirror keeps a full hold of history below its cap.
+    #[test]
+    fn a_mirror_floor_stays_a_hold_below_its_cap() {
+        assert_eq!(mirror_floor(10_000, 1_000), 9_000);
+        assert_eq!(mirror_floor(500, 1_000), 0, "a floor is never negative");
+        assert_eq!(mirror_floor(0, 1_000), 0, "no applied cut purges nothing");
+    }
 
     #[test]
     fn the_horizon_is_the_lower_bound() {

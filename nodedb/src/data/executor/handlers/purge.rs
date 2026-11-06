@@ -13,7 +13,7 @@
 //! A collection keeps its definition: the catalog row outlives its rows.
 //! Idempotent: safe to re-run after a crash (missing data is a no-op).
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use tracing::{info, warn};
 
@@ -39,7 +39,8 @@ impl CoreLoop {
     /// Purge a tenant's data on `vshards` from every engine and cache.
     ///
     /// `collections` names every collection of the tenant by storage name.
-    /// Only those `vshards` homes lose their rows. Memory-only engines
+    /// Only those `vshards` homes lose their rows, and every array of the
+    /// tenant loses the cells `vshards` routes. Memory-only engines
     /// checkpoint before this answers, so a restart loads no purged row from an
     /// older checkpoint. The Control Plane fences WAL replay after every core
     /// answers.
@@ -80,8 +81,25 @@ impl CoreLoop {
             }
         };
 
-        // Caches hold no authority: a miss reads the store.
         let tid_key = TenantId::new(tenant_id);
+        if let Err(e) = self.clear_tenant_group_arrays(database_id, tid_key, &group) {
+            warn!(tenant_id, error = %e, "tenant array purge failed");
+            return self.response_error(
+                task,
+                ErrorCode::Internal {
+                    detail: format!("tenant array purge: {e}"),
+                },
+            );
+        }
+
+        // A tenant re-created under this id starts with no quarantine records.
+        // A record of another group's segment forgets too: its next read
+        // detects the segment again, and that group's purge removes it.
+        if let Some(registry) = &self.quarantine_registry {
+            registry.release_tenant(database_id.as_u64(), tenant_id);
+        }
+
+        // Caches hold no authority: a miss reads the store.
         self.doc_cache.evict_tenant(database_id.as_u64(), tenant_id);
         self.aggregate_cache.retain(|(_, t, _), _| *t != tid_key);
 
@@ -144,6 +162,76 @@ impl CoreLoop {
         }
     }
 
+    /// Answer every collection this core stores rows of for the tenant, by
+    /// storage name. A store can hold a collection the catalog no longer names:
+    /// a purge that lists only the catalog leaves those rows behind.
+    pub(in crate::data::executor) fn execute_list_tenant_collections(
+        &mut self,
+        task: &ExecutionTask,
+        tenant_id: u64,
+    ) -> Response {
+        match self
+            .stored_tenant_collections(task.request.database_id, TenantId::new(tenant_id))
+            .and_then(|names| {
+                zerompk::to_msgpack_vec(&names).map_err(|e| crate::Error::Serialization {
+                    format: "msgpack".into(),
+                    detail: format!("tenant collections: {e}"),
+                })
+            }) {
+            Ok(payload) => self.response_with_payload(task, payload),
+            Err(e) => self.response_error(task, ErrorCode::from(e)),
+        }
+    }
+
+    /// Every collection name any engine of this core holds for the tenant.
+    fn stored_tenant_collections(
+        &self,
+        database_id: DatabaseId,
+        tid: TenantId,
+    ) -> crate::Result<Vec<String>> {
+        let db = database_id.as_u64();
+        let mine = |d: &DatabaseId, t: &TenantId| *d == database_id && *t == tid;
+        let mut names: BTreeSet<String> = self
+            .sparse
+            .versioned_newest_by_collection()?
+            .into_iter()
+            .filter(|row| row.database_id == db && row.tenant == tid.as_u64())
+            .map(|row| row.collection)
+            .collect();
+        names.extend(self.inverted.tenant_collections(db, tid)?);
+        let keyed = self
+            .columnar_engines
+            .keys()
+            .chain(self.columnar_memtables.keys())
+            .map(|(d, t, c)| (d, t, c));
+        let keyed = keyed
+            .chain(self.ts_registries.keys().map(|(d, t, c)| (d, t, c)))
+            .chain(self.vector_collections.keys().map(|(d, t, c)| (d, t, c)))
+            .chain(
+                self.sparse_vector_indexes
+                    .keys()
+                    .map(|(d, t, c, _)| (d, t, c)),
+            )
+            .chain(self.spatial_indexes.keys().map(|(d, t, c, _)| (d, t, c)));
+        for (d, t, collection) in keyed {
+            if mine(d, t) {
+                // A vector index key can carry a `:field` suffix.
+                let stored = collection.split(':').next().unwrap_or(collection.as_str());
+                names.insert(stored.to_string());
+            }
+        }
+        names.extend(
+            self.kv_engine
+                .live_collections()
+                .filter(|row| row.database_id == database_id && row.tenant_id == tid.as_u64())
+                .map(|row| row.collection.to_string()),
+        );
+        if let Some(engine) = self.crdt_engines.get(&(database_id, tid)) {
+            names.extend(engine.collection_names());
+        }
+        Ok(names.into_iter().collect())
+    }
+
     /// Clear every collection of `collections` that `group` homes. Each keeps
     /// its definition. A chain head goes with its rows, so the next write of a
     /// hash-chained collection starts at genesis.
@@ -188,5 +276,79 @@ impl CoreLoop {
                 .delete_chain_head(database_id.as_u64(), tenant_id, collection)?;
         }
         Ok(counts)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nodedb_types::{CollectionKey, StorageKey, Surrogate};
+
+    use super::*;
+    use crate::bridge::envelope::Status;
+    use crate::data::executor::core_loop::tests::{make_core_with_dir, task_with_vshard};
+    use crate::engine::sparse::btree_versioned::VersionedPut;
+    use crate::types::VShardId;
+
+    const TENANT: u64 = 1;
+    /// A collection with rows and no catalog row.
+    const ORPHAN: &str = "orphan";
+
+    fn put(core: &CoreLoop, tenant: u64, coll: &str) {
+        core.sparse
+            .versioned_put(VersionedPut {
+                database_id: 0,
+                tenant,
+                coll,
+                doc_id: &StorageKey::for_surrogate(Surrogate::new(7)),
+                sys_from: 10,
+                valid_from_ms: i64::MIN,
+                valid_until_ms: i64::MAX,
+                body: b"row",
+            })
+            .expect("put");
+    }
+
+    fn listed(core: &mut CoreLoop, tenant: u64) -> Vec<String> {
+        let task = task_with_vshard(VShardId::new(0));
+        let response = core.execute_list_tenant_collections(&task, tenant);
+        assert_eq!(response.status, Status::Ok, "{:?}", response.error_code);
+        zerompk::from_msgpack(response.payload.as_ref()).expect("names")
+    }
+
+    /// The listing finds what the catalog no longer names. The purge the
+    /// listing feeds removes it, and another tenant's row of that name stays.
+    #[test]
+    fn a_row_with_no_catalog_row_is_listed_and_purged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _req, _resp) = make_core_with_dir(dir.path());
+        put(&core, TENANT, ORPHAN);
+        put(&core, TENANT + 1, ORPHAN);
+        assert_eq!(listed(&mut core, TENANT), vec![ORPHAN.to_string()]);
+
+        let home = CollectionKey::from_bare(DatabaseId::DEFAULT, ORPHAN)
+            .vshard()
+            .as_u32();
+        let task = task_with_vshard(VShardId::new(home));
+        let answer = core.execute_purge_tenant(&task, TENANT, &[ORPHAN.to_string()], &[home]);
+        assert_eq!(answer.status, Status::Ok, "{:?}", answer.error_code);
+
+        assert!(listed(&mut core, TENANT).is_empty());
+        assert_eq!(listed(&mut core, TENANT + 1), vec![ORPHAN.to_string()]);
+    }
+
+    /// A purge of another group's vShards leaves the row for that group's purge.
+    #[test]
+    fn a_purge_leaves_a_collection_another_group_homes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _req, _resp) = make_core_with_dir(dir.path());
+        put(&core, TENANT, ORPHAN);
+        let home = CollectionKey::from_bare(DatabaseId::DEFAULT, ORPHAN)
+            .vshard()
+            .as_u32();
+        let other = home.wrapping_add(1);
+        let task = task_with_vshard(VShardId::new(other));
+        let answer = core.execute_purge_tenant(&task, TENANT, &[ORPHAN.to_string()], &[other]);
+        assert_eq!(answer.status, Status::Ok, "{:?}", answer.error_code);
+        assert_eq!(listed(&mut core, TENANT), vec![ORPHAN.to_string()]);
     }
 }

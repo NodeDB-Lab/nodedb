@@ -22,6 +22,7 @@ mod index_rebuild;
 mod ingest;
 mod kv_expiry;
 mod lease;
+mod mirror;
 mod outcome_floor;
 mod quota;
 mod raft_apply;
@@ -75,6 +76,7 @@ pub(in crate::diag) use lease::{
     DdlCleanupNotCompleted, DescriptorDrainNotEnded, DescriptorLeaseNotRenewed,
     DescriptorLeaseReleaseDropped,
 };
+pub(in crate::diag) use mirror::MirrorStatusUnread;
 pub(in crate::diag) use outcome_floor::{WriteWindowHeld, WriteWindowLeaked};
 pub use quota::{DATABASE_SCOPE, TENANT_SCOPE};
 pub(in crate::diag) use quota::{

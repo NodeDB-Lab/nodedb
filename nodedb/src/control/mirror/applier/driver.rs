@@ -120,12 +120,16 @@ pub fn spawn_mirror_applier(
         move |mut shutdown| async move {
             tokio::select! {
                 _ = shutdown.wait_cancelled() => {}
-                stop = run_mirror_applier(state, database, client, link_id) => {
+                stop = run_mirror_applier(Arc::clone(&state), database, client, link_id) => {
                     tracing::warn!(
                         database = database.as_u64(),
                         ?stop,
                         "mirror applier stopped"
                     );
+                    // A mirror that follows nothing keeps no link on any node.
+                    if matches!(stop, MirrorStop::Ended) {
+                        state.mirror.links.teardown_link(database);
+                    }
                 }
             }
         },

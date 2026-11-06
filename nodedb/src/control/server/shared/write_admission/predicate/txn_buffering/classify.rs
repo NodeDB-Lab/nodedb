@@ -345,6 +345,7 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             | MetaOp::PurgeDepartedVShards { .. }
             | MetaOp::PurgeVersionsBelow { .. }
             | MetaOp::KvDueExpiries { .. }
+            | MetaOp::ListTenantCollections { .. }
             | MetaOp::RefreshGraphCount { .. }
             | MetaOp::QueryStorageBytes { .. }
             | MetaOp::PurgeTenant { .. }
@@ -358,7 +359,7 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             | MetaOp::TemporalPurgeCrdt { .. }
             | MetaOp::TemporalPurgeArray { .. }
             | MetaOp::AlterArray { .. }
-            | MetaOp::ApplyContinuousAggRetention
+            | MetaOp::ApplyContinuousAggRetention { .. }
             | MetaOp::QueryAggregateWatermark { .. }
             | MetaOp::QueryLastValues { .. }
             | MetaOp::QueryLastValue { .. }
@@ -2057,7 +2058,9 @@ mod tests {
                 minimum_audit_retain_ms: None,
                 schema_msgpack: None,
             }),
-            PhysicalPlan::Meta(MetaOp::ApplyContinuousAggRetention),
+            PhysicalPlan::Meta(MetaOp::ApplyContinuousAggRetention {
+                skip_databases: Vec::new(),
+            }),
             PhysicalPlan::Meta(MetaOp::QueryAggregateWatermark {
                 aggregate_name: "agg".into(),
             }),

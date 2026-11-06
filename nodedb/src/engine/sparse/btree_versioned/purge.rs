@@ -15,7 +15,7 @@ use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 use super::doc::DOCUMENTS_VERSIONED;
 use super::history_bytes::{apply_versioned_delta, remove_counted};
 use super::index::INDEXES_VERSIONED;
-use super::key::{coll_prefix, coll_prefix_end, tenant_prefix, tenant_prefix_end};
+use super::key::{coll_prefix, coll_prefix_end};
 use super::value::TAG_TOMBSTONE;
 use crate::engine::sparse::btree::{KeyedTable, SparseEngine, invalid_storage_key_err, redb_err};
 use crate::engine::storage_bytes::StorageDelta;
@@ -40,19 +40,6 @@ impl SparseEngine {
     ) -> crate::Result<(usize, usize)> {
         let lo = coll_prefix(database_id, tenant, coll);
         let hi = coll_prefix_end(database_id, tenant, coll);
-        self.delete_all_versioned_in_range(&lo, &hi)
-    }
-
-    /// Whole-tenant analogue of [`Self::delete_all_versioned_for_collection`]:
-    /// hard-drop every versioned document + index row across all collections
-    /// belonging to `(database_id, tenant)`.
-    pub fn delete_all_versioned_for_tenant(
-        &self,
-        database_id: u64,
-        tenant: u64,
-    ) -> crate::Result<(usize, usize)> {
-        let lo = tenant_prefix(database_id, tenant);
-        let hi = tenant_prefix_end(database_id, tenant);
         self.delete_all_versioned_in_range(&lo, &hi)
     }
 
@@ -437,46 +424,6 @@ mod tests {
         // Idempotent: a second drop removes nothing and does not error.
         let (docs2, _) = eng.delete_all_versioned_for_collection(1, 1, "c").unwrap();
         assert_eq!(docs2, 0);
-    }
-
-    #[test]
-    fn delete_all_versioned_for_tenant_drops_every_collection() {
-        let (_d, eng) = fresh_engine();
-        for coll in ["c", "other"] {
-            eng.versioned_put(VersionedPut {
-                database_id: 1,
-                tenant: 1,
-                coll,
-                doc_id: &key(1),
-                body: b"x",
-                sys_from: 100,
-                valid_from_ms: 0,
-                valid_until_ms: i64::MAX,
-            })
-            .unwrap();
-        }
-        // A different tenant must survive.
-        eng.versioned_put(VersionedPut {
-            database_id: 1,
-            tenant: 2,
-            coll: "c",
-            doc_id: &key(1),
-            body: b"x",
-            sys_from: 100,
-            valid_from_ms: 0,
-            valid_until_ms: i64::MAX,
-        })
-        .unwrap();
-
-        let (docs, _idx) = eng.delete_all_versioned_for_tenant(1, 1).unwrap();
-        assert_eq!(docs, 2, "one version in each of two collections removed");
-        assert_eq!(count_all_versions(&eng, 1, 1, "c"), 0);
-        assert_eq!(count_all_versions(&eng, 1, 1, "other"), 0);
-        assert_eq!(
-            count_all_versions(&eng, 1, 2, "c"),
-            1,
-            "other tenant intact"
-        );
     }
 
     #[test]

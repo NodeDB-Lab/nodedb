@@ -283,6 +283,7 @@ pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Perm
             | MetaOp::PurgeDepartedVShards { .. }
             | MetaOp::PurgeVersionsBelow { .. }
             | MetaOp::KvDueExpiries { .. }
+            | MetaOp::ListTenantCollections { .. }
             | MetaOp::RefreshGraphCount { .. }
             | MetaOp::QueryStorageBytes { .. }
             | MetaOp::UnregisterCollection { .. }
@@ -361,7 +362,7 @@ pub fn required_permission(plan: &crate::bridge::envelope::PhysicalPlan) -> Perm
         // Retention enforcement is admin-level (invoked by background tasks).
         PhysicalPlan::Meta(
             MetaOp::EnforceTimeseriesRetention { .. }
-            | MetaOp::ApplyContinuousAggRetention
+            | MetaOp::ApplyContinuousAggRetention { .. }
             | MetaOp::TemporalPurgeEdgeStore { .. }
             | MetaOp::TemporalPurgeDocumentStrict { .. }
             | MetaOp::TemporalPurgeColumnar { .. }

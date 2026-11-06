@@ -6,6 +6,7 @@
 //! transaction snapshots open on this node.
 
 pub mod close;
+pub mod mirror_cap;
 pub mod reservations;
 pub mod run_marker;
 pub mod snapshot_age;
@@ -14,6 +15,7 @@ pub mod state;
 pub mod statement_cap;
 pub mod wait;
 
+pub use mirror_cap::{history_clock_ns, mirror_cap};
 pub use reservations::{OrdinalReservation, OrdinalReservations};
 pub(crate) use run_marker::{agreed_cut, new_cut_marker};
 pub use snapshot_age::{check_snapshot_age, snapshot_max_hold};

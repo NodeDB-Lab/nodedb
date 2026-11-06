@@ -72,6 +72,15 @@ async fn propose_due_slots(state: &SharedState, proposed: &mut ProposedSlots) {
     let now_ms = crate::engine::kv::current_ms();
     let mut live = HashMap::new();
     for s in stored {
+        // A read-only mirror folds its source's cuts when they arrive through
+        // the log. Its own slots start at PROMOTE.
+        if state
+            .mirror
+            .fence
+            .is_read_only(DatabaseId::new(s.database_id))
+        {
+            continue;
+        }
         let Ok(def) = zerompk::from_msgpack::<ContinuousAggregateDef>(&s.def_bytes) else {
             continue;
         };

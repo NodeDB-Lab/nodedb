@@ -52,6 +52,23 @@ pub fn follow_mirror_row(entry: &CatalogEntry, shared: &SharedState) {
     }
 }
 
+/// Synchronous post-apply for a status step: follow the row the step left,
+/// before the applied index moves.
+///
+/// A row that does not read leaves the fence and the verdicts at the last row
+/// they followed. The report names it, and a restart rebuilds both.
+pub fn follow_mirror_status(database_id: u64, shared: &SharedState) {
+    let id = DatabaseId::new(database_id);
+    match shared.credentials.catalog().get_database(id) {
+        Ok(Some(descriptor)) => {
+            shared.mirror.fence.apply_descriptor(&descriptor);
+            shared.mirror.cuts.apply_descriptor(&descriptor);
+        }
+        Ok(None) => {}
+        Err(error) => crate::diag::mirror_status_unread(&error, database_id),
+    }
+}
+
 /// Post-apply for `PutDatabaseGrant`. A session-lifetime identity copies the
 /// grant set, so open sessions rebuild it at their next request.
 pub fn put_grant(_db_id: u64, user_id: u64, _privilege: String, shared: Arc<SharedState>) {

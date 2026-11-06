@@ -16,7 +16,7 @@
 //! tombstone left lowers its slice's newest ordinal, and only to a value at
 //! or below the horizon.
 
-use nodedb_physical::physical_plan::{PURGE_REMAINING_KEY, RetainedHistory};
+use nodedb_physical::physical_plan::{MirrorHistoryFloor, PURGE_REMAINING_KEY, RetainedHistory};
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
@@ -32,13 +32,16 @@ impl CoreLoop {
         horizon: i64,
         batch_units: u32,
         retained: &[RetainedHistory],
+        mirror_floors: &[MirrorHistoryFloor],
     ) -> Response {
         let state = &mut self.maintenance.version_purge;
         state.safe_horizon = state.safe_horizon.max(horizon);
-        let current = state
-            .pass
-            .take()
-            .filter(|pass| pass.horizon == horizon && pass.retained == retained);
+        state.mirror_floors = mirror_floors.to_vec();
+        let current = state.pass.take().filter(|pass| {
+            pass.horizon == horizon
+                && pass.retained == retained
+                && pass.mirror_floors == mirror_floors
+        });
         let mut pass = match current {
             Some(pass) => pass,
             None => match self.version_purge_units() {
@@ -47,6 +50,7 @@ impl CoreLoop {
                     PurgePass {
                         horizon,
                         retained: retained.to_vec(),
+                        mirror_floors: mirror_floors.to_vec(),
                         pending,
                     }
                 }
@@ -151,7 +155,7 @@ mod tests {
     fn run_pass(core: &mut CoreLoop, horizon: i64, retained: &[RetainedHistory]) -> usize {
         let task = task_with_vshard(VShardId::new(0));
         for round in 1..=64 {
-            let response = core.meta_purge_versions_below(&task, horizon, 1, retained);
+            let response = core.meta_purge_versions_below(&task, horizon, 1, retained, &[]);
             if remaining(&response) == 0 {
                 return round;
             }
@@ -200,6 +204,7 @@ mod tests {
                 &task_with_vshard(VShardId::new(0)),
                 25,
                 1,
+                &[],
                 &[]
             )),
             0,

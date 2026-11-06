@@ -111,6 +111,86 @@ pub enum MirrorStatus {
     Promoted,
 }
 
+/// One status change a mirror's metadata log decides at apply.
+///
+/// The log orders each step against every `MirrorCut`, so every node reaches
+/// one answer. A step the row no longer permits changes nothing.
+///
+/// Exhaustive matches are required everywhere this enum is matched — no
+/// `_ =>` arms.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
+pub enum MirrorStatusStep {
+    /// The lag monitor moves `from` to `to`, while the row still holds `from`.
+    Lag {
+        from: MirrorStatus,
+        to: MirrorStatus,
+    },
+    /// PROMOTE fixes the last cut at the row's `ready_cut`.
+    Seal,
+    /// PROMOTE ends: the database becomes writable.
+    Promote,
+}
+
+impl MirrorStatusStep {
+    /// The status this step leaves on a row at `current` with `ready_cut`,
+    /// or `None` when the step changes nothing.
+    pub fn next(&self, current: &MirrorStatus, ready_cut: u64) -> Option<MirrorStatus> {
+        match self {
+            Self::Lag { from, to } => {
+                (from == current && is_lag_status(from) && is_lag_status(to)).then(|| to.clone())
+            }
+            Self::Seal => match current {
+                MirrorStatus::Following
+                | MirrorStatus::Degraded
+                | MirrorStatus::Disconnected
+                | MirrorStatus::Failed { .. }
+                    if ready_cut > 0 =>
+                {
+                    Some(MirrorStatus::Promoting {
+                        final_cut: ready_cut,
+                    })
+                }
+                MirrorStatus::Bootstrapping { .. }
+                | MirrorStatus::Following
+                | MirrorStatus::Degraded
+                | MirrorStatus::Disconnected
+                | MirrorStatus::Failed { .. }
+                | MirrorStatus::Promoting { .. }
+                | MirrorStatus::Promoted => None,
+            },
+            Self::Promote => match current {
+                MirrorStatus::Promoting { .. } => Some(MirrorStatus::Promoted),
+                MirrorStatus::Bootstrapping { .. }
+                | MirrorStatus::Following
+                | MirrorStatus::Degraded
+                | MirrorStatus::Disconnected
+                | MirrorStatus::Failed { .. }
+                | MirrorStatus::Promoted => None,
+            },
+        }
+    }
+}
+
+/// Whether the lag monitor owns this status.
+fn is_lag_status(status: &MirrorStatus) -> bool {
+    match status {
+        MirrorStatus::Following | MirrorStatus::Degraded | MirrorStatus::Disconnected => true,
+        MirrorStatus::Bootstrapping { .. }
+        | MirrorStatus::Promoting { .. }
+        | MirrorStatus::Failed { .. }
+        | MirrorStatus::Promoted => false,
+    }
+}
+
 /// Why a mirror link stopped. Each variant names what an operator acts on.
 ///
 /// Exhaustive matches are required everywhere this enum is matched — no
@@ -817,5 +897,110 @@ mod tests {
     fn mirror_origin_serde_roundtrip() {
         let o = sample_origin();
         assert_eq!(round_trip_serde(&o), o);
+    }
+
+    fn failed() -> MirrorStatus {
+        MirrorStatus::Failed {
+            failure: MirrorFailure::SourceDropped,
+        }
+    }
+
+    /// A lag step acts only on the status it read, so it never undoes a seal.
+    #[test]
+    fn a_lag_step_needs_the_status_it_read() {
+        let step = MirrorStatusStep::Lag {
+            from: MirrorStatus::Following,
+            to: MirrorStatus::Degraded,
+        };
+        assert_eq!(
+            step.next(&MirrorStatus::Following, 5),
+            Some(MirrorStatus::Degraded)
+        );
+        for later in [
+            MirrorStatus::Disconnected,
+            MirrorStatus::Promoting { final_cut: 5 },
+            MirrorStatus::Promoted,
+            failed(),
+        ] {
+            assert_eq!(step.next(&later, 5), None, "{later:?}");
+        }
+    }
+
+    #[test]
+    fn a_lag_step_only_moves_between_lag_statuses() {
+        let step = MirrorStatusStep::Lag {
+            from: MirrorStatus::Promoted,
+            to: MirrorStatus::Following,
+        };
+        assert_eq!(step.next(&MirrorStatus::Promoted, 5), None);
+        let step = MirrorStatusStep::Lag {
+            from: MirrorStatus::Following,
+            to: MirrorStatus::Promoted,
+        };
+        assert_eq!(step.next(&MirrorStatus::Following, 5), None);
+    }
+
+    /// The final cut is the `ready_cut` the step finds: nothing else can name it.
+    #[test]
+    fn a_seal_takes_the_ready_cut_it_finds() {
+        let expected = Some(MirrorStatus::Promoting { final_cut: 7 });
+        for status in [
+            MirrorStatus::Following,
+            MirrorStatus::Degraded,
+            MirrorStatus::Disconnected,
+            failed(),
+        ] {
+            assert_eq!(
+                MirrorStatusStep::Seal.next(&status, 7),
+                expected,
+                "{status:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_seal_needs_a_ready_cut_and_never_moves_a_sealed_mirror() {
+        let bootstrapping = MirrorStatus::Bootstrapping {
+            bytes_done: 0,
+            bytes_total: 0,
+        };
+        assert_eq!(MirrorStatusStep::Seal.next(&bootstrapping, 3), None);
+        assert_eq!(
+            MirrorStatusStep::Seal.next(&MirrorStatus::Following, 0),
+            None
+        );
+        let sealed = MirrorStatus::Promoting { final_cut: 3 };
+        assert_eq!(MirrorStatusStep::Seal.next(&sealed, 9), None);
+        assert_eq!(
+            MirrorStatusStep::Seal.next(&MirrorStatus::Promoted, 9),
+            None
+        );
+    }
+
+    #[test]
+    fn only_a_sealed_mirror_promotes() {
+        let sealed = MirrorStatus::Promoting { final_cut: 3 };
+        assert_eq!(
+            MirrorStatusStep::Promote.next(&sealed, 3),
+            Some(MirrorStatus::Promoted)
+        );
+        assert_eq!(
+            MirrorStatusStep::Promote.next(&MirrorStatus::Following, 3),
+            None
+        );
+        assert_eq!(
+            MirrorStatusStep::Promote.next(&MirrorStatus::Promoted, 3),
+            None
+        );
+    }
+
+    #[test]
+    fn a_status_step_round_trips() {
+        let step = MirrorStatusStep::Lag {
+            from: MirrorStatus::Degraded,
+            to: MirrorStatus::Following,
+        };
+        assert_eq!(round_trip_msgpack(&step), step);
+        assert_eq!(round_trip_serde(&step), step);
     }
 }

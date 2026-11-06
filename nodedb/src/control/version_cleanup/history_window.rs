@@ -34,13 +34,13 @@ use crate::control::state::SharedState;
 pub fn check_history_window(state: &SharedState, tasks: &[PhysicalTask]) -> crate::Result<bool> {
     let limit = std::time::Duration::from_secs(state.tuning.network.txn_snapshot_max_age_secs);
     let limit_ns = window_nanos(limit)?;
-    let now_ns = nodedb_types::wall_now_ns_i64();
-    let floor = now_ns.saturating_sub(limit_ns);
     let mut time_bound = false;
     for task in tasks {
         let Some(oldest) = oldest_pinned_cut(&task.plan) else {
             continue;
         };
+        let now_ns = crate::control::read_cut::history_clock_ns(state, task.database_id)?;
+        let floor = now_ns.saturating_sub(limit_ns);
         let mut names = Vec::new();
         collect_collections(&task.plan, &mut names);
         names.sort();
@@ -86,7 +86,7 @@ pub fn check_graph_history_window(
 ) -> crate::Result<()> {
     let limit = std::time::Duration::from_secs(state.tuning.network.txn_snapshot_max_age_secs);
     let limit_ns = window_nanos(limit)?;
-    let now_ns = nodedb_types::wall_now_ns_i64();
+    let now_ns = crate::control::read_cut::history_clock_ns(state, history.database_id)?;
     if cut >= now_ns.saturating_sub(limit_ns) {
         return Ok(());
     }

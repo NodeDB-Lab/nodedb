@@ -676,6 +676,12 @@ pub enum CatalogEntry {
         database_id: u64,
         state: Box<nodedb_types::MirrorCutState>,
     },
+    /// One status change a mirror's log decides at apply, against the row it
+    /// finds. A step the row no longer permits changes nothing.
+    StepMirrorStatus {
+        database_id: u64,
+        step: nodedb_types::MirrorStatusStep,
+    },
     /// One link's hold on this cluster's Raft logs, on every node. Apply
     /// merges it with the link's row, so a late ack moves nothing back.
     PutMirrorPin(Box<nodedb_types::MirrorPin>),

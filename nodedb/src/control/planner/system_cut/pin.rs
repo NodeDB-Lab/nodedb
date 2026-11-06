@@ -20,7 +20,7 @@ use nodedb_physical::physical_plan::{GraphReadScope, GraphSystemCut};
 use nodedb_physical::physical_task::PhysicalTask;
 use nodedb_types::SystemTimeScope;
 
-use crate::control::read_cut::{StatementCap, statement_cap};
+use crate::control::read_cut::{StatementCap, mirror_cap, statement_cap};
 use crate::control::state::SharedState;
 
 use super::sites::{for_each_cut_site, for_each_cut_site_ref};
@@ -48,9 +48,22 @@ pub async fn pin_statement_cuts(
     let Some(latest_as_of_ms) = latest else {
         return Ok(CutPinning::default());
     };
-    let cap = statement_cap(state, latest_as_of_ms).await?;
+    // A task on a read-only mirror pins under the mirror's cap. Any other task
+    // shares one local read cut, taken only if one needs it.
+    let mut local = None;
     let mut pinning = CutPinning::default();
     for task in tasks.iter_mut() {
+        let cap = match mirror_cap(state, task.database_id)? {
+            Some(cap) => cap,
+            None => match local {
+                Some(cap) => cap,
+                None => {
+                    let cap = statement_cap(state, latest_as_of_ms).await?;
+                    local = Some(cap);
+                    cap
+                }
+            },
+        };
         for_each_cut_site(&mut task.plan, &mut |site| {
             pinning.capped |= pin_site(site, cap);
         });

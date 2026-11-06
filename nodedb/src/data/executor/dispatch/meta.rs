@@ -125,9 +125,23 @@ impl CoreLoop {
                 horizon,
                 batch_units,
                 retained,
-            } => self.meta_purge_versions_below(task, *horizon, *batch_units, retained),
+                mirror_floors,
+            } => self.meta_purge_versions_below(
+                task,
+                *horizon,
+                *batch_units,
+                retained,
+                mirror_floors,
+            ),
 
-            MetaOp::KvDueExpiries { limit } => self.execute_kv_due_expiries(task, *limit),
+            MetaOp::KvDueExpiries {
+                limit,
+                skip_databases,
+            } => self.execute_kv_due_expiries(task, *limit, skip_databases),
+
+            MetaOp::ListTenantCollections { tenant_id } => {
+                self.execute_list_tenant_collections(task, *tenant_id)
+            }
 
             MetaOp::RefreshGraphCount { hosted_vshards } => {
                 self.execute_refresh_graph_count(task, hosted_vshards)
@@ -203,7 +217,9 @@ impl CoreLoop {
                 *max_age_ms,
                 aggregates,
             ),
-            MetaOp::ApplyContinuousAggRetention => self.meta_apply_continuous_agg_retention(task),
+            MetaOp::ApplyContinuousAggRetention { skip_databases } => {
+                self.meta_apply_continuous_agg_retention(task, skip_databases)
+            }
             MetaOp::QueryAggregateWatermark { aggregate_name } => {
                 self.meta_query_aggregate_watermark(task, aggregate_name)
             }

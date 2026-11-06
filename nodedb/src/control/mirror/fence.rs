@@ -62,6 +62,26 @@ impl MirrorFence {
             .cloned()
     }
 
+    /// Whether the database is a mirror that is not promoted. Its rows and its
+    /// schema arrive through the log, so no local loop changes them.
+    pub fn is_read_only(&self, database_id: DatabaseId) -> bool {
+        self.read_only
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains_key(&database_id)
+    }
+
+    /// Every database that is a mirror and not promoted, for a local loop that
+    /// names what it skips to a Data Plane core.
+    pub fn read_only_ids(&self) -> Vec<u64> {
+        self.read_only
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .keys()
+            .map(|database| database.as_u64())
+            .collect()
+    }
+
     /// Whether the database still takes its first capture.
     pub fn is_bootstrapping(&self, database_id: DatabaseId) -> bool {
         self.bootstrapping

@@ -198,7 +198,8 @@ impl SourceService {
         groups.into_iter().collect()
     }
 
-    /// Whether this ack's write is due, and note it when it is.
+    /// Whether this ack's write is due, and note it when it is. A due write
+    /// also forgets every link whose pin ended, so the map tracks live links.
     fn pin_write_due(&self, link_id: u64) -> bool {
         let mut writes = self
             .last_pin_write
@@ -209,6 +210,8 @@ impl SourceService {
             .get(&link_id)
             .is_none_or(|last| now.duration_since(*last) >= PIN_WRITE_INTERVAL);
         if due {
+            let pins = &self.state.mirror.pins;
+            writes.retain(|link, _| pins.get(*link).is_some_and(|pin| pin_is_live(&pin.state)));
             writes.insert(link_id, now);
         }
         due
@@ -233,6 +236,14 @@ impl SourceService {
         match outcome {
             WaitOutcome::Reached | WaitOutcome::TimedOut | WaitOutcome::GroupGone => {}
         }
+    }
+}
+
+/// Whether a pin still holds the log. An ended link takes no more acks.
+fn pin_is_live(state: &MirrorPinState) -> bool {
+    match state {
+        MirrorPinState::Live => true,
+        MirrorPinState::Expired | MirrorPinState::SourceDropped => false,
     }
 }
 

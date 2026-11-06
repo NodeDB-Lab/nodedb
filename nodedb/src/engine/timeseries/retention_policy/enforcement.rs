@@ -74,6 +74,15 @@ async fn enforcement_loop(
         }
 
         for policy in &policies {
+            // A read-only mirror drops no partition on its own clock. The
+            // policy runs from the database's PROMOTE.
+            if state
+                .mirror
+                .fence
+                .is_read_only(DatabaseId::new(policy.database_id))
+            {
+                continue;
+            }
             let tenant_id = TenantId::new(policy.tenant_id);
 
             // Enforce raw tier retention — only if downsample tier covers it.
@@ -151,7 +160,9 @@ async fn enforcement_loop(
             }
 
             // Apply retention to continuous aggregate buckets.
-            let plan = PhysicalPlan::Meta(MetaOp::ApplyContinuousAggRetention);
+            let plan = PhysicalPlan::Meta(MetaOp::ApplyContinuousAggRetention {
+                skip_databases: state.mirror.fence.read_only_ids(),
+            });
             if let Err(e) = crate::control::server::shared::ddl::sync_dispatch::dispatch_system(
                 &state,
                 crate::control::server::shared::ddl::sync_dispatch::SystemTask::new(

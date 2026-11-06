@@ -23,6 +23,9 @@
 //!
 //! One key's error never stops the others. The pass continues, records the
 //! error, and reports it. The key stays due.
+//!
+//! A read-only mirror takes its reaps from its source's log, so no pass reads
+//! its due entries. A promoted mirror's passed TTLs reap from the next pass.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -147,7 +150,10 @@ pub async fn run_reap_pass(state: &SharedState, limit: u32) -> crate::Result<Rea
         state,
         TenantId::new(0),
         DatabaseId::DEFAULT,
-        PhysicalPlan::Meta(MetaOp::KvDueExpiries { limit }),
+        PhysicalPlan::Meta(MetaOp::KvDueExpiries {
+            limit,
+            skip_databases: state.mirror.fence.read_only_ids(),
+        }),
         TraceId::generate(),
     )
     .await?;

@@ -120,7 +120,7 @@ pub use lsn::Lsn;
 pub use mirror::{
     MirrorCutAdvance, MirrorCutMark, MirrorCutState, MirrorEntryStamp, MirrorEpochRange,
     MirrorFailure, MirrorGroupPosition, MirrorMode, MirrorOrigin, MirrorPin, MirrorPinState,
-    MirrorStatus,
+    MirrorStatus, MirrorStatusStep,
 };
 pub use multi_vector::{MultiVector, MultiVectorError, MultiVectorScoreMode};
 pub use namespace::Namespace;
