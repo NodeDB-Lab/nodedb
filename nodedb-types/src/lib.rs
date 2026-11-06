@@ -155,4 +155,4 @@ pub use vector_index_stats::{
 };
 pub use vector_model::{VectorModelEntry, VectorModelMetadata};
 pub use volatility::Volatility;
-pub use wall_clock::{wall_now_ns, wall_now_ns_i64};
+pub use wall_clock::{checked_wall_now_ms, wall_now_ns, wall_now_ns_i64};

@@ -27,6 +27,7 @@ uuid = { workspace = true }
 loro = { workspace = true }
 nodedb-wal = { workspace = true }
 rustc-hash = { workspace = true }
+web-time = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

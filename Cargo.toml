@@ -262,6 +262,10 @@ smallvec = { version = "1", features = ["serde"] }
 ulid = "3"
 nanoid = "0.5"
 
+# `std::time` on native. On wasm32-unknown-unknown, where `std::time` panics,
+# the JS `performance` clock.
+web-time = "1"
+
 # Arbitrary-precision decimal
 rust_decimal = { version = "1", features = ["serde-with-str"] }
 
