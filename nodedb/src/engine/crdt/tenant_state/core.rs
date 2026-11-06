@@ -223,6 +223,8 @@ impl TenantCrdtEngine {
     /// document the collection already holds under this incarnation, loaded
     /// before the binding, mints its later operations under the derived peer
     /// id.
+    ///
+    /// On `Err` the collection keeps the incarnation it had.
     pub fn bind_incarnation(&mut self, collection: &str, incarnation: Hlc) -> crate::Result<()> {
         let previous = self.incarnations.insert(collection.to_owned(), incarnation);
         if previous == Some(incarnation) {
@@ -235,8 +237,14 @@ impl TenantCrdtEngine {
             return Ok(());
         }
         let peer_id = self.peer_id_of(collection);
-        if let Some(state) = self.collections.get_mut(collection) {
-            state.set_peer_id(peer_id).map_err(crate::Error::Crdt)?;
+        if let Some(state) = self.collections.get_mut(collection)
+            && let Err(e) = state.set_peer_id(peer_id)
+        {
+            match previous {
+                Some(previous) => self.incarnations.insert(collection.to_owned(), previous),
+                None => self.incarnations.remove(collection),
+            };
+            return Err(crate::Error::Crdt(e));
         }
         Ok(())
     }

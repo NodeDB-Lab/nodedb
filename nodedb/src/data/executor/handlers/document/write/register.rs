@@ -132,18 +132,26 @@ impl CoreLoop {
         // apply AND boot rehydration replay — so `ALTER COLLECTION ... SET ON
         // CONFLICT ...` survives a restart. A policy that does not apply
         // refuses the register before the collection config is installed.
+        let mut replaced_policy = None;
         if let Some(policy_json) = conflict_policy {
             let applied = self
                 .get_crdt_engine(task.request.database_id, crate::types::TenantId::new(tid))
-                .and_then(|engine| engine.set_collection_policy(collection, policy_json));
-            if let Err(e) = applied {
-                warn!(
-                    core = self.core_id,
-                    %collection,
-                    error = %e,
-                    "persisted conflict policy did not apply on register"
-                );
-                return self.response_error(task, ErrorCode::from(e));
+                .and_then(|engine| {
+                    let previous = engine.registered_collection_policy(collection);
+                    engine.set_collection_policy(collection, policy_json)?;
+                    Ok(previous)
+                });
+            match applied {
+                Ok(previous) => replaced_policy = Some(previous),
+                Err(e) => {
+                    warn!(
+                        core = self.core_id,
+                        %collection,
+                        error = %e,
+                        "persisted conflict policy did not apply on register"
+                    );
+                    return self.response_error(task, ErrorCode::from(e));
+                }
             }
         }
 
@@ -153,10 +161,11 @@ impl CoreLoop {
             collection.to_string(),
         );
         let last_value_cache = timeseries.map(|schema| schema.last_value_cache);
-        self.doc_configs.insert(config_key.clone(), config);
+        let previous_config = self.doc_configs.insert(config_key.clone(), config);
 
         // `SET LAST_VALUE_CACHE` travels on the registration: turning it on
-        // builds the cache from the stored rows, turning it off drops it.
+        // builds the cache from the stored rows, turning it off drops it. A
+        // refused register leaves the config and the policy it found.
         if let Some(enabled) = last_value_cache
             && let Err(e) = self.sync_last_value_cache(&config_key, enabled)
         {
@@ -166,6 +175,7 @@ impl CoreLoop {
                 error = %e,
                 "last-value cache did not build on register"
             );
+            self.undo_register(config_key, previous_config, replaced_policy);
             return self.response_error(task, ErrorCode::from(e));
         }
 
@@ -180,10 +190,214 @@ impl CoreLoop {
                 .get_crdt_engine(task.request.database_id, crate::types::TenantId::new(tid))
                 .and_then(|engine| engine.bind_incarnation(collection, incarnation));
             if let Err(e) = bound {
+                self.undo_register(config_key, previous_config, replaced_policy);
                 return self.response_error(task, ErrorCode::from(e));
             }
         }
 
         self.response_ok(task)
+    }
+
+    /// Put back what a refused register replaced. A `None` config removes the
+    /// config the register installed. `replaced_policy` is `Some` when the
+    /// register set a policy, and holds the policy it replaced, if any.
+    fn undo_register(
+        &mut self,
+        key: (crate::types::DatabaseId, crate::types::TenantId, String),
+        previous_config: Option<crate::engine::document::store::CollectionConfig>,
+        replaced_policy: Option<Option<nodedb_crdt::policy::CollectionPolicy>>,
+    ) {
+        // The register reached the engine to set the policy, so it exists.
+        if let Some(previous) = replaced_policy
+            && let Some(engine) = self.crdt_engines.get_mut(&(key.0, key.1))
+        {
+            engine.restore_collection_policy(&key.2, previous);
+        }
+        match previous_config {
+            Some(config) => {
+                self.doc_configs.insert(key, config);
+            }
+            None => {
+                self.doc_configs.remove(&key);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nodedb_physical::physical_plan::{EnforcementOptions, StorageMode, TimeseriesSchema};
+
+    use super::*;
+    use crate::bridge::envelope::Status;
+    use crate::data::executor::core_loop::tests::{make_core_with_dir, make_default_task};
+    use crate::data::executor::handlers::timeseries::{TimeseriesApplyMode, TimeseriesIngestExec};
+    use crate::types::{DatabaseId, TenantId};
+
+    const TID: u64 = 1;
+    const COLLECTION: &str = "metrics";
+
+    fn key() -> (DatabaseId, TenantId, String) {
+        (
+            DatabaseId::DEFAULT,
+            TenantId::new(TID),
+            COLLECTION.to_string(),
+        )
+    }
+
+    fn register(core: &mut CoreLoop, last_value_cache: bool, hlc: u64) -> Status {
+        register_with_policy(core, last_value_cache, hlc, None)
+    }
+
+    fn register_with_policy(
+        core: &mut CoreLoop,
+        last_value_cache: bool,
+        hlc: u64,
+        conflict_policy: Option<&str>,
+    ) -> Status {
+        let schema = TimeseriesSchema {
+            time_key: "timestamp".into(),
+            columns: Vec::new(),
+            partition_interval: "1h".into(),
+            last_value_cache,
+        };
+        let task = make_default_task();
+        core.execute_register_document_collection(
+            &task,
+            RegisterDocumentCollectionParams {
+                tid: TID,
+                collection: COLLECTION,
+                indexes: &[],
+                crdt_enabled: false,
+                storage_mode: &StorageMode::Schemaless,
+                enforcement: &EnforcementOptions::default(),
+                bitemporal: false,
+                conflict_policy,
+                timeseries: Some(&schema),
+                vector_primary: None,
+                vector_fields: &[],
+                declared_columns: &[],
+                declared_key: None,
+                incarnation: nodedb_types::Hlc::new(hlc, 0),
+            },
+        )
+        .status
+    }
+
+    /// One flushed partition, with its directory then removed: the registry
+    /// lists it, so a last-value cache build does not read.
+    fn unreadable_partition(core: &mut CoreLoop) {
+        let task = make_default_task();
+        let ingested = core.execute_timeseries_ingest(TimeseriesIngestExec {
+            task: &task,
+            tid: TenantId::new(TID),
+            collection: COLLECTION,
+            payload: b"metrics,host=a value=1i 1000000000",
+            format: "ilp",
+            wal_lsn: Some(1),
+            provenance: None,
+            mode: TimeseriesApplyMode::Immediate,
+            rls_write_check: &nodedb_types::RlsWriteCheck::NoPolicyApplies,
+            returning: None,
+            rls_filters: &[],
+        });
+        assert_eq!(ingested.status, Status::Ok, "{:?}", ingested.error_code);
+        core.flush_ts_collection(TenantId::new(TID), DatabaseId::DEFAULT, COLLECTION, 0)
+            .expect("flush");
+        let ts_dir = core.ts_dir_of(&key());
+        let dirs: Vec<String> = core
+            .ts_registries
+            .get(&key())
+            .expect("registry")
+            .current_partitions()
+            .map(|entry| entry.dir_name.clone())
+            .collect();
+        assert!(!dirs.is_empty(), "the flush wrote a partition");
+        for dir in dirs {
+            std::fs::remove_dir_all(ts_dir.join(dir)).expect("remove partition");
+        }
+    }
+
+    /// A register refused by its cache build leaves the prior config. The new
+    /// config stays out, with its cache flag and incarnation.
+    #[test]
+    fn a_refused_register_restores_the_prior_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _req_tx, _resp_rx) = make_core_with_dir(dir.path());
+        assert_eq!(register(&mut core, false, 1), Status::Ok);
+        unreadable_partition(&mut core);
+
+        assert_ne!(register(&mut core, true, 2), Status::Ok);
+
+        let config = core.doc_configs.get(&key()).expect("prior config");
+        assert_eq!(config.incarnation, nodedb_types::Hlc::new(1, 0));
+        let schema = config.timeseries.as_ref().expect("timeseries schema");
+        assert!(!schema.last_value_cache);
+    }
+
+    fn policy_json(policy: nodedb_crdt::policy::CollectionPolicy) -> String {
+        sonic_rs::to_string(&policy).expect("policy json")
+    }
+
+    fn registered_policy(core: &CoreLoop) -> Option<String> {
+        core.crdt_engines
+            .get(&(DatabaseId::DEFAULT, TenantId::new(TID)))
+            .expect("the register made the engine")
+            .registered_collection_policy(COLLECTION)
+            .map(policy_json)
+    }
+
+    /// A refused register leaves the policy it found. Every refusal after the
+    /// policy applies runs this one undo, a failed incarnation bind included.
+    #[test]
+    fn a_refused_register_restores_the_prior_policy() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _req_tx, _resp_rx) = make_core_with_dir(dir.path());
+        let prior = policy_json(nodedb_crdt::policy::CollectionPolicy::ephemeral());
+        let refused = policy_json(nodedb_crdt::policy::CollectionPolicy::strict());
+        assert_ne!(prior, refused);
+        assert_eq!(
+            register_with_policy(&mut core, false, 1, Some(&prior)),
+            Status::Ok
+        );
+        unreadable_partition(&mut core);
+
+        assert_ne!(
+            register_with_policy(&mut core, true, 2, Some(&refused)),
+            Status::Ok
+        );
+
+        assert_eq!(registered_policy(&core), Some(prior));
+    }
+
+    /// A refused register that found no policy leaves none.
+    #[test]
+    fn a_refused_register_removes_the_policy_it_set() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _req_tx, _resp_rx) = make_core_with_dir(dir.path());
+        assert_eq!(register(&mut core, false, 1), Status::Ok);
+        unreadable_partition(&mut core);
+        let refused = policy_json(nodedb_crdt::policy::CollectionPolicy::strict());
+
+        assert_ne!(
+            register_with_policy(&mut core, true, 2, Some(&refused)),
+            Status::Ok
+        );
+
+        assert_eq!(registered_policy(&core), None);
+    }
+
+    /// A first register refused by its cache build installs no config.
+    #[test]
+    fn a_refused_first_register_installs_no_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _req_tx, _resp_rx) = make_core_with_dir(dir.path());
+        assert_eq!(register(&mut core, false, 1), Status::Ok);
+        unreadable_partition(&mut core);
+        core.doc_configs.remove(&key());
+
+        assert_ne!(register(&mut core, true, 2), Status::Ok);
+
+        assert!(!core.doc_configs.contains_key(&key()));
     }
 }
