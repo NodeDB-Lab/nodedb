@@ -14,13 +14,21 @@ use std::sync::Mutex;
 use super::capture::RetryStoreCaptures;
 use super::record::FailedAction;
 
+/// An action sent back for another attempt, and the DLQ entry that keeps it
+/// until the retry queue durably holds it.
+#[derive(Debug)]
+pub struct RequeuedAction {
+    pub action: FailedAction,
+    pub dlq_entry: u64,
+}
+
 /// Actions an operator has sent back for another attempt, parked per consumer
 /// core, and the retry store capture requests each consumer answers.
 ///
 /// Bounded per core: an operator requeueing faster than the Event Plane drains
 /// must be refused rather than allowed to grow the inbox without limit.
 pub struct ActionRequeueInbox {
-    per_core: Vec<Mutex<Vec<FailedAction>>>,
+    per_core: Vec<Mutex<Vec<RequeuedAction>>>,
     capacity_per_core: usize,
     retry_captures: RetryStoreCaptures,
 }
@@ -73,7 +81,7 @@ impl ActionRequeueInbox {
     /// The attempt count is reset: an operator requeue is a fresh decision
     /// that the action can now succeed, so it gets a full budget rather than
     /// the exhausted one that put it in the DLQ.
-    pub fn submit(&self, mut action: FailedAction) -> Result<usize, RequeueError> {
+    pub fn submit(&self, mut action: FailedAction, dlq_entry: u64) -> Result<usize, RequeueError> {
         let core_id = self
             .core_of(action.key.source_vshard)
             .ok_or(RequeueError::NoConsumers)?;
@@ -88,12 +96,12 @@ impl ActionRequeueInbox {
                 capacity: self.capacity_per_core,
             });
         }
-        inbox.push(action);
+        inbox.push(RequeuedAction { action, dlq_entry });
         Ok(core_id)
     }
 
     /// Take everything parked for `core_id`. Empty for an unknown core.
-    pub fn take_for_core(&self, core_id: usize) -> Vec<FailedAction> {
+    pub fn take_for_core(&self, core_id: usize) -> Vec<RequeuedAction> {
         match self.per_core.get(core_id) {
             Some(inbox) => {
                 std::mem::take(&mut *inbox.lock().unwrap_or_else(|poison| poison.into_inner()))
@@ -162,18 +170,23 @@ mod tests {
     #[test]
     fn an_action_lands_on_the_core_owning_its_vshard() {
         let inbox = ActionRequeueInbox::for_cores(4);
-        assert_eq!(inbox.submit(action(6, 5)).expect("submit"), 2);
+        assert_eq!(inbox.submit(action(6, 5), 11).expect("submit"), 2);
         assert!(inbox.take_for_core(0).is_empty());
-        assert_eq!(inbox.take_for_core(2).len(), 1);
+        let taken = inbox.take_for_core(2);
+        assert_eq!(taken.len(), 1);
+        assert_eq!(
+            taken[0].dlq_entry, 11,
+            "the pickup names the entry to settle"
+        );
     }
 
     #[test]
     fn requeueing_restores_a_full_attempt_budget() {
         let inbox = ActionRequeueInbox::for_cores(1);
-        inbox.submit(action(0, 5)).expect("submit");
+        inbox.submit(action(0, 5), 1).expect("submit");
         let taken = inbox.take_for_core(0);
         assert_eq!(
-            taken[0].attempts, 0,
+            taken[0].action.attempts, 0,
             "an operator requeue is a fresh decision, not a sixth attempt"
         );
     }
@@ -181,7 +194,7 @@ mod tests {
     #[test]
     fn taking_an_inbox_empties_it() {
         let inbox = ActionRequeueInbox::for_cores(1);
-        inbox.submit(action(0, 0)).expect("submit");
+        inbox.submit(action(0, 0), 1).expect("submit");
         assert_eq!(inbox.take_for_core(0).len(), 1);
         assert!(inbox.take_for_core(0).is_empty());
         assert_eq!(inbox.pending(), 0);
@@ -190,17 +203,20 @@ mod tests {
     #[test]
     fn a_node_with_no_consumers_refuses_the_requeue() {
         let inbox = ActionRequeueInbox::for_cores(0);
-        assert_eq!(inbox.submit(action(0, 0)), Err(RequeueError::NoConsumers));
+        assert_eq!(
+            inbox.submit(action(0, 0), 1),
+            Err(RequeueError::NoConsumers)
+        );
     }
 
     #[test]
     fn a_full_inbox_refuses_rather_than_growing() {
         let mut inbox = ActionRequeueInbox::for_cores(1);
         inbox.capacity_per_core = 2;
-        inbox.submit(action(0, 0)).expect("first");
-        inbox.submit(action(0, 0)).expect("second");
+        inbox.submit(action(0, 0), 1).expect("first");
+        inbox.submit(action(0, 0), 2).expect("second");
         assert!(matches!(
-            inbox.submit(action(0, 0)),
+            inbox.submit(action(0, 0), 3),
             Err(RequeueError::InboxFull { core_id: 0, .. })
         ));
     }
@@ -209,7 +225,7 @@ mod tests {
     fn a_core_reports_whether_it_has_work_waiting() {
         let inbox = ActionRequeueInbox::for_cores(2);
         assert!(!inbox.has_work_for(0));
-        inbox.submit(action(0, 0)).expect("submit");
+        inbox.submit(action(0, 0), 1).expect("submit");
         assert!(inbox.has_work_for(0));
         assert!(!inbox.has_work_for(1));
         assert!(!inbox.has_work_for(9), "an unknown core never has work");

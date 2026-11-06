@@ -2,8 +2,15 @@
 
 //! Stop the node when WAL catch-up cannot complete.
 
+use std::sync::Arc;
+use std::time::Duration;
+
+use crate::control::security::audit::{AuditEvent, PendingAudit};
 use crate::control::state::SharedState;
 use crate::types::Lsn;
+
+/// Longest wait for the fail-stop audit row before the node stops without it.
+const AUDIT_ROW_WAIT: Duration = Duration::from_secs(5);
 
 /// Is this the WAL reporting that the requested replay suffix was already
 /// truncated away?
@@ -27,13 +34,16 @@ pub fn is_retained_floor_violation(error: &crate::Error) -> bool {
 /// `last_safe_lsn` is only observed for audit and logging; this path never
 /// mutates or flushes it. Continuing without a recoverable WAL prefix would let
 /// later event side effects overtake missing writes.
-pub fn fail_stop_wal_catchup(
+///
+/// The Event Plane does no storage I/O, so the Control Plane recorder writes the audit row.
+/// The row is best-effort, and its wait has a time bound, so the node always stops.
+pub async fn fail_stop_wal_catchup(
     core_id: usize,
-    error: &impl std::fmt::Display,
+    error: String,
     reason: &'static str,
     attempts: u32,
     last_safe_lsn: Lsn,
-    shared_state: &SharedState,
+    shared_state: &Arc<SharedState>,
     shutdown_bus: &crate::control::shutdown::ShutdownBus,
 ) {
     tracing::error!(
@@ -44,22 +54,29 @@ pub fn fail_stop_wal_catchup(
         last_safe_lsn = last_safe_lsn.as_u64(),
         "WAL catchup cannot complete; initiating fail-stop shutdown"
     );
-    shared_state.audit_record(
-        crate::control::security::audit::AuditEvent::AdminAction,
-        None,
-        "event_plane",
-        &format!(
+    let row = PendingAudit {
+        event: AuditEvent::AdminAction,
+        tenant_id: None,
+        database_id: None,
+        source: "event_plane".to_owned(),
+        detail: format!(
             "event consumer core {core_id} WAL catchup stopped after {attempts} attempts at safe LSN {} ({reason}): {error}",
             last_safe_lsn.as_u64()
         ),
-    );
+    };
+    let recorded = tokio::time::timeout(
+        AUDIT_ROW_WAIT,
+        shared_state.audit_recorder().record(vec![row]),
+    )
+    .await;
+    if !matches!(recorded, Ok(Ok(()))) {
+        tracing::error!(core_id, "the fail-stop audit row is not durable");
+    }
     drop(shutdown_bus.initiate());
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::*;
 
     #[tokio::test]
@@ -73,13 +90,14 @@ mod tests {
 
         fail_stop_wal_catchup(
             0,
-            &"replay unavailable",
+            "replay unavailable".to_owned(),
             "WAL catchup replay kept failing",
             10,
             Lsn::new(10),
             &shared_state,
             &shutdown_bus,
-        );
+        )
+        .await;
 
         assert!(shared_state.shutdown.is_shutdown());
         assert_eq!(watermark_store.load(0).unwrap(), Lsn::new(10));

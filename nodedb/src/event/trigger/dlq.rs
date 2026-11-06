@@ -8,8 +8,24 @@
 //!
 //! Bounded per tenant: oldest entries evicted when capacity is reached.
 //! Persisted to redb for durability across restarts.
+//!
+//! # Requeue delivery guarantee
+//!
+//! REQUEUE TRIGGER DLQ delivers at least once.
+//! - The entry stays unresolved until its consumer holds the action in the
+//!   retry queue, so a crash before that point leaves it to requeue again.
+//! - A claimed entry is not evicted and cannot be claimed twice. A refused
+//!   submit gives the claim back, and the entry is listed again.
+//! - A crash after the retry queue takes the action and before the entry
+//!   resolves leaves both. A later requeue of that entry runs the action again,
+//!   under the same action key.
+//! - A claim is in-memory only, so a restart makes every unresolved entry
+//!   claimable again.
+//!
+//! Eviction remains the one loss: at capacity an unclaimed entry can leave
+//! before an operator requeues it, and the eviction logs it.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -70,7 +86,7 @@ impl TriggerDlqEntry {
     }
 }
 
-/// Why an entry could not be taken out of the DLQ for another attempt.
+/// Why a requeue did not claim an entry for another attempt.
 #[derive(Debug, thiserror::Error)]
 pub enum RequeueTakeError {
     #[error("no dead-letter entry {entry_id}")]
@@ -79,13 +95,9 @@ pub enum RequeueTakeError {
     #[error("dead-letter entry {entry_id} is already resolved")]
     AlreadyResolved { entry_id: u64 },
 
-    /// redb refused the resolved mark. The entry stays unresolved.
-    #[error("dead-letter entry {entry_id} could not be marked resolved: {source}")]
-    Persist {
-        entry_id: u64,
-        #[source]
-        source: Box<crate::Error>,
-    },
+    /// A requeue of this entry waits for its consumer to take the action.
+    #[error("dead-letter entry {entry_id} is already requeued")]
+    AlreadyClaimed { entry_id: u64 },
 }
 
 /// Trigger dead-letter queue.
@@ -98,6 +110,12 @@ pub struct TriggerDlq {
     entries: VecDeque<TriggerDlqEntry>,
     next_entry_id: u64,
     max_entries: usize,
+    /// Entries a requeue holds until the retry queue owns their action. At
+    /// most one per inbox slot, so eviction skipping them stays bounded.
+    claimed: HashSet<u64>,
+    /// Claimed entries whose consumer holds the action and whose resolved
+    /// mark redb has not taken yet.
+    unsettled: Vec<u64>,
 }
 
 impl crate::storage::RedbBacked for TriggerDlq {
@@ -121,12 +139,14 @@ impl TriggerDlq {
             entries: loaded.records,
             next_entry_id: loaded.next_key,
             max_entries: DEFAULT_MAX_ENTRIES,
+            claimed: HashSet::new(),
+            unsettled: Vec::new(),
         })
     }
 
     /// Record an action that has exhausted its retries.
     ///
-    /// At capacity the oldest entries are removed in the same redb
+    /// At capacity the oldest unclaimed entries are removed in the same redb
     /// transaction that writes the new one. On error nothing changes.
     pub fn enqueue(&mut self, action: FailedAction) -> crate::Result<u64> {
         let entry_id = self.next_entry_id;
@@ -141,21 +161,24 @@ impl TriggerDlq {
         let evicted: Vec<u64> = self
             .entries
             .iter()
+            .filter(|e| !self.claimed.contains(&e.entry_id))
             .take(evict_count)
             .map(|e| e.entry_id)
             .collect();
         self.store.put_evicting(entry_id, &entry, &evicted)?;
 
         self.next_entry_id += 1;
-        for _ in 0..evict_count {
-            if let Some(old) = self.entries.pop_front() {
+        self.entries.retain(|old| {
+            let evict = evicted.contains(&old.entry_id);
+            if evict {
                 warn!(
                     entry_id = old.entry_id,
                     owner = %old.owner(),
                     "trigger DLQ evicted oldest entry (at capacity)"
                 );
             }
-        }
+            !evict
+        });
         debug!(
             entry_id,
             owner = %entry.owner(),
@@ -165,9 +188,18 @@ impl TriggerDlq {
         Ok(entry_id)
     }
 
-    /// List all unresolved DLQ entries.
+    /// List the DLQ entries an operator can still act on: unresolved, with no
+    /// requeue in flight.
     pub fn list_unresolved(&self) -> Vec<&TriggerDlqEntry> {
-        self.entries.iter().filter(|e| !e.resolved).collect()
+        self.entries
+            .iter()
+            .filter(|e| !e.resolved && !self.claimed.contains(&e.entry_id))
+            .collect()
+    }
+
+    /// Whether a requeue of `entry_id` is in flight.
+    pub fn is_claimed(&self, entry_id: u64) -> bool {
+        self.claimed.contains(&entry_id)
     }
 
     /// Mark an entry as resolved. Returns `Ok(false)` when no entry has
@@ -177,29 +209,61 @@ impl TriggerDlq {
             return Ok(false);
         };
         mark_resolved(&self.store, entry)?;
+        self.claimed.remove(&entry_id);
         Ok(true)
     }
 
-    /// Take the action of an unresolved entry so it can be run again, and
-    /// mark the entry resolved.
+    /// Claim an unresolved entry and return a copy of its action, to run it
+    /// again.
     ///
-    /// Resolving as part of taking is deliberate: the action is now the
-    /// Event Plane's, and leaving the entry unresolved would invite a second
-    /// requeue of work already back in flight.
-    pub fn take_for_requeue(&mut self, entry_id: u64) -> Result<FailedAction, RequeueTakeError> {
+    /// The entry stays in redb, unresolved, and eviction skips it, until
+    /// [`Self::settle_claims`] resolves it or [`Self::release_claim`] gives it
+    /// back. So no step between this call and the retry queue can lose the
+    /// action, a crash included.
+    pub fn claim_for_requeue(&mut self, entry_id: u64) -> Result<FailedAction, RequeueTakeError> {
         let entry = self
             .entries
-            .iter_mut()
+            .iter()
             .find(|e| e.entry_id == entry_id)
             .ok_or(RequeueTakeError::NotFound { entry_id })?;
         if entry.resolved {
             return Err(RequeueTakeError::AlreadyResolved { entry_id });
         }
-        mark_resolved(&self.store, entry).map_err(|e| RequeueTakeError::Persist {
-            entry_id,
-            source: Box::new(e),
-        })?;
-        Ok(entry.action.clone())
+        if self.claimed.contains(&entry_id) {
+            return Err(RequeueTakeError::AlreadyClaimed { entry_id });
+        }
+        let action = entry.action.clone();
+        self.claimed.insert(entry_id);
+        Ok(action)
+    }
+
+    /// Give a claim back, because nothing took its action. The entry is listed
+    /// and claimable again.
+    pub fn release_claim(&mut self, entry_id: u64) {
+        self.claimed.remove(&entry_id);
+    }
+
+    /// Resolve claimed entries whose action the retry queue durably holds,
+    /// along with any earlier one redb refused.
+    ///
+    /// On error the refused entries stay claimed and unresolved, and the next
+    /// call tries them again. The first error is returned.
+    pub fn settle_claims(&mut self, entry_ids: &[u64]) -> crate::Result<()> {
+        self.unsettled.extend_from_slice(entry_ids);
+        let mut first_error = None;
+        for entry_id in std::mem::take(&mut self.unsettled) {
+            match self.resolve(entry_id) {
+                // An entry that is gone has nothing left to resolve.
+                Ok(_) => {
+                    self.claimed.remove(&entry_id);
+                }
+                Err(e) => {
+                    self.unsettled.push(entry_id);
+                    first_error.get_or_insert(e);
+                }
+            }
+        }
+        first_error.map_or(Ok(()), Err)
     }
 
     /// Every entry, newest last, for operator introspection.
@@ -287,6 +351,73 @@ mod tests {
         assert_eq!(unresolved[0].retry_count(), 5);
     }
 
+    /// A claim given back leaves the entry claimable, and a claim never
+    /// reaches redb: a crash before the retry queue holds the action leaves
+    /// the entry to requeue again.
+    #[test]
+    fn a_claim_given_back_or_lost_to_a_restart_leaves_the_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut dlq = TriggerDlq::open(dir.path()).unwrap();
+        let id = dlq
+            .enqueue(failed("orders", "order-1", "audit", 100))
+            .unwrap();
+
+        dlq.claim_for_requeue(id).unwrap();
+        assert!(dlq.list_unresolved().is_empty());
+        dlq.release_claim(id);
+        assert_eq!(dlq.list_unresolved().len(), 1);
+        dlq.claim_for_requeue(id).unwrap();
+        drop(dlq);
+
+        let mut dlq = TriggerDlq::open(dir.path()).unwrap();
+        assert_eq!(dlq.list_unresolved().len(), 1);
+        dlq.claim_for_requeue(id).unwrap();
+    }
+
+    /// Eviction cannot take a claimed entry, so a refused submit always finds
+    /// its entry. It takes the oldest unclaimed entry instead.
+    #[test]
+    fn eviction_skips_a_claimed_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut dlq = TriggerDlq::open(dir.path()).unwrap();
+        dlq.max_entries = 2;
+        let claimed = dlq.enqueue(failed("c", "1", "t", 1)).unwrap();
+        let oldest_unclaimed = dlq.enqueue(failed("c", "2", "t", 2)).unwrap();
+        dlq.claim_for_requeue(claimed).unwrap();
+
+        let newest = dlq.enqueue(failed("c", "3", "t", 3)).unwrap();
+
+        let held: Vec<u64> = dlq.list().map(|e| e.entry_id).collect();
+        assert_eq!(held, vec![claimed, newest]);
+        assert!(!held.contains(&oldest_unclaimed));
+        dlq.release_claim(claimed);
+        assert_eq!(dlq.list_unresolved().len(), 2);
+        drop(dlq);
+        let dlq = TriggerDlq::open(dir.path()).unwrap();
+        let held: Vec<u64> = dlq.list().map(|e| e.entry_id).collect();
+        assert_eq!(held, vec![claimed, newest], "the same set in redb");
+    }
+
+    /// Only settling resolves the entry, and the resolve survives a restart.
+    #[test]
+    fn a_settled_claim_resolves_the_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut dlq = TriggerDlq::open(dir.path()).unwrap();
+        let id = dlq.enqueue(failed("c", "1", "t", 1)).unwrap();
+        dlq.claim_for_requeue(id).unwrap();
+
+        dlq.settle_claims(&[id]).unwrap();
+
+        assert!(!dlq.is_claimed(id));
+        assert!(matches!(
+            dlq.claim_for_requeue(id).unwrap_err(),
+            RequeueTakeError::AlreadyResolved { .. }
+        ));
+        drop(dlq);
+        let dlq = TriggerDlq::open(dir.path()).unwrap();
+        assert!(dlq.list_unresolved().is_empty());
+    }
+
     #[test]
     fn dlq_resolve() {
         let dir = tempfile::tempdir().unwrap();
@@ -359,32 +490,32 @@ mod tests {
     }
 
     #[test]
-    fn an_entry_can_be_taken_back_for_another_attempt() {
+    fn an_entry_can_be_claimed_for_another_attempt() {
         let dir = tempfile::tempdir().unwrap();
         let mut dlq = TriggerDlq::open(dir.path()).unwrap();
         let id = dlq
             .enqueue(failed("orders", "order-1", "audit", 100))
             .unwrap();
 
-        let action = dlq.take_for_requeue(id).expect("take");
+        let action = dlq.claim_for_requeue(id).expect("claim");
         assert_eq!(action.owner(), "audit");
         assert!(
             dlq.list_unresolved().is_empty(),
-            "taking resolves the entry so the same work is not requeued twice"
+            "a claimed entry is not offered for a second requeue"
         );
     }
 
     #[test]
-    fn an_entry_cannot_be_taken_twice() {
+    fn an_entry_cannot_be_claimed_twice() {
         let dir = tempfile::tempdir().unwrap();
         let mut dlq = TriggerDlq::open(dir.path()).unwrap();
         let id = dlq
             .enqueue(failed("orders", "order-1", "audit", 100))
             .unwrap();
-        dlq.take_for_requeue(id).expect("first take");
+        dlq.claim_for_requeue(id).expect("first claim");
         assert!(matches!(
-            dlq.take_for_requeue(id).unwrap_err(),
-            RequeueTakeError::AlreadyResolved { entry_id } if entry_id == id
+            dlq.claim_for_requeue(id).unwrap_err(),
+            RequeueTakeError::AlreadyClaimed { entry_id } if entry_id == id
         ));
     }
 
@@ -393,20 +524,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut dlq = TriggerDlq::open(dir.path()).unwrap();
         assert!(matches!(
-            dlq.take_for_requeue(99).unwrap_err(),
+            dlq.claim_for_requeue(99).unwrap_err(),
             RequeueTakeError::NotFound { entry_id: 99 }
         ));
     }
 
     #[test]
-    fn a_resolved_take_survives_reopen() {
+    fn a_settled_claim_survives_reopen() {
         let dir = tempfile::tempdir().unwrap();
         {
             let mut dlq = TriggerDlq::open(dir.path()).unwrap();
             let id = dlq
                 .enqueue(failed("orders", "order-1", "audit", 100))
                 .unwrap();
-            dlq.take_for_requeue(id).expect("take");
+            dlq.claim_for_requeue(id).expect("claim");
+            dlq.settle_claims(&[id]).expect("settle");
         }
         let dlq = TriggerDlq::open(dir.path()).unwrap();
         assert!(

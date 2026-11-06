@@ -190,13 +190,14 @@ pub(super) async fn consumer_loop(config: ConsumerConfig, metrics: Arc<CoreMetri
                         // begins and restore from a snapshot.
                         fail_stop_wal_catchup(
                             core_id,
-                            &e,
+                            e.to_string(),
                             "the WAL no longer retains the suffix this consumer must replay",
                             wal_retry_count,
                             guard.safe(),
                             &shared_state,
                             &shutdown_bus,
-                        );
+                        )
+                        .await;
                         break;
                     }
                     Err(e) => {
@@ -204,13 +205,14 @@ pub(super) async fn consumer_loop(config: ConsumerConfig, metrics: Arc<CoreMetri
                         if wal_retry_count >= MAX_WAL_RETRIES {
                             fail_stop_wal_catchup(
                                 core_id,
-                                &e,
+                                e.to_string(),
                                 "WAL catchup replay kept failing",
                                 wal_retry_count,
                                 guard.safe(),
                                 &shared_state,
                                 &shutdown_bus,
-                            );
+                            )
+                            .await;
                             break;
                         }
                         warn!(
@@ -402,8 +404,22 @@ async fn process_retry_queue(
     // Collect anything an operator sent back from the DLQ before draining, so
     // a requeued action joins this round instead of waiting for the next poll.
     if let Some(inbox) = shared_state.action_requeue.get() {
-        for action in inbox.take_for_core(core_id) {
-            retry_queue.enqueue(action);
+        // A DLQ entry resolves only once the retry queue durably holds its
+        // action, so a crash in between leaves the entry to requeue again.
+        let mut settled = Vec::new();
+        for requeued in inbox.take_for_core(core_id) {
+            if retry_queue.enqueue(requeued.action) {
+                settled.push(requeued.dlq_entry);
+            }
+        }
+        let outcome = trigger_dlq
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .settle_claims(&settled);
+        if let Err(e) = outcome {
+            // The entry stays unresolved and claimed, and the next round
+            // tries again. The worst outcome is a duplicate attempt.
+            error!(core_id, error = %e, "trigger DLQ refused a requeue's resolved mark");
         }
     }
 

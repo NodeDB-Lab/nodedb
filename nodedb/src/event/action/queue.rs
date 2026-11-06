@@ -162,7 +162,10 @@ impl ActionRetryQueue {
     ///
     /// An action already queued under the same key replaces the queued entry
     /// rather than joining it.
-    pub fn enqueue(&mut self, mut action: FailedAction) {
+    ///
+    /// Returns `true` when the action's durable store holds it. On `false` it
+    /// retries from memory only, and a restart loses it.
+    pub fn enqueue(&mut self, mut action: FailedAction) -> bool {
         action.attempts = action.attempts.saturating_add(1);
         let backoff = compute_backoff(action.attempts);
         let next_retry_at = Instant::now() + backoff;
@@ -175,15 +178,21 @@ impl ActionRetryQueue {
             "deferred action queued for retry"
         );
 
-        if let Some(store) = self.store()
-            && let Err(e) = store.put(&action)
-        {
-            // The action still retries from memory this run; only a restart
-            // loses it. Report rather than drop the retry outright.
-            warn!(owner = %action.owner(), error = %e, "persist pending action failed");
-        }
+        let durable = match self.store() {
+            Some(store) => match store.put(&action) {
+                Ok(_) => true,
+                Err(e) => {
+                    // The action still retries from memory this run; only a
+                    // restart loses it. Report rather than drop the retry.
+                    warn!(owner = %action.owner(), error = %e, "persist pending action failed");
+                    false
+                }
+            },
+            None => false,
+        };
 
         self.hold(action, next_retry_at);
+        durable
     }
 
     /// Keep `action` in memory, replacing a queued entry with the same key.
@@ -346,6 +355,15 @@ mod tests {
         for queued in queue.queue.iter_mut() {
             queued.next_retry_at = Instant::now();
         }
+    }
+
+    /// A DLQ requeue resolves its entry only on a durable hold.
+    #[test]
+    fn enqueue_reports_whether_the_store_holds_the_action() {
+        assert!(!ActionRetryQueue::in_memory().enqueue(action("audit", 10)));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut queue = ActionRetryQueue::open(dir.path(), 0).expect("open");
+        assert!(queue.enqueue(action("audit", 10)));
     }
 
     #[test]
