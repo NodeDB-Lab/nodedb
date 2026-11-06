@@ -4,6 +4,7 @@ mod a4_placement_convergence;
 mod alert_rule_cross_node;
 mod alter_quota_cross_node;
 mod array_install_snapshot_cluster;
+mod array_named_database_txn;
 mod array_raft_partition_recovery;
 mod array_raft_replication;
 mod array_raft_snapshot_install;

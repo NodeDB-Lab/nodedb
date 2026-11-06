@@ -63,7 +63,7 @@ pub(in crate::diag) use cut_barrier::CutBarrierNotPlaced;
 pub use data_plane::LostResponseWrite;
 pub(in crate::diag) use data_plane::{
     CalvinApplyHalted, CalvinCompletionTimeout, CalvinStageRefusedInternal, CoreFailStopped,
-    DataPlaneResponseLost, VectorPayloadUndecodable,
+    DataPlaneResponseLost, RedoNoteMisnamed, VectorPayloadUndecodable,
 };
 pub(in crate::diag) use event_image::{StrictRowImageUnrendered, TimeseriesRowImageUndecodable};
 pub(in crate::diag) use held_entry::{ApplyPanicked, HeldEntryDebtNotRecorded, RedoEntryMalformed};

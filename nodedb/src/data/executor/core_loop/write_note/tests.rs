@@ -137,3 +137,41 @@ pub(crate) fn point_put(
         },
     )
 }
+
+/// A name a settled record's database does not write stops nothing: the LSN
+/// applies, and the core stays up.
+#[test]
+fn a_misnamed_collection_of_a_settled_record_does_not_fail_stop_the_core() {
+    let (mut core, _req_tx, _resp_rx, _dir) = make_core();
+    let lsn = Lsn::new(9);
+    core.note_settled_collection(
+        DatabaseId::new(7),
+        TenantId::new(1),
+        "bare_name",
+        super::keys::WriteStamp {
+            vshard: VShardId::new(1),
+            lsn,
+        },
+    )
+    .expect("the record stays applied");
+    assert_eq!(core.watermark, lsn);
+    assert!(!core.is_fail_stopped());
+}
+
+/// A name the database writes takes the usual note.
+#[test]
+fn a_well_named_collection_of_a_settled_record_notes_as_usual() {
+    let (mut core, _req_tx, _resp_rx, _dir) = make_core();
+    let lsn = Lsn::new(9);
+    core.note_settled_collection(
+        DatabaseId::new(7),
+        TenantId::new(1),
+        "7/named",
+        super::keys::WriteStamp {
+            vshard: VShardId::new(1),
+            lsn,
+        },
+    )
+    .expect("the note lands");
+    assert_eq!(core.watermark, lsn);
+}

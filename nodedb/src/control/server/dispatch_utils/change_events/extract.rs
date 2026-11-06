@@ -24,6 +24,15 @@ pub(super) fn every_row() -> RowIdentity {
     RowIdentity::from_user_key("*")
 }
 
+/// The name a row change of `array_id` carries. A plan names an array by its
+/// bare name and its own database. A change names its collection qualified, as
+/// every other plan does.
+pub(super) fn array_change_name(array_id: &nodedb_array::types::ArrayId) -> String {
+    nodedb_types::QualifiedCollection::new(array_id.database_id, &array_id.name)
+        .as_str()
+        .to_owned()
+}
+
 /// One event per point-targeted vector-primary surrogate; a predicate write
 /// names every row, like `BulkUpdate` / `BulkDelete`.
 fn vector_target_events(
@@ -243,12 +252,19 @@ pub(super) fn extract_write_metadata(
         PhysicalPlan::Columnar(_) => Vec::new(),
 
         // Array cells are data-bearing rows, not an index — need CDC.
-        // `array_id.name` is the user-visible collection name.
         PhysicalPlan::Array(ArrayOp::Put { array_id, .. }) => {
-            vec![(array_id.name.clone(), every_row(), ChangeOperation::Insert)]
+            vec![(
+                array_change_name(array_id),
+                every_row(),
+                ChangeOperation::Insert,
+            )]
         }
         PhysicalPlan::Array(ArrayOp::Delete { array_id, .. }) => {
-            vec![(array_id.name.clone(), every_row(), ChangeOperation::Delete)]
+            vec![(
+                array_change_name(array_id),
+                every_row(),
+                ChangeOperation::Delete,
+            )]
         }
         // Remaining ArrayOp variants are reads or maintenance — no user-data row changed.
         PhysicalPlan::Array(_) => Vec::new(),
@@ -512,6 +528,30 @@ mod tests {
             meta,
             vec![("metrics".to_string(), every_row(), ChangeOperation::Delete)]
         );
+    }
+
+    /// Outside the default database a change names its array qualified, which
+    /// is the form the publish path resolves.
+    #[test]
+    fn an_array_change_in_a_named_database_resolves_to_its_database() {
+        let database = DatabaseId::new(7);
+        let array_id = ArrayId::in_database(TenantId::new(1), database, "genome");
+        let put = PhysicalPlan::Array(ArrayOp::Put {
+            array_id: array_id.clone(),
+            cells_msgpack: Vec::new(),
+            wal_lsn: 0,
+            provenance: None,
+            vshard_id: 0,
+        });
+        let meta = extract_write_metadata(&put, TenantId::new(1));
+        assert_eq!(meta[0].0, "7/genome");
+        assert_eq!(
+            nodedb_types::CollectionKey::from_qualified_str(database, &meta[0].0)
+                .expect("the publish path resolves it")
+                .name(),
+            "genome"
+        );
+        assert_eq!(array_change_name(&array_id), "7/genome");
     }
 
     #[test]

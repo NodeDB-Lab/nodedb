@@ -60,7 +60,7 @@ pub use cut_barrier::cut_barrier_not_placed;
 pub use data_plane::{
     calvin_apply_halted, calvin_completion_timeout, calvin_stage_refused_internal,
     data_plane_core_fail_stopped, data_plane_response_lost, data_plane_responses_lost,
-    vector_payload_undecodable,
+    redo_note_misnamed, vector_payload_undecodable,
 };
 pub use event_image::{strict_row_image_unrendered, timeseries_row_image_undecodable};
 pub use held_entry::{apply_panicked, held_entry_debt_not_recorded, redo_entry_malformed};

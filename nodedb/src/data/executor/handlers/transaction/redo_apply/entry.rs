@@ -331,7 +331,7 @@ impl CoreLoop {
             if keyed.contains(collection.as_str()) {
                 self.publish_applied(stamp);
             } else if let Err(error) =
-                self.note_write(task.request.database_id, tenant, collection, None, stamp)
+                self.note_settled_collection(task.request.database_id, tenant, collection, stamp)
             {
                 self.fail_stop_core(
                     FailStopCause::PostInstallFailed,

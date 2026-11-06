@@ -22,6 +22,7 @@ mod array_geotiff_load;
 mod array_geotiff_multi_source;
 mod array_geotiff_refusals;
 mod array_geotiff_window;
+mod array_named_database_txn;
 mod array_narrow_attrs;
 mod array_reducers;
 mod backup_support;
