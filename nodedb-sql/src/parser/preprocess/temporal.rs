@@ -269,11 +269,13 @@ pub(crate) fn parse_temporal_expr(token: &str) -> Result<i64, TemporalParseError
 
     // NOW() — case-insensitive
     if t.to_uppercase() == "NOW()" {
-        let ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
-        return Ok(ms);
+        return nodedb_types::checked_wall_now_ms().ok_or_else(|| {
+            TemporalParseError(
+                "AS OF NOW(): the system clock reads before the Unix epoch; \
+                 correct the NTP or RTC config, or pass an explicit time"
+                    .into(),
+            )
+        });
     }
 
     // ISO-8601 string literal: 'YYYY-MM-DDTHH:MM:SSZ' (with surrounding quotes)
@@ -387,11 +389,7 @@ fn parse_as_of_expr(
 
     // If the next non-whitespace character opens a quoted string, consume
     // through the closing quote.
-    if trimmed.starts_with('\'') || trimmed.starts_with('"') {
-        let quote = trimmed
-            .chars()
-            .next()
-            .expect("invariant: trimmed.starts_with('\\'' | '\"') guarantees at least one char");
+    if let Some(quote) = trimmed.chars().next().filter(|c| matches!(c, '\'' | '"')) {
         let inner_start = 1;
         let close = trimmed[inner_start..].find(quote).ok_or_else(|| {
             TemporalParseError(format!(
@@ -724,5 +722,28 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!(matches!(ex.temporal.system_time, SystemTimeScope::AsOf(_)));
+    }
+
+    /// A quoted expression parses with either quote. A lone quote is a typed
+    /// error, never a panic.
+    #[test]
+    fn a_quoted_as_of_expression_parses_or_errors() {
+        for sql in [
+            "SELECT * FROM t AS OF SYSTEM TIME '2024-01-15T00:00:00Z'",
+            "SELECT * FROM t AS OF SYSTEM TIME \"2024-01-15T00:00:00Z\"",
+        ] {
+            let ex = extract(sql).unwrap().unwrap();
+            assert_eq!(
+                ex.temporal.system_time,
+                SystemTimeScope::AsOf(1_705_276_800_000),
+                "{sql}"
+            );
+        }
+        for sql in [
+            "SELECT * FROM t AS OF SYSTEM TIME '",
+            "SELECT * FROM t AS OF SYSTEM TIME \"",
+        ] {
+            assert!(extract(sql).is_err(), "{sql}");
+        }
     }
 }

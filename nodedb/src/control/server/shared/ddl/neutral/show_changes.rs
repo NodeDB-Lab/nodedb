@@ -47,10 +47,15 @@ pub fn show_changes(
             }
         } else {
             // Default: last 24 hours of changes.
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
+            let now_ms = nodedb_types::checked_wall_now_ms()
+                .and_then(|ms| u64::try_from(ms).ok())
+                .ok_or_else(|| {
+                    DdlError::new(
+                        "XX000",
+                        "SHOW CHANGES: the system clock reads before the Unix epoch; correct \
+                         the NTP or RTC config, or pass SINCE",
+                    )
+                })?;
             now_ms.saturating_sub(86_400 * 1000)
         };
 
