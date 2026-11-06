@@ -162,6 +162,7 @@ mod tests {
                     epoch: 11,
                     position: 2,
                     vshard_id: 7,
+                    mirror_database: None,
                 }),
                 cross_shard_applied: None,
                 row_sources: Vec::new(),

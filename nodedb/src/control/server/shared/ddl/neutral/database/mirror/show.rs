@@ -100,9 +100,18 @@ pub fn show_database_mirror_status(
             .get_mirror_cut_state(db.id)
             .map_err(|e| DdlError::from_error_in_context("mirror cut state read failed", &e))?
             .unwrap_or_default();
-        let lag_ms = cut_state
-            .lag_ms(now_ms)
-            .map_or_else(String::new, |lag_ms| lag_ms.to_string());
+        // A promoted mirror keeps its cut state and follows nothing.
+        let lag_ms = match origin.status {
+            MirrorStatus::Promoted => String::new(),
+            MirrorStatus::Bootstrapping { .. }
+            | MirrorStatus::Following
+            | MirrorStatus::Degraded
+            | MirrorStatus::Disconnected
+            | MirrorStatus::Promoting { .. }
+            | MirrorStatus::Failed { .. } => cut_state
+                .lag_ms(now_ms)
+                .map_or_else(String::new, |lag_ms| lag_ms.to_string()),
+        };
 
         let mut row = Map::new();
         row.insert("name".to_string(), JsonValue::String(db.name.clone()));

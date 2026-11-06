@@ -118,6 +118,7 @@ mod tests {
             epoch: 1,
             position: 0,
             vshard_id: 0,
+            mirror_database: None,
         };
         for (mut plan, ordinal) in [
             (redo_plan(RedoOrigin::Restore, None), Some(500)),

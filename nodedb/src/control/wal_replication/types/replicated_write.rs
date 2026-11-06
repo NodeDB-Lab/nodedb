@@ -980,6 +980,17 @@ pub enum ReplicatedWrite {
         position: u32,
         tenant_id: u64,
     },
+    /// A mirror's mark in this group's log. Its envelope's stamp names the
+    /// cut. Every replica's apply records that the group applied the cut, once
+    /// every earlier entry of the group concluded.
+    MirrorSeal {
+        /// PROMOTE's barrier: it applies whatever its stamp's epoch, so a new
+        /// applier that resumes PROMOTE finishes it.
+        last: bool,
+        /// The source's fully applied Calvin epochs through this cut. Every
+        /// replica folds each into the mirror's ledger of its vShard.
+        calvin_floors: Vec<super::wire_shapes::MirrorCalvinFloor>,
+    },
 }
 
 #[cfg(test)]

@@ -39,5 +39,5 @@ pub(crate) use system_span::columnar_rows;
 pub use transaction_redo_wire::{CalvinRedoMeta, ReplicatedEventSource, ReplicatedIdentity};
 pub use wire_shapes::{
     BalanceDeltaFields, ColumnarResolvedRow, ConstraintChangeOp, DocumentResolvedMutationWire,
-    KvResolvedMutationWire, ReplicatedBatchEdge, ReplicatedSumTarget,
+    KvResolvedMutationWire, MirrorCalvinFloor, ReplicatedBatchEdge, ReplicatedSumTarget,
 };

@@ -39,14 +39,28 @@ pub fn install_calvin_cut(
 ) -> Result<(), SnapshotInstallError> {
     let mut ids: Vec<u32> = group_vshards.iter().copied().collect();
     ids.sort_unstable();
-    let states: Vec<StoredCalvinApplied> = ids
-        .iter()
-        .map(|&vshard_id| {
-            let named = cut
-                .vshards
-                .iter()
-                .find(|state| state.vshard_id == vshard_id);
+    // Every ledger the cut names, and every ledger this node holds that it
+    // does not. A mirror ledger the builder lacks holds no position there.
+    let ledgers = &shared.calvin.applied;
+    let scopes = ids.iter().flat_map(|&vshard_id| {
+        let named_mirrors = cut
+            .vshards
+            .iter()
+            .filter(move |state| state.vshard_id == vshard_id)
+            .filter_map(|state| state.mirror_database);
+        let held_mirrors = ledgers.mirrors_on(vshard_id);
+        let mirrors: BTreeSet<u64> = named_mirrors.chain(held_mirrors).collect();
+        std::iter::once(None)
+            .chain(mirrors.into_iter().map(Some))
+            .map(move |mirror_database| (mirror_database, vshard_id))
+    });
+    let states: Vec<StoredCalvinApplied> = scopes
+        .map(|(mirror_database, vshard_id)| {
+            let named = cut.vshards.iter().find(|state| {
+                state.vshard_id == vshard_id && state.mirror_database == mirror_database
+            });
             StoredCalvinApplied {
+                mirror_database,
                 vshard_id,
                 fully_applied_epoch: named.map_or(
                     crate::control::cluster::calvin::scheduler::NOT_YET_APPLIED_EPOCH,
@@ -60,11 +74,21 @@ pub fn install_calvin_cut(
         .collect();
 
     for state in &states {
-        shared.calvin.applied.install(
-            state.vshard_id,
-            state.fully_applied_epoch,
-            state.tail.clone(),
-        );
+        match state.mirror_database {
+            None => {
+                ledgers.install(
+                    state.vshard_id,
+                    state.fully_applied_epoch,
+                    state.tail.clone(),
+                );
+            }
+            Some(database) => ledgers.install_mirror(
+                database,
+                state.vshard_id,
+                state.fully_applied_epoch,
+                state.tail.clone(),
+            ),
+        }
     }
     let catalog = shared.credentials.catalog();
     let settle_error = |source| SnapshotInstallError::Settle {

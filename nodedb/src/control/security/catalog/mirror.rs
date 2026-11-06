@@ -117,6 +117,8 @@ mod tests {
                 group_id: 1,
                 log_index: 42,
             }],
+            epochs: Vec::new(),
+            fence_epoch: 0,
         }
     }
 

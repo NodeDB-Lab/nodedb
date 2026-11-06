@@ -132,13 +132,16 @@ mod tests {
             SystemCatalog::open(&catalog_dir.path().join("system.redb")).expect("catalog");
         catalog
             .save_calvin_applied(vec![StoredCalvinApplied {
+                mirror_database: None,
                 vshard_id: 7,
                 fully_applied_epoch: NOT_YET_APPLIED_EPOCH,
                 tail: [(0, 0), (3, 1)].into_iter().collect(),
             }])
             .expect("save");
 
-        let mut recovered = recover_all_applied(&wal, &catalog, &|_| None).expect("recover");
+        let mut recovered = recover_all_applied(&wal, &catalog, &|_| None)
+            .expect("recover")
+            .by_vshard;
         let recovered = recovered.remove(&7).expect("vShard 7 recovered");
         let ledgers = CalvinAppliedLedgers::default();
         ledgers.install(7, recovered.fully_applied_epoch, recovered.applied_tail);

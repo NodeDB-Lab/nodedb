@@ -21,7 +21,7 @@ use crate::control::wal_replication::decode::ChunkedRedo;
 use crate::control::wal_replication::transaction_redo::RedoTarget;
 use crate::control::wal_replication::transaction_redo::chunks::{ChunkApply, RedoChunkError};
 use crate::control::wal_replication::types::RedoContent;
-use crate::control::wal_replication::{CollectionIncarnation, ReplicatedEntry, ReplicatedWrite};
+use crate::control::wal_replication::{ReplicatedEntry, ReplicatedWrite};
 use crate::types::{DatabaseId, TenantId, VShardId};
 use crate::wal::RedoStreamId;
 use crate::wal::manager::RedoChunkPlacement;
@@ -31,8 +31,8 @@ use super::context::{ApplyContext, FinishedApply};
 use super::proposal_gate::{EntryOutcome, HoldReason, ledger_outcome};
 use super::start::Prepared;
 use super::transaction_redo::{
-    RedoApply, conclude_held, conclude_held_claimed, conclude_installed_copy, enqueue_payload,
-    report_then_conclude,
+    FinalEntry, RedoApply, conclude_held, conclude_held_claimed, conclude_installed_copy,
+    enqueue_payload, report_then_conclude,
 };
 
 /// Prepare a committed `RedoChunk` or `RedoAbandon` entry of term `term`.
@@ -47,6 +47,7 @@ pub(super) fn prepare_stream_entry<'a>(
         vshard_id: VShardId::new(entry.vshard_id),
         database_id: DatabaseId::new(entry.database_id),
     };
+    let mirror_database = entry.mirror_database();
     match entry.write {
         ReplicatedWrite::RedoChunk {
             stream,
@@ -54,6 +55,7 @@ pub(super) fn prepare_stream_entry<'a>(
             len,
             bytes,
         } => {
+            let stream = stream.in_mirror(mirror_database);
             let chunk = ChunkApply {
                 group_id: pos.group_id,
                 term,
@@ -78,6 +80,7 @@ pub(super) fn prepare_stream_entry<'a>(
             }))
         }
         ReplicatedWrite::RedoAbandon { stream } => Prepared::Exclusive(Box::pin(async move {
+            let stream = stream.in_mirror(mirror_database);
             let abandoned = ctx
                 .state
                 .redo_chunks
@@ -209,9 +212,14 @@ pub(super) fn prepare_chunked_final<'a>(
     ctx: ApplyContext<'a>,
     pos: AppliedPosition,
     target: RedoTarget,
-    chunked: ChunkedRedo,
-    incarnations: Vec<CollectionIncarnation>,
+    mut chunked: ChunkedRedo,
+    entry: FinalEntry,
 ) -> Prepared<'a> {
+    let FinalEntry {
+        incarnations,
+        mirror_database,
+    } = entry;
+    chunked.stream = chunked.stream.in_mirror(mirror_database);
     let claim = claim_chunked(ctx.state, chunked.calvin(), &chunked.stream);
     let taken = ctx.state.redo_chunks.take_for_final(&chunked.stream);
     let calvin = match claim {
@@ -276,7 +284,10 @@ pub(super) fn prepare_chunked_final<'a>(
             pos,
             target,
             RedoApply {
-                payload: chunked.payload(content),
+                payload: match mirror_database {
+                    Some(database) => chunked.payload(content).in_mirror(database),
+                    None => chunked.payload(content),
+                },
                 incarnations,
                 stream: taken,
                 calvin,
@@ -308,6 +319,13 @@ mod tests {
     use crate::wal::WalManager;
 
     const GROUP: u64 = 4;
+
+    fn plain_final() -> FinalEntry {
+        FinalEntry {
+            incarnations: Vec::new(),
+            mirror_database: None,
+        }
+    }
 
     fn stream() -> RedoStreamId {
         RedoStreamId::Session {
@@ -415,7 +433,7 @@ mod tests {
         assert!(holds(&second), "the dropped stream's next chunk holds");
 
         let Prepared::Concluded(last) =
-            prepare_chunked_final(ctx, pos(GROUP, 12), target(), final_entry(), Vec::new())
+            prepare_chunked_final(ctx, pos(GROUP, 12), target(), final_entry(), plain_final())
         else {
             panic!("a final entry with no stream concludes at prepare");
         };
@@ -437,7 +455,7 @@ mod tests {
         };
 
         let Prepared::Concluded(outcome) =
-            prepare_chunked_final(ctx, pos(GROUP, 12), target(), final_entry(), Vec::new())
+            prepare_chunked_final(ctx, pos(GROUP, 12), target(), final_entry(), plain_final())
         else {
             panic!("a final entry with no stream concludes at prepare");
         };

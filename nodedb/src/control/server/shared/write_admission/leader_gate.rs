@@ -28,6 +28,11 @@
 //! new leader stamps above every read cut an earlier leader closed, whatever
 //! its own clock reads. Every replica installs the stamp the entry
 //! carries, so a version has one system time on every replica.
+//!
+//! An entry a mirror's applier proposed differs in two ways. It takes no key:
+//! the source's log already ordered it, and a mirror has no other writer. It
+//! keeps the ordinal its source stamped, which every replica installs, so the
+//! leader folds that ordinal into its clock and stamps nothing.
 
 use std::sync::{Arc, Weak};
 
@@ -45,7 +50,7 @@ use super::entry_storage::{entry_adds_storage, entry_writes_database};
 use super::gate::{
     WriteAdmission, WriteAdmissionGuard, WriteTarget, admit_request, admit_routed, lock_manager_of,
 };
-use super::mirror_gate::{await_entry_metadata_floor, check_mirror_writable};
+use super::mirror_gate::{await_entry_metadata_floor, check_mirror_proposal};
 use super::route::calvin_route_keeps;
 use super::storage_quota::check_storage_quota;
 use super::tickets::AdmissionTicket;
@@ -86,13 +91,8 @@ impl DataProposeGate for LeaderWriteGate {
         await_entry_metadata_floor(&state, entry.metadata_floor, deadline)
             .await
             .map_err(gate_error)?;
-        check_mirror_writable(
-            &state,
-            crate::types::DatabaseId::new(entry.database_id),
-            crate::event::EventSource::from(entry.event_source),
-            || entry_writes_database(&entry),
-        )
-        .map_err(gate_error)?;
+        check_mirror_proposal(&state, &entry, || entry_writes_database(&entry))
+            .map_err(gate_error)?;
         admit_redo_stream(&state, &entry, deadline).map_err(gate_error)?;
         check_storage_quota(
             &state,
@@ -102,6 +102,10 @@ impl DataProposeGate for LeaderWriteGate {
             || entry_adds_storage(&entry),
         )
         .map_err(gate_error)?;
+        if entry.mirror.is_some() {
+            fold_carried_ordinal(&state, &entry, ordinal_floor);
+            return Ok(Admitted::default());
+        }
         let hold: Option<Box<dyn ProposeHold>> =
             match admit_entry(&state, vshard, &entry).map_err(gate_error)? {
                 WriteAdmission::ExemptRead | WriteAdmission::FastPath { guard: None } => None,
@@ -146,6 +150,15 @@ impl DataProposeGate for LeaderWriteGate {
         };
         Ok(Admitted { hold, entry })
     }
+}
+
+/// Fold a mirror entry's carried ordinal into this leader's clock. The entry
+/// proposes as sent, so its ordinal stays its source's. The clock lands above
+/// it, so a write after PROMOTE stamps above every version the mirror holds.
+fn fold_carried_ordinal(state: &SharedState, entry: &ReplicatedEntry, ordinal_floor: i64) {
+    let clock = state.wal.ordinal_clock();
+    clock.update_from_remote(ordinal_floor);
+    clock.update_from_remote(entry.system_ordinal);
 }
 
 /// Reserve the run of system-time ordinals `entry`'s write stamps from this
@@ -271,7 +284,11 @@ fn admit_redo_stream(
     };
     state
         .redo_chunks
-        .admit_stream(*stream, *len, deadline.into_std())
+        .admit_stream(
+            stream.in_mirror(entry.mirror_database()),
+            *len,
+            deadline.into_std(),
+        )
         .map_err(crate::Error::from)
 }
 
@@ -318,11 +335,12 @@ pub(super) fn entry_scope(
     database_id: crate::types::DatabaseId,
 ) -> EntryScope {
     match write {
-        // Calvin bookkeeping, a backup cut, a topic message, a surrogate
-        // binding and an array schema write no row.
+        // Calvin bookkeeping, a backup cut, a mirror seal, a topic message, a
+        // surrogate binding and an array schema write no row.
         ReplicatedWrite::CalvinReadResult { .. }
         | ReplicatedWrite::CalvinReadTimeout { .. }
         | ReplicatedWrite::CutBarrier { .. }
+        | ReplicatedWrite::MirrorSeal { .. }
         | ReplicatedWrite::TopicPublish { .. }
         | ReplicatedWrite::SurrogateBind { .. }
         | ReplicatedWrite::ArraySchema { .. } => EntryScope::Exempt,
@@ -468,5 +486,85 @@ fn gate_error(error: crate::Error) -> ClusterError {
                 detail,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use nodedb_types::{DatabaseId, MirrorEntryStamp};
+
+    use super::*;
+    use crate::bridge::dispatch::Dispatcher;
+    use crate::wal::WalManager;
+
+    const MIRROR: u64 = 1400;
+
+    fn state() -> (Arc<SharedState>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal = Arc::new(WalManager::open_for_testing(&dir.path().join("wal")).expect("wal"));
+        let (dispatcher, _sides) = Dispatcher::new(1, 64);
+        let state = SharedState::new(dispatcher, wal).expect("state");
+        state
+            .mirror
+            .fence
+            .mark_read_only_for_test(DatabaseId::new(MIRROR), "mirror_db");
+        (state, dir)
+    }
+
+    /// A topic message counts as a database write, and it locks no key.
+    fn write(system_ordinal: i64) -> ReplicatedEntry {
+        let mut entry = ReplicatedEntry::new(
+            1,
+            MIRROR,
+            2,
+            ReplicatedWrite::TopicPublish {
+                topic: "t".into(),
+                payload: "p".into(),
+                event_time: 1,
+                origin: None,
+            },
+        )
+        .with_event_source(crate::event::EventSource::RaftFollower);
+        entry.system_ordinal = system_ordinal;
+        entry
+    }
+
+    fn deadline() -> tokio::time::Instant {
+        tokio::time::Instant::now() + Duration::from_secs(5)
+    }
+
+    #[tokio::test]
+    async fn an_unstamped_applier_source_is_refused() {
+        let (state, _dir) = state();
+        let gate = LeaderWriteGate::new(&state);
+        let bytes = write(0).encode().expect("encode");
+        let refused = gate.admit(2, &bytes, deadline(), 0).await;
+        assert!(refused.is_err());
+    }
+
+    /// A stamped entry takes no key and proposes as sent, so its ordinal stays
+    /// its source's. The clock lands above that ordinal.
+    #[tokio::test]
+    async fn a_stamped_entry_keeps_its_ordinal_and_folds_the_clock() {
+        let (state, _dir) = state();
+        let gate = LeaderWriteGate::new(&state);
+        let carried = i64::MAX / 2;
+        let mut entry = write(carried);
+        entry.mirror = Some(MirrorEntryStamp {
+            source_group: 1,
+            source_index: 9,
+            cut: 1,
+            epoch: 1,
+        });
+        let bytes = entry.encode().expect("encode");
+        let admitted = gate
+            .admit(2, &bytes, deadline(), 0)
+            .await
+            .expect("a stamped entry passes");
+        assert!(admitted.entry.is_none(), "the bytes propose as sent");
+        assert!(admitted.hold.is_none(), "the entry holds no key");
+        assert!(state.wal.ordinal_clock().next_ordinal() > carried);
     }
 }

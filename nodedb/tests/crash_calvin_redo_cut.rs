@@ -90,7 +90,7 @@ fn boot_ledgers(h: &CrashHarness) -> CalvinAppliedLedgers {
     let ledgers = CalvinAppliedLedgers::default();
     let recovered =
         recover_all_applied(&wal, &catalog, &|_| None).expect("recover applied positions");
-    for (vshard_id, state) in recovered {
+    for (vshard_id, state) in recovered.by_vshard {
         ledgers.install(vshard_id, state.fully_applied_epoch, state.applied_tail);
     }
     ledgers

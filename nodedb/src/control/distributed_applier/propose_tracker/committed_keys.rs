@@ -91,6 +91,17 @@ impl CommittedKeys {
         }
     }
 
+    /// Forget the key of `log_index`: the entry concluded with no effect, so
+    /// a later copy of its proposal still applies.
+    pub fn forget(&mut self, group_id: u64, log_index: u64) {
+        let Some(group) = self.groups.get_mut(&group_id) else {
+            return;
+        };
+        if let Ok(at) = group.keys.binary_search_by_key(&log_index, |k| k.log_index) {
+            group.keys.remove(at);
+        }
+    }
+
     /// `group_id`'s keys at or below `through`, committed within the window,
     /// and the lowest index from which they are complete.
     pub fn through(&self, group_id: u64, through: u64, now: Instant) -> CarriedKeys {
@@ -124,6 +135,18 @@ impl CommittedKeys {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_forgotten_key_is_not_carried() {
+        let mut keys = CommittedKeys::new(Duration::from_secs(30));
+        let start = Instant::now();
+        keys.note(1, 4, 0xa, start);
+        keys.note(1, 5, 0xb, start);
+        keys.forget(1, 4);
+        keys.forget(2, 4);
+        keys.forget(1, 9);
+        assert_eq!(keys.through(1, 9, start).keys, vec![(5, 0xb)]);
+    }
 
     #[test]
     fn keys_at_or_below_the_index_within_the_window_are_returned() {

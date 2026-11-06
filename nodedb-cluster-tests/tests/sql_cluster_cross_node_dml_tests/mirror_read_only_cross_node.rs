@@ -94,6 +94,8 @@ async fn every_node_answers_a_mirror_write_with_the_read_only_refusal() {
             group_id: 1,
             log_index: 40,
         }],
+        epochs: Vec::new(),
+        fence_epoch: 0,
     };
     propose_catalog_entry_async(
         shared,
@@ -122,23 +124,33 @@ async fn every_node_answers_a_mirror_write_with_the_read_only_refusal() {
     )
     .await;
 
-    // PROMOTE removes it on every node, the ones that ran no statement too.
+    // PROMOTE keeps it on every node: a replica whose data group lags the
+    // promotion still decides its held entries from the row. A later DROP
+    // removes it.
     cluster
         .exec_ddl_on_any_leader(&format!("ALTER DATABASE {DATABASE} PROMOTE"))
         .await
         .expect("promote the mirror");
     wait_for(
-        "every node removed the cut state",
+        "every node applied the promotion",
         Duration::from_secs(10),
         Duration::from_millis(50),
         || {
             cluster.nodes.iter().all(|node| {
-                node.shared
-                    .credentials
-                    .catalog()
-                    .get_mirror_cut_state(database_id)
-                    .expect("read the cut state")
-                    .is_none()
+                let catalog = node.shared.credentials.catalog();
+                let promoted = catalog
+                    .get_database(database_id)
+                    .expect("read the descriptor")
+                    .and_then(|descriptor| descriptor.mirror_origin)
+                    .is_some_and(|origin| {
+                        matches!(origin.status, nodedb_types::MirrorStatus::Promoted)
+                    });
+                promoted
+                    && catalog
+                        .get_mirror_cut_state(database_id)
+                        .expect("read the cut state")
+                        .as_ref()
+                        == Some(&cut_state)
             })
         },
     )

@@ -68,8 +68,10 @@ pub(super) async fn drive(
     state: &SharedState,
 ) {
     let mut install_released = state.raft_apply_gates.get().map(|g| g.subscribe_released());
+    let mut mirror_moved = state.mirror.cuts.subscribe();
     // A held group whose snapshot debt did not persist gets no batches. The
-    // loop wakes on each Raft tick to write the debt again.
+    // loop wakes on each Raft tick to write the debt again. A mirror entry
+    // behind its metadata floor wakes the same way: no cut watch moves for it.
     let mut debt_retry = tokio::time::interval(Duration::from_millis(
         state.tuning.cluster_transport.raft_tick_interval_ms,
     ));
@@ -84,13 +86,16 @@ pub(super) async fn drive(
         let running = pipeline.has_running();
         let blocked = pipeline.awaits_install();
         let retry_debt = pipeline.retries_debt();
+        let awaits_mirror = pipeline.awaits_mirror();
         tokio::select! {
             biased;
             Some(event) = pipeline.next_event(), if running => {
                 pipeline.handle(event);
             }
             () = wait_install_released(&mut install_released), if blocked => {}
-            _ = debt_retry.tick(), if retry_debt => {}
+            // The sender lives as long as `state`, so the wait never ends early.
+            _ = mirror_moved.changed(), if awaits_mirror => {}
+            _ = debt_retry.tick(), if retry_debt || awaits_mirror => {}
             batch = apply_rx.recv(), if accepting => match batch {
                 Some(batch) => {
                     pipeline.accept(batch);

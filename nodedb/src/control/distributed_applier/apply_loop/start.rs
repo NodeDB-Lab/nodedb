@@ -290,6 +290,16 @@ fn prepare_replicated<'a>(
                 },
             )
         }
+        ReplicatedWrite::MirrorSeal {
+            last: _,
+            ref calvin_floors,
+        } => Prepared::Concluded(super::mirror_hold::apply_mirror_seal(
+            ctx,
+            pos,
+            replicated.database_id,
+            replicated.mirror,
+            calvin_floors,
+        )),
         ReplicatedWrite::CalvinReadResult {
             epoch,
             position,

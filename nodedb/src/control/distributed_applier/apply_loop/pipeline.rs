@@ -24,6 +24,7 @@ use crate::control::distributed_applier::applier::ApplyBatch;
 use crate::control::distributed_applier::proposal_ledger::ProposalLedger;
 use crate::control::state::SharedState;
 
+use super::bookkeeping::release_admission_holds;
 use super::context::{ApplyContext, LoopEvent, LoopFuture, Started, StartedEntry};
 use super::group_watch::GroupWatch;
 use super::held_entry::{
@@ -31,6 +32,7 @@ use super::held_entry::{
 };
 use super::lane::{Lane, QueuedEntry, Slot, SlotState};
 use super::metadata_floor::{HeldEntry, hold_for_metadata};
+use super::mirror_hold::{MirrorTurn, mirror_turn};
 use super::panicked::{conclude_panicked, finished_event, guarded};
 use super::proposal_gate::{EntryOutcome, HoldReason, ProposalGate};
 use super::snapshot_gate::{EntryAdmission, admit_entry, hold_permit};
@@ -47,6 +49,8 @@ pub(super) struct Pipeline<'a> {
     /// Set by a pump that left an entry queued because a snapshot install
     /// held its group's apply gate.
     install_blocked: bool,
+    /// Set by a pump that left a mirror entry waiting for its cut.
+    mirror_blocked: bool,
 }
 
 impl<'a> Pipeline<'a> {
@@ -59,7 +63,14 @@ impl<'a> Pipeline<'a> {
             running: FuturesUnordered::new(),
             debts: HeldDebts::default(),
             install_blocked: false,
+            mirror_blocked: false,
         }
+    }
+
+    /// Whether the last pump left a mirror entry waiting for its cut. The loop
+    /// pumps again once the cut watch moves.
+    pub fn awaits_mirror(&self) -> bool {
+        self.mirror_blocked
     }
 
     /// Whether a group waits for a snapshot install: the last pump left an
@@ -212,6 +223,7 @@ impl<'a> Pipeline<'a> {
     /// Start every entry each group can start now, in log order.
     pub fn pump(&mut self) {
         self.install_blocked = false;
+        self.mirror_blocked = false;
         // Keys a snapshot install carried, before any entry starts: a later
         // copy of one of those proposals is a duplicate here too.
         for key in self.ctx.tracker.take_restored_keys() {
@@ -303,6 +315,26 @@ impl<'a> Pipeline<'a> {
                     continue;
                 }
             };
+            // Below an install's coverage the installed state holds the entry,
+            // so only an entry past the checks above reads its cut's verdict.
+            match mirror_turn(shared, &queued) {
+                MirrorTurn::Proceed => {}
+                MirrorTurn::Wait => {
+                    if let Some(lane) = self.lanes.get_mut(&group_id) {
+                        lane.backlog.push_front(queued);
+                    }
+                    self.mirror_blocked = true;
+                    return;
+                }
+                MirrorTurn::Skip => {
+                    self.ctx.tracker.forget_committed(group_id, log_index);
+                    let outcome = EntryOutcome::Skipped;
+                    if !self.conclude_covered(group_id, log_index, proposal_key, outcome) {
+                        return;
+                    }
+                    continue;
+                }
+            }
             // Every entry that leaves the backlog for good starts. A snapshot
             // builder cuts at the highest one.
             self.ctx.tracker.note_started(group_id, log_index);
@@ -410,9 +442,10 @@ impl<'a> Pipeline<'a> {
         }
     }
 
-    /// Conclude an entry an installed snapshot holds, without reaching a
-    /// core. It counts as started. Its waiter learns the write committed
-    /// without a result. Returns `false` when the group has no lane.
+    /// Conclude an entry an installed snapshot holds, or a mirror entry that
+    /// never applies, without reaching a core. It counts as started. Its
+    /// waiter learns the write committed without a result. Returns `false`
+    /// when the group has no lane.
     fn conclude_covered(
         &mut self,
         group_id: u64,
@@ -448,18 +481,9 @@ impl<'a> Pipeline<'a> {
     /// concluded, and while a copy of its proposal runs: the ledger decides
     /// it once that copy concludes.
     fn next_startable(&mut self, group_id: u64) -> Option<QueuedEntry> {
-        let lane = self.lanes.get_mut(&group_id)?;
-        if lane.blocking.is_some() || lane.is_held() {
-            return None;
-        }
-        let front = lane.backlog.front()?;
-        if front.is_exclusive() && lane.has_running() {
-            return None;
-        }
-        if self.gate.in_flight(front.proposal_key()) {
-            return None;
-        }
-        lane.backlog.pop_front()
+        self.lanes
+            .get_mut(&group_id)?
+            .next_startable(|key| self.gate.in_flight(key))
     }
 
     /// Settle every group's concluded entries in log order. See
@@ -467,15 +491,6 @@ impl<'a> Pipeline<'a> {
     pub fn settle(&mut self) {
         super::settle::settle_lanes(self.ctx, &mut self.lanes);
     }
-}
-
-/// Release the lock keys this node's write gate holds for entries of
-/// `group_id` through `log_index`: their applies started, in log order.
-fn release_admission_holds(state: &SharedState, group_id: u64, log_index: u64) {
-    state
-        .calvin
-        .admission_holds
-        .release_through(group_id, log_index);
 }
 
 #[cfg(test)]

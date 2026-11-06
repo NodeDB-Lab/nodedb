@@ -109,7 +109,8 @@ fn mirror_full_lifecycle() {
     }
 
     // ── Phase 4: PROMOTE ──────────────────────────────────────────────────
-    // Apply what PROMOTE proposes. The apply removes the cut state.
+    // Apply what PROMOTE proposes. The apply keeps the cut state, which a
+    // replica behind the promotion still reads.
     let mut desc = desc.clone();
     desc.status = DatabaseStatus::Active;
     if let Some(ref mut o) = desc.mirror_origin {
@@ -121,8 +122,8 @@ fn mirror_full_lifecycle() {
         catalog
             .get_mirror_cut_state(db_id)
             .expect("read cut state")
-            .is_none(),
-        "the promotion's apply must remove the cut state"
+            .is_some(),
+        "the promotion's apply must keep the cut state"
     );
 
     let desc = catalog.get_database(db_id).expect("get").expect("missing");

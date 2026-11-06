@@ -103,6 +103,9 @@ pub struct CutFloor {
 )]
 #[msgpack(map)]
 pub struct VShardCalvinState {
+    /// The mirror database whose source issued the positions. `None` names
+    /// this cluster's own sequencer.
+    pub mirror_database: Option<u64>,
     pub vshard_id: u32,
     /// Every position of every epoch at or below this is applied. `u64::MAX`
     /// means none is.

@@ -10,14 +10,20 @@
 //!   `nodedb_database_mirror_lag_ms` metric update path.
 //! - [`restart`] — enumerates mirror databases on server start and
 //!   returns the set that need their observer link re-established.
-//! - [`state`] — [`MirrorState`]: the fence and the links `SharedState` holds.
+//! - [`cut_watch`] — [`MirrorCutWatch`]: each mirror's cut state and the
+//!   verdict it gives a held entry.
+//! - [`state`] — [`MirrorState`]: what `SharedState` holds for its mirrors.
 
+pub mod cut_watch;
 pub mod fence;
 pub mod observer;
 pub mod registry;
 pub mod restart;
 pub mod state;
+#[cfg(test)]
+pub(crate) mod test_fixture;
 
+pub use cut_watch::{MirrorCutWatch, MirrorVerdict};
 pub use fence::MirrorFence;
 pub use observer::{
     LAG_DEGRADED_MS, LAG_DISCONNECTED_MS, LagTransition, compute_lag_transition, update_lag_status,

@@ -125,17 +125,31 @@ pub fn capture_calvin_cut(
 ) -> Result<GroupCalvinCut, Error> {
     let ledgers = &shared.calvin.applied;
     let ids: BTreeSet<u32> = group_vshards.iter().copied().collect();
-    let vshards = ids
-        .iter()
-        .filter_map(|&vshard_id| {
-            let (fully_applied_epoch, tail) = ledgers.get(vshard_id)?.snapshot();
-            Some(VShardCalvinState {
-                vshard_id,
-                fully_applied_epoch,
-                tail: tail.into_iter().collect(),
-            })
+    let local = ids.iter().filter_map(|&vshard_id| {
+        let (fully_applied_epoch, tail) = ledgers.get(vshard_id)?.snapshot();
+        Some(VShardCalvinState {
+            mirror_database: None,
+            vshard_id,
+            fully_applied_epoch,
+            tail: tail.into_iter().collect(),
         })
-        .collect();
+    });
+    let mirrored = ids.iter().flat_map(|&vshard_id| {
+        ledgers
+            .mirrors_on(vshard_id)
+            .into_iter()
+            .filter_map(move |database| {
+                let (fully_applied_epoch, tail) =
+                    ledgers.get_mirror(database, vshard_id)?.snapshot();
+                Some(VShardCalvinState {
+                    mirror_database: Some(database),
+                    vshard_id,
+                    fully_applied_epoch,
+                    tail: tail.into_iter().collect(),
+                })
+            })
+    });
+    let vshards = local.chain(mirrored).collect();
     let barrier_logs = barrier_store::capture_group(shared, &ids)?;
     let (cut_barriers, cut_floors) = capture_cut_barriers(shared, group_id, cut_index)?;
     Ok(GroupCalvinCut {

@@ -4,8 +4,10 @@
 
 use std::sync::Arc;
 
+use super::cut_watch::MirrorCutWatch;
 use super::fence::MirrorFence;
 use super::registry::MirrorLinkRegistry;
+use crate::control::security::catalog::SystemCatalog;
 
 /// The live state of this node's mirror databases.
 #[derive(Default)]
@@ -15,4 +17,16 @@ pub struct MirrorState {
     pub links: Arc<MirrorLinkRegistry>,
     /// The databases that refuse client writes.
     pub fence: Arc<MirrorFence>,
+    /// Each mirror's cut state, which decides its held entries.
+    pub cuts: Arc<MirrorCutWatch>,
+}
+
+impl MirrorState {
+    /// Rebuild what follows the catalog. A read error fails the caller: a
+    /// fence that misses a mirror admits client writes to it, and a cut watch
+    /// that misses one skips its entries.
+    pub fn load_from_catalog(&self, catalog: &SystemCatalog) -> crate::Result<()> {
+        self.fence.load_from_catalog(catalog)?;
+        self.cuts.load_from_catalog(catalog)
+    }
 }

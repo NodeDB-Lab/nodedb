@@ -226,6 +226,16 @@ impl ProposeTracker {
         self.slots().note_concluded(group_id, log_index);
     }
 
+    /// Forget the key of entry `log_index` of `group_id`: it concluded with no
+    /// effect, and a later copy of its proposal still applies. The apply loop
+    /// calls it before it notes the entry started, so no snapshot carries it.
+    pub fn forget_committed(&self, group_id: u64, log_index: u64) {
+        self.committed
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .forget(group_id, log_index);
+    }
+
     /// Record the keys of committed entries the apply loop received, for the
     /// snapshots this node builds.
     pub fn note_committed(&self, group_id: u64, entries: impl IntoIterator<Item = (u64, u64)>) {

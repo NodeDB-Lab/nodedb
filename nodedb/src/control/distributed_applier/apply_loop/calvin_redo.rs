@@ -24,6 +24,10 @@
 //! place in the group's lane meanwhile, as a parked write does. A vShard
 //! with no running scheduler gets no event: the next scheduler seeds from
 //! the ledger.
+//!
+//! A mirror's slice carries its source's `(epoch, position)`, which collide
+//! with this cluster's own. It claims in the mirror's own ledger, and no
+//! scheduler hears of it: this cluster's sequencer never ordered it.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -34,13 +38,11 @@ use crate::control::server::dispatch_utils::{SubmitOutcome, refusal_is_final};
 use crate::control::state::SharedState;
 use crate::control::wal_replication::types::CalvinRedoMeta;
 use crate::types::{Lsn, RequestId};
-use crate::wal::RedoStreamId;
+use crate::wal::{CalvinPositionId, RedoStreamId};
 
 /// A Calvin position this entry holds the claim on.
 pub(super) struct CalvinClaim {
-    vshard_id: u32,
-    epoch: u64,
-    position: u32,
+    at: CalvinPositionId,
     primary_write: bool,
     returning: bool,
     ledger: Arc<CalvinAppliedLedger>,
@@ -70,7 +72,16 @@ pub(super) fn claim_inline(
         return ClaimOutcome::NotCalvin;
     };
     match stamp {
-        Some(stamp) => claim(state, meta, stamp.vshard_id, stamp.epoch, stamp.position),
+        Some(stamp) => claim(
+            state,
+            meta,
+            CalvinPositionId {
+                mirror_database: stamp.mirror_database,
+                vshard: stamp.vshard_id,
+                epoch: stamp.epoch,
+                position: stamp.position,
+            },
+        ),
         None => ClaimOutcome::Malformed(crate::Error::Internal {
             detail: "a Calvin redo entry carries no calvin_stamp, so it names no position".into(),
         }),
@@ -86,32 +97,31 @@ pub(super) fn claim_chunked(
     let Some(meta) = meta else {
         return ClaimOutcome::NotCalvin;
     };
-    match *stream {
-        RedoStreamId::Calvin {
-            vshard,
-            epoch,
-            position,
-            ..
-        } => claim(state, meta, vshard, epoch, position),
-        RedoStreamId::Session { .. } => ClaimOutcome::Malformed(crate::Error::Internal {
+    match stream.calvin_position() {
+        Some(at) => claim(state, meta, at),
+        None => ClaimOutcome::Malformed(crate::Error::Internal {
             detail: format!("a Calvin redo entry names the session stream {stream:?}"),
         }),
     }
 }
 
-fn claim(
-    state: &SharedState,
-    meta: &CalvinRedoMeta,
-    vshard_id: u32,
-    epoch: u64,
-    position: u32,
-) -> ClaimOutcome {
-    let ledger = state.calvin.applied.get_or_create(vshard_id);
+fn claim(state: &SharedState, meta: &CalvinRedoMeta, at: CalvinPositionId) -> ClaimOutcome {
+    let CalvinPositionId {
+        mirror_database,
+        vshard: vshard_id,
+        epoch,
+        position,
+    } = at;
+    let ledger = match mirror_database {
+        None => state.calvin.applied.get_or_create(vshard_id),
+        Some(database) => state
+            .calvin
+            .applied
+            .get_or_create_mirror(database, vshard_id),
+    };
     match ledger.claim(epoch, position) {
         Ok(()) => ClaimOutcome::Claimed(CalvinClaim {
-            vshard_id,
-            epoch,
-            position,
+            at,
             primary_write: meta.primary_write,
             returning: meta.returning,
             ledger,
@@ -186,15 +196,13 @@ impl CalvinClaim {
 
     /// The install did not run, or did not become durable.
     pub(super) fn not_applied(&self, error: String) -> CalvinApplyEvent {
-        self.ledger.release_claim(self.epoch, self.position);
+        self.ledger.release_claim(self.at.epoch, self.at.position);
         CalvinApplyEvent::RedoNotApplied { error }
     }
 
     fn applied(&self, state: &SharedState, reply: Response) -> CalvinApplyEvent {
-        self.ledger.mark_applied(self.epoch, self.position);
-        state
-            .redo_chunks
-            .drop_calvin_position(self.vshard_id, self.epoch, self.position);
+        self.ledger.mark_applied(self.at.epoch, self.at.position);
+        state.redo_chunks.drop_calvin_position(self.at);
         // The slice's stamped redo installed on this node.
         state
             .calvin
@@ -209,12 +217,16 @@ impl CalvinClaim {
     }
 
     /// Hand `event` to the vShard's scheduler, waiting for room in its
-    /// inbox. A vShard with no running scheduler takes nothing.
+    /// inbox. A vShard with no running scheduler takes nothing, and no
+    /// scheduler ordered a mirror's slice.
     pub(super) async fn report(&self, state: &SharedState, event: CalvinApplyEvent) {
-        let Some(inbox) = state.calvin.inboxes.get(self.vshard_id) else {
+        if self.at.mirror_database.is_some() {
+            return;
+        }
+        let Some(inbox) = state.calvin.inboxes.get(self.at.vshard) else {
             return;
         };
-        inbox.push(self.epoch, self.position, event).await;
+        inbox.push(self.at.epoch, self.at.position, event).await;
     }
 
     /// Hand an install's `event` to the vShard's scheduler. `collections`
@@ -249,7 +261,9 @@ impl CalvinClaim {
         event: CalvinApplyEvent,
         collections: &[String],
     ) -> Option<CalvinApplyEvent> {
-        if !matches!(event, CalvinApplyEvent::RedoApplied { .. }) {
+        if !matches!(event, CalvinApplyEvent::RedoApplied { .. })
+            || self.at.mirror_database.is_some()
+        {
             return Some(event);
         }
         let Some(gate) =
@@ -257,13 +271,13 @@ impl CalvinClaim {
         else {
             return Some(event);
         };
-        let Some(inbox) = state.calvin.inboxes.get(self.vshard_id) else {
+        let Some(inbox) = state.calvin.inboxes.get(self.at.vshard) else {
             return Some(event);
         };
-        let (epoch, position) = (self.epoch, self.position);
+        let (epoch, position) = (self.at.epoch, self.at.position);
         let fail_scope = crate::fail_point::FailScope::Node(state.node_id);
         tracing::info!(
-            vshard_id = self.vshard_id,
+            vshard_id = self.at.vshard,
             epoch,
             position,
             gate = %gate,
@@ -306,7 +320,65 @@ mod tests {
             epoch: 4,
             position,
             vshard_id: 3,
+            mirror_database: None,
         }
+    }
+
+    fn mirror_stamp(position: u32) -> crate::wal::CalvinStamp {
+        crate::wal::CalvinStamp {
+            mirror_database: Some(1024),
+            ..stamp(position)
+        }
+    }
+
+    /// A mirror's slice at the same numbers as an applied local slice still
+    /// installs, marks only the mirror's ledger, and reaches no scheduler.
+    /// A second copy of it finds its own claim.
+    #[tokio::test]
+    async fn a_mirror_slice_lives_in_its_own_ledger_and_reports_to_nobody() {
+        let (state, _dir) = state();
+        let handle = state.calvin.inboxes.register(3, 4);
+        let ClaimOutcome::Claimed(local) = claim_inline(&state, Some(&meta()), Some(&stamp(1)))
+        else {
+            panic!("the local slice claims");
+        };
+        local.settle(&state, &ok());
+
+        let ClaimOutcome::Claimed(mirrored) =
+            claim_inline(&state, Some(&meta()), Some(&mirror_stamp(1)))
+        else {
+            panic!("the numbers of an applied local slice leave the mirror's slice free");
+        };
+        assert!(matches!(
+            claim_inline(&state, Some(&meta()), Some(&mirror_stamp(1))),
+            ClaimOutcome::Refused
+        ));
+        let event = mirrored.settle(&state, &ok());
+        mirrored.report(&state, event).await;
+        assert!(handle.inbox().take_all().is_empty());
+        assert!(
+            state
+                .calvin
+                .applied
+                .get_or_create_mirror(1024, 3)
+                .is_applied(4, 1)
+        );
+
+        // The chunked final of the same position reads the same ledger.
+        assert!(matches!(
+            claim_chunked(
+                &state,
+                Some(&meta()),
+                &RedoStreamId::Calvin {
+                    vshard: 3,
+                    epoch: 4,
+                    position: 1,
+                    attempt: 2,
+                }
+                .in_mirror(Some(1024)),
+            ),
+            ClaimOutcome::Refused
+        ));
     }
 
     fn ok() -> crate::Result<SubmitOutcome> {

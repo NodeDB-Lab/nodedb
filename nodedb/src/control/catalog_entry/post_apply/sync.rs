@@ -485,8 +485,10 @@ pub fn apply_post_apply_side_effects_sync(entry: &CatalogEntry, shared: &Arc<Sha
         }
         // The scheduler reads the mark from the catalog row apply wrote.
         CatalogEntry::PutBackupScheduleMark(_) => {}
-        // Readers take the cut state from the catalog row apply wrote.
-        CatalogEntry::PutMirrorCutState { .. } => {}
+        // The apply loop's verdict on a held entry reads this copy of the row.
+        CatalogEntry::PutMirrorCutState { database_id, state } => {
+            database::put_cut_state(*database_id, state, shared);
+        }
         // Apply swapped the catalog's in-memory set. The cores receive it in
         // the async post-apply.
         CatalogEntry::PutSpatialRefSys(_) | CatalogEntry::DropSpatialRefSys { .. } => {}

@@ -40,6 +40,7 @@ fn append_stamped(wal: &WalManager, vshard_id: u32, epoch: u64, position: u32) {
             epoch,
             position,
             vshard_id,
+            mirror_database: None,
         }),
         cross_shard_applied: None,
         row_sources: Vec::new(),
@@ -65,6 +66,7 @@ fn recover_vshard(wal: &WalManager, vshard_id: u32) -> AppliedRecovery {
     let catalog = SystemCatalog::open_in_memory().expect("in-memory catalog");
     recover_all_applied(wal, &catalog, &|_| None)
         .expect("recovery scan should succeed")
+        .by_vshard
         .remove(&vshard_id)
         .unwrap_or(AppliedRecovery {
             fully_applied_epoch: NOT_YET_APPLIED_EPOCH,

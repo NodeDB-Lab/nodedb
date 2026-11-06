@@ -184,6 +184,9 @@ impl MetadataCache {
             // Host-side only: the production applier records the point and
             // cuts every group this node hosts.
             MetadataEntry::RestorePoint { .. } => {}
+            // Host-side only: the production applier installs the cut's catalog
+            // entries and raises the mirror's cut state.
+            MetadataEntry::MirrorCut { .. } => {}
             MetadataEntry::JoinTokenTransition { .. } => {
                 // Token lifecycle transitions are enforced by the bootstrap-
                 // listener handler at apply time. The cluster cache records

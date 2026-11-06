@@ -16,7 +16,9 @@
 //! every replica with no gate, so no replica refuses what another applied.
 //!
 //! The mirror applier stamps its writes [`EventSource::RaftFollower`], the one
-//! source that passes.
+//! source that passes. Its proposals also carry a mirror stamp. The leader
+//! proposal gate refuses a `RaftFollower` proposal with no stamp, so no path
+//! reaches a mirror's log by naming that source alone.
 
 use nodedb_cluster::{METADATA_GROUP_ID, WaitOutcome};
 
@@ -27,6 +29,7 @@ use crate::control::server::pgwire::ddl::database::{
 };
 use crate::control::server::shared::session::read_scope;
 use crate::control::state::SharedState;
+use crate::control::wal_replication::ReplicatedEntry;
 use crate::event::EventSource;
 use crate::types::{DatabaseId, RequestId};
 
@@ -42,6 +45,44 @@ pub(crate) fn check_mirror_writable(
     decide_write(&state.mirror.fence, database_id, source, is_write)
 }
 
+/// Refuse a proposal to a mirror that no mirror applier made. Only the leader
+/// proposal gate calls it: a proposal's envelope is where the stamp lives.
+pub(crate) fn check_mirror_proposal(
+    state: &SharedState,
+    entry: &ReplicatedEntry,
+    is_write: impl FnOnce() -> crate::Result<bool>,
+) -> crate::Result<()> {
+    decide_proposal(
+        &state.mirror.fence,
+        DatabaseId::new(entry.database_id),
+        EventSource::from(entry.event_source),
+        entry.mirror.is_some(),
+        is_write,
+    )
+}
+
+fn decide_proposal(
+    fence: &MirrorFence,
+    database_id: DatabaseId,
+    source: EventSource,
+    stamped: bool,
+    is_write: impl FnOnce() -> crate::Result<bool>,
+) -> crate::Result<()> {
+    match (source, stamped) {
+        (EventSource::RaftFollower, true) => Ok(()),
+        (EventSource::RaftFollower, false) => refuse_if_write(fence, database_id, is_write),
+        (
+            EventSource::User
+            | EventSource::Trigger
+            | EventSource::CrdtSync
+            | EventSource::Deferred
+            | EventSource::ImplicitClient
+            | EventSource::Restore,
+            _,
+        ) => decide_write(fence, database_id, source, is_write),
+    }
+}
+
 fn decide_write(
     fence: &MirrorFence,
     database_id: DatabaseId,
@@ -51,6 +92,14 @@ fn decide_write(
     if !source_is_gated(source) {
         return Ok(());
     }
+    refuse_if_write(fence, database_id, is_write)
+}
+
+fn refuse_if_write(
+    fence: &MirrorFence,
+    database_id: DatabaseId,
+    is_write: impl FnOnce() -> crate::Result<bool>,
+) -> crate::Result<()> {
     let Some(database) = fence.read_only_name(database_id) else {
         return Ok(());
     };
@@ -169,32 +218,17 @@ pub(crate) async fn await_entry_metadata_floor(
 
 #[cfg(test)]
 mod tests {
-    use nodedb_types::{MirrorMode, MirrorOrigin, MirrorStatus};
+    use nodedb_types::MirrorStatus;
 
     use super::*;
-    use crate::control::security::catalog::database_types::{DatabaseDescriptor, DatabaseStatus};
+    use crate::control::mirror::test_fixture::mirror_descriptor;
+    use crate::control::security::catalog::database_types::DatabaseDescriptor;
 
     const MIRROR: u64 = 1100;
     const PLAIN: u64 = 1101;
 
     fn descriptor(id: u64, status: MirrorStatus) -> DatabaseDescriptor {
-        DatabaseDescriptor {
-            id: DatabaseId::new(id),
-            name: "mirror_db".to_string(),
-            status: DatabaseStatus::Mirroring,
-            created_at_lsn: 0,
-            quota_ref: 0,
-            parent_clone: None,
-            mirror_origin: Some(MirrorOrigin {
-                source_cluster: "source".to_string(),
-                source_database: DatabaseId::new(0),
-                source_database_name: "source_db".to_string(),
-                mode: MirrorMode::Async,
-                status,
-            }),
-            audit_dml: nodedb_types::AuditDmlMode::None,
-            idle_session_timeout_secs: 0,
-        }
+        mirror_descriptor(id, "mirror_db", status)
     }
 
     fn fence() -> MirrorFence {
@@ -238,6 +272,47 @@ mod tests {
     #[test]
     fn the_applier_source_passes() {
         assert!(write_to(&fence(), MIRROR, EventSource::RaftFollower).is_ok());
+    }
+
+    fn propose_to(
+        fence: &MirrorFence,
+        id: u64,
+        source: EventSource,
+        stamped: bool,
+    ) -> crate::Result<()> {
+        decide_proposal(fence, DatabaseId::new(id), source, stamped, || Ok(true))
+    }
+
+    /// The source alone never reaches a mirror's log: the stamp is what names
+    /// the mirror's applier.
+    #[test]
+    fn an_unstamped_applier_source_is_refused_on_a_mirror() {
+        let error = propose_to(&fence(), MIRROR, EventSource::RaftFollower, false).unwrap_err();
+        assert!(matches!(error, crate::Error::MirrorReadOnly { .. }));
+        assert!(propose_to(&fence(), MIRROR, EventSource::RaftFollower, true).is_ok());
+        assert!(propose_to(&fence(), PLAIN, EventSource::RaftFollower, false).is_ok());
+    }
+
+    /// A stamp does not carry a client's source past the gate.
+    #[test]
+    fn a_stamped_client_source_is_refused_on_a_mirror() {
+        for source in [EventSource::User, EventSource::Restore] {
+            let error = propose_to(&fence(), MIRROR, source, true).unwrap_err();
+            assert!(matches!(error, crate::Error::MirrorReadOnly { .. }));
+        }
+    }
+
+    /// A non-write of the applier's source passes, as any non-write does.
+    #[test]
+    fn an_unstamped_applier_non_write_passes() {
+        let decided = decide_proposal(
+            &fence(),
+            DatabaseId::new(MIRROR),
+            EventSource::RaftFollower,
+            false,
+            || Ok(false),
+        );
+        assert!(decided.is_ok());
     }
 
     #[test]

@@ -10,6 +10,15 @@ use tracing::debug;
 use crate::control::distributed_applier::applied_index::save_applied_index;
 use crate::control::state::SharedState;
 
+/// Release the lock keys this node's write gate holds for entries of
+/// `group_id` through `log_index`: their applies started, in log order.
+pub(super) fn release_admission_holds(state: &SharedState, group_id: u64, log_index: u64) {
+    state
+        .calvin
+        .admission_holds
+        .release_through(group_id, log_index);
+}
+
 /// Record entry `applied_index` of `group_id` as durably applied: persist the
 /// group's durable applied floor, then fire the compaction trigger against it.
 ///

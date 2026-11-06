@@ -67,6 +67,10 @@ pub struct ReplicatedEntry {
     /// installs it and folds it into its clock. `0` for an entry no leader
     /// stamped.
     pub system_ordinal: i64,
+    /// Set on an entry a mirror's applier proposed: its source position and
+    /// the cut that holds it. Such an entry keeps its source's ordinal and
+    /// key, takes no write-gate lock, and applies once its cut is ready.
+    pub mirror: Option<nodedb_types::MirrorEntryStamp>,
 }
 
 /// A user collection or array a replicated write names, and the incarnation
@@ -114,6 +118,7 @@ impl ReplicatedEntry {
             incarnations: Vec::new(),
             user_roles: Vec::new(),
             system_ordinal: 0,
+            mirror: None,
         }
     }
 
@@ -121,6 +126,12 @@ impl ReplicatedEntry {
     /// leader stamped it.
     pub fn carried_system_ordinal(&self) -> Option<i64> {
         (self.system_ordinal != 0).then_some(self.system_ordinal)
+    }
+
+    /// The mirror database that applies the entry, `None` for an entry of
+    /// this cluster.
+    pub fn mirror_database(&self) -> Option<u64> {
+        self.mirror.map(|_| self.database_id)
     }
 
     /// Stamp the roles of the identity that wrote the write.
@@ -202,6 +213,7 @@ mod tests {
     use super::*;
     use crate::bridge::envelope::PhysicalPlan;
     use crate::control::wal_replication::decode;
+    use crate::control::wal_replication::types::MirrorCalvinFloor;
     use crate::types::{DatabaseId, TenantId, VShardId};
     use nodedb_physical::physical_plan::DocumentOp;
     use nodedb_types::{QualifiedCollection, Surrogate};
@@ -268,6 +280,45 @@ mod tests {
                 assert!(rls_filters.is_empty());
             }
             other => panic!("expected PointPut, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_mirror_stamp_roundtrips_and_names_the_database() {
+        let write = ReplicatedWrite::MirrorSeal {
+            last: true,
+            calvin_floors: vec![MirrorCalvinFloor {
+                vshard: 3,
+                epoch: 9,
+            }],
+        };
+        let mut entry = ReplicatedEntry::new(1, 1024, 3, write);
+        assert_eq!(entry.mirror_database(), None);
+        let stamp = nodedb_types::MirrorEntryStamp {
+            source_group: 2,
+            source_index: 40,
+            cut: 5,
+            epoch: 7,
+        };
+        entry.mirror = Some(stamp);
+        let decoded = ReplicatedEntry::from_bytes(&entry.to_bytes()).expect("decode");
+        assert_eq!(decoded.mirror, Some(stamp));
+        assert_eq!(decoded.mirror_database(), Some(1024));
+        match decoded.write {
+            ReplicatedWrite::MirrorSeal {
+                last,
+                calvin_floors,
+            } => {
+                assert!(last);
+                assert_eq!(
+                    calvin_floors,
+                    vec![MirrorCalvinFloor {
+                        vshard: 3,
+                        epoch: 9,
+                    }]
+                );
+            }
+            other => panic!("expected MirrorSeal, got {other:?}"),
         }
     }
 

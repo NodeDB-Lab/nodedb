@@ -198,13 +198,19 @@ pub fn forget_left(shared: &SharedState, vshards: &[u32]) -> crate::Result<()> {
     let resets: Vec<crate::control::security::catalog::calvin_applied::StoredCalvinApplied> =
         vshards
             .iter()
-            .map(|&vshard_id| {
-                crate::control::security::catalog::calvin_applied::StoredCalvinApplied {
-                    vshard_id,
-                    fully_applied_epoch:
-                        crate::control::cluster::calvin::scheduler::NOT_YET_APPLIED_EPOCH,
-                    tail: BTreeSet::new(),
-                }
+            .flat_map(|&vshard_id| {
+                let mirrors = shared.calvin.applied.mirrors_on(vshard_id);
+                std::iter::once(None)
+                    .chain(mirrors.into_iter().map(Some))
+                    .map(move |mirror_database| {
+                        crate::control::security::catalog::calvin_applied::StoredCalvinApplied {
+                            mirror_database,
+                            vshard_id,
+                            fully_applied_epoch:
+                                crate::control::cluster::calvin::scheduler::NOT_YET_APPLIED_EPOCH,
+                            tail: BTreeSet::new(),
+                        }
+                    })
             })
             .collect();
     for &vshard_id in vshards {

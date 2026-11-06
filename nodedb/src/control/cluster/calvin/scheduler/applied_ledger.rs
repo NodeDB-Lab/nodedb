@@ -152,12 +152,90 @@ impl CalvinAppliedLedger {
 }
 
 /// The applied ledger of every vShard this node holds Calvin state for.
+///
+/// A mirror's Calvin slices carry their source's `(epoch, position)`, which
+/// collide with this cluster's own positions on a shared vShard. So each
+/// mirror database has its own ledger per vShard, and no scheduler reads them.
 #[derive(Debug, Default)]
 pub struct CalvinAppliedLedgers {
     by_vshard: Mutex<HashMap<u32, Arc<CalvinAppliedLedger>>>,
+    by_mirror: Mutex<HashMap<(u64, u32), Arc<CalvinAppliedLedger>>>,
 }
 
 impl CalvinAppliedLedgers {
+    /// Replace the ledger of `mirror_database` on `vshard_id`.
+    pub fn install_mirror(
+        &self,
+        mirror_database: u64,
+        vshard_id: u32,
+        fully_applied_epoch: u64,
+        tail: BTreeSet<(u64, u32)>,
+    ) {
+        self.by_mirror
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(
+                (mirror_database, vshard_id),
+                Arc::new(CalvinAppliedLedger::new(fully_applied_epoch, tail)),
+            );
+    }
+
+    /// The ledger of `mirror_database` on `vshard_id`. A pair with no ledger
+    /// has no applied position here, so it gets an empty one.
+    pub fn get_or_create_mirror(
+        &self,
+        mirror_database: u64,
+        vshard_id: u32,
+    ) -> Arc<CalvinAppliedLedger> {
+        let mut by_mirror = self.by_mirror.lock().unwrap_or_else(|p| p.into_inner());
+        Arc::clone(
+            by_mirror
+                .entry((mirror_database, vshard_id))
+                .or_insert_with(|| {
+                    Arc::new(CalvinAppliedLedger::new(
+                        NOT_YET_APPLIED_EPOCH,
+                        BTreeSet::new(),
+                    ))
+                }),
+        )
+    }
+
+    /// The ledger of `mirror_database` on `vshard_id`, when this node holds
+    /// one.
+    pub fn get_mirror(
+        &self,
+        mirror_database: u64,
+        vshard_id: u32,
+    ) -> Option<Arc<CalvinAppliedLedger>> {
+        self.by_mirror
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&(mirror_database, vshard_id))
+            .cloned()
+    }
+
+    /// Every mirror database holding a ledger on `vshard_id`, in id order.
+    pub fn mirrors_on(&self, vshard_id: u32) -> Vec<u64> {
+        let mut databases: Vec<u64> = self
+            .by_mirror
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .keys()
+            .filter(|(_, vshard)| *vshard == vshard_id)
+            .map(|(database, _)| *database)
+            .collect();
+        databases.sort_unstable();
+        databases
+    }
+
+    /// Drop every ledger of a dropped mirror database.
+    pub fn remove_mirror_database(&self, mirror_database: u64) {
+        self.by_mirror
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retain(|(database, _), _| *database != mirror_database);
+    }
+
     /// Replace the ledger of `vshard_id` with one holding
     /// `fully_applied_epoch` and `tail`. A holder of the old ledger keeps the
     /// old one.
@@ -196,13 +274,17 @@ impl CalvinAppliedLedgers {
             .cloned()
     }
 
-    /// Drop the ledger of `vshard_id`: this node left the vShard's group and
-    /// holds none of its applied positions.
+    /// Drop the ledgers of `vshard_id`, its mirrors' too: this node left the
+    /// vShard's group and holds none of its applied positions.
     pub fn remove(&self, vshard_id: u32) {
         self.by_vshard
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(&vshard_id);
+        self.by_mirror
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retain(|(_, vshard), _| *vshard != vshard_id);
     }
 
     /// Every ledger's applied state, in the shape the catalog stores.
@@ -214,11 +296,25 @@ impl CalvinAppliedLedgers {
             .iter()
             .map(|(vshard_id, ledger)| (*vshard_id, Arc::clone(ledger)))
             .collect();
-        ledgers
+        let mirrors: Vec<((u64, u32), Arc<CalvinAppliedLedger>)> = self
+            .by_mirror
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .map(|(key, ledger)| (*key, Arc::clone(ledger)))
+            .collect();
+        let local = ledgers
             .into_iter()
-            .map(|(vshard_id, ledger)| {
+            .map(|(vshard_id, ledger)| (None, vshard_id, ledger));
+        let mirrored = mirrors
+            .into_iter()
+            .map(|((database, vshard_id), ledger)| (Some(database), vshard_id, ledger));
+        local
+            .chain(mirrored)
+            .map(|(mirror_database, vshard_id, ledger)| {
                 let (fully_applied_epoch, tail) = ledger.snapshot();
                 StoredCalvinApplied {
+                    mirror_database,
                     vshard_id,
                     fully_applied_epoch,
                     tail,
@@ -234,6 +330,29 @@ mod tests {
 
     fn empty() -> CalvinAppliedLedger {
         CalvinAppliedLedger::new(NOT_YET_APPLIED_EPOCH, BTreeSet::new())
+    }
+
+    /// A mirror's position and this cluster's position with the same numbers
+    /// sit in separate ledgers, and a snapshot of all names each one.
+    #[test]
+    fn a_mirror_ledger_never_answers_for_the_local_one() {
+        let ledgers = CalvinAppliedLedgers::default();
+        ledgers.get_or_create(3).mark_applied(4, 1);
+        let mirror = ledgers.get_or_create_mirror(1024, 3);
+        assert!(!mirror.is_applied(4, 1));
+        assert!(mirror.claim(4, 1).is_ok());
+        mirror.mark_applied(4, 1);
+        assert_eq!(ledgers.mirrors_on(3), vec![1024]);
+
+        let mut saved = ledgers.snapshot_all();
+        saved.sort_by_key(|state| state.mirror_database);
+        assert_eq!(saved.len(), 2);
+        assert_eq!(saved[0].mirror_database, None);
+        assert_eq!(saved[1].mirror_database, Some(1024));
+
+        ledgers.remove(3);
+        assert!(ledgers.get_mirror(1024, 3).is_none());
+        assert!(ledgers.get(3).is_none());
     }
 
     #[test]

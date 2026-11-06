@@ -67,6 +67,7 @@ impl QueuedEntry {
             || matches!(
                 decoded.write,
                 ReplicatedWrite::CutBarrier { .. }
+                    | ReplicatedWrite::MirrorSeal { .. }
                     | ReplicatedWrite::CalvinReadResult { .. }
                     | ReplicatedWrite::CalvinReadTimeout { .. }
                     | ReplicatedWrite::SurrogateBind { .. }
@@ -102,6 +103,7 @@ impl QueuedEntry {
             | ReplicatedWrite::ArrayCellDelete { .. } => true,
             ReplicatedWrite::ArraySchema { .. }
             | ReplicatedWrite::CutBarrier { .. }
+            | ReplicatedWrite::MirrorSeal { .. }
             | ReplicatedWrite::CalvinReadResult { .. }
             | ReplicatedWrite::CalvinReadTimeout { .. }
             | ReplicatedWrite::SurrogateBind { .. }
@@ -121,7 +123,8 @@ impl QueuedEntry {
     /// publication awaits its proposal marker's fsync. A cut barrier
     /// persists its floor, and a capturing one snapshots its tenants, after
     /// every earlier entry and before every later one. A redo chunk or
-    /// abandon changes the stream a later entry of its group reads.
+    /// abandon changes the stream a later entry of its group reads. A mirror
+    /// seal records that every earlier entry of the group concluded.
     pub fn is_exclusive(&self) -> bool {
         self.decoded.as_ref().is_some_and(|e| {
             matches!(
@@ -132,6 +135,7 @@ impl QueuedEntry {
                     | ReplicatedWrite::ArrayCellDelete { .. }
                     | ReplicatedWrite::TopicPublish { .. }
                     | ReplicatedWrite::CutBarrier { .. }
+                    | ReplicatedWrite::MirrorSeal { .. }
                     | ReplicatedWrite::RedoChunk { .. }
                     | ReplicatedWrite::RedoAbandon { .. }
             )
@@ -245,6 +249,22 @@ impl Lane {
     /// Whether an entry holds the lane.
     pub fn is_held(&self) -> bool {
         self.held_index().is_some()
+    }
+
+    /// Take the next entry when it can start now. `in_flight` says whether a
+    /// copy of a proposal runs.
+    pub fn next_startable(&mut self, in_flight: impl Fn(u64) -> bool) -> Option<QueuedEntry> {
+        if self.blocking.is_some() || self.is_held() {
+            return None;
+        }
+        let front = self.backlog.front()?;
+        if front.is_exclusive() && self.has_running() {
+            return None;
+        }
+        if in_flight(front.proposal_key()) {
+            return None;
+        }
+        self.backlog.pop_front()
     }
 
     /// The proposal key of the entry at `log_index` while it starts or runs.

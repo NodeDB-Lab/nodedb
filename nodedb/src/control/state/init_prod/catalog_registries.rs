@@ -165,7 +165,7 @@ impl SharedState {
         }
         .load(catalog)?;
         load_catalog_caches(self, catalog);
-        self.mirror.fence.load_from_catalog(catalog)?;
+        self.mirror.load_from_catalog(catalog)?;
         crate::control::array_catalog::persist::register_loaded(
             &mut self
                 .array_catalog

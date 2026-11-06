@@ -223,6 +223,9 @@ fn to_physical_plan(
         ReplicatedWrite::CutBarrier { .. } => Err(crate::Error::Internal {
             detail: "CutBarrier reached to_physical_plan (should have been intercepted)".into(),
         }),
+        ReplicatedWrite::MirrorSeal { .. } => Err(crate::Error::Internal {
+            detail: "MirrorSeal reached to_physical_plan (should have been intercepted)".into(),
+        }),
         ReplicatedWrite::CalvinReadResult { .. } => Err(crate::Error::Internal {
             detail: "CalvinReadResult reached to_physical_plan (should have been intercepted)"
                 .into(),

@@ -9,8 +9,9 @@ use crate::control::security::catalog::{SystemCatalog, catalog_err};
 /// Apply a `PutMirrorCutState` entry.
 ///
 /// A database that no longer follows a source writes nothing, so a late
-/// entry never brings back a row PROMOTE or DROP removed. Metadata entries
-/// apply one at a time, so the descriptor read and the write see one state.
+/// entry never moves a promoted mirror's row or brings back a row DROP
+/// removed. Metadata entries apply one at a time, so the descriptor read and
+/// the write see one state.
 pub fn raise(
     database_id: u64,
     state: &MirrorCutState,
@@ -74,6 +75,8 @@ mod tests {
             applied_cut_hlc_ns: 1,
             cap_ordinal: 1,
             positions: Vec::new(),
+            epochs: Vec::new(),
+            fence_epoch: 0,
         }
     }
 

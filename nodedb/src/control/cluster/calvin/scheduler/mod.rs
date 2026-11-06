@@ -30,4 +30,4 @@ pub use lock::{AcquireOutcome, Acquisition, HotKeyTable, LockKey, LockManager, L
 pub use lock as lock_manager;
 pub use metrics::SchedulerMetrics;
 pub use read_results::{BufferedEvents, CalvinReadResults, VShardReadResults};
-pub use recovery::{AppliedRecovery, NOT_YET_APPLIED_EPOCH, recover_all_applied};
+pub use recovery::{AppliedRecovery, NOT_YET_APPLIED_EPOCH, RecoveredApplied, recover_all_applied};

@@ -83,12 +83,13 @@ pub fn enumerate_resumable_mirrors(
 mod tests {
     use std::path::PathBuf;
 
-    use nodedb_types::{DatabaseId, MirrorCutState, MirrorMode, MirrorOrigin, MirrorStatus};
+    use nodedb_types::{DatabaseId, MirrorCutState, MirrorStatus};
     use tempfile::TempDir;
 
+    use super::super::test_fixture::mirror_descriptor;
     use super::*;
     use crate::control::security::catalog::SystemCatalog;
-    use crate::control::security::catalog::database_types::{DatabaseDescriptor, DatabaseStatus};
+    use crate::control::security::catalog::database_types::DatabaseDescriptor;
 
     fn open_tmp_catalog(tmp: &TempDir) -> SystemCatalog {
         let path: PathBuf = tmp.path().join("system.redb");
@@ -96,23 +97,7 @@ mod tests {
     }
 
     fn make_mirror_db(id: u64, name: &str, status: MirrorStatus) -> DatabaseDescriptor {
-        DatabaseDescriptor {
-            id: DatabaseId::new(id),
-            name: name.to_string(),
-            status: DatabaseStatus::Mirroring,
-            created_at_lsn: 0,
-            quota_ref: 0,
-            parent_clone: None,
-            mirror_origin: Some(MirrorOrigin {
-                source_cluster: "prod-us".to_string(),
-                source_database: DatabaseId::new(0),
-                source_database_name: "source_db".to_string(),
-                mode: MirrorMode::Async,
-                status,
-            }),
-            audit_dml: nodedb_types::AuditDmlMode::None,
-            idle_session_timeout_secs: 0,
-        }
+        mirror_descriptor(id, name, status)
     }
 
     #[test]

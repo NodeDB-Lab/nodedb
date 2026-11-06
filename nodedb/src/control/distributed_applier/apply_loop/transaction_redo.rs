@@ -59,6 +59,7 @@ pub(super) fn prepare_transaction_redo_entry<'a>(
         Ok(decoded) => decoded,
         Err(error) => return conclude_held(ctx, pos, HoldReason::Malformed, error, None),
     };
+    let mirror_database = entry.mirror_database();
     let target = RedoTarget {
         tenant_id: TenantId::new(entry.tenant_id),
         database_id: DatabaseId::new(entry.database_id),
@@ -67,6 +68,10 @@ pub(super) fn prepare_transaction_redo_entry<'a>(
     };
     match decoded {
         DecodedTransactionRedo::Inline(payload) => {
+            let payload = match mirror_database {
+                Some(database) => payload.in_mirror(database),
+                None => *payload,
+            };
             let claim = claim_inline(
                 ctx.state,
                 payload.calvin.as_ref(),
@@ -85,16 +90,23 @@ pub(super) fn prepare_transaction_redo_entry<'a>(
                 pos,
                 target,
                 RedoApply {
-                    payload: *payload,
+                    payload,
                     incarnations,
                     stream: None,
                     calvin,
                 },
             ))
         }
-        DecodedTransactionRedo::Chunked(chunked) => {
-            super::redo_chunk::prepare_chunked_final(ctx, pos, target, chunked, incarnations)
-        }
+        DecodedTransactionRedo::Chunked(chunked) => super::redo_chunk::prepare_chunked_final(
+            ctx,
+            pos,
+            target,
+            chunked,
+            FinalEntry {
+                incarnations,
+                mirror_database,
+            },
+        ),
     }
 }
 
@@ -117,6 +129,14 @@ pub(super) fn conclude_installed_copy<'a>(
         durable: true,
         result: None,
     })
+}
+
+/// What a chunked redo's final entry carries beside its stream.
+pub(super) struct FinalEntry {
+    /// The entry's collection incarnations, moved out of the decoded entry.
+    pub incarnations: Vec<CollectionIncarnation>,
+    /// The mirror database that applies the entry, when one does.
+    pub mirror_database: Option<u64>,
 }
 
 /// One committed redo on its way to its core.

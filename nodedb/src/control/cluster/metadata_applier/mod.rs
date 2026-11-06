@@ -52,6 +52,7 @@ mod dispatch;
 mod host_state;
 mod lease_events;
 mod membership_effects;
+mod mirror_cut;
 mod pending_ddl;
 mod restore_point;
 mod surrogate;

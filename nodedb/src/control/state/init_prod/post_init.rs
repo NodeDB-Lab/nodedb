@@ -15,13 +15,13 @@ use super::super::SharedState;
 /// map from the catalog so the Event Plane consumer has accurate data from
 /// the first write after startup, then wire the session-handle audit sink.
 ///
-/// The mirror fence load fails boot: a fence that misses a mirror admits
+/// The mirror state load fails boot: a fence that misses a mirror admits
 /// client writes to it.
 pub(super) fn hydrate_caches(state: &Arc<SharedState>) -> crate::Result<()> {
     SharedState::wire_session_handle_audit(state);
     let catalog = state.credentials.catalog();
     super::catalog_registries::load_catalog_caches(state, catalog);
-    state.mirror.fence.load_from_catalog(catalog)
+    state.mirror.load_from_catalog(catalog)
 }
 
 /// Spawn the array GC background task. The handle is stored by the caller

@@ -21,7 +21,7 @@ use nodedb_wal::WalRecord;
 use nodedb_wal::record::RecordType;
 
 use crate::types::Lsn;
-use crate::wal::{RedoChunkHeader, RedoChunkRecord, RedoRecord, RedoStreamId};
+use crate::wal::{CalvinPositionId, RedoChunkHeader, RedoChunkRecord, RedoRecord, RedoStreamId};
 
 use super::store::RedoChunkStore;
 use super::stream::OpenStream;
@@ -133,7 +133,7 @@ impl RedoChunkStore {
         }
         let applied_positions = if building
             .keys()
-            .any(|stream| matches!(stream, RedoStreamId::Calvin { .. }))
+            .any(|stream| stream.calvin_position().is_some())
         {
             stamped_positions(&redo_records)?
         } else {
@@ -146,12 +146,9 @@ impl RedoChunkStore {
                 RedoStreamId::Session {
                     idempotency_key, ..
                 } => keys.contains(&idempotency_key),
-                RedoStreamId::Calvin {
-                    vshard,
-                    epoch,
-                    position,
-                    ..
-                } => applied_positions.contains(&(vshard, epoch, position)),
+                RedoStreamId::Calvin { .. } | RedoStreamId::MirrorCalvin { .. } => stream
+                    .calvin_position()
+                    .is_some_and(|at| applied_positions.contains(&at)),
             };
             if finished {
                 closed += 1;
@@ -181,12 +178,17 @@ impl RedoChunkStore {
     }
 }
 
-/// The `(vshard, epoch, position)` every stamped transaction redo names.
-fn stamped_positions(records: &[&WalRecord]) -> crate::Result<HashSet<(u32, u64, u32)>> {
+/// The Calvin position every stamped transaction redo names.
+fn stamped_positions(records: &[&WalRecord]) -> crate::Result<HashSet<CalvinPositionId>> {
     let mut positions = HashSet::new();
     for record in records {
         if let Some(stamp) = RedoRecord::from_bytes(&record.payload)?.calvin_stamp {
-            positions.insert((stamp.vshard_id, stamp.epoch, stamp.position));
+            positions.insert(CalvinPositionId {
+                mirror_database: stamp.mirror_database,
+                vshard: stamp.vshard_id,
+                epoch: stamp.epoch,
+                position: stamp.position,
+            });
         }
     }
     Ok(positions)

@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use nodedb_types::DatabaseId;
+use nodedb_types::{DatabaseId, MirrorCutState};
 
 use crate::control::security::catalog::database_types::DatabaseDescriptor;
 use crate::control::state::SharedState;
@@ -19,15 +19,27 @@ use crate::control::state::SharedState;
 pub fn put(descriptor: DatabaseDescriptor, shared: Arc<SharedState>) {
     shared.database_metrics.ensure_database(descriptor.id);
     shared.mirror.fence.apply_descriptor(&descriptor);
+    shared.mirror.cuts.apply_descriptor(&descriptor);
 }
 
 /// Synchronous post-apply for `DeleteDatabase` — release the quota caps and
 /// metrics entry of the dropped scope, its tenants' caps included, and its
-/// mirror fence entry.
+/// mirror state.
 pub fn delete(db_id: u64, shared: Arc<SharedState>) {
     let database_id = DatabaseId::new(db_id);
     super::quota::release_database_scope(database_id, &shared);
     shared.mirror.fence.remove(database_id);
+    shared.mirror.cuts.remove(database_id);
+    shared.calvin.applied.remove_mirror_database(db_id);
+}
+
+/// Synchronous post-apply for `PutMirrorCutState` — follow the row, so the apply
+/// loop's verdict on a held entry reads it before the applied index moves.
+pub fn put_cut_state(db_id: u64, state: &MirrorCutState, shared: &SharedState) {
+    shared
+        .mirror
+        .cuts
+        .apply_state(DatabaseId::new(db_id), state);
 }
 
 /// Post-apply for `PutDatabaseGrant`. A session-lifetime identity copies the

@@ -360,6 +360,8 @@ mod tests {
             applied_cut_hlc_ns: 9,
             cap_ordinal: 9,
             positions: Vec::new(),
+            epochs: Vec::new(),
+            fence_epoch: 0,
         };
         source.raise_mirror_cut_state(db, &state).unwrap();
 
