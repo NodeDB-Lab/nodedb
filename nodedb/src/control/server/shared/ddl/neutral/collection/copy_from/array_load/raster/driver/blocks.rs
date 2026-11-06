@@ -7,7 +7,8 @@
 //! so a block costs one request per source when its data and mask chunks
 //! sit near each other. The producer reads block indexes in order into a
 //! queue of [`BLOCK_QUEUE`], so a load holds at most that many decoded
-//! block sets, one in decode and one in the load.
+//! block sets, one in decode and one in the load. Each set holds a governor
+//! reservation until the load has fed its rows.
 
 use std::sync::Arc;
 
@@ -16,12 +17,19 @@ use tokio::sync::mpsc;
 
 use super::super::fetch::{FetchError, RangeFetch};
 use super::error::DriveError;
+use super::memory::{SetGate, SetReservation, set_bytes};
 
 /// Decoded block sets queued between the producer and the load.
 pub const BLOCK_QUEUE: usize = 2;
 
 /// One block index, read from every source in source order.
 pub type BlockSet = Vec<RasterBlock>;
+
+/// A block set and the memory reservation that accounts for it.
+pub struct ReservedSet {
+    pub blocks: BlockSet,
+    _reservation: SetReservation,
+}
 
 /// Fetch `ranges`, merging close ones, and answer each range in order. An
 /// empty range answers with no bytes and no fetch.
@@ -103,16 +111,32 @@ fn decode_set(
     Ok(set)
 }
 
+/// Reserve block `index` of every reader, then read it.
+async fn read_reserved<F: RangeFetch>(
+    readers: &Arc<Vec<TiffReader>>,
+    fetch: &F,
+    index: u32,
+    gate: &SetGate,
+) -> Result<ReservedSet, DriveError> {
+    let reservation = gate.admit(set_bytes(readers, index)?).await?;
+    let blocks = read_index(readers, fetch, index).await?;
+    Ok(ReservedSet {
+        blocks,
+        _reservation: reservation,
+    })
+}
+
 /// Read `indexes` in order into `tx`. Ends at the first error, after
 /// sending it, or when the load drops its side.
 pub async fn produce_blocks<F: RangeFetch + 'static>(
     readers: Arc<Vec<TiffReader>>,
     fetch: Arc<F>,
     indexes: Vec<u32>,
-    tx: mpsc::Sender<Result<BlockSet, DriveError>>,
+    tx: mpsc::Sender<Result<ReservedSet, DriveError>>,
+    gate: SetGate,
 ) {
     for index in indexes {
-        let read = read_index(&readers, &*fetch, index).await;
+        let read = read_reserved(&readers, &*fetch, index, &gate).await;
         let failed = read.is_err();
         if tx.send(read).await.is_err() || failed {
             return;
@@ -125,9 +149,16 @@ mod tests {
     use nodedb_raster::{RasterLimits, TiffOpener};
     use nodedb_raster_load::PixelWindow;
 
+    use crate::control::server::shared::ddl::neutral::collection::copy_from::row_memory::test_support::memory_of;
     use super::super::super::fetch::memory::MemoryFetch;
+    use super::super::memory::OpenReservation;
     use super::super::open::open_sources;
     use super::*;
+
+    /// A budget far above any fixture.
+    fn roomy() -> OpenReservation {
+        OpenReservation::new(memory_of(1 << 30))
+    }
 
     /// A 64x48 cloud-optimised GeoTIFF in 16x16 tiles with two overviews
     /// and an internal mask.
@@ -145,7 +176,7 @@ mod tests {
     #[tokio::test]
     async fn a_cog_opens_in_one_round() {
         let fetch = MemoryFetch::new(vec![COG.to_vec(), COG.to_vec()]);
-        let readers = open_sources(&fetch, &[opener(0), opener(1)], LIMITS)
+        let readers = open_sources(&fetch, &[opener(0), opener(1)], LIMITS, &mut roomy())
             .await
             .expect("opens");
         assert_eq!(readers.len(), 2);
@@ -158,7 +189,7 @@ mod tests {
     #[tokio::test]
     async fn a_window_fetches_only_its_tiles() {
         let fetch = MemoryFetch::new(vec![COG.to_vec()]);
-        let readers = open_sources(&fetch, &[opener(0)], LIMITS)
+        let readers = open_sources(&fetch, &[opener(0)], LIMITS, &mut roomy())
             .await
             .expect("opens");
         let opened = fetch.calls().len();
@@ -186,7 +217,7 @@ mod tests {
     async fn every_source_reads_the_same_block_in_lockstep() {
         let fetch = MemoryFetch::new(vec![COG.to_vec(), COG.to_vec()]);
         let readers = Arc::new(
-            open_sources(&fetch, &[opener(0), opener(1)], LIMITS)
+            open_sources(&fetch, &[opener(0), opener(1)], LIMITS, &mut roomy())
                 .await
                 .expect("opens"),
         );
@@ -203,6 +234,52 @@ mod tests {
             .map(|r| r.object.0)
             .collect();
         assert!(objects.contains(&0) && objects.contains(&1), "{objects:?}");
+    }
+
+    #[tokio::test]
+    async fn an_open_over_the_budget_is_refused_before_the_fetch() {
+        let fetch = MemoryFetch::new(vec![COG.to_vec()]);
+        let mut tight = OpenReservation::new(memory_of(16));
+        let opened = open_sources(&fetch, &[opener(0)], LIMITS, &mut tight).await;
+        assert!(matches!(opened, Err(DriveError::Memory { .. })));
+        assert!(fetch.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_set_reservation_covers_what_the_set_holds() {
+        let fetch = MemoryFetch::new(vec![COG.to_vec()]);
+        let readers = open_sources(&fetch, &[opener(0)], LIMITS, &mut roomy())
+            .await
+            .expect("opens");
+        let needed = set_bytes(&readers, 5).expect("bound");
+        // 16x16 tile, at least one band, at least one byte per sample.
+        assert!(needed >= 2 * 16 * 16, "{needed}");
+        let readers = Arc::new(readers);
+        let memory = memory_of(needed as usize);
+        let gate = SetGate::new(memory.clone());
+        let set = read_reserved(&readers, &fetch, 5, &gate)
+            .await
+            .expect("fits");
+        let budget = memory.governor().budget(nodedb_mem::EngineId::Query);
+        assert_eq!(budget.allocated() as u64, needed);
+        drop(set);
+        assert_eq!(budget.allocated(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_refused_set_reaches_the_load_as_a_memory_error() {
+        let fetch = Arc::new(MemoryFetch::new(vec![COG.to_vec()]));
+        let readers = Arc::new(
+            open_sources(&*fetch, &[opener(0)], LIMITS, &mut roomy())
+                .await
+                .expect("opens"),
+        );
+        let (tx, mut rx) = mpsc::channel(BLOCK_QUEUE);
+        let gate = SetGate::new(memory_of(16));
+        produce_blocks(readers, fetch, vec![0, 1], tx, gate).await;
+        let first = rx.recv().await.expect("the refusal");
+        assert!(matches!(first, Err(DriveError::Memory { .. })));
+        assert!(rx.recv().await.is_none(), "the producer stops");
     }
 
     #[test]

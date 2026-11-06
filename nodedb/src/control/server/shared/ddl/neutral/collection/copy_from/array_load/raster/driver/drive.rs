@@ -16,6 +16,7 @@
 
 use std::sync::Arc;
 
+use nodedb_mem::{EngineId, ScopedMemory};
 use nodedb_raster::{ObjectId, RasterLimits, RasterReader, TiffOpener};
 use nodedb_raster_load::{
     BlockRows, LayoutError, RasterPlan, SourceHeader, adopted_metadata, check_same_layout,
@@ -27,7 +28,7 @@ use tokio::task::JoinHandle;
 use crate::control::server::shared::ddl::result::DdlError;
 
 use super::super::super::decode::RowError;
-use super::super::super::dispatch::{ArrayLoadCtx, input_cap};
+use super::super::super::dispatch::ArrayLoadCtx;
 use super::super::super::loader::{ArrayLoader, LoadInput};
 use super::super::adopt::adopt_attr_metadata;
 use super::super::fetch::RangeFetch;
@@ -36,9 +37,11 @@ use super::array_view::{array_view, insert_row, meta_alter, view_georef};
 use super::blocks::{BLOCK_QUEUE, produce_blocks};
 use super::error::DriveError;
 use super::load_options::load_options;
+use super::memory::{OpenReservation, SetGate};
 use super::open::open_sources;
 
-/// The most bytes one block decodes to, before the memory headroom cap.
+/// The most bytes one block decodes to. The memory governor bounds what all
+/// open loads hold together.
 const MAX_BLOCK_BYTES: usize = 64 * 1024 * 1024;
 
 /// Aborts the producer task when the load ends early.
@@ -81,14 +84,21 @@ pub(crate) async fn drive_raster<F: RangeFetch + 'static>(
             ),
         ))
     })?;
-    let cap = MAX_BLOCK_BYTES.min(input_cap(ctx.state));
+    let cap = MAX_BLOCK_BYTES;
     let limits = RasterLimits::new(cap);
+    let memory = ScopedMemory::new(
+        Arc::clone(&ctx.state.governor),
+        ctx.database_id,
+        ctx.identity.tenant_id,
+        EngineId::Array,
+    );
+    let mut open_memory = OpenReservation::new(memory.clone());
     let refuse = |loader: &ArrayLoader, e: DriveError| loader.refuse(drive_refusal(e, names, cap));
 
     let openers: Vec<TiffOpener> = (0..names.len())
         .map(|i| opener.with_object(ObjectId(u32::try_from(i).unwrap_or(u32::MAX))))
         .collect();
-    let readers = open_sources(&*fetch, &openers, limits)
+    let readers = open_sources(&*fetch, &openers, limits, &mut open_memory)
         .await
         .map_err(|e| refuse(&loader, e))?;
     let crs = crate::control::crs_context::crs_context_for(ctx.state);
@@ -138,10 +148,11 @@ pub(crate) async fn drive_raster<F: RangeFetch + 'static>(
         Arc::clone(&fetch),
         indexes,
         tx,
+        SetGate::new(memory),
     ))));
     while let Some(next) = rx.recv().await {
-        let blocks = next.map_err(|e| refuse(&loader, e))?;
-        let rows = BlockRows::new(&plan, &blocks).map_err(|e| loader.refuse(e.into()))?;
+        let set = next.map_err(|e| refuse(&loader, e))?;
+        let rows = BlockRows::new(&plan, &set.blocks).map_err(|e| loader.refuse(e.into()))?;
         loader
             .feed_rows(
                 ctx,

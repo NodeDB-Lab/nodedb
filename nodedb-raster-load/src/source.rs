@@ -145,6 +145,10 @@ mod tests {
             self.header.width.div_ceil(self.tile) * self.header.height.div_ceil(self.tile)
         }
 
+        fn block_bytes(&self) -> u64 {
+            u64::from(self.tile) * u64::from(self.tile)
+        }
+
         fn block_window(&self, index: u32) -> Result<BlockWindow, RasterError> {
             let across = self.header.width.div_ceil(self.tile);
             let (col_off, row_off) = ((index % across) * self.tile, (index / across) * self.tile);

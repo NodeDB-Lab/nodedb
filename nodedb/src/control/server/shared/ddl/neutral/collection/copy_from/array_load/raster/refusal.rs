@@ -9,6 +9,7 @@
 //!   that is undefined, or a user-defined CRS no built-in CRS matches, is
 //!   one.
 //! - A block or header over its cap is `54000`.
+//! - A load the memory governor refuses is `53200`.
 //! - A read error outside the file's bytes is `58030`.
 //! - A fetch failure reports the class [`FetchError::sqlstate`] names.
 //! - A plan refusal reports the class [`RasterLoadError::sqlstate`] names.
@@ -44,6 +45,14 @@ pub(super) fn drive_refusal(e: DriveError, names: &[String], cap: usize) -> RowE
         DriveError::Task(detail) => {
             RowError::new(0, "XX000", format!("raster decode task failed: {detail}"))
         }
+        memory @ DriveError::Memory { .. } => RowError::new(
+            0,
+            "53200",
+            format!(
+                "{memory}; load fewer sources at once, retile the file with \
+                 `gdal_translate -co TILED=YES`, or raise the memory limit"
+            ),
+        ),
     }
 }
 
@@ -103,6 +112,28 @@ fn sqlstate(e: &RasterError) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_memory_refusal_names_the_size_the_limit_and_the_next_action() {
+        let error = DriveError::Memory {
+            needed: 300,
+            refusal: nodedb_mem::MemError::BudgetExhausted {
+                engine: nodedb_mem::EngineId::Array,
+                requested: 300,
+                available: 200,
+                limit: 1000,
+            },
+        };
+        let row = drive_refusal(error, &[], 64);
+        assert_eq!(row.sqlstate, "53200");
+        assert!(row.message.contains("300 more bytes"), "{}", row.message);
+        assert!(row.message.contains("limit: 1000 bytes"), "{}", row.message);
+        assert!(
+            row.message.contains("load fewer sources"),
+            "{}",
+            row.message
+        );
+    }
 
     #[test]
     fn each_class_maps_to_its_sqlstate() {

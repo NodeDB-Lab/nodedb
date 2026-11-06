@@ -2,6 +2,7 @@
 
 //! Chunk dispatch and the refusals of an array bulk load.
 
+use nodedb_mem::MemError;
 use nodedb_sql::SqlError;
 use nodedb_sql::catalog::SqlCatalog;
 use nodedb_sql::engine_rules::{BulkLoadParams, BulkLoadPlan};
@@ -71,19 +72,11 @@ pub(super) async fn dispatch_chunk(
     Ok(())
 }
 
-/// The most bytes one incomplete record of a COPY stream holds: the array
-/// engine's memory budget headroom when the load opens.
-pub(super) fn input_cap(state: &SharedState) -> usize {
-    state
-        .governor
-        .budget(nodedb_mem::EngineId::Array)
-        .available()
-}
-
-/// The `54000` refusal of an incomplete record past [`input_cap`].
+/// The `54000` refusal of an incomplete record of `len` bytes that the memory
+/// governor refuses to hold.
 pub(super) fn record_over_cap(
     len: usize,
-    cap: usize,
+    refusal: &MemError,
     row: usize,
     label: &str,
     committed: u64,
@@ -91,8 +84,8 @@ pub(super) fn record_over_cap(
     let e = DdlError::new(
         "54000",
         format!(
-            "{len} bytes hold no record end, over the array engine's {cap}-byte memory \
-             headroom; check the input's line breaks and quotes"
+            "{len} bytes hold no record end, and the memory governor refuses to hold them: \
+             {refusal}; check the input's line breaks and quotes"
         ),
     );
     refuse(e, row, label, committed)
@@ -171,12 +164,19 @@ mod tests {
 
     #[test]
     fn an_endless_record_is_refused_with_54000() {
-        let e = record_over_cap(300, 200, 7, "CSV", 0);
+        let refusal = MemError::BudgetExhausted {
+            engine: nodedb_mem::EngineId::Array,
+            requested: 300,
+            available: 200,
+            limit: 1000,
+        };
+        let e = record_over_cap(300, &refusal, 7, "CSV", 0);
         assert_eq!(e.sqlstate, "54000");
         assert!(
             e.message.starts_with("COPY: CSV row 7: 300 bytes"),
             "{}",
             e.message
         );
+        assert!(e.message.contains("limit: 1000 bytes"), "{}", e.message);
     }
 }

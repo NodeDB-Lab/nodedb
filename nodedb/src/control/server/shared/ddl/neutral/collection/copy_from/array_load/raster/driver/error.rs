@@ -2,6 +2,7 @@
 
 //! `DriveError`: why reading the sources of a raster load failed.
 
+use nodedb_mem::MemError;
 use nodedb_raster::RasterError;
 
 use super::super::fetch::FetchError;
@@ -17,4 +18,7 @@ pub enum DriveError {
     Fetch(#[from] FetchError),
     #[error("raster decode task failed: {0}")]
     Task(String),
+    /// The memory governor refuses what the load needs next.
+    #[error("the raster load needs {needed} more bytes: {refusal}")]
+    Memory { needed: u64, refusal: MemError },
 }

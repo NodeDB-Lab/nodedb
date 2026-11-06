@@ -17,6 +17,9 @@
 //! back whole. A chunk that takes the staged redo past the WAL record cap is
 //! refused with `54000` before it stages.
 
+use std::sync::Arc;
+
+use nodedb_mem::{EngineId, ScopedMemory};
 use nodedb_sql::catalog::ArrayCatalogView;
 use nodedb_sql::types_array::ArrayInsertRow;
 use nodedb_types::Value;
@@ -30,11 +33,12 @@ use super::super::entry::bulk_load_refusal;
 use super::chunker::{ARRAY_COPY_CHUNK_BYTES, ArrayChunker, Chunk};
 use super::decode::{RowError, wire_bound};
 use super::dispatch::{
-    ArrayLoadCtx, check_redo_cap, dispatch_chunk, input_cap, record_over_cap, refuse, refuse_row,
+    ArrayLoadCtx, check_redo_cap, dispatch_chunk, record_over_cap, refuse, refuse_row,
 };
 use super::records::{RecordBoundary, check_delimiter};
 use super::router::CellRouter;
 use super::source::{RowSource, TextFormat, TextSlice};
+use super::tail::RecordTail;
 
 /// What a load reads its rows from.
 pub(crate) enum LoadInput {
@@ -49,10 +53,11 @@ pub(crate) enum LoadInput {
 /// One open array bulk load. Errors carry their SQLSTATE: `22P02` for a
 /// wrong column count or an unparsable value, `23502` for a NULL in a NOT
 /// NULL column, `22003` for a coordinate outside its dim domain, `42703`
-/// for a header that does not name the schema's columns, `54000` for a
-/// record with no end inside the memory headroom or a block's redo over the
-/// WAL record cap, and the Data Plane's own class, such as `53200` under
-/// memory pressure. A row error names the row and how many rows committed.
+/// for a header that does not name the schema's columns, `54000` for an
+/// incomplete record the memory governor refuses to hold or a block's redo
+/// over the WAL record cap, and the Data Plane's own class, such as `53200`
+/// under memory pressure. A row error names the row and how many rows
+/// committed.
 pub(crate) struct ArrayLoader {
     target: LoadTarget,
     progress: LoadProgress,
@@ -87,14 +92,12 @@ struct TextStream {
     format: TextFormat,
     boundary: RecordBoundary,
     /// The bytes of the record the last slice left incomplete.
-    tail: Vec<u8>,
+    tail: RecordTail,
     /// The 1-based number of the next record.
     next_record_no: usize,
     header_pending: bool,
     /// Whether the stream met the `\.` end-of-data line.
     ended: bool,
-    /// The most bytes `tail` holds.
-    cap: usize,
 }
 
 impl ArrayLoader {
@@ -127,11 +130,15 @@ impl ArrayLoader {
                 let stream = TextStream {
                     format,
                     boundary: RecordBoundary::new(format.format, format.delimiter()),
-                    tail: Vec::new(),
+                    tail: RecordTail::new(ScopedMemory::new(
+                        Arc::clone(&ctx.state.governor),
+                        ctx.database_id,
+                        tenant_id,
+                        EngineId::Array,
+                    )),
                     next_record_no: 1,
                     header_pending: format.header,
                     ended: false,
-                    cap: input_cap(ctx.state),
                 };
                 (format.label(), Some(stream))
             }
@@ -178,20 +185,18 @@ impl ArrayLoader {
         let mut rest = bytes;
         if !stream.tail.is_empty() {
             let Some(end) = stream.boundary.scan(rest, true) else {
-                stream.tail.extend_from_slice(rest);
-                return stream.check_tail(target.label, progress.committed);
+                return stream.carry(rest, target.label, progress.committed);
             };
-            stream.tail.extend_from_slice(&rest[..end]);
+            stream.carry(&rest[..end], target.label, progress.committed)?;
             rest = &rest[end..];
-            let mut carried = std::mem::take(&mut stream.tail);
+            let carried = stream.tail.take();
             progress.take_records(ctx, target, stream, &carried).await?;
-            carried.clear();
-            stream.tail = carried;
+            stream.tail.reuse(carried);
             if stream.ended {
                 return Ok(());
             }
         }
-        match stream.boundary.scan(rest, false) {
+        let left = match stream.boundary.scan(rest, false) {
             Some(end) => {
                 progress
                     .take_records(ctx, target, stream, &rest[..end])
@@ -199,11 +204,11 @@ impl ArrayLoader {
                 if stream.ended {
                     return Ok(());
                 }
-                stream.tail.extend_from_slice(&rest[end..]);
+                &rest[end..]
             }
-            None => stream.tail.extend_from_slice(rest),
-        }
-        stream.check_tail(target.label, progress.committed)
+            None => rest,
+        };
+        stream.carry(left, target.label, progress.committed)
     }
 
     /// Load one native request's columns: one per dim, then one per attr,
@@ -265,7 +270,7 @@ impl ArrayLoader {
             && !stream.ended
             && !stream.tail.is_empty()
         {
-            let carried = std::mem::take(&mut stream.tail);
+            let carried = stream.tail.take();
             progress.take_records(ctx, target, stream, &carried).await?;
         }
         for chunk in progress.chunker.finish() {
@@ -276,18 +281,18 @@ impl ArrayLoader {
 }
 
 impl TextStream {
-    /// Refuse an incomplete record past the memory headroom.
-    fn check_tail(&self, label: &str, committed: u64) -> Result<(), DdlError> {
-        if self.tail.len() <= self.cap {
-            return Ok(());
-        }
-        Err(record_over_cap(
-            self.tail.len(),
-            self.cap,
-            self.next_record_no,
-            label,
-            committed,
-        ))
+    /// Carry `bytes` of an incomplete record to the next slice. A record the
+    /// memory governor refuses to hold stops the load.
+    fn carry(&mut self, bytes: &[u8], label: &str, committed: u64) -> Result<(), DdlError> {
+        self.tail.extend(bytes).map_err(|refusal| {
+            record_over_cap(
+                self.tail.len().saturating_add(bytes.len()),
+                &refusal,
+                self.next_record_no,
+                label,
+                committed,
+            )
+        })
     }
 
     /// The 1-based number of the record that holds byte `offset` of a run
