@@ -5,6 +5,7 @@
 mod admission_op;
 mod array_batch;
 mod auth;
+mod batch_admission;
 mod cluster_array;
 mod conversion;
 mod ctx;
