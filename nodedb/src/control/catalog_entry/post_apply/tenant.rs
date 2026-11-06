@@ -52,6 +52,7 @@ pub fn delete(tenant_id: u64, shared: Arc<SharedState>) {
         tenants.remove_quota(tid);
     }
     super::quota::release_tenant_scope(tid, &shared);
+    shared.database_metrics.remove_tenant(tenant_id);
     tracing::debug!(tenant = tenant_id, "post_apply: tenant identity removed");
 }
 

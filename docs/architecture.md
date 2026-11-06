@@ -328,11 +328,14 @@ All resource consumption is observable via Prometheus metrics prefixed `nodedb_`
 - `maintenance_lease_seconds_total` — Cumulative wall seconds holding a maintenance lease
 - `mirror_lag_ms` — Replication lag to follower replicas (distributed deployments)
 
-**Per-Tenant Metrics** (`nodedb_tenant_*{database="<name>", tenant="<tenant>"}`):
+**Per-Tenant Metrics in a Database** (`nodedb_tenant_*{tenant_id="<id>", database="<name>"}`):
 
-- `qps` — Requests per second
-- `memory_bytes` — Total memory reserved
-- `storage_bytes` — Cumulative storage on-disk
+- `qps_total` — Cumulative requests admitted
+
+**Per-Tenant Metrics** (`nodedb_tenant_*{tenant_id="<id>"}`):
+
+- `memory_used_bytes` — Current memory consumption
+- `storage_used_bytes` — Current storage consumption
 
 Counters are incremented at the sites where resources are consumed:
 

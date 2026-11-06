@@ -23,6 +23,8 @@ use super::histogram::AtomicHistogram;
 pub struct DatabaseCounters {
     /// Cumulative requests admitted.
     pub qps_total: AtomicU64,
+    /// Cumulative requests admitted in this database, per tenant.
+    pub tenant_qps_total: RwLock<HashMap<u64, u64>>,
     /// Cumulative query errors.
     pub errors_total: AtomicU64,
     /// Current collection count.
@@ -114,6 +116,43 @@ impl DatabaseMetricsRegistry {
     pub fn record_qps(&self, db: DatabaseId) {
         if let Some(c) = self.get(db) {
             c.qps_total.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Count one request `tenant_id` had admitted in `db`, in both the
+    /// database series and the tenant series. No-op when `db` has no entry.
+    pub fn record_tenant_qps(&self, db: DatabaseId, tenant_id: u64) {
+        if let Some(c) = self.get(db) {
+            c.qps_total.fetch_add(1, Ordering::Relaxed);
+            let mut tenants = c
+                .tenant_qps_total
+                .write()
+                .unwrap_or_else(|p| p.into_inner());
+            *tenants.entry(tenant_id).or_default() += 1;
+        }
+    }
+
+    /// Requests `tenant_id` had admitted in `db`.
+    pub fn tenant_qps_total(&self, db: DatabaseId, tenant_id: u64) -> u64 {
+        self.get(db).map_or(0, |c| {
+            c.tenant_qps_total
+                .read()
+                .unwrap_or_else(|p| p.into_inner())
+                .get(&tenant_id)
+                .copied()
+                .unwrap_or(0)
+        })
+    }
+
+    /// Remove the series of a dropped tenant from every database.
+    pub fn remove_tenant(&self, tenant_id: u64) {
+        let r = self.counters.read().unwrap_or_else(|p| p.into_inner());
+        for counters in r.values() {
+            counters
+                .tenant_qps_total
+                .write()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&tenant_id);
         }
     }
 
@@ -267,6 +306,23 @@ mod tests {
         reg.ensure_database(db(1));
         reg.record_qps(db(1));
         reg.record_qps(db(1));
+        assert_eq!(reg.qps_total(db(1)), 2);
+    }
+
+    #[test]
+    fn a_tenant_series_counts_each_database_apart() {
+        let reg = DatabaseMetricsRegistry::new();
+        reg.ensure_database(db(1));
+        reg.ensure_database(db(2));
+        reg.record_tenant_qps(db(1), 7);
+        reg.record_tenant_qps(db(1), 7);
+        reg.record_tenant_qps(db(2), 7);
+        assert_eq!(reg.tenant_qps_total(db(1), 7), 2);
+        assert_eq!(reg.tenant_qps_total(db(2), 7), 1);
+        assert_eq!(reg.qps_total(db(1)), 2);
+
+        reg.remove_tenant(7);
+        assert_eq!(reg.tenant_qps_total(db(1), 7), 0);
         assert_eq!(reg.qps_total(db(1)), 2);
     }
 

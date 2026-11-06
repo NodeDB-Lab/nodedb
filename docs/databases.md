@@ -387,11 +387,16 @@ nodedb_database_wal_commit_latency_p99_us{database="prod"}
 nodedb_database_maintenance_lease_seconds_total{database="prod"}
 ```
 
-Similarly, tenant metrics are labeled by both database and tenant:
+Tenant request counts are labeled by tenant id and database. The series counts requests admitted in that database:
 
 ```
-nodedb_tenant_qps{database="prod", tenant="acme"}
-nodedb_tenant_memory_bytes{database="prod", tenant="acme"}
+nodedb_tenant_qps_total{tenant_id="7", database="prod"}
+```
+
+Other tenant metrics cover the tenant across all databases, so they carry `tenant_id` only:
+
+```
+nodedb_tenant_memory_used_bytes{tenant_id="7"}
 ```
 
 Metrics are updated continuously and exposed via `/metrics` on the HTTP port.

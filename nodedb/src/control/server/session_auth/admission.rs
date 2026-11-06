@@ -78,7 +78,9 @@ pub fn check_request_admission(
         database_id,
     )?;
 
-    state.database_metrics.record_qps(database_id);
+    state
+        .database_metrics
+        .record_tenant_qps(database_id, scope.identity().tenant_id.as_u64());
     Ok(Some(result))
 }
 
@@ -115,7 +117,9 @@ pub fn check_blacklist_and_status(
     scope.auth().check_status()?;
     check_risk(state, scope.identity(), scope.auth(), peer_addr)?;
 
-    state.database_metrics.record_qps(scope.database_id());
+    state
+        .database_metrics
+        .record_tenant_qps(scope.database_id(), scope.identity().tenant_id.as_u64());
     Ok(())
 }
 
