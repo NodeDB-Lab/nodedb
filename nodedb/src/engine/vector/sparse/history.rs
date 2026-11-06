@@ -94,6 +94,9 @@ impl SparseHistory {
         if sys_from >= sys_to {
             return;
         }
+        // A prior version under this id leaves with its postings, so a read
+        // never scores the new span with the old weights.
+        self.remove_ended(id);
         let mut dims = Vec::with_capacity(entries.len());
         for &(dim, weight) in entries {
             self.ended_postings
@@ -109,9 +112,7 @@ impl SparseHistory {
             sys_to,
         };
         self.ended_bytes += ended_version_bytes(&version);
-        if let Some(replaced) = self.ended.insert(id, version) {
-            self.ended_bytes -= ended_version_bytes(&replaced);
-        }
+        self.ended.insert(id, version);
     }
 
     /// Remove ended version `id` and return it with its entries. `None`
@@ -231,6 +232,22 @@ fn ended_version_bytes(version: &EndedVersion) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An id that ends twice keeps only its newest postings. Older dimensions
+    /// never score under the new span, and a purge leaves nothing behind.
+    #[test]
+    fn ending_an_id_again_replaces_its_postings_and_its_bytes() {
+        let mut h = SparseHistory::default();
+        h.end(1, "d".into(), &[(5, 0.5)], 10, 20);
+        h.end(1, "d".into(), &[(6, 0.7), (7, 0.9)], 20, 30);
+        assert!(h.ended_postings(5).is_empty());
+        assert_eq!(h.ended_postings(6), &[(1, 0.7)]);
+        assert_eq!(h.ended_count(), 1);
+
+        h.purge_below(30);
+        assert!(h.ended_postings(6).is_empty());
+        assert_eq!(h.resident_bytes(), 0);
+    }
 
     #[test]
     fn an_ended_version_is_visible_over_its_span_only() {
