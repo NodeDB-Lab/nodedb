@@ -13,7 +13,7 @@
 //! Using these aliases in field declarations makes the intended semantics
 //! self-documenting and ensures a single canonical width per concept.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use web_time::{SystemTime, UNIX_EPOCH};
 
 /// A wall-clock instant expressed as signed milliseconds since the Unix epoch
 /// (UTC). Negative values represent dates before 1970-01-01.
