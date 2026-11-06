@@ -369,6 +369,8 @@ KILL SESSION 'sid_abc123';
 
 `KILL SESSION` requires `Superuser` or `DatabaseOwner` of the session's database. Idle sessions are force-closed; active sessions are marked for revocation and close at the next request boundary.
 
+To end every session of one user, see `KILL USER SESSIONS` in [Session Management](security/sessions.md#killing-every-session-of-a-user).
+
 ## Per-Database Metrics
 
 NodeDB exposes per-database metrics for observability:

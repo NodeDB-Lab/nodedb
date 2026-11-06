@@ -386,6 +386,8 @@ ALTER TENANT acme IN DATABASE prod_us SET QUOTA (max_memory_bytes=1073741824);
 -- View sessions and kill idle ones
 SHOW SESSIONS [IN DATABASE prod_us];
 KILL SESSION 'sid_abc123';
+KILL USER SESSIONS '42';      -- a credential-store user
+KILL USER SESSIONS '42' OIDC; -- an OIDC principal with that user_id
 
 -- Audit events tagged by database
 SHOW AUDIT IN DATABASE prod_us [WHERE event_type = 'database_quota_changed'] [LIMIT n];

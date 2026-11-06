@@ -5,8 +5,12 @@
 
 use std::net::IpAddr;
 
+/// The prefix bits of the IPv4-mapped range `::ffff:0:0/96`.
+const MAPPED_PREFIX_BITS: u8 = 96;
+
 /// An IPv4 or IPv6 address block. A block matches only addresses of its
-/// own family. An IPv4-mapped IPv6 address matches as its IPv4 form.
+/// own family. An IPv4-mapped IPv6 address matches as its IPv4 form, and a
+/// block inside the IPv4-mapped range is the IPv4 block it names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cidr {
     base: u128,
@@ -33,7 +37,8 @@ impl Cidr {
         if prefix_len > width {
             return None;
         }
-        let mask = mask_of(prefix_len, width);
+        let (ip, prefix_len) = canonical_block(ip, prefix_len);
+        let mask = mask_of(prefix_len, family_width(&ip));
         Some(Self {
             base: bits_of(&ip) & mask,
             mask,
@@ -52,6 +57,19 @@ impl Cidr {
         let ip = ip.to_canonical();
         ip.is_ipv4() == self.is_v4 && bits_of(&ip) & self.mask == self.base
     }
+}
+
+/// The block as it matches. An address that matches arrives in its IPv4 form,
+/// so a block inside `::ffff:0:0/96` becomes the IPv4 block it names:
+/// `::ffff:10.0.0.0/104` is `10.0.0.0/8`.
+fn canonical_block(ip: IpAddr, prefix_len: u8) -> (IpAddr, u8) {
+    if let IpAddr::V6(v6) = ip
+        && prefix_len >= MAPPED_PREFIX_BITS
+        && let Some(v4) = v6.to_ipv4_mapped()
+    {
+        return (IpAddr::V4(v4), prefix_len - MAPPED_PREFIX_BITS);
+    }
+    (ip, prefix_len)
 }
 
 /// The address width of `ip`'s family in bits.
@@ -126,7 +144,27 @@ mod tests {
     #[test]
     fn a_mapped_address_matches_as_ipv4() {
         assert!(cidr("10.0.0.0/8").contains(&ip("::ffff:10.0.0.5")));
-        assert!(!cidr("::ffff:0:0/96").contains(&ip("::ffff:10.0.0.5")));
+    }
+
+    #[test]
+    fn a_block_inside_the_mapped_range_is_its_ipv4_block() {
+        let mapped_slash_8 = cidr("::ffff:10.0.0.0/104");
+        assert_eq!(mapped_slash_8, cidr("10.0.0.0/8"));
+        assert_eq!(mapped_slash_8.prefix_len(), 8);
+        assert!(mapped_slash_8.contains(&ip("10.1.2.3")));
+        assert!(mapped_slash_8.contains(&ip("::ffff:10.1.2.3")));
+        assert!(!mapped_slash_8.contains(&ip("11.0.0.1")));
+        assert!(!mapped_slash_8.contains(&ip("::ffff:11.0.0.1")));
+
+        assert_eq!(cidr("::ffff:0:0/96"), cidr("0.0.0.0/0"));
+        assert_eq!(cidr("::ffff:192.168.1.100"), cidr("192.168.1.100"));
+    }
+
+    /// A shorter prefix reaches outside the mapped range, so it stays IPv6.
+    #[test]
+    fn a_block_wider_than_the_mapped_range_stays_ipv6() {
+        assert!(!cidr("::ffff:0:0/95").contains(&ip("10.0.0.1")));
+        assert!(cidr("::ffff:0:0/95").contains(&ip("::fffe:0:1")));
     }
 
     #[test]

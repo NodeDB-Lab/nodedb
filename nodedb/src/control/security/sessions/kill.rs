@@ -9,6 +9,7 @@
 use std::net::SocketAddr;
 
 use super::registry::{AUTH_METHOD_OIDC, KillReason, RegisteredSession, SessionRegistry};
+use crate::control::security::blacklist::store::user_entry_id;
 
 impl SessionRegistry {
     /// Signal every session `selects` accepts. Returns the number signalled.
@@ -26,12 +27,6 @@ impl SessionRegistry {
         killed
     }
 
-    /// Kill all sessions carrying `user_id`, whatever their auth method.
-    /// `KILL USER SESSIONS` names sessions this way.
-    pub fn kill_sessions_for_user(&self, user_id: u64, reason: KillReason) -> usize {
-        self.kill_where(reason, |s| s.user_id == user_id)
-    }
-
     /// Kill all sessions of the credential-store user `user_id`.
     ///
     /// An OIDC session carries the `user_id` of its token claims. That number
@@ -40,6 +35,14 @@ impl SessionRegistry {
     pub fn kill_sessions_for_stored_user(&self, user_id: u64, reason: KillReason) -> usize {
         self.kill_where(reason, |s| {
             s.user_id == user_id && s.auth_method != AUTH_METHOD_OIDC
+        })
+    }
+
+    /// Kill all OIDC sessions whose token claims carry `user_id`. A
+    /// credential-store user with an equal number stays connected.
+    pub fn kill_sessions_for_oidc_user(&self, user_id: u64, reason: KillReason) -> usize {
+        self.kill_where(reason, |s| {
+            s.user_id == user_id && s.auth_method == AUTH_METHOD_OIDC
         })
     }
 
@@ -65,12 +68,18 @@ impl SessionRegistry {
         self.kill_where(reason, |s| s.api_key_id.as_deref() == Some(key_id))
     }
 
-    /// Kill all sessions of a principal named the way the blacklist names one:
-    /// the decimal `user_id` the auth context carries, or the username.
-    pub fn kill_sessions_for_principal(&self, principal: &str, reason: KillReason) -> usize {
-        let user_id = principal.parse::<u64>().ok();
+    /// Kill the sessions a blacklist entry for `blacklisted_id` refuses.
+    ///
+    /// `check_blacklist` compares the entry with [`user_entry_id`], which reads
+    /// no auth method. So a number covers stored and OIDC principals alike, and
+    /// this kills exactly that set.
+    pub fn kill_sessions_for_blacklisted_user(
+        &self,
+        blacklisted_id: &str,
+        reason: KillReason,
+    ) -> usize {
         self.kill_where(reason, |s| {
-            s.db_user == principal || Some(s.user_id) == user_id
+            user_entry_id(s.user_id, &s.db_user) == blacklisted_id
         })
     }
 

@@ -4,6 +4,7 @@
 //! and rate-limit checks.
 
 use crate::control::security::auth_context::AuthContext;
+use crate::control::security::blacklist::store::user_entry_id;
 use crate::control::security::escalation::{
     AuthViolation, ViolationSubject, record_auth_violation,
 };
@@ -20,7 +21,7 @@ pub fn check_blacklist(
     peer_addr: &str,
 ) -> crate::Result<()> {
     // Check user blacklist.
-    let user_id = identity.user_id.to_string();
+    let user_id = user_entry_id(identity.user_id, &identity.username);
     if let Some(entry) = state.blacklist.check_user(&user_id) {
         record_auth_violation(
             state,
@@ -310,6 +311,39 @@ mod tests {
         let state = SharedState::new_with_tls_policy_config(dispatcher, wal, config)
             .expect("construct shared state");
         (state, dir)
+    }
+
+    /// An entry names no auth method. A number refuses an OIDC identity with
+    /// that number, and a subject refuses a token with no `user_id` claim.
+    #[test]
+    fn a_user_entry_refuses_by_number_across_auth_methods_and_by_subject() {
+        let (state, _dir) = test_state(tls_policy_config(false, "1.2", false));
+        let oidc = |user_id: u64, username: &str| {
+            AuthenticatedIdentity::new_regular(
+                user_id,
+                username,
+                TenantId::new(1),
+                AuthMethod::OidcBearer,
+                vec![Role::ReadWrite],
+                None,
+                DatabaseSet::Some(smallvec::smallvec![DatabaseId::DEFAULT]),
+            )
+        };
+        let peer = "10.0.0.1:1";
+        state
+            .blacklist
+            .blacklist_user("77", "abuse", "admin", 0)
+            .expect("blacklist a number");
+        state
+            .blacklist
+            .blacklist_user("sub-a", "abuse", "admin", 0)
+            .expect("blacklist a subject");
+
+        assert!(check_blacklist(&state, &oidc(77, "sub-x"), peer).is_err());
+        assert!(check_blacklist(&state, &oidc(0, "sub-a"), peer).is_err());
+        assert!(check_blacklist(&state, &oidc(0, "sub-b"), peer).is_ok());
+        // A subject never stands in for a number the identity carries.
+        assert!(check_blacklist(&state, &oidc(78, "sub-a"), peer).is_ok());
     }
 
     fn tls_policy_config(enabled: bool, min: &str, reject_cleartext: bool) -> TlsPolicyConfig {

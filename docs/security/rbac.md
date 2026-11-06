@@ -138,6 +138,7 @@ Who can execute cluster and database-scoped DDL:
 | `BACKUP DATABASE`                     | Superuser or DatabaseOwner                      |
 | `RESTORE DATABASE`                    | Superuser or DatabaseOwner; Superuser for a database that does not exist |
 | `KILL SESSION`                        | Superuser, ClusterAdmin, or session owner       |
+| `KILL USER SESSIONS '<id>' [OIDC]`    | Superuser                                       |
 | `CREATE/ALTER/DROP OIDC PROVIDER`     | Superuser or ClusterAdmin                       |
 
 **Permission denials** emit `PermissionDenied` audit entries and return `INSUFFICIENT_PRIVILEGE` (SQLSTATE 42501).

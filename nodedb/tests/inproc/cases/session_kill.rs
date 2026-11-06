@@ -10,7 +10,9 @@ use futures::StreamExt;
 
 use nodedb::bridge::dispatch::Dispatcher;
 use nodedb::control::security::identity::{AuthenticatedIdentity, Role};
-use nodedb::control::security::sessions::{KillReason, SessionBindRequest, bind_session};
+use nodedb::control::security::sessions::{
+    AUTH_METHOD_OIDC, KillReason, SessionBindRequest, SessionParams, bind_session,
+};
 use nodedb::control::server::session_auth::trust_identity;
 use nodedb::control::state::SharedState;
 use nodedb::types::TenantId;
@@ -179,6 +181,58 @@ async fn kill_user_sessions_ends_every_session_of_the_user() {
 
     assert_connection_closed(first).await;
     assert_connection_closed(second).await;
+}
+
+/// A stored user and an OIDC principal can hold the same number. The statement
+/// names one of them, and the other stays connected.
+#[tokio::test]
+async fn kill_user_sessions_names_one_principal_for_a_shared_number() {
+    let server = TestServer::start().await;
+    let (_client, stored) = connected_user(&server, "numbered").await;
+    let user_id = server
+        .shared
+        .credentials
+        .get_user("numbered")
+        .expect("user")
+        .user_id;
+    let oidc = server
+        .shared
+        .session_registry
+        .register(
+            "oidc-same-number",
+            &SessionParams {
+                user_id,
+                username: "external_user".to_string(),
+                db_user: "external_user".to_string(),
+                peer_addr: "10.0.0.9:1".to_string(),
+                protocol: "native".to_string(),
+                auth_method: AUTH_METHOD_OIDC.to_string(),
+                tenant_id: 1,
+                credential_version: 0,
+                current_database: None,
+                token_expiry_ms: None,
+                api_key_id: None,
+            },
+        )
+        .expect("register");
+
+    server
+        .exec(&format!("KILL USER SESSIONS '{user_id}'"))
+        .await
+        .expect("kill stored user");
+    assert_connection_closed(stored).await;
+    assert_eq!(*oidc.borrow(), KillReason::Alive);
+
+    server
+        .exec(&format!("KILL USER SESSIONS '{user_id}' OIDC"))
+        .await
+        .expect("kill oidc user");
+    assert_eq!(*oidc.borrow(), KillReason::AdminKill);
+
+    let refused = server
+        .exec(&format!("KILL USER SESSIONS '{user_id}' ALL"))
+        .await;
+    assert!(refused.is_err(), "an unknown qualifier is refused");
 }
 
 /// The blacklist names a principal by the id its auth context carries.

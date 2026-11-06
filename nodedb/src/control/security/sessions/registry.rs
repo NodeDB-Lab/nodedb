@@ -437,6 +437,22 @@ mod tests {
     }
 
     #[test]
+    fn an_oidc_user_kill_leaves_a_stored_user_with_an_equal_number() {
+        let reg = SessionRegistry::new();
+        let stored = reg
+            .register("s1", &params(7, "10.0.0.1:1", "native"))
+            .unwrap();
+        let mut external = params(7, "10.0.0.2:1", "native");
+        external.auth_method = AUTH_METHOD_OIDC.to_string();
+        let external = reg.register("s2", &external).unwrap();
+
+        assert_eq!(reg.kill_sessions_for_oidc_user(7, KillReason::AdminKill), 1);
+
+        assert_eq!(*stored.borrow(), KillReason::Alive);
+        assert_eq!(*external.borrow(), KillReason::AdminKill);
+    }
+
+    #[test]
     fn an_api_key_kill_ends_the_sessions_of_that_key_only() {
         let reg = SessionRegistry::new();
         let mut first = params(7, "10.0.0.1:1", "native");
@@ -456,27 +472,48 @@ mod tests {
     }
 
     #[test]
-    fn a_principal_kill_matches_the_id_and_the_name() {
+    fn a_blacklist_kill_matches_the_set_the_entry_refuses() {
         let reg = SessionRegistry::new();
-        let by_id = reg
+        let stored = reg
             .register("s1", &params(42, "10.0.0.1:1", "native"))
             .unwrap();
-        let mut named = params(43, "10.0.0.1:2", "native");
-        named.db_user = "alice".to_string();
-        let named = reg.register("s2", &named).unwrap();
+        let mut oidc = params(42, "10.0.0.2:1", "native");
+        oidc.auth_method = AUTH_METHOD_OIDC.to_string();
+        let oidc = reg.register("s2", &oidc).unwrap();
+        // An OIDC username is its token's subject, so it can read as a number.
+        let mut named = params(43, "10.0.0.3:1", "native");
+        named.db_user = "42".to_string();
+        let named = reg.register("s3", &named).unwrap();
 
         assert_eq!(
-            reg.kill_sessions_for_principal("42", KillReason::AdminKill),
-            1
+            reg.kill_sessions_for_blacklisted_user("alice", KillReason::AdminKill),
+            0
         );
-        assert_eq!(*by_id.borrow(), KillReason::AdminKill);
+        assert_eq!(
+            reg.kill_sessions_for_blacklisted_user("042", KillReason::AdminKill),
+            0,
+            "an entry key is the exact decimal form"
+        );
+        assert_eq!(*stored.borrow(), KillReason::Alive);
+
+        assert_eq!(
+            reg.kill_sessions_for_blacklisted_user("42", KillReason::AdminKill),
+            2
+        );
+        assert_eq!(*stored.borrow(), KillReason::AdminKill);
+        assert_eq!(*oidc.borrow(), KillReason::AdminKill);
         assert_eq!(*named.borrow(), KillReason::Alive);
 
+        // A token with no `user_id` claim goes by its subject.
+        let mut subject = params(0, "10.0.0.4:1", "native");
+        subject.db_user = "sub-a".to_string();
+        subject.auth_method = AUTH_METHOD_OIDC.to_string();
+        let subject = reg.register("s4", &subject).unwrap();
         assert_eq!(
-            reg.kill_sessions_for_principal("alice", KillReason::AdminKill),
+            reg.kill_sessions_for_blacklisted_user("sub-a", KillReason::AdminKill),
             1
         );
-        assert_eq!(*named.borrow(), KillReason::AdminKill);
+        assert_eq!(*subject.borrow(), KillReason::AdminKill);
     }
 
     #[test]
@@ -552,7 +589,7 @@ mod tests {
             .unwrap();
         assert!(!rx.has_changed().unwrap_or(false));
 
-        let killed = reg.kill_sessions_for_user(99, KillReason::UserDropped);
+        let killed = reg.kill_sessions_for_stored_user(99, KillReason::UserDropped);
         assert_eq!(killed, 1);
         assert!(rx.has_changed().unwrap_or(false));
         assert_eq!(*rx.borrow_and_update(), KillReason::UserDropped);
