@@ -219,7 +219,7 @@ async fn answer<R: tokio::io::AsyncRead + Unpin>(
 }
 
 /// Write `response` and finish the stream. A batch past the frame bound answers
-/// a refusal, so the client never reads a frame it would refuse.
+/// a refusal, so the client never reads a frame past its own bound.
 async fn reply(send: &mut quinn::SendStream, response: &MirrorResponse) -> Result<(), MirrorError> {
     let payload = match encode_frame(response, MAX_RESPONSE_FRAME) {
         Ok(payload) => payload,

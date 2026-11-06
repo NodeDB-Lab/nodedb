@@ -38,7 +38,7 @@ pub enum MirrorError {
         computed: u32,
     },
 
-    /// The cross-cluster handshake wire message could not be decoded.
+    /// The cross-cluster handshake wire message did not decode.
     #[error("cross-cluster handshake codec error: {detail}")]
     HandshakeCodec { detail: String },
 
@@ -46,8 +46,8 @@ pub enum MirrorError {
     #[error("cross-cluster transport error: {detail}")]
     Transport { detail: String },
 
-    /// Observer-side bytes-in-flight cap was exceeded; the source should
-    /// pause sending until the observer drains.
+    /// The observer's bytes-in-flight cap was exceeded. The source pauses until
+    /// the observer drains.
     #[error(
         "bytes-in-flight cap exceeded: in_flight={in_flight}, cap={cap} for mirror {database_id:?}"
     )]

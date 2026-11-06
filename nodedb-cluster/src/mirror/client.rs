@@ -6,8 +6,8 @@
 //! one. A replica can answer `LogTruncated` alone: a snapshot install moves one
 //! replica's log start past a position its peers still hold. So a fetch tries
 //! every seed before it reports truncation, and it reports truncation only once
-//! no replica can still answer. A seed it could not reach might hold the
-//! entries, so that outcome stays a transport error, which a later fetch retries.
+//! no replica can still answer. An unreached seed can still hold the entries, so
+//! that outcome stays a transport error, which a later fetch retries.
 
 use std::sync::Arc;
 
@@ -162,8 +162,8 @@ fn tail_answer(response: MirrorResponse) -> Result<MirrorTailBatch, MirrorError>
     }
 }
 
-/// Refuse a batch that moves backward or names an index it did not cover. A
-/// mirror that trusted one would re-apply or skip source entries.
+/// Refuse a batch that moves backward or names an index it did not cover. Such
+/// a batch re-applies or skips source entries.
 fn check_progress(request: &MirrorTailRequest, batch: &MirrorTailBatch) -> Result<(), MirrorError> {
     let in_range = batch
         .entries
@@ -380,8 +380,8 @@ mod tests {
         assert_eq!(fixture.replicas[1].fetches.load(Ordering::SeqCst), 1);
     }
 
-    /// A seed it could not reach can still hold the range, so a fetch reports a
-    /// transport error, and the mirror keeps its copy.
+    /// An unreached seed can still hold the range, so a fetch reports a transport
+    /// error, and the mirror keeps its copy.
     #[tokio::test]
     async fn a_dead_seed_keeps_truncation_from_reporting() {
         let fixture = fixture(vec![Err(truncated(50))], 1);

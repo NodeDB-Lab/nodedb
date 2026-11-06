@@ -64,14 +64,14 @@ impl SendThrottle {
         self.in_flight.load(Ordering::Relaxed)
     }
 
-    /// Whether the source should currently send to this mirror.
+    /// Whether the source sends to this mirror.
     ///
     /// Returns `true` when `in_flight < cap`.
     pub fn can_send(&self) -> bool {
         self.in_flight.load(Ordering::Acquire) < self.cap
     }
 
-    /// Whether the source may resume after being throttled.
+    /// Whether a throttled source resumes.
     ///
     /// Returns `true` when `in_flight <= resume_threshold`.
     pub fn can_resume(&self) -> bool {
