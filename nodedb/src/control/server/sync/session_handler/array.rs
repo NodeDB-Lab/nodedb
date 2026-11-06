@@ -17,6 +17,7 @@ use nodedb_types::sync::wire::array::{
     ArraySnapshotChunkMsg, ArraySnapshotMsg,
 };
 
+use super::super::session::SyncSession;
 use super::super::wire::{SyncFrame, SyncMessageType};
 use crate::control::array_sync::InboundOutcome;
 use crate::control::state::SharedState;
@@ -168,62 +169,139 @@ fn snapshot_outcome_frame(outcome: InboundOutcome) -> Option<SyncFrame> {
     }
 }
 
+/// The reason `session` may not send a frame naming `array`, or `None` when it
+/// may. This is the entry check every other engine frame runs.
+///
+/// An array name stays as stored, in its own case and bare. An op's own bytes
+/// also carry the name and replicate unchanged, so a name is not rewritten to
+/// its bare form, and an own-database qualifier is refused.
+fn array_entry_refusal(session: &SyncSession, array: &str) -> Option<String> {
+    if let Some(reason) = session.entry_refusal(array) {
+        return Some(reason);
+    }
+    (!nodedb_types::CollectionKey::is_bare_name(array))
+        .then(|| format!("array name '{array}' must be bare"))
+}
+
+/// The reject of a data frame whose array name `array_entry_refusal` refuses.
+/// It names no op, and its class is permanent: the same name always refuses.
+fn refused_name_reject(array: &str, detail: String) -> Option<SyncFrame> {
+    reject_frame(&ArrayRejectMsg {
+        array: array.to_string(),
+        op_hlc_bytes: [0; 18],
+        reason: ArrayRejectReason::ShapeInvalid,
+        detail,
+    })
+}
+
+/// The refusal of an advisory frame whose array name is refused.
+fn refused_name_advisory(
+    request: ArrayAdvisoryKind,
+    array: &str,
+    detail: String,
+) -> Option<SyncFrame> {
+    advisory_refusal_frame(&ArrayAdvisoryRefusedMsg {
+        array: array.to_string(),
+        request,
+        reason: ArrayRejectReason::ShapeInvalid,
+        detail,
+    })
+}
+
 /// Route one inbound array frame to the inbound engine, returning the frame
 /// to send back: a reject, or the per-op results of a multi-op frame.
 pub(super) async fn dispatch_array_frame(
     frame: &SyncFrame,
     inbound: &crate::control::array_sync::OriginArrayInbound,
-    session_id: &str,
+    session: &SyncSession,
 ) -> Option<SyncFrame> {
+    let session_id = session.session_id.as_str();
     match frame.msg_type {
         SyncMessageType::ArrayDelta => match frame.decode_body::<ArrayDeltaMsg>() {
-            Some(msg) => match inbound.handle_delta(&msg).await {
-                Ok(_) => None,
-                Err(reject) => reject_frame(&reject),
-            },
+            Some(msg) => {
+                if let Some(detail) = array_entry_refusal(session, &msg.array) {
+                    return refused_name_reject(&msg.array, detail);
+                }
+                match inbound.handle_delta(&msg).await {
+                    Ok(_) => None,
+                    Err(reject) => reject_frame(&reject),
+                }
+            }
             None => undecodable_frame_reject(frame.msg_type),
         },
         SyncMessageType::ArrayDeltaBatch => match frame.decode_body::<ArrayDeltaBatchMsg>() {
             Some(msg) => {
+                if let Some(detail) = array_entry_refusal(session, &msg.array) {
+                    return refused_name_reject(&msg.array, detail);
+                }
                 let results = inbound.handle_delta_batch(&msg).await;
                 SyncFrame::try_encode(SyncMessageType::ArrayOpResults, &results)
             }
             None => undecodable_frame_reject(frame.msg_type),
         },
         SyncMessageType::ArraySnapshot => match frame.decode_body::<ArraySnapshotMsg>() {
-            Some(msg) => match inbound.handle_snapshot_header(&msg) {
-                Ok(_) => None,
-                Err(reject) => reject_frame(&reject),
-            },
+            Some(msg) => {
+                if let Some(detail) = array_entry_refusal(session, &msg.array) {
+                    return refused_name_reject(&msg.array, detail);
+                }
+                match inbound.handle_snapshot_header(&msg) {
+                    Ok(_) => None,
+                    Err(reject) => reject_frame(&reject),
+                }
+            }
             None => undecodable_frame_reject(frame.msg_type),
         },
         SyncMessageType::ArraySnapshotChunk => match frame.decode_body::<ArraySnapshotChunkMsg>() {
-            Some(msg) => match inbound.handle_snapshot_chunk(&msg).await {
-                Ok(outcome) => snapshot_outcome_frame(outcome),
-                Err(reject) => reject_frame(&reject),
-            },
+            Some(msg) => {
+                if let Some(detail) = array_entry_refusal(session, &msg.array) {
+                    return refused_name_reject(&msg.array, detail);
+                }
+                match inbound.handle_snapshot_chunk(&msg).await {
+                    Ok(outcome) => snapshot_outcome_frame(outcome),
+                    Err(reject) => reject_frame(&reject),
+                }
+            }
             None => undecodable_frame_reject(frame.msg_type),
         },
         SyncMessageType::ArraySchema => match frame.decode_body::<ArraySchemaSyncMsg>() {
-            Some(msg) => match inbound.handle_schema(&msg).await {
-                Ok(_) => None,
-                Err(reject) => reject_frame(&reject),
-            },
+            Some(msg) => {
+                if let Some(detail) = array_entry_refusal(session, &msg.array) {
+                    return refused_name_reject(&msg.array, detail);
+                }
+                match inbound.handle_schema(&msg).await {
+                    Ok(_) => None,
+                    Err(reject) => reject_frame(&reject),
+                }
+            }
             None => undecodable_frame_reject(frame.msg_type),
         },
         SyncMessageType::ArrayAck => match frame.decode_body::<ArrayAckMsg>() {
-            Some(msg) => match inbound.handle_ack(&msg) {
-                Ok(_) => None,
-                Err(refusal) => advisory_refusal_frame(&refusal),
-            },
+            Some(msg) => {
+                if let Some(detail) = array_entry_refusal(session, &msg.array) {
+                    return refused_name_advisory(ArrayAdvisoryKind::Ack, &msg.array, detail);
+                }
+                match inbound.handle_ack(&msg) {
+                    Ok(_) => None,
+                    Err(refusal) => advisory_refusal_frame(&refusal),
+                }
+            }
             None => undecodable_advisory_refusal(ArrayAdvisoryKind::Ack),
         },
         SyncMessageType::ArrayCatchupRequest => {
             match frame.decode_body::<ArrayCatchupRequestMsg>() {
-                Some(msg) => match inbound.handle_catchup_request(&msg, session_id) {
-                    Ok(_) => None,
-                    Err(refusal) => advisory_refusal_frame(&refusal),
-                },
+                Some(msg) => {
+                    if let Some(detail) = array_entry_refusal(session, &msg.array) {
+                        return refused_name_advisory(
+                            ArrayAdvisoryKind::CatchupRequest,
+                            &msg.array,
+                            detail,
+                        );
+                    }
+                    match inbound.handle_catchup_request(&msg, session_id) {
+                        Ok(_) => None,
+                        Err(refusal) => advisory_refusal_frame(&refusal),
+                    }
+                }
                 None => undecodable_advisory_refusal(ArrayAdvisoryKind::CatchupRequest),
             }
         }
@@ -263,6 +341,61 @@ mod tests {
     use crate::bridge::dispatch::Dispatcher;
     use crate::control::security::identity::{AuthMethod, AuthenticatedIdentity};
     use crate::wal::WalManager;
+
+    /// An authenticated session on the default database.
+    fn array_session() -> SyncSession {
+        let mut session = SyncSession::new("s".into());
+        session.authenticated = true;
+        session
+    }
+
+    /// A frame naming another database, a stray `/`, or no array never reaches
+    /// the inbound engine. An ordinary name does.
+    #[tokio::test]
+    async fn an_array_frame_with_a_refused_name_is_rejected_before_the_engine() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let (_shared, inbound) = reject_fixture::writer(dir.path(), reject_fixture::refuse_all());
+        for array in ["", "7/grid", "a/b", "0/grid"] {
+            let delta = SyncFrame::try_encode(
+                SyncMessageType::ArrayDelta,
+                &ArrayDeltaMsg {
+                    array: array.into(),
+                    // Not an op: only the name check can answer without a decode error.
+                    op_payload: vec![0xc1],
+                    producer_id: 0,
+                    epoch: 0,
+                    seq: 1,
+                },
+            )
+            .expect("encode delta");
+            let reply = dispatch_array_frame(&delta, &inbound, &array_session())
+                .await
+                .expect("a refused name must be answered");
+            let body: ArrayRejectMsg = reply.decode_body().expect("decode reject");
+            assert_eq!(body.reason, ArrayRejectReason::ShapeInvalid, "{array}");
+            assert!(!body.detail.contains("decode error"), "{}", body.detail);
+
+            let ack = SyncFrame::try_encode(
+                SyncMessageType::ArrayAck,
+                &ArrayAckMsg {
+                    array: array.into(),
+                    replica_id: 1,
+                    ack_hlc_bytes: [0; 18],
+                    applied_seq: 0,
+                    status: Default::default(),
+                },
+            )
+            .expect("encode ack");
+            let reply = dispatch_array_frame(&ack, &inbound, &array_session())
+                .await
+                .expect("a refused name must be answered");
+            assert_eq!(reply.msg_type, SyncMessageType::ArrayAdvisoryRefused);
+        }
+
+        let unauthenticated = SyncSession::new("s".into());
+        assert!(array_entry_refusal(&unauthenticated, "grid").is_some());
+        assert!(array_entry_refusal(&array_session(), "Grid").is_none());
+    }
 
     /// Regression guard for the tenant-isolation bug: `build_array_inbound`
     /// must bind the inbound array engine to the tenant it is GIVEN, never a
@@ -393,7 +526,7 @@ mod tests {
             wire.extend_from_slice(&crc32c::crc32c(&body).to_le_bytes());
             wire.extend_from_slice(&body);
             let frame = SyncFrame::from_bytes(&wire).expect("a well-formed frame");
-            let reply = dispatch_array_frame(&frame, &inbound, "s")
+            let reply = dispatch_array_frame(&frame, &inbound, &array_session())
                 .await
                 .expect("an undecodable frame must be answered");
             assert_eq!(reply.msg_type, SyncMessageType::ArrayReject);
@@ -423,7 +556,7 @@ mod tests {
         )
         .expect("encode delta");
 
-        let reply = dispatch_array_frame(&frame, &inbound, "s")
+        let reply = dispatch_array_frame(&frame, &inbound, &array_session())
             .await
             .expect("a refused delta must be answered");
         assert_eq!(reply.msg_type, SyncMessageType::ArrayReject);
@@ -463,7 +596,7 @@ mod tests {
         )
         .expect("encode batch");
 
-        let reply = dispatch_array_frame(&frame, &inbound, "s")
+        let reply = dispatch_array_frame(&frame, &inbound, &array_session())
             .await
             .expect("a batch is always answered");
         assert_eq!(reply.msg_type, SyncMessageType::ArrayOpResults);
@@ -534,7 +667,7 @@ mod tests {
             (&ack, ArrayAdvisoryKind::Ack),
             (&catch_up, ArrayAdvisoryKind::CatchupRequest),
         ] {
-            let reply = dispatch_array_frame(frame, &inbound, "s")
+            let reply = dispatch_array_frame(frame, &inbound, &array_session())
                 .await
                 .expect("a denied advisory request must be answered");
             assert_eq!(
@@ -562,7 +695,7 @@ mod tests {
             },
         )
         .expect("encode catch-up");
-        let reply = dispatch_array_frame(&frame, &inbound, "s")
+        let reply = dispatch_array_frame(&frame, &inbound, &array_session())
             .await
             .expect("an unknown-array catch-up must be answered");
         assert_eq!(reply.msg_type, SyncMessageType::ArrayAdvisoryRefused);
@@ -621,7 +754,9 @@ mod tests {
 
         let mut ms = 1;
         let reject = loop {
-            if let Some(reply) = dispatch_array_frame(&header_frame(ms), &inbound, "s").await {
+            if let Some(reply) =
+                dispatch_array_frame(&header_frame(ms), &inbound, &array_session()).await
+            {
                 break reply;
             }
             ms += 1;
