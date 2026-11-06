@@ -153,12 +153,9 @@ impl WalAppender<'_> {
 
     /// The millisecond of a fresh ordinal of the node's shared system-time
     /// clock: the stamp a timeseries ingest takes when no replicated entry
-    /// carries one.
-    pub fn ordinal_now_ms(&self) -> u64 {
-        u64::try_from(nodedb_types::ordinal_to_ms(
-            self.wal.ordinal_clock().next_ordinal(),
-        ))
-        .unwrap_or(0)
+    /// carries one. See [`stamp_ms_of_ordinal`] for its refusal.
+    pub fn ordinal_now_ms(&self) -> crate::Result<u64> {
+        stamp_ms_of_ordinal(self.wal.ordinal_clock().next_ordinal())
     }
 
     /// The commit HLC the next record carries: its write's, else the stamp
@@ -247,9 +244,34 @@ impl WalAppender<'_> {
     }
 }
 
+/// The millisecond stamp of `ordinal`. An ordinal with no millisecond past the
+/// epoch is an error: the node's clock reads before the epoch, and a reader
+/// takes a stored `0` for a real time.
+fn stamp_ms_of_ordinal(ordinal: i64) -> crate::Result<u64> {
+    let ms = nodedb_types::ordinal_to_ms(ordinal);
+    u64::try_from(ms)
+        .ok()
+        .filter(|ms| *ms > 0)
+        .ok_or_else(|| crate::Error::Internal {
+            detail: format!(
+                "system-time ordinal {ordinal} has no millisecond past the epoch; correct the \
+                 node's clock and retry the ingest"
+            ),
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A clock before the epoch draws low ordinals, whose millisecond is `0`.
+    /// A reader takes epoch 0 for a real time, so the stamp is refused.
+    #[test]
+    fn an_ordinal_with_no_real_millisecond_is_refused() {
+        assert_eq!(stamp_ms_of_ordinal(5_000_000).expect("a real time"), 5);
+        assert!(stamp_ms_of_ordinal(1).is_err());
+        assert!(stamp_ms_of_ordinal(-1).is_err());
+    }
 
     #[test]
     fn each_record_carries_the_key_of_the_appender_that_wrote_it() {

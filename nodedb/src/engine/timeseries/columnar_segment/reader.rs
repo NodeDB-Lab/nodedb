@@ -139,14 +139,19 @@ impl ColumnarSegmentReader {
     /// Each column decodes with the codec the meta's column stats record,
     /// else the codec `schema.json` records for it in the same writer pass.
     /// A re-encoded backup partition carries no meta. A column neither file
-    /// names a codec for is an error.
+    /// names a codec for is an error. A file that exists and does not read is
+    /// an error too: the other file's codec never stands in for a corrupt one.
     pub fn read_columns(
         partition_dir: &Path,
         requested: &[(String, ColumnType)],
         kek: Option<&WalEncryptionKey>,
     ) -> Result<Vec<ColumnData>, SegmentError> {
-        let meta = Self::read_meta(partition_dir, kek).ok();
-        let schema = Self::read_schema(partition_dir, kek).ok();
+        let meta = read_if_present(partition_dir, "partition.meta", || {
+            Self::read_meta(partition_dir, kek)
+        })?;
+        let schema = read_if_present(partition_dir, "schema.json", || {
+            Self::read_schema(partition_dir, kek)
+        })?;
         let mut result = Vec::with_capacity(requested.len());
         for (name, ty) in requested {
             let codec = meta
@@ -428,6 +433,20 @@ impl ColumnarSegmentReader {
             None => Ok(true),
         }
     }
+}
+
+/// `read`'s result when `file` exists in `partition_dir`, `None` when it does
+/// not.
+fn read_if_present<T>(
+    partition_dir: &Path,
+    file: &str,
+    read: impl FnOnce() -> Result<T, SegmentError>,
+) -> Result<Option<T>, SegmentError> {
+    let path = partition_dir.join(file);
+    let present = path
+        .try_exists()
+        .map_err(|e| SegmentError::Io(format!("stat {}: {e}", path.display())))?;
+    if present { read().map(Some) } else { Ok(None) }
 }
 
 /// Sniff + conditionally decrypt a raw file buffer.
@@ -773,6 +792,28 @@ mod tests {
             ColumnarSegmentReader::read_sparse_index(&part_dir, None),
             Err(SegmentError::Io(_))
         ));
+    }
+
+    /// A corrupt meta is an error, even though `schema.json` names a codec.
+    /// A meta that is absent falls to `schema.json`.
+    #[test]
+    fn read_columns_refuses_a_corrupt_meta_and_reads_without_one() {
+        let (tmp, drain) = build_simple_drain();
+        let writer = ColumnarSegmentWriter::new(tmp.path());
+        writer
+            .write_partition("ts-meta", &drain.view(), 86_400_000, 0, None)
+            .unwrap();
+        let part_dir = tmp.path().join("ts-meta");
+        let requested = [("value".to_string(), ColumnType::Float64)];
+        let meta_path = part_dir.join("partition.meta");
+
+        std::fs::write(&meta_path, b"not a meta").unwrap();
+        assert!(ColumnarSegmentReader::read_columns(&part_dir, &requested, None).is_err());
+
+        std::fs::remove_file(&meta_path).unwrap();
+        let columns = ColumnarSegmentReader::read_columns(&part_dir, &requested, None)
+            .expect("schema.json names the codec");
+        assert_eq!(columns[0].len(), 100);
     }
 
     /// A meta that records no codec for a column refuses the read instead of
