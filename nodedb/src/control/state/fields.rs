@@ -84,7 +84,9 @@ pub struct SharedState {
     pub tls_policy: crate::control::security::tls_policy::TlsPolicy,
     /// SIEM export adapter.
     pub siem: Arc<crate::control::security::siem::SiemExporter>,
-    /// JWKS registry for multi-provider JWT validation (None = JWT disabled).
+    /// JWKS registry for static `[auth.jwt]` and catalog OIDC providers.
+    /// Boot builds it on every server, with or without a provider.
+    /// `None` holds only before boot wiring, and every bearer token is then refused.
     pub jwks_registry: Option<Arc<crate::control::security::jwks::registry::JwksRegistry>>,
     /// Dead-Letter Queue for sync-rejected deltas.
     pub sync_dlq: Mutex<SyncDlq>,

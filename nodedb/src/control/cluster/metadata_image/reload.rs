@@ -131,6 +131,11 @@ pub(super) async fn reload_registries(
         reload_preauthorizations(transport, before, after);
     }
 
+    // Catalog OIDC providers, through the registration boot runs.
+    if let Some(registry) = shared.jwks_registry.as_ref() {
+        registry.sync_catalog_providers(&catalog.list_oidc_providers()?);
+    }
+
     // Authorization state last: it reads everything above.
     crate::control::security::permission_tree::reload::reload_all(shared, None).await?;
     shared.authorization_fence.note_snapshot_installed();
