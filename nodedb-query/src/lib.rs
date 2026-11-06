@@ -43,6 +43,6 @@ pub use numeric_sum::ExactSum;
 pub use partition_hash::{partition_hash, partition_hash_seeded};
 pub use scan_filter::ScanFilter;
 pub use window::{
-    FrameBound, WindowError, WindowFrame, WindowFuncSpec, evaluate_window_functions,
-    evaluate_window_functions_value,
+    FrameBound, WINDOW_FUNCTION_NAMES, WindowError, WindowFrame, WindowFuncSpec,
+    evaluate_window_functions, evaluate_window_functions_value,
 };

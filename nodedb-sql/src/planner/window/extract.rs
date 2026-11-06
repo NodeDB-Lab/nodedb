@@ -22,7 +22,7 @@ use crate::resolver::ColumnScope;
 use crate::resolver::columns::TableScope;
 use crate::resolver::expr::convert_expr;
 use crate::types::{SortKey, SqlExpr, WindowSpec};
-use nodedb_query::{FrameBound, WindowFrame};
+use nodedb_query::{FrameBound, WINDOW_FUNCTION_NAMES, WindowFrame};
 
 use super::frame::convert_window_frame;
 use super::named::{collect_named_windows, flatten_window_spec, resolve_named_def};
@@ -102,6 +102,16 @@ fn convert_window_spec(
                 detail: format!("function '{name}() OVER ()' does not exist"),
             });
         }
+    }
+    // The registry also holds aggregates and timeseries functions the window
+    // evaluators do not compute (`stddev`, `ts_rate`, ...).
+    if !WINDOW_FUNCTION_NAMES.contains(&name.as_str()) {
+        return Err(SqlError::InvalidFunction {
+            detail: format!(
+                "function '{name}() OVER ()' has no window evaluator; window functions are: {}",
+                WINDOW_FUNCTION_NAMES.join(", ")
+            ),
+        });
     }
 
     let args = convert_window_args(func, &name, scope)?;
@@ -259,6 +269,26 @@ mod tests {
                 _ => panic!("not a SELECT"),
             },
             _ => panic!("not a query"),
+        }
+    }
+
+    /// A registered aggregate or timeseries function the evaluators lack is
+    /// refused here. It reaches the Data Plane otherwise.
+    #[test]
+    fn a_registered_function_with_no_window_evaluator_is_refused() {
+        let reg = FunctionRegistry::new();
+        for sql in [
+            "SELECT stddev(x) OVER () AS s FROM t",
+            "SELECT approx_count_distinct(x) OVER () AS s FROM t",
+            "SELECT ts_rate(x) OVER (ORDER BY ts) AS s FROM t",
+        ] {
+            let select = select_of(sql);
+            match extract_window_functions(&select, &reg, &open_scope("t")) {
+                Err(SqlError::InvalidFunction { detail }) => {
+                    assert!(detail.contains("no window evaluator"), "{sql}: {detail}");
+                }
+                other => panic!("{sql}: expected the refusal, got {other:?}"),
+            }
         }
     }
 
