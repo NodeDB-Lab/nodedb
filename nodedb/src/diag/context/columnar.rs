@@ -122,6 +122,42 @@ impl DomainContext for TimeseriesPartitionUnreadable<'_> {
     }
 }
 
+/// A record the quarantine registry dropped at its bound.
+pub(in crate::diag) struct QuarantineRecordEvicted<'a> {
+    /// Display form of the segment key.
+    pub segment: &'a str,
+    /// Engine that owns the segment.
+    pub engine: &'static str,
+    /// Whether the record was a quarantine, and not a pending strike.
+    pub was_quarantined: bool,
+}
+
+impl DomainContext for QuarantineRecordEvicted<'_> {
+    fn domain_kind(&self) -> &'static str {
+        "nodedb.quarantine_record_evicted"
+    }
+
+    fn grouping_key(&self) -> String {
+        // The segment is the occurrence.
+        format!(
+            "engine={} was_quarantined={}",
+            self.engine, self.was_quarantined
+        )
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "segment": self.segment,
+            "engine": self.engine,
+            "was_quarantined": self.was_quarantined,
+            "why_fatal": "thousands of corrupt segments are recorded at once, and the \
+                          listing no longer shows them all",
+            "operator_action": "inspect the disks that hold these segments, and restore \
+                                the damaged collections from a snapshot",
+        })
+    }
+}
+
 /// A timeseries memtable the idle maintenance flush could not write.
 pub(in crate::diag) struct TimeseriesIdleFlushFailed<'a> {
     pub database_id: u64,

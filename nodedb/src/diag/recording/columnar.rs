@@ -65,6 +65,23 @@ pub fn timeseries_partition_unreadable(
     .emit();
 }
 
+/// Report a record the quarantine registry dropped at its bound. Called only
+/// from the registry's eviction. An evicted quarantine reads again and
+/// quarantines again after two more failures.
+pub fn quarantine_record_evicted(segment: &str, engine: &'static str, was_quarantined: bool) {
+    let ctx = context::QuarantineRecordEvicted {
+        segment,
+        engine,
+        was_quarantined,
+    };
+    let _ = Capture::new(
+        EventKind::InvariantViolation,
+        "quarantine registry is full, so it forgot one segment's record",
+    )
+    .domain(&ctx)
+    .emit();
+}
+
 /// Report a committed multi-partition timeseries flush whose install did not
 /// finish. Called only from the install step of `flush_ts_collection` and of
 /// its roll-forward, which keep the flush pending and retry it.

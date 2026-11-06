@@ -45,8 +45,8 @@ pub(in crate::diag) use catalog::{
     MetadataApplyWedged, SynonymGroupNotApplied,
 };
 pub(in crate::diag) use columnar::{
-    ColumnarSegmentCorrupt, TimeseriesFlushNotInstalled, TimeseriesIdleFlushFailed,
-    TimeseriesPartitionUnreadable,
+    ColumnarSegmentCorrupt, QuarantineRecordEvicted, TimeseriesFlushNotInstalled,
+    TimeseriesIdleFlushFailed, TimeseriesPartitionUnreadable,
 };
 pub(in crate::diag) use continuous_agg::{
     ContinuousAggregateNotApplied, ContinuousAggregateStateFault,
@@ -71,6 +71,7 @@ pub use ingest::IlpFlushOutcome;
 pub(in crate::diag) use ingest::{CatchupRecordMisnamed, IlpAcceptedLinesDropped};
 pub(in crate::diag) use lease::{
     DdlCleanupNotCompleted, DescriptorDrainNotEnded, DescriptorLeaseNotRenewed,
+    DescriptorLeaseReleaseDropped,
 };
 pub(in crate::diag) use outcome_floor::{WriteWindowHeld, WriteWindowLeaked};
 pub use quota::{DATABASE_SCOPE, TENANT_SCOPE};

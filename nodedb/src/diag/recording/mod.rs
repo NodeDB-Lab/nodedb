@@ -46,8 +46,8 @@ pub use catalog::{
     metadata_apply_wedged, synonym_group_not_applied,
 };
 pub use columnar::{
-    columnar_segment_corrupt, timeseries_flush_not_installed, timeseries_idle_flush_failed,
-    timeseries_partition_unreadable,
+    columnar_segment_corrupt, quarantine_record_evicted, timeseries_flush_not_installed,
+    timeseries_idle_flush_failed, timeseries_partition_unreadable,
 };
 pub use continuous_agg::{continuous_aggregate_not_applied, continuous_aggregate_state_fault};
 pub use crdt::{
@@ -70,6 +70,7 @@ pub use ingest::{
 };
 pub use lease::{
     ddl_cleanup_not_completed, descriptor_drain_not_ended, descriptor_lease_not_renewed,
+    descriptor_lease_release_dropped,
 };
 pub use outcome_floor::{write_window_held, write_window_leaked};
 pub use quota::{
