@@ -46,6 +46,19 @@ pub async fn start_raft(
     data_dir: &std::path::Path,
     transport_tuning: &ClusterTransportTuning,
 ) -> crate::Result<tokio::sync::watch::Receiver<bool>> {
+    // Bootstrap and join both save the cluster id before the handle exists.
+    let cluster_id = handle
+        .catalog
+        .load_cluster_id()
+        .map_err(|e| crate::Error::Config {
+            detail: format!("cluster catalog: read the cluster id: {e}"),
+        })?
+        .ok_or_else(|| crate::Error::Config {
+            detail: "cluster catalog holds no cluster id, so this node has no database id space; \
+                     bootstrap or join the cluster again"
+                .into(),
+        })?;
+    shared.install_database_id_space(cluster_id);
     let (mut multi_raft, setup) = build_group_setup(handle, &shared, data_dir, transport_tuning)?;
     let hooks = build_hooks(
         handle,

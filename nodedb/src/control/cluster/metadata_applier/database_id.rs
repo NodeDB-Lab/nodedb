@@ -10,18 +10,21 @@ impl MetadataCommitApplier {
     /// Carve the next database id at `raft_index` and persist the new hwm
     /// with the index before the watermark advances.
     ///
-    /// Every node runs this in log order against the same hwm, so every
-    /// node issues the same id. A persist error returns `Err`: the
-    /// watermark stays on this entry and Raft re-delivers it.
+    /// Every node runs this in log order against the same hwm and the
+    /// entry's id space, so every node issues the same id. A persist error
+    /// returns `Err`: the watermark stays on this entry and Raft re-delivers it.
     pub(super) fn apply_database_id_reserve(
         &self,
         node_id: u64,
         request_id: u64,
+        id_space: u64,
         raft_index: u64,
     ) -> Result<(), crate::Error> {
         let shared = self.shared_state()?;
         let registry = &shared.database_registry;
-        let Some(id) = registry.reserve_at_index(raft_index, self.credentials.catalog())? else {
+        let Some(id) =
+            registry.reserve_at_index(raft_index, id_space, self.credentials.catalog())?
+        else {
             debug!(raft_index, "database_id_reserve: already folded into hwm");
             return Ok(());
         };
@@ -62,6 +65,7 @@ mod tests {
         encode_entry(&MetadataEntry::DatabaseIdReserve {
             node_id,
             request_id,
+            id_space: 0,
         })
         .expect("encode")
     }
@@ -93,6 +97,24 @@ mod tests {
         );
         assert_eq!(registry.finish_request(again), None);
         assert_eq!(catalog.get_database_hwm().unwrap(), USER_DB_START);
+    }
+
+    /// The id comes from the entry's space, with no input from this node.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reserve_issues_from_the_space_the_entry_carries() {
+        let (applier, state, _tmp) = applier_with_shared();
+        let registry = &state.database_registry;
+        let request = registry.begin_request();
+        let space = crate::control::database::database_id_space(5);
+        let entry = encode_entry(&MetadataEntry::DatabaseIdReserve {
+            node_id: state.node_id,
+            request_id: request,
+            id_space: space,
+        })
+        .expect("encode");
+        assert_eq!(applier.apply(&[(1, entry)]).await, 1);
+        let id = registry.finish_request(request).expect("issued id");
+        assert_eq!(id.as_u64() >> 30, space);
     }
 
     /// Another node's reservation advances this node's hwm, so the next

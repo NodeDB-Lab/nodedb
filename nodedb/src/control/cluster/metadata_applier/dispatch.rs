@@ -138,8 +138,14 @@ impl MetadataCommitApplier {
             MetadataEntry::DatabaseIdReserve {
                 node_id,
                 request_id,
+                id_space,
             } => {
-                return self.apply_database_id_reserve(*node_id, *request_id, raft_index);
+                return self.apply_database_id_reserve(
+                    *node_id,
+                    *request_id,
+                    *id_space,
+                    raft_index,
+                );
             }
             MetadataEntry::RestorePoint { hlc, created_at_ms } => {
                 return self.apply_restore_point(*hlc, *created_at_ms, raft_index);

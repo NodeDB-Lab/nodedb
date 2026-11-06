@@ -369,10 +369,12 @@ pub enum MetadataEntry {
     /// The id is not carried: every node computes it at apply time as the
     /// next id past the replicated database high-watermark, in log order, so
     /// all nodes agree on it. `request_id` routes the id back to the waiting
-    /// allocation on `node_id`.
+    /// allocation on `node_id`. `id_space` is the proposer's cluster id space,
+    /// so two clusters issue disjoint ids.
     DatabaseIdReserve {
         node_id: u64,
         request_id: u64,
+        id_space: u64,
     },
 
     /// A cluster restore point: one consistent instant across every Raft

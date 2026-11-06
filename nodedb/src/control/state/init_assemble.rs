@@ -178,6 +178,7 @@ impl SharedState {
             sequencer_halt: std::sync::Arc::default(),
             core_stall: std::sync::Arc::default(),
             metadata_raft: std::sync::OnceLock::new(),
+            database_id_space: std::sync::OnceLock::new(),
             propose_tracker: std::sync::OnceLock::new(),
             raft_proposer: std::sync::OnceLock::new(),
             async_raft_proposer_pair: std::sync::OnceLock::new(),

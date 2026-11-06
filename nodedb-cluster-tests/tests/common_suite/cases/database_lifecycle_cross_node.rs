@@ -180,6 +180,15 @@ async fn database_ids_agree_across_nodes_and_never_repeat_after_restart() {
             .unwrap_or_else(|e| panic!("CREATE DATABASE {name}: {e}"));
         issued.push(agreed_database_id(&cluster, name));
     }
+    // Ids come from this cluster's id space, above the 30 counter bits.
+    let space = issued[0].as_u64() >> 30;
+    assert_ne!(
+        space,
+        0,
+        "database id {} has no id space",
+        issued[0].as_u64()
+    );
+    assert_eq!(issued[1].as_u64() >> 30, space);
     cluster
         .wait_for_full_apply_convergence(Duration::from_secs(30))
         .await;

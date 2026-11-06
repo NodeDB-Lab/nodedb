@@ -190,6 +190,7 @@ pub async fn propose_database_id_reserve(
         &MetadataEntry::DatabaseIdReserve {
             node_id,
             request_id,
+            id_space: shared.database_id_space()?,
         },
         "database_id_reserve",
     )

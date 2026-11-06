@@ -66,6 +66,23 @@ impl SharedState {
             .ok_or_else(|| raft_not_started("the metadata raft handle"))
     }
 
+    /// This cluster's database id space. `start_raft` installs it before any
+    /// listener opens.
+    pub(crate) fn database_id_space(&self) -> crate::Result<u64> {
+        self.database_id_space
+            .get()
+            .copied()
+            .ok_or_else(|| raft_not_started("the database id space"))
+    }
+
+    /// Install this cluster's database id space, derived from `cluster_id`.
+    pub(crate) fn install_database_id_space(&self, cluster_id: u64) {
+        let space = crate::control::database::database_id_space(cluster_id);
+        if self.database_id_space.set(space).is_err() {
+            tracing::warn!("database_id_space already set — start_raft appears to have run twice");
+        }
+    }
+
     /// Synchronous data-group Raft proposer. `start_raft` installs it before
     /// any listener opens.
     pub(crate) fn sync_raft_proposer(

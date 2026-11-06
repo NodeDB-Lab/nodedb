@@ -233,6 +233,10 @@ pub struct SharedState {
     /// `control::database::allocate_database_id`, which replicates the id
     /// through metadata group 0 when that group runs.
     pub database_registry: crate::control::database::DatabaseRegistry,
+    /// This cluster's database id space. Set by `start_raft`, which runs
+    /// before any listener opens. Read it through
+    /// `SharedState::database_id_space`.
+    pub(super) database_id_space: OnceLock<u64>,
     /// Global surrogate registry for stable cross-engine PK ↔ Surrogate allocation.
     pub surrogate_registry: crate::control::surrogate::SurrogateRegistryHandle,
     /// CP-side surrogate assigner for INSERT/UPSERT paths.
