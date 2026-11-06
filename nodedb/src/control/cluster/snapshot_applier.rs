@@ -456,6 +456,11 @@ impl nodedb_cluster::SnapshotApplier for DataPlaneSnapshotApplier {
     /// Answer every propose waiter the snapshot covers. Their entries
     /// committed, but no apply on this node produces their results.
     fn snapshot_adopted(&self, group_id: u64, last_included_index: u64) {
+        // The group never installs a snapshot at or below this index, so no
+        // quarantine record of those chunks has a use.
+        self.shared
+            .quarantine_registry
+            .release_raft_through(group_id, last_included_index);
         if group_id == METADATA_GROUP_ID {
             // No entry at or below the index applies here any more, so the
             // cache's applied index starts at it.
