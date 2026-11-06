@@ -37,12 +37,23 @@ pub fn spawn_kv_expiry_reaper(shared: &Arc<SharedState>, config: &ServerConfig) 
                     break;
                 }
                 match crate::control::kv_expiry::run_reap_pass(&state, limit).await {
-                    Ok(pass) if pass.proposed > 0 => tracing::debug!(
-                        due = pass.due,
-                        proposed = pass.proposed,
-                        "kv expiry reap pass"
-                    ),
-                    Ok(_) => {}
+                    Ok(pass) => {
+                        if let Some(error) = &pass.first_error {
+                            tracing::warn!(
+                                due = pass.due,
+                                proposed = pass.proposed,
+                                failed = pass.failed,
+                                %error,
+                                "kv expiry reap pass finished with errors; failed keys stay due"
+                            );
+                        } else if pass.proposed > 0 {
+                            tracing::debug!(
+                                due = pass.due,
+                                proposed = pass.proposed,
+                                "kv expiry reap pass"
+                            );
+                        }
+                    }
                     Err(e) => tracing::warn!(error = %e, "kv expiry reap pass failed"),
                 }
             }

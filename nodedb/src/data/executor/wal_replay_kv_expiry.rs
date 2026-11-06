@@ -152,8 +152,8 @@ impl CoreLoop {
     /// In the install pass of a committed-redo apply, record the undo that
     /// reverses a TTL change exactly. The change ends the key's live version
     /// into history, so the undo reinstalls the whole stored version at its
-    /// own start. A key that stores no live version now records nothing: the
-    /// TTL change will find no key either.
+    /// own start. A key that stores no live version records nothing: the
+    /// TTL change finds no key either.
     fn record_kv_ttl_undo(
         &mut self,
         database_id: u64,

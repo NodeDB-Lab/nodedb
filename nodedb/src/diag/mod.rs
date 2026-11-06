@@ -23,7 +23,7 @@ pub use recording::{
     descriptor_drain_not_ended, descriptor_lease_not_renewed, descriptor_lease_release_dropped,
     entry_kind, fts_index_update_failed, held_entry_debt_not_recorded, history_charge_stale,
     history_compaction_not_applied, ilp_invalid_utf8_drop, ilp_killed_session_lines_refused,
-    ilp_line_read_drop, index_rebuild_not_installed, metadata_apply_wedged,
+    ilp_line_read_drop, index_rebuild_not_installed, kv_reap_entry_unusable, metadata_apply_wedged,
     ordinal_reservation_leaked, orphaned_index_entry_after_delete, quarantine_record_evicted,
     quota_row_invalid, quota_row_undecodable, quota_row_write_failed, quota_scope_purge_incomplete,
     quota_scope_replay_aborted, raft_entries_reapplied, raft_entry_reapplied,
