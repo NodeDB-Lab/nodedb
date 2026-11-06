@@ -148,6 +148,7 @@ pub fn show_raft_group(
         ("term", group.term.to_string()),
         ("commit_index", group.commit_index.to_string()),
         ("last_applied", group.last_applied.to_string()),
+        ("retained_bytes", group.retained_bytes.to_string()),
         ("member_count", group.member_count.to_string()),
         ("vshard_count", group.vshard_count.to_string()),
     ];

@@ -14,7 +14,6 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 
 use nodedb_raft::RaftNode;
 use nodedb_raft::node::RaftConfig;
@@ -29,7 +28,7 @@ use super::core::{MultiRaft, seed_watcher};
 pub struct GroupMountSpec {
     config: RaftConfig,
     storage_path: PathBuf,
-    compaction_ceiling: Option<Arc<AtomicU64>>,
+    compaction_ceilings: nodedb_raft::node::CompactionCeilings,
     /// The handles the group's disk reports through.
     disk_signals: DiskSignals,
 }
@@ -55,9 +54,7 @@ impl GroupMountSpec {
                 detail: format!("failed to open raft storage for group {group_id}: {e}"),
             })?;
         let mut node = RaftNode::new(self.config, storage);
-        if let Some(ceiling) = self.compaction_ceiling {
-            node.set_compaction_ceiling(ceiling);
-        }
+        node.set_compaction_ceilings(self.compaction_ceilings);
         // Reload durable state (HardState + log) before mounting the group.
         // On a restart this recovers the persisted term/voted_for, so a
         // restarted voter cannot forget its vote and double-vote, and the
@@ -100,7 +97,11 @@ impl MultiRaft {
                 log_compaction_threshold: self.log_compaction_threshold,
             },
             storage_path: crate::raft_bootstrap::group_log_path(&self.data_dir, group_id),
-            compaction_ceiling: self.compaction_ceilings.get(&group_id).map(Arc::clone),
+            compaction_ceilings: self
+                .compaction_ceilings
+                .get(&group_id)
+                .cloned()
+                .unwrap_or_default(),
             disk_signals: DiskSignals {
                 wake: Arc::clone(&self.drive_signal),
                 halts: Arc::clone(&self.disk_halts),

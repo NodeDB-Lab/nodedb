@@ -353,6 +353,7 @@ mod tests {
             last_applied: raft_applied,
             last_log_index: 12,
             snapshot_index: 0,
+            retained_bytes: 0,
             replica_state,
             member_count: 1,
             learner_count: 0,

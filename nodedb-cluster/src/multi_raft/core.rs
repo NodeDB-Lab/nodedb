@@ -60,10 +60,10 @@ pub struct MultiRaft {
     /// Per-group gate that orders committed-entry applies against snapshot
     /// installs.
     pub(super) apply_gates: Arc<crate::raft_loop::apply_gate::GroupApplyGates>,
-    /// Per-group ceiling on log compaction: the highest index an archiver
-    /// holds a copy of. A group with a ceiling never compacts past it, so no
-    /// entry leaves the log before it is archived.
-    pub(super) compaction_ceilings: HashMap<u64, Arc<std::sync::atomic::AtomicU64>>,
+    /// Per-group named ceilings on log compaction. A group never compacts
+    /// past its lowest ceiling, so no entry leaves the log before every owner
+    /// released it.
+    pub(super) compaction_ceilings: HashMap<u64, nodedb_raft::node::CompactionCeilings>,
     /// The node clock the metadata entries this node stamps as leader take
     /// their stamp from. `None` proposes them unstamped.
     pub(super) metadata_clock: Option<Arc<nodedb_types::HlcClock>>,
@@ -426,6 +426,7 @@ pub use nodedb_raft::LogEntry;
 mod tests {
     use super::*;
     use crate::multi_raft::status::GroupMembership;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Instant;
 
     #[test]
@@ -602,7 +603,7 @@ mod tests {
             node.election_deadline_override(Instant::now() - Duration::from_millis(1));
         }
         let ceiling = std::sync::Arc::new(AtomicU64::new(0));
-        mr.set_compaction_ceiling(0, std::sync::Arc::clone(&ceiling));
+        mr.set_compaction_ceiling(0, "archive", std::sync::Arc::clone(&ceiling));
         let apply = |mr: &mut MultiRaft| {
             mr.wait_all_durable_blocking().unwrap();
             for (gid, ready) in mr.tick().unwrap().groups {
@@ -625,8 +626,63 @@ mod tests {
 
         assert!(!mr.maybe_compact_group(0, applied).unwrap());
         assert_eq!(mr.first_available_index(0), Some(1));
+        let retained = |mr: &MultiRaft| {
+            mr.group_statuses()
+                .iter()
+                .find(|status| status.group_id == 0)
+                .map(|status| status.retained_bytes)
+        };
+        let held = retained(&mr).unwrap();
+        assert!(held >= 5, "five one-byte entries are held, got {held}");
 
         ceiling.store(3, Ordering::Release);
+        assert!(mr.maybe_compact_group(0, applied).unwrap());
+        assert_eq!(mr.first_available_index(0), Some(4));
+        assert!(
+            retained(&mr).unwrap() < held,
+            "compaction frees the entries it discards"
+        );
+    }
+
+    /// Two owners set before the group mounts both bind it, and the lower one
+    /// holds the log after the other releases.
+    #[test]
+    fn every_owner_bounds_a_group_that_mounts_later() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = RoutingTable::uniform(1, &[1], 1);
+        let mut mr =
+            MultiRaft::new(1, rt, dir.path().to_path_buf()).with_log_compaction_threshold(Some(1));
+        let archive = std::sync::Arc::new(AtomicU64::new(u64::MAX));
+        let pin = std::sync::Arc::new(AtomicU64::new(0));
+        mr.set_compaction_ceiling(0, "archive", archive);
+        mr.set_compaction_ceiling(0, "pin", std::sync::Arc::clone(&pin));
+        mr.add_group(0, vec![]).unwrap();
+        for node in mr.groups.values_mut() {
+            node.election_deadline_override(Instant::now() - Duration::from_millis(1));
+        }
+        let apply = |mr: &mut MultiRaft| {
+            mr.wait_all_durable_blocking().unwrap();
+            for (gid, ready) in mr.tick().unwrap().groups {
+                if let Some(last) = ready.committed_entries.last() {
+                    mr.advance_applied(gid, last.index).unwrap();
+                    mr.save_applied_index(gid, last.index).unwrap();
+                }
+            }
+        };
+        mr.tick().unwrap();
+        apply(&mut mr);
+        for i in 0..5u8 {
+            mr.propose_to_group(0, vec![i]).unwrap();
+        }
+        for _ in 0..3 {
+            apply(&mut mr);
+        }
+        let applied = mr.groups[&0].last_applied();
+
+        assert!(!mr.maybe_compact_group(0, applied).unwrap());
+        assert_eq!(mr.first_available_index(0), Some(1));
+
+        pin.store(3, Ordering::Release);
         assert!(mr.maybe_compact_group(0, applied).unwrap());
         assert_eq!(mr.first_available_index(0), Some(4));
     }

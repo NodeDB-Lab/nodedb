@@ -22,6 +22,8 @@ pub struct GroupStatus {
     /// lagging peer below this index can only be caught up via
     /// `InstallSnapshot`, never `AppendEntries`.
     pub snapshot_index: u64,
+    /// The entry bytes this replica's log holds in memory.
+    pub retained_bytes: u64,
     /// What this replica needs before it takes log entries. A replica that
     /// awaits a snapshot applies nothing until one installs.
     pub replica_state: nodedb_raft::ReplicaState,
@@ -103,6 +105,7 @@ impl MultiRaft {
                 last_applied: node.last_applied(),
                 last_log_index: node.last_log_index(),
                 snapshot_index: node.log_snapshot_index(),
+                retained_bytes: node.log_retained_bytes(),
                 replica_state: node.replica_state(),
                 member_count: node.voters().len() + usize::from(self_is_voter),
                 learner_count: node.learners().len()

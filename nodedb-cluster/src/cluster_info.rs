@@ -142,6 +142,7 @@ impl ClusterObserver {
                     term: gs.term,
                     commit_index: gs.commit_index,
                     last_applied: gs.last_applied,
+                    retained_bytes: gs.retained_bytes,
                     member_count: gs.member_count,
                     vshard_count: gs.vshard_count,
                     members,
@@ -210,6 +211,8 @@ pub struct GroupSnapshot {
     pub term: u64,
     pub commit_index: u64,
     pub last_applied: u64,
+    /// The entry bytes this replica's log holds in memory.
+    pub retained_bytes: u64,
     pub member_count: usize,
     pub vshard_count: usize,
     pub members: Vec<u64>,
@@ -267,6 +270,7 @@ mod tests {
             last_applied: 5,
             last_log_index: 5,
             snapshot_index: 0,
+            retained_bytes: 4096,
             replica_state: nodedb_raft::ReplicaState::Whole,
             member_count: 3,
             learner_count: 0,
@@ -307,6 +311,7 @@ mod tests {
             .find(|g| g.group_id == 0)
             .expect("group 0 present");
         assert_eq!(g0.role, "Leader");
+        assert_eq!(g0.retained_bytes, 4096);
         assert_eq!(g0.leader_id, 1);
         assert!(g0.members.contains(&1));
         assert!(g0.learners.contains(&4));

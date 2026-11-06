@@ -134,9 +134,9 @@ pub struct RaftNode<S: LogStorage> {
     /// restart can still be live. Kept apart from `leader_contact`, which
     /// also feeds the staleness bound: a boot is no contact with any leader.
     pub(super) boot_vote_fence: Instant,
-    /// An outside bound on compaction: the log never discards an entry above
-    /// it. An archiver that must copy entries before they go raises it.
-    pub(super) compaction_ceiling: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+    /// Outside bounds on compaction: the log never discards an entry above
+    /// the lowest. An owner that needs entries to stay raises its own.
+    pub(super) compaction_ceilings: super::compaction_ceiling::CompactionCeilings,
     /// Whether this replica holds the state it can resume the log from. One
     /// that wants a snapshot refuses every `AppendEntries`, reporting this
     /// state, and its leader sends a snapshot instead. One whose
@@ -198,7 +198,7 @@ impl<S: LogStorage> RaftNode<S> {
             leader_mark: Default::default(),
             lease: LeaseState::new(),
             boot_vote_fence: now + config.election_timeout_max,
-            compaction_ceiling: None,
+            compaction_ceilings: Default::default(),
             replica: ReplicaState::Whole,
             replicated_floor: 0,
             floor_gathered_term: 0,

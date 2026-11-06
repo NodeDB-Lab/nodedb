@@ -340,19 +340,24 @@ impl MultiRaft {
             .and_then(newest_log_stamp)
     }
 
-    /// Bound `group_id`'s log compaction by `ceiling`: the log never
-    /// compacts past the index it holds, on every path. An archiver raises
-    /// it once it holds a copy of every entry at or below the new value. The
-    /// bound also holds for the group when it is added again.
+    /// Bound `group_id`'s log compaction by `owner`'s `ceiling`: the log never
+    /// compacts past the lowest index any owner holds, on every path. An
+    /// owner raises its ceiling once it no longer needs the entries at or
+    /// below the new value. The bound also holds for the group when it is
+    /// added again.
     pub fn set_compaction_ceiling(
         &mut self,
         group_id: u64,
+        owner: &'static str,
         ceiling: std::sync::Arc<std::sync::atomic::AtomicU64>,
     ) {
         if let Some(node) = self.groups.get_mut(&group_id) {
-            node.set_compaction_ceiling(std::sync::Arc::clone(&ceiling));
+            node.set_compaction_ceiling(owner, std::sync::Arc::clone(&ceiling));
         }
-        self.compaction_ceilings.insert(group_id, ceiling);
+        self.compaction_ceilings
+            .entry(group_id)
+            .or_default()
+            .set(owner, ceiling);
     }
 }
 

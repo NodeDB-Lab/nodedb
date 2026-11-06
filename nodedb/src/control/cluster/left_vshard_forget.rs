@@ -323,6 +323,7 @@ mod tests {
                     last_applied: 0,
                     last_log_index: 0,
                     snapshot_index: 0,
+                    retained_bytes: 0,
                     replica_state: nodedb_raft::ReplicaState::Whole,
                     member_count: 1,
                     learner_count: 0,
