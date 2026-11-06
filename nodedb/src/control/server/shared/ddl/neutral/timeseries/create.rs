@@ -86,6 +86,7 @@ pub async fn create_timeseries(
         owner: identity.username.clone(),
         created_at: now,
         deactivated_at_ns: 0,
+        storage_conversion: None,
         // Stamped by the metadata applier at commit time.
         descriptor_version: 0,
         constraint_version: 0,

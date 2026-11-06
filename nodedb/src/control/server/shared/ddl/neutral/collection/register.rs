@@ -383,6 +383,7 @@ pub(crate) fn build_doc_config_from_stored<S: CollectionSource + ?Sized>(
         } else {
             Vec::new()
         },
+        storage_conversion: coll.storage_conversion.clone(),
     };
 
     // Written as a struct literal with every field named — and deliberately

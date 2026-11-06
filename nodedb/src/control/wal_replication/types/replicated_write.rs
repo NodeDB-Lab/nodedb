@@ -994,6 +994,33 @@ pub enum ReplicatedWrite {
         /// replica folds each into the mirror's ledger of its vShard.
         calvin_floors: Vec<super::wire_shapes::MirrorCalvinFloor>,
     },
+    /// `PURGE TENANT` in one data group's log. Every replica of the group
+    /// removes the entry's tenant's data on `vshards` at this log position.
+    /// One entry goes to each group, so every write of a group lands wholly
+    /// before or wholly after the purge on every replica.
+    TenantPurge {
+        /// Bare catalog name of every collection of the tenant.
+        collections: Vec<String>,
+        /// The vShards of this entry's group.
+        vshards: Vec<u32>,
+    },
+    /// `CONVERT COLLECTION` in the collection's data-group log. Every replica
+    /// re-encodes the rows at this log position and reads the same inputs, so
+    /// every replica stores the same bytes. A write earlier in the log is
+    /// rewritten. A later write encodes in the target mode.
+    CollectionConvert {
+        /// Bare catalog name.
+        collection: String,
+        target_type: String,
+        /// The target strict columns as JSON. Empty for a schemaless target.
+        schema_json: String,
+        source_storage_mode: nodedb_physical::physical_plan::StorageMode,
+        target_storage_mode: nodedb_physical::physical_plan::StorageMode,
+        /// One more than the catalog row's conversion generation.
+        generation: u64,
+        /// The collection incarnation the conversion rewrites.
+        incarnation: nodedb_types::Hlc,
+    },
 }
 
 #[cfg(test)]
@@ -1159,6 +1186,19 @@ mod tests {
                     position: 1,
                     attempt: 0,
                 },
+            },
+            ReplicatedWrite::TenantPurge {
+                collections: vec!["orders".into()],
+                vshards: vec![0, 1],
+            },
+            ReplicatedWrite::CollectionConvert {
+                collection: "orders".into(),
+                target_type: "document_schemaless".into(),
+                schema_json: String::new(),
+                source_storage_mode: nodedb_physical::physical_plan::StorageMode::Schemaless,
+                target_storage_mode: nodedb_physical::physical_plan::StorageMode::Schemaless,
+                generation: 1,
+                incarnation: nodedb_types::Hlc::new(7, 0),
             },
         ];
 

@@ -11,6 +11,7 @@ mod dispatch;
 mod system_task;
 
 pub(crate) use dispatch::{
-    dispatch_authorized, dispatch_system, dispatch_system_by, dispatch_system_response_with_source,
+    dispatch_authorized, dispatch_committed_apply, dispatch_system, dispatch_system_by,
+    dispatch_system_response_with_source,
 };
 pub(crate) use system_task::{SystemReason, SystemTask};

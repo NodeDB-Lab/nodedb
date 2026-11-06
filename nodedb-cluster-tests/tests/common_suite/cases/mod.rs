@@ -147,6 +147,7 @@ mod planner_local_only;
 mod prepared_cache_invalidation;
 mod promql_remote_storage;
 mod proposal_committed_twice_applies_once;
+mod purge_convert_replicas;
 mod redo_stream_held_replica;
 mod resp_gateway_migration;
 mod retention_policy_cross_node;

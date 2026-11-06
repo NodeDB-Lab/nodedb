@@ -32,6 +32,30 @@ pub enum StorageMode {
     Strict { schema: StrictSchema },
 }
 
+/// The conversion that gave a collection's catalog row its storage mode.
+///
+/// The catalog row and the converted rows reach a replica through two logs.
+/// A replica whose data group has not applied the conversion still stores
+/// rows in `source`, so it keeps `source` until the conversion applies.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
+pub struct StorageConversion {
+    /// One more than the generation the row held before this conversion.
+    pub generation: u64,
+    /// The collection incarnation the conversion rewrote. A row of any other
+    /// incarnation holds rows no conversion touched.
+    pub incarnation: nodedb_types::Hlc,
+    /// How the rows are encoded until the conversion applies.
+    pub source: StorageMode,
+}
+
 /// Collection enforcement options propagated from catalog to Data Plane.
 ///
 /// These flags are cached by the Data Plane in `CollectionConfig` and checked
@@ -86,6 +110,9 @@ pub struct EnforcementOptions {
     /// body and validates REQUIRED, type and CHECK.
     #[serde(default)]
     pub type_guards: Vec<nodedb_types::TypeGuardFieldDef>,
+    /// The conversion that gave the catalog row its storage mode, if any.
+    #[serde(default)]
+    pub storage_conversion: Option<StorageConversion>,
 }
 
 impl EnforcementOptions {

@@ -263,7 +263,7 @@ pub enum CatalogEntry {
         admin: Box<StoredUser>,
     },
     /// Hard-deletes the identity record only. Tenant data is purged separately
-    /// by the `PURGE TENANT CONFIRM` Data Plane meta op.
+    /// by `PURGE TENANT CONFIRM`, which proposes to each data group's log.
     DeleteTenant {
         tenant_id: u64,
     },

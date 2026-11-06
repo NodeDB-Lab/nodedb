@@ -109,6 +109,7 @@ impl QueuedEntry {
             | ReplicatedWrite::SurrogateBind { .. }
             | ReplicatedWrite::RedoChunk { .. }
             | ReplicatedWrite::RedoAbandon { .. } => false,
+            ReplicatedWrite::TenantPurge { .. } | ReplicatedWrite::CollectionConvert { .. } => true,
             _ => matches!(
                 decode_replicated_entry(&self.entry.data),
                 Ok(Some((_, _, plan, _))) if plan_writes_user_data(&plan)
@@ -124,7 +125,9 @@ impl QueuedEntry {
     /// persists its floor, and a capturing one snapshots its tenants, after
     /// every earlier entry and before every later one. A redo chunk or
     /// abandon changes the stream a later entry of its group reads. A mirror
-    /// seal records that every earlier entry of the group concluded.
+    /// seal records that every earlier entry of the group concluded. A tenant
+    /// purge and a conversion act on every earlier entry's rows, and no later
+    /// entry reaches a core before their WAL barrier is durable.
     pub fn is_exclusive(&self) -> bool {
         self.decoded.as_ref().is_some_and(|e| {
             matches!(
@@ -138,6 +141,8 @@ impl QueuedEntry {
                     | ReplicatedWrite::MirrorSeal { .. }
                     | ReplicatedWrite::RedoChunk { .. }
                     | ReplicatedWrite::RedoAbandon { .. }
+                    | ReplicatedWrite::TenantPurge { .. }
+                    | ReplicatedWrite::CollectionConvert { .. }
             )
         })
     }

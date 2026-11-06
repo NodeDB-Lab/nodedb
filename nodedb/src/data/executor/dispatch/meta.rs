@@ -142,16 +142,28 @@ impl CoreLoop {
                 target_type,
                 schema_json,
                 source_storage_mode,
+                target_storage_mode,
+                generation,
+                incarnation,
             } => self.execute_convert_collection(
                 task,
-                tid,
-                collection.as_str(),
-                target_type,
-                schema_json,
-                source_storage_mode,
+                crate::data::executor::handlers::convert::ConvertParams {
+                    tid,
+                    collection: collection.as_str(),
+                    target_type,
+                    schema_json,
+                    source_storage_mode,
+                    target_storage_mode,
+                    generation: *generation,
+                    incarnation: *incarnation,
+                },
             ),
 
-            MetaOp::PurgeTenant { tenant_id } => self.execute_purge_tenant(task, *tenant_id),
+            MetaOp::PurgeTenant {
+                tenant_id,
+                collections,
+                vshards,
+            } => self.execute_purge_tenant(task, *tenant_id, collections, vshards),
 
             MetaOp::UnregisterCollection {
                 tenant_id,

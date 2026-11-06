@@ -46,6 +46,31 @@ impl CoreLoop {
         held
     }
 
+    /// Whether the labels of `node` home on one of `group`.
+    pub(in crate::data::executor::handlers::snapshot) fn labels_home_in(
+        node: &str,
+        group: &HashSet<u32>,
+    ) -> bool {
+        labels_owned_by(node, group)
+    }
+
+    /// Take the labels of `tenant_id`'s nodes `group` homes off the CSR.
+    pub(in crate::data::executor::handlers::snapshot) fn drop_tenant_homed_labels(
+        &mut self,
+        database_id: u64,
+        tenant_id: u64,
+        group: &HashSet<u32>,
+    ) {
+        let dropped: Vec<NodeLabelsEntry> = self
+            .held_node_labels(None)
+            .into_iter()
+            .filter(|(db, tid, node, _)| {
+                *db == database_id && *tid == tenant_id && labels_owned_by(node, group)
+            })
+            .collect();
+        self.remove_label_entries(&dropped);
+    }
+
     /// Drop the label versions of every node `group` homes, in every
     /// database and tenant.
     pub(super) fn purge_group_node_label_versions(

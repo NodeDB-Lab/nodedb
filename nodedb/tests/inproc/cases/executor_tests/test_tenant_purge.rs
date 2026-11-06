@@ -12,6 +12,18 @@ use nodedb_physical::physical_plan::{
 
 use super::helpers::*;
 
+/// The plan a replica runs for a one-group cluster: every collection these
+/// tests write, on every vShard.
+fn purge_plan(tenant_id: u64) -> PhysicalPlan {
+    PhysicalPlan::Meta(MetaOp::PurgeTenant {
+        tenant_id,
+        collections: ["users", "col", "sessions", "metrics", "test"]
+            .map(str::to_owned)
+            .to_vec(),
+        vshards: (0..nodedb_types::id::VShardId::COUNT).collect(),
+    })
+}
+
 #[test]
 fn purge_removes_all_tenant_data() {
     let (mut core, mut tx, mut rx, _dir) = make_core();
@@ -130,15 +142,8 @@ fn purge_removes_all_tenant_data() {
 
     // ── Purge Tenant A ──
 
-    let purge_resp = send_raw_as_tenant(
-        &mut core,
-        &mut tx,
-        &mut rx,
-        TENANT_A,
-        PhysicalPlan::Meta(MetaOp::PurgeTenant {
-            tenant_id: TENANT_A,
-        }),
-    );
+    let purge_resp =
+        send_raw_as_tenant(&mut core, &mut tx, &mut rx, TENANT_A, purge_plan(TENANT_A));
     assert_eq!(purge_resp.status, Status::Ok, "purge should succeed");
 
     // Verify purge summary.
@@ -321,27 +326,11 @@ fn purge_is_idempotent() {
     );
 
     // First purge.
-    let r1 = send_raw_as_tenant(
-        &mut core,
-        &mut tx,
-        &mut rx,
-        TENANT_A,
-        PhysicalPlan::Meta(MetaOp::PurgeTenant {
-            tenant_id: TENANT_A,
-        }),
-    );
+    let r1 = send_raw_as_tenant(&mut core, &mut tx, &mut rx, TENANT_A, purge_plan(TENANT_A));
     assert_eq!(r1.status, Status::Ok);
 
     // Second purge (idempotent — no data to delete).
-    let r2 = send_raw_as_tenant(
-        &mut core,
-        &mut tx,
-        &mut rx,
-        TENANT_A,
-        PhysicalPlan::Meta(MetaOp::PurgeTenant {
-            tenant_id: TENANT_A,
-        }),
-    );
+    let r2 = send_raw_as_tenant(&mut core, &mut tx, &mut rx, TENANT_A, purge_plan(TENANT_A));
     assert_eq!(r2.status, Status::Ok, "second purge should succeed");
     let summary = payload_value(&r2.payload);
     assert_eq!(

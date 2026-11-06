@@ -115,6 +115,10 @@ impl ReplicatedWrite {
             | Self::ArraySchema { .. }
             | Self::RedoChunk { .. }
             | Self::RedoAbandon { .. }
+            // A purge removes versions. A conversion rewrites each version
+            // under the system time it holds.
+            | Self::TenantPurge { .. }
+            | Self::CollectionConvert { .. }
             | Self::SetVectorParams { .. }
             | Self::DropVectorIndex { .. }
             | Self::KvRegisterSortedIndex { .. }

@@ -303,6 +303,7 @@ pub async fn build_and_persist(
         owner: identity.username.clone(),
         created_at: now,
         deactivated_at_ns: 0,
+        storage_conversion: None,
         descriptor_version: 0,
         constraint_version: 0,
         crdt_signing_required,

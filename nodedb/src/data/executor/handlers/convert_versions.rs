@@ -24,11 +24,11 @@ use super::convert::{
 };
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::response_codec;
 use crate::data::executor::scan_normalize::sparse_body_to_msgpack;
 use crate::data::executor::sparse_body_format::SparseBodyFormat;
 use crate::data::executor::strict_format;
 use crate::data::executor::task::ExecutionTask;
+use crate::engine::sparse::btree::storage_conversion::StorageConversionRecord;
 use crate::engine::sparse::btree_versioned::{VersionedPut, VersionedScanParams};
 
 /// Inputs to [`CoreLoop::convert_collection_versions`].
@@ -43,6 +43,8 @@ pub(in crate::data::executor) struct VersionConvert<'a> {
     /// The collection is `bitemporal=true`: a strict target carries the
     /// temporal columns.
     pub bitemporal: bool,
+    /// The conversion record, committed with the rewrite.
+    pub record: StorageConversionRecord,
 }
 
 /// The encoding a version takes in the target.
@@ -72,15 +74,13 @@ impl CoreLoop {
             Err(code) => return self.response_error(task, code),
         };
         tracing::info!(collection = %c.collection, converted, "collection converted");
-        let result = serde_json::json!({
-            "converted": converted,
-            "target_type": c.target_type,
-            "collection": c.collection,
-        });
-        match response_codec::encode_json_as_msgpack(&result) {
-            Ok(payload) => self.response_with_payload(task, payload),
-            Err(e) => self.response_error(task, ErrorCode::from(e)),
-        }
+        self.take_converted_mode(
+            task.request.database_id.as_u64(),
+            c.tid,
+            c.collection,
+            &c.record.target,
+        );
+        self.converted_response(task, converted, c.target_type, c.collection)
     }
 
     /// Rewrite every live version of the collection in `target`'s encoding,
@@ -127,10 +127,23 @@ impl CoreLoop {
         if matches!(target, VersionTarget::Schemaless)
             && !matches!(c.source_format, SparseBodyFormat::Strict(_))
         {
+            let txn = self.sparse.begin_write()?;
+            self.sparse.put_storage_conversion_in_txn(
+                &txn,
+                database_id,
+                tid,
+                collection,
+                &c.record,
+            )?;
+            txn.commit().map_err(|e| ErrorCode::Internal {
+                detail: format!("convert commit: {e}"),
+            })?;
             return Ok(live.len() as u64);
         }
 
         let txn = self.sparse.begin_write()?;
+        self.sparse
+            .put_storage_conversion_in_txn(&txn, database_id, tid, collection, &c.record)?;
         let mut current_bodies: Vec<(StorageKey, i64, Vec<u8>)> = Vec::with_capacity(live.len());
         for version in &versions {
             let msgpack = version_msgpack(&version.body, &c.source_format).ok_or_else(|| {

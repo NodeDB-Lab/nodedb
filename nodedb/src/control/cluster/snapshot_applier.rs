@@ -213,6 +213,9 @@ impl DataPlaneSnapshotApplier {
 
         append_install_barrier(&self.shared.wal, group_id, &collections)?;
         install_on_every_core(&self.shared, group_id, plans, SNAPSHOT_APPLY_TIMEOUT).await?;
+        // The installed rows can hold another mode than the core held. A
+        // Register resolves the mode from the record the snapshot carried.
+        self.refresh_converted_modes(group_id, &collections).await?;
         // The installed rows ride no WAL record: the install is a boundary a
         // point-in-time restore starts after, from a base this forces.
         append_install_marker(&self.shared.wal, group_id)?;
@@ -275,6 +278,40 @@ impl DataPlaneSnapshotApplier {
                 step: SettleStep::RedoStreams,
                 source,
             })?;
+        Ok(())
+    }
+
+    /// Register again every installed collection a conversion touched.
+    async fn refresh_converted_modes(
+        &self,
+        group_id: u64,
+        collections: &[crate::control::cluster::snapshot_install::clear::GroupCollection],
+    ) -> Result<(), SnapshotInstallError> {
+        let settle = |source: crate::Error| SnapshotInstallError::Settle {
+            group_id,
+            step: SettleStep::StorageModes,
+            source,
+        };
+        for coll in collections {
+            let stored = self
+                .shared
+                .credentials
+                .catalog()
+                .get_collection(
+                    crate::types::DatabaseId::new(coll.database_id),
+                    coll.tenant_id,
+                    &coll.name,
+                )
+                .map_err(settle)?;
+            if let Some(stored) = stored.filter(|row| row.storage_conversion.is_some()) {
+                crate::control::server::shared::ddl::neutral::collection::dispatch_register_from_stored(
+                    &self.shared,
+                    &stored,
+                )
+                .await
+                .map_err(settle)?;
+            }
+        }
         Ok(())
     }
 

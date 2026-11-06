@@ -36,6 +36,7 @@ mod sparse_body_format;
 mod sparse_vector_checkpoint;
 mod spatial_checkpoint;
 mod spatial_key;
+mod storage_mode_resolve;
 pub(crate) mod strict_format;
 pub(in crate::data) mod sync_gate;
 mod sync_hwm_checkpoint;

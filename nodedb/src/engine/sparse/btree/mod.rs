@@ -8,6 +8,7 @@ pub mod crdt_dead_letter;
 pub mod document;
 pub mod engine;
 pub mod storage_bytes;
+pub mod storage_conversion;
 pub mod tables;
 pub mod write_set_capture;
 

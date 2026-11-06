@@ -370,6 +370,22 @@ pub(super) fn entry_scope(
                 .as_str()
                 .to_owned(),
         ]),
+        // Each rewrites or removes a collection whole.
+        ReplicatedWrite::CollectionConvert { collection, .. } => EntryScope::Collections(vec![
+            QualifiedCollection::new(database_id, collection)
+                .as_str()
+                .to_owned(),
+        ]),
+        ReplicatedWrite::TenantPurge { collections, .. } => EntryScope::Collections(
+            collections
+                .iter()
+                .map(|name| {
+                    QualifiedCollection::new(database_id, name)
+                        .as_str()
+                        .to_owned()
+                })
+                .collect(),
+        ),
         ReplicatedWrite::PointPut { .. }
         | ReplicatedWrite::PointInsert { .. }
         | ReplicatedWrite::PointDelete { .. }

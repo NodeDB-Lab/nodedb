@@ -283,6 +283,9 @@ mod tests {
                     target_type: "kv".into(),
                     schema_json: "{}".into(),
                     source_storage_mode: StorageMode::Schemaless,
+                    target_storage_mode: StorageMode::Schemaless,
+                    generation: 1,
+                    incarnation: nodedb_types::Hlc::ZERO,
                 }),
                 PhysicalPlan::Meta(MetaOp::VerifyHashChain { collection: docs() }),
                 PhysicalPlan::Meta(MetaOp::EnforceTimeseriesRetention {

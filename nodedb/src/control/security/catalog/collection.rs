@@ -210,6 +210,11 @@ pub struct StoredCollection {
     /// an active row, and `UNDROP COLLECTION` never resets it back to `0`
     /// because a row with `is_active == true` never consults it.
     pub deactivated_at_ns: u64,
+
+    /// The `CONVERT COLLECTION` that gave this row its `collection_type`.
+    /// `None` when no conversion did. The rows of a replica whose data group
+    /// has not applied it stay in its `source` mode until the entry applies.
+    pub storage_conversion: Option<nodedb_physical::physical_plan::StorageConversion>,
 }
 
 impl StoredCollection {
@@ -270,6 +275,7 @@ impl StoredCollection {
             has_implicit_edges: false,
             declared_primary_key: None,
             deactivated_at_ns: 0,
+            storage_conversion: None,
         }
     }
 

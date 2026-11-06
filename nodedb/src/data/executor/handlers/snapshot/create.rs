@@ -114,6 +114,23 @@ impl CoreLoop {
             );
         }
 
+        // The mode the captured rows hold, for each collection a conversion
+        // touched.
+        match self
+            .sparse
+            .storage_conversions_for_tenant(database_id, tenant_id)
+        {
+            Ok(records) => snapshot.storage_conversions = records,
+            Err(e) => {
+                return self.response_error(
+                    task,
+                    ErrorCode::Internal {
+                        detail: format!("snapshot: storage conversion scan failed: {e}"),
+                    },
+                );
+            }
+        }
+
         // 7. Flushed timeseries segments: capture all on-disk partition
         // directories for this tenant from `ts_registries`.
         match self.capture_flushed_ts_segments(database_id, tid_id) {

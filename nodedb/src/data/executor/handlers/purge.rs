@@ -2,191 +2,88 @@
 
 //! Tenant data purge handler.
 //!
-//! Deletes ALL data for a tenant across every engine and cache on this
-//! Data Plane core. Called via `MetaOp::PurgeTenant`.
+//! Removes a tenant's data on one data group's vShards from every engine and
+//! cache on this Data Plane core. Called via `MetaOp::PurgeTenant` when a
+//! replica applies the group's `ReplicatedWrite::TenantPurge` entry.
 //!
-//! Purge order: persistent storage first (sparse, edges, inverted index),
-//! then in-memory state (vectors, timeseries, KV, CRDT, caches).
+//! Every replica of the group applies the entry at one log position, so the
+//! purge names exactly the group's vShards. A node can host other groups of the
+//! tenant, and those purge at their own log positions.
+//!
+//! A collection keeps its definition: the catalog row outlives its rows.
 //! Idempotent: safe to re-run after a crash (missing data is a no-op).
+
+use std::collections::HashSet;
 
 use tracing::{info, warn};
 
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::storage_bytes::DroppedScope;
-use crate::types::TenantId;
+use crate::types::{DatabaseId, TenantId};
+
+/// What one core's purge removed.
+#[derive(Default)]
+struct PurgeCounts {
+    docs: usize,
+    idxs: usize,
+    inv: usize,
+    vec: usize,
+    ts: u64,
+    kv: usize,
+    crdt: usize,
+    spatial: usize,
+}
 
 impl CoreLoop {
-    /// Purge all data for a tenant across every engine and cache.
+    /// Purge a tenant's data on `vshards` from every engine and cache.
     ///
-    /// Dispatched by the Control Plane via `MetaOp::PurgeTenant` through the
-    /// SPSC bridge. Deletes are atomic per-engine and idempotent (safe to retry).
+    /// `collections` names every collection of the tenant by storage name.
+    /// Only those `vshards` homes lose their rows. Memory-only engines
+    /// checkpoint before this answers, so a restart loads no purged row from an
+    /// older checkpoint. The Control Plane fences WAL replay after every core
+    /// answers.
     pub(in crate::data::executor) fn execute_purge_tenant(
         &mut self,
         task: &ExecutionTask,
         tenant_id: u64,
+        collections: &[String],
+        vshards: &[u32],
     ) -> Response {
         info!(core = self.core_id, tenant_id, "starting tenant purge");
+        let group: HashSet<u32> = vshards.iter().copied().collect();
+        let database_id = task.request.database_id;
 
-        // 1. Sparse engine: every document version and index entry version of
-        // every collection of this tenant (persistent, redb). A tenant lives
-        // in exactly one database, so the purge is scoped by
-        // (database_id, tenant_id). A tenant re-created under the same id
-        // cannot resurrect dropped rows.
-        let database_id = task.request.database_id.as_u64();
-        let (docs, idxs) = match self
-            .sparse
-            .delete_all_versioned_for_tenant(database_id, tenant_id)
-        {
-            Ok(counts) => counts,
+        let counts =
+            match self.purge_tenant_collections(database_id, tenant_id, collections, &group) {
+                Ok(counts) => counts,
+                Err(e) => {
+                    warn!(tenant_id, error = %e, "tenant collection purge failed");
+                    return self.response_error(
+                        task,
+                        ErrorCode::Internal {
+                            detail: format!("tenant collection purge: {e}"),
+                        },
+                    );
+                }
+            };
+        let edges = match self.purge_tenant_homed_graph(database_id, tenant_id, &group) {
+            Ok(edges) => edges,
             Err(e) => {
-                warn!(tenant_id, error = %e, "sparse versioned purge failed");
+                warn!(tenant_id, error = %e, "tenant graph purge failed");
                 return self.response_error(
                     task,
                     ErrorCode::Internal {
-                        detail: format!("sparse versioned purge: {e}"),
+                        detail: format!("tenant graph purge: {e}"),
                     },
                 );
             }
         };
 
-        // 2. Graph engine: edges in redb. DB-scoped — a tenant's graph in
-        // database A must not be purged by a purge in database B.
-        let edges = match self
-            .edge_store
-            .purge_tenant(database_id, crate::types::TenantId::new(tenant_id))
-        {
-            Ok(n) => n,
-            Err(e) => {
-                warn!(tenant_id, error = %e, "edge store purge failed");
-                return self.response_error(
-                    task,
-                    ErrorCode::Internal {
-                        detail: format!("edge store purge: {e}"),
-                    },
-                );
-            }
-        };
-        self.historical_csr.invalidate_tenant(
-            nodedb_types::DatabaseId::new(database_id),
-            crate::types::TenantId::new(tenant_id),
-        );
-        // CSR in-memory index: drop the (database, tenant) partition outright.
-        // O(1) structural deletion — no key-prefix scan needed.
-        self.csr.drop_partition(
-            nodedb_types::DatabaseId::new(database_id),
-            crate::types::TenantId::new(tenant_id),
-        );
-        // Deleted-nodes tracker: drop the whole (database, tenant) bucket.
-        self.deleted_nodes.remove(&(
-            nodedb_types::DatabaseId::new(database_id),
-            crate::types::TenantId::new(tenant_id),
-        ));
-
-        // 3. Inverted index (fulltext): postings + doc_lengths (persistent, redb).
-        let inv = match self
-            .inverted
-            .purge_tenant(database_id, crate::types::TenantId::new(tenant_id))
-        {
-            Ok(n) => n,
-            Err(e) => {
-                warn!(tenant_id, error = %e, "inverted index purge failed");
-                return self.response_error(
-                    task,
-                    ErrorCode::Internal {
-                        detail: format!("inverted index purge: {e}"),
-                    },
-                );
-            }
-        };
-
-        // Every counted row of the tenant in the sparse file is gone, so its
-        // stored-bytes counter rows go too.
-        if let Err(e) = self.sparse.retire_storage_bytes(DroppedScope::Tenant {
-            database_id,
-            tenant_id,
-        }) {
-            warn!(tenant_id, error = %e, "sparse storage bytes purge failed");
-            return self.response_error(
-                task,
-                ErrorCode::Internal {
-                    detail: format!("sparse storage bytes purge: {e}"),
-                },
-            );
-        }
-
-        // 4. Vector engine: remove all collections for this tenant. O(1) structural
-        // deletion per entry — no key-prefix scan needed with tuple keys.
-        let vec_removed = {
-            let tid_key = TenantId::new(tenant_id);
-            let before = self.vector_collections.len();
-            self.vector_collections.retain(|(_, t, _), _| *t != tid_key);
-            self.vector_params.retain(|(_, t, _), _| *t != tid_key);
-            self.index_configs.retain(|(_, t, _), _| *t != tid_key);
-            before - self.vector_collections.len()
-        };
-
-        // 5. Timeseries: memtables + partition registries.
-        let ts_removed = {
-            let tid_key = TenantId::new(tenant_id);
-            let before = self.columnar_memtables.len();
-            // Tenant-wide purge: a tenant lives in exactly one database, so the
-            // database component of the key is ignored — match on tenant only.
-            self.columnar_memtables.retain(|(_, t, _), _| *t != tid_key);
-            self.columnar_memtable_mem
-                .retain(|(_, t, _), _| *t != tid_key);
-            // The tenant's document versions are gone, so their charge goes.
-            self.document_history_mem.retain(|(_, t), _| *t != tid_key);
-            self.ts_registries.retain(|(_, t, _), _| *t != tid_key);
-            self.ts_replay.stamps.retain(|(_, t, _), _| *t != tid_key);
-            self.ts_last_value_caches
-                .retain(|(_, t, _), _| *t != tid_key);
-            self.ts_series_catalogs.retain(|(_, t, _), _| *t != tid_key);
-            before - self.columnar_memtables.len()
-        };
-
-        // 6. KV engine: remove all tenant hash tables.
-        let kv_removed = self.kv_engine.purge_tenant(tenant_id);
-
-        // 7. CRDT engine: remove tenant state.
-        let crdt_before = self.crdt_engines.len();
-        self.crdt_engines
-            .retain(|(_, tenant), _| *tenant != TenantId::new(tenant_id));
-        let crdt_removed = (crdt_before - self.crdt_engines.len()) as u32;
-
-        // 8. Spatial indexes: remove tenant-scoped entries.
+        // Caches hold no authority: a miss reads the store.
         let tid_key = TenantId::new(tenant_id);
-        let spatial_removed = {
-            let before = self.spatial_indexes.len();
-            self.spatial_indexes.retain(|(_, t, _, _), _| *t != tid_key);
-            self.spatial_doc_map
-                .retain(|(_, t, _, _, _), _| *t != tid_key);
-            before - self.spatial_indexes.len()
-        };
-
-        // 9. Caches: evict all tenant data.
-        self.doc_cache
-            .evict_tenant(task.request.database_id.as_u64(), tenant_id);
+        self.doc_cache.evict_tenant(database_id.as_u64(), tenant_id);
         self.aggregate_cache.retain(|(_, t, _), _| *t != tid_key);
-
-        // 10. Doc configs: remove collection configs for this tenant.
-        self.doc_configs.retain(|(_, t, _), _| *t != tid_key);
-
-        // Chain hashes: remove for this tenant, in memory AND on disk. Dropping
-        // only the map would let the next restart rehydrate the head of a
-        // purged collection, so a tenant recreated under the same id would
-        // resume a chain whose rows are gone.
-        self.chain.heads.retain(|(_, t, _), _| *t != tid_key);
-        if let Err(e) = self.sparse.delete_chain_heads_for_tenant(tenant_id) {
-            warn!(tenant_id, error = %e, "sparse chain-head purge failed");
-            return self.response_error(
-                task,
-                ErrorCode::Internal {
-                    detail: format!("sparse chain-head purge: {e}"),
-                },
-            );
-        }
 
         // Stored CRDT dead-letter entries: a tenant recreated under the same
         // id must not restore them.
@@ -200,55 +97,96 @@ impl CoreLoop {
             );
         }
 
-        // Sparse vector indexes: remove for this tenant (all databases).
-        self.sparse_vector_indexes
-            .retain(|(_, t, _, _), _| *t != tid_key);
-
-        // Columnar engines + flushed segments: remove for this tenant.
-        self.columnar_engines.retain(|(_, t, _), _| *t != tid_key);
-        self.columnar_flushed_segments
-            .retain(|(_, t, _), _| *t != tid_key);
-        // Lockstep: drop the surrogate sidecar for the same keys.
-        self.columnar_flushed_surrogates
-            .retain(|(_, t, _), _| *t != tid_key);
-        // A tenant re-created under this id starts with no quarantine records.
-        if let Some(registry) = &self.quarantine_registry {
-            registry.release_tenant(database_id, tenant_id);
-        }
         // The purged collections' row-version history releases its charge.
         self.recharge_all_columnar_history();
+
+        if let Err(e) = self.persist_snapshot_install() {
+            warn!(tenant_id, error = %e, "tenant purge checkpoint failed");
+            return self.response_error(
+                task,
+                ErrorCode::Internal {
+                    detail: format!("tenant purge checkpoint: {e}"),
+                },
+            );
+        }
 
         info!(
             core = self.core_id,
             tenant_id,
-            docs,
-            idxs,
+            docs = counts.docs,
+            idxs = counts.idxs,
             edges,
-            inv,
-            vec_removed,
-            ts_removed,
-            kv_removed,
-            crdt_removed,
-            spatial_removed,
+            inv = counts.inv,
+            vec_removed = counts.vec,
+            ts_removed = counts.ts,
+            kv_removed = counts.kv,
+            crdt_removed = counts.crdt,
+            spatial_removed = counts.spatial,
             "tenant purge complete"
         );
 
         let summary = serde_json::json!({
             "tenant_id": tenant_id,
-            "documents_removed": docs,
-            "indexes_removed": idxs,
+            "documents_removed": counts.docs,
+            "indexes_removed": counts.idxs,
             "edges_removed": edges,
-            "inverted_entries_removed": inv,
-            "vector_collections_removed": vec_removed,
-            "timeseries_collections_removed": ts_removed,
-            "kv_tables_removed": kv_removed,
-            "crdt_engines_removed": crdt_removed,
-            "spatial_indexes_removed": spatial_removed,
+            "inverted_entries_removed": counts.inv,
+            "vector_collections_removed": counts.vec,
+            "timeseries_collections_removed": counts.ts,
+            "kv_tables_removed": counts.kv,
+            "crdt_engines_removed": counts.crdt,
+            "spatial_indexes_removed": counts.spatial,
         });
 
         match crate::data::executor::response_codec::encode_json_as_msgpack(&summary) {
             Ok(payload) => self.response_with_payload(task, payload),
             Err(_) => self.response_ok(task),
         }
+    }
+
+    /// Clear every collection of `collections` that `group` homes. Each keeps
+    /// its definition. A chain head goes with its rows, so the next write of a
+    /// hash-chained collection starts at genesis.
+    fn purge_tenant_collections(
+        &mut self,
+        database_id: DatabaseId,
+        tenant_id: u64,
+        collections: &[String],
+        group: &HashSet<u32>,
+    ) -> crate::Result<PurgeCounts> {
+        let tid = TenantId::new(tenant_id);
+        let mut counts = PurgeCounts::default();
+        for collection in collections {
+            let home =
+                nodedb_types::CollectionKey::from_qualified_str(database_id, collection)?.vshard();
+            if !group.contains(&home.as_u32()) {
+                continue;
+            }
+            // Only the home core unlinks the shared on-disk files. An edge
+            // lives on its endpoints' vShards, so edges purge by vShard below.
+            let reclaim_l1_files = self.owns_collection(database_id, collection)?;
+            let stats = self.clear_collection_all_engines(
+                database_id,
+                tid,
+                collection,
+                true,
+                reclaim_l1_files,
+                false,
+            )?;
+            counts.docs += stats.docs_removed;
+            counts.idxs += stats.idxs_removed;
+            counts.inv += stats.inv_removed;
+            counts.vec += stats.vec_removed;
+            counts.ts += stats.ts_removed;
+            counts.kv += stats.kv_removed;
+            counts.crdt += stats.crdt_rows_removed;
+            counts.spatial += stats.spatial_removed;
+            self.chain
+                .heads
+                .remove(&(database_id, tid, collection.clone()));
+            self.sparse
+                .delete_chain_head(database_id.as_u64(), tenant_id, collection)?;
+        }
+        Ok(counts)
     }
 }

@@ -12,6 +12,9 @@
 //! A row that fails to convert fails the whole statement: the handler
 //! returns an error response instead of a success payload, so the caller
 //! never flips the catalog's collection type over partially-converted data.
+//!
+//! Every replica runs this at one position of the data-group log. No input
+//! comes from a clock or from this node, so every replica stores the same bytes.
 
 use sonic_rs;
 
@@ -23,13 +26,12 @@ use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::sparse_body_format::SparseBodyFormat;
 use crate::data::executor::task::ExecutionTask;
+use crate::engine::sparse::btree::storage_conversion::StorageConversionRecord;
 
 /// Map the plan's declared source storage mode to the row-decode format.
 ///
-/// The plan carries this instead of the handler reading `doc_configs`: at
-/// dispatch time that cache still describes the mode from BEFORE this
-/// conversion, since the catalog flip and Data Plane re-register happen
-/// only after this op returns successfully.
+/// The plan carries this instead of the handler reading `doc_configs`, so every
+/// replica decodes with the mode its proposer read from the catalog.
 fn source_format_of(mode: &StorageMode) -> SparseBodyFormat {
     match mode {
         StorageMode::Strict { schema } => SparseBodyFormat::Strict(schema.clone()),
@@ -37,35 +39,84 @@ fn source_format_of(mode: &StorageMode) -> SparseBodyFormat {
     }
 }
 
+/// Borrowed arguments for [`CoreLoop::execute_convert_collection`].
+pub(in crate::data::executor) struct ConvertParams<'a> {
+    pub tid: u64,
+    pub collection: &'a str,
+    pub target_type: &'a str,
+    pub schema_json: &'a str,
+    pub source_storage_mode: &'a StorageMode,
+    pub target_storage_mode: &'a StorageMode,
+    pub generation: u64,
+    pub incarnation: nodedb_types::Hlc,
+}
+
 impl CoreLoop {
-    /// Execute a collection conversion.
+    /// Execute a collection conversion at its data-group log position.
     ///
     /// - `TO document` / `TO kv`: re-encodes a Binary Tuple source to
-    ///   MessagePack. A schemaless source is left untouched. Catalog update
-    ///   happens on the Control Plane, after this returns successfully.
+    ///   MessagePack. A schemaless source is left untouched. The catalog update
+    ///   follows on the metadata log.
     /// - `TO strict`: re-encode each document as a Binary Tuple using the
     ///   provided schema. A document that fails to encode fails the
-    ///   statement.
+    ///   conversion on every replica.
+    ///
+    /// The rewrite and the conversion record commit together. A core that holds
+    /// this generation's record answers without a rewrite, so a re-delivery and
+    /// a retried statement find the work done. A record of this generation with
+    /// another target is a second conversion that raced this one, and it refuses.
     pub(in crate::data::executor) fn execute_convert_collection(
         &mut self,
         task: &ExecutionTask,
-        tid: u64,
-        collection: &str,
-        target_type: &str,
-        schema_json: &str,
-        source_storage_mode: &StorageMode,
+        params: ConvertParams<'_>,
     ) -> Response {
+        let ConvertParams {
+            tid,
+            collection,
+            target_type,
+            schema_json,
+            source_storage_mode,
+            target_storage_mode,
+            generation,
+            incarnation,
+        } = params;
         tracing::debug!(
             core = self.core_id,
             %collection,
             target_type,
+            generation,
             "converting collection"
         );
+
+        let database_id = task.request.database_id.as_u64();
+        let applied = match self
+            .sparse
+            .get_storage_conversion(database_id, tid, collection)
+        {
+            Ok(record) => record.filter(|record| record.incarnation == incarnation),
+            Err(e) => return self.response_error(task, ErrorCode::from(e)),
+        };
+        if let Some(applied) = applied.filter(|record| record.generation >= generation) {
+            if applied.target != *target_storage_mode {
+                return self.response_error(
+                    task,
+                    ErrorCode::Unsupported {
+                        detail: format!(
+                            "CONVERT of collection '{collection}' is refused because another \
+                             CONVERT of it committed with a different target, so run that \
+                             statement again to finish it and then convert from its target"
+                        ),
+                    },
+                );
+            }
+            self.take_converted_mode(database_id, tid, collection, target_storage_mode);
+            return self.converted_response(task, 0, target_type, collection);
+        }
 
         let source_format = source_format_of(source_storage_mode);
         // A collection holds its rows as versions. Each version is rewritten
         // in place, so its history survives the conversion.
-        let bitemporal = self.is_bitemporal(task.request.database_id.as_u64(), tid, collection);
+        let bitemporal = self.is_bitemporal(database_id, tid, collection);
         self.convert_collection_versions(
             task,
             super::convert_versions::VersionConvert {
@@ -75,8 +126,51 @@ impl CoreLoop {
                 schema_json,
                 source_format,
                 bitemporal,
+                record: StorageConversionRecord {
+                    generation,
+                    incarnation,
+                    target: target_storage_mode.clone(),
+                },
             },
         )
+    }
+
+    /// Give `collection`'s config on this core the converted mode, so a later
+    /// entry of the log encodes in it.
+    pub(super) fn take_converted_mode(
+        &mut self,
+        database_id: u64,
+        tid: u64,
+        collection: &str,
+        target: &StorageMode,
+    ) {
+        let key = (
+            crate::types::DatabaseId::new(database_id),
+            crate::types::TenantId::new(tid),
+            collection.to_string(),
+        );
+        if let Some(config) = self.doc_configs.get_mut(&key) {
+            config.storage_mode = target.clone();
+        }
+    }
+
+    /// The conversion's answer: `{"converted": N}`.
+    pub(super) fn converted_response(
+        &mut self,
+        task: &ExecutionTask,
+        converted: u64,
+        target_type: &str,
+        collection: &str,
+    ) -> Response {
+        let result = serde_json::json!({
+            "converted": converted,
+            "target_type": target_type,
+            "collection": collection,
+        });
+        match crate::data::executor::response_codec::encode_json_as_msgpack(&result) {
+            Ok(payload) => self.response_with_payload(task, payload),
+            Err(e) => self.response_error(task, ErrorCode::from(e)),
+        }
     }
 }
 

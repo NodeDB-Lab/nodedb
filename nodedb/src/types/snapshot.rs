@@ -42,6 +42,12 @@ pub struct TenantDataSnapshot {
     /// install puts each catalog in place before it restores any row.
     pub ts_series_catalogs: Vec<(String, Vec<u8>)>,
 
+    /// The conversion record of each collection a conversion touched:
+    /// `[("{db}:{tid}:{collection}", encoded_record), ...]`. It names the mode
+    /// the snapshot's rows hold, so an install reads them with that mode.
+    /// A backup leaves it out: its rows restore as new writes.
+    pub storage_conversions: Vec<(String, Vec<u8>)>,
+
     /// Plain-columnar (and spatial) engine state per collection.
     ///
     /// Each entry is `(collection_key, msgpack_bytes)` where:

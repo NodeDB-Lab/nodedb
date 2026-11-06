@@ -47,6 +47,11 @@ pub fn entry_adds_storage(entry: &ReplicatedEntry) -> crate::Result<bool> {
         ReplicatedWrite::TransactionRedo { adds_storage, .. } => return Ok(*adds_storage),
         // A put binds a cell surrogate. A delete or erasure names none.
         ReplicatedWrite::ArrayOp { cell_surrogate, .. } => return Ok(cell_surrogate.is_some()),
+        // A purge removes rows, and it must pass at any tenant size. A
+        // conversion rewrites the rows the tenant already holds.
+        ReplicatedWrite::TenantPurge { .. } | ReplicatedWrite::CollectionConvert { .. } => {
+            return Ok(false);
+        }
         _ => {}
     }
     let database_id = crate::types::DatabaseId::new(entry.database_id);

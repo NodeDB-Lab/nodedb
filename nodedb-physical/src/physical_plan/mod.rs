@@ -59,8 +59,8 @@ pub use document::{
     DocumentResolvedMutation, EnforcementOptions, GeneratedColumnSpec, IndexProbe,
     MaterializedSumBinding, OllpPredictedEdge, PeriodLockConfig, QuerySource, RedoSumTargets,
     RegisteredIndex, RegisteredIndexState, ResolvedSumTarget, ReturningColumns, ReturningItem,
-    ReturningSpec, RowSource, StorageMode, SumTargetKey, TimeseriesSchema, UpdateValue,
-    resolved_sum_surrogate,
+    ReturningSpec, RowSource, StorageConversion, StorageMode, SumTargetKey, TimeseriesSchema,
+    UpdateValue, resolved_sum_surrogate,
 };
 pub use exchange::{ExchangeMode, ExchangeOp};
 pub use gathered_source::GatheredSource;

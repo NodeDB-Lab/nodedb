@@ -20,6 +20,8 @@ pub enum SettleStep {
     RedoStreams,
     /// Recording the group's backup cut floors and barriers.
     CutBarriers,
+    /// Giving each converted collection the mode its installed rows hold.
+    StorageModes,
 }
 
 impl std::fmt::Display for SettleStep {
@@ -32,6 +34,7 @@ impl std::fmt::Display for SettleStep {
             Self::CalvinState => "Calvin state install",
             Self::RedoStreams => "redo stream install",
             Self::CutBarriers => "cut barrier install",
+            Self::StorageModes => "storage mode install",
         })
     }
 }

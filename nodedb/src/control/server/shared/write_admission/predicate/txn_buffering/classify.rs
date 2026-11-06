@@ -1981,6 +1981,9 @@ mod tests {
                 target_type: "kv".into(),
                 schema_json: "{}".into(),
                 source_storage_mode: nodedb_physical::physical_plan::StorageMode::Schemaless,
+                target_storage_mode: nodedb_physical::physical_plan::StorageMode::Schemaless,
+                generation: 1,
+                incarnation: nodedb_types::Hlc::ZERO,
             }),
             PhysicalPlan::Meta(MetaOp::CreateTenantSnapshot {
                 tenant_id: 1,
@@ -1995,7 +1998,11 @@ mod tests {
                 collections_to_clear: Vec::new(),
                 group_vshards: Vec::new(),
             }),
-            PhysicalPlan::Meta(MetaOp::PurgeTenant { tenant_id: 1 }),
+            PhysicalPlan::Meta(MetaOp::PurgeTenant {
+                tenant_id: 1,
+                collections: Vec::new(),
+                vshards: Vec::new(),
+            }),
             PhysicalPlan::Meta(MetaOp::UnregisterCollection {
                 tenant_id: 1,
                 name: "c".into(),

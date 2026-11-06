@@ -81,22 +81,27 @@ pub enum MetaOp {
     /// Convert a collection's storage mode.
     ///
     /// Scans all documents in the collection and re-encodes them for the
-    /// target type. The catalog update happens on the Control Plane after
-    /// the Data Plane confirms success.
+    /// target type. Every replica runs it at one position of the collection's
+    /// data-group log. The catalog update follows on the metadata log.
     ///
     /// `target_type`: "document_schemaless", "document_strict", "kv".
     /// `schema_json`: for "document_strict"/"kv", JSON-serialized column definitions.
     /// `source_storage_mode`: the collection's storage mode BEFORE this
-    /// conversion, read from the catalog by the Control Plane dispatcher.
-    /// The Data Plane's own `doc_configs` cache still reflects the OLD mode
-    /// at dispatch time (the catalog flip and re-register happen after this
-    /// op returns), so the handler cannot resolve the source format from
-    /// that cache. It must take it from the plan instead.
+    /// conversion, read from the catalog by the proposer. The plan carries
+    /// it, so every replica decodes with the same mode.
+    /// `target_storage_mode`: the mode the core's `doc_configs` takes in the
+    /// same step as the rewrite, so a later entry of the log encodes with it.
+    /// `generation`: one more than the catalog row's conversion generation.
+    /// A core that applied this generation answers without a rewrite.
+    /// `incarnation`: the collection incarnation the conversion rewrites.
     ConvertCollection {
         collection: QualifiedCollection,
         target_type: String,
         schema_json: String,
         source_storage_mode: super::document::StorageMode,
+        target_storage_mode: super::document::StorageMode,
+        generation: u64,
+        incarnation: nodedb_types::Hlc,
     },
 
     /// Snapshot a tenant's data from the sparse engine.
@@ -169,12 +174,21 @@ pub enum MetaOp {
         collections: Vec<super::meta_snapshot::DepartedCollection>,
     },
 
-    /// Purge ALL data for a tenant across every engine and cache.
+    /// Purge a tenant's data on one data group's vShards.
     ///
     /// Deletes documents, indexes, vectors, graph edges, timeseries,
-    /// KV entries, CRDT state, inverted index terms, and cache entries.
+    /// KV entries, CRDT state, inverted index terms, and cache entries of
+    /// each collection `vshards` homes, and of each edge and node label
+    /// `vshards` homes. Every collection keeps its definition.
     /// Idempotent: safe to re-run after a crash.
-    PurgeTenant { tenant_id: u64 },
+    ///
+    /// `collections` holds every collection of the tenant, by storage name.
+    /// `vshards` holds the vShards of the group whose log carries the purge.
+    PurgeTenant {
+        tenant_id: u64,
+        collections: Vec<String>,
+        vshards: Vec<u32>,
+    },
 
     /// Purge a single collection across every engine on this core.
     ///
