@@ -100,30 +100,30 @@ pub(crate) async fn bootstrap_data_plane(
     let event_interest = nodedb::event::interest::EventInterest::new();
 
     // Load the persisted ND-array catalog once, before spawning cores.
-    let array_catalog = bootstrap::data_plane::load_array_catalog(config);
+    let array_catalog = bootstrap::data_plane::load_array_catalog(config)?;
 
     // Load every active collection's schema from the durable catalog once,
     // before spawning cores, so each core can seed `doc_configs` ahead of
     // its own WAL redo replay (see `load_doc_config_registry` docs).
-    let doc_config_seed = Arc::new(bootstrap::data_plane::load_doc_config_registry(config));
+    let doc_config_seed = Arc::new(bootstrap::data_plane::load_doc_config_registry(config)?);
 
     // Load every persisted `CREATE VECTOR INDEX`'s build parameters once,
     // before spawning cores, so each core can seed its vector-index config and
     // rebuild the HNSW from the durable document store on boot (the WAL
     // `VectorParams` record is not crash-durable).
     let vector_index_param_seed =
-        Arc::new(bootstrap::data_plane::load_vector_index_param_seed(config));
+        Arc::new(bootstrap::data_plane::load_vector_index_param_seed(config)?);
 
     // Seed each core with every columnar-family collection's real catalog
     // schema so a fresh `MutationEngine` created during WAL redo replay is
     // pre-registered with its declared types (Geometry, Timestamp, Decimal,
     // etc.) instead of falling back to lossy inference from the first
     // replayed row.
-    let columnar_schema_seed = Arc::new(bootstrap::data_plane::load_columnar_schema_seed(config));
+    let columnar_schema_seed = Arc::new(bootstrap::data_plane::load_columnar_schema_seed(config)?);
 
     // Seed each core with the catalog's user-defined CRS set, so WAL replay
     // and the first request resolve user-defined SRIDs.
-    let crs_set_seed = bootstrap::data_plane::load_crs_set_seed(config);
+    let crs_set_seed = bootstrap::data_plane::load_crs_set_seed(config)?;
 
     // Create the quarantine registry before spawning cores.
     let quarantine_registry =

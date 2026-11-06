@@ -27,30 +27,29 @@ use crate::types::{DatabaseId, TenantId};
 /// The catalog is filled while this function owns it, and only then wrapped
 /// in the shared lock. No other thread can reach it before that, so no lock
 /// is taken here.
+///
+/// `Err` when a catalog exists and its arrays do not read. An empty handle
+/// looks like a first boot and hides every array the catalog declares.
 pub fn load_array_catalog(
     config: &ServerConfig,
-) -> crate::control::array_catalog::ArrayCatalogHandle {
+) -> Result<crate::control::array_catalog::ArrayCatalogHandle, CatalogSeedError> {
+    load_array_catalog_at(&config.catalog_path())
+}
+
+/// [`load_array_catalog`] against an explicit catalog path.
+fn load_array_catalog_at(
+    catalog_path: &std::path::Path,
+) -> Result<crate::control::array_catalog::ArrayCatalogHandle, CatalogSeedError> {
+    const SEED: &str = "ND-array definitions";
     let mut array_catalog = ArrayCatalog::new();
-    let catalog_path = config.catalog_path();
-    match CatalogForRead::open(&catalog_path) {
-        Ok(Some(catalog)) => crate::control::array_catalog::persist::register_loaded(
+    if let Some(catalog) = open_for_seed(SEED, catalog_path)? {
+        crate::control::array_catalog::persist::register_loaded(
             &mut array_catalog,
             catalog.load_all_arrays(),
-        ),
-        // No catalog yet: a genuine fresh start, nothing to seed.
-        Ok(None) => {}
-        // A catalog EXISTS and could not be read — locked by another handle,
-        // corrupt, or unreadable. Seeding nothing here looks exactly like a
-        // fresh start, so this is reported at error level rather than
-        // fail-opened quietly (mirrors the other seed loaders below).
-        Err(error) => {
-            tracing::error!(
-                error = %error,
-                "catalog exists but could not be opened; the ND-array catalog will boot EMPTY"
-            );
-        }
+        )
+        .map_err(|source| CatalogSeedError::load(SEED, catalog_path, source))?;
     }
-    Arc::new(std::sync::RwLock::new(array_catalog))
+    Ok(Arc::new(std::sync::RwLock::new(array_catalog)))
 }
 
 /// Load every active collection's `CollectionConfig` from the durable
@@ -64,12 +63,10 @@ pub fn load_array_catalog(
 /// [`crate::bootstrap::schema_rehydrate::rehydrate_schema_registry`].
 /// Without this, strict (Binary Tuple) document collections replay
 /// through the schemaless fallback and get re-persisted as raw
-/// MessagePack. Mirrors [`load_array_catalog`]'s fail-open pattern: a
-/// catalog open/load failure at this boot phase logs a warning and
-/// yields an empty seed rather than aborting startup.
+/// MessagePack, so a catalog that exists and does not read refuses boot.
 pub fn load_doc_config_registry(
     config: &ServerConfig,
-) -> Vec<crate::data::executor::core_loop::DocConfigSeedEntry> {
+) -> Result<Vec<crate::data::executor::core_loop::DocConfigSeedEntry>, CatalogSeedError> {
     load_doc_config_registry_at(&config.catalog_path())
 }
 
@@ -84,56 +81,34 @@ pub fn load_doc_config_registry(
 /// restart test written against it is weaker than it appears.
 pub fn load_doc_config_registry_at(
     catalog_path: &std::path::Path,
-) -> Vec<crate::data::executor::core_loop::DocConfigSeedEntry> {
-    let catalog = match CatalogForRead::open(catalog_path) {
-        Ok(Some(catalog)) => catalog,
-        // No catalog yet: a genuine fresh start, nothing to seed.
-        Ok(None) => return Vec::new(),
-        // A catalog EXISTS and could not be read — locked by another
-        // handle, corrupt, or unreadable. Seeding nothing here looks
-        // exactly like a fresh start to every core that boots after it,
-        // so this is reported at error level rather than fail-opened
-        // quietly.
-        Err(error) => {
-            tracing::error!(
-                error = %error,
-                "catalog exists but could not be opened; cores will boot with an \
-                 EMPTY schema registry and replayed collections will fall back to \
-                 inferred schemas"
-            );
-            return Vec::new();
-        }
+) -> Result<Vec<crate::data::executor::core_loop::DocConfigSeedEntry>, CatalogSeedError> {
+    const SEED: &str = "collection schemas";
+    let Some(catalog) = open_for_seed(SEED, catalog_path)? else {
+        return Ok(Vec::new());
     };
     load_doc_config_registry_from(&catalog)
+        .map_err(|source| CatalogSeedError::load(SEED, catalog_path, source))
 }
 
 /// [`load_doc_config_registry`] against an ALREADY-OPEN catalog.
 ///
 /// The path-taking variants above open the catalog themselves, which only works
 /// for a caller that holds no handle to it yet. redb is single-writer: a second
-/// open while another handle is alive fails, and `CatalogForRead::open` reports
-/// that failure as `None`, which the loaders turn into an EMPTY seed rather than
-/// an error. That fail-open is right for a missing catalog and silently wrong
-/// for a locked one — the core comes up with no declared schemas at all and
-/// every replayed collection falls back to inference.
-///
-/// So any caller that already has the catalog open must pass it here instead of
+/// open while another handle is alive fails, and that failure refuses boot. So
+/// any caller that already has the catalog open must pass it here instead of
 /// handing over a path and re-opening behind its own lock.
+///
+/// `Err` when the catalog's collections do not read.
 pub fn load_doc_config_registry_from<S>(
     catalog: &S,
-) -> Vec<crate::data::executor::core_loop::DocConfigSeedEntry>
+) -> crate::Result<Vec<crate::data::executor::core_loop::DocConfigSeedEntry>>
 where
     S: crate::bootstrap::constraint_reconcile::CollectionSource + ?Sized,
 {
-    let all = match crate::bootstrap::constraint_reconcile::load_collections(catalog) {
-        Ok(all) => all,
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to load collections to seed doc_configs");
-            return Vec::new();
-        }
-    };
+    let all = crate::bootstrap::constraint_reconcile::load_collections(catalog)?;
 
-    all.into_iter()
+    Ok(all
+        .into_iter()
         .filter(|(_, coll)| coll.is_active)
         .map(|(database_id, coll)| {
             let tenant_id = TenantId::new(coll.tenant_id);
@@ -143,7 +118,7 @@ where
             let key = (database_id, tenant_id, config.name.clone());
             (key, config)
         })
-        .collect()
+        .collect())
 }
 
 /// Load every persisted `CREATE VECTOR INDEX`'s build parameters from the
@@ -154,39 +129,25 @@ where
 /// The WAL `VectorParams` record is not crash-durable — a `kill -9` before
 /// the WAL group-commit flush loses it, so on reopen the core would not know
 /// the collection carries a vector index and post-restart search would return
-/// empty. Mirrors [`load_doc_config_registry`]'s fail-open pattern: a catalog
-/// open/load failure at this boot phase logs a warning and yields an empty
-/// seed rather than aborting startup.
+/// empty. An empty seed also makes the boot rebuild skip every index, so a
+/// catalog that exists and does not read refuses boot.
 pub fn load_vector_index_param_seed(
     config: &ServerConfig,
-) -> Vec<nodedb_types::StoredVectorIndexParams> {
-    let catalog_path = config.catalog_path();
-    let catalog = match CatalogForRead::open(&catalog_path) {
-        Ok(Some(catalog)) => catalog,
-        // No catalog yet: a genuine fresh start, nothing to seed.
-        Ok(None) => return Vec::new(),
-        // A catalog EXISTS and could not be read — locked by another
-        // handle, corrupt, or unreadable. Seeding nothing here looks
-        // exactly like a fresh start to every core that boots after it,
-        // so this is reported at error level rather than fail-opened
-        // quietly.
-        Err(error) => {
-            tracing::error!(
-                error = %error,
-                "catalog exists but could not be opened; cores will boot with an \
-                 EMPTY schema registry and replayed collections will fall back to \
-                 inferred schemas"
-            );
-            return Vec::new();
-        }
+) -> Result<Vec<nodedb_types::StoredVectorIndexParams>, CatalogSeedError> {
+    load_vector_index_param_seed_at(&config.catalog_path())
+}
+
+/// [`load_vector_index_param_seed`] against an explicit catalog path.
+fn load_vector_index_param_seed_at(
+    catalog_path: &std::path::Path,
+) -> Result<Vec<nodedb_types::StoredVectorIndexParams>, CatalogSeedError> {
+    const SEED: &str = "vector index parameters";
+    let Some(catalog) = open_for_seed(SEED, catalog_path)? else {
+        return Ok(Vec::new());
     };
-    match catalog.list_all_vector_index_params() {
-        Ok(entries) => entries,
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to load vector index params to seed cores");
-            Vec::new()
-        }
-    }
+    catalog
+        .list_all_vector_index_params()
+        .map_err(|source| CatalogSeedError::load(SEED, catalog_path, source))
 }
 
 /// Load every active columnar-family collection's (tenant, name, schema)
@@ -205,47 +166,35 @@ pub fn load_vector_index_param_seed(
 /// Pre-registering the engine here means `ensure_columnar_engine_schema`
 /// finds an existing engine and returns its (real, catalog-sourced) schema
 /// instead of ever inferring — the same fix shape as
-/// [`load_doc_config_registry`] for strict document collections. Mirrors
-/// its fail-open pattern: a catalog open/load failure at this boot phase
-/// logs a warning and yields an empty seed rather than aborting startup.
+/// [`load_doc_config_registry`] for strict document collections. A catalog
+/// that exists and does not read refuses boot.
 pub fn load_columnar_schema_seed(
     config: &ServerConfig,
-) -> Vec<(
+) -> Result<ColumnarSchemaSeed, CatalogSeedError> {
+    load_columnar_schema_seed_at(&config.catalog_path())
+}
+
+/// One columnar-family collection's identity and declared schema, per entry.
+pub type ColumnarSchemaSeed = Vec<(
     DatabaseId,
     TenantId,
     String,
     nodedb_types::columnar::ColumnarSchema,
-)> {
-    let catalog_path = config.catalog_path();
-    let catalog = match CatalogForRead::open(&catalog_path) {
-        Ok(Some(catalog)) => catalog,
-        // No catalog yet: a genuine fresh start, nothing to seed.
-        Ok(None) => return Vec::new(),
-        // A catalog EXISTS and could not be read — locked by another
-        // handle, corrupt, or unreadable. Seeding nothing here looks
-        // exactly like a fresh start to every core that boots after it,
-        // so this is reported at error level rather than fail-opened
-        // quietly.
-        Err(error) => {
-            tracing::error!(
-                error = %error,
-                "catalog exists but could not be opened; cores will boot with an \
-                 EMPTY schema registry and replayed collections will fall back to \
-                 inferred schemas"
-            );
-            return Vec::new();
-        }
-    };
+)>;
 
-    let all = match crate::bootstrap::constraint_reconcile::load_collections(&catalog) {
-        Ok(all) => all,
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to load collections to seed columnar schemas");
-            return Vec::new();
-        }
+/// [`load_columnar_schema_seed`] against an explicit catalog path.
+fn load_columnar_schema_seed_at(
+    catalog_path: &std::path::Path,
+) -> Result<ColumnarSchemaSeed, CatalogSeedError> {
+    const SEED: &str = "columnar schemas";
+    let Some(catalog) = open_for_seed(SEED, catalog_path)? else {
+        return Ok(Vec::new());
     };
+    let all = crate::bootstrap::constraint_reconcile::load_collections(&catalog)
+        .map_err(|source| CatalogSeedError::load(SEED, catalog_path, source))?;
 
-    all.into_iter()
+    Ok(all
+        .into_iter()
         .filter(|(_, coll)| coll.is_active && coll.collection_type.is_columnar_family())
         .filter_map(|(database_id, coll)| {
             let schema = crate::control::planner::sql_plan_convert::dml::build_columnar_schema(
@@ -253,7 +202,17 @@ pub fn load_columnar_schema_seed(
                 coll.declared_primary_key.as_deref().unwrap_or(
                     crate::control::planner::sql_plan_convert::dml::DEFAULT_IDENTITY_COLUMN,
                 ),
-            )?;
+            );
+            // Empty fields are a schemaless collection. Other fields that build no schema are a bad catalog row.
+            if schema.is_none() && !coll.fields.is_empty() {
+                tracing::error!(
+                    collection = %coll.name,
+                    tenant_id = coll.tenant_id,
+                    "columnar schema does not build from its catalog fields; \
+                     the collection has no seeded schema, so check its column names and types"
+                );
+            }
+            let schema = schema?;
             Some((
                 database_id,
                 TenantId::new(coll.tenant_id),
@@ -261,40 +220,97 @@ pub fn load_columnar_schema_seed(
                 schema,
             ))
         })
-        .collect()
+        .collect())
+}
+
+/// Why boot refuses to seed the cores from the catalog.
+#[derive(Debug, thiserror::Error)]
+pub enum CatalogSeedError {
+    /// The catalog file exists and did not open.
+    #[error(
+        "boot refused: catalog {} exists and did not open, so the {seed} are unknown: \
+         {detail}; stop any other process holding the file, or restore the catalog from \
+         a backup, then start again",
+        .path.display()
+    )]
+    CatalogOpen {
+        seed: &'static str,
+        path: std::path::PathBuf,
+        detail: String,
+    },
+    /// The catalog opened and the seed's rows did not load.
+    #[error(
+        "boot refused: the {seed} in catalog {} did not load: {source}; restore the \
+         catalog from a backup, then start again",
+        .path.display()
+    )]
+    CatalogLoad {
+        seed: &'static str,
+        path: std::path::PathBuf,
+        #[source]
+        source: Box<crate::Error>,
+    },
+}
+
+impl CatalogSeedError {
+    fn load(seed: &'static str, path: &std::path::Path, source: crate::Error) -> Self {
+        Self::CatalogLoad {
+            seed,
+            path: path.to_path_buf(),
+            source: Box::new(source),
+        }
+    }
+}
+
+impl From<CatalogSeedError> for crate::Error {
+    fn from(e: CatalogSeedError) -> Self {
+        Self::Config {
+            detail: e.to_string(),
+        }
+    }
+}
+
+/// Open the catalog for one seed. `None` when no catalog file exists: a first
+/// boot, the one case with nothing to seed. A file that does not open is
+/// locked, corrupt, or unreadable, and an empty seed hides that.
+fn open_for_seed(
+    seed: &'static str,
+    catalog_path: &std::path::Path,
+) -> Result<Option<CatalogForRead>, CatalogSeedError> {
+    CatalogForRead::open(catalog_path).map_err(|error| CatalogSeedError::CatalogOpen {
+        seed,
+        path: catalog_path.to_path_buf(),
+        detail: error.to_string(),
+    })
 }
 
 /// Load the user-defined CRS set from the durable catalog so each Data Plane
 /// core resolves user-defined SRIDs from its first request, WAL replay
 /// included. A committed `CREATE` or `DROP SPATIAL_REF_SYS` reaches a running
 /// core through `MetaOp::SetCustomCrsSet`; this seed covers the set as of
-/// boot. Mirrors [`load_doc_config_registry`]'s fail-open pattern: a catalog
-/// open/load failure logs an error and yields an empty set, so a geometry in
-/// a user-defined SRID fails to resolve instead of booting being refused.
-pub fn load_crs_set_seed(config: &ServerConfig) -> Arc<nodedb_crs::CustomCrsSet> {
-    let catalog = match CatalogForRead::open(&config.catalog_path()) {
-        Ok(Some(catalog)) => catalog,
-        // No catalog yet: a genuine fresh start, nothing to seed.
-        Ok(None) => return Arc::new(nodedb_crs::CustomCrsSet::new()),
-        Err(error) => {
-            tracing::error!(
-                error = %error,
-                "catalog exists but could not be opened; cores will boot with an \
-                 EMPTY user-defined CRS set"
-            );
-            return Arc::new(nodedb_crs::CustomCrsSet::new());
-        }
+/// boot.
+///
+/// `Err` when a catalog exists and its CRS set does not read. Replay with an
+/// empty set fails or misreads every geometry in a user-defined SRID, so boot
+/// stops.
+pub fn load_crs_set_seed(
+    config: &ServerConfig,
+) -> Result<Arc<nodedb_crs::CustomCrsSet>, CatalogSeedError> {
+    load_crs_set_seed_at(&config.catalog_path())
+}
+
+/// [`load_crs_set_seed`] against an explicit catalog path.
+fn load_crs_set_seed_at(
+    catalog_path: &std::path::Path,
+) -> Result<Arc<nodedb_crs::CustomCrsSet>, CatalogSeedError> {
+    const SEED: &str = "user-defined CRS definitions";
+    let Some(catalog) = open_for_seed(SEED, catalog_path)? else {
+        return Ok(Arc::new(nodedb_crs::CustomCrsSet::new()));
     };
-    match catalog.load_custom_crs_set() {
-        Ok(set) => Arc::new(set),
-        Err(error) => {
-            tracing::error!(
-                error = %error,
-                "failed to load the user-defined CRS set; cores will boot with an EMPTY set"
-            );
-            Arc::new(nodedb_crs::CustomCrsSet::new())
-        }
-    }
+    let set = catalog
+        .load_custom_crs_set()
+        .map_err(|source| CatalogSeedError::load(SEED, catalog_path, source))?;
+    Ok(Arc::new(set))
 }
 
 /// Result of [`spawn_data_plane_cores`]: the core thread handles plus each
@@ -421,4 +437,151 @@ pub fn spawn_data_plane_cores(
         handles: core_handles,
         replay_done: replay_done_rxs,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every loader against one catalog path, as `seed: outcome`.
+    fn every_seed(path: &std::path::Path) -> Vec<(&'static str, Result<(), CatalogSeedError>)> {
+        vec![
+            ("crs", load_crs_set_seed_at(path).map(|_| ())),
+            ("array", load_array_catalog_at(path).map(|_| ())),
+            ("doc", load_doc_config_registry_at(path).map(|_| ())),
+            ("vector", load_vector_index_param_seed_at(path).map(|_| ())),
+            ("columnar", load_columnar_schema_seed_at(path).map(|_| ())),
+        ]
+    }
+
+    /// A first boot has no catalog file. Every seed is empty and boot goes on.
+    #[test]
+    fn an_absent_catalog_seeds_every_loader_empty() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("system.redb");
+
+        for (seed, outcome) in every_seed(&path) {
+            assert!(outcome.is_ok(), "{seed}: a first boot goes on: {outcome:?}");
+        }
+        assert!(load_doc_config_registry_at(&path).expect("doc").is_empty());
+        assert!(
+            load_vector_index_param_seed_at(&path)
+                .expect("vector")
+                .is_empty()
+        );
+        assert!(
+            load_columnar_schema_seed_at(&path)
+                .expect("columnar")
+                .is_empty()
+        );
+    }
+
+    /// A catalog with no rows is a real catalog with nothing to seed.
+    #[test]
+    fn an_empty_catalog_seeds_every_loader() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("system.redb");
+        drop(crate::control::security::catalog::SystemCatalog::open(&path).expect("catalog"));
+
+        for (seed, outcome) in every_seed(&path) {
+            assert!(outcome.is_ok(), "{seed}: {outcome:?}");
+        }
+    }
+
+    /// A catalog that does not open stops boot in every loader. An empty seed
+    /// looks like a first boot, and hides what the catalog declares.
+    #[test]
+    fn a_catalog_that_does_not_open_refuses_boot_in_every_loader() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("system.redb");
+        std::fs::write(&path, vec![0xAB; 8192]).expect("write garbage catalog");
+
+        for (seed, outcome) in every_seed(&path) {
+            let error = outcome.expect_err(seed);
+            assert!(
+                matches!(error, CatalogSeedError::CatalogOpen { .. }),
+                "{seed}: {error}"
+            );
+            let message = error.to_string();
+            assert!(message.contains("system.redb"), "names the file: {message}");
+            assert!(
+                message.contains("did not open"),
+                "names the cause: {message}"
+            );
+            assert!(
+                message.contains("then start again"),
+                "names the action: {message}"
+            );
+            assert!(matches!(
+                crate::Error::from(error),
+                crate::Error::Config { .. }
+            ));
+        }
+    }
+
+    /// A catalog whose collections do not read refuses the seed.
+    struct UnreadableCollections;
+
+    impl crate::bootstrap::constraint_reconcile::CollectionSource for UnreadableCollections {
+        fn list_database_ids(&self) -> crate::Result<Vec<DatabaseId>> {
+            Ok(Vec::new())
+        }
+
+        fn collections_in(
+            &self,
+            _database_id: DatabaseId,
+        ) -> crate::Result<Vec<crate::control::security::catalog::StoredCollection>> {
+            Err(crate::Error::Internal {
+                detail: "collections table unreadable".into(),
+            })
+        }
+
+        fn collections_for_tenant(
+            &self,
+            _database_id: DatabaseId,
+            _tenant_id: u64,
+        ) -> crate::Result<Vec<crate::control::security::catalog::StoredCollection>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[test]
+    fn a_read_error_after_the_open_is_an_error() {
+        assert!(load_doc_config_registry_from(&UnreadableCollections).is_err());
+    }
+
+    #[test]
+    fn a_load_error_names_the_seed_file_and_action() {
+        let error = CatalogSeedError::load(
+            "columnar schemas",
+            std::path::Path::new("/data/system.redb"),
+            crate::Error::Internal {
+                detail: "table unreadable".into(),
+            },
+        );
+        let message = error.to_string();
+        for part in [
+            "columnar schemas",
+            "/data/system.redb",
+            "table unreadable",
+            "then start again",
+        ] {
+            assert!(message.contains(part), "{part}: {message}");
+        }
+    }
+
+    /// A read error refuses the array seed.
+    #[test]
+    fn the_array_registration_reports_a_read_error() {
+        let mut registry = ArrayCatalog::new();
+        let failed = crate::control::array_catalog::persist::register_loaded(
+            &mut registry,
+            Err(crate::Error::Internal {
+                detail: "arrays table unreadable".into(),
+            }),
+        );
+        assert!(failed.is_err());
+        crate::control::array_catalog::persist::register_loaded(&mut registry, Ok(Vec::new()))
+            .expect("nothing to register");
+    }
 }

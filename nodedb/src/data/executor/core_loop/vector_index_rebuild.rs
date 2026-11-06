@@ -22,10 +22,16 @@ impl CoreLoop {
     /// Re-index every document of each seeded vector-index collection from
     /// the durable `sparse` store into the HNSW. Run after WAL replay so it
     /// overlays (rather than races) the replayed state.
+    ///
+    /// `Err` when the store does not read or an insert fails for a reason
+    /// other than the document's data. The index then misses rows the store
+    /// holds, so the core must not serve it as complete. A document whose
+    /// vector does not fit its index is reported and skipped: no rebuild can
+    /// index it.
     pub fn rebuild_vector_indexes_from_store(
         &mut self,
         entries: &[nodedb_types::StoredVectorIndexParams],
-    ) {
+    ) -> crate::Result<()> {
         use std::collections::HashSet;
         // One scan per (database, tenant, collection):
         // `apply_point_put_vector_indexes` re-indexes ALL of the document's
@@ -83,15 +89,7 @@ impl CoreLoop {
                 docs.push((doc_id.surrogate(), normalized.into_owned()));
                 Ok(std::ops::ControlFlow::Continue(()))
             });
-            if let Err(e) = scan {
-                tracing::warn!(
-                    core = self.core_id,
-                    %collection,
-                    error = %e,
-                    "vector-index rebuild scan failed"
-                );
-                continue;
-            }
+            scan.map_err(|e| rebuild_error(self.core_id, db, tenant_id, &collection, e))?;
 
             let mut rebuilt = 0usize;
             for (surrogate, value) in docs {
@@ -108,14 +106,7 @@ impl CoreLoop {
                     Ok(Some((sys_from, _))) => sys_from,
                     Ok(None) => continue,
                     Err(e) => {
-                        tracing::warn!(
-                            core = self.core_id,
-                            %collection,
-                            error = %e,
-                            "vector-index rebuild could not read the row's version; \
-                             its embeddings will not be searchable"
-                        );
-                        continue;
+                        return Err(rebuild_error(self.core_id, db, tenant_id, &collection, e));
                     }
                 };
                 // Same as WAL replay: the document is already durable, so a
@@ -139,7 +130,7 @@ impl CoreLoop {
                     &mut Vec::new(),
                 ) {
                     Ok(inserted) => inserted,
-                    Err(e) => {
+                    Err(e @ crate::Error::DataException { .. }) => {
                         tracing::warn!(
                             core = self.core_id,
                             %collection,
@@ -148,6 +139,11 @@ impl CoreLoop {
                              its embeddings will not be searchable"
                         );
                         continue;
+                    }
+                    // Every other error says nothing about the document, so
+                    // skipping it publishes an index that misses a good row.
+                    Err(e) => {
+                        return Err(rebuild_error(self.core_id, db, tenant_id, &collection, e));
                     }
                 };
                 if inserted > 0 {
@@ -163,5 +159,78 @@ impl CoreLoop {
                 );
             }
         }
+        Ok(())
+    }
+}
+
+/// The boot error for a vector-index rebuild that cannot finish.
+fn rebuild_error(
+    core_id: usize,
+    database_id: u64,
+    tenant_id: u64,
+    collection: &str,
+    cause: crate::Error,
+) -> crate::Error {
+    crate::Error::Storage {
+        engine: "vector".into(),
+        detail: format!(
+            "core {core_id}: vector index rebuild of '{collection}' \
+             (database {database_id}, tenant {tenant_id}) did not finish: {cause}"
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::data::executor::core_loop::tests::make_core_with_dir;
+    use crate::engine::document::store::StorageKey;
+
+    const COLLECTION: &str = "rebuild_vec";
+
+    fn entry() -> nodedb_types::StoredVectorIndexParams {
+        nodedb_types::StoredVectorIndexParams {
+            database_id: crate::types::DatabaseId::DEFAULT.as_u64(),
+            tenant_id: 1,
+            collection: COLLECTION.to_string(),
+            field_name: "embedding".to_string(),
+            dim: 3,
+            metric: "cosine".to_string(),
+            m: 0,
+            ef_construction: 0,
+            index_type: String::new(),
+            pq_m: 0,
+            ivf_cells: 0,
+            ivf_nprobe: 0,
+            modification_hlc: nodedb_types::Hlc::ZERO,
+        }
+    }
+
+    /// A store row that does not read fails the rebuild. A rebuild that
+    /// continues publishes an index without that row, and boot reports success.
+    #[test]
+    fn a_row_that_does_not_read_fails_the_rebuild() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _req_tx, _resp_rx) = make_core_with_dir(dir.path());
+        let db = crate::types::DatabaseId::DEFAULT.as_u64();
+        let key = StorageKey::for_surrogate(nodedb_types::Surrogate::new(9));
+        core.sparse
+            .corrupt_current_version_for_test(db, 1, COLLECTION, &key);
+
+        let error = core
+            .rebuild_vector_indexes_from_store(&[entry()])
+            .expect_err("an unreadable row fails the rebuild");
+
+        assert!(
+            matches!(error, crate::Error::Storage { ref detail, .. } if detail.contains(COLLECTION)),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_empty_store_rebuilds_without_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _req_tx, _resp_rx) = make_core_with_dir(dir.path());
+        core.rebuild_vector_indexes_from_store(&[entry()])
+            .expect("nothing to read");
     }
 }

@@ -172,7 +172,7 @@ impl SharedState {
                 .write()
                 .unwrap_or_else(|p| p.into_inner()),
             catalog.load_all_arrays(),
-        );
+        )?;
         // The authorization fence holds this cache's source index, so the
         // definitions load into the cache in place. Nothing else holds the
         // lock while a constructor runs.
