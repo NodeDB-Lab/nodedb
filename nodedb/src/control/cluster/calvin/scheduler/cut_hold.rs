@@ -78,6 +78,7 @@ mod tests {
             hlc,
             restore_point: 0,
             capture: None,
+            mirror: None,
         }
     }
 

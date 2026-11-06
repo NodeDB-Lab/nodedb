@@ -58,6 +58,7 @@ pub fn spawn_background_loops(
         tracing::warn!(error = %e, "database metrics: catalog list error at startup");
     }
     mirror::spawn_mirror_lag_monitor(shared);
+    crate::control::mirror::source::cut_loop::spawn_mirror_source_loops(shared);
     database_metrics::spawn_database_metrics_sampler(shared);
     storage_bytes::spawn_storage_sampler(
         shared,

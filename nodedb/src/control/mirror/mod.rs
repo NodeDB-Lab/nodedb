@@ -12,6 +12,7 @@
 //!   returns the set that need their observer link re-established.
 //! - [`cut_watch`] — [`MirrorCutWatch`]: each mirror's cut state and the
 //!   verdict it gives a held entry.
+//! - [`source`] — what this cluster does for the mirrors that follow it.
 //! - [`state`] — [`MirrorState`]: what `SharedState` holds for its mirrors.
 
 pub mod cut_watch;
@@ -19,6 +20,7 @@ pub mod fence;
 pub mod observer;
 pub mod registry;
 pub mod restart;
+pub mod source;
 pub mod state;
 #[cfg(test)]
 pub(crate) mod test_fixture;

@@ -7,6 +7,7 @@ mod data_plane;
 mod engines;
 mod maintenance;
 mod memory;
+mod mirror;
 mod network;
 mod promql;
 mod scheduler;
@@ -25,6 +26,7 @@ pub use engines::{
 };
 pub use maintenance::MaintenanceTuning;
 pub use memory::MemoryTuning;
+pub use mirror::MirrorTuning;
 pub use network::{BridgeTuning, ClusterTransportTuning, NetworkTuning, WalTuning};
 pub use promql::PromqlTuning;
 pub use scheduler::SchedulerTuning;

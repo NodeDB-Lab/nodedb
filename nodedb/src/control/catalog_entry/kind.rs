@@ -103,6 +103,8 @@ impl CatalogEntry {
             Self::CommitConsumerOffsets(_) => "commit_consumer_offsets",
             Self::PutBackupScheduleMark(_) => "put_backup_schedule_mark",
             Self::PutMirrorCutState { .. } => "put_mirror_cut_state",
+            Self::PutMirrorPin(_) => "put_mirror_pin",
+            Self::DeleteMirrorPin { .. } => "delete_mirror_pin",
             Self::PutSpatialRefSys(_) => "put_spatial_ref_sys",
             Self::DropSpatialRefSys { .. } => "drop_spatial_ref_sys",
             Self::PutCredential(_) => "put_credential",

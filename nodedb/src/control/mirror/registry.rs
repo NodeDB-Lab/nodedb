@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Registry of active cross-cluster observer links keyed by local `DatabaseId`.
+//! Registry of active cross-cluster links keyed by local `DatabaseId`.
 //!
 //! The registry is `Send + Sync` and lives on the Control Plane. Each mirror
 //! database that is actively following a source cluster has one entry here.
@@ -10,8 +10,8 @@
 //! # Receive timestamp
 //!
 //! Each entry tracks `last_received_ms`: the wall-clock time at which the
-//! mirror's apply loop most recently received an AppendEntries (or any
-//! source-originated frame) over the link. The receive-side wiring calls
+//! mirror most recently received a source-originated frame over the link. The
+//! receive-side wiring calls
 //! [`MirrorLinkRegistry::record_received`] on every inbound frame; the lag
 //! monitor reads the value via [`MirrorLinkRegistry::last_received_ms`] to
 //! drive the `Degraded → Disconnected` transition.
@@ -121,7 +121,7 @@ impl MirrorLinkRegistry {
             .map(|e| e.last_received_ms.load(Ordering::Relaxed))
     }
 
-    /// Tear down the observer link for `db_id` if one is registered.
+    /// Tear down the link for `db_id` if one is registered.
     ///
     /// The link entry is removed from the registry before any I/O so a
     /// concurrent caller cannot re-use a link that is mid-teardown. The
@@ -133,7 +133,7 @@ impl MirrorLinkRegistry {
             info!(
                 db_id = db_id.as_u64(),
                 source_cluster = link.source_cluster_id(),
-                "mirror link teardown: removing cross-cluster observer link"
+                "mirror link teardown: removing cross-cluster link"
             );
             // The link is `Arc`-wrapped; dropping the last Arc here causes
             // quinn to close the underlying QUIC connection gracefully on the

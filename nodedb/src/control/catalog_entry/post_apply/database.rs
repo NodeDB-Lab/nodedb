@@ -9,7 +9,9 @@
 
 use std::sync::Arc;
 
-use nodedb_types::{DatabaseId, MirrorCutState};
+use nodedb_types::DatabaseId;
+
+use crate::control::catalog_entry::CatalogEntry;
 
 use crate::control::security::catalog::database_types::DatabaseDescriptor;
 use crate::control::state::SharedState;
@@ -31,15 +33,23 @@ pub fn delete(db_id: u64, shared: Arc<SharedState>) {
     shared.mirror.fence.remove(database_id);
     shared.mirror.cuts.remove(database_id);
     shared.calvin.applied.remove_mirror_database(db_id);
+    shared.mirror.pins.source_dropped(db_id);
 }
 
-/// Synchronous post-apply for `PutMirrorCutState` — follow the row, so the apply
-/// loop's verdict on a held entry reads it before the applied index moves.
-pub fn put_cut_state(db_id: u64, state: &MirrorCutState, shared: &SharedState) {
-    shared
-        .mirror
-        .cuts
-        .apply_state(DatabaseId::new(db_id), state);
+/// Synchronous post-apply for a mirror row: follow it before the applied index
+/// moves. The apply loop's verdict on a held entry reads the cut state, and
+/// each log's compaction reads the pins. Any other entry changes nothing here.
+pub fn follow_mirror_row(entry: &CatalogEntry, shared: &SharedState) {
+    if let CatalogEntry::PutMirrorCutState { database_id, state } = entry {
+        shared
+            .mirror
+            .cuts
+            .apply_state(DatabaseId::new(*database_id), state);
+    } else if let CatalogEntry::PutMirrorPin(pin) = entry {
+        shared.mirror.pins.apply(pin);
+    } else if let CatalogEntry::DeleteMirrorPin { link_id } = entry {
+        shared.mirror.pins.remove(*link_id);
+    }
 }
 
 /// Post-apply for `PutDatabaseGrant`. A session-lifetime identity copies the

@@ -39,6 +39,9 @@ pub fn delete(db_id: u64, catalog: &SystemCatalog) -> crate::Result<()> {
     catalog
         .delete_mirror_calvin_applied(db_id)
         .map_err(|e| catalog_err(&format!("delete mirror calvin (database {db_id})"), e))?;
+    catalog
+        .mark_mirror_pins_source_dropped(db_id)
+        .map_err(|e| catalog_err(&format!("stop mirror pins (database {db_id})"), e))?;
     // A stale quota row keeps consuming the sum-of-quotas ceiling.
     super::quota::purge_database_scope(db_id, catalog)
 }

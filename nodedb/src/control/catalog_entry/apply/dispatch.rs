@@ -423,6 +423,8 @@ fn apply_to_inner(entry: &CatalogEntry, catalog: &SystemCatalog) -> crate::Resul
         CatalogEntry::PutMirrorCutState { database_id, state } => {
             mirror_cut::raise(*database_id, state, catalog)
         }
+        CatalogEntry::PutMirrorPin(pin) => catalog.raise_mirror_pin(pin),
+        CatalogEntry::DeleteMirrorPin { link_id } => catalog.delete_mirror_pin(*link_id),
         CatalogEntry::PutSpatialRefSys(def) => spatial_ref_sys::define(def, catalog),
         CatalogEntry::DropSpatialRefSys { srid } => spatial_ref_sys::retire(*srid, catalog),
         CatalogEntry::PutCredential(row) => credential::put(row, catalog),

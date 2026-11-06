@@ -930,6 +930,9 @@ pub enum ReplicatedWrite {
         /// the request's tenants when it applies the first barrier of the
         /// request, before it applies the next entry.
         capture: Option<nodedb_physical::physical_plan::CutCaptureRequest>,
+        /// Set on a mirror cut's barrier: the mark every mirror reads. Such a
+        /// barrier raises no restore floor.
+        mirror: Option<super::wire_shapes::MirrorBarrier>,
     },
     /// One message published to a durable topic whose home vShard is this
     /// entry's vShard. Every replica appends it to its topic log at apply, in

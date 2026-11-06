@@ -65,6 +65,8 @@ pub struct CoveredCutBarrier {
     pub restore_point: u64,
     /// A database backup's capture request.
     pub capture: Option<nodedb_physical::physical_plan::CutCaptureRequest>,
+    /// What a mirror cut tells the source's mirrors.
+    pub mirror: Option<nodedb_types::MirrorCutMark>,
     /// The log index of the cut's first barrier in the group.
     pub log_index: u64,
 }

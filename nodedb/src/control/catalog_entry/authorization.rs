@@ -17,6 +17,8 @@ impl CatalogEntry {
             Self::CommitConsumerOffsets(_)
                 | Self::PutBackupScheduleMark(_)
                 | Self::PutMirrorCutState { .. }
+                | Self::PutMirrorPin(_)
+                | Self::DeleteMirrorPin { .. }
         )
     }
 
@@ -116,6 +118,8 @@ impl CatalogEntry {
             | Self::CommitConsumerOffsets(_)
             | Self::PutBackupScheduleMark(_)
             | Self::PutMirrorCutState { .. }
+            | Self::PutMirrorPin(_)
+            | Self::DeleteMirrorPin { .. }
             | Self::PutSpatialRefSys(_)
             | Self::DropSpatialRefSys { .. }
             | Self::PutCredential(_)

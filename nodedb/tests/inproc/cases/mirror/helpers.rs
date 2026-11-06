@@ -11,8 +11,7 @@
 //!
 //! 2. **Two-server pgwire fixtures** ([`inject_mirror_descriptor`],
 //!    [`assert_sqlstate`]) — drive a live `TestServer` for end-to-end SQL
-//!    behaviour. The transport between source and mirror uses real QUIC
-//!    (nexar+quinn) via `CrossClusterLink` — no mocks.
+//!    behaviour. They inject mirror state and open no link to a source.
 //!
 //! Both modes share [`now_ms`].
 

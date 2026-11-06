@@ -328,6 +328,7 @@ mod tests {
             hlc: 7,
             restore_point: 0,
             capture: None,
+            mirror: None,
         };
         let plain = ReplicatedEntry::new(1, 0, 3, write.clone());
         assert_eq!(plain.event_source, ReplicatedEventSource::User);

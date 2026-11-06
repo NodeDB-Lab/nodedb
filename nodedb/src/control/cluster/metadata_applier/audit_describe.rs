@@ -199,6 +199,8 @@ pub(super) fn describe_entry(e: &catalog_entry::CatalogEntry) -> (String, u64, S
         E::PutMirrorCutState { database_id, .. } => {
             (format!("mirror_cut_state:{database_id}"), 0, String::new())
         }
+        E::PutMirrorPin(pin) => (format!("mirror_pin:{}", pin.link_id), 0, String::new()),
+        E::DeleteMirrorPin { link_id } => (format!("mirror_pin:{link_id}"), 0, String::new()),
         E::PutSpatialRefSys(def) => (format!("spatial_ref_sys:{}", def.srid), 0, String::new()),
         E::DropSpatialRefSys { srid } => (format!("spatial_ref_sys:{srid}"), 0, String::new()),
         E::PutCredential(row) => (

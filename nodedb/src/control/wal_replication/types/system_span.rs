@@ -198,6 +198,7 @@ mod tests {
             hlc: 1,
             restore_point: 0,
             capture: None,
+            mirror: None,
         };
         assert_eq!(barrier.system_ordinal_span(), None);
     }

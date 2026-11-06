@@ -154,6 +154,7 @@ pub(super) const BOOTSTRAP_TABLES: &[BootstrapTable] = bootstrap_tables![
     // ── Scheduled backups ──
     "backup_schedule_marks" => super::backup_schedule_marks::BACKUP_SCHEDULE_MARKS,
     "mirror_cut_state" => MIRROR_CUT_STATE,
+    "mirror_pins" => MIRROR_PINS,
     // ── Tenant relocation ──
     "move_tenant_journal" => super::move_tenant_journal_types::MOVE_TENANT_JOURNAL,
 ];

@@ -275,10 +275,14 @@ fn prepare_replicated<'a>(
             hlc,
             restore_point,
             capture,
+            mirror,
         } => {
-            // Every entry after the barrier records above the cut, on this
-            // life and on every later one.
-            watch.raise_cut(pos.group_id, pos.log_index, hlc);
+            // Every entry after a restore cut's barrier records above the cut,
+            // on this life and on every later one. A mirror cut names no
+            // restore.
+            if mirror.is_none() {
+                watch.raise_cut(pos.group_id, pos.log_index, hlc);
+            }
             super::cut_barrier::prepare_cut_barrier(
                 ctx,
                 pos,
@@ -287,6 +291,7 @@ fn prepare_replicated<'a>(
                     hlc,
                     restore_point,
                     capture,
+                    mirror: mirror.map(|barrier| barrier.mark),
                 },
             )
         }

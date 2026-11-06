@@ -465,6 +465,7 @@ mod tests {
             hlc: scheduler.shared.hlc_clock.now().wall_ns,
             restore_point: 0,
             capture: None,
+            mirror: None,
         };
         scheduler.process_scheduler_input(SchedulerInput::CutMarker {
             hlc: cut.hlc,

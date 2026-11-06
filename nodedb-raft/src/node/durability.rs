@@ -160,6 +160,13 @@ impl<S: LogStorage> RaftNode<S> {
         self.log.retained_bytes()
     }
 
+    /// Committed entries from `lo` whose data sums to at most `max_bytes`. The
+    /// first entry always ships, so an oversized one still ships alone.
+    pub fn log_committed_within(&self, lo: u64, max_bytes: usize) -> Result<&[LogEntry]> {
+        self.log
+            .entries_within(lo, self.volatile.commit_index, max_bytes)
+    }
+
     /// Bound every compaction of this log by `owner`'s `ceiling`: no entry
     /// above the value it holds is discarded, whoever asks. Other owners'
     /// ceilings stay, and the lowest binds.

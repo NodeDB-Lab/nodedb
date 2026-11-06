@@ -1,37 +1,49 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Cross-cluster mirror transport: QUIC link, cluster-id handshake,
-//! send-rate throttle, and snapshot bootstrap.
+//! Cross-cluster mirror transport: an mTLS QUIC listener on the source, a
+//! seeded client on the mirror, and snapshot bootstrap.
 //!
 //! # Module layout
 //!
 //! - [`error`] — [`MirrorError`] enum; wires into [`crate::error::ClusterError`].
-//! - [`handshake`] — [`MirrorHello`] / [`MirrorHelloAck`] wire types and codec.
-//! - [`link`] — [`CrossClusterLink`]: outbound QUIC connection with exponential
-//!   backoff reconnect and cluster-id authentication.
-//! - [`throttle`] — [`SendThrottle`]: per-mirror bytes-in-flight cap; source
-//!   pauses when the observer falls behind.
+//! - [`allowlist`] — [`MirrorAllowlist`]: who can open a link, and the TLS
+//!   configs that enforce it.
+//! - [`handshake`] — [`MirrorHello`] / [`MirrorHelloAck`].
+//! - [`tail_wire`] — the bounded frames, requests and refusals of a link.
+//! - [`listener`] — [`serve_mirror_source`]: the source's accept loop.
+//! - [`link`] — [`CrossClusterLink`]: one mirror's connection, seed rotation and
+//!   reconnect backoff.
+//! - [`client`] — [`MirrorSourceClient`]: hello, fetch and ack across replicas.
+//! - [`throttle`] — [`SendThrottle`]: a bootstrap transfer's bytes-in-flight cap.
 //! - [`bootstrap`] — [`MirrorBootstrapReceiver`]: cross-cluster snapshot transfer,
 //!   `Bootstrapping → Following` status transitions.
-//! - [`source_handler`] — [`handle_mirror_connection`]: source-side validation of
-//!   incoming mirror connections (cluster-id check, observer-only enforcement).
 
+pub mod allowlist;
 pub mod bootstrap;
+pub mod client;
 pub mod error;
 pub mod handshake;
 pub mod link;
-pub mod source_handler;
+pub mod listener;
+pub mod tail_wire;
 pub mod throttle;
+
+pub use allowlist::{
+    ALPN_NODEDB_MIRROR, MirrorAllowlist, MirrorClient, make_mirror_client_config,
+    make_mirror_server_config,
+};
 
 pub use bootstrap::{
     BootstrapChunkOutcome, CrossClusterSnapshotEnvelope, MirrorBootstrapReceiver,
     PROGRESS_REPORT_CHUNK_BYTES,
 };
+pub use client::MirrorSourceClient;
 pub use error::MirrorError;
-pub use handshake::{
-    MIRROR_HELLO_ERR_BAD_VERSION, MIRROR_HELLO_ERR_CLUSTER_ID, MIRROR_HELLO_ERR_OBSERVER_ONLY,
-    MIRROR_PROTOCOL_VERSION, MirrorHello, MirrorHelloAck,
+pub use handshake::{MIRROR_PROTOCOL_VERSION, MirrorHello, MirrorHelloAck};
+pub use link::{CrossClusterLink, MirrorLinkConfig};
+pub use listener::{MirrorSourceService, bind_mirror_endpoint, serve_mirror_source};
+pub use tail_wire::{
+    MAX_TAIL_BYTES, MAX_TAIL_WAIT_MS, MirrorAck, MirrorRefusal, MirrorRequest, MirrorResponse,
+    MirrorTailBatch, MirrorTailEntry, MirrorTailRequest,
 };
-pub use link::CrossClusterLink;
-pub use source_handler::{HandshakeOutcome, SourceHandlerParams, handle_mirror_connection};
 pub use throttle::{DEFAULT_CAP_BYTES, SendThrottle};

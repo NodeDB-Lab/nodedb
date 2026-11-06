@@ -37,6 +37,11 @@ pub(super) fn prepare_cut_barrier<'a>(
         .calvin
         .cut_barriers
         .note_applied(&cut, pos.group_id, pos.log_index);
+    // A mirror reads the barrier's place in the log. No restore names it, so
+    // it persists no floor.
+    if cut.mirror.is_some() {
+        return Prepared::Barrier;
+    }
     let barrier = CutBarrierPoint {
         hlc: cut.hlc,
         restore_point: cut.restore_point,
@@ -58,6 +63,7 @@ pub(super) fn note_covered_barrier(state: &SharedState, group_id: u64, queued: &
                 hlc,
                 restore_point,
                 capture,
+                mirror,
             },
         ..
     }) = &queued.decoded
@@ -66,6 +72,7 @@ pub(super) fn note_covered_barrier(state: &SharedState, group_id: u64, queued: &
             hlc: *hlc,
             restore_point: *restore_point,
             capture: capture.clone(),
+            mirror: mirror.as_ref().map(|barrier| barrier.mark),
         };
         state
             .calvin

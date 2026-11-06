@@ -114,6 +114,7 @@ pub(super) fn validate_domain(config: &ServerConfig) -> crate::Result<()> {
         "checkpoint.wal_archive_interval_secs",
     )?;
     super::pitr::validate_pitr(config)?;
+    config.mirror.validate()?;
     super::backup::validate_backup(config)?;
     super::egress::validate_egress(&config.egress)?;
 

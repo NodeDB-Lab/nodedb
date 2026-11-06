@@ -164,6 +164,7 @@ mod tests {
             hlc: scheduler.shared.hlc_clock.now().wall_ns,
             restore_point: 0,
             capture: None,
+            mirror: None,
         }
     }
 
@@ -311,6 +312,7 @@ mod tests {
             hlc: 1,
             restore_point: 0,
             capture: None,
+            mirror: None,
         };
         scheduler.process_scheduler_input(marker(&stale));
         assert!(!scheduler.held_for_cut(0));

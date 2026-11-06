@@ -89,11 +89,20 @@ impl SendThrottle {
     ///
     /// Saturates at zero to guard against double-acks.
     pub fn ack(&self, bytes: u64) {
-        let prev = self.in_flight.load(Ordering::Acquire);
-        let new = prev.saturating_sub(bytes);
-        // Attempt the CAS.  Contention is rare (one ack task per mirror) so a
-        // simple exchange is fine here; we do not need perfect accuracy.
-        self.in_flight.store(new, Ordering::Release);
+        // One atomic step: a charge that lands during the ack stays counted.
+        let mut held = self.in_flight.load(Ordering::Acquire);
+        loop {
+            let next = held.saturating_sub(bytes);
+            match self.in_flight.compare_exchange_weak(
+                held,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(current) => held = current,
+            }
+        }
     }
 
     /// Reset the counter to zero (called on link teardown).
@@ -143,6 +152,38 @@ mod tests {
         t.charge(10);
         t.ack(50); // ack more than in flight
         assert_eq!(t.in_flight(), 0);
+    }
+
+    /// Charges and acks race on many threads and none is lost. The balance
+    /// ends where the operations say.
+    #[test]
+    fn concurrent_charges_and_acks_lose_nothing() {
+        const ROUNDS: u64 = 20_000;
+        let throttle = SendThrottle::new(u64::MAX);
+        throttle.charge(4 * ROUNDS);
+        let workers: Vec<_> = (0..4)
+            .map(|_| {
+                let charger = throttle.clone();
+                let acker = throttle.clone();
+                (
+                    std::thread::spawn(move || {
+                        for _ in 0..ROUNDS {
+                            charger.charge(3);
+                        }
+                    }),
+                    std::thread::spawn(move || {
+                        for _ in 0..ROUNDS {
+                            acker.ack(3);
+                        }
+                    }),
+                )
+            })
+            .collect();
+        for (charger, acker) in workers {
+            charger.join().expect("charger");
+            acker.join().expect("acker");
+        }
+        assert_eq!(throttle.in_flight(), 4 * ROUNDS);
     }
 
     #[test]

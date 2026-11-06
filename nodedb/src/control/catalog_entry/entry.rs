@@ -676,6 +676,13 @@ pub enum CatalogEntry {
         database_id: u64,
         state: Box<nodedb_types::MirrorCutState>,
     },
+    /// One link's hold on this cluster's Raft logs, on every node. Apply
+    /// merges it with the link's row, so a late ack moves nothing back.
+    PutMirrorPin(Box<nodedb_types::MirrorPin>),
+    /// Remove a link's hold.
+    DeleteMirrorPin {
+        link_id: u64,
+    },
 
     // ── User-defined CRSs ──────────────────────────────────────────
     /// `CREATE SPATIAL_REF_SYS`: one user-defined CRS. Apply defines it in

@@ -5,13 +5,99 @@
 //! The table holds one [`MirrorCutState`] per mirror database. Only a
 //! committed metadata entry writes it, so every node holds the same row, and
 //! a group 0 snapshot carries it.
+//!
+//! `_system.mirror_pins` holds one [`MirrorPin`] per link that follows a
+//! database of this cluster. It replicates the same way.
 
-use nodedb_types::{DatabaseId, MirrorCutState};
+use nodedb_types::{DatabaseId, MirrorCutState, MirrorPin, MirrorPinState};
 use redb::{ReadableDatabase, ReadableTable};
 
-use super::types::{MIRROR_CUT_STATE, SystemCatalog, catalog_err};
+use super::types::{MIRROR_CUT_STATE, MIRROR_PINS, SystemCatalog, catalog_err};
 
 impl SystemCatalog {
+    /// Every link's pin.
+    pub fn list_mirror_pins(&self) -> crate::Result<Vec<MirrorPin>> {
+        let txn = self
+            .db
+            .begin_read()
+            .map_err(|e| catalog_err("mirror_pins begin_read", e))?;
+        let table = txn
+            .open_table(MIRROR_PINS)
+            .map_err(|e| catalog_err("open mirror_pins", e))?;
+        let mut pins = Vec::new();
+        for row in table
+            .iter()
+            .map_err(|e| catalog_err("iter mirror_pins", e))?
+        {
+            let (_, value) = row.map_err(|e| catalog_err("read mirror_pins", e))?;
+            pins.push(
+                zerompk::from_msgpack(value.value())
+                    .map_err(|e| catalog_err("deserialize mirror_pins", e))?,
+            );
+        }
+        Ok(pins)
+    }
+
+    /// Store `pin`, merged with the link's row: a late ack moves nothing back,
+    /// and a pin that stopped holding stays stopped.
+    pub fn raise_mirror_pin(&self, pin: &MirrorPin) -> crate::Result<()> {
+        let txn = self
+            .db
+            .begin_write()
+            .map_err(|e| catalog_err("mirror_pins begin_write", e))?;
+        {
+            let mut table = txn
+                .open_table(MIRROR_PINS)
+                .map_err(|e| catalog_err("open mirror_pins (raise)", e))?;
+            let current: Option<MirrorPin> = table
+                .get(pin.link_id)
+                .map_err(|e| catalog_err("get mirror_pins (raise)", e))?
+                .map(|row| zerompk::from_msgpack(row.value()))
+                .transpose()
+                .map_err(|e| catalog_err("deserialize mirror_pins (raise)", e))?;
+            let next = current.map_or_else(|| pin.clone(), |current| current.merged(pin));
+            let bytes = zerompk::to_msgpack_vec(&next)
+                .map_err(|e| catalog_err("serialize mirror_pins", e))?;
+            table
+                .insert(pin.link_id, bytes.as_slice())
+                .map_err(|e| catalog_err("insert mirror_pins", e))?;
+        }
+        txn.commit()
+            .map_err(|e| catalog_err("mirror_pins commit", e))
+    }
+
+    /// Remove the pin of `link_id`.
+    pub fn delete_mirror_pin(&self, link_id: u64) -> crate::Result<()> {
+        let txn = self
+            .db
+            .begin_write()
+            .map_err(|e| catalog_err("mirror_pins begin_write (delete)", e))?;
+        {
+            let mut table = txn
+                .open_table(MIRROR_PINS)
+                .map_err(|e| catalog_err("open mirror_pins (delete)", e))?;
+            table
+                .remove(link_id)
+                .map_err(|e| catalog_err("remove mirror_pins", e))?;
+        }
+        txn.commit()
+            .map_err(|e| catalog_err("mirror_pins delete commit", e))
+    }
+
+    /// Stop every pin that follows the dropped database `database`. The row
+    /// stays, so its link's next fetch learns the source dropped.
+    pub fn mark_mirror_pins_source_dropped(&self, database: u64) -> crate::Result<()> {
+        for pin in self.list_mirror_pins()? {
+            if pin.database == database {
+                self.raise_mirror_pin(&MirrorPin {
+                    state: MirrorPinState::SourceDropped,
+                    ..pin
+                })?;
+            }
+        }
+        Ok(())
+    }
+
     /// The cut state of a mirror database, or `None` before its first cut.
     pub fn get_mirror_cut_state(
         &self,
@@ -120,6 +206,46 @@ mod tests {
             epochs: Vec::new(),
             fence_epoch: 0,
         }
+    }
+
+    fn pin(link_id: u64, database: u64, log_index: u64) -> MirrorPin {
+        MirrorPin {
+            link_id,
+            client: "dr".to_string(),
+            database,
+            positions: vec![MirrorGroupPosition {
+                group_id: 1,
+                log_index,
+            }],
+            acked_ms: 5,
+            state: MirrorPinState::Live,
+        }
+    }
+
+    #[test]
+    fn a_pin_merges_on_raise_and_a_delete_removes_it() {
+        let tmp = TempDir::new().expect("tempdir");
+        let catalog = open_tmp_catalog(&tmp);
+        catalog.raise_mirror_pin(&pin(1, 1024, 40)).expect("raise");
+        catalog.raise_mirror_pin(&pin(1, 1024, 30)).expect("raise");
+        assert_eq!(
+            catalog.list_mirror_pins().expect("list"),
+            vec![pin(1, 1024, 40)]
+        );
+        catalog.delete_mirror_pin(1).expect("delete");
+        assert!(catalog.list_mirror_pins().expect("list").is_empty());
+    }
+
+    #[test]
+    fn a_database_drop_stops_only_its_own_pins() {
+        let tmp = TempDir::new().expect("tempdir");
+        let catalog = open_tmp_catalog(&tmp);
+        catalog.raise_mirror_pin(&pin(1, 1024, 40)).expect("raise");
+        catalog.raise_mirror_pin(&pin(2, 1025, 40)).expect("raise");
+        catalog.mark_mirror_pins_source_dropped(1024).expect("mark");
+        let pins = catalog.list_mirror_pins().expect("list");
+        assert_eq!(pins[0].state, MirrorPinState::SourceDropped);
+        assert_eq!(pins[1].state, MirrorPinState::Live);
     }
 
     #[test]

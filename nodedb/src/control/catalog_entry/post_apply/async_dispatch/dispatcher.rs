@@ -433,6 +433,9 @@ pub async fn run_post_apply_async_side_effects(
         | CatalogEntry::PutBackupScheduleMark(_)
         // A mirror cut state is its catalog row alone.
         | CatalogEntry::PutMirrorCutState { .. }
+        // A retention pin takes effect in the synchronous post-apply.
+        | CatalogEntry::PutMirrorPin(_)
+        | CatalogEntry::DeleteMirrorPin { .. }
         // Checkpoints have no in-memory mirror at all.
         // CompactHistory has its own async branch above; it does not appear
         // here.

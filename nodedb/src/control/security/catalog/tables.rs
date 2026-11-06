@@ -367,6 +367,13 @@ pub(super) const CLONE_LINEAGE: TableDefinition<u64, &[u8]> =
 pub(super) const MIRROR_CUT_STATE: TableDefinition<u64, &[u8]> =
     TableDefinition::new("_system.mirror_cut_state");
 
+/// Table: `link_id (u64)` → MessagePack-serialized `MirrorPin`.
+///
+/// Each mirror link's hold on this cluster's Raft logs. The metadata group
+/// replicates it, so a leader change keeps every hold.
+pub(super) const MIRROR_PINS: TableDefinition<u64, &[u8]> =
+    TableDefinition::new("_system.mirror_pins");
+
 // ── Vector model + checkpoints ────────────────────────────────────────
 
 /// Table: "{database_id}:{tenant_id}:{collection}:{column}" -> MessagePack-serialized VectorModelEntry.

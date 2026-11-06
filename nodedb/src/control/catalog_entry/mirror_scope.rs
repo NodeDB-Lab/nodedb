@@ -149,6 +149,9 @@ impl CatalogEntry {
             // How far the mirror followed its source: the applier's own row.
             Self::PutMirrorCutState { .. } => UNSCOPED,
 
+            // A link's hold on this cluster's logs: the source's own row.
+            Self::PutMirrorPin(_) | Self::DeleteMirrorPin { .. } => UNSCOPED,
+
             // Reader state.
             Self::PutConsumerGroupIfAbsent(_)
             | Self::DeleteConsumerGroup { .. }

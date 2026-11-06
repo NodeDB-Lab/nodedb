@@ -227,6 +227,7 @@ pub(super) const REPLICATED_TABLES: &[ReplicatedTable] = replicated_tables![
     "backup_schedule_marks" => super::backup_schedule_marks::BACKUP_SCHEDULE_MARKS,
     // ── Mirror followers ──
     "mirror_cut_state" => MIRROR_CUT_STATE,
+    "mirror_pins" => MIRROR_PINS,
 ];
 
 /// The labels of every replicated table, in image order.
