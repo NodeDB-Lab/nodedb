@@ -7,6 +7,7 @@ use nodedb_cluster::MetadataEntry;
 use nodedb_types::{DatabaseId, MirrorCutAdvance, MirrorStatus};
 use tracing::debug;
 
+use super::catalog_ddl::DescriptorCheck;
 use super::types::MetadataCommitApplier;
 use crate::control::catalog_entry::{self, CatalogEntry};
 use crate::control::security::catalog::SystemCatalog;
@@ -30,6 +31,15 @@ fn takes_cuts(catalog: &SystemCatalog, database: DatabaseId) -> crate::Result<bo
     })
 }
 
+/// Whether the mirror still takes its first capture. Its first cut then carries
+/// the capture's catalog image.
+fn is_bootstrapping(catalog: &SystemCatalog, database: DatabaseId) -> crate::Result<bool> {
+    Ok(catalog
+        .get_database(database)?
+        .and_then(|descriptor| descriptor.mirror_origin)
+        .is_some_and(|origin| matches!(origin.status, MirrorStatus::Bootstrapping { .. })))
+}
+
 impl MetadataCommitApplier {
     /// Apply one `MirrorCut`.
     ///
@@ -38,6 +48,10 @@ impl MetadataCommitApplier {
     /// re-apply as their stamped versions allow. A crash after it finds the
     /// row at the cut and changes nothing. Every node computes the next state
     /// from the same row in log order, so each reaches the same verdicts.
+    ///
+    /// A bootstrap's first cut carries an image: each source row at its current
+    /// version, with no version below it. Any later cut carries a log, and a
+    /// forward gap there is an anomaly.
     pub(super) async fn apply_mirror_cut(
         &self,
         database: u64,
@@ -68,11 +82,16 @@ impl MetadataCommitApplier {
             return Ok(());
         };
         if next.ready_cut > current.ready_cut {
+            let check = if current.ready_cut == 0 && is_bootstrapping(store, id)? {
+                DescriptorCheck::Image
+            } else {
+                DescriptorCheck::Log
+            };
             for payload in catalog {
                 let ddl = MetadataEntry::CatalogDdl {
                     payload: payload.clone(),
                 };
-                self.apply_catalog_ddl(&ddl, raft_index).await?;
+                self.apply_catalog_ddl_as(&ddl, raft_index, check).await?;
             }
         }
         let state = MetadataEntry::CatalogDdl {
@@ -147,6 +166,64 @@ mod tests {
 
     fn mirror_id() -> DatabaseId {
         DatabaseId::new(DB)
+    }
+
+    /// A collection at `version` in the mirror's database.
+    fn collection_row(version: u64) -> Vec<u8> {
+        let mut stored =
+            crate::control::security::catalog::StoredCollection::stamped_for_test(1, "c", "owner");
+        stored.database_id = mirror_id();
+        stored.descriptor_version = version;
+        catalog_entry::encode(&CatalogEntry::PutCollection(Box::new(stored))).expect("encode")
+    }
+
+    fn collection_version(state: &SharedState) -> Option<u64> {
+        state
+            .credentials
+            .catalog()
+            .get_collection(mirror_id(), 1, "c")
+            .expect("read")
+            .map(|row| row.descriptor_version)
+    }
+
+    /// A converted or altered source collection reaches a bootstrap at version 2
+    /// with no version 1. It installs, on the watermark, and no wedge stands.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_bootstrap_image_installs_a_row_at_its_source_version() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let (applier, state) = applier_with_shared_at(tmp.path(), "test.wal");
+        let put = ddl(&CatalogEntry::PutDatabase(Box::new(descriptor(
+            MirrorStatus::Bootstrapping {
+                bytes_done: 0,
+                bytes_total: 0,
+            },
+        ))));
+        assert_eq!(applier.apply(&[(1, put)]).await, 1);
+
+        let image = cut(1, 3, vec![collection_row(2)]);
+        assert_eq!(applier.apply(&[(2, image.clone())]).await, 2);
+        assert_eq!(collection_version(&state), Some(2));
+        assert!(!state.metadata_apply_wedge.is_wedged());
+
+        // The same cut re-delivered finds the row at the cut and changes nothing.
+        assert_eq!(applier.apply(&[(3, image)]).await, 3);
+        assert_eq!(collection_version(&state), Some(2));
+    }
+
+    /// Once the mirror follows, a cut carries a log, and a gap there is
+    /// divergence. The check that catches it stays on.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_following_mirrors_cut_keeps_the_gap_check() {
+        let (applier, state, _tmp) = following_mirror().await;
+        assert_eq!(
+            applier
+                .apply(&[(2, cut(1, 3, vec![collection_row(2)]))])
+                .await,
+            0,
+            "a halted entry applies nothing in its batch"
+        );
+        assert_eq!(collection_version(&state), None);
+        assert!(state.metadata_apply_wedge.is_wedged());
     }
 
     /// The catalog entries and the raised cut land at one log index, and the

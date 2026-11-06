@@ -121,9 +121,24 @@ impl SurrogateAssigner {
             .get()
             .and_then(|fence| fence.read_only_name(key.database_id()));
         match read_only {
-            Some(database) => Err(crate::Error::MirrorReadOnly {
-                database: database.to_string(),
-            }),
+            Some(database) => {
+                // A client write refused here is routine. A bootstrap re-issue
+                // refused here is a capture that lost a bind, so it names itself.
+                let bootstrapping = self
+                    .mirror_fence
+                    .get()
+                    .is_some_and(|fence| fence.is_bootstrapping(key.database_id()));
+                if bootstrapping {
+                    tracing::warn!(
+                        database = %database,
+                        collection = key.name(),
+                        "a key with no bind reached a bootstrapping mirror; the write stops here"
+                    );
+                }
+                Err(crate::Error::MirrorReadOnly {
+                    database: database.to_string(),
+                })
+            }
             None => Ok(()),
         }
     }

@@ -159,9 +159,8 @@ impl MetadataCursor {
         check: &mut CatalogCheck<'_>,
     ) -> Result<Vec<Vec<u8>>, MirrorFailure> {
         let split = self.held.partition_point(|entry| entry.index <= target);
-        let taken: Vec<MirrorTailEntry> = self.held.drain(..split).collect();
-        let mut payloads = Vec::with_capacity(taken.len());
-        for entry in taken {
+        let mut payloads = Vec::with_capacity(split);
+        for entry in self.held.drain(..split) {
             check.check(&entry.data, entry.index)?;
             payloads.push(entry.data);
         }

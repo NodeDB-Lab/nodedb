@@ -6,12 +6,13 @@
 //! Each leadership runs one session:
 //!
 //! 1. Fence first: a new epoch releases whatever a former applier left held.
-//! 2. Tail every source group from the replicated positions.
-//! 3. For each cut, commit its entries and each group's seal, stamped with the
+//! 2. A mirror still bootstrapping installs its first capture.
+//! 3. Tail every source group from the replicated positions.
+//! 4. For each cut, commit its entries and each group's seal, stamped with the
 //!    epoch, while they hold their lanes.
-//! 4. Propose `MirrorCut`, which installs the cut's catalog and raises
+//! 5. Propose `MirrorCut`, which installs the cut's catalog and raises
 //!    `ready_cut` in one index. The held entries then apply.
-//! 5. Ack the source, so its pin moves.
+//! 6. Ack the source, so its pin moves.
 //!
 //! A session keeps no state a new leader needs: `MirrorCutState` holds it.
 
@@ -55,8 +56,8 @@ impl From<MirrorFailure> for SessionEnd {
     }
 }
 
-/// Whether the database follows its source now, or `None` when the applier has
-/// nothing to wait for.
+/// Whether the database tails its source, or takes its first capture when
+/// `false`, or `None` when the applier has nothing to do.
 pub(super) fn follows(state: &SharedState, database: DatabaseId) -> crate::Result<Option<bool>> {
     let descriptor = state.credentials.catalog().get_database(database)?;
     let Some(origin) = descriptor.and_then(|descriptor| descriptor.mirror_origin) else {
@@ -64,7 +65,6 @@ pub(super) fn follows(state: &SharedState, database: DatabaseId) -> crate::Resul
     };
     Ok(match origin.status {
         MirrorStatus::Following | MirrorStatus::Degraded | MirrorStatus::Disconnected => Some(true),
-        // A bootstrap's end moves the status, and the tail starts at its positions.
         MirrorStatus::Bootstrapping { .. } => Some(false),
         MirrorStatus::Promoting { .. } | MirrorStatus::Failed { .. } | MirrorStatus::Promoted => {
             None
@@ -82,11 +82,7 @@ pub async fn run_mirror_applier(
     loop {
         match follows(&state, database) {
             Ok(None) => return MirrorStop::Ended,
-            Ok(Some(true)) => {}
-            Ok(Some(false)) => {
-                tokio::time::sleep(IDLE_POLL).await;
-                continue;
-            }
+            Ok(Some(_)) => {}
             Err(error) => {
                 tracing::warn!(database = database.as_u64(), %error, "mirror applier: a catalog read failed");
                 tokio::time::sleep(IDLE_POLL).await;

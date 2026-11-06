@@ -29,6 +29,7 @@ use nodedb_types::{
 };
 use tokio::sync::watch;
 
+use super::mirror_bootstrap_fixture::use_database;
 use super::mirror_source_cross_node::{assert_no_straddle, barrier_seq, calvin_places};
 use crate::common::cluster_harness::{TestCluster, TestClusterNode, wait_for, wait_for_async};
 use nodedb::control::wal_replication::ReplicatedEntry;
@@ -258,14 +259,6 @@ async fn seed_mirror(
     }
 }
 
-async fn use_source_database(source: &TestCluster) {
-    for node in &source.nodes {
-        node.exec(&format!("USE DATABASE {DATABASE}"))
-            .await
-            .expect("use the source");
-    }
-}
-
 /// Wait until every mirror node reads `rows` rows of `collection`.
 async fn await_rows(mirror: &TestCluster, collection: &str, rows: usize) {
     let sql = format!("SELECT id FROM {collection}");
@@ -301,7 +294,7 @@ async fn a_source_write_reaches_the_mirror_and_an_ack_releases_compaction() {
         .await
         .expect("source cluster");
     let pair = pair(source).await;
-    use_source_database(&pair.source).await;
+    use_database(&pair.source, DATABASE).await;
     for node in &pair.source.nodes {
         spawn_mirror_source_loops(&node.shared);
     }
@@ -434,7 +427,7 @@ async fn a_cut_never_splits_a_calvin_transaction_across_groups() {
     const ROUNDS: u64 = 8;
     let source = TestCluster::spawn_three().await.expect("source cluster");
     let pair = pair(source).await;
-    use_source_database(&pair.source).await;
+    use_database(&pair.source, DATABASE).await;
     let first_index: Vec<(u64, u64)> = pair
         .data_groups()
         .map(|group| (group, commit_of(&pair.source.nodes[0], group) + 1))

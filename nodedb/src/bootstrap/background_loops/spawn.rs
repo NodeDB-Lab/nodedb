@@ -46,11 +46,12 @@ pub fn spawn_background_loops(
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
     checkpoint: crate::control::checkpoint_manager::CheckpointManagerConfig,
 ) -> crate::event::EventPlane {
-    // Mirror restart: enumerate databases that need observer links
-    // re-established and log the decisions. The cluster layer processes
-    // these asynchronously via the mirror link registry once QUIC transport
-    // is available.
-    mirror::log_mirror_restart_decisions(shared);
+    if shared.mirror.settings.set(config.mirror.clone()).is_err() {
+        tracing::warn!("the [mirror] settings were already installed on this node");
+    }
+    // Each mirror the catalog holds resumes from its replicated cut state, and
+    // each new `MIRROR DATABASE` starts here.
+    crate::control::mirror::applier::spawn_mirror_supervisor(shared);
     if let Err(e) = crate::control::metrics::database_sync::ensure_listed(
         &shared.database_metrics,
         shared.credentials.catalog(),

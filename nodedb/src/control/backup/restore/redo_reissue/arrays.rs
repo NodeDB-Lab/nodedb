@@ -212,7 +212,7 @@ pub(in crate::control::backup::restore) async fn reissue_array_cells(
                 identities,
                 restore_cut: target.restore_cut,
             };
-            commit_batch(state, tenant, target.dest, target.restore_id, vec![plan])
+            commit_batch(state, tenant, target.dest, target.mark(), vec![plan])
                 .await
                 .map_err(|e| {
                     in_context(

@@ -10,9 +10,13 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use rand::RngExt as _;
+use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
+use crate::transport::config::TlsCredentials;
+
+use super::allowlist::make_mirror_client_config;
 use super::error::MirrorError;
 use super::handshake::{MIRROR_PROTOCOL_VERSION, MirrorHello, MirrorHelloAck};
 use super::tail_wire::{
@@ -55,6 +59,19 @@ struct LinkState {
     connection: Option<quinn::Connection>,
 }
 
+/// The id of the link of `mirror_cluster_id` to the source database
+/// `source_database`. Every node of a mirror derives the same one, and so does
+/// a restart.
+pub fn derive_link_id(mirror_cluster_id: u64, source_database: &str) -> u64 {
+    let mut hasher = Sha256::new();
+    hasher.update(mirror_cluster_id.to_le_bytes());
+    hasher.update(source_database.as_bytes());
+    let digest = hasher.finalize();
+    let mut id = [0u8; 8];
+    id.copy_from_slice(&digest[..8]);
+    u64::from_le_bytes(id)
+}
+
 /// One mirror's connection to its source.
 pub struct CrossClusterLink {
     config: MirrorLinkConfig,
@@ -79,6 +96,24 @@ impl CrossClusterLink {
             state: Mutex::new(LinkState::default()),
             throttle,
         }
+    }
+
+    /// A link that dials from its own client endpoint, as `creds` identify it.
+    pub fn open(config: MirrorLinkConfig, creds: &TlsCredentials) -> Result<Self, MirrorError> {
+        let client_config =
+            make_mirror_client_config(creds).map_err(|e| MirrorError::Transport {
+                detail: format!("mirror client TLS config: {e}"),
+            })?;
+        let bind = SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, 0));
+        let endpoint = quinn::Endpoint::client(bind).map_err(|e| MirrorError::Transport {
+            detail: format!("mirror client endpoint: {e}"),
+        })?;
+        Ok(Self::new(
+            config,
+            endpoint,
+            client_config,
+            SendThrottle::default_cap(),
+        ))
     }
 
     /// The source cluster this link follows.
@@ -132,7 +167,7 @@ impl CrossClusterLink {
                 Ok(ack)
             }
             MirrorResponse::Refused(refusal) => Err(MirrorError::Refused(refusal)),
-            MirrorResponse::Tail(_) | MirrorResponse::Ack => {
+            MirrorResponse::Tail(_) | MirrorResponse::Ack | MirrorResponse::Bootstrap(_) => {
                 Err(MirrorError::Refused(MirrorRefusal::Malformed {
                     detail: "the source answered a hello with another response".to_string(),
                 }))

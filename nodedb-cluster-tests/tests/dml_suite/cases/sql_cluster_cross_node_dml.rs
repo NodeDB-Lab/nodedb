@@ -73,6 +73,14 @@ mod graph_traverse_reverse_cross_node;
 mod join_cross_node;
 #[path = "../../sql_cluster_cross_node_dml_tests/mirror_apply_two_clusters.rs"]
 mod mirror_apply_two_clusters;
+#[path = "../../sql_cluster_cross_node_dml_tests/mirror_bootstrap_engines.rs"]
+mod mirror_bootstrap_engines;
+#[path = "../../sql_cluster_cross_node_dml_tests/mirror_bootstrap_fixture.rs"]
+mod mirror_bootstrap_fixture;
+#[path = "../../sql_cluster_cross_node_dml_tests/mirror_bootstrap_purge_convert.rs"]
+mod mirror_bootstrap_purge_convert;
+#[path = "../../sql_cluster_cross_node_dml_tests/mirror_bootstrap_two_clusters.rs"]
+mod mirror_bootstrap_two_clusters;
 #[path = "../../sql_cluster_cross_node_dml_tests/mirror_read_only_cross_node.rs"]
 mod mirror_read_only_cross_node;
 #[path = "../../sql_cluster_cross_node_dml_tests/mirror_source_cross_node.rs"]

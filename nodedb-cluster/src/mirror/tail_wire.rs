@@ -12,6 +12,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use nodedb_types::MirrorGroupPosition;
 
+use super::bootstrap::CrossClusterSnapshotEnvelope;
 use super::error::MirrorError;
 use super::handshake::{MirrorHello, MirrorHelloAck};
 
@@ -28,6 +29,32 @@ pub const MAX_TAIL_WAIT_MS: u64 = 30_000;
 pub const MAX_ACK_POSITIONS: usize = 4_096;
 /// The longest cluster or database name a hello carries.
 pub const MAX_NAME_BYTES: usize = 256;
+/// The most capture bytes one bootstrap response carries.
+pub const MAX_BOOTSTRAP_CHUNK: usize = 16 * 1024 * 1024;
+/// The most bytes one bootstrap capture holds. The source refuses to serve a
+/// larger one, and the mirror refuses to receive it.
+pub const MAX_BOOTSTRAP_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+
+/// Ask for the bootstrap capture of a link, from `offset`.
+///
+/// Offset 0 starts a capture when the source holds none for the link. A source
+/// that holds none at a later offset refuses, and the mirror starts over.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
+#[msgpack(map)]
+pub struct MirrorBootstrapRequest {
+    /// The link the capture is for. Its pin names the database.
+    pub link_id: u64,
+    pub offset: u64,
+}
 
 /// One fetch of a group's committed log.
 #[derive(
@@ -161,12 +188,24 @@ pub enum MirrorRefusal {
     Malformed { detail: String },
     #[error("the source cannot answer yet: {detail}")]
     Unavailable { detail: String },
+    #[error("database {database:?} is an unmaterialized clone; materialize it first")]
+    UnmaterializedClone { database: String },
+    #[error("the capture of link {link_id} failed on the source: {detail}")]
+    BootstrapFailed { link_id: u64, detail: String },
+    #[error("this replica holds no capture of link {link_id} at offset {offset}")]
+    BootstrapRestart { link_id: u64, offset: u64 },
 }
 
 impl MirrorRefusal {
     /// A refusal the mirror's next attempt can clear with no operator.
     pub fn is_transient(&self) -> bool {
-        matches!(self, Self::Unavailable { .. } | Self::NotHosted { .. })
+        matches!(
+            self,
+            Self::Unavailable { .. }
+                | Self::NotHosted { .. }
+                | Self::BootstrapFailed { .. }
+                | Self::BootstrapRestart { .. }
+        )
     }
 }
 
@@ -185,6 +224,7 @@ pub enum MirrorRequest {
     Hello(MirrorHello),
     Tail(MirrorTailRequest),
     Ack(MirrorAck),
+    Bootstrap(MirrorBootstrapRequest),
 }
 
 impl MirrorRequest {
@@ -211,7 +251,7 @@ impl MirrorRequest {
                 "an ack of {} positions passes the bound of {MAX_ACK_POSITIONS}",
                 ack.positions.len()
             )),
-            Self::Ack(_) => Ok(()),
+            Self::Ack(_) | Self::Bootstrap(_) => Ok(()),
         }
     }
 }
@@ -231,6 +271,8 @@ pub enum MirrorResponse {
     Hello(MirrorHelloAck),
     Tail(MirrorTailBatch),
     Ack,
+    /// A chunk of the capture, or `None` while the source still takes it.
+    Bootstrap(Option<Box<CrossClusterSnapshotEnvelope>>),
     Refused(MirrorRefusal),
 }
 

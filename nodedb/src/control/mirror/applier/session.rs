@@ -96,6 +96,22 @@ impl<'a> Session<'a> {
         metadata_term(self.state) == Some(self.term)
     }
 
+    /// The failure of a metadata apply that halted on this node. No entry applies
+    /// past it, so every wait on a proposal ends at its deadline.
+    pub(super) fn halted_apply(&self) -> Option<MirrorFailure> {
+        self.state
+            .metadata_apply_wedge
+            .report()
+            .map(|wedge| MirrorFailure::ApplyError {
+                source_group: METADATA_GROUP_ID,
+                source_index: wedge.raft_index,
+                detail: format!(
+                    "this node's metadata apply halted at index {} on {}: {}",
+                    wedge.raft_index, wedge.entry_kind, wedge.error
+                ),
+            })
+    }
+
     pub(super) fn cut_state(&self) -> crate::Result<MirrorCutState> {
         Ok(self
             .state
@@ -106,10 +122,16 @@ impl<'a> Session<'a> {
     }
 
     pub(super) async fn run(mut self) -> SessionEnd {
-        let state = match self.start().await {
+        let mut state = match self.start().await {
             Ok(state) => state,
             Err(end) => return end,
         };
+        if matches!(follows(self.state, self.database), Ok(Some(false))) {
+            state = match self.bootstrap().await {
+                Ok(state) => state,
+                Err(end) => return end,
+            };
+        }
         self.resume(&state);
         loop {
             if !self.still_leads() {
@@ -146,9 +168,13 @@ impl<'a> Session<'a> {
                 Err(FenceError::Retry(error)) => {
                     tracing::warn!(
                         database = self.database.as_u64(),
+                        group = METADATA_GROUP_ID,
                         %error,
                         "mirror applier: the fence did not land"
                     );
+                    if let Some(failure) = self.halted_apply() {
+                        return Err(failure.into());
+                    }
                 }
             }
             tokio::time::sleep(backoff).await;

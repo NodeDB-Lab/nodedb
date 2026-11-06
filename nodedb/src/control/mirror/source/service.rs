@@ -15,8 +15,9 @@ use std::time::{Duration, Instant};
 use nodedb_cluster::calvin::SEQUENCER_GROUP_ID;
 use nodedb_cluster::mirror::tail_wire::{MAX_TAIL_BYTES, MAX_TAIL_WAIT_MS};
 use nodedb_cluster::mirror::{
-    MIRROR_PROTOCOL_VERSION, MirrorAck, MirrorClient, MirrorHello, MirrorHelloAck, MirrorRefusal,
-    MirrorSourceService, MirrorTailBatch, MirrorTailEntry, MirrorTailRequest,
+    CrossClusterSnapshotEnvelope, MIRROR_PROTOCOL_VERSION, MirrorAck, MirrorBootstrapRequest,
+    MirrorClient, MirrorHello, MirrorHelloAck, MirrorRefusal, MirrorSourceService, MirrorTailBatch,
+    MirrorTailEntry, MirrorTailRequest,
 };
 use nodedb_cluster::{ClusterError, METADATA_GROUP_ID, WaitOutcome};
 use nodedb_types::{DatabaseId, MirrorPin, MirrorPinState};
@@ -26,6 +27,7 @@ use crate::control::metadata_proposer::propose_catalog_entry_async;
 use crate::control::security::auth_fence::cluster::routed_groups;
 use crate::control::state::SharedState;
 
+use super::bootstrap::{CaptureAnswer, CaptureSlots, start_capture};
 use super::filter::{data_entry_leaves, metadata_payloads};
 
 /// How often an ack moves the replicated pin. An ack between two of these moves
@@ -94,6 +96,21 @@ fn check_rehello(
     check_link(client, link_id, Some(pin)).map(drop)
 }
 
+/// Refuse a database whose rows still live in its clone source. A clone's lineage
+/// names this cluster's LSNs and surrogates, which mean nothing on a mirror.
+fn check_materialized(
+    name: &str,
+    has_parent: bool,
+    mut collections: impl Iterator<Item = bool>,
+) -> Result<(), MirrorRefusal> {
+    if has_parent || collections.any(|cloned| cloned) {
+        return Err(MirrorRefusal::UnmaterializedClone {
+            database: name.to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// Refuse a group a mirror never tails. The sequencer log carries every
 /// database's transactions, and a slice installs from its data group alone.
 fn check_group(group: u64) -> Result<(), MirrorRefusal> {
@@ -139,6 +156,8 @@ pub struct SourceService {
     cluster_name: String,
     /// When this node last wrote each link's pin.
     last_pin_write: std::sync::Mutex<std::collections::HashMap<u64, Instant>>,
+    /// Each link's bootstrap capture on this replica.
+    captures: Arc<CaptureSlots>,
 }
 
 impl SourceService {
@@ -147,7 +166,26 @@ impl SourceService {
             state,
             cluster_name,
             last_pin_write: std::sync::Mutex::default(),
+            captures: Arc::default(),
         }
+    }
+
+    /// Refuse a database that is an unmaterialized clone, or holds a collection
+    /// that is one.
+    fn refuse_clone(&self, name: &str, database: DatabaseId) -> Result<(), MirrorRefusal> {
+        let catalog = self.state.credentials.catalog();
+        let has_parent = catalog
+            .get_database(database)
+            .map_err(unavailable)?
+            .is_some_and(|descriptor| descriptor.parent_clone.is_some());
+        let collections = catalog
+            .load_all_collections(database)
+            .map_err(unavailable)?;
+        check_materialized(
+            name,
+            has_parent,
+            collections.iter().map(|coll| coll.cloned_from.is_some()),
+        )
     }
 
     /// Every group a mirror tails: the data groups and the metadata group.
@@ -240,6 +278,7 @@ impl MirrorSourceService for SourceService {
                 database: hello.source_database,
             });
         }
+        self.refuse_clone(&hello.source_database, database)?;
         match self.state.mirror.pins.get(hello.link_id) {
             Some(pin) => check_rehello(client, hello.link_id, database.as_u64(), &pin)?,
             None => {
@@ -336,6 +375,38 @@ impl MirrorSourceService for SourceService {
             ..pin
         })
         .await
+    }
+
+    /// The pin names the database, so the request cannot name one of its own.
+    async fn bootstrap(
+        &self,
+        client: &MirrorClient,
+        request: MirrorBootstrapRequest,
+    ) -> Result<Option<CrossClusterSnapshotEnvelope>, MirrorRefusal> {
+        let pin = self.state.mirror.pins.get(request.link_id);
+        let database = check_link(client, request.link_id, pin.as_ref())?;
+        match self.captures.answer(request.link_id, request.offset) {
+            CaptureAnswer::Start => {
+                start_capture(
+                    &self.state,
+                    Arc::clone(&self.captures),
+                    self.cluster_name.clone(),
+                    DatabaseId::new(database),
+                    request.link_id,
+                );
+                Ok(None)
+            }
+            CaptureAnswer::Wait => Ok(None),
+            CaptureAnswer::Chunk(chunk) => Ok(Some(*chunk)),
+            CaptureAnswer::Failed(detail) => Err(MirrorRefusal::BootstrapFailed {
+                link_id: request.link_id,
+                detail,
+            }),
+            CaptureAnswer::Restart => Err(MirrorRefusal::BootstrapRestart {
+                link_id: request.link_id,
+                offset: request.offset,
+            }),
+        }
     }
 }
 
@@ -459,6 +530,20 @@ mod tests {
         assert!(matches!(
             check_rehello(&me, 7, DB + 1, &held),
             Err(MirrorRefusal::LinkNotOwned { link_id: 7 })
+        ));
+    }
+
+    /// A clone's lineage holds on the database or on any one collection.
+    #[test]
+    fn an_unmaterialized_clone_is_refused() {
+        assert!(check_materialized("orders", false, [false, false].into_iter()).is_ok());
+        assert!(matches!(
+            check_materialized("orders", true, [false].into_iter()),
+            Err(MirrorRefusal::UnmaterializedClone { .. })
+        ));
+        assert!(matches!(
+            check_materialized("orders", false, [false, true].into_iter()),
+            Err(MirrorRefusal::UnmaterializedClone { .. })
         ));
     }
 

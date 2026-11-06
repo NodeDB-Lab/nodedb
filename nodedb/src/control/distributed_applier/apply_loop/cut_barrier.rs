@@ -127,7 +127,7 @@ fn prepare_capture_barrier<'a>(
         persist_floor_durably(ctx, group_id, log_index, hlc).await;
         record_restore_point(ctx, group_id, restore_point, hlc, log_index, log_term);
         crate::control::backup::cut_capture::apply::capture_at_barrier(
-            ctx.state, group_id, &request,
+            ctx.state, group_id, log_index, &request,
         )
         .await;
         finish_barrier(ctx, group_id, log_index, applied_key)

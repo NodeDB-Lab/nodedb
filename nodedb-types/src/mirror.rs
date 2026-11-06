@@ -170,6 +170,11 @@ pub enum MirrorFailure {
     /// The source's retention bound passed before the bootstrap finished.
     #[error("the source's log retention bound passed before the bootstrap finished")]
     BootstrapOutrun,
+    /// A capture could not install, or its install stopped part way. A partial
+    /// install plus a newer capture leaves rows the source deleted, so only an
+    /// operator's rebuild clears it.
+    #[error("the bootstrap did not finish: {detail}")]
+    BootstrapFailed { detail: String },
 }
 
 /// A mirror's place in one source Raft group: every entry at or below
@@ -581,6 +586,9 @@ mod tests {
                 detail: "move tenant".into(),
             },
             MirrorFailure::BootstrapOutrun,
+            MirrorFailure::BootstrapFailed {
+                detail: "stopped during the re-issue".into(),
+            },
         ] {
             let s = MirrorStatus::Failed { failure };
             assert_eq!(round_trip_msgpack(&s), s);

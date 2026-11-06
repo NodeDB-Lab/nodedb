@@ -199,6 +199,23 @@ pub fn validate(
     }
 }
 
+/// Validate one row of a mirror's bootstrap image. The image holds the source's
+/// row at its current version, and the versions below it never reach the mirror.
+/// So a row with no prior is the base of that descriptor's history here, at any
+/// version. Every other verdict is [`validate`]'s: a re-delivered image row is
+/// acknowledged, and a divergent one stays a loud anomaly.
+pub fn validate_image_row(
+    entry: &CatalogEntry,
+    catalog: &SystemCatalog,
+) -> Result<ValidationOutcome, crate::Error> {
+    match validate(entry, catalog) {
+        Err(crate::Error::DescriptorVersionAnomaly { prior: 0, .. }) => {
+            Ok(ValidationOutcome::Apply)
+        }
+        verdict => verdict,
+    }
+}
+
 /// A clone applies once. Its lineage edge is the last write of `clone_apply`
 /// and outlives a later drop of the child, so the edge marks a completed
 /// clone. Re-applying re-reads the source's current collections into the
@@ -291,6 +308,39 @@ mod tests {
         let mut stored = StoredCollection::stamped_for_test(1, name, "tester");
         stored.descriptor_version = version;
         CatalogEntry::PutCollection(Box::new(stored))
+    }
+
+    /// The source's row at version 3 reaches a mirror with no versions below it.
+    #[test]
+    fn an_image_row_with_no_prior_applies_at_any_version() {
+        let (store, _tmp) = make_catalog();
+        let catalog = store.catalog();
+        let row = collection_with_version("orders", 3);
+        assert!(matches!(
+            validate(&row, catalog),
+            Err(crate::Error::DescriptorVersionAnomaly { prior: 0, .. })
+        ));
+        assert_eq!(
+            validate_image_row(&row, catalog).expect("the base of its history"),
+            ValidationOutcome::Apply
+        );
+    }
+
+    /// A row the mirror already holds keeps every check: only a missing prior
+    /// is new.
+    #[test]
+    fn an_image_row_over_a_held_row_keeps_the_gap_check() {
+        let (store, _tmp) = make_catalog();
+        let catalog = store.catalog();
+        seed_prior(catalog, "orders", 1);
+        assert!(matches!(
+            validate_image_row(&collection_with_version("orders", 3), catalog),
+            Err(crate::Error::DescriptorVersionAnomaly {
+                carried: 3,
+                prior: 1,
+                ..
+            })
+        ));
     }
 
     fn seed_prior(catalog: &SystemCatalog, name: &str, version: u64) {

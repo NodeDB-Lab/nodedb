@@ -20,6 +20,7 @@ use nodedb_cluster::mirror::{
 };
 use nodedb_types::{MirrorGroupPosition, MirrorPinState};
 
+use super::mirror_bootstrap_fixture::use_database;
 use crate::common::cluster_harness::{TestCluster, wait_for};
 
 const CLUSTER_NAME: &str = "source";
@@ -121,14 +122,6 @@ async fn seed_databases(cluster: &TestCluster) {
             .exec_ddl_on_any_leader(&format!("CREATE DATABASE {database}"))
             .await
             .expect("create database");
-    }
-}
-
-async fn use_database(cluster: &TestCluster, database: &str) {
-    for node in &cluster.nodes {
-        node.exec(&format!("USE DATABASE {database}"))
-            .await
-            .expect("use database");
     }
 }
 

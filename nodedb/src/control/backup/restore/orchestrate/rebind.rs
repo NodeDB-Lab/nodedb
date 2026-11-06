@@ -176,6 +176,7 @@ mod collection_name_tests {
         dest: DatabaseId::DEFAULT,
         restore_id: 0,
         restore_cut: i64::MAX,
+        event_source: crate::event::EventSource::Restore,
     };
 
     #[test]
@@ -211,6 +212,7 @@ mod collection_name_tests {
             dest: DatabaseId::new(1030),
             restore_id: 0,
             restore_cut: i64::MAX,
+            event_source: crate::event::EventSource::Restore,
         };
         let snap = TenantDataSnapshot {
             documents_versioned: vec![(

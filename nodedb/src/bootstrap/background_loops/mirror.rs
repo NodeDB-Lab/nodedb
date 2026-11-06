@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Mirror database restart decisions and the mirror lag monitor.
+//! The mirror lag monitor.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,34 +12,6 @@ use crate::control::state::SharedState;
 
 /// Interval between mirror lag samples.
 const MIRROR_LAG_INTERVAL: Duration = Duration::from_secs(5);
-
-/// Enumerate mirror databases that need their observer link re-established
-/// after a server restart, and log the restart decisions.
-///
-/// This is called once during startup, after [`SharedState`] and the catalog
-/// are fully open. Databases with `MirrorStatus::Promoted` are excluded:
-/// they are normal writable databases and must NOT attempt to reconnect.
-/// The actual link objects are created by the cluster layer when it
-/// processes each restart decision; this function only reads the catalog
-/// and logs.
-pub fn log_mirror_restart_decisions(shared: &Arc<SharedState>) {
-    let catalog = shared.credentials.catalog();
-    match crate::control::mirror::enumerate_resumable_mirrors(catalog) {
-        Ok(decisions) => {
-            for d in &decisions {
-                tracing::info!(
-                    database = %d.database_name,
-                    ready_cut = d.ready_cut,
-                    needs_bootstrap = d.needs_bootstrap,
-                    "mirror restart: observer link will resume"
-                );
-            }
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "mirror restart: failed to enumerate mirrors; skipping");
-        }
-    }
-}
 
 /// Mirror lag monitor.
 ///
@@ -90,8 +62,8 @@ fn sample_mirror_lag(shared: &SharedState) {
             continue;
         }
         // Read the real receive timestamp from the link registry. `None`
-        // means no link is registered for this database (the cluster layer
-        // has not yet (re)established it after restart). `update_lag_status`
+        // means no link is registered for this database (the supervisor has
+        // not started its applier on this node yet). `update_lag_status`
         // falls back to the applied cut's time in that case, so the
         // disconnect timer still advances.
         let last_received = shared.mirror.links.last_received_ms(db.id);

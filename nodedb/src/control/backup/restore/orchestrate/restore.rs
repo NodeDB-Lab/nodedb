@@ -85,6 +85,7 @@ pub async fn restore_tenant(
         RestoreMark {
             id: restore_id,
             cut: restore_cut,
+            event_source: crate::event::EventSource::Restore,
         },
     )
     .await?;

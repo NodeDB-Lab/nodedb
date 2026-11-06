@@ -1,26 +1,29 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Restart-resume for mirror databases.
+//! Which mirror databases need an applier, and where each one resumes.
 //!
-//! On server start, each database with `mirror_origin.is_some()` and
-//! `status != Promoted` must have its cross-cluster observer link
-//! re-established from its replicated cut state. A reboot therefore fetches
-//! no fresh snapshot: each source group resumes after `ready_cut`.
+//! The applier supervisor reads this set on every pass, so a restart and a new
+//! `MIRROR DATABASE` take one path. A reboot fetches no fresh capture: each
+//! source group resumes from the replicated cut state.
 //!
-//! A `Promoted` mirror is a normal writable database; it must NOT
-//! attempt to reconnect.
+//! A `Promoted` mirror is a normal writable database and follows no source.
 //!
-//! A mirror with no ready cut restarts from bootstrap.
+//! A mirror with no ready cut starts from bootstrap.
 
-use nodedb_types::{MirrorGroupPosition, MirrorStatus};
-use tracing::info;
+use nodedb_types::{DatabaseId, MirrorGroupPosition, MirrorStatus};
 
 use crate::control::security::catalog::SystemCatalog;
 
-/// Summary of one database's restart decision.
+/// One mirror database's restart decision.
 #[derive(Debug)]
 pub struct MirrorRestartDecision {
+    /// The mirror's id, which is the source database's id.
+    pub database: DatabaseId,
     pub database_name: String,
+    /// The name `[mirror.sources]` knows the source cluster by.
+    pub source_cluster: String,
+    pub source_database_name: String,
+    pub status: MirrorStatus,
     /// The newest source cut that committed in every mirror group.
     pub ready_cut: u64,
     /// Where each source group resumes.
@@ -28,54 +31,49 @@ pub struct MirrorRestartDecision {
     pub needs_bootstrap: bool,
 }
 
-/// Enumerate databases in `catalog` that need their observer link restarted.
+impl MirrorRestartDecision {
+    /// Whether an applier has work on this mirror. A failed mirror waits for an
+    /// operator, and a promoting one ends on its own path.
+    pub fn wants_applier(&self) -> bool {
+        match self.status {
+            MirrorStatus::Bootstrapping { .. }
+            | MirrorStatus::Following
+            | MirrorStatus::Degraded
+            | MirrorStatus::Disconnected => true,
+            MirrorStatus::Promoting { .. }
+            | MirrorStatus::Failed { .. }
+            | MirrorStatus::Promoted => false,
+        }
+    }
+}
+
+/// Every mirror in `catalog` that is not promoted.
 ///
-/// Returns a list of databases (by name + resume positions) that are mirrors
-/// but not yet promoted. Databases with `MirrorStatus::Promoted` are excluded
-/// — they are normal writable databases and must not attempt to reconnect.
 /// A cut state that does not read fails the enumeration: a guessed position
 /// applies entries twice, or skips them.
 pub fn enumerate_resumable_mirrors(
     catalog: &SystemCatalog,
 ) -> crate::Result<Vec<MirrorRestartDecision>> {
-    let databases = catalog.list_databases()?;
     let mut decisions = Vec::new();
-
-    for db in databases {
-        let origin = match db.mirror_origin {
-            Some(ref o) => o,
-            None => continue,
+    for db in catalog.list_databases()? {
+        let Some(origin) = db.mirror_origin else {
+            continue;
         };
-
-        // Promoted mirrors are normal writable databases — skip.
         if matches!(origin.status, MirrorStatus::Promoted) {
-            info!(
-                database = %db.name,
-                "mirror restart: database is Promoted — skipping observer reconnect"
-            );
             continue;
         }
-
         let cut_state = catalog.get_mirror_cut_state(db.id)?.unwrap_or_default();
-        let needs_bootstrap = cut_state.ready_cut == 0;
-        let ready_cut = cut_state.ready_cut;
-
         decisions.push(MirrorRestartDecision {
-            database_name: db.name.clone(),
-            ready_cut,
+            database: db.id,
+            database_name: db.name,
+            source_cluster: origin.source_cluster,
+            source_database_name: origin.source_database_name,
+            status: origin.status,
+            ready_cut: cut_state.ready_cut,
+            needs_bootstrap: cut_state.ready_cut == 0,
             positions: cut_state.positions,
-            needs_bootstrap,
         });
-
-        info!(
-            database = %db.name,
-            ready_cut,
-            needs_bootstrap,
-            status = ?origin.status,
-            "mirror restart: scheduling observer resume"
-        );
     }
-
     Ok(decisions)
 }
 
@@ -83,7 +81,7 @@ pub fn enumerate_resumable_mirrors(
 mod tests {
     use std::path::PathBuf;
 
-    use nodedb_types::{DatabaseId, MirrorCutState, MirrorStatus};
+    use nodedb_types::{MirrorCutState, MirrorFailure};
     use tempfile::TempDir;
 
     use super::super::test_fixture::mirror_descriptor;
@@ -143,9 +141,11 @@ mod tests {
             .iter()
             .find(|d| d.database_name == "follower_db")
             .unwrap();
+        assert_eq!(d.database, db_id);
         assert_eq!(d.ready_cut, 99);
         assert_eq!(d.positions, vec![position]);
         assert!(!d.needs_bootstrap);
+        assert!(d.wants_applier());
     }
 
     #[test]
@@ -171,5 +171,27 @@ mod tests {
         assert_eq!(d.ready_cut, 0);
         assert!(d.positions.is_empty());
         assert!(d.needs_bootstrap);
+        assert!(d.wants_applier());
+    }
+
+    #[test]
+    fn a_failed_mirror_stays_listed_and_gets_no_applier() {
+        let tmp = TempDir::new().unwrap();
+        let catalog = open_tmp_catalog(&tmp);
+        let db = make_mirror_db(
+            104,
+            "failed_db",
+            MirrorStatus::Failed {
+                failure: MirrorFailure::SourceDropped,
+            },
+        );
+        catalog.put_database(&db).unwrap();
+
+        let decisions = enumerate_resumable_mirrors(&catalog).unwrap();
+        let d = decisions
+            .iter()
+            .find(|d| d.database_name == "failed_db")
+            .unwrap();
+        assert!(!d.wants_applier());
     }
 }

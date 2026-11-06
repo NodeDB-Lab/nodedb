@@ -23,11 +23,13 @@ use tokio::sync::{Semaphore, watch};
 use tracing::{debug, warn};
 
 use super::allowlist::{MirrorAllowlist, MirrorClient};
+use super::bootstrap::CrossClusterSnapshotEnvelope;
 use super::error::MirrorError;
 use super::handshake::{MirrorHello, MirrorHelloAck};
 use super::tail_wire::{
-    MAX_REQUEST_FRAME, MAX_RESPONSE_FRAME, MirrorAck, MirrorRefusal, MirrorRequest, MirrorResponse,
-    MirrorTailBatch, MirrorTailRequest, encode_frame, read_frame, write_frame,
+    MAX_REQUEST_FRAME, MAX_RESPONSE_FRAME, MirrorAck, MirrorBootstrapRequest, MirrorRefusal,
+    MirrorRequest, MirrorResponse, MirrorTailBatch, MirrorTailRequest, encode_frame, read_frame,
+    write_frame,
 };
 
 /// How long a client gets to send its request.
@@ -53,6 +55,13 @@ pub trait MirrorSourceService: Send + Sync + 'static {
     ) -> Result<MirrorTailBatch, MirrorRefusal>;
 
     async fn ack(&self, client: &MirrorClient, ack: MirrorAck) -> Result<(), MirrorRefusal>;
+
+    /// A chunk of the link's capture, or `None` while the capture runs.
+    async fn bootstrap(
+        &self,
+        client: &MirrorClient,
+        request: MirrorBootstrapRequest,
+    ) -> Result<Option<CrossClusterSnapshotEnvelope>, MirrorRefusal>;
 }
 
 /// Bind the listener's endpoint at `addr`.
@@ -201,6 +210,10 @@ async fn answer<R: tokio::io::AsyncRead + Unpin>(
             .map(MirrorResponse::Hello),
         MirrorRequest::Tail(tail) => service.tail(client, tail).await.map(MirrorResponse::Tail),
         MirrorRequest::Ack(ack) => service.ack(client, ack).await.map(|()| MirrorResponse::Ack),
+        MirrorRequest::Bootstrap(request) => service
+            .bootstrap(client, request)
+            .await
+            .map(|chunk| MirrorResponse::Bootstrap(chunk.map(Box::new))),
     };
     answered.unwrap_or_else(MirrorResponse::Refused)
 }
@@ -273,6 +286,15 @@ mod tests {
         async fn ack(&self, _client: &MirrorClient, _ack: MirrorAck) -> Result<(), MirrorRefusal> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
+        }
+
+        async fn bootstrap(
+            &self,
+            _client: &MirrorClient,
+            _request: MirrorBootstrapRequest,
+        ) -> Result<Option<CrossClusterSnapshotEnvelope>, MirrorRefusal> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(None)
         }
     }
 

@@ -10,6 +10,8 @@
 
 use nodedb_types::{CollectionKey, DatabaseId, QualifiedCollection};
 
+use crate::event::EventSource;
+
 /// The source database of a backup section and the destination database
 /// its rows restore into.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,6 +30,9 @@ pub(crate) struct DatabaseTarget {
     /// and stays current. `i64::MAX` for a re-issue that is no RESTORE: it
     /// sets the backup's state over every destination version.
     pub restore_cut: i64,
+    /// The source every re-issued write gives its events. A mirror's bootstrap
+    /// re-issues as `RaftFollower`, the one source a mirror's gates pass.
+    pub event_source: EventSource,
 }
 
 /// What every re-issued write of one RESTORE carries: its id and its cut.
@@ -37,6 +42,8 @@ pub(crate) struct RestoreMark {
     pub id: u64,
     /// See [`DatabaseTarget::restore_cut`].
     pub cut: i64,
+    /// See [`DatabaseTarget::event_source`].
+    pub event_source: EventSource,
 }
 
 /// A restored collection's names in the destination database.
@@ -70,6 +77,7 @@ impl DatabaseTarget {
         RestoreMark {
             id: self.restore_id,
             cut: self.restore_cut,
+            event_source: self.event_source,
         }
     }
 
@@ -133,6 +141,7 @@ mod tests {
         dest: DatabaseId::new(2048),
         restore_id: 0,
         restore_cut: i64::MAX,
+        event_source: EventSource::Restore,
     };
 
     #[test]
@@ -161,6 +170,7 @@ mod tests {
             dest: DatabaseId::DEFAULT,
             restore_id: 0,
             restore_cut: i64::MAX,
+            event_source: EventSource::Restore,
         };
         let name = target
             .resolve("orders")

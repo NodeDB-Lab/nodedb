@@ -20,7 +20,7 @@ use super::batch::{CutBatch, positions};
 use super::driver::SessionEnd;
 use super::progress::PendingCut;
 use super::propose::{GroupProposal, SealAt, propose_group};
-use super::rewrite::{CatalogCheck, rewrite_entry};
+use super::rewrite::{CatalogCheck, rewrite_entry, split_tenant_purge};
 use super::session::{FIRST_RETRY_BACKOFF, FenceError, MAX_RETRY_BACKOFF, Session};
 
 /// How long one attempt of one cut can take in one group.
@@ -75,7 +75,15 @@ impl Session<'_> {
                     Ok(_) => break,
                     Err(FenceError::Lost) => return Err(SessionEnd::LostLeadership),
                     Err(FenceError::Retry(error)) => {
-                        tracing::warn!(%error, "mirror applier: the fence did not land");
+                        tracing::warn!(
+                            cut = batch.cut,
+                            group = METADATA_GROUP_ID,
+                            %error,
+                            "mirror applier: the fence did not land"
+                        );
+                        if let Some(failure) = self.halted_apply() {
+                            return Err(failure.into());
+                        }
                         if !self.still_leads() {
                             return Err(SessionEnd::LostLeadership);
                         }
@@ -113,25 +121,31 @@ impl Session<'_> {
             })
             .collect();
         for source in &batch.entries {
-            let mut entry = source.entry.clone();
-            rewrite_entry(
-                &mut entry,
-                MirrorEntryStamp {
-                    source_group: source.group,
-                    source_index: source.index,
-                    cut: batch.cut,
-                    epoch: self.epoch,
-                },
-                metadata_floor,
-            );
-            let group = group_of_vshard(self.state, entry.vshard_id)?;
-            let proposal = proposals
-                .iter_mut()
-                .find(|proposal| proposal.group == group)
-                .ok_or_else(|| crate::Error::Internal {
-                    detail: format!("mirror applier: group {group} is not in the routing table"),
-                })?;
-            proposal.entries.push((entry.vshard_id, entry.encode()?));
+            let shares = split_tenant_purge(source.entry.clone(), |vshard| {
+                group_of_vshard(self.state, vshard)
+            })?;
+            for mut entry in shares {
+                rewrite_entry(
+                    &mut entry,
+                    MirrorEntryStamp {
+                        source_group: source.group,
+                        source_index: source.index,
+                        cut: batch.cut,
+                        epoch: self.epoch,
+                    },
+                    metadata_floor,
+                );
+                let group = group_of_vshard(self.state, entry.vshard_id)?;
+                let proposal = proposals
+                    .iter_mut()
+                    .find(|proposal| proposal.group == group)
+                    .ok_or_else(|| crate::Error::Internal {
+                        detail: format!(
+                            "mirror applier: group {group} is not in the routing table"
+                        ),
+                    })?;
+                proposal.entries.push((entry.vshard_id, entry.encode()?));
+            }
         }
         for proposal in &mut proposals {
             let vshard = self.seal_vshard(proposal.group)?;
@@ -214,7 +228,17 @@ impl Session<'_> {
             )
             .await;
             if let Err(error) = proposed {
-                tracing::warn!(cut = batch.cut, %error, "mirror applier: a cut did not land");
+                tracing::warn!(
+                    cut = batch.cut,
+                    epoch = self.epoch,
+                    group = METADATA_GROUP_ID,
+                    %error,
+                    "mirror applier: a cut did not land; the wait was for this node's metadata \
+                     apply"
+                );
+                if let Some(failure) = self.halted_apply() {
+                    return Err(failure.into());
+                }
             } else {
                 match self.cut_state() {
                     Ok(state)
@@ -270,7 +294,11 @@ impl Session<'_> {
 
     /// Tell the source how far the mirror holds its log. A later cut acks again,
     /// so an error here costs only retention.
-    async fn ack(&self, cut: u64, resume: Vec<MirrorGroupPosition>) -> Result<(), SessionEnd> {
+    pub(super) async fn ack(
+        &self,
+        cut: u64,
+        resume: Vec<MirrorGroupPosition>,
+    ) -> Result<(), SessionEnd> {
         let ack = MirrorAck {
             link_id: self.link_id,
             cut,

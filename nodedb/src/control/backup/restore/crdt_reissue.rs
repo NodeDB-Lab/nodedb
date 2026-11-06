@@ -11,7 +11,6 @@
 use crate::Error;
 use crate::bridge::envelope::PhysicalPlan;
 use crate::control::state::SharedState;
-use crate::event::EventSource;
 use crate::types::TenantId;
 use nodedb_physical::physical_plan::CrdtOp;
 
@@ -49,7 +48,7 @@ async fn reissue_crdt_collection(
     .ok_or_else(|| Error::Internal {
         detail: "restore reissue: crdt import did not map to a replicated write".into(),
     })?
-    .with_event_source(EventSource::Restore)
+    .with_event_source(target.event_source)
     .with_restore_id(target.restore_id);
     let deadline = crate::control::server::shared::session::StatementDeadline::of_statement(state)
         .tokio_instant();

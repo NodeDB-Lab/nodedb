@@ -2,6 +2,7 @@
 
 //! Start the mirror listener from the `[mirror]` config.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use nodedb_cluster::TlsCredentials;
@@ -36,16 +37,17 @@ pub fn read_mirror_credentials(paths: &MirrorTlsPaths) -> crate::Result<TlsCrede
     })
 }
 
-/// Bind and serve the mirror listener, when the config names one. A config that
-/// names one and cannot bind it fails the boot: an operator asked for it.
+/// Bind and serve the mirror listener, when the config names one, and answer
+/// the address it bound. A config that names one and cannot bind it fails the
+/// boot: an operator asked for it.
 pub fn spawn_mirror_listener(
     shared: &Arc<SharedState>,
     settings: &MirrorSettings,
-) -> crate::Result<()> {
-    let Some(listen) = settings.listen else {
-        return Ok(());
-    };
+) -> crate::Result<Option<SocketAddr>> {
     settings.validate()?;
+    let Some(listen) = settings.listen else {
+        return Ok(None);
+    };
     let (Some(tls), Some(cluster_name)) = (&settings.tls, &settings.cluster_name) else {
         return Err(crate::Error::Config {
             detail: "[mirror] listen needs tls and cluster_name".to_string(),
@@ -59,8 +61,11 @@ pub fn spawn_mirror_listener(
                 detail: format!("[mirror] listen {listen}: {e}"),
             }
         })?;
+    let bound = endpoint.local_addr().map_err(|e| crate::Error::Config {
+        detail: format!("[mirror] listen {listen}: {e}"),
+    })?;
     let service = Arc::new(SourceService::new(Arc::clone(shared), cluster_name.clone()));
-    tracing::info!(%listen, clients = settings.clients.len(), "mirror listener running");
+    tracing::info!(%bound, clients = settings.clients.len(), "mirror listener running");
     spawn_loop(
         &shared.loop_registry,
         &shared.shutdown,
@@ -78,5 +83,5 @@ pub fn spawn_mirror_listener(
             }
         },
     );
-    Ok(())
+    Ok(Some(bound))
 }

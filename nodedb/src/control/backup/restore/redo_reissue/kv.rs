@@ -229,6 +229,7 @@ mod tests {
             dest: crate::types::DatabaseId::DEFAULT,
             restore_id: 1,
             restore_cut: i64::MAX,
+            event_source: crate::event::EventSource::Restore,
         };
         let name = target.bare("sessions");
         let mut keys = key_versions(table());

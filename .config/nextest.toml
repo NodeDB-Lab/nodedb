@@ -64,7 +64,7 @@ test-threads = "num-cpus"
 # bring-ups and a cross-cluster catch-up. It keeps the group below. Settings
 # resolve per key by first match, so only its ceiling moves.
 [[profile.default.overrides]]
-filter = 'package(nodedb-cluster-tests) & test(mirror_apply_two_clusters)'
+filter = 'package(nodedb-cluster-tests) & (test(mirror_apply_two_clusters) | test(mirror_bootstrap))'
 slow-timeout = { period = "30s", terminate-after = 12 }
 
 [[profile.default.overrides]]

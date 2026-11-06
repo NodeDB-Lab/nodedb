@@ -11,11 +11,13 @@
 
 use std::sync::Arc;
 
+use super::bootstrap::CrossClusterSnapshotEnvelope;
 use super::error::MirrorError;
 use super::handshake::MirrorHelloAck;
 use super::link::CrossClusterLink;
 use super::tail_wire::{
-    MirrorAck, MirrorRefusal, MirrorRequest, MirrorResponse, MirrorTailBatch, MirrorTailRequest,
+    MirrorAck, MirrorBootstrapRequest, MirrorRefusal, MirrorRequest, MirrorResponse,
+    MirrorTailBatch, MirrorTailRequest,
 };
 
 /// What every seed of one fetch answered, short of an answer the fetch returns.
@@ -114,12 +116,37 @@ impl MirrorSourceClient {
         match self.link.exchange(&MirrorRequest::Ack(ack.clone())).await? {
             MirrorResponse::Ack => Ok(()),
             MirrorResponse::Refused(refusal) => Err(MirrorError::Refused(refusal)),
-            MirrorResponse::Hello(_) | MirrorResponse::Tail(_) => {
+            MirrorResponse::Hello(_) | MirrorResponse::Tail(_) | MirrorResponse::Bootstrap(_) => {
                 Err(MirrorError::Refused(MirrorRefusal::Malformed {
                     detail: "the source answered an ack with another response".to_string(),
                 }))
             }
         }
+    }
+
+    /// Fetch a chunk of the link's capture from `offset`, or `None` while the
+    /// source still takes it.
+    pub async fn bootstrap_chunk(
+        &self,
+        link_id: u64,
+        offset: u64,
+    ) -> Result<Option<CrossClusterSnapshotEnvelope>, MirrorError> {
+        let request = MirrorRequest::Bootstrap(MirrorBootstrapRequest { link_id, offset });
+        match self.link.exchange(&request).await? {
+            MirrorResponse::Bootstrap(chunk) => Ok(chunk.map(|boxed| *boxed)),
+            MirrorResponse::Refused(refusal) => Err(MirrorError::Refused(refusal)),
+            MirrorResponse::Hello(_) | MirrorResponse::Tail(_) | MirrorResponse::Ack => {
+                Err(MirrorError::Refused(MirrorRefusal::Malformed {
+                    detail: "the source answered a bootstrap with another response".to_string(),
+                }))
+            }
+        }
+    }
+
+    /// Move to the next replica. A capture lives on one replica, so a transfer
+    /// that lost its replica starts over on another.
+    pub async fn next_seed(&self) {
+        self.link.next_seed().await;
     }
 }
 
@@ -127,7 +154,7 @@ fn tail_answer(response: MirrorResponse) -> Result<MirrorTailBatch, MirrorError>
     match response {
         MirrorResponse::Tail(batch) => Ok(batch),
         MirrorResponse::Refused(refusal) => Err(MirrorError::Refused(refusal)),
-        MirrorResponse::Hello(_) | MirrorResponse::Ack => {
+        MirrorResponse::Hello(_) | MirrorResponse::Ack | MirrorResponse::Bootstrap(_) => {
             Err(MirrorError::Refused(MirrorRefusal::Malformed {
                 detail: "the source answered a fetch with another response".to_string(),
             }))
@@ -167,7 +194,7 @@ mod tests {
     use crate::mirror::handshake::MirrorHello;
     use crate::mirror::link::MirrorLinkConfig;
     use crate::mirror::listener::{MirrorSourceService, serve_mirror_source};
-    use crate::mirror::tail_wire::MirrorTailEntry;
+    use crate::mirror::tail_wire::{MirrorBootstrapRequest, MirrorTailEntry};
     use crate::mirror::throttle::SendThrottle;
     use crate::transport::config::{
         SNI_HOSTNAME, TlsCredentials, generate_node_credentials, issue_leaf_for_sans,
@@ -206,6 +233,14 @@ mod tests {
 
         async fn ack(&self, _client: &MirrorClient, _ack: MirrorAck) -> Result<(), MirrorRefusal> {
             Ok(())
+        }
+
+        async fn bootstrap(
+            &self,
+            _client: &MirrorClient,
+            _request: MirrorBootstrapRequest,
+        ) -> Result<Option<CrossClusterSnapshotEnvelope>, MirrorRefusal> {
+            Ok(None)
         }
     }
 

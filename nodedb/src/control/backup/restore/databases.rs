@@ -108,6 +108,7 @@ pub(super) async fn resolve_databases(
                 dest,
                 restore_id: restore.id,
                 restore_cut: restore.cut,
+                event_source: restore.event_source,
             },
         );
     }

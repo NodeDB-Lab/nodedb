@@ -35,15 +35,16 @@ pub use allowlist::{
 
 pub use bootstrap::{
     BootstrapChunkOutcome, CrossClusterSnapshotEnvelope, MirrorBootstrapReceiver,
-    PROGRESS_REPORT_CHUNK_BYTES,
+    PROGRESS_REPORT_CHUNK_BYTES, ProgressCallback,
 };
 pub use client::MirrorSourceClient;
 pub use error::MirrorError;
 pub use handshake::{MIRROR_PROTOCOL_VERSION, MirrorHello, MirrorHelloAck};
-pub use link::{CrossClusterLink, MirrorLinkConfig};
+pub use link::{CrossClusterLink, MirrorLinkConfig, derive_link_id};
 pub use listener::{MirrorSourceService, bind_mirror_endpoint, serve_mirror_source};
 pub use tail_wire::{
-    MAX_TAIL_BYTES, MAX_TAIL_WAIT_MS, MirrorAck, MirrorRefusal, MirrorRequest, MirrorResponse,
-    MirrorTailBatch, MirrorTailEntry, MirrorTailRequest,
+    MAX_BOOTSTRAP_BYTES, MAX_BOOTSTRAP_CHUNK, MAX_TAIL_BYTES, MAX_TAIL_WAIT_MS, MirrorAck,
+    MirrorBootstrapRequest, MirrorRefusal, MirrorRequest, MirrorResponse, MirrorTailBatch,
+    MirrorTailEntry, MirrorTailRequest,
 };
 pub use throttle::{DEFAULT_CAP_BYTES, SendThrottle};

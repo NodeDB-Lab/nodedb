@@ -16,6 +16,16 @@ use crate::control::state::SharedState;
 
 use super::types::MetadataCommitApplier;
 
+/// The rule for a catalog entry's descriptor version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DescriptorCheck {
+    /// The entry is the next one of its descriptor's log.
+    Log,
+    /// The entry is a row of a mirror's bootstrap image: with no prior row, it
+    /// starts its descriptor's history at the version it carries.
+    Image,
+}
+
 impl MetadataCommitApplier {
     /// Release the descriptor drain a `Put*` DDL installed, and no drain
     /// another owner holds on the same descriptor.
@@ -49,6 +59,18 @@ impl MetadataCommitApplier {
         &self,
         entry: &MetadataEntry,
         raft_index: u64,
+    ) -> Result<(), crate::Error> {
+        self.apply_catalog_ddl_as(entry, raft_index, DescriptorCheck::Log)
+            .await
+    }
+
+    /// [`Self::apply_catalog_ddl`] under `check`, the rule for the entry's
+    /// descriptor version.
+    pub(super) async fn apply_catalog_ddl_as(
+        &self,
+        entry: &MetadataEntry,
+        raft_index: u64,
+        check: DescriptorCheck,
     ) -> Result<(), crate::Error> {
         let catalog = self.credentials.catalog();
         let (payload, audit) = match entry {
@@ -124,8 +146,14 @@ impl MetadataCommitApplier {
         // payloads remain loud typed errors. A version of `0` (unit-test
         // fixtures that bypass the proposer) is applied without version
         // fencing.
+        let validated = match check {
+            DescriptorCheck::Log => catalog_entry::descriptor_validate::validate(&stamped, catalog),
+            DescriptorCheck::Image => {
+                catalog_entry::descriptor_validate::validate_image_row(&stamped, catalog)
+            }
+        };
         if matches!(
-            catalog_entry::descriptor_validate::validate(&stamped, catalog)?,
+            validated?,
             catalog_entry::descriptor_validate::ValidationOutcome::AlreadyApplied
         ) {
             debug!(

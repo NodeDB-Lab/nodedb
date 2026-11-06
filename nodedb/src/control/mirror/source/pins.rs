@@ -173,8 +173,8 @@ impl MirrorPinTable {
             .any(|pin| matches!(pin.state, MirrorPinState::Live))
     }
 
-    /// The compaction ceiling of `group_id`, created on first use at what the
-    /// pins hold now.
+    /// The compaction ceiling of `group_id`. First use creates it at the bound
+    /// the pins hold.
     pub fn ceiling_for(&self, group_id: u64) -> Arc<AtomicU64> {
         let mut state = self.write();
         let value = state.ceiling(group_id);

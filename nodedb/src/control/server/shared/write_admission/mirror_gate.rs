@@ -70,6 +70,9 @@ fn decide_proposal(
 ) -> crate::Result<()> {
     match (source, stamped) {
         (EventSource::RaftFollower, true) => Ok(()),
+        // A bootstrap's re-issue. No cut holds it: its rows go in before the
+        // mirror takes its first cut.
+        (EventSource::RaftFollower, false) if fence.is_bootstrapping(database_id) => Ok(()),
         (EventSource::RaftFollower, false) => refuse_if_write(fence, database_id, is_write),
         (
             EventSource::User
@@ -291,6 +294,65 @@ mod tests {
         assert!(matches!(error, crate::Error::MirrorReadOnly { .. }));
         assert!(propose_to(&fence(), MIRROR, EventSource::RaftFollower, true).is_ok());
         assert!(propose_to(&fence(), PLAIN, EventSource::RaftFollower, false).is_ok());
+    }
+
+    /// A bootstrap's re-issue passes only while the mirror bootstraps, and a
+    /// client's source never passes.
+    #[test]
+    fn only_a_bootstrap_admits_an_unstamped_applier_source() {
+        let fence = MirrorFence::new();
+        fence.apply_descriptor(&descriptor(
+            MIRROR,
+            MirrorStatus::Bootstrapping {
+                bytes_done: 0,
+                bytes_total: 0,
+            },
+        ));
+        assert!(propose_to(&fence, MIRROR, EventSource::RaftFollower, false).is_ok());
+        for source in [EventSource::User, EventSource::Restore] {
+            assert!(propose_to(&fence, MIRROR, source, false).is_err());
+        }
+        fence.apply_descriptor(&descriptor(MIRROR, MirrorStatus::Following));
+        assert!(propose_to(&fence, MIRROR, EventSource::RaftFollower, false).is_err());
+    }
+
+    /// A re-issue that lost its source reaches every door as a client's write. A
+    /// Calvin class with no source code reads as `User`.
+    #[test]
+    fn a_bootstrapping_mirror_refuses_every_other_source_at_every_door() {
+        let fence = MirrorFence::new();
+        fence.apply_descriptor(&descriptor(
+            MIRROR,
+            MirrorStatus::Bootstrapping {
+                bytes_done: 0,
+                bytes_total: 0,
+            },
+        ));
+        for source in [
+            EventSource::User,
+            EventSource::Trigger,
+            EventSource::CrdtSync,
+            EventSource::Deferred,
+            EventSource::ImplicitClient,
+            EventSource::Restore,
+        ] {
+            assert!(
+                matches!(
+                    propose_to(&fence, MIRROR, source, false),
+                    Err(crate::Error::MirrorReadOnly { .. })
+                ),
+                "the proposal gate admits {source:?}"
+            );
+            assert!(
+                matches!(
+                    decide_write(&fence, DatabaseId::new(MIRROR), source, || Ok(true)),
+                    Err(crate::Error::MirrorReadOnly { .. })
+                ),
+                "the write funnel and the Calvin submit admit {source:?}"
+            );
+        }
+        let defaulted = EventSource::from_wal_code(0).unwrap_or(EventSource::User);
+        assert!(decide_write(&fence, DatabaseId::new(MIRROR), defaulted, || Ok(true)).is_err());
     }
 
     /// A stamp does not carry a client's source past the gate.

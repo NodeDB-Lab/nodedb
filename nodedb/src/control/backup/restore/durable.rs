@@ -20,8 +20,8 @@ use super::target::DatabaseTarget;
 ///
 /// Proposes the write as a normal replicated write does:
 /// `to_replicated_entry` + `propose_replicated_entry`. The entry gives the
-/// write's events [`crate::event::EventSource::Restore`] and carries
-/// `target.restore_id`, so every replica marks it under that restore.
+/// write's events `target.event_source` and carries `target.restore_id`, so
+/// every replica marks it under that restore.
 pub(crate) async fn reissue_plan_durably(
     state: &SharedState,
     tenant_id: TenantId,
@@ -65,7 +65,7 @@ pub(crate) async fn reissue_plan_durably(
     })?
     // Every replica applies the write as restored: AFTER triggers do not
     // fire again for it.
-    .with_event_source(crate::event::EventSource::Restore)
+    .with_event_source(target.event_source)
     .with_restore_id(target.restore_id);
     let deadline = crate::control::server::shared::session::StatementDeadline::of_statement(state)
         .tokio_instant();

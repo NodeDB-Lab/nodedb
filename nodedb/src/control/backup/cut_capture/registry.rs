@@ -21,9 +21,14 @@ const CAPTURE_TTL: Duration = Duration::from_secs(30 * 60);
 /// One group's capture of a request's tenants.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum GroupCapture {
-    /// `(tenant_id, TenantDataSnapshot msgpack)` per tenant, filtered to the
-    /// group's vShards.
-    Taken(Vec<(u64, Vec<u8>)>),
+    Taken {
+        /// `(tenant_id, TenantDataSnapshot msgpack)` per tenant, filtered to
+        /// the group's vShards.
+        tenants: Vec<(u64, Vec<u8>)>,
+        /// The barrier's log index. The capture holds every entry at or below
+        /// it and none above.
+        barrier_index: u64,
+    },
     /// The snapshot failed. The backup fails with this reason.
     Failed(String),
 }
@@ -109,18 +114,23 @@ mod tests {
     #[test]
     fn take_all_returns_one_request_and_removes_it() {
         let captures = CutCaptures::new();
-        captures.park(7, 1, GroupCapture::Taken(vec![(1, vec![1])]));
+        let one = GroupCapture::Taken {
+            tenants: vec![(1, vec![1])],
+            barrier_index: 5,
+        };
+        captures.park(7, 1, one.clone());
         captures.park(7, 2, GroupCapture::Failed("x".into()));
-        captures.park(8, 1, GroupCapture::Taken(Vec::new()));
+        captures.park(
+            8,
+            1,
+            GroupCapture::Taken {
+                tenants: Vec::new(),
+                barrier_index: 6,
+            },
+        );
         let mut taken = captures.take_all(7);
         taken.sort_by_key(|(group, _)| *group);
-        assert_eq!(
-            taken,
-            vec![
-                (1, GroupCapture::Taken(vec![(1, vec![1])])),
-                (2, GroupCapture::Failed("x".into())),
-            ]
-        );
+        assert_eq!(taken, vec![(1, one), (2, GroupCapture::Failed("x".into()))]);
         assert!(captures.take_all(7).is_empty());
         assert_eq!(captures.take_all(8).len(), 1);
     }

@@ -10,7 +10,7 @@
 //! the descriptor at that floor. Boot and a metadata image install rebuild the
 //! whole set.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 use nodedb_types::{DatabaseId, MirrorStatus};
@@ -18,10 +18,20 @@ use nodedb_types::{DatabaseId, MirrorStatus};
 use crate::control::security::catalog::SystemCatalog;
 use crate::control::security::catalog::database_types::DatabaseDescriptor;
 
+fn is_bootstrapping(descriptor: &DatabaseDescriptor) -> bool {
+    descriptor
+        .mirror_origin
+        .as_ref()
+        .is_some_and(|origin| matches!(origin.status, MirrorStatus::Bootstrapping { .. }))
+}
+
 /// Names of the databases that refuse client writes, by id.
 #[derive(Debug, Default)]
 pub struct MirrorFence {
     read_only: RwLock<HashMap<DatabaseId, Arc<str>>>,
+    /// The mirrors still taking their first capture. Their re-issue is the one
+    /// unstamped writer a mirror admits.
+    bootstrapping: RwLock<HashSet<DatabaseId>>,
 }
 
 /// The name a read-only database goes by, or `None` for a writable one.
@@ -52,8 +62,29 @@ impl MirrorFence {
             .cloned()
     }
 
+    /// Whether the database still takes its first capture.
+    pub fn is_bootstrapping(&self, database_id: DatabaseId) -> bool {
+        self.bootstrapping
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(&database_id)
+    }
+
+    fn follow_bootstrap(&self, descriptor: &DatabaseDescriptor) {
+        let mut bootstrapping = self
+            .bootstrapping
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if is_bootstrapping(descriptor) {
+            bootstrapping.insert(descriptor.id);
+        } else {
+            bootstrapping.remove(&descriptor.id);
+        }
+    }
+
     /// Follow one applied descriptor.
     pub fn apply_descriptor(&self, descriptor: &DatabaseDescriptor) {
+        self.follow_bootstrap(descriptor);
         let mut read_only = self
             .read_only
             .write()
@@ -74,6 +105,10 @@ impl MirrorFence {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&database_id);
+        self.bootstrapping
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&database_id);
     }
 
     /// Replace the set with what `catalog` holds.
@@ -82,11 +117,19 @@ impl MirrorFence {
     /// continue: a set that misses a mirror admits writes to it.
     pub fn load_from_catalog(&self, catalog: &SystemCatalog) -> crate::Result<()> {
         let mut loaded = HashMap::new();
+        let mut bootstrapping = HashSet::new();
         for descriptor in catalog.list_databases()? {
             if let Some(name) = read_only_name(&descriptor) {
                 loaded.insert(descriptor.id, name);
             }
+            if is_bootstrapping(&descriptor) {
+                bootstrapping.insert(descriptor.id);
+            }
         }
+        *self
+            .bootstrapping
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = bootstrapping;
         *self
             .read_only
             .write()

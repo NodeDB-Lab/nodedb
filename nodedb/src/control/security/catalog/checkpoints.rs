@@ -127,6 +127,29 @@ impl SystemCatalog {
         }
     }
 
+    /// Every checkpoint of every document, in key order.
+    pub fn load_all_checkpoints(&self) -> crate::Result<Vec<CheckpointRecord>> {
+        let read_txn = self
+            .db
+            .begin_read()
+            .map_err(|e| catalog_err("read txn", e))?;
+        let table = read_txn
+            .open_table(CHECKPOINTS)
+            .map_err(|e| catalog_err("open checkpoints", e))?;
+        let mut records = Vec::new();
+        for entry in table
+            .iter()
+            .map_err(|e| catalog_err("scan checkpoints", e))?
+        {
+            let (_key, value) = entry.map_err(|e| catalog_err("iterate checkpoints", e))?;
+            records.push(
+                zerompk::from_msgpack(value.value())
+                    .map_err(|e| catalog_err("deserialize checkpoint", e))?,
+            );
+        }
+        Ok(records)
+    }
+
     /// List all checkpoints for a document, ordered by created_at descending.
     ///
     /// The scan is bounded to the document's key range, so a catalog holding

@@ -8,8 +8,9 @@
 //!   source link before the catalog mutation lands.
 //! - [`observer`] — lag-transition logic and the
 //!   `nodedb_database_mirror_lag_ms` metric update path.
-//! - [`restart`] — enumerates mirror databases on server start and
-//!   returns the set that need their observer link re-established.
+//! - [`restart`] — the mirror databases that need an applier, and where each
+//!   one resumes.
+//! - `bootstrap_image` — what a bootstrap transfer carries.
 //! - [`cut_watch`] — [`MirrorCutWatch`]: each mirror's cut state and the
 //!   verdict it gives a held entry.
 //! - [`applier`] — what this cluster does to follow a source.
@@ -17,6 +18,7 @@
 //! - [`state`] — [`MirrorState`]: what `SharedState` holds for its mirrors.
 
 pub mod applier;
+pub(crate) mod bootstrap_image;
 pub mod cut_watch;
 pub mod fence;
 pub mod observer;

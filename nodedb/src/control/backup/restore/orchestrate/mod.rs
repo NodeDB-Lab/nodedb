@@ -17,5 +17,6 @@ mod restore;
 mod stats;
 
 pub use database::reissue_into_database;
+pub(crate) use database::reissue_mirror_capture;
 pub use restore::restore_tenant;
 pub use stats::{CollectionRows, RestoreStats};

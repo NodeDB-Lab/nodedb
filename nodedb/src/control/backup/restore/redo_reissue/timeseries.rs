@@ -202,6 +202,7 @@ mod tests {
             dest: crate::types::DatabaseId::DEFAULT,
             restore_id: 1,
             restore_cut: i64::MAX,
+            event_source: crate::event::EventSource::Restore,
         };
         let name = target.bare("cpu");
         let rows = vec![Value::Integer(1); ROWS_PER_CHUNK + 1];

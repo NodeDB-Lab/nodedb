@@ -11,6 +11,7 @@ use super::cut_watch::MirrorCutWatch;
 use super::fence::MirrorFence;
 use super::registry::MirrorLinkRegistry;
 use super::source::pins::MirrorPinTable;
+use crate::config::server::MirrorSettings;
 use crate::control::security::catalog::SystemCatalog;
 
 /// The live state of this node's mirror databases.
@@ -30,6 +31,9 @@ pub struct MirrorState {
     pub cluster_id: OnceLock<u64>,
     /// The Raft operations this node's appliers use, once Raft started.
     pub raft: OnceLock<Arc<dyn MirrorRaft>>,
+    /// The `[mirror]` section. `MIRROR DATABASE` and the applier supervisor find
+    /// each source's seeds and credentials here.
+    pub settings: OnceLock<MirrorSettings>,
 }
 
 impl MirrorState {

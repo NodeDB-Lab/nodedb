@@ -33,6 +33,8 @@ pub(crate) struct GroupReply {
     pub group_id: u64,
     /// `(tenant_id, TenantDataSnapshot msgpack)`.
     pub tenants: Vec<(u64, Vec<u8>)>,
+    /// The capturing barrier's log index in the group. `0` on a failure.
+    pub barrier_index: u64,
     /// The reason the capture failed, when it did.
     pub failure: Option<String>,
 }
@@ -43,6 +45,13 @@ pub(crate) struct DatabaseCapture {
     pub cut: u64,
     /// Each tenant's rows, merged over every group.
     pub tenants: BTreeMap<u64, TenantDataSnapshot>,
+    /// Each data group's capturing barrier: its log index. The capture holds
+    /// every entry at or below it, and none above.
+    pub positions: BTreeMap<u64, u64>,
+    /// Each tenant's conversion records: the mode its captured rows hold, for
+    /// each collection a conversion touched. A backup leaves them out: its rows
+    /// restore as new writes. A mirror keeps them with the rows.
+    pub conversions: BTreeMap<u64, Vec<(String, Vec<u8>)>>,
 }
 
 /// Capture every tenant of `tenants` in `database_id` at one cut.
@@ -116,14 +125,19 @@ pub(crate) fn take_replies(state: &SharedState, request: u64) -> Vec<GroupReply>
         .take_all(request)
         .into_iter()
         .map(|(group_id, capture)| match capture {
-            GroupCapture::Taken(tenants) => GroupReply {
+            GroupCapture::Taken {
+                tenants,
+                barrier_index,
+            } => GroupReply {
                 group_id,
                 tenants,
+                barrier_index,
                 failure: None,
             },
             GroupCapture::Failed(reason) => GroupReply {
                 group_id,
                 tenants: Vec::new(),
+                barrier_index: 0,
                 failure: Some(reason),
             },
         })
@@ -167,6 +181,8 @@ fn assemble(
         by_group.entry(reply.group_id).or_insert(reply);
     }
     let mut tenants: BTreeMap<u64, TenantDataSnapshot> = BTreeMap::new();
+    let mut positions: BTreeMap<u64, u64> = BTreeMap::new();
+    let mut conversions: BTreeMap<u64, Vec<(String, Vec<u8>)>> = BTreeMap::new();
     for group_id in data_groups(state) {
         let reply = by_group
             .remove(&group_id)
@@ -179,8 +195,9 @@ fn assemble(
                 ),
             });
         }
+        positions.insert(group_id, reply.barrier_index);
         for (tenant_id, body) in reply.tenants {
-            let snap: TenantDataSnapshot =
+            let mut snap: TenantDataSnapshot =
                 zerompk::from_msgpack(&body).map_err(|e| Error::Serialization {
                     format: "msgpack".into(),
                     detail: format!(
@@ -188,8 +205,17 @@ fn assemble(
                          {group_id}: {e}"
                     ),
                 })?;
+            conversions
+                .entry(tenant_id)
+                .or_default()
+                .append(&mut snap.storage_conversions);
             append_snapshot(tenants.entry(tenant_id).or_default(), snap);
         }
     }
-    Ok(DatabaseCapture { cut, tenants })
+    Ok(DatabaseCapture {
+        cut,
+        tenants,
+        positions,
+        conversions,
+    })
 }

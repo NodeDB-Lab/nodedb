@@ -10,16 +10,19 @@
 //! the write's HLC are the source's, and each carried surrogate installs as it
 //! came. The applier mints no surrogate: nothing here draws from the assigner.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
-use nodedb_types::{DatabaseId, MirrorEntryStamp, MirrorFailure};
+use nodedb_types::{CollectionType, DatabaseId, DocumentMode, MirrorEntryStamp, MirrorFailure};
 
 use crate::control::catalog_entry::{self, CatalogEntry};
-use crate::control::security::catalog::SystemCatalog;
+use crate::control::security::catalog::{StoredCollection, SystemCatalog};
 use crate::control::wal_replication::decode::{DecodedTransactionRedo, decode_transaction_redo};
 use crate::control::wal_replication::types::{MirrorBarrier, ReplicatedEventSource};
 use crate::control::wal_replication::{ReplicatedEntry, ReplicatedWrite};
 use crate::event::EventSource;
+
+/// The odd step between two groups' purge share keys.
+const PURGE_SHARE_KEY_STEP: u64 = 0x9E37_79B9_7F4A_7C15;
 
 /// What one source entry is to the applier.
 #[derive(Debug, PartialEq, Eq)]
@@ -126,7 +129,9 @@ pub(super) fn classify_write(write: &ReplicatedWrite) -> WriteClass<'_> {
         | ReplicatedWrite::TopicPublish { .. }
         | ReplicatedWrite::SurrogateBind { .. }
         | ReplicatedWrite::RedoChunk { .. }
-        | ReplicatedWrite::RedoAbandon { .. } => WriteClass::Applies,
+        | ReplicatedWrite::RedoAbandon { .. }
+        | ReplicatedWrite::TenantPurge { .. }
+        | ReplicatedWrite::CollectionConvert { .. } => WriteClass::Applies,
     }
 }
 
@@ -233,7 +238,76 @@ pub(super) struct CatalogCheck<'a> {
 #[derive(Clone)]
 struct HeldCollection {
     incarnation: nodedb_types::Hlc,
-    collection_type: nodedb_types::CollectionType,
+    collection_type: CollectionType,
+    /// The newest conversion of this incarnation the row names. `0` for none.
+    conversion: u64,
+}
+
+impl HeldCollection {
+    fn of(stored: &StoredCollection) -> Self {
+        Self {
+            incarnation: stored.incarnation,
+            collection_type: stored.collection_type.clone(),
+            conversion: stored
+                .storage_conversion
+                .as_ref()
+                .filter(|conversion| conversion.incarnation == stored.incarnation)
+                .map_or(0, |conversion| conversion.generation),
+        }
+    }
+}
+
+/// How a collection type stores its rows. ALTER moves a strict schema inside one
+/// family. Only a conversion moves a collection between two.
+fn storage_family(collection_type: &CollectionType) -> u8 {
+    match collection_type {
+        CollectionType::Document(DocumentMode::Schemaless) => 0,
+        CollectionType::Document(DocumentMode::Strict(_)) => 1,
+        CollectionType::KeyValue(_) => 2,
+        CollectionType::Columnar(_) => 3,
+    }
+}
+
+/// Split a tenant purge along the mirror's groups. The source lists its own
+/// group's vShards, and each mirror group takes its share at this log position.
+///
+/// A vShard belongs to one source group, so each share keeps its place against
+/// every other write of its vShards. Each share of a split takes its own key, and
+/// a re-proposal of that share derives the same one.
+pub(super) fn split_tenant_purge(
+    entry: ReplicatedEntry,
+    group_of: impl Fn(u32) -> crate::Result<u64>,
+) -> crate::Result<Vec<ReplicatedEntry>> {
+    let ReplicatedWrite::TenantPurge {
+        collections,
+        vshards,
+    } = &entry.write
+    else {
+        return Ok(vec![entry]);
+    };
+    let mut shares: BTreeMap<u64, Vec<u32>> = BTreeMap::new();
+    for vshard in vshards {
+        shares.entry(group_of(*vshard)?).or_default().push(*vshard);
+    }
+    if shares.len() <= 1 {
+        return Ok(vec![entry]);
+    }
+    Ok(shares
+        .into_iter()
+        .filter_map(|(group, vshards)| {
+            let mut share = entry.clone();
+            share.vshard_id = vshards.first().copied()?;
+            share.idempotency_key = entry
+                .idempotency_key
+                .wrapping_add(group.wrapping_mul(PURGE_SHARE_KEY_STEP))
+                | 1;
+            share.write = ReplicatedWrite::TenantPurge {
+                collections: collections.clone(),
+                vshards,
+            };
+            Some(share)
+        })
+        .collect())
 }
 
 impl<'a> CatalogCheck<'a> {
@@ -248,8 +322,9 @@ impl<'a> CatalogCheck<'a> {
     /// Check one source catalog payload.
     ///
     /// A drop or a tenant move stops the link: neither reaches the mirror's
-    /// rows. A changed collection type stops it too: CONVERT re-encodes rows on
-    /// the source's cores, with no log entry a mirror can follow.
+    /// rows. A row that changes storage family stops it too, unless the row
+    /// names a new conversion: the conversion's data-group entry re-encodes the
+    /// mirror's rows, in either order against this row.
     pub(super) fn check(&mut self, payload: &[u8], index: u64) -> Result<(), MirrorFailure> {
         let entry = catalog_entry::decode(payload)
             .map_err(|error| poison(nodedb_cluster::METADATA_GROUP_ID, index, error.to_string()))?;
@@ -264,21 +339,15 @@ impl<'a> CatalogCheck<'a> {
         if let CatalogEntry::PutCollection(stored) | CatalogEntry::PutCollectionIfAbsent(stored) =
             &entry
         {
-            return self.check_type(
-                &stored.name,
-                stored.tenant_id,
-                HeldCollection {
-                    incarnation: stored.incarnation,
-                    collection_type: stored.collection_type.clone(),
-                },
-            );
+            return self.check_type(&stored.name, stored.tenant_id, HeldCollection::of(stored));
         }
         // Every other entry names an object the mirror installs as stamped.
         Ok(())
     }
 
-    /// One incarnation with two types is a CONVERT. A drop and a same-name
-    /// create start a new incarnation, which holds any type.
+    /// One incarnation in two storage families with no new conversion has no
+    /// entry a mirror can follow. A drop and a same-name create start a new
+    /// incarnation, which holds any type.
     fn check_type(
         &mut self,
         name: &str,
@@ -296,17 +365,18 @@ impl<'a> CatalogCheck<'a> {
                     source_index: 0,
                     detail: error.to_string(),
                 })?
-                .map(|stored| HeldCollection {
-                    incarnation: stored.incarnation,
-                    collection_type: stored.collection_type,
-                }),
+                .as_ref()
+                .map(HeldCollection::of),
         };
         if let Some(held) = held
             && held.incarnation == incoming.incarnation
-            && held.collection_type != incoming.collection_type
+            && storage_family(&held.collection_type) != storage_family(&incoming.collection_type)
+            && incoming.conversion <= held.conversion
         {
             return Err(MirrorFailure::UnsupportedSourceOp {
-                detail: format!("CONVERT changed the storage type of collection '{name}'"),
+                detail: format!(
+                    "collection '{name}' changed its storage type with no new conversion"
+                ),
             });
         }
         self.seen.insert(key, incoming);
@@ -467,6 +537,169 @@ mod tests {
             check_data_entry(&bytes, 3, 9, DB),
             Ok(CheckedEntry::Data(_))
         ));
+    }
+
+    fn strict_type() -> CollectionType {
+        CollectionType::strict(
+            nodedb_types::columnar::StrictSchema::new(vec![
+                nodedb_types::columnar::ColumnDef::required(
+                    "id",
+                    nodedb_types::columnar::ColumnType::String,
+                ),
+            ])
+            .expect("schema"),
+        )
+    }
+
+    fn row_payload(stored: &StoredCollection) -> Vec<u8> {
+        catalog_entry::encode(&CatalogEntry::PutCollection(Box::new(stored.clone())))
+            .expect("encode")
+    }
+
+    fn check_second_row(mutate: impl FnOnce(&mut StoredCollection)) -> Result<(), MirrorFailure> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let catalog = SystemCatalog::open(&dir.path().join("system.redb")).expect("catalog");
+        let mut check = CatalogCheck::new(&catalog, DB);
+        let first = StoredCollection::stamped_for_test(1, "c", "owner");
+        check.check(&row_payload(&first), 1).expect("first row");
+        let mut second = first;
+        mutate(&mut second);
+        check.check(&row_payload(&second), 2)
+    }
+
+    /// The conversion's data-group entry re-encodes the mirror's rows.
+    #[test]
+    fn a_row_that_names_a_new_conversion_passes() {
+        assert!(
+            check_second_row(|row| {
+                row.collection_type = strict_type();
+                row.storage_conversion = Some(nodedb_physical::physical_plan::StorageConversion {
+                    generation: 1,
+                    incarnation: row.incarnation,
+                    source: nodedb_physical::physical_plan::StorageMode::Schemaless,
+                });
+            })
+            .is_ok()
+        );
+    }
+
+    /// No log entry re-encodes these rows, so the link stops.
+    #[test]
+    fn a_family_change_with_no_new_conversion_stops_the_link() {
+        assert!(matches!(
+            check_second_row(|row| row.collection_type = strict_type()),
+            Err(MirrorFailure::UnsupportedSourceOp { .. })
+        ));
+    }
+
+    /// A conversion stamp of another incarnation says nothing of these rows.
+    #[test]
+    fn a_conversion_of_another_incarnation_does_not_count() {
+        assert!(matches!(
+            check_second_row(|row| {
+                row.collection_type = strict_type();
+                row.storage_conversion = Some(nodedb_physical::physical_plan::StorageConversion {
+                    generation: 1,
+                    incarnation: nodedb_types::Hlc::ZERO,
+                    source: nodedb_physical::physical_plan::StorageMode::Schemaless,
+                });
+            }),
+            Err(MirrorFailure::UnsupportedSourceOp { .. })
+        ));
+    }
+
+    /// ALTER moves a strict schema, and no rows change encoding family.
+    #[test]
+    fn a_schema_change_inside_one_family_passes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let catalog = SystemCatalog::open(&dir.path().join("system.redb")).expect("catalog");
+        let mut check = CatalogCheck::new(&catalog, DB);
+        let mut row = StoredCollection::stamped_for_test(1, "c", "owner");
+        row.collection_type = strict_type();
+        check.check(&row_payload(&row), 1).expect("first row");
+        row.collection_type = CollectionType::strict(
+            nodedb_types::columnar::StrictSchema::new(vec![
+                nodedb_types::columnar::ColumnDef::required(
+                    "id",
+                    nodedb_types::columnar::ColumnType::String,
+                ),
+                nodedb_types::columnar::ColumnDef::required(
+                    "added",
+                    nodedb_types::columnar::ColumnType::String,
+                ),
+            ])
+            .expect("schema"),
+        );
+        assert!(check.check(&row_payload(&row), 2).is_ok());
+    }
+
+    fn purge(vshards: Vec<u32>) -> ReplicatedEntry {
+        ReplicatedEntry::new(
+            1,
+            DB.as_u64(),
+            vshards.first().copied().unwrap_or(0),
+            ReplicatedWrite::TenantPurge {
+                collections: vec!["c".into()],
+                vshards,
+            },
+        )
+    }
+
+    fn share_vshards(entry: &ReplicatedEntry) -> Vec<u32> {
+        match &entry.write {
+            ReplicatedWrite::TenantPurge { vshards, .. } => vshards.clone(),
+            other => panic!("not a purge: {other:?}"),
+        }
+    }
+
+    /// A purge spans the mirror's groups: each group takes only its vShards, at
+    /// a vShard of its own, under its own key.
+    #[test]
+    fn a_purge_splits_along_the_mirror_groups() {
+        let entry = purge(vec![1, 2, 3, 4]);
+        let original = entry.idempotency_key;
+        let shares = split_tenant_purge(entry, |vshard| Ok(u64::from(vshard % 2))).expect("split");
+        assert_eq!(shares.len(), 2);
+        assert_eq!(share_vshards(&shares[0]), vec![2, 4]);
+        assert_eq!(shares[0].vshard_id, 2);
+        assert_eq!(share_vshards(&shares[1]), vec![1, 3]);
+        assert_eq!(shares[1].vshard_id, 1);
+        assert_ne!(shares[0].idempotency_key, shares[1].idempotency_key);
+        assert_ne!(shares[0].idempotency_key, 0);
+        assert_ne!(shares[1].idempotency_key, original);
+    }
+
+    /// A re-proposed cut proposes the same shares under the same keys.
+    #[test]
+    fn a_split_derives_the_same_keys_each_time() {
+        let entry = purge(vec![1, 2]);
+        let first =
+            split_tenant_purge(entry.clone(), |vshard| Ok(u64::from(vshard))).expect("split");
+        let second = split_tenant_purge(entry, |vshard| Ok(u64::from(vshard))).expect("split");
+        for (one, other) in first.iter().zip(&second) {
+            assert_eq!(one.idempotency_key, other.idempotency_key);
+        }
+    }
+
+    #[test]
+    fn a_purge_inside_one_group_stays_whole() {
+        let entry = purge(vec![1, 2]);
+        let original = entry.idempotency_key;
+        let shares = split_tenant_purge(entry, |_| Ok(5)).expect("split");
+        assert_eq!(shares.len(), 1);
+        assert_eq!(shares[0].idempotency_key, original);
+        assert_eq!(share_vshards(&shares[0]), vec![1, 2]);
+    }
+
+    #[test]
+    fn any_other_write_passes_through() {
+        let shares = split_tenant_purge(put(DB.as_u64()), |_| {
+            Err(crate::Error::Internal {
+                detail: "no routing is consulted".into(),
+            })
+        })
+        .expect("no split");
+        assert_eq!(shares.len(), 1);
     }
 
     #[test]
