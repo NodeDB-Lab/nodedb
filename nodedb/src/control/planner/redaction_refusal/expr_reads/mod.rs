@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 
+mod array;
 mod columnar;
 mod document;
 mod kv;

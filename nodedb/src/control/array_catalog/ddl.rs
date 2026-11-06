@@ -59,7 +59,10 @@ pub(crate) async fn run_trusted_array_ddl(
         ..
     } = task;
     let (statement, key, payload) = match &plan {
-        PhysicalPlan::Array(ArrayOp::OpenArray { .. }) => ("CREATE ARRAY", "opened", None),
+        PhysicalPlan::Array(ArrayOp::OpenArray { array_id, .. }) => {
+            refuse_name_under_redaction(&state.redaction, array_id)?;
+            ("CREATE ARRAY", "opened", None)
+        }
         PhysicalPlan::Array(ArrayOp::DropArray { .. }) => ("DROP ARRAY", "dropped", None),
         PhysicalPlan::Meta(MetaOp::AlterArray {
             audit_retain_ms, ..
@@ -149,7 +152,15 @@ fn entry_for(
                 name: array_id.name.clone(),
                 schema_msgpack: schema_msgpack.clone(),
                 schema_hash: *schema_hash,
-                created_at_ms: now_epoch_ms(),
+                created_at_ms: nodedb_types::checked_wall_now_ms().ok_or_else(|| {
+                    crate::Error::Internal {
+                        detail: format!(
+                            "CREATE ARRAY {}: the system clock reads before the Unix epoch; \
+                             correct the NTP or RTC config and retry",
+                            array_id.name
+                        ),
+                    }
+                })?,
                 prefix_bits: *prefix_bits,
                 audit_retain_ms: *audit_retain_ms,
                 minimum_audit_retain_ms: *minimum_audit_retain_ms,
@@ -216,11 +227,26 @@ fn entry_for(
     }
 }
 
-fn now_epoch_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
-        .unwrap_or(0)
+/// Refuse an array named by a redaction policy.
+///
+/// Column redaction does not cover array attributes, so the policy DDL
+/// refuses an existing array. This is the same rule for the other order: a
+/// policy first, then an array of its name, whose reads the policy cannot mask.
+fn refuse_name_under_redaction(
+    store: &crate::control::security::redaction::RedactionStore,
+    array_id: &nodedb_array::types::ArrayId,
+) -> crate::Result<()> {
+    let qualified = nodedb_types::QualifiedCollection::new(array_id.database_id, &array_id.name);
+    if store.has_any_rule_for_collection_any_role(array_id.tenant_id.as_u64(), qualified.as_str()) {
+        return Err(crate::Error::FeatureNotSupported {
+            detail: format!(
+                "CREATE ARRAY {name}: a redaction policy names '{name}', and column redaction \
+                 does not cover array attributes; drop the policy or choose another name",
+                name = array_id.name
+            ),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -251,6 +277,38 @@ mod tests {
 
     fn entry(catalog: &SystemCatalog, plan: &PhysicalPlan) -> crate::Result<CatalogEntry> {
         entry_for(catalog, TenantId::new(1), DatabaseId::DEFAULT, plan)
+    }
+
+    /// A policy on a name refuses an array of that name in the same database.
+    #[test]
+    fn an_array_named_by_a_redaction_policy_is_refused() {
+        use crate::control::security::redaction::{
+            RedactionMode, RedactionPolicy, RedactionRule, RedactionStore,
+        };
+        let store = RedactionStore::new();
+        store.create_policy(RedactionPolicy {
+            name: "p".to_string(),
+            tenant_id: 1,
+            collection: "grid".to_string(),
+            display_collection: "grid".to_string(),
+            for_role: "support".to_string(),
+            rules: vec![RedactionRule {
+                field: "secret".to_string(),
+                mode: RedactionMode::Hash,
+            }],
+        });
+        let array = |database: DatabaseId, name: &str| {
+            ArrayId::in_database(TenantId::new(1), database, name)
+        };
+
+        let err = refuse_name_under_redaction(&store, &array(DatabaseId::DEFAULT, "grid"))
+            .expect_err("a policy names the array");
+        assert!(
+            matches!(err, crate::Error::FeatureNotSupported { .. }),
+            "{err:?}"
+        );
+        assert!(refuse_name_under_redaction(&store, &array(DatabaseId::DEFAULT, "other")).is_ok());
+        assert!(refuse_name_under_redaction(&store, &array(DatabaseId::new(7), "grid")).is_ok());
     }
 
     #[test]

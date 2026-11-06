@@ -293,6 +293,31 @@ async fn create_redaction_policy_rejects_an_array_collection() {
     );
 }
 
+/// The other order is refused too: a policy first, then an array of its name.
+/// The array reads would run under a policy that cannot mask them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn create_array_rejects_a_name_a_redaction_policy_holds() {
+    let server = TestServer::start().await;
+
+    server
+        .exec(&format!(
+            "CREATE REDACTION POLICY p ON redact_later FOR ROLE {ROLE} (secret HASH)"
+        ))
+        .await
+        .unwrap();
+
+    server
+        .expect_error(
+            "CREATE ARRAY redact_later \
+             DIMS (x INT64 [0..100], y INT64 [0..100]) \
+             ATTRS (secret STRING) \
+             TILE_EXTENTS (10, 10) \
+             CELL_ORDER HILBERT",
+            "column redaction does not cover array attributes",
+        )
+        .await;
+}
+
 /// Purging a collection removes its policies from both the catalog and the
 /// in-memory store, so a later collection of the same name is not redacted by
 /// a policy nobody re-created.
