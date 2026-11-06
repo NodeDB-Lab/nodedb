@@ -140,6 +140,18 @@ pub struct TokenRefreshAckMsg {
     pub expires_in_secs: u64,
 }
 
+/// Token refresh hint (server → client, 0x62).
+///
+/// The session's token entered the server's refresh window. The client
+/// replies with `TokenRefresh`. The server sends one hint per token.
+#[derive(
+    Debug, Clone, Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack,
+)]
+pub struct TokenRefreshRequiredMsg {
+    /// Seconds until the session's token expires. `0` when it already did.
+    pub expires_in_secs: u64,
+}
+
 /// Ping/Pong keepalive (0xFF).
 #[derive(
     Debug, Clone, Serialize, Deserialize, zerompk::ToMessagePack, zerompk::FromMessagePack,

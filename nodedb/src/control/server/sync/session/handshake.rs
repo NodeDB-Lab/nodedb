@@ -12,6 +12,7 @@ use crate::control::security::sessions::{SessionBindRequest, bind_session};
 use crate::control::state::SharedState;
 
 use super::super::dlq::DeviceMetadata;
+use super::super::security::{UpgradeAuthResult, validate_upgrade_token};
 use super::super::wire::*;
 use super::fencing::FencingDecision;
 use super::state::SyncSession;
@@ -158,36 +159,33 @@ impl SyncSession {
         // policy. Without `SharedState` there is no gate at all, so the token
         // is unverifiable and the handshake is refused rather than falling
         // through to the trust branch above.
-        let identity = match shared {
-            Some(state) => crate::control::server::session_auth::authenticate_bearer_jwt(
-                state,
-                &msg.jwt_token,
-                &self.device_metadata.remote_addr,
-                &self.session_id,
-            )
-            .await
-            .map(|(identity, _claims)| identity),
-            None => None,
-        };
-        let Some(identity) = identity else {
-            warn!(
-                session = %self.session_id,
-                "sync handshake FAILED: bearer token not authenticated"
-            );
-            let ack = HandshakeAckMsg {
-                success: false,
-                session_id: self.session_id.clone(),
-                server_clock: HashMap::new(),
-                // Deliberately generic, matching the HTTP bearer route: the
-                // client learns it is unauthenticated, never why.
-                error: Some("invalid bearer token".into()),
-                fork_detected: false,
-                server_wire_version: SYNC_WIRE_VERSION,
-                producer_id: 0,
-                accepted_epoch: 0,
-                delta_signing_key: [0; 32],
-            };
-            return SyncFrame::try_encode(SyncMessageType::HandshakeAck, &ack);
+        let identity = match validate_upgrade_token(
+            shared.map(Arc::as_ref),
+            &msg.jwt_token,
+            &self.device_metadata.remote_addr,
+            &self.session_id,
+        )
+        .await
+        {
+            UpgradeAuthResult::Authenticated { identity, .. } => identity,
+            UpgradeAuthResult::Rejected { reason } => {
+                warn!(
+                    session = %self.session_id,
+                    "sync handshake FAILED: bearer token not authenticated"
+                );
+                let ack = HandshakeAckMsg {
+                    success: false,
+                    session_id: self.session_id.clone(),
+                    server_clock: HashMap::new(),
+                    error: Some(reason.into()),
+                    fork_detected: false,
+                    server_wire_version: SYNC_WIRE_VERSION,
+                    producer_id: 0,
+                    accepted_epoch: 0,
+                    delta_signing_key: [0; 32],
+                };
+                return SyncFrame::try_encode(SyncMessageType::HandshakeAck, &ack);
+            }
         };
 
         self.tenant_id = Some(identity.tenant_id);
@@ -330,6 +328,7 @@ impl SyncSession {
         self.producer_id = 0;
         self.accepted_epoch = 0;
         self.delta_signing_key = None;
+        self.refresh_hinted_expiry_ms = None;
         // The peer address is a property of the accepted TCP connection, not
         // of the authentication binding: it is stamped once before any frame
         // is read and is the same address whether this handshake succeeds or

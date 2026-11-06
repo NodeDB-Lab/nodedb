@@ -12,6 +12,7 @@ use tracing::{info, warn};
 
 use crate::control::security::sessions::session_ended;
 use crate::control::server::sync::listener::{SyncListenerState, SyncRegistrationCleanupGuard};
+use crate::control::server::sync::security::now_epoch_ms;
 use crate::control::server::sync::session::SyncSession;
 use crate::control::server::sync::wire::SyncFrame;
 use crate::control::state::SharedState;
@@ -161,6 +162,20 @@ async fn run_sync_session(
         register_channels(&session, &mut channels, &shared, &session_id).await;
 
         if pump_deliveries(&mut ws, &mut session, &mut channels, &shared).await == Flow::Break {
+            break;
+        }
+
+        // The client's keepalive drives this check on an idle session.
+        if let Some(state) = shared.as_ref()
+            && let Some(hint) = session.token_refresh_hint(
+                state.tuning.network.token_refresh_window_secs,
+                now_epoch_ms(),
+            )
+            && ws
+                .send(Message::Binary(hint.to_bytes().into()))
+                .await
+                .is_err()
+        {
             break;
         }
 

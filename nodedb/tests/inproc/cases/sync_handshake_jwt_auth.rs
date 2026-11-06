@@ -29,7 +29,10 @@ use nodedb::control::server::sync::shape::handler::{ShapeSnapshotMsg, ShapeSubsc
 use nodedb_test_support::jwks_fixture::{JwksFixture, loopback_egress, now_secs};
 use nodedb_test_support::pgwire_harness::TestServer;
 use nodedb_types::sync::shape::{ShapeDefinition, ShapeType};
-use nodedb_types::sync::wire::{HandshakeAckMsg, HandshakeMsg, SyncFrame, SyncMessageType};
+use nodedb_types::sync::wire::{
+    HandshakeAckMsg, HandshakeMsg, SyncFrame, SyncMessageType, TokenRefreshAckMsg, TokenRefreshMsg,
+    TokenRefreshRequiredMsg,
+};
 
 /// Tenant the test provider binds its identities to.
 const TENANT: u64 = 1;
@@ -220,6 +223,41 @@ async fn valid_token_authenticates_the_sync_session() {
     assert!(
         snapshot.is_some(),
         "the authenticated session was not answered with a shape snapshot"
+    );
+}
+
+/// A token inside the refresh window draws one hint. A rotation answers with
+/// the new token's own lifetime, read from its expiry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_token_near_its_expiry_draws_a_hint_and_a_refresh_reports_the_new_lifetime() {
+    let fixture = SyncAuthFixture::start().await;
+    let addr = start_listener(&fixture.server).await;
+    let mut ws = connect(addr).await;
+
+    let near = fixture.mint("alice", serde_json::json!({ "exp": now_secs() + 60 }));
+    let ack = handshake(&mut ws, &near).await;
+    assert!(ack.success, "{:?}", ack.error);
+
+    let hint = next_frame(&mut ws).await.expect("a hint is sent");
+    assert_eq!(hint.msg_type, SyncMessageType::TokenRefreshRequired);
+    let hint: TokenRefreshRequiredMsg = hint.decode_body().expect("hint decodes");
+    assert!(hint.expires_in_secs <= 120, "{}", hint.expires_in_secs);
+
+    let later = fixture.mint("alice", serde_json::json!({ "exp": now_secs() + 7_200 }));
+    send(
+        &mut ws,
+        SyncMessageType::TokenRefresh,
+        &TokenRefreshMsg { new_token: later },
+    )
+    .await;
+    let reply = next_frame(&mut ws).await.expect("a refresh is answered");
+    assert_eq!(reply.msg_type, SyncMessageType::TokenRefreshAck);
+    let reply: TokenRefreshAckMsg = reply.decode_body().expect("ack decodes");
+    assert!(reply.success, "{:?}", reply.error);
+    assert!(
+        (7_000..=7_400).contains(&reply.expires_in_secs),
+        "{}",
+        reply.expires_in_secs
     );
 }
 

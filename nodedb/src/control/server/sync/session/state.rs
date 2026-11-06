@@ -98,6 +98,8 @@ pub struct SyncSession {
     /// Catalog-backed per-user HMAC key issued after JWT authentication.
     /// Zero/absent in trust mode and test-only sessions without a catalog.
     pub delta_signing_key: Option<[u8; 32]>,
+    /// The token expiry the client last got a `TokenRefreshRequired` hint for.
+    pub refresh_hinted_expiry_ms: Option<u64>,
 }
 
 impl SyncSession {
@@ -134,6 +136,7 @@ impl SyncSession {
             producer_id: 0,
             accepted_epoch: 0,
             delta_signing_key: None,
+            refresh_hinted_expiry_ms: None,
         }
     }
 

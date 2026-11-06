@@ -1,18 +1,19 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Sync-layer security: JWT upgrade validation and silent rejection logging.
+//! Sync-layer security: bearer validation, token refresh hints, and silent
+//! rejection logging.
 //!
 //! CRDT RLS is deliberately evaluated by Control admission against the exact
 //! Data-Plane post-merge preview, not raw delta bytes.
 //!
-//! ## JWT on WebSocket Upgrade
+//! ## JWT on the handshake
 //!
-//! The JWT token is validated on initial WebSocket connection (via query
-//! parameter `?token=<jwt>` or the handshake message). The extracted
-//! `AuthenticatedIdentity` is stored for the session lifetime. Periodic
-//! refresh checks are performed: when the token's `exp` is within the
-//! refresh window, the server sends a `TokenRefreshRequired` hint so
-//! the client can re-authenticate without disconnection.
+//! A `Handshake` frame and a `TokenRefresh` frame each carry a bearer token.
+//! Both pass the gate every bearer route uses: the `[auth.jwt]` and catalog
+//! providers, then the stateful JWT policy. The session keeps the identity and
+//! its expiry. When the expiry enters the refresh window, the server sends a
+//! `TokenRefreshRequired` hint, so the client can re-authenticate without
+//! disconnection.
 //!
 //! ## Silent Rejection
 //!
@@ -21,7 +22,6 @@
 //! payload hash. Authorization/RLS denials use typed `DeltaReject` responses.
 
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 use tracing::warn;
@@ -31,10 +31,15 @@ use crate::control::security::audit::{
     AuditAuth, AuditEvent, AuditLog, AuditRecordInput, record_concurrent,
 };
 use crate::control::security::identity::AuthenticatedIdentity;
-use crate::control::security::jwt::{JwtConfig, JwtError, JwtValidator};
-use crate::control::security::util::base64_url_decode;
+use crate::control::server::session_auth::authenticate_bearer_jwt;
+use crate::control::state::SharedState;
 
-/// Result of JWT validation on WebSocket upgrade.
+/// The reason a client receives for a refused bearer token. It is generic on
+/// purpose, as on the HTTP bearer route: the client learns it is
+/// unauthenticated, never why.
+const INVALID_BEARER_TOKEN: &str = "invalid bearer token";
+
+/// Result of validating a bearer token a sync client presents.
 #[derive(Debug)]
 pub enum UpgradeAuthResult {
     /// Authentication succeeded; session may proceed.
@@ -43,74 +48,52 @@ pub enum UpgradeAuthResult {
         /// Seconds until token expires (for refresh scheduling).
         expires_in_secs: u64,
     },
-    /// Authentication failed; connection should be closed.
-    Rejected { reason: String },
+    /// Authentication failed. The session stays unauthenticated.
+    Rejected { reason: &'static str },
 }
 
-/// Validate a JWT token during WebSocket upgrade.
+/// Validate a bearer token from a `Handshake` or `TokenRefresh` frame.
 ///
-/// Called before the sync session is created. If this returns `Rejected`,
-/// the WebSocket connection is closed immediately with a 4001 close code.
-pub fn validate_upgrade_token(token: &str, config: &JwtConfig) -> UpgradeAuthResult {
-    let validator = JwtValidator::new(config.clone());
-    match validator.validate(token) {
-        Ok(identity) => {
-            // Decode claims again to get raw `exp` for refresh scheduling.
-            let expires_in = extract_exp_from_token(token).unwrap_or(0);
-            let now = now_epoch_secs();
-            let remaining = expires_in.saturating_sub(now);
-
-            UpgradeAuthResult::Authenticated {
-                identity,
-                expires_in_secs: remaining,
-            }
-        }
-        Err(e) => UpgradeAuthResult::Rejected {
-            reason: e.to_string(),
+/// With no `SharedState` nothing can verify the token, so it is rejected.
+pub async fn validate_upgrade_token(
+    shared: Option<&SharedState>,
+    token: &str,
+    peer_addr: &str,
+    session_id: &str,
+) -> UpgradeAuthResult {
+    let verified = match shared {
+        Some(state) => authenticate_bearer_jwt(state, token, peer_addr, session_id).await,
+        None => None,
+    };
+    match verified {
+        Some((identity, _claims)) => UpgradeAuthResult::Authenticated {
+            expires_in_secs: identity
+                .token_expiry_ms
+                .map_or(0, |expiry_ms| remaining_secs(expiry_ms, now_epoch_ms())),
+            identity,
+        },
+        None => UpgradeAuthResult::Rejected {
+            reason: INVALID_BEARER_TOKEN,
         },
     }
 }
 
-/// Check if a token needs refresh (within refresh window of expiry).
+/// Check if a session's token needs refresh (within refresh window of expiry).
 ///
-/// Returns `Some(remaining_secs)` if the token should be refreshed,
-/// `None` if still healthy.
+/// Returns `Some(remaining_secs)` if the token should be refreshed. Returns
+/// `None` if it is still healthy, or if the identity has no token expiry.
 pub fn check_token_refresh_needed(
-    token: &str,
-    config: &JwtConfig,
-    shared: &crate::control::state::SharedState,
+    token_expiry_ms: Option<u64>,
+    refresh_window_secs: u64,
+    now_ms: u64,
 ) -> Option<u64> {
-    let token_refresh_window_secs = shared.tuning.network.token_refresh_window_secs;
-    // Re-validate to check if still valid.
-    let validator = JwtValidator::new(config.clone());
-    match validator.validate(token) {
-        Ok(_) => {
-            let exp = extract_exp_from_token(token).unwrap_or(0);
-            if exp == 0 {
-                return None; // No expiry set.
-            }
-            let now = now_epoch_secs();
-            let remaining = exp.saturating_sub(now);
-            if remaining <= token_refresh_window_secs {
-                Some(remaining)
-            } else {
-                None
-            }
-        }
-        Err(JwtError::Expired) => Some(0), // Already expired.
-        Err(_) => None,                    // Other errors — not a refresh issue.
-    }
+    let remaining = remaining_secs(token_expiry_ms?, now_ms);
+    (remaining <= refresh_window_secs).then_some(remaining)
 }
 
-/// Extract the `exp` claim from a JWT without full validation.
-fn extract_exp_from_token(token: &str) -> Option<u64> {
-    let parts: Vec<&str> = token.split('.').collect();
-    if parts.len() != 3 {
-        return None;
-    }
-    let payload = base64_url_decode(parts[1])?;
-    let claims: serde_json::Value = crate::util::bounded_json::from_slice(&payload).ok()?;
-    claims.get("exp")?.as_u64()
+/// Whole seconds from `now_ms` to `expiry_ms`, `0` once it passed.
+fn remaining_secs(expiry_ms: u64, now_ms: u64) -> u64 {
+    expiry_ms.saturating_sub(now_ms) / 1_000
 }
 
 /// Reason a sync delta was silently rejected.
@@ -189,12 +172,9 @@ fn sha256_hex(data: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-/// Current epoch seconds.
-fn now_epoch_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+/// Current epoch milliseconds.
+pub(super) fn now_epoch_ms() -> u64 {
+    nodedb_types::wall_now_ns() / nodedb_types::NANOS_PER_MS as u64
 }
 
 #[cfg(test)]
@@ -272,11 +252,33 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_token_with_nothing_to_verify_it_is_rejected() {
+        let result = validate_upgrade_token(None, "bad.token.here", "", "s").await;
+        assert!(matches!(
+            result,
+            UpgradeAuthResult::Rejected {
+                reason: INVALID_BEARER_TOKEN
+            }
+        ));
+    }
+
     #[test]
-    fn upgrade_rejects_bad_token() {
-        let config = JwtConfig::default();
-        let result = validate_upgrade_token("bad.token.here", &config);
-        assert!(matches!(result, UpgradeAuthResult::Rejected { .. }));
+    fn a_refresh_is_due_only_inside_the_window() {
+        const NOW_MS: u64 = 1_000_000;
+        assert_eq!(check_token_refresh_needed(None, 300, NOW_MS), None);
+        let expiry = |secs: u64| Some(NOW_MS + secs * 1_000);
+        assert_eq!(check_token_refresh_needed(expiry(301), 300, NOW_MS), None);
+        assert_eq!(
+            check_token_refresh_needed(expiry(300), 300, NOW_MS),
+            Some(300)
+        );
+        assert_eq!(check_token_refresh_needed(expiry(5), 300, NOW_MS), Some(5));
+        assert_eq!(
+            check_token_refresh_needed(Some(NOW_MS - 1), 300, NOW_MS),
+            Some(0),
+            "an expired token is due"
+        );
     }
 
     #[test]
