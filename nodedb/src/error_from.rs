@@ -72,6 +72,14 @@ impl From<crate::engine::timeseries::merge::MergeIncompatibility> for Error {
     }
 }
 
+impl From<crate::control::server::sync::kv_session::KvPushRowError> for Error {
+    fn from(e: crate::control::server::sync::kv_session::KvPushRowError) -> Self {
+        Self::BadRequest {
+            detail: e.to_string(),
+        }
+    }
+}
+
 impl From<crate::engine::timeseries::columnar_segment::SegmentError> for Error {
     fn from(e: crate::engine::timeseries::columnar_segment::SegmentError) -> Self {
         Self::Storage {
