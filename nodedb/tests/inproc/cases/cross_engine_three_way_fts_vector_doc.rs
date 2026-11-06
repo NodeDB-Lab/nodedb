@@ -22,7 +22,7 @@
 //!        Assert the intersection == {1..7}.
 //!
 //! Uses the same CoreLoop ring-buffer harness as `cross_engine_bitmap_currency.rs`
-//! and `surrogate_round_trip.rs`. No server or network required.
+//! and the `surrogate_round_trip` module. No server or network required.
 
 use std::time::{Duration, Instant};
 
