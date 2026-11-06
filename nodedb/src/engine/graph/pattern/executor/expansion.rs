@@ -162,6 +162,22 @@ pub(super) fn resolve_collection_filter(
     }
 }
 
+/// The filter of a query's `IN '<collection>'` clause. The clause names the
+/// collection bare, and the CSR interns the name the edge store holds, which
+/// carries its database's qualifier. `stored` is that name. A scoped query with
+/// no stored name matches nothing.
+pub(super) fn query_collection_filter(
+    query: &crate::engine::graph::pattern::ast::MatchQuery,
+    stored: Option<&str>,
+    csr: &CsrIndex,
+) -> CollectionFilter {
+    match (&query.collection, stored) {
+        (None, _) => CollectionFilter::Unscoped,
+        (Some(_), Some(stored)) => resolve_collection_filter(Some(stored), csr),
+        (Some(_), None) => CollectionFilter::Empty,
+    }
+}
+
 /// Return `csr.node_name_raw(node).to_string()` when `want_path`, else `""`.
 ///
 /// Centralises the three identical `if want_path { … } else { String::new() }`
