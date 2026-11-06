@@ -249,6 +249,12 @@ impl CoreLoop {
         if let Some(registry) = self.ts_registries.get_mut(key) {
             registry.remove(partition_key);
         }
+        self.release_ts_partitions(
+            key.0,
+            key.1,
+            &key.2,
+            std::slice::from_ref(&partition_key.dir_name),
+        );
         Ok(())
     }
 }

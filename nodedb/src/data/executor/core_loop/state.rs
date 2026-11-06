@@ -365,8 +365,9 @@ pub struct CoreLoop {
     pub(in crate::data::executor) crs_set: Arc<nodedb_crs::CustomCrsSet>,
 
     /// Per-core io_uring reader for batched columnar segment reads.
-    /// Initialized lazily; `None` if io_uring is not available.
-    pub(in crate::data::executor) uring_reader: Option<crate::data::io::uring_reader::UringReader>,
+    /// `None` if io_uring is not available. `RefCell`: `&self` scans borrow it.
+    pub(in crate::data::executor) uring_reader:
+        std::cell::RefCell<Option<crate::data::io::uring_reader::UringReader>>,
 
     /// Per-engine segment/checkpoint at-rest encryption keys.
     pub(in crate::data::executor) segment_keks: super::SegmentKeks,

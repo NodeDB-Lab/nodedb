@@ -24,6 +24,8 @@ mod codec;
 mod error;
 mod reader;
 mod schema;
+#[cfg(test)]
+pub(crate) mod test_partition;
 mod util;
 mod writer;
 

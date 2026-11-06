@@ -29,6 +29,7 @@ use crate::engine::sparse::fts_redb::tables::{
     DOC_FIELDS, DOC_LENGTHS, DOC_TERMS, INDEX_META, POSTINGS, SEGMENTS, STATS,
 };
 use crate::engine::storage_bytes::StorageDelta;
+use crate::storage::quarantine::{CollectionScope, QuarantineEngine};
 
 /// Index metadata sub-keys that configure a collection rather than hold its
 /// indexed data: they survive a data-only purge.
@@ -50,13 +51,25 @@ pub(super) fn collection(
     tid: u64,
     coll: &str,
 ) -> crate::Result<usize> {
-    purge(
+    let removed = purge(
         backend,
         database_id,
         tid,
         KeyOwner::collection(database_id, tid, coll),
         MetaRows::All,
-    )
+    )?;
+    release_collection_segments(backend, database_id, tid, coll);
+    Ok(removed)
+}
+
+/// Forget the quarantine records of the segments a collection purge removed.
+fn release_collection_segments(backend: &RedbFtsBackend, database_id: u64, tid: u64, coll: &str) {
+    if let Some(registry) = &backend.quarantine_registry {
+        registry.release_collection_engine(
+            QuarantineEngine::Fts,
+            &CollectionScope::new(database_id, tid, coll),
+        );
+    }
 }
 
 /// Drop every indexed row of one collection, keeping its configuration.
@@ -66,13 +79,15 @@ pub(super) fn collection_data(
     tid: u64,
     coll: &str,
 ) -> crate::Result<usize> {
-    purge(
+    let removed = purge(
         backend,
         database_id,
         tid,
         KeyOwner::collection(database_id, tid, coll),
         MetaRows::KeepConfig,
-    )
+    )?;
+    release_collection_segments(backend, database_id, tid, coll);
+    Ok(removed)
 }
 
 pub(super) fn tenant(backend: &RedbFtsBackend, database_id: u64, tid: u64) -> crate::Result<usize> {

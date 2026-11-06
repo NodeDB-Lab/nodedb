@@ -116,6 +116,7 @@ impl CoreLoop {
             rls_predicates,
             limit: gather_limit,
             cut,
+            task: Some(task),
         }) {
             Ok(rows) => rows,
             Err(e) => return self.response_error(task, e),

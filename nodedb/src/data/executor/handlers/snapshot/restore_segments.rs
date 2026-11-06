@@ -99,6 +99,11 @@ impl CoreLoop {
                 self.continuous_agg_mgr
                     .reset_for_source(database_id, tenant_id, &collection);
             }
+            // The snapshot's partitions replace any local directory they name.
+            self.release_quarantined_segments(
+                crate::storage::quarantine::QuarantineEngine::Timeseries,
+                &reg_key,
+            );
 
             for part_blob in &coll_blob.partitions {
                 // Deserialize PartitionMeta from the embedded msgpack bytes.
@@ -378,6 +383,11 @@ impl CoreLoop {
                 })?;
 
             self.columnar_engines.insert(engine_key.clone(), engine);
+            // The snapshot's segments carry ids a corrupt local one had.
+            self.release_quarantined_segments(
+                crate::storage::quarantine::QuarantineEngine::Columnar,
+                &engine_key,
+            );
             if !flushed.is_empty() {
                 self.columnar_flushed_segments
                     .insert(engine_key.clone(), flushed);

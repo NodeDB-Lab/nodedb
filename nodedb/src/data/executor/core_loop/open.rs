@@ -173,7 +173,7 @@ impl CoreLoop {
             array_engine,
             array_catalog,
             crs_set: Arc::new(nodedb_crs::CustomCrsSet::new()),
-            uring_reader: crate::data::io::uring_reader::UringReader::new(),
+            uring_reader: std::cell::RefCell::new(crate::data::io::uring_reader::UringReader::new()),
             segment_keks: crate::data::executor::core_loop::SegmentKeks {
                 vector_checkpoint_kek: None,
                 spatial_checkpoint_kek: None,

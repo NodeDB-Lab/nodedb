@@ -10,14 +10,13 @@
 use std::collections::HashMap;
 
 use nodedb_types::columnar::schema::TS_SYSTEM;
-use nodedb_types::datetime::NdbDateTimeError;
 use nodedb_types::value::Value;
 
 use crate::Error;
 use crate::engine::timeseries::columnar_memtable::{
     ColumnType, ColumnarMemtable, ColumnarMemtableConfig, MemtableSnapshot,
 };
-use crate::engine::timeseries::row_cells::{insert_non_null, memtable_cell, partition_cell};
+use crate::engine::timeseries::row_cells::{insert_non_null, memtable_cell, read_partition_cell};
 use crate::types::TsFlushedCollectionBlob;
 
 use super::timeseries_partition::{BackedUpPartition, read_backed_up_partition};
@@ -130,7 +129,7 @@ fn decode_memtable_rows(
                 continue;
             }
             let cell = memtable_cell(&mt, *col_idx, *ty, idx)
-                .map_err(|e| instant_cell_error(collection, name, e))?;
+                .map_err(|e| cell_error(collection, name, e))?;
             insert_non_null(&mut map, name, cell);
         }
         if system == SystemCell::Keep {
@@ -142,11 +141,12 @@ fn decode_memtable_rows(
     Ok(())
 }
 
-/// A stored millisecond count that the column's instant kind cannot carry.
-fn instant_cell_error(collection: &str, column: &str, e: NdbDateTimeError) -> Error {
+/// A stored cell that does not read: a millisecond count its instant kind
+/// cannot carry, or a column that does not match its schema.
+fn cell_error(collection: &str, column: &str, e: impl std::fmt::Display) -> Error {
     Error::Storage {
         engine: "timeseries".into(),
-        detail: format!("restore reissue: time column '{column}' of '{collection}': {e}"),
+        detail: format!("restore reissue: column '{column}' of '{collection}': {e}"),
     }
 }
 
@@ -175,8 +175,8 @@ fn decode_partition_rows(
             if name == TS_SYSTEM && system_fallback.is_none() {
                 continue;
             }
-            let cell = partition_cell(&col_data[col_i], *ty, col_i, &sym_dicts, idx)
-                .map_err(|e| instant_cell_error(collection, name, e))?;
+            let cell = read_partition_cell(&col_data[col_i], *ty, col_i, &sym_dicts, idx)
+                .map_err(|e| cell_error(collection, name, e))?;
             insert_non_null(&mut map, name, cell);
         }
         if let Some(fallback) = system_fallback {
@@ -255,15 +255,15 @@ mod tests {
         let data = ColumnData::Timestamp(vec![EARLY_MS]);
         let dicts = HashMap::new();
         assert_eq!(
-            partition_cell(&data, NAIVE, 0, &dicts, 0).expect("in range"),
+            read_partition_cell(&data, NAIVE, 0, &dicts, 0).expect("in range"),
             Value::NaiveDateTime(early())
         );
         assert_eq!(
-            partition_cell(&data, UTC, 0, &dicts, 0).expect("in range"),
+            read_partition_cell(&data, UTC, 0, &dicts, 0).expect("in range"),
             Value::DateTime(early())
         );
         assert_eq!(
-            partition_cell(&data, MILLIS, 0, &dicts, 0).expect("an integer"),
+            read_partition_cell(&data, MILLIS, 0, &dicts, 0).expect("an integer"),
             Value::Integer(EARLY_MS)
         );
     }
@@ -273,6 +273,6 @@ mod tests {
     #[test]
     fn an_out_of_range_instant_cell_is_an_error() {
         let data = ColumnData::Timestamp(vec![i64::MAX]);
-        assert!(partition_cell(&data, NAIVE, 0, &HashMap::new(), 0).is_err());
+        assert!(read_partition_cell(&data, NAIVE, 0, &HashMap::new(), 0).is_err());
     }
 }

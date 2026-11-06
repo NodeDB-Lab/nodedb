@@ -45,6 +45,7 @@ pub(super) fn write(
     }
     delta.apply(&write_txn, SPARSE_COUNTER)?;
     write_txn.commit().map_err(|e| redb_err("commit", e))?;
+    release_quarantine(backend, database_id, tid, index, segment_id);
     Ok(())
 }
 
@@ -131,7 +132,28 @@ pub(super) fn remove(
     }
     delta.apply(&write_txn, SPARSE_COUNTER)?;
     write_txn.commit().map_err(|e| redb_err("commit", e))?;
+    release_quarantine(backend, database_id, tid, index, segment_id);
     Ok(())
+}
+
+/// Forget the quarantine record of a segment whose bytes were just removed
+/// or replaced.
+fn release_quarantine(
+    backend: &RedbFtsBackend,
+    database_id: u64,
+    tid: u64,
+    index: IndexScope<'_>,
+    segment_id: &str,
+) {
+    if let Some(reg) = &backend.quarantine_registry {
+        let scope = CollectionScope::new(database_id, tid, index.collection());
+        let segment = FtsSegmentRef {
+            scope: &scope,
+            field: index.field_name(),
+            segment_id,
+        };
+        reg.release(&segment.key());
+    }
 }
 
 /// Inputs to [`compact_commit`]: the merged-segment write plus the source
@@ -204,6 +226,10 @@ pub(super) fn compact_commit(
     write_txn
         .commit()
         .map_err(|e| redb_err("compact txn commit", e))?;
+    release_quarantine(backend, database_id, tid, index, new_segment_id);
+    for id in merged_ids {
+        release_quarantine(backend, database_id, tid, index, id);
+    }
     Ok(())
 }
 
@@ -236,4 +262,79 @@ pub(super) fn list_all_indexes(
         }
     }
     Ok(indexes)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::engine::durability_gate::GatedDatabase;
+    use crate::storage::quarantine::{QuarantineRegistry, SegmentKey};
+
+    const DB: u64 = 1;
+    const TID: u64 = 2;
+    const INDEX: IndexScope<'static> = IndexScope::document("docs");
+
+    fn open(reg: &Arc<QuarantineRegistry>) -> (RedbFtsBackend, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = redb::Database::create(dir.path().join("fts.redb")).expect("create");
+        let mut backend = RedbFtsBackend::open(Arc::new(GatedDatabase::new(db))).expect("open");
+        backend.set_quarantine_registry(Arc::clone(reg));
+        (backend, dir)
+    }
+
+    fn key(segment_id: &str) -> SegmentKey {
+        let scope = CollectionScope::new(DB, TID, INDEX.collection());
+        FtsSegmentRef {
+            scope: &scope,
+            field: None,
+            segment_id,
+        }
+        .key()
+    }
+
+    fn quarantine(reg: &QuarantineRegistry, segment_id: &str) {
+        reg.record_failure(key(segment_id), "crc").expect("strike");
+        reg.record_failure(key(segment_id), "crc")
+            .expect_err("second strike");
+        assert!(reg.is_quarantined(&key(segment_id)));
+    }
+
+    /// New bytes under a segment id leave no record of the old bytes, whether
+    /// a write replaced them, a removal dropped them, or a compaction merged
+    /// them.
+    #[test]
+    fn every_segment_change_releases_its_quarantine_record() {
+        let reg = Arc::new(QuarantineRegistry::new());
+        let (backend, _dir) = open(&reg);
+
+        quarantine(&reg, "s1");
+        write(&backend, DB, TID, INDEX, "s1", b"bytes").expect("write");
+        assert!(!reg.is_quarantined(&key("s1")));
+
+        quarantine(&reg, "s1");
+        remove(&backend, DB, TID, INDEX, "s1").expect("remove");
+        assert!(!reg.is_quarantined(&key("s1")));
+
+        quarantine(&reg, "merged");
+        quarantine(&reg, "kept");
+        compact_commit(
+            &backend,
+            CompactCommit {
+                database_id: DB,
+                tid: TID,
+                index: INDEX,
+                new_segment_id: "new",
+                new_segment_data: b"bytes",
+                merged_ids: &["merged".to_string()],
+            },
+        )
+        .expect("compact");
+        assert!(!reg.is_quarantined(&key("merged")));
+        assert!(reg.is_quarantined(&key("kept")));
+
+        super::super::purge::collection(&backend, DB, TID, INDEX.collection()).expect("purge");
+        assert!(!reg.is_quarantined(&key("kept")));
+    }
 }

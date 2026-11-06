@@ -12,6 +12,7 @@ pub enum QuarantineEngine {
     Columnar,
     Fts,
     Vector,
+    Timeseries,
     Raft,
 }
 
@@ -21,6 +22,7 @@ impl QuarantineEngine {
             QuarantineEngine::Columnar => "columnar",
             QuarantineEngine::Fts => "fts",
             QuarantineEngine::Vector => "vector",
+            QuarantineEngine::Timeseries => "timeseries",
             QuarantineEngine::Raft => "raft",
         }
     }
@@ -69,6 +71,11 @@ pub enum SegmentKey {
         scope: CollectionScope,
         segment_id: String,
     },
+    /// A flushed timeseries partition, by its directory name.
+    Timeseries {
+        scope: CollectionScope,
+        partition: String,
+    },
     /// A Raft InstallSnapshot chunk of one group at one log index.
     Raft {
         group_id: u64,
@@ -83,6 +90,7 @@ impl SegmentKey {
             SegmentKey::Columnar { .. } => QuarantineEngine::Columnar,
             SegmentKey::Fts { .. } => QuarantineEngine::Fts,
             SegmentKey::Vector { .. } => QuarantineEngine::Vector,
+            SegmentKey::Timeseries { .. } => QuarantineEngine::Timeseries,
             SegmentKey::Raft { .. } => QuarantineEngine::Raft,
         }
     }
@@ -92,7 +100,8 @@ impl SegmentKey {
         match self {
             SegmentKey::Columnar { scope, .. }
             | SegmentKey::Fts { scope, .. }
-            | SegmentKey::Vector { scope, .. } => Some(scope),
+            | SegmentKey::Vector { scope, .. }
+            | SegmentKey::Timeseries { scope, .. } => Some(scope),
             SegmentKey::Raft { .. } => None,
         }
     }
@@ -102,9 +111,10 @@ impl SegmentKey {
     pub fn field(&self) -> Option<&str> {
         match self {
             SegmentKey::Fts { field, .. } => field.as_deref(),
-            SegmentKey::Columnar { .. } | SegmentKey::Vector { .. } | SegmentKey::Raft { .. } => {
-                None
-            }
+            SegmentKey::Columnar { .. }
+            | SegmentKey::Vector { .. }
+            | SegmentKey::Timeseries { .. }
+            | SegmentKey::Raft { .. } => None,
         }
     }
 
@@ -115,6 +125,7 @@ impl SegmentKey {
             SegmentKey::Fts { segment_id, .. } | SegmentKey::Vector { segment_id, .. } => {
                 segment_id.clone()
             }
+            SegmentKey::Timeseries { partition, .. } => partition.clone(),
             SegmentKey::Raft {
                 group_id,
                 last_included_index,

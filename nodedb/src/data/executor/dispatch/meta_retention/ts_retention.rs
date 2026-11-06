@@ -167,6 +167,12 @@ impl CoreLoop {
         }
 
         if !removed.is_empty() {
+            self.release_ts_partitions(
+                task.request.database_id,
+                task.request.tenant_id,
+                collection,
+                &removed,
+            );
             self.continuous_agg_mgr
                 .forget_partitions(database_id, tenant_id, collection, &removed);
             self.persist_dirty_cagg_images();

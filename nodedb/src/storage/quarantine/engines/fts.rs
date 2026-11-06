@@ -19,7 +19,8 @@ pub struct FtsSegmentRef<'a> {
 }
 
 impl FtsSegmentRef<'_> {
-    fn key(&self) -> SegmentKey {
+    /// The registry key of this segment.
+    pub fn key(&self) -> SegmentKey {
         SegmentKey::Fts {
             scope: self.scope.clone(),
             field: self.field.map(str::to_string),

@@ -93,6 +93,7 @@ impl CoreLoop {
                 nodedb_columnar::VersionCut::Current,
                 nodedb_columnar::VersionCut::At,
             ),
+            task: None,
         })?;
         rows.into_iter().map(ts_row_to_doc).collect()
     }

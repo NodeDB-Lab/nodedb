@@ -33,6 +33,7 @@ use crate::data::executor::handlers::columnar_resolve::{
 };
 use crate::data::executor::handlers::transaction::undo::{ColumnarTruncateUndo, UndoEntry};
 use crate::data::executor::task::ExecutionTask;
+use crate::storage::quarantine::QuarantineEngine;
 
 /// How a truncate treats a bitemporal collection's history.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +84,7 @@ impl CoreLoop {
         let rows = engine.truncate();
         let flushed_segments = self.columnar_flushed_segments.remove(&key);
         let flushed_surrogates = self.columnar_flushed_surrogates.remove(&key);
+        self.release_quarantined_segments(QuarantineEngine::Columnar, &key);
 
         let spatial_keys: Vec<_> = self
             .spatial_indexes

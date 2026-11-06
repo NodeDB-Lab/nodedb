@@ -211,6 +211,10 @@ impl CoreLoop {
         // Lockstep: drop the surrogate sidecar for the same keys.
         self.columnar_flushed_surrogates
             .retain(|(_, t, _), _| *t != tid_key);
+        // A tenant re-created under this id starts with no quarantine records.
+        if let Some(registry) = &self.quarantine_registry {
+            registry.release_tenant(database_id, tenant_id);
+        }
         // The purged collections' row-version history releases its charge.
         self.recharge_all_columnar_history();
 

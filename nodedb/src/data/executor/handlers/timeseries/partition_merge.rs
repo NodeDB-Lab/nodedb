@@ -286,7 +286,14 @@ impl CoreLoop {
                 self.persist_cagg_image(database_id, tenant_id, root)?;
             }
         }
-        finish_merge(ts_dir, manifest)
+        finish_merge(ts_dir, manifest)?;
+        self.release_ts_partitions(
+            crate::types::DatabaseId::new(database_id),
+            crate::types::TenantId::new(tenant_id),
+            root,
+            &manifest.sources,
+        );
+        Ok(())
     }
 }
 

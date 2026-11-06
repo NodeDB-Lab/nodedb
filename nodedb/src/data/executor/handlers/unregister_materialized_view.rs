@@ -56,6 +56,10 @@ impl CoreLoop {
         self.columnar_flushed_segments
             .retain(|(d, t, c), _| !(*d == db && *t == tid && c == &nm));
         let segments_removed = before_segments - self.columnar_flushed_segments.len();
+        self.release_quarantined_segments(
+            crate::storage::quarantine::QuarantineEngine::Columnar,
+            &(db, tid, nm.clone()),
+        );
         // Lockstep: drop the surrogate sidecar for the same MV key.
         self.columnar_flushed_surrogates
             .retain(|(d, t, c), _| !(*d == db && *t == tid && c == &nm));

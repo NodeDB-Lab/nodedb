@@ -57,7 +57,7 @@ use super::materialize_scan_ts_row::{RowShape, encode_row_map, system_time};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::timeseries::cell_read::{TsCell, read_ts_cell};
 use crate::data::executor::handlers::timeseries::partition_read::{
-    TsPartitionColumns, partition_corrupt, read_ts_partition,
+    TsPartitionColumns, account_partition_read, partition_corrupt, read_ts_partition,
 };
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::timeseries::columnar_memtable::{ColumnData, ColumnType};
@@ -186,10 +186,11 @@ impl CoreLoop {
                     schema,
                     columns: col_data,
                     sym_dicts,
-                } = match read_ts_partition(
+                } = match account_partition_read(
+                    self.ts_partition_quarantine(task.request.database_id, tid, collection)
+                        .as_ref(),
                     part_dir,
-                    SITE,
-                    self.segment_keks.ts_segment_kek.as_ref(),
+                    read_ts_partition(part_dir, SITE, self.segment_keks.ts_segment_kek.as_ref()),
                 ) {
                     Ok(partition) => partition,
                     Err(e) => return self.response_error(task, e),

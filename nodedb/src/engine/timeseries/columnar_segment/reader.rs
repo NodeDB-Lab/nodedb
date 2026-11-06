@@ -102,7 +102,8 @@ impl ColumnarSegmentReader {
         decode_column(&data, col_type, codec)
     }
 
-    /// Decode a column from pre-read raw bytes (already decrypted by caller).
+    /// Decode a column from the bytes of its file, read by the caller. An
+    /// encrypted file decrypts here with `kek`, as [`Self::read_column`] does.
     pub fn decode_column_from_bytes(
         partition_dir: &Path,
         col_name: &str,
@@ -115,7 +116,8 @@ impl ColumnarSegmentReader {
             Some(codec) => codec,
             None => Self::stored_codec(partition_dir, col_name, kek)?,
         };
-        decode_column(raw_bytes, col_type, codec)
+        let data = decrypt_segment_file(kek, raw_bytes)?;
+        decode_column(&data, col_type, codec)
     }
 
     /// Read the symbol dictionary for a tag column.
@@ -165,6 +167,20 @@ impl ColumnarSegmentReader {
                 codec,
                 kek,
             )?);
+        }
+        // Columns of one partition hold one row count. A caller indexes every
+        // column by a row of the first, so another length is refused here.
+        if let Some(first) = result.first()
+            && let Some(pos) = result.iter().position(|column| column.len() != first.len())
+        {
+            return Err(SegmentError::Corrupt(format!(
+                "partition {} column '{}' holds {} rows, column '{}' holds {}",
+                partition_dir.display(),
+                requested[pos].0,
+                result[pos].len(),
+                requested[0].0,
+                first.len()
+            )));
         }
         Ok(result)
     }
@@ -441,10 +457,76 @@ mod tests {
     use super::super::super::columnar_memtable::{
         ColumnValue, ColumnarMemtable, ColumnarMemtableConfig, TimeKind,
     };
+    use super::super::test_partition::write_ramp_partition;
     use super::super::writer::ColumnarSegmentWriter;
     use super::*;
 
     const MILLIS: ColumnType = ColumnType::Timestamp(TimeKind::Millis);
+
+    /// A batched read hands over a file's on-disk bytes. An encrypted file
+    /// decodes with the key, and the same bytes do not decode without it.
+    #[test]
+    fn column_file_bytes_decrypt_with_the_segment_key() {
+        let kek = WalEncryptionKey::from_bytes(&[0x42u8; 32]).expect("key");
+        let dir = TempDir::new().expect("tempdir");
+        let mut memtable = ColumnarMemtable::new_metric(ColumnarMemtableConfig::default());
+        for i in 0..10 {
+            memtable
+                .ingest_row(
+                    1,
+                    &[ColumnValue::Timestamp(1_000 + i), ColumnValue::Float64(1.0)],
+                )
+                .expect("row");
+        }
+        ColumnarSegmentWriter::new(dir.path())
+            .write_partition("ts-enc", &memtable.drain().view(), 0, 1, Some(&kek))
+            .expect("write");
+        let part = dir.path().join("ts-enc");
+        let raw = std::fs::read(part.join("value.col")).expect("read file");
+        let codec = ColumnarSegmentReader::read_meta(&part, Some(&kek))
+            .expect("meta")
+            .column_stats
+            .get("value")
+            .map(|stats| stats.codec);
+
+        let column = ColumnarSegmentReader::decode_column_from_bytes(
+            &part,
+            "value",
+            ColumnType::Float64,
+            codec,
+            &raw,
+            Some(&kek),
+        )
+        .expect("decodes with the key");
+
+        assert_eq!(column.len(), 10);
+        assert!(
+            ColumnarSegmentReader::decode_column_from_bytes(
+                &part,
+                "value",
+                ColumnType::Float64,
+                codec,
+                &raw,
+                None,
+            )
+            .is_err()
+        );
+    }
+
+    /// Columns of unequal length refuse the read. The RESTORE decode indexes
+    /// every column by a row of the first, which panics on a short column.
+    #[test]
+    fn read_columns_refuses_columns_of_unequal_length() {
+        let dir = TempDir::new().expect("tempdir");
+        let full = write_ramp_partition(dir.path(), "ts-full", 10);
+        let short = write_ramp_partition(dir.path(), "ts-short", 3);
+        std::fs::copy(short.join("value.col"), full.join("value.col")).expect("swap column");
+        let schema = ColumnarSegmentReader::read_schema(&full, None).expect("schema");
+
+        let result = ColumnarSegmentReader::read_columns(&full, &schema.columns, None);
+
+        assert!(matches!(result, Err(SegmentError::Corrupt(_))));
+    }
 
     fn test_config() -> ColumnarMemtableConfig {
         ColumnarMemtableConfig {
