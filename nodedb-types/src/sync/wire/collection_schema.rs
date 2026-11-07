@@ -51,6 +51,12 @@ pub struct CollectionDescriptor {
 }
 
 /// Wire envelope announcing a collection's descriptor to a sync peer (opcode 0x13).
+///
+/// Origin answers a client announce with its own `CollectionSchema` frame.
+/// That reply carries the descriptor Origin holds and the collection's
+/// incarnation. The client adopts both, since its own announce never
+/// overwrites an existing collection. A refused announce answers a
+/// `CollectionSchemaReject` frame (0x17).
 #[derive(
     Debug,
     Clone,
@@ -63,7 +69,9 @@ pub struct CollectionDescriptor {
 pub struct CollectionSchemaSyncMsg {
     /// The collection's engine-agnostic descriptor.
     pub descriptor: CollectionDescriptor,
-    /// HLC timestamp at which this descriptor was created/announced.
+    /// The collection's incarnation: the HLC of the put that created it.
+    /// In an Origin frame it is the value every `DeltaPushMsg` for the
+    /// collection must state as `collection_incarnation`.
     pub creation_hlc: Hlc,
 }
 

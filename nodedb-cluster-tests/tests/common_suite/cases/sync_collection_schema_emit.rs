@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use nodedb::control::server::sync::listener::{SyncListenerConfig, start_sync_listener};
 use nodedb::control::shutdown::{ShutdownBus, ShutdownWatch};
-use nodedb_test_support::sync_client::SyncTestClient;
+use nodedb_test_support::sync_client::{SchemaOutcome, SyncTestClient};
 use nodedb_types::collection_config::{PartitionStrategy, PrimaryEngine};
 use nodedb_types::sync::wire::{CollectionDescriptor, SyncMessageType};
 use nodedb_types::{CollectionType, DatabaseId, Hlc};
@@ -99,13 +99,18 @@ async fn collection_schema_precedes_shape_snapshot() {
         .expect("sync handshake with node 0");
 
     // Materialize the collection on the server. This is the client→server
-    // announce (receive side); it does NOT mark the server session's
-    // emit-announce set, so the subscription below still triggers an emit.
+    // announce (receive side). The push consumes the server's answer to it.
+    // The answer does not mark the server session's emit-announce set, so
+    // the subscription below still triggers an emit.
     let name = "emit_doc";
-    client
+    let outcome = client
         .push_collection_schema(document_descriptor(name), Hlc::new(1, 0))
         .await
         .expect("push CollectionSchema to materialize collection");
+    assert!(
+        matches!(outcome, SchemaOutcome::Held(_)),
+        "announce must answer the held collection, got {outcome:?}"
+    );
 
     // Wait until the receiving node's catalog can resolve the collection —
     // the emit path resolves the descriptor from exactly this catalog.

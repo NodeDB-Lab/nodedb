@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use nodedb::control::server::sync::listener::{SyncListenerConfig, start_sync_listener};
 use nodedb::control::shutdown::{ShutdownBus, ShutdownWatch};
-use nodedb_test_support::sync_client::SyncTestClient;
+use nodedb_test_support::sync_client::{SchemaOutcome, SyncTestClient};
 use nodedb_types::collection_config::{PartitionStrategy, PrimaryEngine};
 use nodedb_types::columnar::{ColumnDef, ColumnType, StrictSchema};
 use nodedb_types::sync::wire::CollectionDescriptor;
@@ -130,10 +130,20 @@ async fn announced_schema_materializes_on_every_node() {
 
     let hlc = Hlc::new(1, 0);
     for (name, ct, bitemporal) in &cases {
-        client
+        let outcome = client
             .push_collection_schema(descriptor(name, ct.clone(), *bitemporal), hlc)
             .await
             .unwrap_or_else(|e| panic!("push CollectionSchema for '{name}': {e}"));
+        match outcome {
+            SchemaOutcome::Held(held) => assert_ne!(
+                held.creation_hlc,
+                Hlc::ZERO,
+                "the answer for '{name}' must carry the collection's incarnation"
+            ),
+            SchemaOutcome::Reject(reject) => {
+                panic!("announce for '{name}' refused: {reject:?}")
+            }
+        }
     }
 
     // Assert on node 1 — a node the client never talked to.

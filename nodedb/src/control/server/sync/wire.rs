@@ -8,7 +8,8 @@
 
 // ── Re-export all wire types from nodedb-types ──
 pub use nodedb_types::sync::wire::{
-    AckStatus, CollectionDescriptor, CollectionSchemaSyncMsg, ColumnarInsertAckMsg,
+    AckStatus, CollectionDescriptor, CollectionSchemaRefusal, CollectionSchemaRejectMsg,
+    CollectionSchemaSyncMsg, ColumnarInsertAckMsg,
     ColumnarInsertMsg, DefinitionSyncMsg, DeltaAckMsg, DeltaPushMsg, DeltaRejectMsg,
     FtsDeleteAckMsg, FtsDeleteMsg, FtsIndexAckMsg, FtsIndexMsg, HandshakeAckMsg, HandshakeMsg,
     KvPushAckMsg, KvPushMsg, KvPushOp, PeerPresence, PingPongMsg, PresenceBroadcastMsg,

@@ -433,6 +433,17 @@ pub(crate) fn is_retryable_dispatch_error(error: &crate::Error) -> bool {
     retryable_refusal_reason(error).is_some() || is_indeterminate(error)
 }
 
+/// Whether `error` leaves the commit of a proposal unknown. An idempotent
+/// write can re-send after it, since a committed first send makes the re-send
+/// a no-op.
+pub(crate) fn is_unknown_commit_outcome(error: &crate::Error) -> bool {
+    matches!(
+        error,
+        crate::Error::ProposalOutcomeUnknown { .. }
+            | crate::Error::CommittedResultUnavailable { .. }
+    )
+}
+
 /// The [`AckStatus`] an engine ack must carry when its dispatch failed.
 ///
 /// A dispatch can fail because the write was refused on its merits (terminal —
