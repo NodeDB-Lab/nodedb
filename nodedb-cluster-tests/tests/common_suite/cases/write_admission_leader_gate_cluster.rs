@@ -20,10 +20,16 @@ use super::calvin_multishard_fixture::{Fixture, schemaless_ddl};
 use super::vshard_names::distinct_vshard_collections;
 use crate::common::cluster_harness::TestClusterNode;
 use crate::common::cluster_harness::shared_steps::key_collection;
-use crate::common::pgwire_harness::raw_pgwire::RawPgConn;
+use crate::common::pgwire_harness::raw_pgwire::{RawPgConn, error_sqlstate};
 
 const TENANT: u64 = 1;
 const ROUNDS: usize = 8;
+/// How often a round runs again after a retryable abort.
+const ROUND_ATTEMPTS: usize = 5;
+/// SQLSTATE `serialization_failure`: the transaction aborted and wrote nothing.
+const SERIALIZATION_FAILURE: &str = "40001";
+/// SQLSTATE of a read or write refused for want of a confirmed leader.
+const STALE_READ: &str = "55P03";
 
 /// Whether the server answered `messages` with an error.
 fn failed(messages: &[(u8, Vec<u8>)]) -> bool {
@@ -31,8 +37,10 @@ fn failed(messages: &[(u8, Vec<u8>)]) -> bool {
 }
 
 /// Run one cross-shard transaction that writes the row `r` of `rows` and the
-/// row `s` of `other`. A refused statement or commit rolls the transaction
-/// back: the race may abort it, and convergence is the property under test.
+/// row `s` of `other`. The race can abort a statement or the commit with
+/// `40001` or `55P03`. The transaction wrote nothing, so the round rolls back
+/// and runs again, up to [`ROUND_ATTEMPTS`] times. Any other error panics.
+/// Convergence is the property under test.
 async fn calvin_round(conn: &mut RawPgConn, rows: &str, other: &str, round: usize) {
     let statements = [
         "BEGIN".to_owned(),
@@ -40,11 +48,22 @@ async fn calvin_round(conn: &mut RawPgConn, rows: &str, other: &str, round: usiz
         format!("UPDATE {other} SET v = 'calvin_{round}' WHERE id = 's'"),
         "COMMIT".to_owned(),
     ];
-    for sql in &statements {
-        if failed(&conn.simple_query(sql).await) {
-            conn.simple_query("ROLLBACK").await;
-            return;
+    'attempt: for _ in 0..ROUND_ATTEMPTS {
+        for sql in &statements {
+            let Err(body) = conn.try_simple_query(sql).await else {
+                continue;
+            };
+            let state = error_sqlstate(&body);
+            assert!(
+                matches!(state.as_deref(), Some(SERIALIZATION_FAILURE | STALE_READ)),
+                "{sql}: unexpected error: {}",
+                String::from_utf8_lossy(&body)
+            );
+            // Outside a transaction ROLLBACK only warns, so its result does not matter.
+            let _ = conn.try_simple_query("ROLLBACK").await;
+            continue 'attempt;
         }
+        return;
     }
 }
 

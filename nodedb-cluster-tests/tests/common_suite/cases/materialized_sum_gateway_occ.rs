@@ -25,11 +25,12 @@ use std::time::Duration;
 
 use nodedb_test_support::fail_point::{FailAction, FailGuard};
 
-use super::materialized_sum_cross_shard::{
-    SOURCE, TARGET, balance_of, declare_binding, pg_detail, seed,
-};
+use super::calvin_replica_content::run_retrying;
+use super::materialized_sum_cross_shard::{SOURCE, TARGET, balance_of, declare_binding, seed};
 use crate::common::cluster_harness::shared_steps::group_of;
-use crate::common::cluster_harness::{GroupLeader, TestCluster, wait_for};
+use crate::common::cluster_harness::{
+    GroupLeader, TestCluster, read_once_a_leader_exists, wait_for,
+};
 
 /// Opening balance of the account, before any source row counts.
 const START: i64 = 100;
@@ -78,11 +79,12 @@ async fn cluster_led_by_first_node() -> TestCluster {
 
 /// The sum of every `SOURCE` amount, read through node `idx`.
 async fn source_sum(cluster: &TestCluster, idx: usize) -> f64 {
-    let rows = cluster.nodes[idx]
-        .client
-        .simple_query(&format!("SELECT amount FROM {SOURCE}"))
-        .await
-        .unwrap_or_else(|e| panic!("read source amounts: {}", pg_detail(&e)));
+    let sql = format!("SELECT amount FROM {SOURCE}");
+    // A leader change refuses a read with `55P03` before it runs, so it runs again.
+    let rows = read_once_a_leader_exists("read source amounts", STEP_DEADLINE, STEP_POLL, || {
+        cluster.nodes[idx].client.simple_query(&sql)
+    })
+    .await;
     rows.into_iter()
         .filter_map(|m| match m {
             tokio_postgres::SimpleQueryMessage::Row(r) => r.get(0).map(str::to_string),
@@ -149,13 +151,14 @@ async fn forwarded_statement_then_move_source(statement: &'static str) {
     )
     .await;
 
-    cluster.nodes[0]
-        .client
-        .simple_query(&format!(
-            "UPDATE {SOURCE} SET amount = '100' WHERE id = 'e1'"
-        ))
-        .await
-        .unwrap_or_else(|e| panic!("update on the leader: {}", pg_detail(&e)));
+    // A `40001` abort writes nothing and a `55P03` refusal precedes the run,
+    // so a retry applies the overwrite once.
+    run_retrying(
+        &cluster.nodes[0].client,
+        "update on the leader",
+        &format!("UPDATE {SOURCE} SET amount = '100' WHERE id = 'e1'"),
+    )
+    .await;
 
     std::fs::write(&release, b"go").expect("release the gate");
     match forwarded.await {

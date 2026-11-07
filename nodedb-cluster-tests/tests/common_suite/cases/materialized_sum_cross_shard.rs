@@ -15,7 +15,7 @@
 //! balance assertion below passing while testing the co-resident path.
 
 use crate::common;
-use common::cluster_harness::TestCluster;
+use common::cluster_harness::{TestCluster, read_once_a_leader_exists};
 
 use std::time::Duration;
 
@@ -35,12 +35,16 @@ pub(super) fn pg_detail(e: &tokio_postgres::Error) -> String {
 
 /// The balance column of one `TARGET` row, as read through `client`.
 pub(super) async fn balance_of(client: &tokio_postgres::Client, account: &str) -> String {
-    let rows = client
-        .simple_query(&format!(
-            "SELECT balance FROM {TARGET} WHERE id = '{account}'"
-        ))
-        .await
-        .unwrap_or_else(|e| panic!("read balance: {}", pg_detail(&e)));
+    let sql = format!("SELECT balance FROM {TARGET} WHERE id = '{account}'");
+    // A leader change refuses a read with `55P03` before it runs. The read
+    // changes nothing, so it runs again until a leader serves it.
+    let rows = read_once_a_leader_exists(
+        "read balance",
+        Duration::from_secs(30),
+        Duration::from_millis(50),
+        || client.simple_query(&sql),
+    )
+    .await;
     rows.into_iter()
         .find_map(|m| match m {
             tokio_postgres::SimpleQueryMessage::Row(r) => r.get(0).map(str::to_string),
