@@ -23,3 +23,6 @@ mod search;
 mod search_over_relation;
 
 pub use query::{plan_query, plan_statement_query};
+
+#[cfg(test)]
+mod relation_alias_capability;

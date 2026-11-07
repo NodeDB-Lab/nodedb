@@ -149,6 +149,11 @@ pub trait TableProvider {
 ///   Callers propagate this up so the pgwire layer can retry
 ///   the whole statement.
 pub trait SqlCatalog {
+    /// Whether materialized CTE and derived relations accept positional column alias lists.
+    fn supports_materialized_relation_column_aliases(&self) -> bool {
+        true
+    }
+
     fn get_collection(
         &self,
         database_id: DatabaseId,

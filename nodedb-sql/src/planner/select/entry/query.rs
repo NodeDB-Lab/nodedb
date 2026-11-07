@@ -83,6 +83,11 @@ fn plan_query_at(
         let mut relations = Vec::new();
         for cte in &with.cte_tables {
             let name = check_ast_identifier(&cte.alias.name)?;
+            crate::resolver::derived::check_materialized_column_aliases(
+                catalog,
+                &name,
+                cte.alias.columns.len(),
+            )?;
             let declared: Vec<String> = cte
                 .alias
                 .columns

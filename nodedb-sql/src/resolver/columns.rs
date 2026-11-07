@@ -427,6 +427,13 @@ impl TableScope {
         } = factor
         {
             let alias_str = crate::reserved::check_ast_identifier(&alias.name)?;
+            if !*lateral {
+                crate::resolver::derived::check_materialized_column_aliases(
+                    catalog,
+                    &alias_str,
+                    alias.columns.len(),
+                )?;
+            }
             let declared: Vec<String> = alias
                 .columns
                 .iter()

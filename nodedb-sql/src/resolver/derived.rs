@@ -83,6 +83,22 @@ pub fn open_subquery_relation(alias: &str) -> CollectionInfo {
     }
 }
 
+/// Refuse positional aliases when the execution catalog cannot materialize them.
+pub(crate) fn check_materialized_column_aliases(
+    catalog: &dyn SqlCatalog,
+    name: &str,
+    count: usize,
+) -> Result<()> {
+    if count > 0 && !catalog.supports_materialized_relation_column_aliases() {
+        return Err(SqlError::Unsupported {
+            detail: format!(
+                "relation '{name}' uses a positional column alias list unsupported by this executor. Name columns in the body SELECT instead"
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// Rename an inferred relation's columns to an alias column list.
 ///
 /// `WITH c(a, b) AS (...)` and `FROM (...) AS t(a, b)` name the output

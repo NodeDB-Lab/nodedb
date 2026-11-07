@@ -45,6 +45,11 @@ pub(super) fn plan_derived_side(
             .into(),
     })?;
     let name = crate::reserved::check_ast_identifier(&alias.name)?;
+    crate::resolver::derived::check_materialized_column_aliases(
+        catalog,
+        &name,
+        alias.columns.len(),
+    )?;
     let relation = scope
         .table_by_ref(&name)
         .ok_or_else(|| SqlError::UnknownTable { name: name.clone() })?;
