@@ -29,3 +29,5 @@ unicode-normalization = { workspace = true }
 hex = { workspace = true }
 
 [dev-dependencies]
+# Tests resolve EPSG CRSs outside the always-built-in set.
+nodedb-crs = { workspace = true, features = ["epsg"] }

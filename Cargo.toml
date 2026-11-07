@@ -47,7 +47,9 @@ documentation = "https://docs.rs/nodedb"
 nodedb = { path = "nodedb", version = "0.7.0-dev" }
 nodedb-types = { path = "nodedb-types", version = "0.7.0-dev" }
 nodedb-srid = { path = "nodedb-srid", version = "0.7.0-dev" }
-nodedb-crs = { path = "nodedb-crs", version = "0.7.0-dev" }
+# Default features off: the full EPSG table (`epsg`) is the final binary's
+# choice. A library crate that enables it forces it on every embedder.
+nodedb-crs = { path = "nodedb-crs", version = "0.7.0-dev", default-features = false }
 nodedb-client = { path = "nodedb-client", version = "0.7.0-dev" }
 nodedb-bridge = { path = "nodedb-bridge", version = "0.7.0-dev" }
 nodedb-wal = { path = "nodedb-wal", version = "0.7.0-dev" }
@@ -329,7 +331,8 @@ rcgen = "0.14"
 # systemd readiness notification (Linux service integration)
 sd-notify = "0.5"
 
-# Pure-Rust zstd decoder (wasm builds, where zstd-sys cannot link)
+# Pure-Rust zstd decoder: wasm builds, where zstd-sys cannot link, and the
+# compressed EPSG table of nodedb-crs on every target.
 ruzstd = "0.9"
 
 # CJK / language segmentation (FTS analyzers)

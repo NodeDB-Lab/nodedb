@@ -1,7 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! PROJ strings that cover every method, flag, unit, axis order and datum
-//! form, for the writer round-trip tests.
+//! form, for the writer round-trip tests, and the built-in codes those tests
+//! resolve.
+
+/// Built-ins with an EPSG datum code, a shift or an area. Every build
+/// carries these.
+#[cfg(not(feature = "epsg"))]
+pub(crate) const BUILTIN_CODES: &[u32] = &[4326, 32648, 3857, 990_001, 990_002];
+
+/// Built-ins with an EPSG datum code, a shift or an area, including EPSG
+/// codes only the `epsg` feature carries.
+#[cfg(feature = "epsg")]
+pub(crate) const BUILTIN_CODES: &[u32] =
+    &[4326, 4742, 3375, 32648, 2263, 3857, 5514, 990_001, 990_002];
 
 pub(crate) const CASES: &[&str] = &[
     "+proj=longlat +datum=WGS84 +no_defs",

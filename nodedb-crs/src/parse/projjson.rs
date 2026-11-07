@@ -379,6 +379,7 @@ mod tests {
     }
 
     /// EPSG:3375 GDM2000 / Peninsula RSO as PROJ 9 writes it, trimmed.
+    #[cfg(feature = "epsg")]
     const RSO: &str = r#"{
       "type": "ProjectedCRS", "name": "GDM2000 / Peninsula RSO",
       "base_crs": {"name": "GDM2000",
@@ -404,6 +405,7 @@ mod tests {
       "bbox": {"south_latitude": 1.13, "west_longitude": 98.02, "north_latitude": 7.81, "east_longitude": 105.82},
       "id": {"authority": "EPSG", "code": 3375}}"#;
 
+    #[cfg(feature = "epsg")]
     #[test]
     fn rso_matches_the_builtin_projection() {
         let def = parse(RSO).unwrap();

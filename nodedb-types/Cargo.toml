@@ -44,5 +44,6 @@ hex = { workspace = true }
 web-time = { workspace = true }
 
 [dev-dependencies]
-nodedb-crs = { workspace = true }
+# Tests resolve EPSG CRSs outside the always-built-in set.
+nodedb-crs = { workspace = true, features = ["epsg"] }
 toml = { workspace = true }

@@ -306,8 +306,8 @@ mod tests {
     #[test]
     fn builtins_round_trip_with_datum_code_and_area() {
         let ctx = CrsContext::builtin_only();
-        for code in [4326, 4742, 3375, 32648, 2263, 3857, 5514, 990_001, 990_002] {
-            let srid = Srid::new(code).unwrap();
+        for code in crate::parse::round_trip_cases::BUILTIN_CODES {
+            let srid = Srid::new(*code).unwrap();
             let def = ctx.resolve(srid).unwrap();
             let json = def.to_projjson();
             let back =

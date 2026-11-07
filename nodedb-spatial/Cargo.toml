@@ -32,3 +32,5 @@ geo = { workspace = true }
 
 [dev-dependencies]
 rand = { workspace = true }
+# Tests resolve EPSG CRSs outside the always-built-in set.
+nodedb-crs = { workspace = true, features = ["epsg"] }

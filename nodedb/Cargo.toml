@@ -24,7 +24,8 @@ path = "src/lib.rs"
 [dependencies]
 # Internal foundation crates
 nodedb-types = { workspace = true }
-nodedb-crs = { workspace = true }
+# The server resolves every EPSG CRS.
+nodedb-crs = { workspace = true, features = ["epsg"] }
 nodedb-columnar = { workspace = true, features = ["diagnostics"] }
 nodedb-bridge = { workspace = true }
 nodedb-physical = { workspace = true }

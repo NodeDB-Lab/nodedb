@@ -4408,6 +4408,7 @@ name = "nodedb-crs"
 version = "0.7.0-dev"
 dependencies = [
  "nodedb-srid",
+ "ruzstd",
  "serde",
  "thiserror 2.0.21",
  "zerompk",

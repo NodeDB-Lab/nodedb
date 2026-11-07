@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The built-in CRS table: NodeDB's own codes, then every EPSG CRS.
+//! The built-in CRS table: NodeDB's own codes, then the EPSG CRSs.
 //!
-//! The EPSG table is two tab-separated files compiled into the binary:
-//! `epsg.tsv` from the pinned EPSG dataset, and `epsg_supplement.tsv` with
-//! EPSG CRSs published after it. No code is in both. One CRS per line,
+//! The EPSG CRSs come from tab-separated tables compiled into the binary.
+//! With the `epsg` feature they are `epsg.tsv` from the pinned EPSG dataset
+//! and `epsg_supplement.tsv` with EPSG CRSs published after it. Without
+//! the feature the one table is `epsg_core.tsv`: WGS 84, Web Mercator and
+//! the WGS 84 UTM and UPS grids. No code is in two searched tables. One CRS per line,
 //! sorted ascending by code, `#` starts a comment line:
 //!
 //! ```text
@@ -17,19 +19,15 @@
 //! A line that does not start with a digit is not data, so a column-header
 //! line is skipped like a comment.
 //!
-//! Lookup bisects the text by byte offset. It allocates nothing and keeps
-//! no state.
+//! Lookup bisects the text by byte offset and searches the core table
+//! first. It allocates nothing. The full EPSG table decompresses once, when
+//! a lookup misses the core table or a caller lists the built-ins.
 
+use super::tables::{CORE_TSV, epsg_tables, tables_after_core};
 use crate::def::{AreaOfUse, CrsDef, CrsKind, DatumShift};
 use crate::error::CrsParseError;
 use crate::parse::parse_proj_string;
 use crate::srid::Srid;
-
-/// The EPSG table from the pinned EPSG dataset.
-const EPSG_TSV: &str = include_str!("../../data/epsg.tsv");
-
-/// EPSG CRSs newer than the pinned dataset, such as GDM2020.
-const EPSG_SUPPLEMENT_TSV: &str = include_str!("../../data/epsg_supplement.tsv");
 
 /// Number of tab-separated fields per data line.
 const FIELDS: usize = 7;
@@ -125,8 +123,12 @@ pub fn builtin_lookup(code: u32) -> Option<BuiltinEntry> {
         .iter()
         .find(|e| e.code == code)
         .copied()
-        .or_else(|| lookup_in(EPSG_TSV, code))
-        .or_else(|| lookup_in(EPSG_SUPPLEMENT_TSV, code))
+        .or_else(|| lookup_in(CORE_TSV, code))
+        .or_else(|| {
+            tables_after_core()
+                .into_iter()
+                .find_map(|table| lookup_in(table, code))
+        })
 }
 
 /// Bisect `table` for `code`.
@@ -213,19 +215,18 @@ fn table_rows(table: &'static str) -> impl Iterator<Item = &'static str> {
         .filter(|l| is_data_line(l))
 }
 
-/// Every EPSG row of both files, split into its fields, ascending by code.
+/// Every row of the searched EPSG tables, split into its fields, ascending
+/// by code.
 fn epsg_entries() -> impl Iterator<Item = BuiltinEntry> {
-    let mut main = table_rows(EPSG_TSV).filter_map(parse_row).peekable();
-    let mut newer = table_rows(EPSG_SUPPLEMENT_TSV)
-        .filter_map(parse_row)
-        .peekable();
-    core::iter::from_fn(
-        move || match (main.peek().map(|e| e.code), newer.peek().map(|e| e.code)) {
-            (Some(a), Some(b)) if b < a => newer.next(),
-            (Some(_), Some(_) | None) => main.next(),
-            (None, Some(_) | None) => newer.next(),
-        },
-    )
+    let mut tables = epsg_tables().map(|table| table_rows(table).filter_map(parse_row).peekable());
+    core::iter::from_fn(move || {
+        let (_, lowest) = tables
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(i, rows)| rows.peek().map(|e| (e.code, i)))
+            .min()?;
+        tables.get_mut(lowest)?.next()
+    })
 }
 
 /// Every built-in CRS row: NodeDB's own first, then every EPSG CRS
@@ -334,15 +335,53 @@ mod tests {
     #[test]
     fn geographic_crs_on_a_datum() {
         assert_eq!(geographic_crs_on_datum(6326), Some(Srid::WGS84));
-        assert_eq!(geographic_crs_on_datum(6742).map(Srid::code), Some(4742));
         assert_eq!(geographic_crs_on_datum(1), None);
     }
 
-    /// Every row of both EPSG files is well formed, the codes ascend
-    /// strictly, and no code is in both files.
+    #[cfg(feature = "epsg")]
+    #[test]
+    fn geographic_crs_on_an_epsg_only_datum() {
+        assert_eq!(geographic_crs_on_datum(6742).map(Srid::code), Some(4742));
+    }
+
+    /// The codes of the core table, which every build carries.
+    fn core_codes() -> Vec<u32> {
+        [3857, 4326]
+            .into_iter()
+            .chain(32601..=32661)
+            .chain(32701..=32761)
+            .collect()
+    }
+
+    /// The core table holds WGS 84, Web Mercator and the WGS 84 UTM and UPS
+    /// grids, all on the WGS 84 datum.
+    #[test]
+    fn core_table_holds_the_wgs84_grids() {
+        let codes: Vec<u32> = table_rows(CORE_TSV)
+            .filter_map(parse_row)
+            .map(|e| e.code)
+            .collect();
+        assert_eq!(codes, core_codes());
+        for code in core_codes() {
+            let entry = builtin_lookup(code).unwrap_or_else(|| panic!("{code} not built in"));
+            assert_eq!(entry.datum_code(), Ok(Some(6326)), "{code}");
+        }
+        assert_eq!(
+            builtin_lookup(3857).map(|e| e.name),
+            Some("WGS 84 / Pseudo-Mercator")
+        );
+        assert_eq!(
+            builtin_lookup(32760).map(|e| e.name),
+            Some("WGS 84 / UTM zone 60S")
+        );
+    }
+
+    /// Every row of every compiled-in EPSG table is well formed, the codes
+    /// ascend strictly, and each row resolves to itself. Under `epsg` that
+    /// makes each core row a copy of its full-table row.
     #[test]
     fn epsg_tables_are_well_formed_and_sorted() {
-        for table in [EPSG_TSV, EPSG_SUPPLEMENT_TSV] {
+        for table in epsg_tables().into_iter().chain([CORE_TSV]) {
             let mut previous = 0u32;
             let mut rows = 0usize;
             for line in table_rows(table) {
@@ -359,22 +398,46 @@ mod tests {
             assert!(rows > 0);
             assert!(table.starts_with("# EPSG "));
         }
+        let codes: Vec<u32> = epsg_entries().map(|e| e.code).collect();
+        assert!(codes.windows(2).all(|w| w[0] < w[1]), "merged codes ascend");
+        let rows: usize = epsg_tables()
+            .into_iter()
+            .map(|t| table_rows(t).count())
+            .sum();
+        assert_eq!(codes.len(), rows);
+    }
+
+    /// No supplement code is in the main table.
+    #[cfg(feature = "epsg")]
+    #[test]
+    fn supplement_codes_are_not_in_the_main_table() {
+        use crate::registry::tables::{EPSG_SUPPLEMENT_TSV, epsg_main};
         for line in table_rows(EPSG_SUPPLEMENT_TSV) {
             let code = parse_row(line).map(|e| e.code).unwrap_or_default();
             assert!(
-                lookup_in(EPSG_TSV, code).is_none(),
+                lookup_in(epsg_main(), code).is_none(),
                 "{code} is in both files"
             );
         }
-        let codes: Vec<u32> = epsg_entries().map(|e| e.code).collect();
-        assert!(codes.windows(2).all(|w| w[0] < w[1]), "merged codes ascend");
-        assert_eq!(
-            codes.len(),
-            table_rows(EPSG_TSV).count() + table_rows(EPSG_SUPPLEMENT_TSV).count()
-        );
+    }
+
+    /// Without `epsg` the core table answers its codes and nothing else.
+    #[cfg(not(feature = "epsg"))]
+    #[test]
+    fn without_the_feature_only_core_codes_are_built_in() {
+        for code in core_codes() {
+            assert!(builtin_lookup(code).is_some(), "{code}");
+        }
+        for code in [2263, 3375, 4742, 12287, 25320, 27700] {
+            assert_eq!(builtin_lookup(code), None, "{code}");
+        }
+        assert!(builtin_lookup(990_001).is_some());
+        assert_eq!(epsg_entries().count(), core_codes().len());
+        assert_eq!(geographic_crs_on_datum(6742), None);
     }
 
     /// GDM2020 resolves from the supplement with its EPSG datum, 1471.
+    #[cfg(feature = "epsg")]
     #[test]
     fn gdm2020_is_built_in() {
         let gdm = builtin_lookup(12287).unwrap();
@@ -389,10 +452,14 @@ mod tests {
         }
     }
 
-    /// Every EPSG row parses to a definition of its listed kind.
+    /// Every compiled-in EPSG row parses to a definition of its listed kind.
     #[test]
     fn every_epsg_row_parses() {
-        for line in table_rows(EPSG_TSV).chain(table_rows(EPSG_SUPPLEMENT_TSV)) {
+        for line in epsg_tables()
+            .into_iter()
+            .chain([CORE_TSV])
+            .flat_map(table_rows)
+        {
             let entry = parse_row(line).unwrap_or_else(|| panic!("malformed row: {line}"));
             let Ok(srid) = Srid::new(entry.code) else {
                 panic!("code out of range: {}", entry.code);

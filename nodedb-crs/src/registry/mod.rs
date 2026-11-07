@@ -6,6 +6,7 @@
 pub mod builtin;
 pub mod context;
 pub mod custom;
+mod tables;
 
 pub use builtin::{
     BuiltinEntry, builtin_codes, builtin_entries, builtin_lookup, geographic_crs_on_datum,

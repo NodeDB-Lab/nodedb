@@ -3,10 +3,15 @@
 //! Coordinate reference systems for NodeDB.
 //!
 //! An [`Srid`] names a CRS. A [`CrsContext`] resolves it to a [`CrsDef`]:
-//! user-defined CRSs first, then the built-in EPSG table. A [`Transformer`]
+//! user-defined CRSs first, then the built-in table. A [`Transformer`]
 //! maps coordinates between two definitions, at a [`CoordinateEpoch`] when a
 //! datum shift is time-dependent. A definition reads from and
 //! writes to PROJ strings, WKT2 and PROJJSON.
+//!
+//! The built-in table holds NodeDB's own codes, WGS 84, Web Mercator and the
+//! WGS 84 UTM and UPS grids. The `epsg` feature, on by default, adds every
+//! other EPSG CRS. Without it, any other EPSG code answers
+//! [`UnknownSrid::Undefined`].
 //!
 //! The crate does no file or network I/O, so it builds for
 //! `wasm32-unknown-unknown`.
