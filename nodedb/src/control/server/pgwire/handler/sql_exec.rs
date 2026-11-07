@@ -16,7 +16,7 @@ use pgwire::api::results::{DataRowEncoder, QueryResponse, Response, Tag};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 
 use crate::control::security::identity::{AuthMethod, AuthenticatedIdentity};
-use crate::control::server::session_auth::identity::stored_user_identity;
+use crate::control::security::session_identity::stored_user_identity;
 
 use super::super::types::text_field;
 use super::connection_admin;

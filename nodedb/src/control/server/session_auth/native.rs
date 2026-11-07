@@ -19,12 +19,11 @@ use crate::control::security::escalation::{
     AuthViolation, ViolationSubject, record_auth_violation,
 };
 use crate::control::security::identity::{AuthMethod, AuthenticatedIdentity};
+use crate::control::security::session_identity::stored_user_identity;
 use crate::control::state::SharedState;
 use crate::types::TenantId;
 
-use super::identity::{
-    configured_trust_identity, stored_user_identity, trust_identity, verify_api_key_identity,
-};
+use super::identity::{configured_trust_identity, trust_identity, verify_api_key_identity};
 
 /// Minimum wall-clock time for any authentication attempt that ends in failure.
 ///

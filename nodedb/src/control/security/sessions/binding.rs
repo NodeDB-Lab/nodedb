@@ -12,7 +12,7 @@ use tokio::sync::watch;
 
 use crate::control::security::auth_context::generate_session_id;
 use crate::control::security::identity::{AuthMethod, AuthenticatedIdentity};
-use crate::control::server::session_auth::identity::rebuild_session_identity;
+use crate::control::security::session_identity::rebuild_session_identity;
 use crate::control::state::SharedState;
 use crate::types::DatabaseId;
 

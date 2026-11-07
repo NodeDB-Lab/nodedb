@@ -13,7 +13,7 @@ use crate::control::security::escalation::{
     AuthViolation, ViolationSubject, record_auth_violation,
 };
 use crate::control::security::identity::{AuthMethod, AuthenticatedIdentity};
-use crate::control::server::session_auth::identity::stored_user_identity;
+use crate::control::security::session_identity::stored_user_identity;
 
 use super::core::NodeDbPgHandler;
 

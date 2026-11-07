@@ -8,10 +8,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nodedb::control::security::identity::AuthMethod;
+use nodedb::control::security::session_identity::stored_user_identity;
 use nodedb::control::security::sessions::{
     KillReason, SessionBindRequest, SessionBinding, bind_session,
 };
-use nodedb::control::server::session_auth::identity::stored_user_identity;
 use nodedb::control::server::sync::listener::{SyncListenerConfig, start_sync_listener};
 use nodedb::control::shutdown::{ShutdownBus, ShutdownWatch};
 use nodedb_test_support::sync_client::SyncTestClient;

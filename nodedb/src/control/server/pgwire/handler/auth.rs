@@ -10,8 +10,8 @@ use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use crate::config::auth::AuthMode;
 use crate::control::security::audit::ArcAuditEmitter;
 use crate::control::security::identity::{AuthMethod, AuthenticatedIdentity};
+use crate::control::security::session_identity::stored_user_identity;
 use crate::control::security::tls_policy::TransportSecurity;
-use crate::control::server::session_auth::identity::stored_user_identity;
 use crate::control::server::shared::authorization::{
     AuthorizationError, authorize_database, authorize_task_set,
 };
