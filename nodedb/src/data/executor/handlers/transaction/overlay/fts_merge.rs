@@ -120,10 +120,7 @@ fn merge_cut_view(
     at_cut: crate::engine::sparse::inverted::TextCutView,
 ) -> Option<StagedView> {
     let Some(staged) = staged else {
-        if at_cut.hidden.is_empty() && at_cut.docs.is_empty() {
-            return None;
-        }
-        return Some(StagedView::new(at_cut.hidden, false, at_cut.docs));
+        return (!at_cut.is_empty()).then(|| at_cut.into_staged());
     };
     if staged.hides_all() {
         return Some(staged);

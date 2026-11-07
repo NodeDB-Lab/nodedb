@@ -37,8 +37,8 @@ pub(crate) mod test_support;
 
 pub use core::InvertedIndex;
 pub use doc_image::FtsDocImage;
-pub use history::{TextCutView, UNVERSIONED};
 pub use indexing::IndexDocScope;
+pub use nodedb_fts::history::{TextCutView, UNVERSIONED};
 pub use nodedb_fts::posting::{MatchOffset, Posting, QueryMode, TextSearchResult};
 pub use nodedb_fts::{DocumentText, FtsSearchParams, IndexScope};
 pub use rebuild_install::{FtsInstallOutcome, FtsRebuildRefusal};

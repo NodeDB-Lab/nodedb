@@ -16,6 +16,7 @@ use std::fmt;
 
 use nodedb_types::Surrogate;
 
+use super::memory_history::MemoryHistory;
 use crate::backend::FtsBackend;
 use crate::posting::Posting;
 use crate::scope::IndexScope;
@@ -31,7 +32,7 @@ impl fmt::Display for MemoryError {
 }
 
 /// `(database_id, tid, collection, field)`: one index.
-type IndexKey = (u64, u64, String, String);
+pub(super) type IndexKey = (u64, u64, String, String);
 /// An index key plus a term, meta subkey, or segment id.
 type SubKey = (IndexKey, String);
 /// An index key plus a document.
@@ -57,6 +58,8 @@ pub struct MemoryBackend {
     meta: RefCell<HashMap<SubKey, Vec<u8>>>,
     /// `(index, segment_id) → compressed segment bytes`.
     segments: RefCell<HashMap<SubKey, Vec<u8>>>,
+    /// The system-time history of every index.
+    pub(super) history: RefCell<MemoryHistory>,
 }
 
 impl MemoryBackend {
@@ -65,7 +68,7 @@ impl MemoryBackend {
     }
 }
 
-fn index_key(database_id: u64, tid: u64, index: IndexScope<'_>) -> IndexKey {
+pub(super) fn index_key(database_id: u64, tid: u64, index: IndexScope<'_>) -> IndexKey {
     (
         database_id,
         tid,
@@ -104,6 +107,9 @@ impl MemoryBackend {
         self.segments
             .borrow_mut()
             .retain(|k, _| !owned_by(&k.0, database_id, tid, collection));
+        self.history
+            .borrow_mut()
+            .retain(|k| !owned_by(k, database_id, tid, collection));
         let after = postings.len() + doc_lengths.len();
         before - after
     }

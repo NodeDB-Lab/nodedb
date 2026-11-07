@@ -20,6 +20,7 @@ pub mod codec;
 pub mod document_text;
 pub mod fuzzy;
 pub mod highlight;
+pub mod history;
 pub mod index;
 pub mod lsm;
 mod mem_scope;
@@ -33,10 +34,11 @@ pub use analyzer::{
     AnalyzerRegistry, EdgeNgramAnalyzer, KeywordAnalyzer, LanguageAnalyzer, NgramAnalyzer,
     SimpleAnalyzer, StandardAnalyzer, SynonymMap, TextAnalyzer, analyze,
 };
-pub use backend::FtsBackend;
+pub use backend::{FtsBackend, FtsHistoryRead, FtsHistoryWrite};
 pub use block::{CompactPosting, PostingBlock};
 pub use document_text::DocumentText;
 pub use fuzzy::{fuzzy_discount, fuzzy_match, levenshtein, max_distance_for_length};
+pub use history::{EndedVersion, TextCut, TextCutView, UNVERSIONED};
 pub use index::{FtsIndex, FtsIndexError, MAX_INDEXABLE_SURROGATE, SynonymGroupRecord};
 pub use nodedb_types::Surrogate;
 pub use posting::{Bm25Params, MatchOffset, Posting, QueryMode, TextSearchResult};
