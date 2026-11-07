@@ -6,6 +6,7 @@
 //! - AVX-512 (512-bit, 8 f64/op) — Intel Xeon, AMD Zen 4+
 //! - AVX2+FMA (256-bit, 4 f64/op) — most x86_64 since 2013
 //! - NEON (128-bit, 2 f64/op) — ARM64 (Graviton, Apple Silicon)
+//! - Wasm SIMD128 (2 f64/op), chosen at compile time by `+simd128`
 //! - Scalar fallback — auto-vectorized by LLVM
 //!
 //! All kernels use Kahan compensated summation for numerical accuracy.
@@ -60,7 +61,11 @@ impl TsSimdRuntime {
                 min_f64: wasm_min_f64,
                 max_f64: wasm_max_f64,
                 range_filter_i64: scalar_range_filter_i64,
-                name: "wasm-simd128",
+                name: if cfg!(target_feature = "simd128") {
+                    "wasm-simd128"
+                } else {
+                    "scalar"
+                },
             };
         }
         #[allow(unreachable_code)]
@@ -403,10 +408,13 @@ fn neon_max_f64(values: &[f64]) -> f64 {
 }
 
 // ── WASM SIMD (wasm32 with simd128) ──
+//
+// Wasm has no runtime feature detection, and an engine without SIMD rejects
+// a module holding a SIMD instruction. The SIMD kernels therefore build only
+// when the crate compiles with `+simd128`. Otherwise the wrappers run scalar.
 
-#[cfg(target_arch = "wasm32")]
-#[target_feature(enable = "simd128")]
-unsafe fn wasm_sum_f64_inner(values: &[f64]) -> f64 {
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+fn wasm_sum_f64_inner(values: &[f64]) -> f64 {
     use core::arch::wasm32::*;
     let mut acc = f64x2_splat(0.0);
     let chunks = values.len() / 2;
@@ -424,15 +432,15 @@ unsafe fn wasm_sum_f64_inner(values: &[f64]) -> f64 {
 
 #[cfg(target_arch = "wasm32")]
 fn wasm_sum_f64(values: &[f64]) -> f64 {
-    if values.len() < 4 {
-        return scalar_sum_f64(values);
+    #[cfg(target_feature = "simd128")]
+    if values.len() >= 4 {
+        return wasm_sum_f64_inner(values);
     }
-    unsafe { wasm_sum_f64_inner(values) }
+    scalar_sum_f64(values)
 }
 
-#[cfg(target_arch = "wasm32")]
-#[target_feature(enable = "simd128")]
-unsafe fn wasm_min_f64_inner(values: &[f64]) -> f64 {
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+fn wasm_min_f64_inner(values: &[f64]) -> f64 {
     use core::arch::wasm32::*;
     let mut acc = f64x2_splat(f64::INFINITY);
     let chunks = values.len() / 2;
@@ -452,15 +460,15 @@ unsafe fn wasm_min_f64_inner(values: &[f64]) -> f64 {
 
 #[cfg(target_arch = "wasm32")]
 fn wasm_min_f64(values: &[f64]) -> f64 {
-    if values.len() < 4 {
-        return scalar_min_f64(values);
+    #[cfg(target_feature = "simd128")]
+    if values.len() >= 4 {
+        return wasm_min_f64_inner(values);
     }
-    unsafe { wasm_min_f64_inner(values) }
+    scalar_min_f64(values)
 }
 
-#[cfg(target_arch = "wasm32")]
-#[target_feature(enable = "simd128")]
-unsafe fn wasm_max_f64_inner(values: &[f64]) -> f64 {
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+fn wasm_max_f64_inner(values: &[f64]) -> f64 {
     use core::arch::wasm32::*;
     let mut acc = f64x2_splat(f64::NEG_INFINITY);
     let chunks = values.len() / 2;
@@ -480,10 +488,11 @@ unsafe fn wasm_max_f64_inner(values: &[f64]) -> f64 {
 
 #[cfg(target_arch = "wasm32")]
 fn wasm_max_f64(values: &[f64]) -> f64 {
-    if values.len() < 4 {
-        return scalar_max_f64(values);
+    #[cfg(target_feature = "simd128")]
+    if values.len() >= 4 {
+        return wasm_max_f64_inner(values);
     }
-    unsafe { wasm_max_f64_inner(values) }
+    scalar_max_f64(values)
 }
 
 #[cfg(test)]

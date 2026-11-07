@@ -262,7 +262,8 @@ fn strip_valid_time(sql: &str) -> Result<Option<(String, ValidTime)>, TemporalPa
 /// Supported forms:
 /// - Integer literal — interpreted directly as milliseconds.
 /// - `NOW()` — resolved to the current wall-clock millisecond via
-///   `std::time::SystemTime`. This is evaluated once at parse time, not
+///   `nodedb_types::checked_wall_now_ms`, which reads the JS clock on wasm32.
+///   This is evaluated once at parse time, not
 ///   deferred, so the resolved value is stable for the duration of the query.
 /// - ISO-8601 / RFC-3339 string literal `'2024-01-15T00:00:00Z'` — parsed
 ///   with [`chrono`]'s `DateTime::parse_from_rfc3339`.

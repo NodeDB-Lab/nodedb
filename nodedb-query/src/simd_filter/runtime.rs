@@ -103,7 +103,11 @@ impl FilterSimdRuntime {
                 lt_i64: |v, t| scalar_cmp_i64(v, t, CmpOp::Lt),
                 lte_i64: |v, t| scalar_cmp_i64(v, t, CmpOp::Lte),
                 range_i64: scalar_range_i64,
-                name: "wasm-simd128",
+                name: if cfg!(target_feature = "simd128") {
+                    "wasm-simd128"
+                } else {
+                    "scalar"
+                },
             };
         }
         #[allow(unreachable_code)]
