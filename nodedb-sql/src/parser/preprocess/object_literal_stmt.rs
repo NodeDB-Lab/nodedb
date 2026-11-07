@@ -3,6 +3,7 @@
 //! Rewrite `INSERT/UPSERT INTO coll { ... }` (and `[{ ... }, ...]`) into
 //! standard `INSERT INTO coll (cols) VALUES (row), ...`.
 
+use super::lex::first_sql_word;
 use super::literal::value_to_sql_literal;
 use crate::error::SqlError;
 use crate::parser::object_literal::{
@@ -33,7 +34,9 @@ use crate::parser::object_literal::{
 /// text before rewriting and re-attaches it to the rebuilt statement, so it
 /// survives the reconstruction and is not leftover input to reject.
 pub(super) fn try_rewrite_object_literal(sql: &str) -> Result<Option<String>, SqlError> {
-    let after_into = sql["INSERT INTO ".len()..].trim_start();
+    let Some(after_into) = text_after_into(sql) else {
+        return Ok(None);
+    };
     let Some(coll_end) = after_into.find(|c: char| c.is_whitespace()) else {
         return Ok(None);
     };
@@ -59,6 +62,23 @@ pub(super) fn try_rewrite_object_literal(sql: &str) -> Result<Option<String>, Sq
         return Ok(None);
     }
     Ok(Some(fields_to_values_sql(coll_name, &[fields])))
+}
+
+/// The text after `INSERT INTO` or `UPSERT INTO`, or `None` when `sql` does not hold that shape.
+///
+/// Comments can lead the statement, any run of whitespace can separate the keywords,
+/// and the text can end at any byte.
+pub(super) fn text_after_into(sql: &str) -> Option<&str> {
+    let verb = first_sql_word(sql)?;
+    // `verb` borrows from `sql`, so the pointer distance is its byte offset.
+    let verb_end = verb.as_ptr() as usize - sql.as_ptr() as usize + verb.len();
+    let rest = sql.get(verb_end..)?;
+    let rest = rest.strip_prefix(char::is_whitespace)?.trim_start();
+    if !nodedb_types::starts_with_ascii_case_insensitive(rest, "INTO") {
+        return None;
+    }
+    let rest = rest.get("INTO".len()..)?;
+    rest.strip_prefix(char::is_whitespace).map(str::trim_start)
 }
 
 /// Rewrite `[{ ... }, { ... }]` → multi-row VALUES.

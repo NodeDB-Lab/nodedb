@@ -12,7 +12,7 @@
 
 use super::function_args::rewrite_object_literal_args;
 use super::lex::{first_sql_word, has_brace_outside_literals, has_operator_outside_literals};
-use super::object_literal_stmt::try_rewrite_object_literal;
+use super::object_literal_stmt::{text_after_into, try_rewrite_object_literal};
 use super::search_vector::{
     try_rewrite_nested_search_using_vector, try_rewrite_search_using_vector,
 };
@@ -76,7 +76,12 @@ pub fn preprocess(sql: &str) -> Result<Option<PreprocessedSql>, SqlError> {
     let is_upsert = first_word == "UPSERT";
 
     if is_upsert {
-        let rewritten = format!("INSERT INTO {}", &temporal_sql["UPSERT INTO ".len()..]);
+        let Some(after_into) = text_after_into(&temporal_sql) else {
+            return Err(SqlError::Parse {
+                detail: "UPSERT needs the form UPSERT INTO <collection> ...".to_string(),
+            });
+        };
+        let rewritten = format!("INSERT INTO {after_into}");
         // `?`: a malformed object literal — or a clause the literal form cannot
         // carry — must fail the statement here rather than fall through to be
         // reparsed as something else, which would let the error disappear.
@@ -381,6 +386,7 @@ mod tests {
         // A block comment before UPSERT must still trigger the UPSERT path.
         let result = pp("/* hint */ UPSERT INTO t (name) VALUES ('a')").unwrap();
         assert!(result.is_upsert);
+        assert_eq!(result.sql, "INSERT INTO t (name) VALUES ('a')");
     }
 
     #[test]
@@ -401,6 +407,42 @@ mod tests {
         assert!(
             result.is_none() || !result.unwrap().sql.contains("\"foo\""),
             "string literal brace must not be rewritten"
+        );
+    }
+
+    /// A statement can end at any byte, so a verb alone is never a panic.
+    #[test]
+    fn a_verb_with_no_into_does_not_panic() {
+        for sql in [
+            "INSERT",
+            "INSERT ",
+            "INSERT INTO",
+            "INSERT é",
+            "INSERT INTOx",
+        ] {
+            assert!(preprocess(sql).is_ok(), "{sql}");
+        }
+        for sql in ["UPSERT", "UPSERT ", "UPSERT INTO", "UPSERT é"] {
+            let error = preprocess(sql).expect_err(sql);
+            assert!(matches!(error, SqlError::Parse { .. }), "{sql}: {error}");
+        }
+    }
+
+    /// Any whitespace can separate the keywords, and the collection name stays whole.
+    #[test]
+    fn whitespace_between_the_keywords_keeps_the_collection_name() {
+        let rewritten = pp("INSERT   INTO\n docs { id: 'a' }").expect("object literal rewrites");
+        assert!(
+            rewritten.sql.starts_with("INSERT INTO docs "),
+            "{}",
+            rewritten.sql
+        );
+        let rewritten = pp("UPSERT   INTO docs { id: 'a' }").expect("object literal rewrites");
+        assert!(rewritten.is_upsert);
+        assert!(
+            rewritten.sql.starts_with("INSERT INTO docs "),
+            "{}",
+            rewritten.sql
         );
     }
 }

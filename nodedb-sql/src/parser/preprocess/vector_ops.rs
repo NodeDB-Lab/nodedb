@@ -18,14 +18,17 @@ pub(super) fn rewrite_arrow_distance(sql: &str) -> Option<String> {
 
 /// Extract the left operand before `<->`: a column name or dotted path.
 fn extract_left_operand(before: &str) -> Option<String> {
-    // Determine what the effective "before" text is by looking only at the
-    // last Text segment — the operand cannot span across a quoted literal.
-    let text_before = last_text_segment(before);
+    // The operand ends `before`, so the caller can find it by length. A literal,
+    // quoted identifier, or comment in that place is no operand this rewrite takes.
+    let segs = segments(before);
+    let Some(SqlSegment::Text(text_before)) = segs.last() else {
+        return None;
+    };
     let trimmed = text_before.trim_end();
+    // The character before the identifier can be multi-byte, so this trims and never adds 1.
     let start = trimmed
-        .rfind(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '.')
-        .map(|p| p + 1)
-        .unwrap_or(0);
+        .trim_end_matches(|c: char| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+        .len();
     let ident = &trimmed[start..];
     if ident.is_empty() {
         return None;
@@ -34,18 +37,6 @@ fn extract_left_operand(before: &str) -> Option<String> {
     // We need the ident string only (the caller uses its length for offset math
     // and only the text content for the rewrite).
     Some(ident.to_string())
-}
-
-/// Return the content of the last `Text` segment in `sql`, or the whole
-/// string if there are no non-text segments.
-fn last_text_segment(sql: &str) -> &str {
-    let segs = segments(sql);
-    for seg in segs.iter().rev() {
-        if let SqlSegment::Text(t) = seg {
-            return t;
-        }
-    }
-    ""
 }
 
 /// Extract the right operand after `<->`: ARRAY[...], $param, or identifier.
@@ -286,5 +277,49 @@ mod tests {
     #[test]
     fn nip_no_match_returns_none() {
         assert!(rewrite_neg_inner_product("SELECT * FROM t").is_none());
+    }
+
+    // ── Multi-byte text before an operand ─────────────────────────────────
+
+    /// A multi-byte character directly before the left operand is not an
+    /// identifier character, and the slice stays on a character boundary.
+    #[test]
+    fn a_multi_byte_character_before_the_left_operand_does_not_panic() {
+        for (sql, expected) in [
+            ("ةSu<#>s", "ةvector_neg_inner_product(Su, s)"),
+            ("é col <#> s", "é vector_neg_inner_product(col, s)"),
+        ] {
+            assert_eq!(rewrite_neg_inner_product(sql).as_deref(), Some(expected));
+        }
+        assert_eq!(
+            rewrite_arrow_distance("日本語a <-> b").as_deref(),
+            Some("日本語vector_distance(a, b)")
+        );
+        assert_eq!(
+            rewrite_cosine_distance("ßa <=> $1").as_deref(),
+            Some("ßvector_cosine_distance(a, $1)")
+        );
+    }
+
+    /// A quoted identifier, literal, or comment directly before the operator is
+    /// not an operand. The rewrite leaves the text alone, and never takes a word
+    /// from before it.
+    #[test]
+    fn a_non_text_segment_before_the_operator_is_no_operand() {
+        for sql in [
+            "SELECT \"a é\" <-> b",
+            "SELECT 'x' <-> b",
+            "SELECT col /* c */ <-> b",
+            "SELECT col -- c\n <-> b",
+        ] {
+            assert_eq!(rewrite_arrow_distance(sql), None, "{sql}");
+        }
+    }
+
+    /// The exact input the `sql_preprocess` fuzz target found.
+    #[test]
+    fn the_fuzz_input_runs_through_the_pipeline() {
+        let sql = std::str::from_utf8(b"\xd3\xa9Su<#>s\"L  ").expect("utf-8 input");
+        let _ = crate::parser::preprocess::pipeline::preprocess(sql);
     }
 }
