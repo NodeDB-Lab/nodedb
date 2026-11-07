@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use nodedb_physical::physical_task::PhysicalTask;
 
 use crate::control::lease::QueryLeaseScope;
+use crate::control::planner::calvin::node_delete_txn::TxnEdgeTruncate;
 use crate::types::{TxnId, VShardId};
 
 use super::super::connection::SessionId;
@@ -66,6 +67,21 @@ impl SessionStore {
     pub fn is_in_transaction_block(&self, addr: impl Into<SessionId>) -> bool {
         self.read_session(addr, |s| s.tx_state == TransactionState::InBlock)
             .unwrap_or(false)
+    }
+
+    /// What the session's transaction does with a TRUNCATE of an edge-bearing
+    /// collection.
+    pub fn tx_edge_truncate(&self, addr: impl Into<SessionId>) -> TxnEdgeTruncate {
+        self.read_session(addr, |s| s.tx_edge_truncate)
+            .unwrap_or(TxnEdgeTruncate::Refuse)
+    }
+
+    /// Let the session's transaction cut the edges of a TRUNCATE at commit.
+    /// The caller proved the transaction reads nothing after the TRUNCATE.
+    pub fn allow_tx_edge_truncate(&self, addr: impl Into<SessionId>) {
+        self.write_session(addr, |s| {
+            s.tx_edge_truncate = TxnEdgeTruncate::CutAtCommit;
+        });
     }
 
     /// The snapshot the current transaction block reads at. `None` outside

@@ -369,10 +369,12 @@ pub enum MetadataEntry {
     /// The id is not carried: every node computes it at apply time as the
     /// next id past the replicated database high-watermark, in log order, so
     /// all nodes agree on it. `request_id` routes the id back to the waiting
-    /// allocation on `node_id`.
+    /// allocation on `node_id`. `id_space` is the proposer's cluster id space,
+    /// so two clusters issue disjoint ids.
     DatabaseIdReserve {
         node_id: u64,
         request_id: u64,
+        id_space: u64,
     },
 
     /// A cluster restore point: one consistent instant across every Raft
@@ -390,6 +392,24 @@ pub enum MetadataEntry {
     /// archive covers every stamp up to the newest one it holds. This entry
     /// moves that frontier forward on an idle log. It applies nothing.
     ArchiveMark,
+
+    /// One source cut of a mirror database.
+    ///
+    /// Its data entries committed in every mirror group and hold their lanes.
+    /// This entry installs the cut's schema and raises `ready_cut` at one log
+    /// index, which releases them. A former applier's epoch, a promoted mirror
+    /// and a dropped database make it a no-op on every node.
+    ///
+    /// `advance.cut` equal to `ready_cut` installs nothing. It raises only the
+    /// epoch fence and the applied fields, so a new applier releases the
+    /// partial cut a former one left in the lanes.
+    MirrorCut {
+        database: u64,
+        advance: nodedb_types::MirrorCutAdvance,
+        /// The source's catalog entries of the cut, frozen as the source
+        /// stamped them, each encoded as the `CatalogDdl` payload is.
+        catalog: Vec<Vec<u8>>,
+    },
 }
 
 /// The direction of a join-token lifecycle transition.

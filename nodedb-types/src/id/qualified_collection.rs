@@ -127,6 +127,14 @@ impl QualifiedCollection {
             )),
         }
     }
+
+    /// The bare name inside a stored collection name: the form a client names
+    /// the collection by, with no database id.
+    pub fn bare_of_stored(stored: &str) -> &str {
+        stored
+            .split_once(QUALIFIER_SEPARATOR)
+            .map_or(stored, |(_, bare)| bare)
+    }
 }
 
 impl fmt::Display for QualifiedCollection {
@@ -153,6 +161,16 @@ mod tests {
         assert_eq!(
             QualifiedCollection::database_of_stored(qualified.as_str()).expect("qualified name"),
             DatabaseId::new(9)
+        );
+    }
+
+    #[test]
+    fn a_stored_name_holds_its_bare_name() {
+        assert_eq!(QualifiedCollection::bare_of_stored("users"), "users");
+        let qualified = QualifiedCollection::new(DatabaseId::new(9), "orders");
+        assert_eq!(
+            QualifiedCollection::bare_of_stored(qualified.as_str()),
+            "orders"
         );
     }
 

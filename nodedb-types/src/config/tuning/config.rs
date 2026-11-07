@@ -63,6 +63,8 @@ pub struct TuningConfig {
     pub startup: StartupTuning,
     #[serde(default)]
     pub version_cleanup: VersionCleanupTuning,
+    #[serde(default)]
+    pub mirror: super::mirror::MirrorTuning,
 }
 
 impl TuningConfig {

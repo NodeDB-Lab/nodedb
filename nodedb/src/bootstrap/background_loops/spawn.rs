@@ -46,11 +46,12 @@ pub fn spawn_background_loops(
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
     checkpoint: crate::control::checkpoint_manager::CheckpointManagerConfig,
 ) -> crate::event::EventPlane {
-    // Mirror restart: enumerate databases that need observer links
-    // re-established and log the decisions. The cluster layer processes
-    // these asynchronously via the mirror_link_registry once QUIC transport
-    // is available.
-    mirror::log_mirror_restart_decisions(shared);
+    if shared.mirror.settings.set(config.mirror.clone()).is_err() {
+        tracing::warn!("the [mirror] settings were already installed on this node");
+    }
+    // Each mirror the catalog holds resumes from its replicated cut state, and
+    // each new `MIRROR DATABASE` starts here.
+    crate::control::mirror::applier::spawn_mirror_supervisor(shared);
     if let Err(e) = crate::control::metrics::database_sync::ensure_listed(
         &shared.database_metrics,
         shared.credentials.catalog(),
@@ -58,6 +59,7 @@ pub fn spawn_background_loops(
         tracing::warn!(error = %e, "database metrics: catalog list error at startup");
     }
     mirror::spawn_mirror_lag_monitor(shared);
+    crate::control::mirror::source::cut_loop::spawn_mirror_source_loops(shared);
     database_metrics::spawn_database_metrics_sampler(shared);
     storage_bytes::spawn_storage_sampler(
         shared,
@@ -181,9 +183,9 @@ fn spawn_security_loops(shared: &Arc<SharedState>) {
     crate::control::security::sessions::spawn_idle_sweep_loop(shared);
     info!("idle session sweep loop running");
 
-    // Ships the audit/auth events buffered by `audit_record_with_db_strict`
-    // to the configured webhook. No task when no SIEM destination is
-    // configured.
+    // Ships the audit and auth events the audit log's export sink buffers to
+    // the configured webhook. Every published entry reaches that sink. No task
+    // runs when no SIEM destination is configured.
     crate::control::security::siem::spawn_export_loop(shared);
 }
 

@@ -298,7 +298,8 @@ pub(crate) async fn apply_here(
 ) -> crate::Result<CrossShardWriteResponse> {
     let key = applied_key_of(request);
     let dedup = state
-        .cross_shard_dedup
+        .cross_shard
+        .dedup
         .get()
         .ok_or_else(|| crate::Error::Dispatch {
             detail: "cross-shard dedup store not initialised".into(),

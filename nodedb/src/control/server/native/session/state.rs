@@ -88,6 +88,9 @@ pub struct NativeSession {
     pub(super) connection_permit: Option<ConnectionPermit>,
     /// Counts this connection under its database until the session drops.
     pub(super) connection_guard: Option<NativeConnectionGuard>,
+    /// The registry row and kill signal. Set once, by the auth frame: a second
+    /// auth frame is refused, so nothing replaces it.
+    pub(super) binding: Option<crate::control::security::sessions::SessionBinding>,
 }
 
 impl NativeSession {
@@ -124,6 +127,7 @@ impl NativeSession {
             global_permit: Some(global_permit),
             connection_permit: None,
             connection_guard: None,
+            binding: None,
         }
     }
 

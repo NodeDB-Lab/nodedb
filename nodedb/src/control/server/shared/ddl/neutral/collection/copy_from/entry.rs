@@ -13,6 +13,9 @@
 //! site builds a `DdlError` directly via [`ddl_err`] so the whole call chain
 //! speaks one error type.
 
+use std::sync::Arc;
+
+use nodedb_mem::{EngineId, ScopedMemory};
 use nodedb_types::DatabaseId;
 
 use nodedb_sql::SqlError;
@@ -130,7 +133,16 @@ pub async fn copy_from_file(
         }
     };
     let path = single_file(sources)?;
-    let bytes = CopySourceFile::open(path).await?.read_all().await?;
+    // A row format parses the whole file, so the file stays in memory for the
+    // whole load. No engine owns the raw bytes, so they charge the query budget.
+    let memory = ScopedMemory::new(
+        Arc::clone(&state.governor),
+        database_id,
+        tenant_id,
+        EngineId::Query,
+    );
+    let file = CopySourceFile::open(path).await?.read_all(&memory).await?;
+    let bytes = file.bytes.as_slice();
 
     // Each row fires its collection's BEFORE, INSTEAD OF and SYNC AFTER
     // bodies, which join the statement's transaction. Outside a transaction
@@ -158,13 +170,14 @@ pub async fn copy_from_file(
                 tenant_id,
                 database_id,
                 txn_ctx,
+                memory: &memory,
             };
             match row_format {
-                RowFormat::Ndjson => import_ndjson(&import_ctx, collection, path, &bytes).await,
+                RowFormat::Ndjson => import_ndjson(&import_ctx, collection, path, bytes).await,
                 RowFormat::JsonArray => {
-                    import_json_array(&import_ctx, collection, path, &bytes).await
+                    import_json_array(&import_ctx, collection, path, bytes).await
                 }
-                RowFormat::Csv(csv) => import_csv(&import_ctx, collection, path, &bytes, csv).await,
+                RowFormat::Csv(csv) => import_csv(&import_ctx, collection, path, bytes, csv).await,
             }
         },
     )

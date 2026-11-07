@@ -51,6 +51,12 @@ pub fn impersonate(
     }
     let target_id = parts[3].trim_matches('\'');
 
+    super::audit_intent::record_action_intent(
+        state,
+        identity,
+        Some(identity.tenant_id),
+        &format!("{} impersonating {target_id}", identity.username),
+    )?;
     state
         .impersonation
         .start_impersonation(
@@ -153,6 +159,13 @@ pub fn delegate(
         .map(|i| parts[i + 1..].join(" ").trim_matches('\'').to_string())
         .unwrap_or_default();
 
+    // A delegation grants scopes, so its record comes first.
+    super::audit_intent::record_action_intent(
+        state,
+        identity,
+        Some(identity.tenant_id),
+        &format!("DELEGATE scopes from '{delegator_id}' to '{delegate_id}': {reason}"),
+    )?;
     state
         .impersonation
         .delegate(delegator_id, delegate_id, scopes, expires_secs, &reason)

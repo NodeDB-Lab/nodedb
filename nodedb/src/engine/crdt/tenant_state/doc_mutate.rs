@@ -6,6 +6,7 @@ use loro::LoroValue;
 use nodedb_crdt::state::RowImage;
 
 use super::TenantCrdtEngine;
+use super::core::loro_root;
 
 impl TenantCrdtEngine {
     /// Insert-or-replace a document row's scalar fields (full-projection LWW
@@ -17,7 +18,7 @@ impl TenantCrdtEngine {
         fields: &[(&str, LoroValue)],
     ) -> crate::Result<()> {
         self.state_mut(collection)?
-            .upsert(collection, row_id, fields)
+            .upsert(loro_root(collection), row_id, fields)
             .map_err(crate::Error::Crdt)
     }
 
@@ -30,14 +31,14 @@ impl TenantCrdtEngine {
         fields: &[(&str, LoroValue)],
     ) -> crate::Result<()> {
         self.state_mut(collection)?
-            .set_fields(collection, row_id, fields)
+            .set_fields(loro_root(collection), row_id, fields)
             .map_err(crate::Error::Crdt)
     }
 
     /// Delete a document row (tombstone in the collection's Loro doc).
     pub fn doc_delete(&mut self, collection: &str, row_id: &str) -> crate::Result<()> {
         self.state_mut(collection)?
-            .delete(collection, row_id)
+            .delete(loro_root(collection), row_id)
             .map_err(crate::Error::Crdt)
     }
 
@@ -47,7 +48,7 @@ impl TenantCrdtEngine {
     pub fn doc_row_image(&self, collection: &str, row_id: &str) -> crate::Result<Option<RowImage>> {
         match self.collections.get(collection) {
             Some(state) => state
-                .row_image(collection, row_id)
+                .row_image(loro_root(collection), row_id)
                 .map(Some)
                 .map_err(crate::Error::Crdt),
             None => Ok(None),
@@ -67,7 +68,7 @@ impl TenantCrdtEngine {
             return Ok(());
         };
         self.state_mut(collection)?
-            .restore_row_image(collection, row_id, image)
+            .restore_row_image(loro_root(collection), row_id, image)
             .map_err(crate::Error::Crdt)
     }
 }

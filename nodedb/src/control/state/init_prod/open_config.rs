@@ -14,6 +14,8 @@ pub struct OpenConfig<'a> {
     /// The `[egress]` policy. The shared outbound client, the SIEM exporter
     /// and every remote source go through it.
     pub egress: Arc<EgressPolicy>,
+    /// The most sessions this node holds at once. `0` means no limit.
+    pub max_active_sessions: usize,
 }
 
 impl<'a> OpenConfig<'a> {
@@ -23,6 +25,7 @@ impl<'a> OpenConfig<'a> {
         Self {
             auth,
             egress: Arc::new(EgressPolicy::strict()),
+            max_active_sessions: 0,
         }
     }
 }

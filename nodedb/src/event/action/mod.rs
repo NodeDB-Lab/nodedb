@@ -10,5 +10,5 @@ pub mod store;
 pub use self::capture::{RetryStoreCaptures, RetryStoreImage};
 pub use self::queue::ActionRetryQueue;
 pub use self::record::{ActionContext, ActionId, ActionKey, ActionPayload, FailedAction};
-pub use self::requeue::{ActionRequeueInbox, RequeueError};
+pub use self::requeue::{ActionRequeueInbox, RequeueError, RequeuedAction};
 pub use self::store::ActionStore;

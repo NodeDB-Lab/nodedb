@@ -15,6 +15,7 @@ use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tracing::{debug, info, warn};
 
+use crate::control::security::sessions::session_ended;
 use crate::control::server::conn_stream::ConnStream;
 use crate::control::state::SharedState;
 
@@ -175,6 +176,13 @@ impl RespListener {
     }
 }
 
+/// Tell the client why its session ended. The caller closes the connection.
+async fn write_session_end(stream: &mut ConnStream, ended: &crate::Error, write_buf: &mut Vec<u8>) {
+    write_buf.clear();
+    super::codec::RespValue::from_error(ended).serialize(write_buf);
+    let _ = stream.write_all(write_buf).await;
+}
+
 /// Handle a single RESP connection.
 ///
 /// The connection future is boxed, once per connection. Every command path
@@ -205,8 +213,18 @@ async fn serve_connection(
     let mut write_buf = Vec::with_capacity(4096);
 
     loop {
-        // Read data from the socket.
-        let n = match stream.read(&mut read_buf).await {
+        // Read data from the socket, racing the kill signal. A command in
+        // progress finishes first: the kill is observed here or in the refresh
+        // ahead of the next pipelined command.
+        let read = tokio::select! {
+            biased;
+            ended = session_ended(&mut session.binding) => {
+                write_session_end(&mut stream, &ended, &mut write_buf).await;
+                return Ok(());
+            }
+            read = stream.read(&mut read_buf) => read,
+        };
+        let n = match read {
             Ok(0) => {
                 debug!(%peer, "RESP connection closed");
                 return Ok(());
@@ -255,6 +273,11 @@ async fn serve_connection(
                         return Ok(());
                     }
 
+                    if let Err(ended) = session.refresh(state) {
+                        write_session_end(&mut stream, &ended, &mut write_buf).await;
+                        return Ok(());
+                    }
+
                     // SUBSCRIBE/PSUBSCRIBE take over the connection (enter push mode).
                     if cmd.name == "SUBSCRIBE" {
                         if super::handler_pubsub::handle_subscribe(
@@ -285,7 +308,14 @@ async fn serve_connection(
 
                     // Execute the command with timing for slow-log.
                     let start = std::time::Instant::now();
+                    if let Some(binding) = &session.binding {
+                        // The command name only. RESP arguments carry values and AUTH passwords.
+                        binding.set_statement(&cmd.name);
+                    }
                     let resp = handler::execute(&cmd, &mut session, state).await;
+                    if let Some(binding) = &session.binding {
+                        binding.clear_statement();
+                    }
                     let elapsed = start.elapsed();
 
                     // Slow-log: commands exceeding 10ms threshold.

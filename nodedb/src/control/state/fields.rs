@@ -29,6 +29,8 @@ pub struct SharedState {
     pub audit: Arc<Mutex<AuditLog>>,
     /// Control Plane recorder for Event Plane audit records, spawned on first use.
     pub(super) audit_recorder: OnceLock<crate::control::security::audit::AuditRecorder>,
+    /// Per-peer bound on the audit rows bearer refusals write.
+    pub bearer_refusal_throttle: crate::control::security::bearer::BearerRefusalThrottle,
     pub api_keys: ApiKeyStore,
     pub roles: RoleStore,
     pub permissions: PermissionStore,
@@ -82,7 +84,9 @@ pub struct SharedState {
     pub tls_policy: crate::control::security::tls_policy::TlsPolicy,
     /// SIEM export adapter.
     pub siem: Arc<crate::control::security::siem::SiemExporter>,
-    /// JWKS registry for multi-provider JWT validation (None = JWT disabled).
+    /// JWKS registry for static `[auth.jwt]` and catalog OIDC providers.
+    /// Boot builds it on every server, with or without a provider.
+    /// `None` holds only before boot wiring, and every bearer token is then refused.
     pub jwks_registry: Option<Arc<crate::control::security::jwks::registry::JwksRegistry>>,
     /// Dead-Letter Queue for sync-rejected deltas.
     pub sync_dlq: Mutex<SyncDlq>,
@@ -153,6 +157,9 @@ pub struct SharedState {
     /// Per-group gates that order the apply loop's writes against snapshot
     /// installs. Set by `start_raft`.
     pub raft_apply_gates: OnceLock<Arc<nodedb_cluster::GroupApplyGates>>,
+    /// The record of this node's fail-stopped Raft group disks, for the health
+    /// surfaces. Set by `start_raft`.
+    pub raft_disk_halts: OnceLock<Arc<nodedb_cluster::group_disk::GroupDiskHalts>>,
     /// Answers whether a read can be served here: leadership confirmed for a
     /// linearizable read, replica freshness for a bounded-staleness one.
     /// Set by `start_raft`.
@@ -220,15 +227,16 @@ pub struct SharedState {
     pub array_subscriber_cursors: std::sync::Arc<crate::control::array_sync::SubscriberMap>,
     /// Cross-shard merger registry for HLC-ordered multi-shard delivery.
     pub array_merger_registry: std::sync::Arc<crate::control::array_sync::MergerRegistry>,
-    /// Registry of active cross-cluster observer links for mirror databases.
-    /// One entry per mirror following a source cluster. `ALTER DATABASE PROMOTE`
-    /// tears down the source link through it. Added on mirror creation or
-    /// restart-resume, removed on promotion or `DROP DATABASE`.
-    pub mirror_link_registry: Arc<crate::control::mirror::MirrorLinkRegistry>,
+    /// This node's observer links and the databases that refuse client writes.
+    pub mirror: crate::control::mirror::MirrorState,
     /// Database-id allocator. Allocate through
     /// `control::database::allocate_database_id`, which replicates the id
     /// through metadata group 0 when that group runs.
     pub database_registry: crate::control::database::DatabaseRegistry,
+    /// This cluster's database id space. Set by `start_raft`, which runs
+    /// before any listener opens. Read it through
+    /// `SharedState::database_id_space`.
+    pub(super) database_id_space: OnceLock<u64>,
     /// Global surrogate registry for stable cross-engine PK ↔ Surrogate allocation.
     pub surrogate_registry: crate::control::surrogate::SurrogateRegistryHandle,
     /// CP-side surrogate assigner for INSERT/UPSERT paths.
@@ -272,16 +280,8 @@ pub struct SharedState {
     pub watermark_tracker: Arc<crate::event::watermark_tracker::WatermarkTracker>,
     /// Event Plane memory budget (512 MB cap).
     pub event_plane_budget: Arc<crate::event::budget::EventPlaneBudget>,
-    /// Cross-shard event dispatcher. Boot wires it with the cluster handle.
-    pub cross_shard_dispatcher: Option<Arc<crate::event::cross_shard::CrossShardDispatcher>>,
-    /// Cross-shard dead letter queue. Boot wires it with the cluster handle.
-    pub cross_shard_dlq: Option<Arc<Mutex<crate::event::cross_shard::CrossShardDlq>>>,
-    /// Cross-shard delivery metrics. Boot wires them with the cluster handle.
-    pub cross_shard_metrics: Option<Arc<crate::event::cross_shard::CrossShardMetrics>>,
-    /// Cross-shard applied-request dedup store, installed at Raft group
-    /// setup. Every committed redo that carries a cross-shard key records it
-    /// here as it applies.
-    pub cross_shard_dedup: OnceLock<Arc<crate::event::cross_shard::CrossShardDedup>>,
+    /// Cross-shard event delivery.
+    pub cross_shard: super::cross_shard::CrossShardState,
     /// Open chunked redo streams: the chunks every data-group apply holds
     /// until each stream's final entry.
     pub redo_chunks: Arc<crate::control::wal_replication::transaction_redo::RedoChunkStore>,
@@ -422,10 +422,8 @@ pub struct SharedState {
     /// Durable ledgers of the Event Plane's non-idempotent sinks. Set by the
     /// Event Plane before its consumers start.
     pub sink_ledgers: OnceLock<Arc<crate::event::sink_ledger::SinkLedgers>>,
-    /// Test-only drop guard: owns the auto-cleaning temp directory the test
-    /// constructor roots its CDC-offset / job-history / MV-persistence stores
-    /// under, so they're removed on drop instead of leaking `/tmp/nodedb-test-*`
-    /// dirs across a test session. `None` in production.
+    /// Test-only drop guard: owns the temp directory of the test constructor's
+    /// CDC-offset, job-history and MV stores. `None` in production.
     pub _test_state_dir: Option<tempfile::TempDir>,
     /// Schema version counter — bumped on CREATE/DROP/ALTER DDL.
     pub schema_version: crate::control::server::shared::session::plan_cache::SchemaVersion,

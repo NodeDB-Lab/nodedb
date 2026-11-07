@@ -416,6 +416,9 @@ pub fn error_to_sqlstate(err: &crate::Error) -> (&'static str, &'static str, Str
             sqlstate::READ_ONLY_SQL_TRANSACTION,
             err.to_string(),
         ),
+        crate::Error::MirrorSyncTimeout { .. } => {
+            ("ERROR", sqlstate::MIRROR_SYNC_TIMEOUT, err.to_string())
+        }
         // The client redirects the strong read to the source cluster.
         crate::Error::StaleReadNotLeader { .. } => {
             ("ERROR", sqlstate::STALE_READ_NOT_LEADER, err.to_string())

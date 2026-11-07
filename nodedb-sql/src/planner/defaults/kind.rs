@@ -48,7 +48,7 @@ impl Generator {
             Self::NanoidLen(len) => {
                 nodedb_types::Value::String(nodedb_types::id_gen::nanoid_with_length(len))
             }
-            Self::Now => nodedb_types::Value::String(now_rfc3339()),
+            Self::Now => nodedb_types::Value::String(now_rfc3339()?),
         };
         Ok(value)
     }
@@ -63,13 +63,18 @@ pub(super) fn cuid2_with_length(len: usize) -> crate::Result<String> {
 }
 
 /// Render the current wall-clock instant the way `DEFAULT NOW()` stores it.
-fn now_rfc3339() -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    chrono::DateTime::from_timestamp_millis(now.as_millis() as i64)
+///
+/// A clock outside the range a timestamp holds is an error. A stored default
+/// of epoch 0 reads as a real time.
+fn now_rfc3339() -> crate::Result<String> {
+    nodedb_types::checked_wall_now_ms()
+        .and_then(chrono::DateTime::from_timestamp_millis)
         .map(|dt| dt.to_rfc3339())
-        .unwrap_or_else(|| now.as_millis().to_string())
+        .ok_or_else(|| SqlError::DataException {
+            detail: "DEFAULT NOW(): the system clock reads outside the timestamp range; \
+                     correct the NTP or RTC config and retry"
+                .into(),
+        })
 }
 
 /// Classify the keyword-spelled defaults: the ID generators and `NOW()`.
@@ -135,4 +140,18 @@ pub(super) fn parametric_or_literal(expr: &str, upper: &str) -> crate::Result<Op
     }
 
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `DEFAULT NOW()` stores an RFC-3339 time of the running clock.
+    #[test]
+    fn default_now_stores_the_current_time() {
+        let before = nodedb_types::checked_wall_now_ms().expect("clock after the epoch");
+        let stored = now_rfc3339().expect("clock in range");
+        let parsed = chrono::DateTime::parse_from_rfc3339(&stored).expect("RFC-3339");
+        assert!(parsed.timestamp_millis() >= before, "{stored}");
+    }
 }

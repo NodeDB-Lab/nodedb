@@ -28,22 +28,23 @@ pub fn load_all(catalog: &SystemCatalog) -> Result<ArrayCatalog, NodeDbError> {
 
 /// Register every entry of a boot-time `load_all_arrays` read into `reg`.
 ///
-/// Boot fails open: a read error or an entry that does not register logs a
-/// warning and the rest boots. `register` refuses an id already present, so
-/// a second load never duplicates an entry.
-pub fn register_loaded(reg: &mut ArrayCatalog, loaded: crate::Result<Vec<ArrayCatalogEntry>>) {
-    match loaded {
-        Ok(entries) => {
-            for entry in entries {
-                if let Err(e) = reg.register(entry) {
-                    tracing::warn!(error = %e, "failed to register array at startup");
-                }
-            }
+/// `Err` when the read failed or an entry does not register: an array the
+/// catalog declares and the registry lacks reads as absent. An id already
+/// present is skipped, so a second load never duplicates an entry.
+pub fn register_loaded(
+    reg: &mut ArrayCatalog,
+    loaded: crate::Result<Vec<ArrayCatalogEntry>>,
+) -> crate::Result<()> {
+    for entry in loaded? {
+        if reg.lookup_by_id(&entry.array_id).is_some() {
+            continue;
         }
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to load _system.arrays at startup");
-        }
+        reg.register(entry).map_err(|e| crate::Error::Storage {
+            engine: "array".into(),
+            detail: format!("array catalog entry did not register: {e}"),
+        })?;
     }
+    Ok(())
 }
 
 /// Persist (or overwrite) a single entry.

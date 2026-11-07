@@ -18,9 +18,11 @@ use std::time::Duration;
 use nodedb_cluster::calvin::SEQUENCER_GROUP_ID;
 use nodedb_cluster::{METADATA_GROUP_ID, MultiRaft};
 
+use crate::control::cluster::calvin::scheduler::NOT_YET_APPLIED_EPOCH;
 use crate::control::security::auth_fence::cluster::{hosts_group, routed_groups};
 use crate::control::state::SharedState;
 use crate::control::wal_replication::ReplicatedEntry;
+use crate::control::wal_replication::types::MirrorCalvinFloor;
 use crate::types::DatabaseId;
 
 use super::ordered_cut::{CutKey, CutWindow, OrderedCut};
@@ -171,11 +173,12 @@ fn propose_if_due(state: &SharedState, cut: &OrderedCut, group_id: u64) -> crate
     let Some(&vshard_id) = vshards.first() else {
         return Ok(());
     };
+    let floors = mirror_calvin_floors(state, cut, &vshards);
     let bytes = ReplicatedEntry::new(
         BARRIER_FRAME_TENANT,
         DatabaseId::DEFAULT.as_u64(),
         vshard_id,
-        cut.barrier_write(),
+        cut.barrier_write(floors),
     )
     .encode()?;
     let landed = {
@@ -201,6 +204,30 @@ fn propose_if_due(state: &SharedState, cut: &OrderedCut, group_id: u64) -> crate
         ),
     }
     Ok(())
+}
+
+/// The fully applied Calvin epoch of each of `vshards`, for a mirror cut's
+/// barrier. Empty for any other cut.
+///
+/// The caller reads this on the group's leader before it proposes. A position
+/// at or below a watermark applied here, so its redo committed in this log,
+/// and the barrier lands after it. A later copy of such a position, after the
+/// barrier, installs nothing on the mirror: its ledger holds the watermark.
+fn mirror_calvin_floors(
+    state: &SharedState,
+    cut: &OrderedCut,
+    vshards: &[u32],
+) -> Vec<MirrorCalvinFloor> {
+    if cut.mirror.is_none() {
+        return Vec::new();
+    }
+    vshards
+        .iter()
+        .filter_map(|&vshard| {
+            let (epoch, _) = state.calvin.applied.get(vshard)?.snapshot();
+            (epoch != NOT_YET_APPLIED_EPOCH).then_some(MirrorCalvinFloor { vshard, epoch })
+        })
+        .collect()
 }
 
 /// Report that the cut's window closed before `group_id` applied its

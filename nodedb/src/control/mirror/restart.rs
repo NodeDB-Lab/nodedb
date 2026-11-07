@@ -1,97 +1,81 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Restart-resume for mirror databases.
+//! Which mirror databases need an applier, and where each one resumes.
 //!
-//! On server start, each database with `mirror_origin.is_some()` and
-//! `status != Promoted` must have its cross-cluster observer link
-//! re-established from the persisted `last_applied` LSN. This avoids
-//! fetching a fresh snapshot when the server simply rebooted — the source
-//! will stream entries from `last_applied + 1` onward.
+//! The applier supervisor reads this set on every pass, so a restart and a new
+//! `MIRROR DATABASE` take one path. A reboot fetches no fresh capture: each
+//! source group resumes from the replicated cut state.
 //!
-//! A `Promoted` mirror is a normal writable database; it must NOT
-//! attempt to reconnect.
+//! A `Promoted` mirror is a normal writable database and follows no source.
 //!
-//! Recovery uses the `MirrorLagRecord` from `_system.mirror_lag` for the
-//! precise LSN watermark. If no lag record exists the descriptor's
-//! `last_applied` field is used. If that is also zero the mirror restarts
-//! from bootstrap (LSN 0 triggers a fresh snapshot on the source side).
+//! A mirror with no ready cut starts from bootstrap.
 
-use nodedb_types::MirrorStatus;
-use tracing::{info, warn};
+use nodedb_types::{DatabaseId, MirrorGroupPosition, MirrorMode, MirrorStatus};
 
 use crate::control::security::catalog::SystemCatalog;
 
-/// Summary of one database's restart decision.
+/// One mirror database's restart decision.
 #[derive(Debug)]
 pub struct MirrorRestartDecision {
+    /// The mirror's id, which is the source database's id.
+    pub database: DatabaseId,
     pub database_name: String,
-    pub resume_from_lsn: u64,
+    /// The name `[mirror.sources]` knows the source cluster by.
+    pub source_cluster: String,
+    pub source_database_name: String,
+    pub mode: MirrorMode,
+    pub status: MirrorStatus,
+    /// The newest source cut that committed in every mirror group.
+    pub ready_cut: u64,
+    /// Where each source group resumes.
+    pub positions: Vec<MirrorGroupPosition>,
     pub needs_bootstrap: bool,
 }
 
-/// Enumerate databases in `catalog` that need their observer link restarted.
+impl MirrorRestartDecision {
+    /// Whether an applier has work on this mirror. A failed mirror waits for an
+    /// operator, and a promoting one ends on its own path.
+    pub fn wants_applier(&self) -> bool {
+        match self.status {
+            MirrorStatus::Bootstrapping { .. }
+            | MirrorStatus::Following
+            | MirrorStatus::Degraded
+            | MirrorStatus::Disconnected => true,
+            MirrorStatus::Promoting { .. }
+            | MirrorStatus::Failed { .. }
+            | MirrorStatus::Promoted => false,
+        }
+    }
+}
+
+/// Every mirror in `catalog` that is not promoted.
 ///
-/// Returns a list of databases (by name + resume LSN) that are mirrors but
-/// not yet promoted. Databases with `MirrorStatus::Promoted` are excluded —
-/// they are normal writable databases and must not attempt to reconnect.
+/// A cut state that does not read fails the enumeration: a guessed position
+/// applies entries twice, or skips them.
 pub fn enumerate_resumable_mirrors(
     catalog: &SystemCatalog,
 ) -> crate::Result<Vec<MirrorRestartDecision>> {
-    let databases = catalog.list_databases()?;
     let mut decisions = Vec::new();
-
-    for db in databases {
-        let origin = match db.mirror_origin {
-            Some(ref o) => o,
-            None => continue,
+    for db in catalog.list_databases()? {
+        let Some(origin) = db.mirror_origin else {
+            continue;
         };
-
-        // Promoted mirrors are normal writable databases — skip.
         if matches!(origin.status, MirrorStatus::Promoted) {
-            info!(
-                database = %db.name,
-                "mirror restart: database is Promoted — skipping observer reconnect"
-            );
             continue;
         }
-
-        // Determine the precise resume LSN: prefer the lag record (written
-        // atomically with every DDL apply) over the descriptor's field
-        // (updated only at bootstrap completion and PROMOTE).
-        let resume_lsn = match catalog.get_mirror_lag(db.id) {
-            Ok(Some(lag)) => lag.last_applied_lsn.as_u64(),
-            Ok(None) => origin.last_applied.as_u64(),
-            Err(e) => {
-                warn!(
-                    database = %db.name,
-                    error = %e,
-                    "mirror restart: failed to read mirror_lag; falling back to descriptor LSN"
-                );
-                origin.last_applied.as_u64()
-            }
-        };
-
-        // LSN 0 means no entries have ever been applied — a fresh snapshot
-        // is required from the source. The bootstrap receiver handles this
-        // automatically: when the mirror connects with LSN 0 the source
-        // streams a full snapshot.
-        let needs_bootstrap = resume_lsn == 0;
-
+        let cut_state = catalog.get_mirror_cut_state(db.id)?.unwrap_or_default();
         decisions.push(MirrorRestartDecision {
-            database_name: db.name.clone(),
-            resume_from_lsn: resume_lsn,
-            needs_bootstrap,
+            database: db.id,
+            database_name: db.name,
+            source_cluster: origin.source_cluster,
+            source_database_name: origin.source_database_name,
+            mode: origin.mode,
+            status: origin.status,
+            ready_cut: cut_state.ready_cut,
+            needs_bootstrap: cut_state.ready_cut == 0,
+            positions: cut_state.positions,
         });
-
-        info!(
-            database = %db.name,
-            resume_lsn,
-            needs_bootstrap,
-            status = ?origin.status,
-            "mirror restart: scheduling observer resume"
-        );
     }
-
     Ok(decisions)
 }
 
@@ -99,41 +83,21 @@ pub fn enumerate_resumable_mirrors(
 mod tests {
     use std::path::PathBuf;
 
-    use nodedb_types::{DatabaseId, Lsn, MirrorLagRecord, MirrorMode, MirrorOrigin, MirrorStatus};
+    use nodedb_types::{MirrorCutState, MirrorFailure};
     use tempfile::TempDir;
 
+    use super::super::test_fixture::mirror_descriptor;
     use super::*;
     use crate::control::security::catalog::SystemCatalog;
-    use crate::control::security::catalog::database_types::{DatabaseDescriptor, DatabaseStatus};
+    use crate::control::security::catalog::database_types::DatabaseDescriptor;
 
     fn open_tmp_catalog(tmp: &TempDir) -> SystemCatalog {
         let path: PathBuf = tmp.path().join("system.redb");
         SystemCatalog::open(&path).expect("open catalog")
     }
 
-    fn make_mirror_db(
-        id: u64,
-        name: &str,
-        status: MirrorStatus,
-        last_applied: Lsn,
-    ) -> DatabaseDescriptor {
-        DatabaseDescriptor {
-            id: DatabaseId::new(id),
-            name: name.to_string(),
-            status: DatabaseStatus::Mirroring,
-            created_at_lsn: 0,
-            quota_ref: 0,
-            parent_clone: None,
-            mirror_origin: Some(MirrorOrigin {
-                source_cluster: "prod-us".to_string(),
-                source_database: DatabaseId::new(0),
-                mode: MirrorMode::Async,
-                last_applied,
-                status,
-            }),
-            audit_dml: nodedb_types::AuditDmlMode::None,
-            idle_session_timeout_secs: 0,
-        }
+    fn make_mirror_db(id: u64, name: &str, status: MirrorStatus) -> DatabaseDescriptor {
+        mirror_descriptor(id, name, status)
     }
 
     #[test]
@@ -141,12 +105,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let catalog = open_tmp_catalog(&tmp);
         let db_id = DatabaseId::new(100);
-        let db = make_mirror_db(
-            db_id.as_u64(),
-            "promoted_db",
-            MirrorStatus::Promoted,
-            Lsn::new(50),
-        );
+        let db = make_mirror_db(db_id.as_u64(), "promoted_db", MirrorStatus::Promoted);
         catalog.put_database(&db).unwrap();
 
         let decisions = enumerate_resumable_mirrors(&catalog).unwrap();
@@ -157,25 +116,24 @@ mod tests {
     }
 
     #[test]
-    fn following_mirror_included_with_lag_lsn() {
+    fn following_mirror_resumes_from_its_cut_state() {
         let tmp = TempDir::new().unwrap();
         let catalog = open_tmp_catalog(&tmp);
         let db_id = DatabaseId::new(101);
-        let db = make_mirror_db(
-            db_id.as_u64(),
-            "follower_db",
-            MirrorStatus::Following,
-            Lsn::new(10),
-        );
+        let db = make_mirror_db(db_id.as_u64(), "follower_db", MirrorStatus::Following);
         catalog.put_database(&db).unwrap();
 
-        // Write a lag record with a higher LSN than the descriptor.
+        let position = nodedb_types::MirrorGroupPosition {
+            group_id: 2,
+            log_index: 77,
+        };
         catalog
-            .put_mirror_lag(
+            .raise_mirror_cut_state(
                 db_id,
-                &MirrorLagRecord {
-                    last_applied_lsn: Lsn::new(99),
-                    last_apply_ms: 1_000,
+                &MirrorCutState {
+                    ready_cut: 99,
+                    positions: vec![position],
+                    ..MirrorCutState::default()
                 },
             )
             .unwrap();
@@ -185,35 +143,15 @@ mod tests {
             .iter()
             .find(|d| d.database_name == "follower_db")
             .unwrap();
-        assert_eq!(d.resume_from_lsn, 99, "should use lag record LSN");
+        assert_eq!(d.database, db_id);
+        assert_eq!(d.ready_cut, 99);
+        assert_eq!(d.positions, vec![position]);
         assert!(!d.needs_bootstrap);
+        assert!(d.wants_applier());
     }
 
     #[test]
-    fn mirror_with_no_lag_record_falls_back_to_descriptor_lsn() {
-        let tmp = TempDir::new().unwrap();
-        let catalog = open_tmp_catalog(&tmp);
-        let db_id = DatabaseId::new(102);
-        let db = make_mirror_db(
-            db_id.as_u64(),
-            "no_lag_db",
-            MirrorStatus::Following,
-            Lsn::new(42),
-        );
-        catalog.put_database(&db).unwrap();
-        // No lag record written.
-
-        let decisions = enumerate_resumable_mirrors(&catalog).unwrap();
-        let d = decisions
-            .iter()
-            .find(|d| d.database_name == "no_lag_db")
-            .unwrap();
-        assert_eq!(d.resume_from_lsn, 42);
-        assert!(!d.needs_bootstrap);
-    }
-
-    #[test]
-    fn mirror_with_zero_lsn_needs_bootstrap() {
+    fn mirror_with_no_cut_state_needs_bootstrap() {
         let tmp = TempDir::new().unwrap();
         let catalog = open_tmp_catalog(&tmp);
         let db_id = DatabaseId::new(103);
@@ -224,7 +162,6 @@ mod tests {
                 bytes_done: 0,
                 bytes_total: 0,
             },
-            Lsn::new(0),
         );
         catalog.put_database(&db).unwrap();
 
@@ -233,7 +170,30 @@ mod tests {
             .iter()
             .find(|d| d.database_name == "fresh_db")
             .unwrap();
-        assert_eq!(d.resume_from_lsn, 0);
+        assert_eq!(d.ready_cut, 0);
+        assert!(d.positions.is_empty());
         assert!(d.needs_bootstrap);
+        assert!(d.wants_applier());
+    }
+
+    #[test]
+    fn a_failed_mirror_stays_listed_and_gets_no_applier() {
+        let tmp = TempDir::new().unwrap();
+        let catalog = open_tmp_catalog(&tmp);
+        let db = make_mirror_db(
+            104,
+            "failed_db",
+            MirrorStatus::Failed {
+                failure: MirrorFailure::SourceDropped,
+            },
+        );
+        catalog.put_database(&db).unwrap();
+
+        let decisions = enumerate_resumable_mirrors(&catalog).unwrap();
+        let d = decisions
+            .iter()
+            .find(|d| d.database_name == "failed_db")
+            .unwrap();
+        assert!(!d.wants_applier());
     }
 }

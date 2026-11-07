@@ -98,6 +98,7 @@ mod tests {
             hlc: state.hlc_clock.now().wall_ns,
             restore_point: 0,
             capture: None,
+            mirror: None,
         }
     }
 

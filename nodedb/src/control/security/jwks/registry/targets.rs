@@ -47,6 +47,11 @@ impl RefreshTargets {
         self.catalog.contains_key(name)
     }
 
+    /// The name of every registered catalog provider.
+    pub fn catalog_names(&self) -> Vec<String> {
+        self.catalog.keys().cloned().collect()
+    }
+
     /// Every endpoint to fetch, static providers first.
     pub fn snapshot(&self) -> Vec<RefreshTarget> {
         self.statics

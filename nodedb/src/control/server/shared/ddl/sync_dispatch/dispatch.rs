@@ -8,7 +8,7 @@ use crate::bridge::envelope::{PhysicalPlan, Priority, Request, Response};
 use crate::control::server::shared::clone_write::CloneCheckedTask;
 use crate::control::server::shared::response_payload::payload_or_typed_error;
 use crate::control::server::shared::session::{StatementDeadline, statement_deadline};
-use crate::control::server::shared::write_admission::plan_is_write;
+use crate::control::server::shared::write_admission::{check_mirror_writable, plan_is_write};
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, ReadConsistency, TenantId, TraceId, VShardId};
 
@@ -119,6 +119,13 @@ pub(crate) async fn dispatch_authorized(
     // otherwise. A linearizable read is confirmed where it runs
     // (`dispatch_utils::owner_read`).
     let plan = if plan_is_write(&task.plan) {
+        // This door reaches the core with no write funnel in front of it.
+        check_mirror_writable(
+            state,
+            task.database_id,
+            crate::event::EventSource::User,
+            || Ok(true),
+        )?;
         task.plan
     } else {
         use crate::control::server::dispatch_utils::{OwnedRead, OwnedReadScope, route_owned_read};
@@ -176,24 +183,53 @@ struct PlanDispatch {
     event_source: crate::event::EventSource,
 }
 
+/// Run `task` on its owning core for a committed log entry, bounded by
+/// `deadline` alone. An apply serves no statement, and its work can outlast the
+/// node's default statement deadline.
+pub(crate) async fn dispatch_committed_apply(
+    state: &SharedState,
+    task: SystemTask<'_>,
+    deadline: Instant,
+    event_source: crate::event::EventSource,
+) -> crate::Result<Response> {
+    let vshard_id = task.collection.vshard();
+    let dispatch = PlanDispatch {
+        tenant_id: task.tenant_id,
+        database_id: task.collection.database_id(),
+        vshard_id,
+        plan: task.plan,
+        deadline: StatementDeadline::after(deadline.saturating_duration_since(Instant::now())),
+        event_source,
+    };
+    send_plan_until(state, dispatch, deadline).await
+}
+
 /// Shared transport: build the request envelope, dispatch, await the response.
 async fn dispatch_plan(state: &SharedState, dispatch: PlanDispatch) -> crate::Result<Response> {
+    // Whichever comes first: the running statement's deadline, or the caller's
+    // own bound. A DDL statement a session bounded with `statement_timeout`
+    // stops with the statement; a background caller with no statement scope
+    // keeps exactly the bound it asked for.
+    let deadline = statement_deadline(state.tuning.network.default_deadline_secs)
+        .min(dispatch.deadline.instant());
+    send_plan_until(state, dispatch, deadline).await
+}
+
+/// Build the request envelope with `deadline`, dispatch, await the response.
+async fn send_plan_until(
+    state: &SharedState,
+    dispatch: PlanDispatch,
+    deadline: Instant,
+) -> crate::Result<Response> {
     let PlanDispatch {
         tenant_id,
         database_id,
         vshard_id,
         plan,
-        deadline: cap,
+        deadline: _,
         event_source,
     } = dispatch;
     let request_id = state.next_request_id();
-
-    // Whichever comes first: the running statement's deadline, or the caller's
-    // own bound. A DDL statement a session bounded with `statement_timeout`
-    // stops with the statement; a background caller with no statement scope
-    // keeps exactly the bound it asked for.
-    let deadline =
-        statement_deadline(state.tuning.network.default_deadline_secs).min(cap.instant());
 
     let request = Request {
         request_id,

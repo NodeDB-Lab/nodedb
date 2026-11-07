@@ -30,6 +30,7 @@ pub(super) fn wire_proposers(
     install_applied_index_sink(shared, raft_loop);
     install_apply_gates(shared, raft_loop);
     install_async_proposer(shared, raft_loop, &tracker)?;
+    super::mirror_raft::install_mirror_raft(shared, raft_loop);
     spawn_apply_loop(shared, tracker, apply_rx);
     Ok(())
 }
@@ -198,6 +199,16 @@ fn install_apply_gates(shared: &Arc<SharedState>, raft_loop: &Arc<RaftLoopType>)
         .apply_gates();
     if shared.raft_apply_gates.set(apply_gates).is_err() {
         tracing::warn!("raft_apply_gates already set — start_raft appears to have run twice");
+    }
+    // A fail-stopped group disk leaves the node serving its other groups, so
+    // the health surfaces read this record to report the lost replica.
+    let disk_halts = raft_loop
+        .multi_raft_handle()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .disk_halts();
+    if shared.raft_disk_halts.set(disk_halts).is_err() {
+        tracing::warn!("raft_disk_halts already set — start_raft appears to have run twice");
     }
 }
 

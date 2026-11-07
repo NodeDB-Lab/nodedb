@@ -48,4 +48,6 @@ pub struct CutBarrierWire {
     /// The capture each group's leader takes when it applies the barrier,
     /// `None` for a cut that captures nothing.
     pub capture: Option<CutCaptureWire>,
+    /// What the cut tells a source's mirrors, `None` for a cut of no mirror.
+    pub mirror: Option<nodedb_types::MirrorCutMark>,
 }

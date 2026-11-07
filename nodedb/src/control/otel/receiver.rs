@@ -19,6 +19,7 @@ use axum::routing::post;
 use prost::Message;
 use tracing::info;
 
+use super::auth_error::OtelAuthError;
 use super::proto;
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::security::tls_policy::TransportSecurity;
@@ -87,7 +88,7 @@ pub async fn receive_metrics(
 ) -> impl IntoResponse {
     let identity = match authenticate_otel(&headers, &state, &peer.to_string()).await {
         Ok(identity) => identity,
-        Err(message) => return (StatusCode::UNAUTHORIZED, message),
+        Err(error) => return (StatusCode::UNAUTHORIZED, error.to_string()),
     };
     let data = decompress_body(&headers, &body);
     let req = match proto::ExportMetricsServiceRequest::decode(&data[..]) {
@@ -141,7 +142,7 @@ pub async fn receive_traces(
 ) -> impl IntoResponse {
     let identity = match authenticate_otel(&headers, &state, &peer.to_string()).await {
         Ok(identity) => identity,
-        Err(message) => return (StatusCode::UNAUTHORIZED, message),
+        Err(error) => return (StatusCode::UNAUTHORIZED, error.to_string()),
     };
     let data = decompress_body(&headers, &body);
     let req = match proto::ExportTraceServiceRequest::decode(&data[..]) {
@@ -166,7 +167,7 @@ pub async fn receive_logs(
 ) -> impl IntoResponse {
     let identity = match authenticate_otel(&headers, &state, &peer.to_string()).await {
         Ok(identity) => identity,
-        Err(message) => return (StatusCode::UNAUTHORIZED, message),
+        Err(error) => return (StatusCode::UNAUTHORIZED, error.to_string()),
     };
     let data = decompress_body(&headers, &body);
     let req = match proto::ExportLogsServiceRequest::decode(&data[..]) {
@@ -413,18 +414,16 @@ pub(super) async fn authenticate_otel(
     headers: &HeaderMap,
     shared: &SharedState,
     peer_addr: &str,
-) -> Result<AuthenticatedIdentity, String> {
+) -> Result<AuthenticatedIdentity, OtelAuthError> {
     let header = headers
         .get("authorization")
-        .ok_or_else(|| "missing Authorization: Bearer <token> header".to_owned())?;
-    let value = header
-        .to_str()
-        .map_err(|_| "invalid authorization header encoding".to_owned())?;
+        .ok_or(OtelAuthError::MissingHeader)?;
+    let value = header.to_str().map_err(|_| OtelAuthError::HeaderEncoding)?;
     let token = value
         .strip_prefix("Bearer ")
         .map(str::trim)
         .filter(|token| !token.is_empty())
-        .ok_or_else(|| "invalid authorization header".to_owned())?;
+        .ok_or(OtelAuthError::MalformedHeader)?;
 
     // A JWT goes through the shared bearer gate, which audits every refusal and login.
     // An OTLP request carries no session, so the session id stays empty.
@@ -435,7 +434,7 @@ pub(super) async fn authenticate_otel(
         return admit_transport(shared, identity, peer_addr);
     }
     let identity = session_auth::verify_api_key_identity(shared, token, peer_addr, "OTLP")
-        .ok_or_else(|| "invalid bearer token".to_owned())?;
+        .ok_or(OtelAuthError::InvalidToken)?;
     admit_transport(shared, identity, peer_addr)
 }
 
@@ -449,9 +448,9 @@ fn admit_transport(
     shared: &SharedState,
     identity: AuthenticatedIdentity,
     peer_addr: &str,
-) -> Result<AuthenticatedIdentity, String> {
+) -> Result<AuthenticatedIdentity, OtelAuthError> {
     session_auth::check_transport_security(shared, &identity, OTLP_TRANSPORT, peer_addr)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| OtelAuthError::Transport(Box::new(e)))?;
     Ok(identity)
 }
 

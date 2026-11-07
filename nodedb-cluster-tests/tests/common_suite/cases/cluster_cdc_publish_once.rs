@@ -116,6 +116,81 @@ async fn replicated_write_publishes_exactly_one_change_event_per_node() {
     cluster.shutdown().await;
 }
 
+/// An array write outside the default database publishes its event on every
+/// node, in autocommit and in a transaction. The event names the array bare, in
+/// its own database.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_array_write_in_a_named_database_publishes_its_event() {
+    const DATABASE: &str = "cdc_named_db";
+    const ARRAY: &str = "cdc_named_arr";
+    let cluster = TestCluster::spawn_three()
+        .await
+        .expect("spawn 3-node cluster");
+    cluster
+        .exec_ddl_on_any_leader(&format!("CREATE DATABASE {DATABASE}"))
+        .await
+        .unwrap_or_else(|e| panic!("CREATE DATABASE {DATABASE}: {e}"));
+    for node in &cluster.nodes {
+        node.exec(&format!("USE DATABASE {DATABASE}"))
+            .await
+            .unwrap_or_else(|e| panic!("USE DATABASE {DATABASE}: {e}"));
+    }
+    cluster
+        .exec_ddl_on_any_leader(&format!(
+            "CREATE ARRAY {ARRAY} DIMS (x INT64 [0..15]) ATTRS (v INT64) TILE_EXTENTS (16) \
+             CELL_ORDER ROW_MAJOR"
+        ))
+        .await
+        .unwrap_or_else(|e| panic!("CREATE ARRAY {ARRAY}: {e}"));
+    let database = cluster.nodes[0]
+        .shared
+        .credentials
+        .catalog()
+        .get_database_id_by_name(DATABASE)
+        .expect("catalog")
+        .expect("the database");
+
+    let mut subs: Vec<Subscription> = cluster
+        .nodes
+        .iter()
+        .map(|node| {
+            node.shared
+                .change_stream
+                .subscribe_in_database(Some(ARRAY.to_string()), None, database)
+        })
+        .collect();
+
+    cluster.nodes[0]
+        .exec(&format!("INSERT INTO ARRAY {ARRAY} COORDS (0) VALUES (10)"))
+        .await
+        .unwrap_or_else(|e| panic!("insert: {e}"));
+    let writer = &cluster.nodes[0];
+    writer.exec("BEGIN").await.expect("begin");
+    writer
+        .exec(&format!("INSERT INTO ARRAY {ARRAY} COORDS (1) VALUES (11)"))
+        .await
+        .unwrap_or_else(|e| panic!("insert in a transaction: {e}"));
+    writer.exec("COMMIT").await.expect("commit");
+    cluster
+        .wait_for_full_apply_convergence(Duration::from_secs(15))
+        .await;
+
+    for (idx, sub) in subs.iter_mut().enumerate() {
+        for write in ["autocommit", "transaction"] {
+            let event = match tokio::time::timeout(ARRIVAL_TIMEOUT, sub.recv_sequenced()).await {
+                Ok(Ok(event)) => event,
+                Ok(Err(e)) => panic!("node {idx}: change stream closed: {e}"),
+                Err(_) => panic!("node {idx}: the {write} array write published no event"),
+            };
+            assert_eq!(event.collection, ARRAY, "node {idx}: {write}");
+            assert_eq!(event.operation, ChangeOperation::Insert, "node {idx}");
+        }
+    }
+
+    drop(subs);
+    cluster.shutdown().await;
+}
+
 /// Rows the cursor tests write.
 const ROWS: usize = 4;
 

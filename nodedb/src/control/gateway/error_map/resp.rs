@@ -163,6 +163,7 @@ impl GatewayErrorMap {
             | Error::RoleInheritanceDepthExceeded { .. }
             | Error::OllpExhausted { .. }
             | Error::MirrorReadOnly { .. }
+            | Error::MirrorSyncTimeout { .. }
             | Error::StaleReadNotLeader { .. } => format!(
                 "{} {err}",
                 remote_code_to_resp_prefix(crate::error_classify::classify(err).code())

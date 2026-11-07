@@ -11,7 +11,6 @@
 
 use nodedb_sql::parser::query_function::VerifyAuditChainArgs;
 
-use crate::control::security::audit::verify_chain;
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::state::SharedState;
 use crate::types::DatabaseId;
@@ -64,16 +63,10 @@ pub async fn verify_audit_chain(
         .map_err(|_| err("22023", "to_seq must be an integer"))?
         .unwrap_or(u64::MAX);
 
-    let (entries, tail_hash) = state
-        .audit_chain_snapshot()
+    let (report, last_in_range) = state
+        .verify_audit_chain(from_seq, to_seq)
         .map_err(|e| DdlError::from_error_in_context("audit log read failed", &e))?;
-    let report = verify_chain(&entries, from_seq, to_seq, &tail_hash);
-    let last_checked_seq = entries
-        .iter()
-        .map(|e| e.seq)
-        .filter(|seq| (from_seq..=to_seq).contains(seq))
-        .max()
-        .unwrap_or(from_seq.saturating_sub(1));
+    let last_checked_seq = last_in_range.unwrap_or(from_seq.saturating_sub(1));
 
     let result = serde_json::json!({
         "valid": report.broken_at.is_none(),

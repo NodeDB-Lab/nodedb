@@ -96,7 +96,7 @@ impl CoreLoop {
                 // Test-only fault boundary after a potentially-mutating stage.
                 crate::fail_point!(self.fail_scope, "calvin_static::during_overlay_stage");
             }
-            Ok::<CalvinReply, ErrorCode>(staging.reply)
+            Ok::<CalvinReply, ErrorCode>(staging.into_reply())
         }));
         self.apply_scope.calvin_txn_ordinal = None;
         self.epoch_system_ms = prev_epoch_ms;

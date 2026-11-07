@@ -21,8 +21,15 @@ pub struct RaftLog<S: LogStorage> {
     snapshot_index: u64,
     /// Term of the last entry included in the snapshot.
     snapshot_term: u64,
+    /// Sum of the data length of every entry in `entries`.
+    retained_bytes: u64,
     /// Persistent storage backend.
     storage: S,
+}
+
+/// The data length of `entries`.
+fn data_bytes(entries: &[LogEntry]) -> u64 {
+    entries.iter().map(|e| e.data.len() as u64).sum()
 }
 
 impl<S: LogStorage> RaftLog<S> {
@@ -31,6 +38,7 @@ impl<S: LogStorage> RaftLog<S> {
             entries: Vec::new(),
             snapshot_index: 0,
             snapshot_term: 0,
+            retained_bytes: 0,
             storage,
         }
     }
@@ -41,7 +49,13 @@ impl<S: LogStorage> RaftLog<S> {
         self.snapshot_index = snap_index;
         self.snapshot_term = snap_term;
         self.entries = self.storage.load_entries_after(snap_index)?;
+        self.retained_bytes = data_bytes(&self.entries);
         Ok(())
+    }
+
+    /// The entry bytes this log holds in memory: what compaction would free.
+    pub fn retained_bytes(&self) -> u64 {
+        self.retained_bytes
     }
 
     /// Last log index (snapshot_index if log is empty).
@@ -157,12 +171,14 @@ impl<S: LogStorage> RaftLog<S> {
         }
         self.storage.append(new)?;
         self.entries.extend_from_slice(new);
+        self.retained_bytes = self.retained_bytes.saturating_add(data_bytes(new));
         Ok(true)
     }
 
     /// Append a single entry proposed by the leader.
     pub fn append(&mut self, entry: LogEntry) -> Result<()> {
         self.storage.append(std::slice::from_ref(&entry))?;
+        self.retained_bytes = self.retained_bytes.saturating_add(entry.data.len() as u64);
         self.entries.push(entry);
         Ok(())
     }
@@ -179,6 +195,8 @@ impl<S: LogStorage> RaftLog<S> {
         }
         self.storage.truncate(index)?;
         let offset = (index - self.snapshot_index - 1) as usize;
+        let removed = self.entries.get(offset..).map_or(0, data_bytes);
+        self.retained_bytes = self.retained_bytes.saturating_sub(removed);
         self.entries.truncate(offset);
         Ok(())
     }
@@ -199,6 +217,7 @@ impl<S: LogStorage> RaftLog<S> {
             .compact(last_included_index, last_included_term)?;
         let new_start = last_included_index + 1;
         self.entries.retain(|e| e.index >= new_start);
+        self.retained_bytes = data_bytes(&self.entries);
         self.snapshot_index = last_included_index;
         self.snapshot_term = last_included_term;
         Ok(())
@@ -251,6 +270,50 @@ mod tests {
             index,
             data: vec![],
         }
+    }
+
+    fn sized_entry(term: u64, index: u64, bytes: usize) -> LogEntry {
+        LogEntry {
+            term,
+            index,
+            data: vec![0; bytes],
+        }
+    }
+
+    /// The count follows every change to the log.
+    #[test]
+    fn retained_bytes_follow_append_conflict_and_compaction() {
+        let mut log = RaftLog::new(MemStorage::new());
+        assert_eq!(log.retained_bytes(), 0);
+        log.append(sized_entry(1, 1, 10)).unwrap();
+        log.append_entries(1, &[sized_entry(1, 2, 20), sized_entry(1, 3, 30)])
+            .unwrap();
+        assert_eq!(log.retained_bytes(), 60);
+
+        // A conflict at index 2 removes indexes 2 and 3 and adds one entry.
+        log.append_entries(1, &[sized_entry(2, 2, 5)]).unwrap();
+        assert_eq!(log.retained_bytes(), 15);
+
+        log.apply_snapshot(1, 1).unwrap();
+        assert_eq!(log.retained_bytes(), 5);
+    }
+
+    #[test]
+    fn a_held_entry_resent_adds_no_bytes() {
+        let mut log = RaftLog::new(MemStorage::new());
+        log.append_entries(0, &[sized_entry(1, 1, 10)]).unwrap();
+        log.append_entries(0, &[sized_entry(1, 1, 10)]).unwrap();
+        assert_eq!(log.retained_bytes(), 10);
+    }
+
+    #[test]
+    fn restore_recounts_the_retained_bytes() {
+        let mut log = RaftLog::new(MemStorage::new());
+        log.append(sized_entry(1, 1, 10)).unwrap();
+        log.append(sized_entry(1, 2, 20)).unwrap();
+        let mut restored = RaftLog::new(log.storage);
+        restored.restore().unwrap();
+        assert_eq!(restored.retained_bytes(), 30);
     }
 
     #[test]

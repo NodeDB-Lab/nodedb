@@ -12,7 +12,7 @@ use crate::error::{Result, SqlError};
 use crate::functions::registry::FunctionRegistry;
 use crate::planner::lateral::plan::{LateralJoinArgs, plan_lateral_join};
 use crate::planner::lateral::subquery::{
-    is_lateral_derived, lateral_alias_from_factor, subquery_from_factor,
+    is_lateral_derived, lateral_alias_from_factor, lateral_subquery,
 };
 use crate::resolver::columns::{ColumnNaming, TableScope};
 use crate::types::*;
@@ -68,8 +68,7 @@ pub fn plan_join_from_select(
                             .into(),
                     }
                 })?;
-            let subquery = subquery_from_factor(&join_item.relation)
-                .expect("is_lateral_derived guarantees Derived variant");
+            let subquery = lateral_subquery(&join_item.relation)?;
             let left_join = is_left_join_operator(&join_item.join_operator);
             let projection = super::super::select::convert_projection(&select.projection, scope)?;
             return Ok(Some(plan_lateral_join(LateralJoinArgs {

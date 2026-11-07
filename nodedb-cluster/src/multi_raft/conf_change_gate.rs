@@ -99,7 +99,7 @@ mod tests {
             node.election_deadline_override(Instant::now() - Duration::from_millis(1));
         }
         mr.tick().expect("tick");
-        mr.wait_all_durable_blocking();
+        mr.wait_all_durable_blocking().expect("durable");
         mr.tick().expect("tick");
         assert!(mr.group_role_is_leader(0));
         (mr, dir)

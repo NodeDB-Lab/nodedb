@@ -92,6 +92,12 @@ pub async fn restore_version(
         },
     )
     .with_type_guards_from(state, database_id);
+    super::super::audit_intent::record_action_intent(
+        state,
+        identity,
+        Some(tenant_id),
+        &format!("RESTORE {collection}/{doc_id} to version '{checkpoint_name}'"),
+    )?;
     crate::control::crdt_admission::dispatch_crdt_restore_admitted(
         state,
         crate::control::crdt_admission::CrdtRestoreAdmissionRequest {
@@ -110,16 +116,12 @@ pub async fn restore_version(
     .await
     .map_err(|e| DdlError::from_error_in_context("restore dispatch", &e))?;
 
-    state
-        .audit
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .record(
-            crate::control::security::audit::AuditEvent::AdminAction,
-            Some(tenant_id),
-            &identity.username,
-            &format!("RESTORE {collection}/{doc_id} to version '{checkpoint_name}'"),
-        );
+    state.audit_record(
+        crate::control::security::audit::AuditEvent::AdminAction,
+        Some(tenant_id),
+        &identity.username,
+        &format!("RESTORE {collection}/{doc_id} to version '{checkpoint_name}'"),
+    );
 
     Ok(vec![DdlResult::Status {
         command: "RESTORE".to_string(),

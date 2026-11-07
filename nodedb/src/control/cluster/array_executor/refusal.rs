@@ -180,6 +180,7 @@ pub(super) fn execution_error(context: &str, error: crate::Error) -> ClusterErro
         | crate::Error::RoleInheritanceDepthExceeded { .. }
         | crate::Error::OllpExhausted { .. }
         | crate::Error::MirrorReadOnly { .. }
+        | crate::Error::MirrorSyncTimeout { .. }
         | crate::Error::StaleReadNotLeader { .. }) => {
             let detail = format!("{context}: {other}");
             ClusterError::ShardExecution {

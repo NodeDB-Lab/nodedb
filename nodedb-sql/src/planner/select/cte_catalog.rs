@@ -77,6 +77,11 @@ impl SqlCatalog for CteCatalog<'_> {
         }
     }
 
+    /// A definition nests inside the catalogs of the definitions around it.
+    fn is_statement_relation(&self, name: &str) -> bool {
+        self.relation(name).is_some() || self.inner.is_statement_relation(name)
+    }
+
     fn crs_context(&self) -> nodedb_crs::CrsContext<'_> {
         self.inner.crs_context()
     }

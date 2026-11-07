@@ -87,6 +87,7 @@ impl CoreLoop {
                 epoch_system_ms,
                 reply: answer.reply,
                 user_write: true,
+                mirror: false,
             }),
             reads: Vec::new(),
             snapshot_ordinal: None,

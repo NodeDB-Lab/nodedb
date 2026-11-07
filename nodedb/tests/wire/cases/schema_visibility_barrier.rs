@@ -9,8 +9,8 @@
 //! that surfaces as a corrupt or incomplete read later.
 //!
 //! Tests use a multi-core harness (4 cores) so the fan-out path is
-//! exercised.  The single-core path is covered by the existing
-//! `catalog_schema_evolution.rs` tests.
+//! exercised.  `online_alter_add_column.rs` covers ALTER ADD COLUMN on a
+//! single-core server.
 
 use crate::harness::TestServer;
 

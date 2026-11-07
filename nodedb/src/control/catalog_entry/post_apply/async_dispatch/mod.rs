@@ -19,6 +19,7 @@
 //!
 //! [sync]: crate::control::catalog_entry::post_apply::sync
 
+mod apply_outcome;
 pub mod array;
 pub mod collection;
 pub mod continuous_aggregate;

@@ -164,3 +164,31 @@ pub fn subquery_from_factor(factor: &ast::TableFactor) -> Option<&ast::Query> {
         _ => None,
     }
 }
+
+/// The subquery of a LATERAL item. A factor with no subquery is a typed error.
+pub fn lateral_subquery(factor: &ast::TableFactor) -> Result<&ast::Query> {
+    subquery_from_factor(factor).ok_or_else(|| SqlError::Unsupported {
+        detail: format!("LATERAL expects a subquery, got `{factor}`; write LATERAL (SELECT ...)"),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::statement::parse_sql;
+
+    #[test]
+    fn a_factor_with_no_subquery_is_a_typed_error() {
+        let statements = parse_sql("SELECT * FROM t").expect("parses");
+        let ast::Statement::Query(query) = &statements[0] else {
+            panic!("not a query");
+        };
+        let ast::SetExpr::Select(select) = query.body.as_ref() else {
+            panic!("not a SELECT");
+        };
+        assert!(matches!(
+            lateral_subquery(&select.from[0].relation),
+            Err(SqlError::Unsupported { .. })
+        ));
+    }
+}

@@ -27,4 +27,5 @@ pub mod timeseries_reissue;
 mod validate;
 pub mod vector_reissue;
 
+pub(crate) use orchestrate::reissue_mirror_capture;
 pub use orchestrate::{CollectionRows, RestoreStats, reissue_into_database, restore_tenant};

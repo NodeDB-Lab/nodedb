@@ -140,6 +140,19 @@ impl TransactionRedoPayload {
         }
     }
 
+    /// The payload as a mirror of `mirror_database` applies it.
+    ///
+    /// Its Calvin position belongs to the source's sequencer, so it records
+    /// under the mirror's own ledger. Its cross-shard applied key serves
+    /// trigger dedup, and no trigger fires on a mirror.
+    pub fn in_mirror(mut self, mirror_database: u64) -> Self {
+        if let Some(stamp) = self.redo.calvin_stamp.as_mut() {
+            stamp.mirror_database = Some(mirror_database);
+        }
+        self.redo.cross_shard_applied = None;
+        self
+    }
+
     /// The Data-Plane plan that applies this redo.
     pub fn apply_plan(&self) -> crate::Result<PhysicalPlan> {
         Ok(PhysicalPlan::Meta(MetaOp::ApplyTransactionRedo {
@@ -175,6 +188,7 @@ impl TransactionRedoPayload {
             epoch_system_ms: meta.epoch_system_ms,
             reply: meta.reply.clone(),
             user_write: meta.user_write,
+            mirror: stamp.mirror_database.is_some(),
         }))
     }
 }
@@ -242,6 +256,7 @@ mod tests {
             epoch: 9,
             position: 4,
             vshard_id: 2,
+            mirror_database: None,
         };
         let calvin = payload(Some(stamp), Some(meta()));
         assert_eq!(
@@ -252,8 +267,40 @@ mod tests {
                 epoch_system_ms: 1_700,
                 reply: CalvinReplySpec::Count(vec![7]),
                 user_write: true,
+                mirror: false,
             })
         );
+    }
+
+    /// A mirror's slice records under the mirror's ledger, installs as a
+    /// mirror install, and carries no trigger dedup key.
+    #[test]
+    fn a_mirrored_redo_names_its_mirror_and_drops_the_dedup_key() {
+        let stamp = CalvinStamp {
+            epoch: 9,
+            position: 4,
+            vshard_id: 2,
+            mirror_database: None,
+        };
+        let mut calvin = payload(Some(stamp), Some(meta()));
+        calvin.redo.cross_shard_applied = Some(crate::wal::CrossShardAppliedKey {
+            source_vshard: 1,
+            source_lsn: 2,
+            source_sequence: 3,
+            origin: "source".into(),
+        });
+        let mirrored = calvin.in_mirror(1024);
+        assert_eq!(
+            mirrored
+                .redo
+                .calvin_stamp
+                .as_ref()
+                .map(|s| s.mirror_database),
+            Some(Some(1024))
+        );
+        assert!(mirrored.redo.cross_shard_applied.is_none());
+        let install = install_of(&mirrored).expect("plan").expect("install");
+        assert!(install.mirror);
     }
 
     #[test]

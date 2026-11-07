@@ -21,12 +21,10 @@ pub fn continuous_aggregate_version(
     database_id: u64,
     tenant_id: u64,
     name: &str,
-) -> u64 {
-    catalog
-        .get_continuous_aggregate(database_id, tenant_id, name)
-        .ok()
-        .flatten()
-        .map_or(0, |stored| stored.modification_hlc.wall_ns.max(1))
+) -> crate::Result<u64> {
+    Ok(catalog
+        .get_continuous_aggregate(database_id, tenant_id, name)?
+        .map_or(0, |stored| stored.modification_hlc.wall_ns.max(1)))
 }
 
 /// `set` with one pseudo-entry per continuous aggregate `plan` reads.
@@ -36,9 +34,9 @@ pub fn with_continuous_aggregates(
     catalog: &SystemCatalog,
     database_id: u64,
     tenant_id: u64,
-) -> GatewayVersionSet {
+) -> crate::Result<GatewayVersionSet> {
     for name in provider_names(plan) {
-        let version = continuous_aggregate_version(catalog, database_id, tenant_id, &name);
+        let version = continuous_aggregate_version(catalog, database_id, tenant_id, &name)?;
         if version != 0 {
             set = set.with_extra(
                 continuous_aggregate_version_key(database_id, tenant_id, &name),
@@ -46,7 +44,7 @@ pub fn with_continuous_aggregates(
             );
         }
     }
-    set
+    Ok(set)
 }
 
 /// Every provider name `plan` reads, in plan order. Walks the same nesting

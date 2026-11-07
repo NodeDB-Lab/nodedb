@@ -189,6 +189,7 @@ pub(crate) fn execution_error_to_typed(err: crate::Error) -> TypedClusterError {
         | crate::Error::RoleInheritanceDepthExceeded { .. }
         | crate::Error::OllpExhausted { .. }
         | crate::Error::MirrorReadOnly { .. }
+        | crate::Error::MirrorSyncTimeout { .. }
         | crate::Error::StaleReadNotLeader { .. }) => numeric_typed(other),
     }
 }

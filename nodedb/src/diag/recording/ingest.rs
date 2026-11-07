@@ -35,7 +35,19 @@ pub fn ilp_line_read_drop(
     );
 }
 
-/// Shared emit for the two ILP termination causes. Private so the only entry
+/// Report an ILP connection ended by a session kill while it held accepted
+/// lines. The kill refuses those lines. Called from the ILP connection loop.
+pub fn ilp_killed_session_lines_refused(peer: &str, database_id: u64, buffered_lines: u64) {
+    record_ilp_drop(
+        "session_killed",
+        peer,
+        database_id,
+        buffered_lines,
+        context::IlpFlushOutcome::Lost,
+    );
+}
+
+/// Shared emit for the ILP termination causes. Private so the only entry
 /// points are the one-per-cause functions above.
 fn record_ilp_drop(
     cause: &'static str,

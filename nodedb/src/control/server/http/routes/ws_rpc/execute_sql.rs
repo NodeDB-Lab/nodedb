@@ -43,6 +43,11 @@ pub async fn execute_sql(
     let tenant_id = identity.tenant_id;
     let emitter = ArcAuditEmitter(Arc::clone(&shared.audit));
     authorize_database(identity, database_id, &emitter)?;
+    // The statement's DDL proposals carry its text. Array DDL is the DDL this route runs.
+    let _audit = crate::control::server::shared::session::audit_context::AuditScope::statement(
+        identity,
+        sql.trim(),
+    );
 
     // Quota enforcement — reject before planning or dispatch.
     shared.check_tenant_quota(tenant_id)?;
@@ -110,6 +115,7 @@ pub async fn execute_sql(
         RoutedStatement::PerTask(statement) => statement,
     };
 
+    let sync_database = crate::control::mirror::source::sync::sync_database_of(shared, &tasks);
     let read_only = tasks
         .iter()
         .all(|task| !crate::control::server::shared::write_admission::plan_is_write(&task.plan));
@@ -416,7 +422,7 @@ pub async fn execute_sql(
                 trace_id,
                 database_id: checked.database_id(),
                 txn_id: None,
-                linearizable: true,
+                linearizable: crate::control::server::shared::session::read_scope::linearizable(),
             };
             let payloads: crate::Result<Vec<Vec<u8>>> = match shared.installed_gateway() {
                 Ok(gateway) => gateway.execute(&gw_ctx, checked).await,
@@ -455,7 +461,11 @@ pub async fn execute_sql(
     if read_only {
         lease_scope.guard(body).await?
     } else {
-        body.await
+        let answer = body.await?;
+        if let Some(database) = sync_database {
+            crate::control::mirror::source::sync::await_mirror_sync(shared, database).await?;
+        }
+        Ok(answer)
     }
 }
 

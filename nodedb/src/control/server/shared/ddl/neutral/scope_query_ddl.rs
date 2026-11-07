@@ -93,6 +93,12 @@ pub fn alter_scope(
         None
     };
 
+    super::audit_intent::record_action_intent(
+        state,
+        identity,
+        Some(identity.tenant_id),
+        &format!("ALTER SCOPE '{scope_name}'"),
+    )?;
     let found = state
         .scope_defs
         .alter(scope_name, grants_opt, includes_opt)

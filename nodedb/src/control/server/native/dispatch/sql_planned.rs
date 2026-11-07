@@ -141,6 +141,12 @@ pub(super) async fn execute_planned(
     // `cross_shard_txn` parameter picks the cross-shard mode. An unset value
     // is the documented default, `CrossShardTxnMode::Strict`.
     let in_txn_block = ctx.sessions.transaction_state(ctx.peer_addr) == TransactionState::InBlock;
+    // A statement in a block waits at its COMMIT.
+    let sync_database = if in_txn_block {
+        None
+    } else {
+        crate::control::mirror::source::sync::sync_database_of(ctx.state, &admission.tasks)
+    };
     let session = DmlTxnCtx {
         sessions: ctx.sessions,
         session_id: ctx.peer_addr.into(),
@@ -173,11 +179,14 @@ pub(super) async fn execute_planned(
         lease_scope,
         sum_target_reads,
     } = match routed {
-        Ok(AtomicRoute::Implicit(answer)) => return resp(answer_to_native(seq, answer)),
+        Ok(AtomicRoute::Implicit(answer)) => {
+            let response = answer_to_native(seq, answer);
+            return resp(mirror_confirmed(ctx, seq, sync_database, response).await);
+        }
         // A RETURNING write surfaces its rows from the applied response. A
         // plain write reports the count its own mutation returned.
         Ok(AtomicRoute::Calvin(applied)) => {
-            return resp(super::conversion::calvin_native_response(
+            let response = super::conversion::calvin_native_response(
                 seq,
                 applied.apply_result,
                 &applied.plans,
@@ -189,7 +198,8 @@ pub(super) async fn execute_planned(
                     auth: ctx.auth_context(),
                     sequences: Some(&sequences),
                 },
-            ));
+            );
+            return resp(mirror_confirmed(ctx, seq, sync_database, response).await);
         }
         Ok(AtomicRoute::PerTask(statement)) => statement,
         Err(error) => return resp(statement_error_to_native(seq, error)),
@@ -256,6 +266,41 @@ pub(super) async fn execute_planned(
             Err(revoked) => resp(error_to_native(seq, &revoked)),
         }
     } else {
-        run.await
+        match run.await {
+            SqlOutcome::Response(response) => {
+                resp(mirror_confirmed(ctx, seq, sync_database, *response).await)
+            }
+            stream @ SqlOutcome::Stream(_) => stream,
+        }
+    }
+}
+
+/// The session's database, when a write the request commits waits on its sync
+/// mirrors. A write in a block waits at its COMMIT.
+pub(super) fn autocommit_sync_database(ctx: &DispatchCtx<'_>) -> Option<crate::types::DatabaseId> {
+    let database = ctx.database_id();
+    (ctx.sessions.transaction_state(ctx.peer_addr) != TransactionState::InBlock
+        && ctx.state.mirror.pins.holds_sync(database.as_u64()))
+    .then_some(database)
+}
+
+/// `response` once every sync mirror of `database` holds the write it answers.
+/// A failed write waits for nothing, and the mirror's timeout says the write
+/// committed.
+pub(super) async fn mirror_confirmed(
+    ctx: &DispatchCtx<'_>,
+    seq: u64,
+    database: Option<crate::types::DatabaseId>,
+    response: NativeResponse,
+) -> NativeResponse {
+    let Some(database) = database else {
+        return response;
+    };
+    if response.status == nodedb_types::protocol::ResponseStatus::Error {
+        return response;
+    }
+    match crate::control::mirror::source::sync::await_mirror_sync(ctx.state, database).await {
+        Ok(()) => response,
+        Err(error) => error_to_native(seq, &error),
     }
 }

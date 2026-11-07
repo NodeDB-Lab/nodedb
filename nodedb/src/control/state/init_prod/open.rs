@@ -39,6 +39,7 @@ impl SharedState {
         let super::open_config::OpenConfig {
             auth: auth_config,
             egress,
+            max_active_sessions,
         } = config;
         let remote_sources =
             crate::control::security::egress::RemoteSources::new(egress).map_err(|e| {
@@ -79,7 +80,13 @@ impl SharedState {
             si_bus,
             uc_bus,
             bus_consumer_handle,
-        } = super::bootstrap::run(&wal, catalog_path, auth_config, is_cluster)?;
+        } = super::bootstrap::run(
+            &wal,
+            catalog_path,
+            auth_config,
+            is_cluster,
+            max_active_sessions,
+        )?;
 
         let super::auth_parts::AuthParts {
             metering_config,
@@ -208,7 +215,7 @@ impl SharedState {
         })?;
 
         crate::event::topic::hydrate_topic_buffers(&state)?;
-        super::post_init::hydrate_caches(&state);
+        super::post_init::hydrate_caches(&state)?;
         crate::control::cluster::metadata_applier::seed_host_tables(&state)?;
         super::post_init::spawn_array_gc(&state);
 

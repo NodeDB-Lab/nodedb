@@ -8,7 +8,8 @@
 //! surrogate bindings, below), the metadata-group host tables, join
 //! tokens, enrollment pre-authorizations, the surrogate and database-id
 //! watermarks with their reserve cursors, the sync producer registry, the
-//! cluster restore points, and the scheduled backup marks.
+//! cluster restore points, the scheduled backup marks, and the mirror cut
+//! states.
 //!
 //! Every other bootstrap table stays out of the image. Each one is written
 //! only by this node, or travels with a data-group snapshot:
@@ -40,8 +41,6 @@
 //! - `topic_messages`: this node's published-message buffer.
 //! - `topic_publish_marks`: the committed-message marks of this node's
 //!   topic log, moved with each append.
-//! - `mirror_collection_map`, `mirror_lag`: state of a mirror stream, not of
-//!   group 0.
 //! - `move_tenant_journal`: the journal of the node coordinating a move.
 
 use redb::{
@@ -226,6 +225,9 @@ pub(super) const REPLICATED_TABLES: &[ReplicatedTable] = replicated_tables![
     "restore_points" => super::restore_points::RESTORE_POINTS,
     // ── Scheduled backups ──
     "backup_schedule_marks" => super::backup_schedule_marks::BACKUP_SCHEDULE_MARKS,
+    // ── Mirror followers ──
+    "mirror_cut_state" => MIRROR_CUT_STATE,
+    "mirror_pins" => MIRROR_PINS,
 ];
 
 /// The labels of every replicated table, in image order.
@@ -315,6 +317,7 @@ impl SystemCatalog {
         }
         txn.commit()
             .map_err(|e| catalog_err("replicated image: commit", e))?;
+        self.note_relations_written();
         self.reload_event_definitions()?;
         Ok(())
     }
@@ -344,6 +347,30 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), labels.len(), "a replicated label repeats");
+    }
+
+    /// A node that installs a group 0 snapshot resumes the mirror's cut state.
+    #[test]
+    fn the_image_carries_the_mirror_cut_state() {
+        let source = SystemCatalog::open_in_memory().unwrap();
+        let target = SystemCatalog::open_in_memory().unwrap();
+        let db = DatabaseId::new(1050);
+        let state = nodedb_types::MirrorCutState {
+            ready_cut: 3,
+            applied_cut: 2,
+            applied_cut_hlc_ns: 9,
+            cap_ordinal: 9,
+            positions: Vec::new(),
+            epochs: Vec::new(),
+            fence_epoch: 0,
+            source_timeline: None,
+        };
+        source.raise_mirror_cut_state(db, &state).unwrap();
+
+        let image = source.begin_replicated_read().unwrap().dump().unwrap();
+        target.replace_replicated_tables(&image).unwrap();
+
+        assert_eq!(target.get_mirror_cut_state(db).unwrap(), Some(state));
     }
 
     /// A dump replaces another catalog's tables exactly: rows it lacks are

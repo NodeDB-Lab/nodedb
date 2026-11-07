@@ -72,6 +72,28 @@ fn plan_one(sql: &str) -> SqlPlan {
     plans.remove(0)
 }
 
+/// An equi-correlated LATERAL with no LIMIT lowers to a join, and both sides
+/// read the statement's valid time, in either clause form.
+#[test]
+fn both_sides_of_a_lowered_lateral_carry_the_valid_time() {
+    for sql in [
+        "SELECT l.id FROM ledger l JOIN LATERAL \
+         (SELECT i.id FROM ledger i WHERE i.kind = l.kind) x ON true AS OF VALID TIME 5",
+        "SELECT l.id FROM ledger l FOR VALID_TIME CONTAINS 5 JOIN LATERAL \
+         (SELECT i.id FROM ledger i WHERE i.kind = l.kind) x ON true",
+    ] {
+        let SqlPlan::Join { left, right, .. } = plan_one(sql) else {
+            panic!("expected a join for {sql}");
+        };
+        for side in [&left, &right] {
+            let SqlPlan::Scan { temporal, .. } = side.as_ref() else {
+                panic!("expected a scan side for {sql}, got {side:?}");
+            };
+            assert_eq!(temporal.valid_time, nodedb_sql::ValidTime::At(5), "{sql}");
+        }
+    }
+}
+
 #[test]
 fn as_of_indexed_equality_plans_the_index_lookup_with_its_cutoff() {
     let plan = plan_one("SELECT id, kind FROM ledger AS OF SYSTEM TIME 1000 WHERE kind = 'x'");

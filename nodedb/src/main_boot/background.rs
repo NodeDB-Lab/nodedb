@@ -114,6 +114,9 @@ pub(crate) async fn spawn(
     let _event_plane_shutdown =
         event_plane.spawn_shutdown_supervisor(shutdown_bus, config.tuning.shutdown.deadline());
 
+    // A config that names a mirror listener and cannot serve it stops the boot.
+    nodedb::control::mirror::source::listener::spawn_mirror_listener(shared, &config.mirror)?;
+
     Ok(BackgroundLoops {
         raft_ready_rx,
         _lease_renewal,

@@ -15,7 +15,7 @@
 //! balance assertion below passing while testing the co-resident path.
 
 use crate::common;
-use common::cluster_harness::TestCluster;
+use common::cluster_harness::{TestCluster, read_once_a_leader_exists};
 
 use std::time::Duration;
 
@@ -23,10 +23,10 @@ use nodedb::types::DatabaseId;
 
 /// Source and target, chosen for readability rather than for their hashes — the
 /// homing assertion below is what makes the choice meaningful.
-const SOURCE: &str = "xs_entries";
-const TARGET: &str = "xs_accounts";
+pub(super) const SOURCE: &str = "xs_entries";
+pub(super) const TARGET: &str = "xs_accounts";
 
-fn pg_detail(e: &tokio_postgres::Error) -> String {
+pub(super) fn pg_detail(e: &tokio_postgres::Error) -> String {
     match e.as_db_error() {
         Some(db) => format!("{}: {}", db.code().code(), db.message()),
         None => format!("{e}"),
@@ -34,13 +34,17 @@ fn pg_detail(e: &tokio_postgres::Error) -> String {
 }
 
 /// The balance column of one `TARGET` row, as read through `client`.
-async fn balance_of(client: &tokio_postgres::Client, account: &str) -> String {
-    let rows = client
-        .simple_query(&format!(
-            "SELECT balance FROM {TARGET} WHERE id = '{account}'"
-        ))
-        .await
-        .unwrap_or_else(|e| panic!("read balance: {}", pg_detail(&e)));
+pub(super) async fn balance_of(client: &tokio_postgres::Client, account: &str) -> String {
+    let sql = format!("SELECT balance FROM {TARGET} WHERE id = '{account}'");
+    // A leader change refuses a read with `55P03` before it runs. The read
+    // changes nothing, so it runs again until a leader serves it.
+    let rows = read_once_a_leader_exists(
+        "read balance",
+        Duration::from_secs(30),
+        Duration::from_millis(50),
+        || client.simple_query(&sql),
+    )
+    .await;
     rows.into_iter()
         .find_map(|m| match m {
             tokio_postgres::SimpleQueryMessage::Row(r) => r.get(0).map(str::to_string),
@@ -55,7 +59,7 @@ async fn balance(client: &tokio_postgres::Client) -> String {
 }
 
 /// Create the two collections and declare the binding.
-async fn declare_binding(cluster: &TestCluster) {
+pub(super) async fn declare_binding(cluster: &TestCluster) {
     cluster
         .exec_ddl_on_any_leader(&format!(
             "CREATE COLLECTION {TARGET} (id TEXT PRIMARY KEY, owner TEXT) \
@@ -196,7 +200,12 @@ async fn repeated_cross_shard_inserts_accumulate() {
 /// The seeding entries go in through the INSERT path, which already credits the
 /// target across shards; every test below then exercises a NON-insert shape
 /// against that settled starting total.
-async fn seed(cluster: &TestCluster, account: &str, start: &str, entries: &[(&str, &str)]) {
+pub(super) async fn seed(
+    cluster: &TestCluster,
+    account: &str,
+    start: &str,
+    entries: &[(&str, &str)],
+) {
     cluster.nodes[0]
         .client
         .simple_query(&format!(

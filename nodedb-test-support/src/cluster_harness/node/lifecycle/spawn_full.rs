@@ -221,6 +221,9 @@ impl TestClusterNode {
             // `[tuning]` section. A walk coordinator's visit cap reads it.
             state.tuning.graph = graph_tuning.clone();
             state.tuning.query = query_tuning.clone();
+            if let Some(network) = &config.network_tuning {
+                state.tuning.network = network.clone();
+            }
             // Fixed test KEK so backup tests produce encrypted envelopes.
             state.backup_kek = Some(Arc::new([0x42u8; 32]));
             state.backup_storage = config.backup_storage.clone().map(Arc::new);
@@ -283,7 +286,8 @@ impl TestClusterNode {
                     // production gets booting a fresh data dir.
                     doc_config_seed: nodedb::bootstrap::data_plane::load_doc_config_registry_from(
                         shared.credentials.catalog(),
-                    ),
+                    )
+                    .expect("the catalog's collections read"),
                     crs_set_seed: shared.credentials.catalog().custom_crs_set(),
                     event_interest: crate::core_loop_runner::event_interest_for(&shared),
                     stop_rx: core_stop_rx,

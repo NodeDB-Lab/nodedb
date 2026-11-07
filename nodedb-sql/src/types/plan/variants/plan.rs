@@ -80,9 +80,9 @@ pub enum SqlPlan {
     /// remaining filters, projection, sort, and limit.
     ///
     /// Emitted by `document_schemaless::plan_scan` /
-    /// `document_strict::plan_scan` when the WHERE clause contains a
-    /// single equality predicate on a `Ready` indexed field. Any
-    /// additional predicates fall through as post-filters.
+    /// `document_strict::plan_scan` when the WHERE clause holds an equality
+    /// conjunct on a `Ready` indexed field. Any other predicates stay as
+    /// post-filters.
     DocumentIndexLookup(DocumentIndexLookupPlan),
     RangeScan(RangeScanPlan),
 

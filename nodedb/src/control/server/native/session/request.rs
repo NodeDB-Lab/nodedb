@@ -37,6 +37,10 @@ impl NativeSession {
             self.sessions.statement_timeout(self.peer_addr),
             self.state.tuning.network.default_deadline_secs,
         );
+        let _read_scope = crate::control::server::shared::session::read_scope::enter(
+            &self.sessions,
+            self.peer_addr.into(),
+        );
 
         // Auth handling.
         if op == OpCode::Auth {
@@ -61,11 +65,17 @@ impl NativeSession {
             // the same consequence: the gate reads Ok while work sent to that
             // core never completes. One atomic load, so it stays on this path.
             // A fail-stopped core refuses its work outright, with the same
-            // consequence.
+            // consequence. A fail-stopped group disk takes out this node's
+            // replica of the group.
             let native_status = if self.state.metadata_apply_wedge.is_wedged()
                 || self.state.sequencer_halt.is_halted()
                 || self.state.sequencer_halt.apply_halt().is_halted()
                 || self.state.core_stall.is_stalled()
+                || self
+                    .state
+                    .raft_disk_halts
+                    .get()
+                    .is_some_and(|halts| halts.is_halted())
                 || self
                     .state
                     .system_metrics
@@ -123,6 +133,14 @@ impl NativeSession {
             }
         }
 
+        // A killed session stops here, and a credential change reaches this
+        // request's identity. The run loop closes the connection after a kill.
+        if let (Some(binding), Some(identity)) = (self.binding.as_mut(), self.identity.as_mut())
+            && let Err(e) = binding.refresh(&self.state, identity)
+        {
+            return SqlOutcome::Response(Box::new(dispatch::error_to_native(seq, &e)));
+        }
+
         let identity = match self.identity.as_ref() {
             Some(id) => id,
             None => {
@@ -134,9 +152,9 @@ impl NativeSession {
             }
         };
 
-        // The identity resolved above is session-lifetime and server-issued
-        // (tenant, roles, superuser) — it is never re-derived from the
-        // token. `verified_jwt`, in contrast, is the raw claim payload of an
+        // The identity resolved above is server-issued (tenant, roles,
+        // superuser) — it is never re-derived from the token. `verified_jwt`,
+        // in contrast, is the raw claim payload of an
         // OIDC bearer token, retained only to re-derive claim-driven
         // `$auth.*` enrichment on every request. `exp` on those claims was
         // checked exactly once, at the Auth frame that established the

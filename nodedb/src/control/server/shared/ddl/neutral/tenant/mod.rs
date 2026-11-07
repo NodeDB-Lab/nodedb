@@ -8,7 +8,7 @@
 //! - [`alter_quota`] — `ALTER TENANT <name> IN DATABASE <db> SET QUOTA (...)` —
 //!   persists quota to `_system.tenant_quotas`.
 //! - [`drop`] — `DROP TENANT` (proposes `DeleteTenant`).
-//! - [`purge`] — `PURGE TENANT <id> CONFIRM` (Data Plane meta op).
+//! - [`purge`] — `PURGE TENANT <id> CONFIRM` (an entry in each data group's log).
 //! - [`show_in_database`] — `SHOW TENANT QUOTA/USAGE FOR <name> IN DATABASE <db>`.
 //! - [`move_tenant`] — `MOVE TENANT <name> FROM <db> TO <db>` (async, 5-phase).
 //!

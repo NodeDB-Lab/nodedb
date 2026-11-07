@@ -96,6 +96,12 @@ pub enum CatalogEntry {
     /// Runtime state (current value, is_called, epoch, period_key). Used by
     /// ALTER SEQUENCE RESTART to propagate the new counter across nodes.
     PutSequenceState(Box<SequenceState>),
+    /// One node reserves a run of values. Apply writes `next` only over the row
+    /// `expected` names, so a replay or a lost race changes nothing.
+    ReserveSequenceRange {
+        expected: Option<Box<SequenceState>>,
+        next: Box<SequenceState>,
+    },
 
     // ── Trigger ────────────────────────────────────────────────────
     /// CREATE [OR REPLACE] TRIGGER, and ALTER TRIGGER ENABLE/DISABLE.
@@ -263,7 +269,7 @@ pub enum CatalogEntry {
         admin: Box<StoredUser>,
     },
     /// Hard-deletes the identity record only. Tenant data is purged separately
-    /// by the `PURGE TENANT CONFIRM` Data Plane meta op.
+    /// by `PURGE TENANT CONFIRM`, which proposes to each data group's log.
     DeleteTenant {
         tenant_id: u64,
     },
@@ -667,6 +673,32 @@ pub enum CatalogEntry {
     /// minute nor repeats a finished one. The mark is keyed by the schedule's
     /// config incarnation, and apply only raises it, so a replay is a no-op.
     PutBackupScheduleMark(Box<StoredBackupScheduleMark>),
+
+    // ── Mirror followers ───────────────────────────────────────────
+    /// How far a mirror database followed its source, on every node. Apply
+    /// never moves the row back, and a database that follows nothing writes
+    /// nothing, so a replay is a no-op.
+    PutMirrorCutState {
+        database_id: u64,
+        state: Box<nodedb_types::MirrorCutState>,
+    },
+    /// One status change a mirror's log decides at apply, against the row it
+    /// finds. A step the row no longer permits changes nothing.
+    StepMirrorStatus {
+        database_id: u64,
+        step: nodedb_types::MirrorStatusStep,
+    },
+    /// `MIRROR DATABASE`: the row goes in unless the log already holds its
+    /// name, its id, or a live mirror of its source. Of two concurrent
+    /// statements, the first in the log wins.
+    ClaimMirrorDatabase(Box<crate::control::security::catalog::database_types::DatabaseDescriptor>),
+    /// One link's hold on this cluster's Raft logs, on every node. Apply
+    /// merges it with the link's row, so a late ack moves nothing back.
+    PutMirrorPin(Box<nodedb_types::MirrorPin>),
+    /// Remove a link's hold.
+    DeleteMirrorPin {
+        link_id: u64,
+    },
 
     // ── User-defined CRSs ──────────────────────────────────────────
     /// `CREATE SPATIAL_REF_SYS`: one user-defined CRS. Apply defines it in

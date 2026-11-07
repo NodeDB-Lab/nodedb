@@ -27,7 +27,9 @@ pub(crate) fn map_sequence_error(name: &str, error: SequenceError) -> SqlError {
         | SequenceError::AlreadyExists { .. }
         | SequenceError::InvalidDefinition { .. }
         | SequenceError::FormatParse { .. }
-        | SequenceError::InvalidResetScope { .. }) => SqlError::ObjectNotInPrerequisiteState {
+        | SequenceError::InvalidResetScope { .. }
+        | SequenceError::ReadOnlyMirror { .. }
+        | SequenceError::Unavailable { .. }) => SqlError::ObjectNotInPrerequisiteState {
             object: name.to_string(),
             detail: other.to_string(),
         },
@@ -52,7 +54,9 @@ pub(crate) fn sequence_error_to_error(name: &str, error: SequenceError) -> crate
         | SequenceError::AlreadyExists { .. }
         | SequenceError::InvalidDefinition { .. }
         | SequenceError::FormatParse { .. }
-        | SequenceError::InvalidResetScope { .. }) => crate::Error::ObjectNotInPrerequisiteState {
+        | SequenceError::InvalidResetScope { .. }
+        | SequenceError::ReadOnlyMirror { .. }
+        | SequenceError::Unavailable { .. }) => crate::Error::ObjectNotInPrerequisiteState {
             object: name.to_string(),
             detail: other.to_string(),
         },

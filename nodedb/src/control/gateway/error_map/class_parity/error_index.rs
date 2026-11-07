@@ -3,7 +3,7 @@
 //! A dense index per `crate::Error` variant.
 
 /// The number of `crate::Error` variants [`error_variant_index`] numbers.
-pub(super) const ERROR_VARIANT_COUNT: usize = 128;
+pub(super) const ERROR_VARIANT_COUNT: usize = 129;
 
 /// A dense index per `crate::Error` variant. Exhaustive, so a new variant
 /// fails to compile here until it gets an index, and
@@ -119,6 +119,7 @@ pub(crate) fn error_variant_index(err: &crate::Error) -> usize {
         E::RoleInheritanceDepthExceeded { .. } => 104,
         E::OllpExhausted { .. } => 105,
         E::MirrorReadOnly { .. } => 106,
+        E::MirrorSyncTimeout { .. } => 128,
         E::StaleReadNotLeader { .. } => 107,
         E::RoleInUse { .. } => 108,
         E::Ddl(_) => 109,

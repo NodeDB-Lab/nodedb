@@ -27,6 +27,7 @@ impl RaftRpc {
             | RaftRpc::Ping(_)
             | RaftRpc::ReadIndexRequest(_)
             | RaftRpc::LeaderStatusRequest(_)
+            | RaftRpc::LogProbeRequest(_)
             // A voter raises its floor to the maximum of the two, so a
             // repeat leaves the same floor and answers it.
             | RaftRpc::OrdinalFloorRequest(_) => true,
@@ -82,6 +83,7 @@ impl RaftRpc {
             | RaftRpc::DataProposeResponse(_)
             | RaftRpc::ReadIndexResponse(_)
             | RaftRpc::LeaderStatusResponse(_)
+            | RaftRpc::LogProbeResponse(_)
             | RaftRpc::OrdinalFloorResponse(_)
             | RaftRpc::AuthLeaseRenewResponse(_)
             | RaftRpc::AuthBarrierResponse(_)

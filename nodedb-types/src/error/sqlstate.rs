@@ -334,6 +334,14 @@ pub const CLONE_PREDATES_QUERY_TIME: &str = "22023";
 /// in both cases.
 pub const STALE_READ_NOT_LEADER: &str = "55P03";
 
+/// `55M01` — NodeDB extension: a write committed on the source, and a sync
+/// mirror did not confirm it in time.
+///
+/// Uses Class 55 "Object Not In Prerequisite State": the mirror is not in the
+/// state a confirmation needs. A client must not retry the write as a failed
+/// one: its row is on the source.
+pub const MIRROR_SYNC_TIMEOUT: &str = "55M01";
+
 /// `55006` — NodeDB extension: a write targeted a `Shadowed`/`Materializing`
 /// clone collection whose engine has no copy-on-write support.
 ///
@@ -475,6 +483,7 @@ mod tests {
             CLONE_DEPTH_EXCEEDED,
             CLONE_PREDATES_QUERY_TIME,
             STALE_READ_NOT_LEADER,
+            MIRROR_SYNC_TIMEOUT,
             CONNECTION_FAILURE,
             SERVER_REJECTED_ESTABLISHMENT,
             PROTOCOL_VIOLATION,

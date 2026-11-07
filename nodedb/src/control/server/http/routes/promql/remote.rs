@@ -253,6 +253,16 @@ pub async fn remote_write(
         }
     }
 
+    // A sync mirror's timeout maps to class 55, a 4xx. A remote-write client
+    // does not retry it, and the samples stay stored.
+    if total_accepted > 0
+        && let Err(error) =
+            crate::control::mirror::source::sync::await_database_sync(&state.shared, database_id)
+                .await
+    {
+        return crate::control::server::http::auth::ApiError::from(error).into_response();
+    }
+
     // Prometheus expects 204 No Content on success.
     if total_rejected == 0 {
         (StatusCode::NO_CONTENT, String::new()).into_response()

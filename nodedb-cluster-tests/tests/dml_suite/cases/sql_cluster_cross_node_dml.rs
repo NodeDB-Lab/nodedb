@@ -71,6 +71,44 @@ mod graph_traverse_cross_node;
 mod graph_traverse_reverse_cross_node;
 #[path = "../../sql_cluster_cross_node_dml_tests/join_cross_node.rs"]
 mod join_cross_node;
+#[path = "../../sql_cluster_cross_node_dml_tests/mirror_apply_two_clusters.rs"]
+mod mirror_apply_two_clusters;
+#[path = "../../sql_cluster_cross_node_dml_tests/mirror_bootstrap_compaction.rs"]
+mod mirror_bootstrap_compaction;
+#[path = "../../sql_cluster_cross_node_dml_tests/mirror_bootstrap_engines.rs"]
+mod mirror_bootstrap_engines;
+#[cfg(feature = "failpoints")]
+#[path = "../../sql_cluster_cross_node_dml_tests/mirror_bootstrap_final_cut.rs"]
+mod mirror_bootstrap_final_cut;
+#[path = "../../sql_cluster_cross_node_dml_tests/mirror_bootstrap_fixture.rs"]
+mod mirror_bootstrap_fixture;
+#[cfg(feature = "failpoints")]
+#[path = "../../sql_cluster_cross_node_dml_tests/mirror_bootstrap_kill.rs"]
+mod mirror_bootstrap_kill;
+#[path = "../../sql_cluster_cross_node_dml_tests/mirror_bootstrap_promote.rs"]
+mod mirror_bootstrap_promote;
+#[path = "../../sql_cluster_cross_node_dml_tests/mirror_bootstrap_purge_convert.rs"]
+mod mirror_bootstrap_purge_convert;
+#[cfg(feature = "failpoints")]
+#[path = "../../sql_cluster_cross_node_dml_tests/mirror_bootstrap_recover.rs"]
+mod mirror_bootstrap_recover;
+#[cfg(feature = "failpoints")]
+#[path = "../../sql_cluster_cross_node_dml_tests/mirror_bootstrap_recover_fixture.rs"]
+mod mirror_bootstrap_recover_fixture;
+#[path = "../../sql_cluster_cross_node_dml_tests/mirror_bootstrap_retention.rs"]
+mod mirror_bootstrap_retention;
+#[path = "../../sql_cluster_cross_node_dml_tests/mirror_bootstrap_retention_fixture.rs"]
+mod mirror_bootstrap_retention_fixture;
+#[path = "../../sql_cluster_cross_node_dml_tests/mirror_bootstrap_retention_purge.rs"]
+mod mirror_bootstrap_retention_purge;
+#[path = "../../sql_cluster_cross_node_dml_tests/mirror_bootstrap_sync.rs"]
+mod mirror_bootstrap_sync;
+#[path = "../../sql_cluster_cross_node_dml_tests/mirror_bootstrap_two_clusters.rs"]
+mod mirror_bootstrap_two_clusters;
+#[path = "../../sql_cluster_cross_node_dml_tests/mirror_read_only_cross_node.rs"]
+mod mirror_read_only_cross_node;
+#[path = "../../sql_cluster_cross_node_dml_tests/mirror_source_cross_node.rs"]
+mod mirror_source_cross_node;
 #[path = "../../sql_cluster_cross_node_dml_tests/native_implicit_edge_delete_cross_node.rs"]
 mod native_implicit_edge_delete_cross_node;
 #[path = "../../sql_cluster_cross_node_dml_tests/native_remote_home_surrogate_cross_node.rs"]

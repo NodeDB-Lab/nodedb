@@ -12,7 +12,9 @@ use tracing::{info, warn};
 
 use crate::control::planner::procedural::executor::bindings::RowBindings;
 use crate::control::planner::procedural::executor::core::{AtomicBody, StatementExecutor};
-use crate::control::security::egress::{EgressError, EgressFault, EgressPolicy, classify};
+use crate::control::security::egress::{
+    EgressError, EgressFault, EgressPolicy, classify, url_host_for_log,
+};
 use crate::control::security::identity::{AuthenticatedIdentity, Role};
 use crate::control::state::SharedState;
 use crate::types::TenantId;
@@ -183,6 +185,9 @@ pub async fn notify_webhook_with_client(
         }
     };
 
+    // A webhook URL carries secrets in its path or query, so logs name the host only.
+    let host = url_host_for_log(url);
+    let host = host.as_str();
     let max_retries = 3u32;
     for attempt in 0..max_retries {
         match client
@@ -196,7 +201,7 @@ pub async fn notify_webhook_with_client(
             Ok(resp) if resp.status().is_success() => {
                 info!(
                     alert = event.alert_name,
-                    url,
+                    host,
                     status = event.status,
                     "alert webhook delivered"
                 );
@@ -206,7 +211,7 @@ pub async fn notify_webhook_with_client(
                 // 4xx (except 429) is permanent failure.
                 warn!(
                     alert = event.alert_name,
-                    url,
+                    host,
                     status_code = resp.status().as_u16(),
                     "alert webhook permanently rejected"
                 );
@@ -215,7 +220,7 @@ pub async fn notify_webhook_with_client(
             Ok(resp) => {
                 warn!(
                     alert = event.alert_name,
-                    url,
+                    host,
                     status_code = resp.status().as_u16(),
                     attempt,
                     "alert webhook delivery failed, retrying"
@@ -232,7 +237,7 @@ pub async fn notify_webhook_with_client(
                 }
                 warn!(
                     alert = event.alert_name,
-                    url,
+                    host,
                     attempt,
                     error = %e.without_url(),
                     "alert webhook delivery error, retrying"
@@ -247,7 +252,7 @@ pub async fn notify_webhook_with_client(
 
     warn!(
         alert = event.alert_name,
-        url, "alert webhook delivery failed after all retries"
+        host, "alert webhook delivery failed after all retries"
     );
     WebhookOutcome::Failed
 }

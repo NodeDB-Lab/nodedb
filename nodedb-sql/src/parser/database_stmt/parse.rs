@@ -147,6 +147,27 @@ mod tests {
     }
 
     #[test]
+    fn parse_alter_database_mirror_recovery() {
+        for (sql, expected) in [
+            (
+                "ALTER DATABASE mydb MIRROR RESUME",
+                AlterDatabaseOperation::MirrorResume,
+            ),
+            (
+                "ALTER DATABASE mydb MIRROR REBOOTSTRAP",
+                AlterDatabaseOperation::MirrorRebootstrap,
+            ),
+        ] {
+            match ok(sql) {
+                NodedbStatement::Database(DatabaseStmt::AlterDatabase { operation, .. }) => {
+                    assert_eq!(operation, expected);
+                }
+                other => panic!("unexpected: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn parse_show_databases() {
         assert_eq!(
             try_parse_database_statement("SHOW DATABASES")

@@ -40,6 +40,15 @@ pub async fn alter_database_materialize(
         &format!("ALTER DATABASE {name} MATERIALIZE"),
     )?;
 
+    // A resumed copy writes rows with no status write first, so the catalog
+    // chokepoint comes too late to refuse it.
+    super::super::audit_intent::record_action_intent(
+        state,
+        identity,
+        None,
+        &format!("ALTER DATABASE {name} MATERIALIZE"),
+    )?;
+
     // Build a completion handle so callers can observe progress if needed.
     let handle = CloneMaterializerHandle::new(db_id);
 

@@ -150,19 +150,19 @@ pub trait SnapshotApplier: Send + Sync + 'static {
 /// All methods take `(group_id, last_included_index)` as the snapshot identity.
 pub trait SnapshotQuarantineHook: Send + Sync + 'static {
     /// Returns `true` if the chunk identified by `(group_id, index)` is
-    /// already in the quarantined state and should be rejected immediately
-    /// without attempting to decode it.
+    /// in the quarantined state.
     fn is_quarantined(&self, group_id: u64, last_included_index: u64) -> bool;
 
-    /// Called after a successful decode — resets the strike counter so a
-    /// single transient CRC error is not held against a healthy peer.
+    /// Called after a successful decode. It clears the record, a quarantine
+    /// included: bytes that check out prove the chunk at this index is good,
+    /// and a single transient CRC error is not held against a healthy peer.
     fn record_success(&self, group_id: u64, last_included_index: u64);
 
     /// Called on a CRC-class decode failure.
     ///
-    /// Returns `true` when the segment has just been quarantined (second
-    /// consecutive failure), and `false` on the first strike (caller should
-    /// surface the framing error and allow the peer to retry).
+    /// Returns `true` when the chunk is quarantined (second consecutive failure
+    /// or later), and `false` on the first strike (caller surfaces the framing
+    /// error and the peer retries).
     fn record_failure(&self, group_id: u64, last_included_index: u64, error: &str) -> bool;
 }
 

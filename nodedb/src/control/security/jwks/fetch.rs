@@ -189,27 +189,29 @@ impl JwksFetchError {
     }
 }
 
-/// Start the periodic JWKS refresh task.
+/// The periodic JWKS refresh: refresh every target at the interval until shutdown.
 ///
-/// Spawns a Tokio task that refreshes JWKS keys for every target at the
-/// configured interval. Each tick reads `targets` afresh, so a catalog
-/// provider registered after the start is refreshed too. Runs on the
-/// Control Plane.
-pub fn spawn_refresh_task(
+/// Each tick reads `targets` afresh, so a catalog provider registered after
+/// the start is refreshed too. Shutdown ends the loop mid-fetch.
+/// Runs on the Control Plane.
+pub(super) async fn run_refresh_loop(
     targets: Arc<parking_lot::RwLock<super::registry::targets::RefreshTargets>>,
-    cache: std::sync::Arc<JwksCache>,
+    cache: Arc<JwksCache>,
     refresh_interval_secs: u64,
-    policy: std::sync::Arc<EgressPolicy>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut interval =
-            tokio::time::interval(std::time::Duration::from_secs(refresh_interval_secs));
-        // First tick fires immediately — skip it since we fetch on startup.
-        interval.tick().await;
+    policy: Arc<EgressPolicy>,
+    mut shutdown: crate::control::shutdown::ShutdownReceiver,
+) {
+    let mut interval = tokio::time::interval(Duration::from_secs(refresh_interval_secs));
+    // The first tick fires at once. Startup already fetched.
+    interval.tick().await;
 
-        loop {
-            interval.tick().await;
-            let snapshot = targets.read().snapshot();
+    loop {
+        tokio::select! {
+            _ = shutdown.wait_cancelled() => return,
+            _ = interval.tick() => {}
+        }
+        let snapshot = targets.read().snapshot();
+        let refresh = async {
             for target in &snapshot {
                 fetch_and_cache(
                     &target.cache_identity,
@@ -220,8 +222,12 @@ pub fn spawn_refresh_task(
                 )
                 .await;
             }
+        };
+        tokio::select! {
+            _ = shutdown.wait_cancelled() => return,
+            () = refresh => {}
         }
-    })
+    }
 }
 
 #[cfg(test)]

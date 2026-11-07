@@ -22,21 +22,24 @@ use std::time::Duration;
 
 use nodedb_cluster::calvin::{CutBarrierWire, CutCaptureWire};
 use nodedb_physical::physical_plan::CutCaptureRequest;
+use nodedb_types::MirrorCutMark;
 
 use crate::control::state::SharedState;
 use crate::control::wal_replication::ReplicatedWrite;
+use crate::control::wal_replication::types::{MirrorBarrier, MirrorCalvinFloor};
 use crate::types::CoveredCutBarrier;
 
 /// The clock skew between two nodes a cut's window tolerates.
 const CLOCK_SKEW_MARGIN: Duration = Duration::from_secs(30);
 
-/// What names one cut on every node: its watermark, its restore point, and
-/// its capture request, `0` for none.
+/// What names one cut on every node: its watermark, its restore point, its
+/// capture request, `0` for none, and its mirror cut number, `0` for none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CutKey {
     pub hlc: u64,
     pub restore_point: u64,
     pub capture: u64,
+    pub mirror: u64,
 }
 
 /// A cut whose barriers the data-group leaders order with its marker.
@@ -48,6 +51,9 @@ pub struct OrderedCut {
     pub restore_point: u64,
     /// A database backup's capture request.
     pub capture: Option<CutCaptureRequest>,
+    /// What the cut tells a source's mirrors. Such a cut records no restore
+    /// floor: it runs far too often to fsync one, and no restore names it.
+    pub mirror: Option<MirrorCutMark>,
 }
 
 impl OrderedCut {
@@ -59,6 +65,7 @@ impl OrderedCut {
                 .capture
                 .as_ref()
                 .map_or(0, |request| request.request_id),
+            mirror: self.mirror.map_or(0, |mark| mark.seq),
         }
     }
 
@@ -72,6 +79,7 @@ impl OrderedCut {
                 database_id: wire.database_id,
                 tenants: wire.tenants.clone(),
             }),
+            mirror: barrier.mirror,
         }
     }
 
@@ -83,15 +91,22 @@ impl OrderedCut {
                 database_id: request.database_id,
                 tenants: request.tenants.clone(),
             }),
+            mirror: self.mirror,
         }
     }
 
-    /// The write of this cut's barrier entry.
-    pub fn barrier_write(&self) -> ReplicatedWrite {
+    /// The write of this cut's barrier entry. `calvin_floors` are the fully
+    /// applied Calvin epochs of the group's vShards, read before the propose.
+    /// A cut of no mirror ignores them.
+    pub fn barrier_write(&self, calvin_floors: Vec<MirrorCalvinFloor>) -> ReplicatedWrite {
         ReplicatedWrite::CutBarrier {
             hlc: self.hlc,
             restore_point: self.restore_point,
             capture: self.capture.clone(),
+            mirror: self.mirror.map(|mark| MirrorBarrier {
+                mark,
+                calvin_floors,
+            }),
         }
     }
 
@@ -101,6 +116,7 @@ impl OrderedCut {
             hlc: self.hlc,
             restore_point: self.restore_point,
             capture: self.capture.clone(),
+            mirror: self.mirror,
             log_index,
         }
     }
@@ -111,6 +127,7 @@ impl OrderedCut {
             hlc: barrier.hlc,
             restore_point: barrier.restore_point,
             capture: barrier.capture.clone(),
+            mirror: barrier.mirror,
         }
     }
 }
@@ -165,6 +182,7 @@ mod tests {
                 database_id: 2,
                 tenants: vec![1, 4],
             }),
+            mirror: None,
         };
         let back = OrderedCut::from_marker(7, 3, &cut.to_wire());
         assert_eq!(back, cut);
@@ -173,16 +191,57 @@ mod tests {
             CutKey {
                 hlc: 7,
                 restore_point: 3,
-                capture: 11
+                capture: 11,
+                mirror: 0,
             }
         );
         let plain = OrderedCut {
             hlc: 7,
             restore_point: 0,
             capture: None,
+            mirror: None,
         };
         assert_eq!(plain.key().capture, 0);
         assert_ne!(plain.key(), cut.key(), "the capture keeps two cuts apart");
+    }
+
+    /// A mirror cut carries its mark through the marker and the snapshot, and
+    /// never shares a key with a backup's cut at the same watermark.
+    #[test]
+    fn a_mirror_cut_keeps_its_mark_and_its_own_key() {
+        let mark = MirrorCutMark {
+            seq: 9,
+            cap_ordinal: 5,
+            metadata_index: 4,
+            surrogate_hwm: 3,
+        };
+        let cut = OrderedCut {
+            hlc: 7,
+            restore_point: 0,
+            capture: None,
+            mirror: Some(mark),
+        };
+        assert_eq!(OrderedCut::from_marker(7, 0, &cut.to_wire()), cut);
+        assert_eq!(OrderedCut::from_covered(&cut.covered_at(40)), cut);
+        let backup = OrderedCut {
+            mirror: None,
+            ..cut.clone()
+        };
+        assert_ne!(cut.key(), backup.key());
+        let floors = vec![MirrorCalvinFloor {
+            vshard: 2,
+            epoch: 3,
+        }];
+        let ReplicatedWrite::CutBarrier { mirror, .. } = cut.barrier_write(floors.clone()) else {
+            panic!("a cut's write is a barrier");
+        };
+        assert_eq!(
+            mirror,
+            Some(MirrorBarrier {
+                mark,
+                calvin_floors: floors,
+            })
+        );
     }
 
     #[test]
@@ -195,6 +254,7 @@ mod tests {
                 database_id: 2,
                 tenants: vec![1],
             }),
+            mirror: None,
         };
         let covered = cut.covered_at(40);
         assert_eq!(covered.log_index, 40);

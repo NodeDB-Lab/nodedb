@@ -54,13 +54,13 @@ impl InvertedIndex {
         self.inner.backend_mut()
     }
 
-    /// Purge all inverted index entries for a `(database, tenant)`. Structural
-    /// drop via tuple ranges on every FTS table.
-    pub fn purge_tenant(&self, database_id: u64, tid: TenantId) -> crate::Result<usize> {
-        self.note_purge(database_id, tid.as_u64(), None);
-        self.inner
-            .purge_tenant(database_id, tid.as_u64())
-            .map_err(into_result_err)
+    /// Every collection the tenant holds an inverted index of, stored names.
+    pub fn tenant_collections(
+        &self,
+        database_id: u64,
+        tid: TenantId,
+    ) -> crate::Result<Vec<String>> {
+        self.backend().tenant_collections(database_id, tid.as_u64())
     }
 
     /// Purge all inverted index entries for a single
@@ -165,7 +165,7 @@ mod tests {
     }
 
     #[test]
-    fn purge_tenant_structurally_drops_data() {
+    fn purge_collection_keeps_the_other_tenant() {
         let (idx, _dir) = open_temp();
         let t1 = TenantId::new(1);
         let t2 = TenantId::new(2);
@@ -174,7 +174,12 @@ mod tests {
         idx.index_document(DB, t2, "docs", Surrogate::new(1), &body("alpha bravo"))
             .unwrap();
 
-        idx.purge_tenant(DB, t1).unwrap();
+        assert_eq!(
+            idx.tenant_collections(DB, t1).unwrap(),
+            vec!["docs".to_string()]
+        );
+        idx.purge_collection(DB, t1, "docs").unwrap();
+        assert!(idx.tenant_collections(DB, t1).unwrap().is_empty());
 
         assert!(
             idx.search(

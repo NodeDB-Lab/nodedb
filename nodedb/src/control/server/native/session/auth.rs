@@ -7,6 +7,7 @@
 use nodedb_types::protocol::{NativeResponse, RequestFields};
 
 use crate::control::security::audit::ArcAuditEmitter;
+use crate::control::security::sessions::{SessionBindRequest, bind_session};
 use crate::control::server::admission::{AdmissionError, ConnectionPermit, ScopedConnectionPermit};
 use crate::control::server::shared::authorization::authorize_database;
 
@@ -158,6 +159,28 @@ impl NativeSession {
                 // to this native connection.
                 auth_context.database_id = Some(db_id);
 
+                // The registry row comes ahead of any capacity, so a session cap
+                // refusal holds no slot. The auth context's random id is unique to
+                // this connection, and a refusal below drops the row with `binding`.
+                let peer = self.peer_addr.to_string();
+                let binding = match bind_session(
+                    &self.state,
+                    SessionBindRequest {
+                        session_id: Some(auth_context.session_id.clone()),
+                        ..SessionBindRequest::new(&identity, "native", &peer).in_database(db_id)
+                    },
+                ) {
+                    Ok(binding) => binding,
+                    Err(e @ crate::Error::SessionCapExceeded { .. }) => {
+                        return error_to_native_with_sqlstate(
+                            seq,
+                            nodedb_types::error::sqlstate::TOO_MANY_CONNECTIONS,
+                            &e,
+                        );
+                    }
+                    Err(e) => return error_to_native_with_sqlstate(seq, "28000", &e),
+                };
+
                 // Scoped admission: acquire per-database and per-tenant permits
                 // only after authentication and database authorization succeed.
                 // `acquire` releases the database slot itself when the tenant
@@ -219,6 +242,7 @@ impl NativeSession {
                 self.verified_jwt = verified_jwt.map(|bearer| bearer.claims);
                 self.cleanup.publish_identity(identity.clone());
                 self.identity = Some(identity);
+                self.binding = Some(binding);
                 resp
             }
             // A transient login rate-limit is distinct from a credential

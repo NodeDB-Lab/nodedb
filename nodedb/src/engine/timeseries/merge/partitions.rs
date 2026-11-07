@@ -28,6 +28,7 @@ use std::collections::HashMap;
 
 use nodedb_types::timeseries::{PartitionMeta, SymbolDictionary};
 
+use super::incompatibility::MergeIncompatibility;
 use crate::engine::timeseries::columnar_memtable::{
     ColumnData, ColumnType, ColumnarDrainResult, ColumnarSchema, NULL_SYMBOL_ID,
 };
@@ -52,8 +53,8 @@ pub struct MergedPartition {
 /// What a merge of a group produced.
 pub enum MergeOutcome {
     Merged(MergedPartition),
-    /// The sources cannot combine without changing a row. The text says why.
-    Incompatible(String),
+    /// The sources cannot combine without changing a row.
+    Incompatible(MergeIncompatibility),
 }
 
 /// Combine `sources`, in the order given, into one partition's rows.
@@ -63,14 +64,16 @@ pub enum MergeOutcome {
 /// reached the id space.
 pub fn merge_sources(sources: Vec<MergeSource>) -> crate::Result<MergeOutcome> {
     let Some(first) = sources.first() else {
-        return Ok(MergeOutcome::Incompatible("no source partitions".into()));
+        return Ok(MergeOutcome::Incompatible(MergeIncompatibility::NoSources));
     };
     let interval_ms = first.meta.interval_ms;
     if let Some(other) = sources.iter().find(|s| s.meta.interval_ms != interval_ms) {
-        return Ok(MergeOutcome::Incompatible(format!(
-            "partition intervals differ: {interval_ms} and {}",
-            other.meta.interval_ms
-        )));
+        return Ok(MergeOutcome::Incompatible(
+            MergeIncompatibility::IntervalsDiffer {
+                first_ms: interval_ms,
+                other_ms: other.meta.interval_ms,
+            },
+        ));
     }
     let schemas: Vec<&ColumnarSchema> = sources.iter().map(|s| &s.schema).collect();
     let schema = match union_schema(&schemas) {
@@ -160,14 +163,14 @@ pub fn merge_sources(sources: Vec<MergeSource>) -> crate::Result<MergeOutcome> {
 
 /// Why partitions with these schemas do not combine, or `None` when they
 /// do. A caller checks this on the schemas alone before it reads columns.
-pub fn schema_incompatibility(schemas: &[&ColumnarSchema]) -> Option<String> {
+pub fn schema_incompatibility(schemas: &[&ColumnarSchema]) -> Option<MergeIncompatibility> {
     union_schema(schemas).err()
 }
 
 /// The union of the source schemas, or why the sources do not combine.
-fn union_schema(schemas: &[&ColumnarSchema]) -> Result<ColumnarSchema, String> {
+fn union_schema(schemas: &[&ColumnarSchema]) -> Result<ColumnarSchema, MergeIncompatibility> {
     let Some((first, rest)) = schemas.split_first() else {
-        return Err("no source partitions".into());
+        return Err(MergeIncompatibility::NoSources);
     };
     let time_name = time_column(first)?;
     let mut columns = first.columns.clone();
@@ -176,14 +179,19 @@ fn union_schema(schemas: &[&ColumnarSchema]) -> Result<ColumnarSchema, String> {
     for schema in rest {
         let name = time_column(schema)?;
         if name != time_name {
-            return Err(format!("time columns differ: '{time_name}' and '{name}'"));
+            return Err(MergeIncompatibility::TimeColumnsDiffer {
+                first: time_name.to_string(),
+                other: name.to_string(),
+            });
         }
         for (i, (col, ty)) in schema.columns.iter().enumerate() {
             match columns.iter().find(|(n, _)| n == col) {
                 Some((_, held)) if held != ty => {
-                    return Err(format!(
-                        "column '{col}' is {held:?} in one partition and {ty:?} in another"
-                    ));
+                    return Err(MergeIncompatibility::ColumnTypesDiffer {
+                        column: col.clone(),
+                        first: *held,
+                        other: *ty,
+                    });
                 }
                 Some(_) => {}
                 None => {
@@ -201,10 +209,10 @@ fn union_schema(schemas: &[&ColumnarSchema]) -> Result<ColumnarSchema, String> {
 }
 
 /// The name of `schema`'s time column.
-fn time_column(schema: &ColumnarSchema) -> Result<&str, String> {
+fn time_column(schema: &ColumnarSchema) -> Result<&str, MergeIncompatibility> {
     match schema.columns.get(schema.timestamp_idx) {
         Some((name, ty)) if ty.is_time() => Ok(name.as_str()),
-        _ => Err("a partition schema names no time column".into()),
+        _ => Err(MergeIncompatibility::NoTimeColumn),
     }
 }
 

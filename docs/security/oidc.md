@@ -226,8 +226,10 @@ SHOW AUDIT WHERE event_type = 'auth_success';
 Every accepted bearer login records an `auth_success` entry. The entry carries `auth_user_id`, `auth_user_name` and `session_id`. Its detail reads:
 
 ```
-bearer login accepted: method=<oidc_bearer|jwt_bearer> provider="<name>" sub="<sub>"
+bearer login accepted: method=oidc_bearer provider="okta" sub="alice"
 ```
+
+The `method` is `oidc_bearer` for a catalog OIDC provider and `jwt_bearer` for a static `[auth.jwt]` provider. The `sub` is the `sub` of the verified claims. An empty `sub` reads `sub=<unknown>`.
 
 **Failed attempts:**
 
@@ -238,8 +240,10 @@ SHOW AUDIT WHERE event_type = 'auth_failure';
 Every refusal records an `auth_failure` entry. Its detail reads:
 
 ```
-bearer login refused: method=<oidc_bearer|jwt_bearer> provider=<name> sub=<sub> reason="<reason>"
+bearer login refused: method=oidc_bearer provider="okta" sub="alice" reason="JWT signature verification failed"
 ```
+
+The `provider`, `sub` and `reason` values are quoted and escaped, so a client-chosen `sub` cannot forge another field. A refusal before the token routes to a provider, or with no `sub`, writes `provider=<unknown>` or `sub=<unknown>` without quotes. The `sub` of a refusal is unverified text the client chose, cut to 256 characters.
 
 The audit log never holds the token. A bearer refusal does not count toward account lockout or the login rate limit.
 

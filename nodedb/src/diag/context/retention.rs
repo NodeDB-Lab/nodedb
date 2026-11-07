@@ -49,6 +49,41 @@ impl DomainContext for RetentionAutowireOrphaned<'_> {
     }
 }
 
+/// A committed `TRUNCATE ... RESTART IDENTITY` whose sequence kept its counter.
+pub(in crate::diag) struct SequenceRestartFailed<'a> {
+    pub database_id: u64,
+    pub tenant_id: u64,
+    pub collection: &'a str,
+    pub detail: &'a str,
+}
+
+impl DomainContext for SequenceRestartFailed<'_> {
+    fn domain_kind(&self) -> &'static str {
+        "nodedb.sequence_restart_failed"
+    }
+
+    fn grouping_key(&self) -> String {
+        format!(
+            "database={} collection={}",
+            self.database_id, self.collection
+        )
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "database_id": self.database_id,
+            "tenant_id": self.tenant_id,
+            "collection": self.collection,
+            "detail": self.detail,
+            "why_fatal": "the truncate committed, so the transaction reports success. The \
+                          sequence keeps its counter, so it repeats no value and its next value \
+                          sits above the start",
+            "operator_action": "run ALTER SEQUENCE <name> RESTART WITH <start> once the cause \
+                                clears",
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

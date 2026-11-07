@@ -75,6 +75,7 @@ pub(super) fn run(
     catalog_path: &std::path::Path,
     auth_config: &crate::config::auth::AuthConfig,
     is_cluster: bool,
+    max_active_sessions: usize,
 ) -> crate::Result<ProdBootstrap> {
     let mut credentials = CredentialStore::open(catalog_path)?;
     credentials
@@ -209,11 +210,9 @@ pub(super) fn run(
     // the real gate from the `StartupSequencer` it constructs.
     let startup_gate = StartupGate::pre_fired();
     let shared_audit = Arc::new(Mutex::new(audit_log));
-    let prod_session_registry = Arc::new(SessionRegistry::new());
-    let (si_bus, uc_bus, bus_consumer_task) = super::super::buses_init::init_security_buses(
-        Arc::clone(&shared_audit),
-        Arc::clone(&prod_session_registry),
-    );
+    let prod_session_registry = Arc::new(SessionRegistry::with_cap(max_active_sessions));
+    let (si_bus, uc_bus, bus_consumer_task) =
+        super::super::buses_init::init_security_buses(Arc::clone(&shared_audit));
     let bus_consumer_handle = bus_consumer_task;
 
     Ok(ProdBootstrap {

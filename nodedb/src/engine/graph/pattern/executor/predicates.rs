@@ -30,6 +30,8 @@ pub struct PropertyLookup<'a> {
     pub csr: &'a CsrIndex,
     pub database_id: u64,
     pub tenant_id: u64,
+    /// The `IN '<collection>'` collection under the name the edge store and the
+    /// CSR hold it by, with its database's qualifier.
     pub collection: Option<&'a str>,
     /// Where the node collection keeps its documents, and the cut a
     /// versioned read takes.

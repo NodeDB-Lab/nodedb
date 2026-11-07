@@ -109,11 +109,18 @@ impl ReplicatedWrite {
             Self::CalvinReadResult { .. }
             | Self::CalvinReadTimeout { .. }
             | Self::CutBarrier { .. }
+            | Self::MirrorSeal { .. }
             | Self::TopicPublish { .. }
             | Self::SurrogateBind { .. }
             | Self::ArraySchema { .. }
             | Self::RedoChunk { .. }
             | Self::RedoAbandon { .. }
+            // A purge removes versions. A conversion rewrites each version
+            // under the system time it holds.
+            | Self::TenantPurge { .. }
+            | Self::CollectionConvert { .. }
+            | Self::RetentionDrop { .. }
+            | Self::TimeseriesAggregateImage { .. }
             | Self::SetVectorParams { .. }
             | Self::DropVectorIndex { .. }
             | Self::KvRegisterSortedIndex { .. }
@@ -197,6 +204,7 @@ mod tests {
             hlc: 1,
             restore_point: 0,
             capture: None,
+            mirror: None,
         };
         assert_eq!(barrier.system_ordinal_span(), None);
     }

@@ -19,4 +19,4 @@ pub use keys::{
 };
 pub use plan_keys::touched_collections;
 pub use provider_keys::{continuous_aggregate_version, provider_names, with_continuous_aggregates};
-pub use set::GatewayVersionSet;
+pub use set::{GatewayVersionSet, catalog_name, collection_version};

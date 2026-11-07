@@ -101,6 +101,15 @@ pub async fn crdt_apply(
     .map_err(crate::Error::from)
     .map_err(ApiError::from)?;
 
+    // A mirror binds no surrogate for a delta it refuses.
+    crate::control::server::shared::write_admission::check_mirror_writable(
+        &state.shared,
+        database_id,
+        crate::event::EventSource::User,
+        || Ok(true),
+    )
+    .map_err(ApiError::from)?;
+
     // Decode and bound the external delta before allocating identity state.
     let delta = decode_bounded_delta(&body.delta)?;
 
@@ -156,7 +165,7 @@ pub async fn crdt_apply(
     // — lost to followers and entirely on leader failover.
     let _request = state.shared.tenant_request_guard(identity.tenant_id);
     // RLS write policies are stored keyed by `db_qualified(database_id,
-    // collection)`.
+    // collection)`, and the admission addresses the Data Plane by that key.
     let qualified_collection =
         crate::control::planner::sql_plan_convert::convert::db_qualified(database_id, &collection);
     let crs_set = crate::control::crs_context::crs_set_for(&state.shared);
@@ -178,7 +187,7 @@ pub async fn crdt_apply(
         &state.shared,
         crate::control::crdt_admission::AuthorizedCrdtApplyAdmissionRequest {
             authorized,
-            collection: &collection,
+            collection: &qualified_collection,
             deadline: crate::control::server::shared::session::StatementDeadline::of_statement(
                 &state.shared,
             ),
@@ -189,6 +198,9 @@ pub async fn crdt_apply(
     .await;
 
     result.map_err(ApiError::from)?;
+    crate::control::mirror::source::sync::await_database_sync(&state.shared, database_id)
+        .await
+        .map_err(ApiError::from)?;
 
     Ok((
         rate_limit_headers,

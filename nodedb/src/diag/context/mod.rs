@@ -20,7 +20,9 @@ mod event_image;
 mod held_entry;
 mod index_rebuild;
 mod ingest;
+mod kv_expiry;
 mod lease;
+mod mirror;
 mod outcome_floor;
 mod quota;
 mod raft_apply;
@@ -36,14 +38,17 @@ mod vshard_departure;
 mod write_path;
 
 pub(in crate::diag) use array_sync::ArraySnapshotBufferPoisoned;
-pub(in crate::diag) use audit::{AuditFlushNotPersisted, AuditWalAppendFailed};
+pub(in crate::diag) use audit::{
+    AuditFlushNotPersisted, AuditPruneNotApplied, AuditWalAppendFailed, AuditWalNotTruncated,
+    SecurityBusLagged, SecurityBusRowsNotRecorded,
+};
 pub(in crate::diag) use catalog::{
     CatalogApplyOrphanRow, CollectionPurgeRowMissing, ConsumerGroupOffsetsRetained,
     MetadataApplyWedged, SynonymGroupNotApplied,
 };
 pub(in crate::diag) use columnar::{
-    ColumnarSegmentCorrupt, TimeseriesFlushNotInstalled, TimeseriesIdleFlushFailed,
-    TimeseriesPartitionUnreadable,
+    ColumnarSegmentCorrupt, QuarantineRecordEvicted, TimeseriesFlushNotInstalled,
+    TimeseriesIdleFlushFailed, TimeseriesPartitionUnreadable,
 };
 pub(in crate::diag) use continuous_agg::{
     ContinuousAggregateNotApplied, ContinuousAggregateStateFault,
@@ -59,16 +64,19 @@ pub(in crate::diag) use cut_barrier::CutBarrierNotPlaced;
 pub use data_plane::LostResponseWrite;
 pub(in crate::diag) use data_plane::{
     CalvinApplyHalted, CalvinCompletionTimeout, CalvinStageRefusedInternal, CoreFailStopped,
-    DataPlaneResponseLost, VectorPayloadUndecodable,
+    DataPlaneResponseLost, RedoNoteMisnamed, VectorPayloadUndecodable,
 };
 pub(in crate::diag) use event_image::{StrictRowImageUnrendered, TimeseriesRowImageUndecodable};
 pub(in crate::diag) use held_entry::{ApplyPanicked, HeldEntryDebtNotRecorded, RedoEntryMalformed};
 pub(in crate::diag) use index_rebuild::IndexRebuildNotInstalled;
 pub use ingest::IlpFlushOutcome;
 pub(in crate::diag) use ingest::{CatchupRecordMisnamed, IlpAcceptedLinesDropped};
+pub(in crate::diag) use kv_expiry::KvReapEntryUnusable;
 pub(in crate::diag) use lease::{
     DdlCleanupNotCompleted, DescriptorDrainNotEnded, DescriptorLeaseNotRenewed,
+    DescriptorLeaseReleaseDropped,
 };
+pub(in crate::diag) use mirror::{MirrorLinkStopped, MirrorStatusUnread};
 pub(in crate::diag) use outcome_floor::{WriteWindowHeld, WriteWindowLeaked};
 pub use quota::{DATABASE_SCOPE, TENANT_SCOPE};
 pub(in crate::diag) use quota::{
@@ -83,7 +91,7 @@ pub(in crate::diag) use recovery::{ReplayRecordUnapplied, WalArchivalFailedTrunc
 pub(in crate::diag) use redo_stream::{
     RedoAbandonGivenUp, RedoSnapshotDebtNotRecorded, RedoStreamLostHere,
 };
-pub(in crate::diag) use retention::RetentionAutowireOrphaned;
+pub(in crate::diag) use retention::{RetentionAutowireOrphaned, SequenceRestartFailed};
 pub(in crate::diag) use storage_bytes::{
     StorageBytesResidue, StorageBytesSampleFailed, StorageBytesUnderflow, StorageSharePeerSkipped,
 };

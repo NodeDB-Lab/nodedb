@@ -496,10 +496,11 @@ mod crdt_replay_tests {
         // Build one collection's CRDT doc directly; the WAL record carries the
         // collection so replay routes the import to the matching per-collection
         // LoroDoc.
+        // The record names the stored collection, and the Loro root is its bare name.
         let state = nodedb_crdt::state::CrdtState::new(0).expect("state");
         state
             .upsert(
-                collection,
+                nodedb_types::QualifiedCollection::bare_of_stored(collection),
                 row_id,
                 &[("name", LoroValue::String("alice".into()))],
             )

@@ -13,10 +13,10 @@ use super::outcome::ApplyOutcome;
 use super::{
     alert_rule, api_key, array, auth_user, backup_schedule, change_stream, checkpoint, clone_cow,
     collection, column_stats, consumer_group, continuous_aggregate, credential, custom_type,
-    database, function, index_registry, materialized_view, oidc_provider, owner, permission,
-    procedure, quota, redaction, retention_policy, rls, role, schedule, scope_grant, scope_quota,
-    sequence, spatial_ref_sys, streaming_materialized_view, synonym_group, tenant, topic, trigger,
-    user, vector, wal_tombstone,
+    database, function, index_registry, materialized_view, mirror_cut, oidc_provider, owner,
+    permission, procedure, quota, redaction, retention_policy, rls, role, schedule, scope_grant,
+    scope_quota, sequence, spatial_ref_sys, streaming_materialized_view, synonym_group, tenant,
+    topic, trigger, user, vector, wal_tombstone,
 };
 
 /// Apply `entry` to `catalog`.
@@ -33,6 +33,9 @@ pub fn apply_to(
     catalog: &SystemCatalog,
 ) -> Result<ApplyOutcome, crate::Error> {
     let outcome = match entry {
+        CatalogEntry::ClaimMirrorDatabase(descriptor) => {
+            mirror_cut::claim_mirror(descriptor, catalog)?
+        }
         CatalogEntry::PutTenantWithAdmin { tenant, admin } => {
             if tenant::put_with_admin(tenant, admin, catalog)? {
                 ApplyOutcome::Applied
@@ -123,6 +126,9 @@ fn apply_to_inner(entry: &CatalogEntry, catalog: &SystemCatalog) -> crate::Resul
             ..
         } => sequence::delete(*database_id, *tenant_id, name, catalog),
         CatalogEntry::PutSequenceState(state) => sequence::put_state(state, catalog),
+        CatalogEntry::ReserveSequenceRange { expected, next } => {
+            sequence::reserve_range(expected.as_deref(), next, catalog)
+        }
         CatalogEntry::PutTrigger(stored) => trigger::put(stored, catalog),
         CatalogEntry::DeleteTrigger {
             database_id,
@@ -191,7 +197,7 @@ fn apply_to_inner(entry: &CatalogEntry, catalog: &SystemCatalog) -> crate::Resul
         } => continuous_aggregate::delete(*database_id, *tenant_id, name, catalog),
         CatalogEntry::PutTenant(stored) => tenant::put(stored, catalog),
         // Applied by `apply_to` so its commit outcome can suppress post-apply.
-        CatalogEntry::PutTenantWithAdmin { .. } => Ok(()),
+        CatalogEntry::PutTenantWithAdmin { .. } | CatalogEntry::ClaimMirrorDatabase(_) => Ok(()),
         CatalogEntry::DeleteTenant { tenant_id } => tenant::delete(*tenant_id, catalog),
         CatalogEntry::PutRlsPolicy(stored) => rls::put(stored, catalog),
         CatalogEntry::DeleteRlsPolicy {
@@ -420,6 +426,14 @@ fn apply_to_inner(entry: &CatalogEntry, catalog: &SystemCatalog) -> crate::Resul
         // The post-apply writes them.
         CatalogEntry::CommitConsumerOffsets(_) => Ok(()),
         CatalogEntry::PutBackupScheduleMark(mark) => backup_schedule::raise_mark(mark, catalog),
+        CatalogEntry::PutMirrorCutState { database_id, state } => {
+            mirror_cut::raise(*database_id, state, catalog)
+        }
+        CatalogEntry::StepMirrorStatus { database_id, step } => {
+            mirror_cut::step_status(*database_id, step, catalog)
+        }
+        CatalogEntry::PutMirrorPin(pin) => catalog.raise_mirror_pin(pin),
+        CatalogEntry::DeleteMirrorPin { link_id } => catalog.delete_mirror_pin(*link_id),
         CatalogEntry::PutSpatialRefSys(def) => spatial_ref_sys::define(def, catalog),
         CatalogEntry::DropSpatialRefSys { srid } => spatial_ref_sys::retire(*srid, catalog),
         CatalogEntry::PutCredential(row) => credential::put(row, catalog),

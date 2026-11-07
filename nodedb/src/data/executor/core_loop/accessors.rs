@@ -173,6 +173,25 @@ impl CoreLoop {
         self.quarantine_registry = Some(registry);
     }
 
+    /// Forget the quarantine records of a collection's segments of `engine`.
+    /// The caller removed or replaced those segments, and their ids can return.
+    pub(in crate::data::executor) fn release_quarantined_segments(
+        &self,
+        engine: crate::storage::quarantine::QuarantineEngine,
+        key: &(crate::types::DatabaseId, crate::types::TenantId, String),
+    ) {
+        if let Some(registry) = &self.quarantine_registry {
+            registry.release_collection_engine(
+                engine,
+                &crate::storage::quarantine::CollectionScope::new(
+                    key.0.as_u64(),
+                    key.1.as_u64(),
+                    key.2.as_str(),
+                ),
+            );
+        }
+    }
+
     /// Scope this core's fail points to node `node_id`, and the fail points
     /// of the event producer it holds. Called once by the server bootstrap
     /// before the core recovers.

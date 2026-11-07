@@ -2,7 +2,7 @@
 
 //! Version-history operations: read at version, export delta, restore, compact.
 
-use super::core::TenantCrdtEngine;
+use super::core::{TenantCrdtEngine, loro_root};
 
 /// Envelope version embedded in every serialized `VersionVector` JSON string.
 ///
@@ -50,7 +50,7 @@ impl TenantCrdtEngine {
         let Some(state) = self.collections.get(collection) else {
             return Ok(None);
         };
-        match state.read_at_version(collection, document_id, &vv) {
+        match state.read_at_version(loro_root(collection), document_id, &vv) {
             Ok(Some(val)) => {
                 let json = crate::engine::document::crdt_store::loro_value_to_json(&val);
                 sonic_rs::to_vec(&json)
@@ -93,7 +93,7 @@ impl TenantCrdtEngine {
             })
         })?;
         state
-            .preview_restore_to_version(collection, document_id, &vv)
+            .preview_restore_to_version(loro_root(collection), document_id, &vv)
             .map_err(crate::Error::Crdt)
     }
 
@@ -112,7 +112,7 @@ impl TenantCrdtEngine {
             })
         })?;
         state
-            .restore_to_version(collection, document_id, &vv)
+            .restore_to_version(loro_root(collection), document_id, &vv)
             .map_err(crate::Error::Crdt)
     }
 

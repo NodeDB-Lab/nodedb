@@ -99,6 +99,8 @@ impl CoreLoop {
             if let Some(registry) = self.ts_registries.get_mut(&key) {
                 registry.update_meta(&partition_key, meta);
             }
+            // The directory holds new bytes under its old name.
+            self.release_ts_partitions(key.0, key.1, &key.2, std::slice::from_ref(&entry.dir_name));
             rewritten += 1;
         }
         tracing::info!(

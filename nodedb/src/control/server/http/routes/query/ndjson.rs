@@ -15,13 +15,12 @@ use crate::control::server::response_shape::request::MaterializedShapeRequest;
 use crate::control::server::response_shape::types::describe_plan;
 use crate::control::server::shared::authorization::authorize_database;
 use crate::control::server::shared::cluster_array_dispatch::{is_cluster_array, run_cluster_array};
-use crate::control::server::shared::metering::{
-    DetachedMeterGuard, PlanMeteringInfo, meter_dispatch,
-};
+use crate::control::server::shared::metering::{PlanMeteringInfo, meter_dispatch};
 use crate::control::server::shared::plan_admission::{
     PlanAdmissionRequest, plan_authorize_and_admit,
 };
 use crate::control::server::shared::quota_admission::admit_quota_for_dispatch;
+use crate::control::server::shared::session::{read_consistency, read_scope};
 use crate::control::server::shared::statement_exec::{
     AtomicStatement, StatementExec, authorize_one_task,
 };
@@ -31,23 +30,45 @@ use super::super::super::peer::PeerAddr;
 use super::super::super::transport::ClientTransport;
 use super::super::atomic_statement::{RoutedStatement, route_http_statement};
 use super::super::ndjson_error::error_line;
-use super::super::query_stream::{NdjsonBody, ndjson_body_stream, try_open_stream};
+use super::super::query_stream::{NdjsonBody, bound_ndjson_body, stream_binding, try_open_stream};
 use super::super::result_shape::append_ndjson_payload;
-use super::ndjson_response::{ndjson_response, quota_rejection};
+use super::ndjson_response::{
+    ndjson_response, quota_rejection, rows_to_ndjson, stream_meter_guard, sync_timeout_line,
+};
 use super::{DatabaseQueryParam, resolve_database_id};
 
 /// POST /v1/query/stream — execute SQL, return results as NDJSON.
 ///
 /// Each row is a separate JSON line (`\n`-terminated), Content-Type
 /// `application/x-ndjson`, so clients can process large result sets unbuffered.
-/// An error is an in-band `{"error": "...", "code": "NDB-<n>"}` line.
+/// An error is an in-band `{"error": "...", "code": "NDB-<n>"}` line. The body's
+/// optional `read_consistency` defaults to `strong`.
 pub async fn query_ndjson(
+    state: State<AppState>,
+    headers: HeaderMap,
+    peer: PeerAddr,
+    transport: ClientTransport,
+    db_param: QueryParams<DatabaseQueryParam>,
+    axum::Json(body): axum::Json<crate::control::server::http::types::HttpQueryStreamRequest>,
+) -> Response {
+    match read_consistency::parse_request_field(body.read_consistency.as_deref()) {
+        Ok(level) => read_scope::with_request_consistency(
+            level,
+            ndjson_at_consistency(state, headers, peer, transport, db_param, body),
+        )
+        .await
+        .into_response(),
+        Err(error) => ApiError::from(error).into_response(),
+    }
+}
+
+async fn ndjson_at_consistency(
     State(state): State<AppState>,
     headers: HeaderMap,
     peer: PeerAddr,
     transport: ClientTransport,
     QueryParams(db_param): QueryParams<DatabaseQueryParam>,
-    axum::Json(body): axum::Json<crate::control::server::http::types::HttpQueryStreamRequest>,
+    body: crate::control::server::http::types::HttpQueryStreamRequest,
 ) -> impl IntoResponse {
     let (identity, verified_jwt) =
         match resolve_auth_parts(&headers, &state, peer.as_str(), transport.security()).await {
@@ -68,6 +89,10 @@ pub async fn query_ndjson(
     if sql.is_empty() {
         return (StatusCode::BAD_REQUEST, "empty SQL").into_response();
     }
+    // The statement's DDL proposals carry its text. Array DDL is the DDL this route runs.
+    let _audit = crate::control::server::shared::session::audit_context::AuditScope::statement(
+        &identity, sql,
+    );
 
     let tenant_id = identity.tenant_id;
 
@@ -152,12 +177,7 @@ pub async fn query_ndjson(
     let (tasks, lease_scope) = match routed {
         Ok(RoutedStatement::PerTask(statement)) => (statement.tasks, statement.lease_scope),
         Ok(RoutedStatement::Answered(rows)) => {
-            let mut ndjson = String::new();
-            for row in rows {
-                ndjson.push_str(&row.to_string());
-                ndjson.push('\n');
-            }
-            return ndjson_response(ndjson, rate_limit_headers);
+            return ndjson_response(rows_to_ndjson(rows), rate_limit_headers);
         }
         // A statement that stopped answers one error line, as a task that
         // stopped in the loop below does.
@@ -187,19 +207,15 @@ pub async fn query_ndjson(
                 })
                 .into_response();
             };
-            // Streaming body owns the guard, so only rows actually sent are billed;
-            // see `DetachedMeterGuard`.
-            let stream_meter_guard = if state.shared.metering_config.enabled
-                && let [task] = tasks.as_slice()
+            let stream_meter_guard = stream_meter_guard(&state.shared, &scope, &tasks);
+            let binding = match stream_binding(&state.shared, &identity, peer.as_str(), database_id)
             {
-                let info = PlanMeteringInfo::extract(&task.plan);
-                DetachedMeterGuard::new(&state.shared, &scope, &info)
-            } else {
-                None
+                Ok(binding) => binding,
+                Err(error) => return ApiError::from(error).into_response(),
             };
             let mut response = Response::builder()
                 .header("Content-Type", "application/x-ndjson")
-                .body(axum::body::Body::from_stream(ndjson_body_stream(
+                .body(axum::body::Body::from_stream(bound_ndjson_body(
                     NdjsonBody {
                         stream,
                         limit,
@@ -218,6 +234,7 @@ pub async fn query_ndjson(
                         database_id,
                         meter_guard: stream_meter_guard,
                     },
+                    binding,
                 )))
                 .unwrap_or_else(|_| {
                     (StatusCode::INTERNAL_SERVER_ERROR, "encoding error").into_response()
@@ -236,6 +253,8 @@ pub async fn query_ndjson(
         })
         .into_response();
     };
+    let sync_database =
+        crate::control::mirror::source::sync::sync_database_of(&state.shared, &tasks);
     let mut ndjson = String::new();
     let mut failed = false;
     // Checked once, not per task: keeps per-task extraction a no-op when metering is
@@ -402,7 +421,7 @@ pub async fn query_ndjson(
                                 trace_id,
                                 database_id,
                                 txn_id: None,
-                                linearizable: true,
+                                linearizable: read_scope::linearizable(),
                             };
                             gateway.execute(&gw_ctx, checked).await
                         }
@@ -461,6 +480,10 @@ pub async fn query_ndjson(
                 failed = true;
             }
         }
+    }
+    if !failed && let Some(line) = sync_timeout_line(&state.shared, sync_database).await {
+        ndjson.push_str(&line);
+        failed = true;
     }
     if failed {
         state.shared.database_metrics.record_error(database_id);

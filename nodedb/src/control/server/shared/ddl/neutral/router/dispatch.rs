@@ -24,8 +24,8 @@ use super::super::query_functions;
 use super::route_tokens::RouteTokens;
 use super::{
     string_admin, string_engine_ops, string_introspection, string_schema, string_streaming,
-    string_versioning, typed_auth, typed_automation, typed_collection, typed_database, typed_misc,
-    typed_policy, typed_streamview,
+    string_versioning, sync_wait, typed_auth, typed_automation, typed_collection, typed_database,
+    typed_misc, typed_policy, typed_streamview,
 };
 
 /// Try to handle `sql` with a migrated protocol-neutral DDL family handler.
@@ -113,7 +113,10 @@ pub async fn try_dispatch(
                         collection::insert_document(state, identity, database_id, sql, txn_ctx)
                             .await
                 {
-                    return Some(result);
+                    return Some(
+                        sync_wait::confirmed_unless_staged(state, database_id, txn_ctx, result)
+                            .await,
+                    );
                 }
 
                 // UPSERT INTO — same as INSERT but merges into existing document
@@ -124,7 +127,10 @@ pub async fn try_dispatch(
                         collection::upsert_document(state, identity, database_id, sql, txn_ctx)
                             .await
                 {
-                    return Some(result);
+                    return Some(
+                        sync_wait::confirmed_unless_staged(state, database_id, txn_ctx, result)
+                            .await,
+                    );
                 }
             }
 
@@ -168,13 +174,19 @@ pub async fn try_dispatch(
     // GRAPH TRAVERSE/NEIGHBORS/PATH, GRAPH ALGO, GRAPH RAG FUSION, SHOW GRAPH
     // STATS) parse into typed `GraphStmt` variants. `dispatch_graph` returns `Some` for the
     // graph-overlay variants and `None` otherwise.
-    if let NodedbStatement::Graph(_) = &stmt {
+    if let NodedbStatement::Graph(graph) = &stmt {
+        let writes = graph_stmt_writes(graph);
         // The graph-overlay handlers thread the session's transaction context
         // through `txn_ctx`: single-hop reads (Neighbors/Hop) resolve the
         // active `TxnId` for read-your-own-writes overlay merge, and edge
         // writes (`GRAPH DELETE EDGE`) stage into the per-transaction
         // `GraphTxnOverlay` through the neutral gate when `InBlock`.
-        return graph_ops::dispatch_graph(state, identity, database_id, stmt, txn_ctx).await;
+        let result = graph_ops::dispatch_graph(state, identity, database_id, stmt, txn_ctx).await?;
+        return Some(if writes {
+            sync_wait::confirmed_unless_staged(state, database_id, txn_ctx, result).await
+        } else {
+            result
+        });
     }
 
     if let Some(r) = typed_misc::try_typed(state, identity, sql, database_id, &stmt, txn_ctx).await
@@ -201,6 +213,22 @@ pub async fn try_dispatch(
     }
 
     None
+}
+
+/// Whether a graph statement writes, and so waits for a sync mirror.
+fn graph_stmt_writes(stmt: &GraphStmt) -> bool {
+    match stmt {
+        GraphStmt::GraphInsertEdge { .. }
+        | GraphStmt::GraphDeleteEdge { .. }
+        | GraphStmt::GraphSetLabels { .. } => true,
+        GraphStmt::GraphTraverse { .. }
+        | GraphStmt::GraphNeighbors { .. }
+        | GraphStmt::GraphPath { .. }
+        | GraphStmt::GraphAlgo { .. }
+        | GraphStmt::MatchQuery { .. }
+        | GraphStmt::GraphRagFusion { .. }
+        | GraphStmt::ShowGraphStats { .. } => false,
+    }
 }
 
 /// Whether a statement, upper-cased, can open with `COPY`, `INSERT`, or

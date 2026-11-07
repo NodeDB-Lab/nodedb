@@ -143,6 +143,7 @@ pub(crate) fn is_unclassified_failure(e: &Error) -> bool {
         | Error::RoleInheritanceDepthExceeded { .. }
         | Error::OllpExhausted { .. }
         | Error::MirrorReadOnly { .. }
+        | Error::MirrorSyncTimeout { .. }
         | Error::StaleReadNotLeader { .. } => false,
     }
 }

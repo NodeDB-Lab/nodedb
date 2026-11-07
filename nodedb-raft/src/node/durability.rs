@@ -125,18 +125,15 @@ impl<S: LogStorage> RaftNode<S> {
     /// `last_applied` then would discard entries the next collection still
     /// reads.
     ///
-    /// Every request is first clamped to the compaction ceiling, when one is
-    /// set (see [`Self::set_compaction_ceiling`]).
+    /// Every request is first clamped to the lowest compaction ceiling (see
+    /// [`Self::set_compaction_ceiling`]).
     ///
     /// Returns `Ok(false)` when there is nothing to compact
     /// (`up_to_index <= snapshot_index`). Returns
     /// `Err(RaftError::LogCompacted)` if the term at `up_to_index` is no
     /// longer available (already compacted away).
     pub fn compact_log_up_to(&mut self, up_to_index: u64) -> Result<bool> {
-        let up_to_index = match &self.compaction_ceiling {
-            Some(ceiling) => up_to_index.min(ceiling.load(std::sync::atomic::Ordering::Acquire)),
-            None => up_to_index,
-        };
+        let up_to_index = self.compaction_ceilings.clamp(up_to_index);
         if up_to_index <= self.log.snapshot_index() {
             return Ok(false);
         }
@@ -158,13 +155,35 @@ impl<S: LogStorage> RaftNode<S> {
         Ok(true)
     }
 
-    /// Bound every compaction of this log by `ceiling`: no entry above the
-    /// value it holds is discarded, whoever asks.
+    /// The entry bytes this replica's log holds in memory.
+    pub fn log_retained_bytes(&self) -> u64 {
+        self.log.retained_bytes()
+    }
+
+    /// Committed entries from `lo` whose data sums to at most `max_bytes`. The
+    /// first entry always ships, so an oversized one still ships alone.
+    pub fn log_committed_within(&self, lo: u64, max_bytes: usize) -> Result<&[LogEntry]> {
+        self.log
+            .entries_within(lo, self.volatile.commit_index, max_bytes)
+    }
+
+    /// Bound every compaction of this log by `owner`'s `ceiling`: no entry
+    /// above the value it holds is discarded, whoever asks. Other owners'
+    /// ceilings stay, and the lowest binds.
     pub fn set_compaction_ceiling(
         &mut self,
+        owner: &'static str,
         ceiling: std::sync::Arc<std::sync::atomic::AtomicU64>,
     ) {
-        self.compaction_ceiling = Some(ceiling);
+        self.compaction_ceilings.set(owner, ceiling);
+    }
+
+    /// Replace every compaction ceiling of this log, for a group that mounts.
+    pub fn set_compaction_ceilings(
+        &mut self,
+        ceilings: super::compaction_ceiling::CompactionCeilings,
+    ) {
+        self.compaction_ceilings = ceilings;
     }
 
     /// Check the configured auto-compaction threshold against the
@@ -277,7 +296,7 @@ mod tests {
             apply_durably(&mut node, last);
         }
         let ceiling = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-        node.set_compaction_ceiling(std::sync::Arc::clone(&ceiling));
+        node.set_compaction_ceiling("archive", std::sync::Arc::clone(&ceiling));
         assert!(
             !node.compact_log_up_to(last).unwrap(),
             "a zero ceiling holds every entry"
@@ -285,6 +304,26 @@ mod tests {
         ceiling.store(2, std::sync::atomic::Ordering::Release);
         assert!(node.compact_log_up_to(last).unwrap());
         assert_eq!(node.first_available_index(), 3);
+    }
+
+    /// A second owner's ceiling holds entries the first owner released.
+    #[test]
+    fn the_lowest_owner_holds_the_log() {
+        let mut node = leader_with_applied_noop(test_config(1, vec![]));
+        let mut last = 0;
+        for _ in 0..4 {
+            last = node.propose(b"write".to_vec()).unwrap();
+            apply_durably(&mut node, last);
+        }
+        let archive = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX));
+        let pin = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(2));
+        node.set_compaction_ceiling("archive", archive);
+        node.set_compaction_ceiling("pin", std::sync::Arc::clone(&pin));
+        assert!(node.compact_log_up_to(last).unwrap());
+        assert_eq!(node.first_available_index(), 3);
+        pin.store(u64::MAX, std::sync::atomic::Ordering::Release);
+        assert!(node.compact_log_up_to(last).unwrap());
+        assert_eq!(node.first_available_index(), last + 1);
     }
 
     #[test]

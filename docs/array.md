@@ -310,8 +310,8 @@ The result has a `result` column. A grouped call also has a `group` column that 
 `ARRAY_AGG` takes these named arguments after its positional ones: `p`, `bins`, `lo`, `hi`, and `physical`. A reducer refuses a parameter it does not take, and refuses to run without one it needs. An unknown named argument, or `=` in place of `=>`, is refused.
 
 ```sql
--- 90th percentile of reflectance per scene date, physical values
-SELECT * FROM ARRAY_AGG('scene', 'red', 'percentile', 'date', p => 0.9, physical => true);
+-- 90th percentile of reflectance per row, physical values
+SELECT * FROM ARRAY_AGG('scene', 'red', 'percentile', 'row', p => 0.9, physical => true);
 
 -- Population standard deviation of the whole array
 SELECT * FROM ARRAY_AGG('scene', 'red', 'stddev_pop');
@@ -320,13 +320,13 @@ SELECT * FROM ARRAY_AGG('scene', 'red', 'stddev_pop');
 A histogram splits `[lo, hi]` into `bins` bins of width `(hi - lo) / bins`. Bin `i` holds the values in `[lo + i*w, lo + (i+1)*w)`, and the last bin also holds `hi`. A value below `lo`, above `hi`, or `NaN` falls in no bin and is not counted. A histogram returns one row per bin, zero-count bins included, with `bin_lo` and `bin_hi` (`double precision`) and `count` (`bigint`) in place of `result`. A grouped histogram returns one row per bin per group, after `group`:
 
 ```sql
-SELECT * FROM ARRAY_AGG('scene', 'ndvi', 'histogram', bins => 4, lo => -1, hi => 1);
+SELECT * FROM ARRAY_AGG('scene', 'red', 'histogram', bins => 4, lo => 0, hi => 1, physical => true);
 --  bin_lo | bin_hi | count
 -- --------+--------+-------
---    -1   |  -0.5  |   12
---   -0.5  |   0    |   40
---    0    |   0.5  |  311
---    0.5  |   1    |  145
+--    0    |  0.25  |   12
+--   0.25  |  0.5   |   40
+--   0.5   |  0.75  |  311
+--   0.75  |   1    |  145
 ```
 
 Every reducer accepts integer and float attributes. `COUNT` also accepts `STRING` and `BYTES`. Another reducer over a `STRING` or `BYTES` attribute is refused at plan time with a type mismatch error. Every reducer groups by a dimension.
@@ -343,14 +343,15 @@ Three more optional arguments bound the cells the reducer reads:
 Pass `NULL` for an argument to skip it:
 
 ```sql
--- Mean NDVI inside a field boundary
+-- Mean reflectance inside a field boundary, drawn over col (x) and row (y)
 SELECT * FROM ARRAY_AGG(
-  'scene', 'ndvi', 'MEAN', NULL, NULL,
-  'POLYGON((101 2, 103 2, 103 4, 101 4, 101 2))', ARRAY['lon', 'lat']
+  'scene', 'red', 'MEAN', NULL, NULL,
+  'POLYGON((100 200, 300 200, 300 400, 100 400, 100 200))', ARRAY['col', 'row'],
+  physical => true
 );
 
--- Sum per lon value inside a box
-SELECT * FROM ARRAY_AGG('scene', 'ndvi', 'SUM', 'lon', '{lon: [101, 103]}');
+-- Sum per col value inside a box
+SELECT * FROM ARRAY_AGG('scene', 'red', 'SUM', 'col', '{col: [100, 300]}');
 ```
 
 A cell is in a zone when it lies inside one member polygon and outside that polygon's holes. Edges are half-open: on a rectangle, a cell on the lower x or y edge is inside and a cell on the upper edge is outside. A region that holds no cell returns `NULL` for every reducer, `COUNT` included. Tiles whose bounding boxes miss the region are skipped before decode.
@@ -407,15 +408,13 @@ Returns one object `{"compacted": n}`. `n` counts the cores that merged segments
 
 ```sql
 -- One file: band i loads into attribute i.
-COPY scene FROM '/data/LC09_SR.tif' WITH (FORMAT geotiff, TIME '2024-03-15T03:12:00Z');
+COPY scene FROM '/data/LC09_SR.tif' WITH (FORMAT geotiff);
 
 -- One file per band group, read in lockstep: each cell gets every attribute.
 COPY scene FROM (
   's3://usgs-landsat/collection02/level-2/.../LC09_..._SR_B4.TIF',
-  's3://usgs-landsat/collection02/level-2/.../LC09_..._SR_B5.TIF',
-  's3://usgs-landsat/collection02/level-2/.../LC09_..._QA_PIXEL.TIF'
-) WITH (FORMAT geotiff, BANDS (red, nir, qa), CREDENTIAL landsat, REQUESTER_PAYS true,
-        TIME '2024-03-15T03:12:00Z');
+  's3://usgs-landsat/collection02/level-2/.../LC09_..._SR_QA_AEROSOL.TIF'
+) WITH (FORMAT geotiff, BANDS (red, qa), CREDENTIAL landsat, REQUESTER_PAYS true);
 
 -- An HTTPS source behind Earthdata Login.
 COPY scene FROM 'https://data.lpdaac.earthdatacloud.nasa.gov/.../HLS.S30....B04.tif'
@@ -582,12 +581,13 @@ System time–based retention enables GDPR and data minimization compliance:
 
 ```sql
 ALTER ARRAY spatial_grid SET (audit_retain_ms = 86400000);  -- keep 1 day
-
--- Tiles older than now - 1 day are candidates for purge
--- Purge is automatic during compaction
 ```
 
-Purged tiles are irreversibly removed; historical queries beyond the retention window will see gaps.
+- The metadata leader decides each purge once per retention pass. The decision enters the log, so every replica and mirror removes the same versions.
+- A purge flushes the array's memtable first, so a version below the cutoff leaves even with no write behind it.
+- The cell's version at the cutoff stays. A read at or after the cutoff answers as before.
+
+Purged tiles are irreversibly removed. A read below the cutoff can answer nothing.
 
 ## Related
 

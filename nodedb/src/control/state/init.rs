@@ -137,7 +137,7 @@ fn test_auth_and_buses(wal: &Arc<WalManager>) -> crate::Result<(AuthInputs, BusP
     };
     let session_registry = Arc::new(crate::control::security::sessions::SessionRegistry::new());
     let (si_bus, uc_bus, bus_consumer_handle) =
-        super::buses_init::init_security_buses(Arc::clone(&audit), Arc::clone(&session_registry));
+        super::buses_init::init_security_buses(Arc::clone(&audit));
     // The default configs pin the effective bounds to the config types the
     // production constructor reads.
     let metering_config = MeteringConfig::default();

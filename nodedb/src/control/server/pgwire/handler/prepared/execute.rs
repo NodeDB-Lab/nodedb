@@ -44,6 +44,9 @@ impl NodeDbPgHandler {
         let session_id = self.session_id;
         let identity = self.resolve_identity(client, &session_id)?;
         let stmt = &portal.statement.statement;
+        if let Some(binding) = self.sessions.binding(session_id) {
+            binding.set_statement_text(&stmt.sql);
+        }
 
         // An aborted transaction block refuses every statement until it ends,
         // the same gate Parse and the simple-query path apply. Transaction

@@ -5,18 +5,18 @@
 //! BoundedStaleness(1000 ms) reads pass.
 //!
 //! This test simulates the observable lag from a cross-region deployment by
-//! injecting a synthetic lag record with a 300 ms offset and verifying that:
+//! injecting a synthetic cut state with a 300 ms offset and verifying that:
 //! 1. The status remains `Following` (lag < 5 s).
 //! 2. A `BoundedStaleness(1000 ms)` read is accepted.
 //! 3. A `BoundedStaleness(100 ms)` read is rejected (lag > 100 ms).
 //!
-//! The QUIC transport RTT is reflected in the lag record's `last_apply_ms`
-//! value: a 200 ms round-trip means entries arrive ~200 ms late. The test
-//! models this by writing a lag record with `last_apply_ms = now - 300`.
+//! The QUIC transport RTT shows in the age of the applied cut: a 200 ms
+//! round-trip means entries arrive ~200 ms late. The test models this with an
+//! applied cut 300 ms old.
 
 use std::time::Duration;
 
-use nodedb_types::{DatabaseId, Lsn, MirrorLagRecord, MirrorMode, MirrorOrigin, MirrorStatus};
+use nodedb_types::{DatabaseId, MirrorMode, MirrorOrigin, MirrorStatus};
 use tempfile::TempDir;
 
 use nodedb::control::server::pgwire::ddl::database::{
@@ -24,7 +24,10 @@ use nodedb::control::server::pgwire::ddl::database::{
 };
 use nodedb::types::ReadConsistency;
 
-use super::helpers::{TEST_SOURCE_CLUSTER, inject_lag_record_for_id, now_ms, open_tmp_catalog};
+use super::helpers::{
+    TEST_SOURCE_CLUSTER, TEST_SOURCE_DATABASE, applied_cut_state, inject_cut_state_for_id, now_ms,
+    open_tmp_catalog,
+};
 
 #[test]
 fn mirror_simulated_cross_region_latency() {
@@ -35,13 +38,13 @@ fn mirror_simulated_cross_region_latency() {
     // Simulate 200 ms cross-region RTT: last entry applied 300 ms ago
     // (200 ms transit + ~100 ms apply queue drain).
     let simulated_lag_ms = 300u64;
-    inject_lag_record_for_id(&catalog, db_id, simulated_lag_ms, 1);
+    inject_cut_state_for_id(&catalog, db_id, simulated_lag_ms, 1);
 
     let origin = MirrorOrigin {
         source_cluster: TEST_SOURCE_CLUSTER.to_string(),
         source_database: DatabaseId::new(0),
+        source_database_name: TEST_SOURCE_DATABASE.to_string(),
         mode: MirrorMode::Async,
-        last_applied: Lsn::new(1),
         status: MirrorStatus::Following,
     };
 
@@ -80,7 +83,7 @@ fn mirror_simulated_cross_region_latency() {
 
     // Status must remain Following (lag < LAG_DEGRADED_MS = 5 s).
     use nodedb::control::mirror::{LAG_DEGRADED_MS, LagTransition, compute_lag_transition};
-    let t = compute_lag_transition(&MirrorStatus::Following, simulated_lag_ms, now_ms(), false);
+    let t = compute_lag_transition(&MirrorStatus::Following, simulated_lag_ms, now_ms());
     assert_eq!(
         t,
         LagTransition::Unchanged,
@@ -95,27 +98,21 @@ fn mirror_simulated_latency_at_threshold_boundary() {
     let catalog = open_tmp_catalog(&dir);
     let db_id = DatabaseId::new(5002);
 
-    // Fix `now` and derive `last_apply_ms` from it so the computed lag is
+    // Fix `now` and derive the cut's time from it so the computed lag is
     // exactly 199 ms — one millisecond inside the 200 ms bound — regardless of
-    // how long lag injection takes. Passing the same `now` into the check keeps
+    // how long injection takes. Passing the same `now` into the check keeps
     // this boundary deterministic; reading the wall clock inside the check would
     // add real elapsed time to the lag and flake the assertion on a slow runner.
     let now = now_ms();
     catalog
-        .put_mirror_lag(
-            db_id,
-            &MirrorLagRecord {
-                last_applied_lsn: Lsn::new(1),
-                last_apply_ms: now.saturating_sub(199),
-            },
-        )
-        .expect("inject lag record");
+        .raise_mirror_cut_state(db_id, &applied_cut_state(1, now, 199))
+        .expect("inject cut state");
 
     let origin = MirrorOrigin {
         source_cluster: TEST_SOURCE_CLUSTER.to_string(),
         source_database: DatabaseId::new(0),
+        source_database_name: TEST_SOURCE_DATABASE.to_string(),
         mode: MirrorMode::Async,
-        last_applied: Lsn::new(1),
         status: MirrorStatus::Following,
     };
 

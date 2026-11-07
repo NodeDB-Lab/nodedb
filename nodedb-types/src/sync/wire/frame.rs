@@ -70,6 +70,8 @@ pub enum SyncMessageType {
     TokenRefresh = 0x60,
     /// Token refresh acknowledgment (server → client, 0x61).
     TokenRefreshAck = 0x61,
+    /// The session's token nears its expiry (server → client, 0x62).
+    TokenRefreshRequired = 0x62,
     /// Definition sync (server → client, 0x70).
     /// Carries function/trigger/procedure definitions from Origin to Lite.
     DefinitionSync = 0x70,
@@ -159,6 +161,7 @@ impl SyncMessageType {
             0x52 => Some(Self::Throttle),
             0x60 => Some(Self::TokenRefresh),
             0x61 => Some(Self::TokenRefreshAck),
+            0x62 => Some(Self::TokenRefreshRequired),
             0x70 => Some(Self::DefinitionSync),
             0x80 => Some(Self::PresenceUpdate),
             0x81 => Some(Self::PresenceBroadcast),

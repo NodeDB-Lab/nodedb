@@ -223,7 +223,11 @@ mod tests {
         assert!(!plan_adds_storage(&delete()));
         assert!(!plan_adds_storage(&truncate()));
         assert!(!plan_adds_storage(&PhysicalPlan::Meta(
-            MetaOp::PurgeTenant { tenant_id: 1 }
+            MetaOp::PurgeTenant {
+                tenant_id: 1,
+                collections: Vec::new(),
+                vshards: Vec::new(),
+            }
         )));
     }
 

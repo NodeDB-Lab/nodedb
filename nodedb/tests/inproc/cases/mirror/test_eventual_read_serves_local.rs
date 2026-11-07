@@ -6,7 +6,7 @@
 //!
 //! Tests the catalog-level consistency gate directly.
 
-use nodedb_types::{DatabaseId, Lsn, MirrorMode, MirrorOrigin, MirrorStatus};
+use nodedb_types::{DatabaseId, MirrorMode, MirrorOrigin, MirrorStatus};
 use tempfile::TempDir;
 
 use nodedb::control::server::pgwire::ddl::database::{
@@ -14,7 +14,9 @@ use nodedb::control::server::pgwire::ddl::database::{
 };
 use nodedb::types::ReadConsistency;
 
-use super::helpers::{TEST_SOURCE_CLUSTER, inject_lag_record_for_id, now_ms, open_tmp_catalog};
+use super::helpers::{
+    TEST_SOURCE_CLUSTER, TEST_SOURCE_DATABASE, inject_cut_state_for_id, now_ms, open_tmp_catalog,
+};
 
 #[test]
 fn mirror_eventual_read_serves_local() {
@@ -22,16 +24,16 @@ fn mirror_eventual_read_serves_local() {
     let catalog = open_tmp_catalog(&dir);
     let db_id = DatabaseId::new(2001);
 
-    // Write a lag record that is 120 seconds stale — far beyond any
+    // Write a cut state that is 120 seconds stale — far beyond any
     // practical BoundedStaleness window.
-    inject_lag_record_for_id(&catalog, db_id, 120_000, 1);
+    inject_cut_state_for_id(&catalog, db_id, 120_000, 1);
 
     let origin = MirrorOrigin {
         source_cluster: TEST_SOURCE_CLUSTER.to_string(),
         source_database: DatabaseId::new(0),
+        source_database_name: TEST_SOURCE_DATABASE.to_string(),
         mode: MirrorMode::Async,
-        last_applied: Lsn::new(1),
-        status: MirrorStatus::Degraded { lag_ms: 120_000 },
+        status: MirrorStatus::Degraded,
     };
 
     // Eventual always serves locally regardless of lag.
@@ -58,8 +60,8 @@ fn mirror_eventual_serves_even_when_disconnected() {
     let origin = MirrorOrigin {
         source_cluster: TEST_SOURCE_CLUSTER.to_string(),
         source_database: DatabaseId::new(0),
+        source_database_name: TEST_SOURCE_DATABASE.to_string(),
         mode: MirrorMode::Async,
-        last_applied: Lsn::new(0),
         status: MirrorStatus::Disconnected,
     };
 

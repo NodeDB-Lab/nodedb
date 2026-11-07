@@ -121,8 +121,9 @@ pub enum DatabaseStmt {
     /// `SHOW DATABASE MIRROR STATUS [FOR <name>]`
     ///
     /// Returns one row per mirror database (or one row if `FOR <name>` is given):
-    /// `name`, `source_cluster`, `source_database`, `mode`, `status`,
-    /// `last_applied_lsn`, `last_apply_ms`.
+    /// `name`, `source_cluster`, `source_database`, `source_database_name`,
+    /// `mode`, `status`, `failure`, `bytes_done`, `bytes_total`, `lag_ms`,
+    /// `ready_cut`, `applied_cut`, `applied_cut_hlc_ns`.
     ///
     /// Every match on this variant must be exhaustive — no `_ =>` arms.
     ShowDatabaseMirrorStatus {

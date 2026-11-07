@@ -26,7 +26,7 @@ use tokio::sync::Notify;
 use crate::control::wal_replication::encode::RedoEntryTarget;
 use crate::types::Lsn;
 use crate::wal::manager::{RedoChunkPlacement, WalFloorHold};
-use crate::wal::{RedoChunkHeader, RedoStreamId, WalManager};
+use crate::wal::{CalvinPositionId, RedoChunkHeader, RedoStreamId, WalManager};
 
 use super::error::RedoChunkError;
 use super::stream::OpenStream;
@@ -343,40 +343,24 @@ impl RedoChunkStore {
         self.note_open(&state);
     }
 
-    /// Drop every stream of the Calvin position `(epoch, position)` of
-    /// `vshard`. The position applied through one copy of its redo, so no
-    /// other attempt's stream installs. The Calvin apply path calls it once
-    /// the position's install is durable.
-    pub fn drop_calvin_position(&self, vshard: u32, epoch: u64, position: u32) {
-        if self.open_streams() == 0 {
-            return;
-        }
-        let mut state = self.lock();
-        state.streams.retain(|stream, _| {
-            !matches!(
-                stream,
-                RedoStreamId::Calvin { vshard: v, epoch: e, position: p, .. }
-                    if *v == vshard && *e == epoch && *p == position
-            )
-        });
-        self.note_open(&state);
+    /// Drop every stream of the Calvin position `at`. The position applied
+    /// through one copy of its redo, so no other attempt's stream installs.
+    /// The Calvin apply path calls it once the position's install is durable.
+    pub fn drop_calvin_position(&self, at: CalvinPositionId) {
+        self.drop_applied_calvin_streams(|position| position == at);
     }
 
     /// Drop every Calvin stream whose position `applied` names. Boot calls
     /// it once the applied ledgers recovered: a position that applied
     /// through one copy installs no other.
-    pub fn drop_applied_calvin_streams(&self, applied: impl Fn(u32, u64, u32) -> bool) {
+    pub fn drop_applied_calvin_streams(&self, applied: impl Fn(CalvinPositionId) -> bool) {
         if self.open_streams() == 0 {
             return;
         }
         let mut state = self.lock();
-        state.streams.retain(|stream, _| {
-            !matches!(
-                stream,
-                RedoStreamId::Calvin { vshard, epoch, position, .. }
-                    if applied(*vshard, *epoch, *position)
-            )
-        });
+        state
+            .streams
+            .retain(|stream, _| !stream.calvin_position().is_some_and(&applied));
         self.note_open(&state);
     }
 }
@@ -558,8 +542,42 @@ pub(super) mod tests {
                 .await
                 .expect("chunk");
         }
-        store.drop_calvin_position(2, 5, 1);
+        store.drop_calvin_position(CalvinPositionId {
+            mirror_database: None,
+            vshard: 2,
+            epoch: 5,
+            position: 1,
+        });
         assert_eq!(store.open_streams(), 0);
+    }
+
+    /// A mirror's install drops only its own streams: a local stream with the
+    /// same numbers stays.
+    #[tokio::test]
+    async fn a_mirror_position_keeps_a_local_stream_with_the_same_numbers() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = RedoChunkStore::new(wal(&dir), limits(1 << 20));
+        let local = RedoStreamId::Calvin {
+            vshard: 2,
+            epoch: 5,
+            position: 1,
+            attempt: 0,
+        };
+        let mirrored = local.in_mirror(Some(1024));
+        for stream in [local, mirrored] {
+            store
+                .apply_chunk(chunk(stream, 0, 2, b"ab"))
+                .await
+                .expect("chunk");
+        }
+        store.drop_calvin_position(CalvinPositionId {
+            mirror_database: Some(1024),
+            vshard: 2,
+            epoch: 5,
+            position: 1,
+        });
+        assert_eq!(store.open_streams(), 1);
+        assert!(store.take_for_final(&local).is_some());
     }
 
     /// Boot drops the streams of every position its ledgers hold applied,
@@ -585,9 +603,7 @@ pub(super) mod tests {
             .await
             .expect("chunk");
 
-        store.drop_applied_calvin_streams(|vshard, epoch, position| {
-            (vshard, epoch, position) == (2, 5, 1)
-        });
+        store.drop_applied_calvin_streams(|at| (at.vshard, at.epoch, at.position) == (2, 5, 1));
 
         assert_eq!(store.open_streams(), 2);
         assert!(store.take_for_final(&calvin(1)).is_none());

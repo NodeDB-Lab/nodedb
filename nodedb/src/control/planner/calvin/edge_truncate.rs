@@ -20,8 +20,12 @@
 //!   applied at the RESTORE's ordinal. A TRUNCATE sequenced before the
 //!   RESTORE leaves it, and one sequenced after the RESTORE hides it.
 //!
-//! A collection that never held an edge truncates its rows alone, as an
-//! autocommit write.
+//! Every other task of the request, such as the settled balance deltas of a
+//! cross-shard materialized sum, joins the transaction in request order. The
+//! settlement reads guard those deltas.
+//!
+//! A lone TRUNCATE of a collection that never held an edge, with no settlement
+//! read, truncates its rows as an autocommit write.
 
 use nodedb_physical::physical_plan::{DocumentOp, GraphOp, PhysicalPlan};
 use nodedb_physical::physical_task::PhysicalTask;
@@ -37,8 +41,9 @@ use crate::control::server::shared::clone_write::{
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TenantId, TraceId, VShardId};
 
+use super::dependent_recon::SettledReads;
 use super::submit::submit_calvin_routed;
-use super::tx_class::build_static_tx_class;
+use super::tx_class::build_single_vshard_tx_class;
 
 /// Whether `plan` is a TRUNCATE.
 pub fn is_truncate(plan: &PhysicalPlan) -> bool {
@@ -52,101 +57,147 @@ pub(super) struct TruncateOutcome {
     pub apply_result: Option<Response>,
 }
 
-/// Run the TRUNCATE among `tasks`: with the collection's edges in one
-/// Calvin transaction when an edge was ever written into it. `None` when
-/// `tasks` holds no TRUNCATE.
+/// Run the TRUNCATEs among `tasks`. `None` when `tasks` holds no TRUNCATE.
 ///
-/// With `identity`, the TRUNCATE passes the clone-write gate and
+/// A lone TRUNCATE of an edge-free collection with no settlement read runs as
+/// an autocommit write. Any other set runs as one Calvin transaction. Each
+/// TRUNCATE of an edge-bearing collection adds its edge shares. Every other
+/// task keeps its place in the set and commits under `user_roles`. `settled`
+/// guards the balance deltas among them.
+///
+/// With `identity`, each TRUNCATE passes the clone-write gate and
 /// authorization. Without it, the caller already authorized it.
 pub(super) async fn dispatch_truncate(
     state: &SharedState,
     tasks: &[PhysicalTask],
     identity: Option<&AuthenticatedIdentity>,
     tenant_id: TenantId,
+    user_roles: &[String],
+    settled: SettledReads<'_>,
 ) -> crate::Result<Option<TruncateOutcome>> {
-    let Some(task) = tasks.iter().find(|task| is_truncate(&task.plan)) else {
+    let Some(first) = tasks.iter().find(|task| is_truncate(&task.plan)) else {
         return Ok(None);
     };
-    let PhysicalPlan::Document(DocumentOp::Truncate { collection, .. }) = &task.plan else {
-        return Ok(None);
-    };
-    let collection = collection.clone();
+    if tasks.len() == 1 && settled.reads.is_empty() && !truncate_is_edge_bearing(state, first)? {
+        return dispatch_lone_truncate(state, first, identity, tenant_id)
+            .await
+            .map(Some);
+    }
 
-    // The statement holds the collection's lease, so the flag read here
-    // stays true or false until the TRUNCATE's outcome.
-    let edge_bearing =
-        collection_is_edge_bearing(state, task.tenant_id, task.database_id, collection.as_str())?;
-
-    // The clone-write gate and authorization of the rows' truncate. The
-    // lease holds until the transaction's outcome.
-    let (rows_task, _lease) = match identity {
-        Some(identity) => {
-            let emitter = crate::control::security::audit::ArcAuditEmitter(std::sync::Arc::clone(
-                &state.audit,
-            ));
-            match intercept_and_authorize(InterceptAndAuthorizeParams {
-                state,
-                task: task.clone(),
-                identity,
-                tenant_id,
-                permissions: &state.permissions,
-                roles: &state.roles,
-                emitter: &emitter,
-            })
-            .await?
-            {
-                CloneCheckedOutcome::Handled(response) if !edge_bearing => {
-                    return Ok(Some(TruncateOutcome {
-                        apply_result: Some(response),
-                    }));
-                }
+    // Each lease holds until the transaction's outcome.
+    let mut leases = Vec::new();
+    let mut submission = Vec::with_capacity(tasks.len());
+    for task in tasks {
+        let PhysicalPlan::Document(DocumentOp::Truncate { collection, .. }) = &task.plan else {
+            submission.push(task.clone());
+            continue;
+        };
+        // The statement holds the collection's lease, so this flag stays true
+        // or false until the TRUNCATE's outcome.
+        let edge_bearing = truncate_is_edge_bearing(state, task)?;
+        let rows_task = match identity {
+            Some(identity) => match clone_checked(state, task, identity, tenant_id).await? {
                 CloneCheckedOutcome::Handled(_) => {
                     return Err(crate::Error::BadRequest {
                         detail: format!(
-                            "TRUNCATE of '{collection}' writes through a clone and cuts \
-                             graph edges, which one transaction does not carry together"
+                            "TRUNCATE of '{collection}' writes through a clone, so it cannot \
+                             join a transaction. Run it alone, on a collection with no edge \
+                             and no materialized sum."
                         ),
                     });
                 }
-                CloneCheckedOutcome::Proceed(checked) if !edge_bearing => {
-                    let response =
-                        dispatch_authorized_durable_write(state, checked, TraceId::ZERO).await?;
-                    crate::control::local_dispatch::reject_data_plane_error(&response)?;
-                    return Ok(Some(TruncateOutcome {
-                        apply_result: Some(response),
-                    }));
-                }
                 CloneCheckedOutcome::Proceed(checked) => {
                     let (authorized, lease) = checked.into_parts();
-                    (authorized.into_physical_task(), Some(lease))
+                    leases.push(lease);
+                    authorized.into_physical_task()
                 }
-            }
-        }
-        None if !edge_bearing => {
-            let response = dispatch_rows_plan(state, task).await?;
-            crate::control::local_dispatch::reject_data_plane_error(&response)?;
-            return Ok(Some(TruncateOutcome {
-                apply_result: Some(response),
-            }));
-        }
-        None => (task.clone(), None),
-    };
+            },
+            None => task.clone(),
+        };
+        let edge_shares = if edge_bearing {
+            edge_share_tasks(&rows_task, collection)
+        } else {
+            Vec::new()
+        };
+        let edge_shares = match identity {
+            Some(identity) => authorize(state, identity, edge_shares)?,
+            None => edge_shares,
+        };
+        submission.push(rows_task);
+        submission.extend(edge_shares);
+    }
 
-    let edge_shares = edge_share_tasks(&rows_task, &collection);
-    let edge_shares = match identity {
-        Some(identity) => authorize(state, identity, edge_shares)?,
-        None => edge_shares,
-    };
-    let mut submission = Vec::with_capacity(edge_shares.len() + 1);
-    submission.push(rows_task);
-    submission.extend(edge_shares);
-    let tx_class = build_static_tx_class(&submission, tenant_id, &[])?;
+    // A zero-net settlement ships no task, so the set can hold one vShard.
+    let mut tx_class = build_single_vshard_tx_class(&submission, tenant_id, settled.reads)?;
+    tx_class.set_user_roles(user_roles.to_vec());
+    tx_class.set_snapshot_ordinal(settled.snapshot_ordinal);
+    #[cfg(feature = "failpoints")]
+    crate::control::fail_gate::before_recon_submit(state.node_id).await;
     let apply_result = submit_calvin_routed(state, tx_class).await?;
+    drop(leases);
     Ok(Some(TruncateOutcome { apply_result }))
 }
 
+/// Run one TRUNCATE of an edge-free collection as an autocommit write.
+async fn dispatch_lone_truncate(
+    state: &SharedState,
+    task: &PhysicalTask,
+    identity: Option<&AuthenticatedIdentity>,
+    tenant_id: TenantId,
+) -> crate::Result<TruncateOutcome> {
+    let response = match identity {
+        Some(identity) => match clone_checked(state, task, identity, tenant_id).await? {
+            CloneCheckedOutcome::Handled(response) => response,
+            CloneCheckedOutcome::Proceed(checked) => {
+                let response =
+                    dispatch_authorized_durable_write(state, checked, TraceId::ZERO).await?;
+                crate::control::local_dispatch::reject_data_plane_error(&response)?;
+                response
+            }
+        },
+        None => {
+            let response = dispatch_rows_plan(state, task).await?;
+            crate::control::local_dispatch::reject_data_plane_error(&response)?;
+            response
+        }
+    };
+    Ok(TruncateOutcome {
+        apply_result: Some(response),
+    })
+}
+
+/// The clone-write gate and authorization of one rows' truncate.
+async fn clone_checked(
+    state: &SharedState,
+    task: &PhysicalTask,
+    identity: &AuthenticatedIdentity,
+    tenant_id: TenantId,
+) -> crate::Result<CloneCheckedOutcome> {
+    let emitter =
+        crate::control::security::audit::ArcAuditEmitter(std::sync::Arc::clone(&state.audit));
+    intercept_and_authorize(InterceptAndAuthorizeParams {
+        state,
+        task: task.clone(),
+        identity,
+        tenant_id,
+        permissions: &state.permissions,
+        roles: &state.roles,
+        emitter: &emitter,
+    })
+    .await
+}
+
+/// Whether the collection `task` truncates ever held an edge. `false` for a
+/// task that is no TRUNCATE.
+fn truncate_is_edge_bearing(state: &SharedState, task: &PhysicalTask) -> crate::Result<bool> {
+    let PhysicalPlan::Document(DocumentOp::Truncate { collection, .. }) = &task.plan else {
+        return Ok(false);
+    };
+    collection_is_edge_bearing(state, task.tenant_id, task.database_id, collection.as_str())
+}
+
 /// One `TruncateEdges` of `collection` per vShard, beside `rows_task`.
-fn edge_share_tasks(
+pub(super) fn edge_share_tasks(
     rows_task: &PhysicalTask,
     collection: &nodedb_types::QualifiedCollection,
 ) -> Vec<PhysicalTask> {
@@ -244,6 +295,25 @@ mod tests {
         }
     }
 
+    /// A zero-net settlement ships no balance task. Its TRUNCATE on one vShard
+    /// still builds a transaction that carries the settlement read.
+    #[test]
+    fn a_truncate_on_one_vshard_carries_its_settlement_read() {
+        use crate::control::server::shared::session::read_set::{EngineTag, ReadKey, ReadSetEntry};
+        let read = ReadSetEntry {
+            engine: EngineTag::Document,
+            database_id: DatabaseId::DEFAULT,
+            tenant_id: TenantId::new(1),
+            collection: "c".to_string(),
+            key: ReadKey::Predicate,
+            observed_at: Some(42),
+            home: None,
+        };
+        let tx_class = build_single_vshard_tx_class(&[truncate_task()], TenantId::new(1), &[read])
+            .expect("a one-vShard TRUNCATE transaction class");
+        assert_eq!(tx_class.versioned_reads.len(), 1);
+    }
+
     #[test]
     fn only_a_truncate_is_a_truncate() {
         let task = truncate_task();
@@ -278,7 +348,7 @@ mod tests {
         }
         let mut submission = vec![task];
         submission.extend(shares);
-        let tx_class = build_static_tx_class(&submission, TenantId::new(1), &[])
+        let tx_class = build_single_vshard_tx_class(&submission, TenantId::new(1), &[])
             .expect("a TRUNCATE transaction class");
         assert_eq!(
             tx_class.participating_vshards().len(),

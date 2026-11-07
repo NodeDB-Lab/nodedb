@@ -74,8 +74,8 @@ impl NdbDateTime {
     /// `i64::MAX` (year ~292,277 CE) rather than wrapping — clocks that far
     /// in the future simply report the maximum representable timestamp.
     pub fn now() -> Self {
-        let dur = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let dur = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .unwrap_or_else(|_| {
                 use std::sync::atomic::{AtomicBool, Ordering};
                 static LOGGED: AtomicBool = AtomicBool::new(false);

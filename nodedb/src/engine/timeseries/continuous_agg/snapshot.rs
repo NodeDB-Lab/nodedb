@@ -128,7 +128,12 @@ impl ContinuousAggregateManager {
     /// The aggregates from the one that reads `target`'s root down to
     /// `target`, root side first. `None` when one is not registered or the
     /// chain loops.
-    fn chain_path(&self, database_id: u64, tenant_id: u64, target: &str) -> Option<Vec<String>> {
+    pub(super) fn chain_path(
+        &self,
+        database_id: u64,
+        tenant_id: u64,
+        target: &str,
+    ) -> Option<Vec<String>> {
         let mut path = vec![target.to_string()];
         loop {
             let current = path.last()?;

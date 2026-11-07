@@ -289,7 +289,7 @@ ALTER SEQUENCE event_seq RESTART WITH 100;
 | `CACHE n` | Values a node pre-allocates per round-trip to the registry |
 | `FORMAT 'template'` | Render template applied to the numeric value |
 | `RESET period` | Period after which the counter restarts |
-| `GAP_FREE` | Accepted and stored; allocation is not yet serialized or rolled back per transaction |
+| `GAP_FREE` | Refused with SQLSTATE `0A000`: a rollback or a node stop leaves a gap. Create the sequence without it |
 | `SCOPE name` | Named allocation scope |
 
 `DROP SEQUENCE [IF EXISTS] <name>` removes it. `SHOW SEQUENCES` lists every sequence. `DESCRIBE SEQUENCE <name>` reports one sequence's current state. `ALTER SEQUENCE <name> RESTART [WITH n]` and `ALTER SEQUENCE <name> FORMAT '<template>'` change it in place.
@@ -354,9 +354,13 @@ USE DATABASE prod_us;
 CLONE DATABASE staging FROM prod_us AS OF SYSTEM TIME 1730000000000;
 CLONE DATABASE latest FROM prod_us;   -- uses prod_us's current LSN
 
--- Mirror a database (read-only replica, optionally cross-cluster)
-MIRROR DATABASE prod_eu FROM prod_us MODE = async;
-MIRROR DATABASE prod_eu FROM prod_us MODE = sync;
+-- Mirror a database of another cluster (read-only copy)
+MIRROR DATABASE orders_eu FROM prod-us.orders;
+MIRROR DATABASE orders_eu FROM prod-us.orders MODE = sync;
+
+-- Recover a failed mirror
+ALTER DATABASE orders_eu MIRROR RESUME;
+ALTER DATABASE orders_eu MIRROR REBOOTSTRAP;
 
 -- Move a tenant to a different database
 MOVE TENANT acme FROM prod_us TO prod_eu;
@@ -366,7 +370,7 @@ SHOW DATABASES;
 
 -- View clone lineage, mirror status, quotas, or usage
 SHOW DATABASE LINEAGE FOR my_clone;
-SHOW DATABASE MIRROR STATUS FOR prod_eu;
+SHOW DATABASE MIRROR STATUS FOR orders_eu;
 SHOW DATABASE QUOTA FOR prod_us;
 SHOW DATABASE USAGE FOR prod_us;
 
@@ -386,6 +390,8 @@ ALTER TENANT acme IN DATABASE prod_us SET QUOTA (max_memory_bytes=1073741824);
 -- View sessions and kill idle ones
 SHOW SESSIONS [IN DATABASE prod_us];
 KILL SESSION 'sid_abc123';
+KILL USER SESSIONS '42';      -- a credential-store user
+KILL USER SESSIONS '42' OIDC; -- an OIDC principal with that user_id
 
 -- Audit events tagged by database
 SHOW AUDIT IN DATABASE prod_us [WHERE event_type = 'database_quota_changed'] [LIMIT n];

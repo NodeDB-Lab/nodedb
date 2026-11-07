@@ -9,6 +9,8 @@
 //! neither identifies the affected transactions well enough to act on after
 //! the fact. These entry points file a structured report at the site that
 //! detects the drop, without changing what that site returns or does next.
+//! A Raft group's disk reports its write errors the same way, and a Calvin
+//! verdict that conflicts with the stored one too.
 //!
 //! One report per root cause: a report is filed where the invariant is known
 //! and nowhere else. Mirrors `nodedb-wal/src/diag/` — the real implementation
@@ -31,10 +33,14 @@ mod inert;
 
 #[cfg(all(feature = "diagnostics", not(target_arch = "wasm32")))]
 pub use recording::{
-    sequencer_backpressure_drop, sequencer_epoch_gap, sequencer_participants_underivable,
+    calvin_verdict_conflict, raft_disk_fail_stopped, raft_disk_write_abandoned,
+    raft_disk_write_retried, sequencer_backpressure_drop, sequencer_epoch_gap,
+    sequencer_participants_underivable,
 };
 
 #[cfg(not(all(feature = "diagnostics", not(target_arch = "wasm32"))))]
 pub use inert::{
-    sequencer_backpressure_drop, sequencer_epoch_gap, sequencer_participants_underivable,
+    calvin_verdict_conflict, raft_disk_fail_stopped, raft_disk_write_abandoned,
+    raft_disk_write_retried, sequencer_backpressure_drop, sequencer_epoch_gap,
+    sequencer_participants_underivable,
 };

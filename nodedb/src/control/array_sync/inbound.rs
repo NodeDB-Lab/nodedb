@@ -342,6 +342,15 @@ impl OriginArrayInbound {
                 format!("shape validation: {e}"),
             ));
         }
+        // The op's own bytes name its target, apart from the frame's name.
+        if !nodedb_types::CollectionKey::is_bare_name(&op.header.array) {
+            return Err(build_reject(
+                &op.header.array,
+                op.header.hlc,
+                ArrayRejectReason::ShapeInvalid,
+                format!("op array name '{}' must be bare", op.header.array),
+            ));
+        }
 
         let authorization = self.authorize_array(
             &op.header.array,

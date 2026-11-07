@@ -24,7 +24,6 @@ use crate::control::planner::calvin::submit::submit_calvin_routed;
 use crate::control::planner::calvin::tx_class::build_single_vshard_tx_class;
 use crate::control::state::SharedState;
 use crate::control::surrogate::CarriedIdentity;
-use crate::event::EventSource;
 use crate::types::{DatabaseId, TenantId, VShardId};
 use crate::wal::RedoRecord;
 
@@ -178,13 +177,13 @@ fn edge_batch(stored: &str, batch: Vec<EdgeUnit>, restore_cut: i64) -> Vec<Resto
     homes.into_values().map(|(plan, _)| plan).collect()
 }
 
-/// Commit `plans` as one Calvin transaction of RESTORE `restore_id`, and
-/// wait until it committed.
+/// Commit `plans` as one Calvin transaction of the re-issue `restore`, and wait
+/// until it committed.
 pub(super) async fn commit_batch(
     state: &SharedState,
     tenant_id: TenantId,
     database_id: DatabaseId,
-    restore_id: u64,
+    restore: RestoreMark,
     plans: Vec<RestoredRedo>,
 ) -> crate::Result<()> {
     let tasks: Vec<PhysicalTask> = plans
@@ -201,8 +200,8 @@ pub(super) async fn commit_batch(
     let mut tx_class = build_single_vshard_tx_class(&tasks, tenant_id, &[])?;
     // Every replica installs the rows as restored: AFTER triggers fired when
     // the rows were first written, and do not fire again.
-    tx_class.set_event_source(EventSource::Restore.wal_code());
-    tx_class.set_restore_id(restore_id);
+    tx_class.set_event_source(restore.event_source.wal_code());
+    tx_class.set_restore_id(restore.id);
     if let Some(response) = submit_calvin_routed(state, tx_class).await? {
         crate::control::local_dispatch::reject_data_plane_error(&response)?;
     }
@@ -250,7 +249,7 @@ pub(super) async fn commit_collection(
                 + plan.vector_rows.len()
                 + plan.timeseries.len(),
         );
-        commit_batch(state, tenant_id, database_id, restore.id, vec![plan])
+        commit_batch(state, tenant_id, database_id, restore, vec![plan])
             .await
             .map_err(|e| {
                 in_context(
@@ -292,7 +291,7 @@ pub(super) async fn commit_edges(
                 versions,
             );
         }
-        commit_batch(state, tenant_id, database_id, restore.id, plans)
+        commit_batch(state, tenant_id, database_id, restore, plans)
             .await
             .map_err(|e| in_context(e, &format!("edges of '{collection}'")))?;
         transactions += 1;
@@ -335,7 +334,7 @@ pub(super) async fn commit_labels(
                 identities: Vec::new(),
                 restore_cut: restore.cut,
             };
-            commit_batch(state, tenant_id, database_id, restore.id, vec![plan])
+            commit_batch(state, tenant_id, database_id, restore, vec![plan])
                 .await
                 .map_err(|e| {
                     in_context(e, &format!("node labels to vShard {}", vshard_id.as_u32()))

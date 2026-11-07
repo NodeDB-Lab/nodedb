@@ -98,6 +98,7 @@ pub(in crate::data::executor) fn calvin_redo() -> Vec<u8> {
             epoch: 3,
             position: 0,
             vshard_id: 0,
+            mirror_database: None,
         }),
         cross_shard_applied: None,
         row_sources: Vec::new(),

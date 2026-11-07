@@ -24,7 +24,7 @@ fn replaces_stored_versions(op: &MetaOp) -> bool {
             | MetaOp::UnregisterMaterializedView { .. }
             | MetaOp::ConvertCollection { .. }
             | MetaOp::EnforceTimeseriesRetention { .. }
-            | MetaOp::ApplyContinuousAggRetention
+            | MetaOp::ApplyContinuousAggRetention { .. }
             | MetaOp::TemporalPurgeEdgeStore { .. }
             | MetaOp::TemporalPurgeDocumentStrict { .. }
             | MetaOp::TemporalPurgeColumnar { .. }

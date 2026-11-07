@@ -23,6 +23,9 @@ pub struct SyncSession {
     pub identity: Option<AuthenticatedIdentity>,
     /// Whether the handshake completed successfully.
     pub authenticated: bool,
+    /// The registry row and kill signal of the handshake's identity. A handshake
+    /// clears it and binds its own identity ahead of the `HandshakeAck`.
+    pub binding: Option<crate::control::security::sessions::SessionBinding>,
     /// Client's vector clock per collection.
     pub client_clock: HashMap<String, HashMap<String, u64>>,
     /// Server's vector clock per collection (latest LSN).
@@ -95,6 +98,8 @@ pub struct SyncSession {
     /// Catalog-backed per-user HMAC key issued after JWT authentication.
     /// Zero/absent in trust mode and test-only sessions without a catalog.
     pub delta_signing_key: Option<[u8; 32]>,
+    /// The token expiry the client last got a `TokenRefreshRequired` hint for.
+    pub refresh_hinted_expiry_ms: Option<u64>,
 }
 
 impl SyncSession {
@@ -110,6 +115,7 @@ impl SyncSession {
             username: None,
             identity: None,
             authenticated: false,
+            binding: None,
             client_clock: HashMap::new(),
             server_clock: HashMap::new(),
             subscribed_shapes: Vec::new(),
@@ -130,6 +136,7 @@ impl SyncSession {
             producer_id: 0,
             accepted_epoch: 0,
             delta_signing_key: None,
+            refresh_hinted_expiry_ms: None,
         }
     }
 

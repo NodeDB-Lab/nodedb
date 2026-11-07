@@ -84,6 +84,6 @@ impl ClusterArrayExecutor {
             .map_err(encode_err)?;
             result.rows.push(summary);
         }
-        Ok(encode_row_array(&result.rows))
+        encode_row_array(&result.rows)
     }
 }

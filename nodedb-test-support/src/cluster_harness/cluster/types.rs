@@ -53,6 +53,8 @@ pub(crate) struct ClusterSpawnConfig {
     /// `[tuning.calvin]` bounds.
     pub(crate) redo_chunk_limits:
         Option<nodedb::control::wal_replication::transaction_redo::chunks::RedoChunkLimits>,
+    /// The `[tuning.network]` every Control Plane runs. `None` keeps the default.
+    pub(crate) network_tuning: Option<nodedb_types::config::tuning::NetworkTuning>,
 }
 
 impl ClusterSpawnConfig {

@@ -47,6 +47,13 @@ pub struct AuthenticatedIdentity {
     /// via `GRANT … ON DATABASE …`. Session bind rejects `current_database`
     /// values not in this set with `ACCESS_DENIED`.
     pub accessible_databases: DatabaseSet,
+    /// The API key this identity authenticated with. Revoking the key ends the
+    /// sessions it opened, and a session rebuilds its identity through the key.
+    pub api_key_id: Option<String>,
+    /// When a bearer token's session ends, in milliseconds since the epoch, or
+    /// `None` for an identity no token bounds. The value is the first instant the
+    /// per-request expiry check refuses the token, clock skew included.
+    pub token_expiry_ms: Option<u64>,
 }
 
 /// Read-only privilege view exposed through `Deref` for compatibility with
@@ -114,7 +121,21 @@ impl AuthenticatedIdentity {
             },
             default_database,
             accessible_databases,
+            api_key_id: None,
+            token_expiry_ms: None,
         }
+    }
+
+    /// Name the API key this identity authenticated with.
+    pub(crate) fn with_api_key_id(mut self, key_id: String) -> Self {
+        self.api_key_id = Some(key_id);
+        self
+    }
+
+    /// Bound this identity by its bearer token's expiry.
+    pub(crate) fn with_token_expiry_ms(mut self, expiry_ms: u64) -> Self {
+        self.token_expiry_ms = Some(expiry_ms);
+        self
     }
 
     /// Construct an identity from a NodeDB credential-catalog record.
@@ -131,6 +152,8 @@ impl AuthenticatedIdentity {
             },
             default_database: principal.default_database,
             accessible_databases: principal.accessible_databases,
+            api_key_id: None,
+            token_expiry_ms: None,
         }
     }
 
@@ -159,6 +182,8 @@ impl AuthenticatedIdentity {
             },
             default_database,
             accessible_databases,
+            api_key_id: None,
+            token_expiry_ms: None,
         }
     }
 

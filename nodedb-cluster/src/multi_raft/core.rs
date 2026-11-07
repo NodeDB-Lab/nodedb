@@ -60,10 +60,10 @@ pub struct MultiRaft {
     /// Per-group gate that orders committed-entry applies against snapshot
     /// installs.
     pub(super) apply_gates: Arc<crate::raft_loop::apply_gate::GroupApplyGates>,
-    /// Per-group ceiling on log compaction: the highest index an archiver
-    /// holds a copy of. A group with a ceiling never compacts past it, so no
-    /// entry leaves the log before it is archived.
-    pub(super) compaction_ceilings: HashMap<u64, Arc<std::sync::atomic::AtomicU64>>,
+    /// Per-group named ceilings on log compaction. A group never compacts
+    /// past its lowest ceiling, so no entry leaves the log before every owner
+    /// released it.
+    pub(super) compaction_ceilings: HashMap<u64, nodedb_raft::node::CompactionCeilings>,
     /// The node clock the metadata entries this node stamps as leader take
     /// their stamp from. `None` proposes them unstamped.
     pub(super) metadata_clock: Option<Arc<nodedb_types::HlcClock>>,
@@ -82,6 +82,8 @@ pub struct MultiRaft {
     /// drives the groups on it, so a commit the disk completed does not wait
     /// for the next tick.
     pub(super) drive_signal: Arc<tokio::sync::Notify>,
+    /// The fail-stopped disks of this node.
+    pub(super) disk_halts: Arc<crate::group_disk::GroupDiskHalts>,
 }
 
 /// What this node's replica of a data group needs before it takes log
@@ -153,7 +155,14 @@ impl MultiRaft {
             snapshot_requirement: None,
             sequencer_cut_floor_ms: 0,
             drive_signal: Arc::new(tokio::sync::Notify::new()),
+            disk_halts: Arc::default(),
         }
+    }
+
+    /// The record of this node's fail-stopped disks. The host reads it for
+    /// its health surfaces.
+    pub fn disk_halts(&self) -> Arc<crate::group_disk::GroupDiskHalts> {
+        Arc::clone(&self.disk_halts)
     }
 
     /// Each mounted group's leadership. A reader holds this handle and reads
@@ -278,12 +287,25 @@ impl MultiRaft {
     /// Block until every write each group staged so far is durable. For boot
     /// and tests, off the async threads: a running node waits on a
     /// [`Self::durability_ticket`] instead.
-    pub fn wait_all_durable_blocking(&self) {
-        for node in self.groups.values() {
-            if let Some(ticket) = node.storage().ticket() {
-                ticket.wait_blocking();
+    ///
+    /// Fails at the first group whose disk closed or fail-stopped first: its
+    /// staged writes never become durable.
+    pub fn wait_all_durable_blocking(&self) -> Result<()> {
+        for (&group_id, node) in &self.groups {
+            if let Some(ticket) = node.storage().ticket()
+                && !ticket.wait_blocking()
+            {
+                return Err(crate::error::ClusterError::Storage {
+                    detail: format!(
+                        "raft group {group_id} on node {}: wait for staged writes: the disk \
+                         closed or fail-stopped first, so they are not durable. Check the \
+                         group's disk and restart the node.",
+                        self.node_id
+                    ),
+                });
             }
         }
+        Ok(())
     }
 
     /// Tick all Raft groups. Returns aggregated ready output.
@@ -310,6 +332,11 @@ impl MultiRaft {
         let mut ready = MultiRaftReady::default();
 
         for (&group_id, node) in &mut self.groups {
+            // A replica whose disk fail-stopped cannot make its log durable.
+            // It steps down and hands off, and it stands for no election.
+            if node.storage().disk_failed() && node.replica_state().may_lead() {
+                node.set_replica_state(nodedb_raft::ReplicaState::AwaitingSnapshot);
+            }
             node.on_storage_progress();
             if advance_clock {
                 node.tick();
@@ -399,6 +426,7 @@ pub use nodedb_raft::LogEntry;
 mod tests {
     use super::*;
     use crate::multi_raft::status::GroupMembership;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Instant;
 
     #[test]
@@ -421,9 +449,47 @@ mod tests {
         // The first tick elects every group's leader. Each leader's no-op
         // commits once its disk holds it, and the next tick delivers it.
         mr.tick().unwrap();
-        mr.wait_all_durable_blocking();
+        mr.wait_all_durable_blocking().unwrap();
         let ready = mr.tick().unwrap();
         assert_eq!(ready.groups.len(), 5);
+    }
+
+    /// A staged write whose disk fail-stops fails the wait, with the group
+    /// named. The replica then stands down and the record shows the halt.
+    #[test]
+    fn a_fail_stopped_disk_fails_the_durable_wait_and_stands_the_replica_down() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = RoutingTable::uniform(1, &[1], 1);
+        let mut mr = MultiRaft::new(1, rt, dir.path().to_path_buf());
+        mr.add_group(1, vec![]).unwrap();
+        mr.groups[&1].storage().disk().inject_for_test(
+            crate::raft_storage_ops::LogWriteError::Deterministic {
+                context: "serialize entry",
+                detail: "bad bytes".to_owned(),
+            },
+        );
+        for node in mr.groups.values_mut() {
+            node.election_deadline_override(Instant::now() - Duration::from_millis(1));
+        }
+        mr.tick().unwrap();
+
+        let refused = mr.wait_all_durable_blocking();
+        assert!(
+            matches!(
+                &refused,
+                Err(crate::error::ClusterError::Storage { detail })
+                    if detail.contains("raft group 1")
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(mr.disk_halts().halted_groups(), vec![1]);
+
+        mr.tick().unwrap();
+        assert!(!mr.is_group_leader(1));
+        assert_eq!(
+            mr.replica_state(1),
+            Some(nodedb_raft::ReplicaState::AwaitingSnapshot)
+        );
     }
 
     /// Drive a single-node group to a leader that holds and has delivered its
@@ -436,7 +502,7 @@ mod tests {
             node.election_deadline_override(Instant::now() - Duration::from_millis(1));
         }
         mr.tick().unwrap();
-        mr.wait_all_durable_blocking();
+        mr.wait_all_durable_blocking().unwrap();
         for (gid, ready) in mr.tick().unwrap().groups {
             if let Some(last) = ready.committed_entries.last() {
                 mr.advance_applied(gid, last.index).unwrap();
@@ -537,9 +603,9 @@ mod tests {
             node.election_deadline_override(Instant::now() - Duration::from_millis(1));
         }
         let ceiling = std::sync::Arc::new(AtomicU64::new(0));
-        mr.set_compaction_ceiling(0, std::sync::Arc::clone(&ceiling));
+        mr.set_compaction_ceiling(0, "archive", std::sync::Arc::clone(&ceiling));
         let apply = |mr: &mut MultiRaft| {
-            mr.wait_all_durable_blocking();
+            mr.wait_all_durable_blocking().unwrap();
             for (gid, ready) in mr.tick().unwrap().groups {
                 if let Some(last) = ready.committed_entries.last() {
                     mr.advance_applied(gid, last.index).unwrap();
@@ -560,8 +626,63 @@ mod tests {
 
         assert!(!mr.maybe_compact_group(0, applied).unwrap());
         assert_eq!(mr.first_available_index(0), Some(1));
+        let retained = |mr: &MultiRaft| {
+            mr.group_statuses()
+                .iter()
+                .find(|status| status.group_id == 0)
+                .map(|status| status.retained_bytes)
+        };
+        let held = retained(&mr).unwrap();
+        assert!(held >= 5, "five one-byte entries are held, got {held}");
 
         ceiling.store(3, Ordering::Release);
+        assert!(mr.maybe_compact_group(0, applied).unwrap());
+        assert_eq!(mr.first_available_index(0), Some(4));
+        assert!(
+            retained(&mr).unwrap() < held,
+            "compaction frees the entries it discards"
+        );
+    }
+
+    /// Two owners set before the group mounts both bind it, and the lower one
+    /// holds the log after the other releases.
+    #[test]
+    fn every_owner_bounds_a_group_that_mounts_later() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = RoutingTable::uniform(1, &[1], 1);
+        let mut mr =
+            MultiRaft::new(1, rt, dir.path().to_path_buf()).with_log_compaction_threshold(Some(1));
+        let archive = std::sync::Arc::new(AtomicU64::new(u64::MAX));
+        let pin = std::sync::Arc::new(AtomicU64::new(0));
+        mr.set_compaction_ceiling(0, "archive", archive);
+        mr.set_compaction_ceiling(0, "pin", std::sync::Arc::clone(&pin));
+        mr.add_group(0, vec![]).unwrap();
+        for node in mr.groups.values_mut() {
+            node.election_deadline_override(Instant::now() - Duration::from_millis(1));
+        }
+        let apply = |mr: &mut MultiRaft| {
+            mr.wait_all_durable_blocking().unwrap();
+            for (gid, ready) in mr.tick().unwrap().groups {
+                if let Some(last) = ready.committed_entries.last() {
+                    mr.advance_applied(gid, last.index).unwrap();
+                    mr.save_applied_index(gid, last.index).unwrap();
+                }
+            }
+        };
+        mr.tick().unwrap();
+        apply(&mut mr);
+        for i in 0..5u8 {
+            mr.propose_to_group(0, vec![i]).unwrap();
+        }
+        for _ in 0..3 {
+            apply(&mut mr);
+        }
+        let applied = mr.groups[&0].last_applied();
+
+        assert!(!mr.maybe_compact_group(0, applied).unwrap());
+        assert_eq!(mr.first_available_index(0), Some(1));
+
+        pin.store(3, Ordering::Release);
         assert!(mr.maybe_compact_group(0, applied).unwrap());
         assert_eq!(mr.first_available_index(0), Some(4));
     }

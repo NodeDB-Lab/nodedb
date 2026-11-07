@@ -88,7 +88,7 @@ pub(crate) async fn forward_to_leader(
         version_plan,
         forward_task.tenant_id,
         forward_task.database_id,
-    );
+    )?;
 
     let route = TaskRoute {
         plan: forward_task.plan,
@@ -137,14 +137,14 @@ fn version_set_for_plan(
     plan: &PhysicalPlan,
     tenant_id: TenantId,
     database_id: DatabaseId,
-) -> GatewayVersionSet {
+) -> crate::Result<GatewayVersionSet> {
     let catalog = state.credentials.catalog();
     GatewayVersionSet::from_plan(plan, |name| {
-        catalog
-            .get_collection(database_id, tenant_id.as_u64(), name)
-            .ok()
-            .flatten()
-            .map(|col| col.descriptor_version.max(1))
-            .unwrap_or(0)
+        crate::control::gateway::version_set::collection_version(
+            catalog,
+            database_id,
+            tenant_id.as_u64(),
+            name,
+        )
     })
 }

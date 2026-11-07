@@ -86,7 +86,7 @@ pub(super) async fn dispatch_authorized_single_task(
         trace_id: TraceId::generate(),
         database_id: ctx.database_id(),
         txn_id,
-        linearizable: true,
+        linearizable: crate::control::server::shared::session::read_scope::linearizable(),
     };
     // The typed error passes through unchanged. The native frame renders its
     // SQLSTATE and numeric code from it.

@@ -131,7 +131,14 @@ pub(in super::super) fn convert_create_array(
         name: name.to_string(),
         schema_msgpack: schema_msgpack.clone(),
         schema_hash,
-        created_at_ms: now_epoch_ms(),
+        created_at_ms: nodedb_types::checked_wall_now_ms().ok_or_else(|| {
+            crate::Error::Internal {
+                detail: format!(
+                    "CREATE ARRAY {name}: the system clock reads before the Unix epoch; \
+                     correct the NTP or RTC config and retry"
+                ),
+            }
+        })?,
         prefix_bits,
         audit_retain_ms,
         minimum_audit_retain_ms,
@@ -307,11 +314,4 @@ pub(super) fn stable_schema_hash(bytes: &[u8]) -> u64 {
     let lo = crc32c::crc32c(&bytes[..mid]) as u64;
     let hi = crc32c::crc32c(&bytes[mid..]) as u64;
     (hi << 32) | lo
-}
-
-pub(super) fn now_epoch_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
 }

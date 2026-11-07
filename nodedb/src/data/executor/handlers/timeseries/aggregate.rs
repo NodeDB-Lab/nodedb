@@ -4,9 +4,9 @@
 //! staged rows, and AUTO_TIER downsample buckets.
 //!
 //! Uses the grouped_scan engine with SIMD bitmask filters, direct-index Vec
-//! for low-cardinality symbol GROUP BY, parallel partition processing via
-//! std::thread::scope, sparse index block-level skip, and single metadata
-//! read per partition.
+//! for low-cardinality symbol GROUP BY, sparse index block-level skip, and
+//! single metadata read per partition. Every partition reads on the core
+//! thread: a core spawns no scan thread and never waits on one.
 //!
 //! The caller's read policy travels as part of `filter_predicates`: the
 //! grouped scan lowers every predicate onto typed column vectors before any
@@ -19,6 +19,8 @@ use crate::data::executor::task::ExecutionTask;
 use crate::engine::timeseries::grouped_scan::{
     GroupedAggResult, PartitionAggParams, aggregate_memtable, aggregate_partition,
 };
+
+use super::partition_read::account_partition_read;
 
 /// Borrowed inputs to [`CoreLoop::execute_ts_aggregate`]: the target
 /// collection, time range, GROUP BY / aggregate / filter specs, and gap-fill
@@ -113,8 +115,8 @@ impl CoreLoop {
             GroupedAggResult::new(num_aggs)
         };
 
-        // Phase 2: Aggregate disk partitions (parallel), over the raw part
-        // of the range only.
+        // Phase 2: Aggregate disk partitions, over the raw part of the range
+        // only.
         if committed_visible
             && let Some(time_range) = raw_range
             && let Some(registry) = self.ts_registries.get(&key)
@@ -136,102 +138,31 @@ impl CoreLoop {
                     })
                     .collect();
 
-                if partition_dirs.len() <= 1 {
-                    // Single partition — use io_uring batched reads on TPC core.
-                    let io_priority = Some(task.request.priority);
-                    let io_metrics: &crate::data::io::IoMetrics = &self.io_metrics;
-                    for dir in &partition_dirs {
-                        match aggregate_partition(PartitionAggParams {
-                            partition_dir: dir,
-                            group_by,
-                            aggregates,
-                            filters: filter_predicates,
-                            time_range,
-                            needed_columns,
-                            bucket_interval_ms,
-                            uring_reader: self.uring_reader.as_mut(),
-                            io_priority,
-                            io_metrics: Some(io_metrics),
-                            kek: self.segment_keks.ts_segment_kek.as_ref(),
-                        }) {
-                            Ok(Some(part_result)) => merged.merge(&part_result),
-                            Ok(None) => {}
-                            Err(e) => return self.response_error(task, e),
-                        }
-                    }
-                } else {
-                    // Multiple partitions — parallel via std::thread::scope.
-                    let group_by_owned: Vec<String> = group_by.to_vec();
-                    let agg_owned: Vec<(String, String)> = aggregates.to_vec();
-                    let filters_owned: Vec<crate::bridge::scan_filter::ScanFilter> =
-                        filter_predicates.to_vec();
-                    let needed_owned: Vec<String> = needed_columns.to_vec();
-                    let kek = self.segment_keks.ts_segment_kek.as_ref();
-
-                    let available = std::thread::available_parallelism()
-                        .map(|n| n.get())
-                        .unwrap_or(1);
-                    let thread_count = available.min(partition_dirs.len()).min(8);
-                    let chunk_size = partition_dirs.len().div_ceil(thread_count);
-
-                    let partition_results: crate::Result<Vec<GroupedAggResult>> =
-                        std::thread::scope(|s| {
-                            let handles: Vec<_> = partition_dirs
-                                .chunks(chunk_size)
-                                .map(|chunk| {
-                                    let gb = &group_by_owned;
-                                    let ag = &agg_owned;
-                                    let fl = &filters_owned;
-                                    let nc = &needed_owned;
-                                    s.spawn(move || -> crate::Result<_> {
-                                        let mut local = GroupedAggResult::new(ag.len());
-                                        for dir in chunk {
-                                            // Parallel threads: no io_uring (fadvise fallback).
-                                            if let Some(r) =
-                                                aggregate_partition(PartitionAggParams {
-                                                    partition_dir: dir,
-                                                    group_by: gb,
-                                                    aggregates: ag,
-                                                    filters: fl,
-                                                    time_range,
-                                                    needed_columns: nc,
-                                                    bucket_interval_ms,
-                                                    uring_reader: None,
-                                                    io_priority: None,
-                                                    io_metrics: None,
-                                                    kek,
-                                                })?
-                                            {
-                                                local.merge(&r);
-                                            }
-                                        }
-                                        Ok(local)
-                                    })
-                                })
-                                .collect();
-
-                            // A worker that panicked aggregated none of its
-                            // partitions: the aggregate is refused, never
-                            // answered without them.
-                            handles
-                                .into_iter()
-                                .map(|h| {
-                                    h.join().map_err(|_| crate::Error::Internal {
-                                        detail: format!(
-                                            "timeseries aggregate on '{collection}': a partition \
-                                             worker panicked"
-                                        ),
-                                    })?
-                                })
-                                .collect()
-                        });
-
-                    let partition_results = match partition_results {
-                        Ok(results) => results,
+                // Every partition reads on this core through its io_uring. A
+                // corrupt one charges a strike to its quarantine record.
+                let io_priority = Some(task.request.priority);
+                let io_metrics: &crate::data::io::IoMetrics = &self.io_metrics;
+                let quarantine =
+                    self.ts_partition_quarantine(task.request.database_id, tid, collection);
+                let mut uring = self.uring_reader.try_borrow_mut().ok();
+                for dir in &partition_dirs {
+                    let read = aggregate_partition(PartitionAggParams {
+                        partition_dir: dir,
+                        group_by,
+                        aggregates,
+                        filters: filter_predicates,
+                        time_range,
+                        needed_columns,
+                        bucket_interval_ms,
+                        uring_reader: uring.as_deref_mut().and_then(Option::as_mut),
+                        io_priority,
+                        io_metrics: Some(io_metrics),
+                        kek: self.segment_keks.ts_segment_kek.as_ref(),
+                    });
+                    match account_partition_read(quarantine.as_ref(), dir, read) {
+                        Ok(Some(part_result)) => merged.merge(&part_result),
+                        Ok(None) => {}
                         Err(e) => return self.response_error(task, e),
-                    };
-                    for r in &partition_results {
-                        merged.merge(r);
                     }
                 }
             }

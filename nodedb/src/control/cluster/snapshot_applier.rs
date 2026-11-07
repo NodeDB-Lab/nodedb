@@ -213,6 +213,9 @@ impl DataPlaneSnapshotApplier {
 
         append_install_barrier(&self.shared.wal, group_id, &collections)?;
         install_on_every_core(&self.shared, group_id, plans, SNAPSHOT_APPLY_TIMEOUT).await?;
+        // The installed rows can hold another mode than the core held. A
+        // Register resolves the mode from the record the snapshot carried.
+        self.refresh_converted_modes(group_id, &collections).await?;
         // The installed rows ride no WAL record: the install is a boundary a
         // point-in-time restore starts after, from a base this forces.
         append_install_marker(&self.shared.wal, group_id)?;
@@ -275,6 +278,40 @@ impl DataPlaneSnapshotApplier {
                 step: SettleStep::RedoStreams,
                 source,
             })?;
+        Ok(())
+    }
+
+    /// Register again every installed collection a conversion touched.
+    async fn refresh_converted_modes(
+        &self,
+        group_id: u64,
+        collections: &[crate::control::cluster::snapshot_install::clear::GroupCollection],
+    ) -> Result<(), SnapshotInstallError> {
+        let settle = |source: crate::Error| SnapshotInstallError::Settle {
+            group_id,
+            step: SettleStep::StorageModes,
+            source,
+        };
+        for coll in collections {
+            let stored = self
+                .shared
+                .credentials
+                .catalog()
+                .get_collection(
+                    crate::types::DatabaseId::new(coll.database_id),
+                    coll.tenant_id,
+                    &coll.name,
+                )
+                .map_err(settle)?;
+            if let Some(stored) = stored.filter(|row| row.storage_conversion.is_some()) {
+                crate::control::server::shared::ddl::neutral::collection::dispatch_register_from_stored(
+                    &self.shared,
+                    &stored,
+                )
+                .await
+                .map_err(settle)?;
+            }
+        }
         Ok(())
     }
 
@@ -456,6 +493,11 @@ impl nodedb_cluster::SnapshotApplier for DataPlaneSnapshotApplier {
     /// Answer every propose waiter the snapshot covers. Their entries
     /// committed, but no apply on this node produces their results.
     fn snapshot_adopted(&self, group_id: u64, last_included_index: u64) {
+        // The group never installs a snapshot at or below this index, so no
+        // quarantine record of those chunks has a use.
+        self.shared
+            .quarantine_registry
+            .release_raft_through(group_id, last_included_index);
         if group_id == METADATA_GROUP_ID {
             // No entry at or below the index applies here any more, so the
             // cache's applied index starts at it.

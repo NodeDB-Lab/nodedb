@@ -286,7 +286,14 @@ impl CoreLoop {
                 self.persist_cagg_image(database_id, tenant_id, root)?;
             }
         }
-        finish_merge(ts_dir, manifest)
+        finish_merge(ts_dir, manifest)?;
+        self.release_ts_partitions(
+            crate::types::DatabaseId::new(database_id),
+            crate::types::TenantId::new(tenant_id),
+            root,
+            &manifest.sources,
+        );
+        Ok(())
     }
 }
 
@@ -313,7 +320,7 @@ fn stage_merge(
     if let Some(reason) = schema_incompatibility(&schema_refs) {
         tracing::debug!(
             collection = %ts_dir.display(),
-            reason,
+            %reason,
             "timeseries partitions left unmerged"
         );
         return Ok(None);
@@ -346,7 +353,7 @@ fn stage_merge(
         MergeOutcome::Incompatible(reason) => {
             tracing::debug!(
                 collection = %ts_dir.display(),
-                reason,
+                %reason,
                 "timeseries partitions left unmerged"
             );
             return Ok(None);

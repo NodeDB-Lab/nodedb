@@ -167,6 +167,7 @@ impl ApiKeyStore {
                 accessible_databases,
             },
         )
+        .with_api_key_id(record.key_id.clone())
     }
 
     /// Build a `StoredApiKey` ready for replication + return the
@@ -241,6 +242,12 @@ impl ApiKeyStore {
     pub fn get_key(&self, key_id: &str) -> Option<ApiKeyRecord> {
         let keys = self.keys.read();
         keys.get(key_id).cloned()
+    }
+
+    /// Whether the key exists and is neither revoked nor expired.
+    /// Reads the record in place, without a clone.
+    pub fn is_key_valid(&self, key_id: &str) -> bool {
+        self.keys.read().get(key_id).is_some_and(|k| k.is_valid())
     }
 
     /// Revoke an API key by key_id.

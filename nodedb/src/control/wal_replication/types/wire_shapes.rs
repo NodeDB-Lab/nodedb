@@ -4,6 +4,43 @@
 
 // ── Replicated write envelope ───────────────────────────────────────
 
+/// A source vShard's fully applied Calvin epoch, carried by a `MirrorSeal`.
+/// Every position at or below `epoch` sits before the seal in the source log.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
+pub struct MirrorCalvinFloor {
+    pub vshard: u32,
+    pub epoch: u64,
+}
+
+/// What a mirror cut's barrier carries in one data group's log.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
+pub struct MirrorBarrier {
+    pub mark: nodedb_types::MirrorCutMark,
+    /// The fully applied Calvin epochs of the group's vShards. The group's
+    /// leader reads them before it proposes the barrier, so every position
+    /// they cover sits before the barrier in this log.
+    pub calvin_floors: Vec<MirrorCalvinFloor>,
+}
+
 /// One edge of an `EdgePutBatch` / `EdgeDeleteBatch` in the cross-node wire
 /// shape. Endpoint surrogates are bare `u32`, not `Surrogate`. Followers bind
 /// both verbatim on apply (never re-allocate).

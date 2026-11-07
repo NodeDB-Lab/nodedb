@@ -14,7 +14,7 @@
 
 use std::collections::VecDeque;
 
-use nodedb_physical::physical_plan::RetainedHistory;
+use nodedb_physical::physical_plan::{MirrorHistoryFloor, RetainedHistory};
 use nodedb_types::{DatabaseId, QualifiedCollection};
 
 use crate::data::executor::spatial_key::SpatialIndexKey;
@@ -59,6 +59,7 @@ pub(in crate::data::executor) enum PurgeUnit {
 pub(in crate::data::executor) struct PurgePass {
     pub horizon: i64,
     pub retained: Vec<RetainedHistory>,
+    pub mirror_floors: Vec<MirrorHistoryFloor>,
     pub pending: VecDeque<PurgeUnit>,
 }
 
@@ -66,26 +67,28 @@ impl PurgePass {
     /// The horizon the stored collection `stored` of `(database_id, tenant)`
     /// purges at. A retained collection purges at its own horizon, `None`
     /// to keep its history. `stored` can carry a `:field` suffix, as a
-    /// vector index key does.
+    /// vector index key does. A read-only mirror's floor limits either.
     pub(in crate::data::executor) fn horizon_of(
         &self,
         database_id: u64,
         tenant: u64,
         stored: &str,
     ) -> Option<i64> {
-        match self
+        let horizon = match self
             .retained
             .iter()
             .find(|r| names(r, database_id, tenant, stored))
         {
-            Some(retained) => retained.horizon,
-            None => Some(self.horizon),
-        }
+            Some(retained) => retained.horizon?,
+            None => self.horizon,
+        };
+        Some(under_floor(&self.mirror_floors, database_id, horizon))
     }
 
     /// The horizon a tenant-wide store of `(database_id, tenant)` purges at:
-    /// the lowest of the pass horizon and every retained collection's, and
-    /// `None` when any retained collection keeps its whole history.
+    /// the lowest of the pass horizon, a read-only mirror's floor, and every
+    /// retained collection's, and `None` when any retained collection keeps its
+    /// whole history.
     pub(in crate::data::executor) fn tenant_horizon(
         &self,
         database_id: u64,
@@ -94,8 +97,23 @@ impl PurgePass {
         self.retained
             .iter()
             .filter(|r| r.database_id == database_id && r.tenant_id == tenant)
-            .try_fold(self.horizon, |lowest, r| r.horizon.map(|h| lowest.min(h)))
+            .try_fold(
+                under_floor(&self.mirror_floors, database_id, self.horizon),
+                |lowest, r| r.horizon.map(|h| lowest.min(h)),
+            )
     }
+}
+
+/// `horizon`, lowered to `database_id`'s floor when it is a read-only mirror.
+pub(in crate::data::executor) fn under_floor(
+    floors: &[MirrorHistoryFloor],
+    database_id: u64,
+    horizon: i64,
+) -> i64 {
+    floors
+        .iter()
+        .find(|floor| floor.database_id == database_id)
+        .map_or(horizon, |floor| horizon.min(floor.floor))
 }
 
 /// Whether `stored`, a Data Plane collection name with an optional
@@ -121,9 +139,12 @@ pub(in crate::data::executor) struct VersionPurgeState {
     /// nanoseconds. Every node runs one value.
     pub commit_window_ns: i64,
     /// The newest cleanup horizon this core received, `0` before the first.
-    /// Every purge on the core, the audit-retention ones included, stays at
-    /// or below it.
+    /// Every purge this core decides stays at or below it. A logged audit purge
+    /// carries a cutoff its decider held below a horizon of its own.
     pub safe_horizon: i64,
+    /// Each read-only mirror's limit on `safe_horizon`, as the newest request
+    /// named it.
+    pub mirror_floors: Vec<MirrorHistoryFloor>,
     /// The pass in progress, `None` before the first request.
     pub pass: Option<PurgePass>,
     /// Each plain columnar collection's charged history bytes and the
@@ -152,18 +173,12 @@ impl VersionPurgeState {
                 nodedb_types::config::tuning::NetworkTuning::default().snapshot_max_hold(),
             ),
             safe_horizon: 0,
+            mirror_floors: Vec::new(),
             pass: None,
             columnar_history: std::collections::HashMap::new(),
             index_charges: std::collections::HashMap::new(),
             vector_compaction_due: std::collections::HashSet::new(),
         }
-    }
-
-    /// The last millisecond whose every ordinal sits at or below the safe
-    /// horizon. An audit cutoff past it is lowered to it.
-    pub(in crate::data::executor) fn cap_cutoff_ms(&self, cutoff_ms: i64) -> i64 {
-        let safe_ms = nodedb_types::ordinal_to_ms(self.safe_horizon.saturating_add(1)) - 1;
-        cutoff_ms.min(safe_ms)
     }
 }
 
@@ -204,8 +219,27 @@ mod tests {
         PurgePass {
             horizon: 100,
             retained,
+            mirror_floors: Vec::new(),
             pending: VecDeque::new(),
         }
+    }
+
+    /// A mirror's floor limits its plain and retained stores, and no other
+    /// database's. A collection that keeps its whole history still does.
+    #[test]
+    fn a_mirror_floor_limits_only_its_own_database() {
+        let mut pass = pass(vec![retained("audit", Some(40)), retained("keep", None)]);
+        pass.mirror_floors = vec![MirrorHistoryFloor {
+            database_id: 3,
+            floor: 30,
+        }];
+        assert_eq!(pass.horizon_of(3, 1, "plain"), Some(30));
+        assert_eq!(pass.horizon_of(3, 1, "audit"), Some(30));
+        assert_eq!(pass.horizon_of(3, 1, "keep"), None);
+        assert_eq!(pass.horizon_of(4, 1, "plain"), Some(100));
+        assert_eq!(pass.tenant_horizon(4, 1), Some(100));
+        pass.retained.pop();
+        assert_eq!(pass.tenant_horizon(3, 1), Some(30));
     }
 
     #[test]
@@ -239,19 +273,5 @@ mod tests {
             pass(vec![retained("audit", Some(40)), retained("keep", None)]).tenant_horizon(3, 1),
             None
         );
-    }
-
-    #[test]
-    fn an_audit_cutoff_is_capped_at_the_safe_horizon() {
-        let mut state = VersionPurgeState::new();
-        assert!(
-            nodedb_types::ms_to_ordinal_upper(state.cap_cutoff_ms(5_000)) <= 0,
-            "no horizon received yet purges nothing"
-        );
-        state.safe_horizon = nodedb_types::ms_to_ordinal_upper(7);
-        assert_eq!(state.cap_cutoff_ms(5_000), 7);
-        assert_eq!(state.cap_cutoff_ms(3), 3);
-        state.safe_horizon = nodedb_types::ms_to_ordinal_upper(7) - 1;
-        assert_eq!(state.cap_cutoff_ms(5_000), 6, "ms 7 is not wholly below");
     }
 }

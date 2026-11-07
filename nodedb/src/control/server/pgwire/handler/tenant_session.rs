@@ -38,9 +38,6 @@ impl NodeDbPgHandler {
         }
 
         let prior = self.sessions.get_effective_tenant_id(session_id);
-        self.sessions
-            .set_effective_tenant_id(session_id, new_tenant);
-
         let detail = match new_tenant {
             Some(tenant) => format!(
                 "{source}: tenant switched from {} to {}",
@@ -52,6 +49,19 @@ impl NodeDbPgHandler {
                 identity.tenant_id
             ),
         };
+
+        // The override changes whose data the session reads and writes, so its record comes first.
+        self.state
+            .audit_record_strict(
+                AuditEvent::ActionIntent,
+                Some(identity.tenant_id),
+                &identity.username,
+                &detail,
+            )
+            .map_err(|e| error_to_pg_in_context("audit record", &e))?;
+        self.sessions
+            .set_effective_tenant_id(session_id, new_tenant);
+
         self.state.audit_record(
             AuditEvent::PrivilegeChange,
             Some(identity.tenant_id),

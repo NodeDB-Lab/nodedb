@@ -55,6 +55,13 @@ pub enum TriggerActionError {
         source: crate::Error,
     },
 
+    /// The action's durable audit record did not land, so the action did not run.
+    #[error("trigger action audit record failed: {source}")]
+    AuditIntent {
+        #[source]
+        source: crate::Error,
+    },
+
     /// The action's transaction did not commit, so it applied nothing.
     #[error("trigger action transaction failed: {source}")]
     Transaction {
@@ -82,6 +89,7 @@ impl From<TriggerActionError> for crate::Error {
             },
             TriggerActionError::Plan { source }
             | TriggerActionError::LeaseAdmission { source }
+            | TriggerActionError::AuditIntent { source }
             | TriggerActionError::AppliedLookup { source } => source,
             // The transaction error keeps its class: its statement or commit
             // error, or the Data-Plane verdict that aborted the commit.
@@ -104,6 +112,7 @@ impl TriggerActionError {
             // a partial application to duplicate by running it again.
             Self::Plan { .. }
             | Self::LeaseAdmission { .. }
+            | Self::AuditIntent { .. }
             | Self::Transaction { .. }
             | Self::AppliedLookup { .. } => true,
             Self::Rejected { .. } => false,

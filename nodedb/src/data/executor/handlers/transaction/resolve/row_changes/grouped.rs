@@ -91,9 +91,9 @@ impl CoreLoop {
         }
     }
 
-    /// Arrays, named by the array's name. A cell existed when the array's
-    /// committed state holds it. An array this core never opened holds no
-    /// cell.
+    /// Arrays, named as every row change names its collection: qualified for
+    /// the array's database. A cell existed when the array's committed state
+    /// holds it. An array this core never opened holds no cell.
     pub(in crate::data::executor) fn array_row_changes(
         &self,
         scope: ResolveScope,
@@ -106,7 +106,9 @@ impl CoreLoop {
                 ArrayOp::Put { array_id, .. } | ArrayOp::Delete { array_id, .. },
             ) = plan
             {
-                arrays.insert(array_id.name.clone(), array_id);
+                let name =
+                    nodedb_types::QualifiedCollection::new(array_id.database_id, &array_id.name);
+                arrays.insert(name.as_str().to_owned(), array_id);
             }
         }
         let Some(overlay) = self.array_txn_overlays.get(&scope.txn_id) else {

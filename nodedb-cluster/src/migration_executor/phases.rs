@@ -338,7 +338,7 @@ mod tests {
         }
         mr.tick().unwrap();
         // The no-op commits once the disk holds it.
-        mr.wait_all_durable_blocking();
+        mr.wait_all_durable_blocking().unwrap();
         for (gid, ready) in mr.tick().unwrap().groups {
             if let Some(last) = ready.committed_entries.last() {
                 mr.advance_applied(gid, last.index).unwrap();

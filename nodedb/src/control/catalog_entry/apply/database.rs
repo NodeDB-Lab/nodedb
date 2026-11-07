@@ -9,7 +9,31 @@ use nodedb_types::{DatabaseId, Hlc};
 
 /// Apply a `PutDatabase` entry — upsert the descriptor into
 /// `_system.databases` and `_system.databases_by_name`.
+///
+/// A promoted mirror keeps its cut state. A replica whose data group lags the
+/// promotion still decides each held entry from that row.
+///
+/// A `PutDatabase` never moves a mirror's status: the entry was planned against
+/// an older read, and `StepMirrorStatus` owns the status. The row's own status
+/// survives, whatever the entry carries.
 pub fn put(descriptor: &DatabaseDescriptor, catalog: &SystemCatalog) -> crate::Result<()> {
+    let held = catalog.get_database(descriptor.id).map_err(|e| {
+        catalog_err(
+            &format!("get_database (database {})", descriptor.id.as_u64()),
+            e,
+        )
+    })?;
+    let mut descriptor = descriptor.clone();
+    if let Some(held) = held
+        && let (Some(row), Some(origin)) = (
+            held.mirror_origin.as_ref(),
+            descriptor.mirror_origin.as_mut(),
+        )
+    {
+        origin.status = row.status.clone();
+        descriptor.status = held.status;
+    }
+    let descriptor = &descriptor;
     catalog.put_database(descriptor).map_err(|e| {
         catalog_err(
             &format!(
@@ -23,22 +47,22 @@ pub fn put(descriptor: &DatabaseDescriptor, catalog: &SystemCatalog) -> crate::R
 }
 
 /// Apply a `DeleteDatabase` entry — remove the descriptor, its
-/// reverse-lookup row, the quota rows of the dropped scope, and its mirror
-/// collection map and lag rows.
+/// reverse-lookup row, the quota rows of the dropped scope, its mirror cut
+/// state, and its mirror Calvin positions.
 pub fn delete(db_id: u64, catalog: &SystemCatalog) -> crate::Result<()> {
     let id = DatabaseId::new(db_id);
     catalog
         .delete_database(id)
         .map_err(|e| catalog_err(&format!("delete_database (database {db_id})"), e))?;
-    catalog.delete_mirror_collection_map(id).map_err(|e| {
-        catalog_err(
-            &format!("delete_mirror_collection_map (database {db_id})"),
-            e,
-        )
-    })?;
     catalog
-        .delete_mirror_lag(id)
-        .map_err(|e| catalog_err(&format!("delete_mirror_lag (database {db_id})"), e))?;
+        .delete_mirror_cut_state(id)
+        .map_err(|e| catalog_err(&format!("delete_mirror_cut_state (database {db_id})"), e))?;
+    catalog
+        .delete_mirror_calvin_applied(db_id)
+        .map_err(|e| catalog_err(&format!("delete mirror calvin (database {db_id})"), e))?;
+    catalog
+        .mark_mirror_pins_source_dropped(db_id)
+        .map_err(|e| catalog_err(&format!("stop mirror pins (database {db_id})"), e))?;
     // A stale quota row keeps consuming the sum-of-quotas ceiling.
     super::quota::purge_database_scope(db_id, catalog)
 }
@@ -215,6 +239,8 @@ pub fn delete_grant(
 mod tests {
     use std::sync::Arc;
 
+    use nodedb_types::MirrorStatus;
+
     use super::*;
     use crate::control::catalog_entry::apply::apply_to;
     use crate::control::catalog_entry::entry::CatalogEntry;
@@ -363,26 +389,80 @@ mod tests {
         assert!(catalog.get_database(child).expect("read").is_none());
     }
 
-    /// `DeleteDatabase` removes the mirror rows on every node that applies
-    /// it, and a replay of it is a no-op.
+    fn seed_cut_state(catalog: &SystemCatalog, db: DatabaseId) {
+        let state = nodedb_types::MirrorCutState {
+            ready_cut: 5,
+            applied_cut: 5,
+            applied_cut_hlc_ns: 7,
+            cap_ordinal: 7,
+            positions: Vec::new(),
+            epochs: Vec::new(),
+            fence_epoch: 0,
+            source_timeline: None,
+        };
+        catalog
+            .raise_mirror_cut_state(db, &state)
+            .expect("seed cut state");
+    }
+
+    fn mirror_descriptor(db: DatabaseId, status: MirrorStatus) -> DatabaseDescriptor {
+        DatabaseDescriptor {
+            id: db,
+            name: "mirror_db".to_string(),
+            status: DatabaseStatus::Mirroring,
+            created_at_lsn: 0,
+            quota_ref: 0,
+            parent_clone: None,
+            mirror_origin: Some(nodedb_types::MirrorOrigin {
+                source_cluster: "source".to_string(),
+                source_database: db,
+                source_database_name: "orders".to_string(),
+                mode: nodedb_types::MirrorMode::Async,
+                status,
+            }),
+            audit_dml: nodedb_types::AuditDmlMode::None,
+            idle_session_timeout_secs: 0,
+        }
+    }
+
+    /// `DeleteDatabase` removes the cut state on every node that applies it,
+    /// and a replay of it is a no-op.
     #[test]
-    fn delete_removes_mirror_rows_and_replays_cleanly() {
+    fn delete_removes_the_cut_state_and_replays_cleanly() {
         let (credentials, _tmp) = open_catalog();
         let catalog = credentials.catalog();
         let db = DatabaseId::new(1030);
-        catalog
-            .apply_ddl_entry_atomic(db, nodedb_types::Lsn::new(5), 7, "src", "local")
-            .expect("seed mirror rows");
+        seed_cut_state(catalog, db);
         let entry = CatalogEntry::DeleteDatabase { db_id: db.as_u64() };
         for _ in 0..2 {
             apply_to(&entry, catalog).expect("delete database applies");
-            assert!(catalog.get_mirror_lag(db).expect("read lag").is_none());
-            assert!(
-                catalog
-                    .get_mirror_collection_mapping(db, "src")
-                    .expect("read map")
-                    .is_none()
-            );
+            assert!(catalog.get_mirror_cut_state(db).expect("read").is_none());
         }
+    }
+
+    /// A promoted mirror keeps its cut state: a replica behind the promotion
+    /// decides its held entries from the row.
+    #[test]
+    fn a_promotion_keeps_the_cut_state() {
+        let (credentials, _tmp) = open_catalog();
+        let catalog = credentials.catalog();
+        let db = DatabaseId::new(1031);
+        seed_cut_state(catalog, db);
+        let entry =
+            CatalogEntry::PutDatabase(Box::new(mirror_descriptor(db, MirrorStatus::Promoted)));
+        apply_to(&entry, catalog).expect("promotion applies");
+        assert!(catalog.get_mirror_cut_state(db).expect("read").is_some());
+    }
+
+    #[test]
+    fn a_following_descriptor_keeps_the_cut_state() {
+        let (credentials, _tmp) = open_catalog();
+        let catalog = credentials.catalog();
+        let db = DatabaseId::new(1032);
+        seed_cut_state(catalog, db);
+        let entry =
+            CatalogEntry::PutDatabase(Box::new(mirror_descriptor(db, MirrorStatus::Following)));
+        apply_to(&entry, catalog).expect("descriptor applies");
+        assert!(catalog.get_mirror_cut_state(db).expect("read").is_some());
     }
 }

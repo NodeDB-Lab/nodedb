@@ -111,9 +111,13 @@ pub async fn upload_wasm(
     // `func` was fetched using `database_id`; retaining that descriptor in
     // the proposal keeps the update within the authenticated database scope.
     let entry = crate::control::catalog_entry::CatalogEntry::PutFunction(Box::new(func));
-    if let Err(e) =
-        crate::control::metadata_proposer::propose_catalog_entry_async(&state.shared, &entry).await
-    {
+    let proposed = crate::control::server::shared::session::audit_context::with_action_context(
+        &identity,
+        format!("UPLOAD WASM MODULE FOR FUNCTION {name} (hash: {hash})"),
+        crate::control::metadata_proposer::propose_catalog_entry_async(&state.shared, &entry),
+    )
+    .await;
+    if let Err(e) = proposed {
         return Ok((
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("metadata propose error: {e}"),

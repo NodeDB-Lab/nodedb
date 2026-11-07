@@ -124,10 +124,8 @@ impl Validator {
                         max_retries,
                         ttl_secs,
                     } => {
-                        let now_ms = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_millis() as u64;
+                        let now_ms =
+                            nodedb_types::wall_now_ns() / nodedb_types::NANOS_PER_MS as u64;
 
                         let base_ms = 500u64;
                         let first_retry_after_ms = base_ms;

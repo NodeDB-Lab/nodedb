@@ -122,7 +122,7 @@ pub fn capture_shared_state(
         Some(dlq) => Some(dlq.lock().map_err(|_| poisoned("trigger DLQ"))?),
         None => None,
     };
-    let cross_shard_dlq = match &state.cross_shard_dlq {
+    let cross_shard_dlq = match &state.cross_shard.dlq {
         Some(dlq) => Some(dlq.lock().map_err(|_| poisoned("cross-shard DLQ"))?),
         None => None,
     };
@@ -149,7 +149,7 @@ pub fn capture_shared_state(
     if let Some(dlq) = &cross_shard_dlq {
         stores.push(store(event, CROSS_SHARD_DLQ_FILE, &**dlq));
     }
-    if let Some(dedup) = state.cross_shard_dedup.get() {
+    if let Some(dedup) = state.cross_shard.dedup.get() {
         stores.push(store(event, CROSS_SHARD_DEDUP_FILE, &**dedup));
     }
     let mut node = capture_node_state(data_dir, state.credentials.catalog(), cluster, &stores)?;

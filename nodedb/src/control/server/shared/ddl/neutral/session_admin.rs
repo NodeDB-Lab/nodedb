@@ -28,7 +28,6 @@
 
 use serde_json::{Map, Value as JsonValue};
 
-use crate::control::security::audit::verify_chain;
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::response_shape::types::ShapedRows;
 use crate::control::state::SharedState;
@@ -225,19 +224,27 @@ pub fn kill_session(
     }
 }
 
-/// KILL USER SESSIONS '<auth_user_id>'
+/// KILL USER SESSIONS '<user_id>' [OIDC]
+///
+/// The number names a credential-store user. With `OIDC` it names the
+/// `user_id` of a token's claims. The two share no id space, so one number
+/// never ends the sessions of two principals. `SHOW SESSIONS` lists each
+/// session's `user_id` and `auth_method`.
 pub fn kill_user_sessions(
     state: &SharedState,
     identity: &AuthenticatedIdentity,
     parts: &[&str],
 ) -> Result<Vec<DdlResult>, DdlError> {
+    const SYNTAX: &str = "syntax: KILL USER SESSIONS '<user_id>' [OIDC]";
     if !identity.is_superuser {
         return Err(err("42501", "permission denied: requires superuser"));
     }
-    if parts.len() < 4 {
-        return Err(err("42601", "syntax: KILL USER SESSIONS '<auth_user_id>'"));
-    }
-    let user_id_str = parts[3].trim_matches('\'');
+    let oidc = match parts.len() {
+        4 => false,
+        5 if parts[4].trim_end_matches(';').eq_ignore_ascii_case("OIDC") => true,
+        _ => return Err(err("42601", SYNTAX)),
+    };
+    let user_id_str = parts[3].trim_end_matches(';').trim_matches('\'');
     let user_id: u64 = user_id_str.parse().map_err(|_| {
         err(
             "22003",
@@ -245,16 +252,24 @@ pub fn kill_user_sessions(
         )
     })?;
 
-    let killed = state.session_registry.kill_sessions_for_user(
-        user_id,
-        crate::control::security::sessions::KillReason::AdminKill,
-    );
+    let reason = crate::control::security::sessions::KillReason::AdminKill;
+    let (killed, principal) = if oidc {
+        let killed = state
+            .session_registry
+            .kill_sessions_for_oidc_user(user_id, reason);
+        (killed, "oidc user_id")
+    } else {
+        let killed = state
+            .session_registry
+            .kill_sessions_for_stored_user(user_id, reason);
+        (killed, "user_id")
+    };
 
     state.audit_record(
         crate::control::security::audit::AuditEvent::AdminAction,
         Some(identity.tenant_id),
         &identity.username,
-        &format!("killed {killed} sessions for user_id={user_id}"),
+        &format!("killed {killed} sessions for {principal}={user_id}"),
     );
 
     Ok(status(&format!("KILL {killed}")))
@@ -272,10 +287,9 @@ pub fn verify_audit_chain(
         return Err(err("42501", "permission denied: requires superuser"));
     }
 
-    let (entries, tail_hash) = state
-        .audit_chain_snapshot()
+    let (report, _last_in_range) = state
+        .verify_audit_chain(1, u64::MAX)
         .map_err(|e| DdlError::from_error_in_context("audit log read failed", &e))?;
-    let report = verify_chain(&entries, 1, u64::MAX, &tail_hash);
     match report.broken_at {
         None => {
             let columns = vec!["status".to_string(), "entries".to_string()];

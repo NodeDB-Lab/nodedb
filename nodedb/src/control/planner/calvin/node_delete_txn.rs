@@ -24,11 +24,21 @@ use crate::control::planner::implicit_edges::append_implicit_edge_delete_tasks;
 use crate::control::state::SharedState;
 use crate::types::{TraceId, TxnId};
 
+/// What a transaction does with a TRUNCATE of an edge-bearing collection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TxnEdgeTruncate {
+    /// Refuse it: the transaction can read the collection's edges later.
+    Refuse,
+    /// Carry its edge shares, which cut the edges at the transaction's turn.
+    /// The transaction reads nothing after the TRUNCATE.
+    CutAtCommit,
+}
+
 /// The edge tasks a delete `task` inside transaction `txn_id` carries: a
 /// `BulkDelete`, a `PointDelete` of a bound surrogate, or a CRDT
 /// `DocDelete` of a bound document. Empty for any
 /// other task, and for a delete on a collection no edge was ever written
-/// into. A TRUNCATE of an edge-bearing collection is refused.
+/// into. A TRUNCATE of an edge-bearing collection follows `truncate`.
 ///
 /// `prediction` is the statement's own read of a predicate delete's rows.
 /// The edge tasks derive from it, so they cover exactly the rows it stages.
@@ -39,6 +49,7 @@ pub async fn txn_node_delete_tasks(
     task: &PhysicalTask,
     txn_id: Option<TxnId>,
     prediction: Option<&PreexecScan>,
+    truncate: TxnEdgeTruncate,
 ) -> crate::Result<Vec<PhysicalTask>> {
     let (tenant_id, database_id) = (task.tenant_id, task.database_id);
     // The rows the statement deletes: a predicate, one row by surrogate, or
@@ -79,23 +90,29 @@ pub async fn txn_node_delete_tasks(
         }) => (collection, DeleteTarget::Document(document_id.clone())),
         // A TRUNCATE's edge shares stage nothing: each tombstones its
         // vShard's edges at the transaction's turn. A read later in the same
-        // transaction block still sees the edges, so the block refuses it.
+        // transaction still sees the edges, so a transaction that can read
+        // later refuses it.
         PhysicalPlan::Document(DocumentOp::Truncate { collection, .. }) => {
-            if super::edge_truncate::collection_is_edge_bearing(
+            if !super::edge_truncate::collection_is_edge_bearing(
                 state,
                 tenant_id,
                 database_id,
                 collection.as_str(),
             )? {
-                return Err(crate::Error::BadRequest {
-                    detail: format!(
-                        "TRUNCATE of '{collection}' cannot run inside a transaction block: \
-                         graph edges were written into it, and the block's later reads would \
-                         still see them. Run the TRUNCATE outside the transaction."
-                    ),
-                });
+                return Ok(Vec::new());
             }
-            return Ok(Vec::new());
+            return match truncate {
+                TxnEdgeTruncate::CutAtCommit => {
+                    Ok(super::edge_truncate::edge_share_tasks(task, collection))
+                }
+                TxnEdgeTruncate::Refuse => Err(crate::Error::FeatureNotSupported {
+                    detail: format!(
+                        "TRUNCATE of '{collection}' cannot run in a transaction with a later \
+                         read: graph edges were written into it, and the later read would still \
+                         see them. Run the TRUNCATE as its own statement."
+                    ),
+                }),
+            };
         }
         _ => return Ok(Vec::new()),
     };

@@ -15,16 +15,24 @@ use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 
 use super::types::{SystemCatalog, catalog_err};
 
-/// Table: `vshard_id` -> `(fully_applied_epoch, msgpack of the applied tail)`.
-pub(super) const CALVIN_APPLIED: TableDefinition<u32, (u64, &[u8])> =
+/// Table: `(mirror database, vshard_id)` -> `(fully_applied_epoch, msgpack of
+/// the applied tail)`. Database `0` names this cluster's own sequencer: `0` is
+/// the default database, which no mirror follows.
+pub(super) const CALVIN_APPLIED: TableDefinition<(u64, u32), (u64, &[u8])> =
     TableDefinition::new("_system.calvin_applied");
+
+/// The database half of a key that holds this cluster's own positions.
+const LOCAL_POSITIONS: u64 = 0;
 
 /// Sentinel `fully_applied_epoch`: no epoch is fully applied.
 const NONE_FULLY_APPLIED: u64 = u64::MAX;
 
-/// One vShard's applied state.
+/// One ledger's applied state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredCalvinApplied {
+    /// The mirror database whose source issued the positions. `None` names
+    /// this cluster's own sequencer.
+    pub mirror_database: Option<u64>,
     pub vshard_id: u32,
     /// Every position of every epoch at or below this is applied. `u64::MAX`
     /// means none is.
@@ -34,7 +42,15 @@ pub struct StoredCalvinApplied {
 }
 
 impl StoredCalvinApplied {
-    /// The union of two states of one vShard: the higher watermark, and the
+    /// The state's table key.
+    fn key(&self) -> (u64, u32) {
+        (
+            self.mirror_database.unwrap_or(LOCAL_POSITIONS),
+            self.vshard_id,
+        )
+    }
+
+    /// The union of two states of one ledger: the higher watermark, and the
     /// tail entries of both above it.
     fn merge(self, other: StoredCalvinApplied) -> StoredCalvinApplied {
         let fully_applied_epoch = match (self.fully_applied_epoch, other.fully_applied_epoch) {
@@ -50,6 +66,7 @@ impl StoredCalvinApplied {
             })
             .collect();
         StoredCalvinApplied {
+            mirror_database: self.mirror_database,
             vshard_id: self.vshard_id,
             fully_applied_epoch,
             tail,
@@ -75,7 +92,27 @@ fn decode_tail(bytes: &[u8]) -> crate::Result<BTreeSet<(u64, u32)>> {
 }
 
 impl SystemCatalog {
-    /// The saved applied state of every vShard.
+    /// Remove the saved applied state of a dropped mirror database.
+    pub fn delete_mirror_calvin_applied(&self, mirror_database: u64) -> crate::Result<()> {
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(|e| catalog_err("delete_mirror_calvin_applied txn", e))?;
+        {
+            let mut table = write_txn
+                .open_table(CALVIN_APPLIED)
+                .map_err(|e| catalog_err("open calvin_applied", e))?;
+            let keys = (mirror_database, u32::MIN)..=(mirror_database, u32::MAX);
+            table
+                .retain_in(keys, |_, _| false)
+                .map_err(|e| catalog_err("remove calvin_applied", e))?;
+        }
+        write_txn
+            .commit()
+            .map_err(|e| catalog_err("commit calvin_applied", e))
+    }
+
+    /// The saved applied state of every ledger.
     pub fn load_all_calvin_applied(&self) -> crate::Result<Vec<StoredCalvinApplied>> {
         let read_txn = self
             .db
@@ -89,10 +126,12 @@ impl SystemCatalog {
             .iter()
             .map_err(|e| catalog_err("iter calvin_applied", e))?
         {
-            let (vshard, value) = row.map_err(|e| catalog_err("read calvin_applied", e))?;
+            let (key, value) = row.map_err(|e| catalog_err("read calvin_applied", e))?;
+            let (database, vshard_id) = key.value();
             let (fully_applied_epoch, tail) = value.value();
             out.push(StoredCalvinApplied {
-                vshard_id: vshard.value(),
+                mirror_database: (database != LOCAL_POSITIONS).then_some(database),
+                vshard_id,
                 fully_applied_epoch,
                 tail: decode_tail(tail)?,
             });
@@ -100,7 +139,7 @@ impl SystemCatalog {
         Ok(out)
     }
 
-    /// Replace the saved state of each vShard in `states` with the given one.
+    /// Replace the saved state of each ledger in `states` with the given one.
     ///
     /// A data-group snapshot install replaces the vShard's storage with the
     /// leader's, so the applied state it brought replaces this node's: a
@@ -121,10 +160,7 @@ impl SystemCatalog {
             for state in states {
                 let tail = encode_tail(&state.tail)?;
                 table
-                    .insert(
-                        state.vshard_id,
-                        (state.fully_applied_epoch, tail.as_slice()),
-                    )
+                    .insert(state.key(), (state.fully_applied_epoch, tail.as_slice()))
                     .map_err(|e| catalog_err("insert calvin_applied", e))?;
             }
         }
@@ -134,7 +170,7 @@ impl SystemCatalog {
     }
 
     /// Save `states` in one transaction. Each is merged with the state
-    /// already saved for its vShard, so the saved state only grows.
+    /// already saved for its ledger, so the saved state only grows.
     pub fn save_calvin_applied(&self, states: Vec<StoredCalvinApplied>) -> crate::Result<()> {
         if states.is_empty() {
             return Ok(());
@@ -149,12 +185,13 @@ impl SystemCatalog {
                 .map_err(|e| catalog_err("open calvin_applied", e))?;
             for state in states {
                 let saved = match table
-                    .get(state.vshard_id)
+                    .get(state.key())
                     .map_err(|e| catalog_err("get calvin_applied", e))?
                 {
                     Some(row) => {
                         let (fully_applied_epoch, tail) = row.value();
                         Some(StoredCalvinApplied {
+                            mirror_database: state.mirror_database,
                             vshard_id: state.vshard_id,
                             fully_applied_epoch,
                             tail: decode_tail(tail)?,
@@ -168,10 +205,7 @@ impl SystemCatalog {
                 };
                 let tail = encode_tail(&merged.tail)?;
                 table
-                    .insert(
-                        merged.vshard_id,
-                        (merged.fully_applied_epoch, tail.as_slice()),
-                    )
+                    .insert(merged.key(), (merged.fully_applied_epoch, tail.as_slice()))
                     .map_err(|e| catalog_err("insert calvin_applied", e))?;
             }
         }
@@ -187,10 +221,36 @@ mod tests {
 
     fn state(vshard_id: u32, w: u64, tail: &[(u64, u32)]) -> StoredCalvinApplied {
         StoredCalvinApplied {
+            mirror_database: None,
             vshard_id,
             fully_applied_epoch: w,
             tail: tail.iter().copied().collect(),
         }
+    }
+
+    /// A mirror's row and the local row of one vShard stay apart, and dropping
+    /// the mirror removes only its rows.
+    #[test]
+    fn a_mirror_row_stays_apart_and_drops_with_its_database() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let catalog = SystemCatalog::open(&dir.path().join("system.redb")).expect("catalog");
+        let local = state(3, NONE_FULLY_APPLIED, &[(2, 1)]);
+        let mirror = StoredCalvinApplied {
+            mirror_database: Some(1024),
+            ..state(3, NONE_FULLY_APPLIED, &[(9, 9)])
+        };
+        catalog
+            .save_calvin_applied(vec![local.clone(), mirror.clone()])
+            .expect("save");
+        assert_eq!(
+            catalog.load_all_calvin_applied().expect("load"),
+            vec![local.clone(), mirror]
+        );
+        catalog.delete_mirror_calvin_applied(1024).expect("delete");
+        assert_eq!(
+            catalog.load_all_calvin_applied().expect("load"),
+            vec![local]
+        );
     }
 
     #[test]

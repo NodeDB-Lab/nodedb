@@ -226,12 +226,11 @@ pub struct CoreLoop {
         crate::engine::timeseries::columnar_memtable::ColumnarMemtable,
     >,
 
-    /// Live engine-memory reservation for each columnar timeseries memtable's
-    /// resident footprint. Recharged via `recharge_ts_memtable_budget` after
-    /// every ingest (so the Timeseries budget tracks the memtable's actual
-    /// `memory_bytes()`) and dropped when `flush_ts_collection` drains the
-    /// memtable — so the flush release balances the reservation instead of
-    /// releasing bytes that were never reserved.
+    /// Live engine-memory reservation for each columnar timeseries memtable's resident footprint.
+    /// Recharged via `recharge_ts_memtable_budget` after every ingest (so the Timeseries budget
+    /// tracks the memtable's actual `memory_bytes()`) and dropped when `flush_ts_collection` drains
+    /// the memtable — so the flush release balances the reservation instead of releasing bytes
+    /// that were never reserved.
     /// Key: (DatabaseId, TenantId, collection).
     pub(in crate::data::executor) columnar_memtable_mem:
         HashMap<(DatabaseId, TenantId, String), nodedb_mem::ReservationToken>,
@@ -274,6 +273,11 @@ pub struct CoreLoop {
     /// Used by idle flush: if no ingest for 5 seconds, `maybe_run_maintenance`
     /// flushes all non-empty memtables to disk partitions.
     pub(in crate::data::executor) last_ts_ingest: Option<std::time::Instant>,
+
+    /// Each array's newest audit-purge cutoff from the log. A compaction's window
+    /// ends here, so it reads no local clock.
+    pub(in crate::data::executor) array_retention_floors:
+        HashMap<nodedb_array::types::ArrayId, i64>,
 
     /// Per-collection last-value caches for O(1) recent value lookup.
     /// Key: (DatabaseId, TenantId, collection).
@@ -365,8 +369,9 @@ pub struct CoreLoop {
     pub(in crate::data::executor) crs_set: Arc<nodedb_crs::CustomCrsSet>,
 
     /// Per-core io_uring reader for batched columnar segment reads.
-    /// Initialized lazily; `None` if io_uring is not available.
-    pub(in crate::data::executor) uring_reader: Option<crate::data::io::uring_reader::UringReader>,
+    /// `None` if io_uring is not available. `RefCell`: `&self` scans borrow it.
+    pub(in crate::data::executor) uring_reader:
+        std::cell::RefCell<Option<crate::data::io::uring_reader::UringReader>>,
 
     /// Per-engine segment/checkpoint at-rest encryption keys.
     pub(in crate::data::executor) segment_keks: super::SegmentKeks,
@@ -396,15 +401,13 @@ pub struct CoreLoop {
 
     /// Shared collection-scoped scan-quiesce registry.
     ///
-    /// When set, every scan handler on this core calls
-    /// `quiesce.try_start_scan(tenant, collection)` at entry and holds
-    /// the resulting `ScanGuard` across the row stream. A concurrent
-    /// `PurgeCollection` post-apply flow calls `begin_drain` +
-    /// `wait_until_drained` on the same registry, so the unlink pass
-    /// only runs once every in-flight scan has released.
+    /// When set, every scan handler on this core calls `quiesce.try_start_scan(tenant, collection)`
+    /// at entry and holds the resulting `ScanGuard` across the row stream. A concurrent
+    /// `PurgeCollection` post-apply flow calls `begin_drain` + `wait_until_drained` on the same
+    /// registry, so the unlink pass only runs once every in-flight scan has released.
     ///
-    /// `None` in test / no-cluster bringup: scans skip the gate. Boot wires
-    /// the shared registry via `set_quiesce` after `SharedState::open`.
+    /// `None` in test / no-cluster bringup: scans skip the gate. Boot wires the shared registry
+    /// via `set_quiesce` after `SharedState::open`.
     pub(in crate::data::executor) quiesce:
         Option<std::sync::Arc<crate::bridge::quiesce::CollectionQuiesce>>,
 
@@ -420,18 +423,16 @@ pub struct CoreLoop {
 
     /// Ambient deterministic timestamp for the current Calvin epoch.
     ///
-    /// Set to `Some(ms)` by `execute_calvin_execute_static`,
-    /// `execute_calvin_execute_active` and `execute_calvin_resolve` while they
-    /// stage or resolve a transaction's plans, and by `install_calvin_redo`
-    /// while it renders the reply, then restored immediately after. Engine
-    /// handlers that need "current time" (KV TTL expire_at, timeseries
-    /// system_ms) call `self.epoch_system_ms.unwrap_or_else(<wall_clock_read>)`
-    /// so that single-shard (non-Calvin) paths read the wall clock. A
-    /// bitemporal document or columnar stamp reads
+    /// Set to `Some(ms)` by `execute_calvin_execute_static`, `execute_calvin_execute_active` and
+    /// `execute_calvin_resolve` while they stage or resolve a transaction's plans, and by
+    /// `install_calvin_redo` while it renders the reply, then restored immediately after. Engine
+    /// handlers that need "current time" (KV TTL expire_at, timeseries system_ms) call
+    /// `self.epoch_system_ms.unwrap_or_else(<wall_clock_read>)` so that single-shard (non-Calvin)
+    /// paths read the wall clock. A bitemporal document or columnar stamp reads
     /// `apply_scope.calvin_txn_ordinal` instead (see `bitemporal_time.rs`).
     ///
-    /// Safety: this is safe because `CoreLoop` is `!Send` and single-threaded
-    /// per core, and staging never recurses into another Calvin execute.
+    /// Safety: this is safe because `CoreLoop` is `!Send` and single-threaded per core, and staging
+    /// never recurses into another Calvin execute.
     pub(in crate::data::executor) epoch_system_ms: Option<i64>,
 
     /// Per-transaction staging overlay: not-yet-durable writes for each

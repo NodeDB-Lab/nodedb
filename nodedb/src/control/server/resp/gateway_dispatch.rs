@@ -13,6 +13,8 @@ use std::sync::Arc;
 use crate::bridge::envelope::{PhysicalPlan, Response};
 use crate::control::gateway::GatewayErrorMap;
 use crate::control::gateway::core::QueryContext;
+use crate::control::local_dispatch::reject_data_plane_error;
+use crate::control::mirror::source::sync::await_database_sync;
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::security::request_scope::ClientRequestScope;
 use crate::control::server::shared::clone_write::CloneCheckedOutcome;
@@ -110,7 +112,13 @@ pub(super) async fn dispatch_kv_write(
     {
         meter_resp_dispatch(state, scope, info);
     }
-    result
+    let response = result?;
+    // A write the Data Plane refused waits for nothing. Its caller reads the
+    // refusal from the response.
+    if reject_data_plane_error(&response).is_ok() {
+        await_database_sync(state, database_id).await?;
+    }
+    Ok(response)
 }
 
 /// Run one checked RESP task through the gateway.
@@ -443,6 +451,53 @@ mod tests {
             "a RESP session whose real peer address falls inside a blacklisted CIDR range \
              must be rejected"
         );
+    }
+
+    /// A RESP write to a database with a sync mirror answers the typed timeout
+    /// once the link confirms nothing. The write stays committed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn kv_write_waits_for_a_sync_mirror() {
+        use nodedb_physical::physical_plan::KvOp;
+        use nodedb_types::{MirrorMode, MirrorPin, MirrorPinState};
+
+        let cluster = crate::control::cluster::test_one_node::boot_with(|state| {
+            state.tuning.mirror.sync_timeout_ms = 200;
+        })
+        .await;
+        cluster.state.mirror.pins.apply(&MirrorPin {
+            link_id: 1,
+            client: "resp-test".to_string(),
+            database: DatabaseId::DEFAULT.as_u64(),
+            positions: Vec::new(),
+            acked_ms: 0,
+            state: MirrorPinState::Live,
+            mode: MirrorMode::Sync,
+            acked_ordinal: 1,
+        });
+        let session = resp_session_with_identity(regular_identity(4));
+        let plan = PhysicalPlan::Kv(KvOp::Put {
+            collection: nodedb_types::QualifiedCollection::new(
+                DatabaseId::DEFAULT,
+                &session.collection,
+            ),
+            key: b"k".to_vec(),
+            value: b"v".to_vec(),
+            ttl_ms: 0,
+            surrogate: nodedb_types::Surrogate(1),
+            returning: None,
+            rls_filters: Vec::new(),
+            provenance: None,
+        });
+
+        let error = dispatch_kv_write(&cluster.state, &session, plan)
+            .await
+            .expect_err("a stopped sync mirror confirms nothing");
+
+        assert!(
+            matches!(error, crate::Error::MirrorSyncTimeout { .. }),
+            "{error:?}"
+        );
+        cluster.shutdown().await;
     }
 
     /// A booted one-node cluster with metering on. `metering_config` has no

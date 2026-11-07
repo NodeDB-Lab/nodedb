@@ -14,11 +14,13 @@ impl Scheduler {
     /// before its `CompletionAck` fires the coordinator's waiter.
     ///
     /// A multi-collection cross-shard COMMIT has many primary-write
-    /// participants, each a plain affected-count write, and they coalesce:
-    /// the first answer stands, with every participant's timeseries install
-    /// counts merged in. Only two participants that each carry RETURNING
-    /// rows conflict: a cross-shard RETURNING union is unsupported, so the
-    /// statement fails loudly rather than return one shard's rows.
+    /// participants, each a plain affected-count write. This node's sidecar
+    /// holds only the participants it hosts, so it keeps the first plain
+    /// answer as the response the coordinator reshapes. The coordinator takes
+    /// the statement's count from every participant's `CompletionAck`
+    /// (`with_reported_results`). Only two participants that each carry
+    /// RETURNING rows conflict: a cross-shard RETURNING union is unsupported,
+    /// so the statement fails loudly rather than return one shard's rows.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn deposit_reply(
         &self,
         txn_id: TxnId,
@@ -90,16 +92,7 @@ impl Scheduler {
             .network
             .max_query_result_bytes
             .min(crate::control::state::ACK_ROWS_FRAME_BUDGET);
-        CalvinAckResult::of(reply, slice, limit)
-            .to_bytes()
-            .unwrap_or_else(|error| {
-                tracing::warn!(
-                    vshard_id = self.vshard_id,
-                    %error,
-                    "calvin: the completion ack carries no report"
-                );
-                Vec::new()
-            })
+        CalvinAckResult::of(reply, slice, limit).to_bytes_or_failed()
     }
 }
 

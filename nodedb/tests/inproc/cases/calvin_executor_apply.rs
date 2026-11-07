@@ -177,6 +177,7 @@ fn install(
             epoch_system_ms: 0,
             reply: reply.clone(),
             user_write: true,
+            mirror: false,
         }),
         reads: Vec::new(),
         snapshot_ordinal: None,

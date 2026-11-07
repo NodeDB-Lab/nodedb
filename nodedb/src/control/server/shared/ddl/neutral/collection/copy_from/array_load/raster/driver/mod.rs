@@ -5,6 +5,7 @@ pub mod blocks;
 pub mod drive;
 pub mod error;
 pub mod load_options;
+pub mod memory;
 pub mod open;
 
 pub(crate) use drive::drive_raster;

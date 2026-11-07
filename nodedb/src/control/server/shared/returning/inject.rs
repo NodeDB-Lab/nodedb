@@ -388,6 +388,7 @@ pub fn inject_returning_spec(plan: &mut PhysicalPlan, spec: ReturningSpec) {
             | MetaOp::Compact
             | MetaOp::Checkpoint
             | MetaOp::RegisterContinuousAggregate { .. }
+            | MetaOp::InstallAggregateImage { .. }
             | MetaOp::UnregisterContinuousAggregate { .. }
             | MetaOp::ListContinuousAggregates
             | MetaOp::ContinuousAggregatesRegistered
@@ -398,6 +399,7 @@ pub fn inject_returning_spec(plan: &mut PhysicalPlan, spec: ReturningSpec) {
             | MetaOp::PurgeDepartedVShards { .. }
             | MetaOp::PurgeVersionsBelow { .. }
             | MetaOp::KvDueExpiries { .. }
+            | MetaOp::ListTenantCollections { .. }
             | MetaOp::RefreshGraphCount { .. }
             | MetaOp::QueryStorageBytes { .. }
             | MetaOp::PurgeTenant { .. }
@@ -411,7 +413,7 @@ pub fn inject_returning_spec(plan: &mut PhysicalPlan, spec: ReturningSpec) {
             | MetaOp::TemporalPurgeCrdt { .. }
             | MetaOp::TemporalPurgeArray { .. }
             | MetaOp::AlterArray { .. }
-            | MetaOp::ApplyContinuousAggRetention
+            | MetaOp::ApplyContinuousAggRetention { .. }
             | MetaOp::QueryAggregateWatermark { .. }
             | MetaOp::QueryLastValues { .. }
             | MetaOp::QueryLastValue { .. }

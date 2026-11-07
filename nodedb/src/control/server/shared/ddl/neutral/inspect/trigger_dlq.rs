@@ -61,7 +61,10 @@ pub fn show_trigger_dlq(
     let visible =
         |tenant_id: u64| identity.is_superuser || tenant_id == identity.tenant_id.as_u64();
     let mut rows: Vec<Map<String, JsonValue>> = Vec::new();
-    for entry in dlq.list().filter(|e| !e.resolved && visible(e.tenant_id())) {
+    for entry in dlq
+        .list()
+        .filter(|e| !e.resolved && !dlq.is_claimed(e.entry_id) && visible(e.tenant_id()))
+    {
         let mut row = Map::new();
         row.insert("entry_id".into(), JsonValue::from(entry.entry_id));
         row.insert("tenant_id".into(), JsonValue::from(entry.tenant_id()));
@@ -89,8 +92,12 @@ pub fn show_trigger_dlq(
 /// REQUEUE TRIGGER DLQ <entry_id> — hand one dead-lettered action back to the
 /// Event Plane for another attempt.
 ///
-/// The entry is marked resolved as it is taken, so the same work cannot be
-/// requeued twice while it is in flight.
+/// Delivery is at-least-once. The entry stays in the DLQ, claimed and safe from
+/// eviction, until the action's consumer durably holds it in the retry queue.
+/// The claim stops a second requeue while the first is in flight. An inbox that
+/// refuses the action gives the claim back, so the entry is listed again. A
+/// crash before the entry resolves leaves it to requeue again, which can run
+/// the action twice and cannot lose it.
 pub fn requeue_trigger_dlq(
     state: &SharedState,
     identity: &AuthenticatedIdentity,
@@ -109,32 +116,49 @@ pub fn requeue_trigger_dlq(
         ));
     };
 
-    // Take under the lock, then release it before touching the inbox — the
-    // consumer collecting requeued work must never wait on the DLQ mutex.
-    let action = {
-        let mut dlq = dlq.lock().unwrap_or_else(|poison| poison.into_inner());
-        let owner_tenant = dlq
-            .list()
-            .find(|e| e.entry_id == entry_id)
-            .map(|e| e.tenant_id());
-        match owner_tenant {
-            Some(tenant_id)
-                if !identity.is_superuser && tenant_id != identity.tenant_id.as_u64() =>
-            {
-                // Report exactly as an absent entry: whether another tenant
-                // holds this id is not this caller's to learn.
-                return Err(ddl_err("42704", format!("no dead-letter entry {entry_id}")));
-            }
-            _ => {}
+    let owner_tenant = dlq
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .list()
+        .find(|e| e.entry_id == entry_id)
+        .map(|e| e.tenant_id());
+    match owner_tenant {
+        Some(tenant_id) if !identity.is_superuser && tenant_id != identity.tenant_id.as_u64() => {
+            // Report exactly as an absent entry: whether another tenant
+            // holds this id is not this caller's to learn.
+            return Err(ddl_err("42704", format!("no dead-letter entry {entry_id}")));
         }
-        dlq.take_for_requeue(entry_id)
-            .map_err(|e| ddl_err(requeue_take_sqlstate(&e), e.to_string()))?
-    };
+        // The DLQ mutex is released here, so the audit sync never holds it.
+        // A failed record leaves the entry unresolved.
+        Some(_) => super::super::audit_intent::record_action_intent(
+            state,
+            identity,
+            Some(identity.tenant_id),
+            &format!("REQUEUE TRIGGER DLQ {entry_id}"),
+        )?,
+        // The take below reports the absent entry.
+        None => {}
+    }
+
+    // Claim under the lock, then release it before touching the inbox — the
+    // consumer collecting requeued work must never wait on the DLQ mutex.
+    let action = dlq
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .claim_for_requeue(entry_id)
+        .map_err(|e| ddl_err(requeue_take_sqlstate(&e), e.to_string()))?;
 
     let owner = action.owner().to_owned();
-    let core_id = inbox
-        .submit(action)
-        .map_err(|e| ddl_err("55000", e.to_string()))?;
+    let core_id = match inbox.submit(action, entry_id) {
+        Ok(core_id) => core_id,
+        Err(refused) => {
+            // The claim held the entry, so eviction left it to give back.
+            dlq.lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .release_claim(entry_id);
+            return Err(ddl_err("55000", refused.to_string()));
+        }
+    };
 
     state.audit_record(
         crate::control::security::audit::AuditEvent::AdminAction,
@@ -156,8 +180,6 @@ fn requeue_take_sqlstate(error: &crate::event::trigger::RequeueTakeError) -> &'s
         // No such object.
         E::NotFound { .. } => "42704",
         // The object exists but is not in a state this action accepts.
-        E::AlreadyResolved { .. } => "55000",
-        // redb refused the write. The entry stays unresolved in the DLQ.
-        E::Persist { .. } => "58030",
+        E::AlreadyResolved { .. } | E::AlreadyClaimed { .. } => "55000",
     }
 }

@@ -20,7 +20,7 @@ use std::collections::BTreeSet;
 use nodedb_physical::physical_plan::{CrdtOp, GraphOp, PhysicalPlan};
 use nodedb_physical::physical_task::PhysicalTask;
 
-use super::dependent_recon::DependentReconOutcome;
+use super::dependent_recon::{DependentReconOutcome, SettledReads};
 use super::dependent_recon_finish::finish_committed;
 use super::dependent_recon_node_edges::{
     NodeDeletePlan, NodeIncidentEdges, node_delete_tasks, read_node_incident_edges,
@@ -46,12 +46,17 @@ pub fn is_crdt_doc_delete(plan: &PhysicalPlan) -> bool {
 
 /// Dispatch the CRDT document deletes among `tasks` with their nodes' edge
 /// tombstones. `None` when `tasks` holds no CRDT document delete.
+///
+/// `settled` guards the balance deltas that ride in `tasks`. Every other write
+/// of `tasks` commits in the transaction, under `user_roles`.
 pub(super) async fn dispatch_crdt_doc_deletes(
     state: &SharedState,
     tasks: &[PhysicalTask],
     identity: Option<&AuthenticatedIdentity>,
     tenant_id: TenantId,
     database_id: DatabaseId,
+    user_roles: &[String],
+    settled: SettledReads<'_>,
 ) -> crate::Result<Option<DependentReconOutcome>> {
     // The node every deleted document id names, bound or not. An id unbound
     // at planning names no stored document, so the read finds it absent and
@@ -144,12 +149,17 @@ pub(super) async fn dispatch_crdt_doc_deletes(
                 .map(|task| task.into_physical_task())
                 .collect();
             }
+            #[cfg(feature = "failpoints")]
+            crate::control::fail_gate::before_recon_submit(state.node_id).await;
             orc.submit_with_retry_via(
                 pred_class,
                 tenant_id,
                 || {
-                    let tx_class = build_single_vshard_tx_class(&submission, tenant_id, &[])
-                        .map_err(|e| OllpError::Terminal(Box::new(e)))?;
+                    let mut tx_class =
+                        build_single_vshard_tx_class(&submission, tenant_id, settled.reads)
+                            .map_err(|e| OllpError::Terminal(Box::new(e)))?;
+                    tx_class.set_user_roles(user_roles.to_vec());
+                    tx_class.set_snapshot_ordinal(settled.snapshot_ordinal);
                     Ok(Some(tx_class))
                 },
                 |tx_class| async move {

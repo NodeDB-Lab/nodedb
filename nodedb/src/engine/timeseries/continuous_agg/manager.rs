@@ -300,15 +300,22 @@ impl ContinuousAggregateManager {
 
     // -- Retention --
 
-    /// Apply retention across every registered aggregate on this core:
+    /// Apply retention across one tenant's aggregates of `database` on this core:
     /// remove materialized buckets older than each aggregate's retention
     /// period. An aggregate that loses a bucket records `ordinal`, the
     /// system time of the pass, as its rewrite.
-    pub fn apply_retention(&mut self, now_ms: i64, ordinal: i64) -> usize {
+    pub fn apply_retention(
+        &mut self,
+        now_ms: i64,
+        ordinal: i64,
+        database: u64,
+        tenant: u64,
+    ) -> usize {
         let mut total_removed = 0;
         let defs: Vec<(AggKey, u64)> = self
             .definitions
             .iter()
+            .filter(|(key, _)| key.0 == database && key.1 == tenant)
             .map(|(key, d)| (key.clone(), d.retention_period_ms))
             .collect();
 
@@ -346,9 +353,10 @@ impl ContinuousAggregateManager {
     /// of the source, a clear-then-install, and a truncate undo owe their
     /// aggregates.
     pub fn reset_for_source(&mut self, database_id: u64, tenant_id: u64, source: &str) {
+        let bare = super::fold::source_name(database_id, source);
         let mut pending: Vec<String> = self
             .dependencies
-            .get(&(database_id, tenant_id, source.to_string()))
+            .get(&(database_id, tenant_id, bare.to_string()))
             .cloned()
             .unwrap_or_default();
         let mut seen = HashSet::new();
@@ -561,7 +569,12 @@ mod tests {
             .get_materialized(0, 1, "v_1m")
             .expect("registered")
             .len();
-        let removed = mgr.apply_retention(T0 + 15 * 60_000, 1);
+        assert_eq!(
+            mgr.apply_retention(T0 + 15 * 60_000, 1, 9, 1),
+            0,
+            "another database's pass keeps these buckets"
+        );
+        let removed = mgr.apply_retention(T0 + 15 * 60_000, 1, 0, 1);
         assert!(removed > 0);
         assert!(
             mgr.get_materialized(0, 1, "v_1m")

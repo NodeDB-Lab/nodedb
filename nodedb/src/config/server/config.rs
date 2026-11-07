@@ -122,6 +122,10 @@ pub struct ServerConfig {
     #[serde(default)]
     pub pitr: PitrSettings,
 
+    /// This cluster as a mirror's source, and as a mirror of others.
+    #[serde(default)]
+    pub mirror: super::mirror::MirrorSettings,
+
     /// Snapshot storage configuration.
     /// Controls where warm-tier snapshots are persisted. When absent, defaults
     /// to local filesystem at `{data_dir}/snapshots`.

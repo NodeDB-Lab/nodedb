@@ -8,6 +8,7 @@ pub mod raster;
 pub mod records;
 pub mod router;
 pub mod source;
+pub mod tail;
 
 pub(crate) use dispatch::ArrayLoadCtx;
 pub(crate) use loader::{ArrayLoader, LoadInput};

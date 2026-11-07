@@ -37,8 +37,8 @@ use nodedb_wal::WalRecord;
 use nodedb_wal::record::RecordType;
 use tracing::warn;
 
-use crate::wal::RedoRecord;
 use crate::wal::manager::WalManager;
+use crate::wal::{CalvinStamp, RedoRecord};
 
 /// Sentinel used when no Calvin epoch has ever been fully applied / no marker
 /// exists for this vShard.
@@ -79,7 +79,34 @@ impl AppliedRecovery {
     }
 }
 
-/// Every vShard's applied `(epoch, position)` markers in one pass over the
+/// Every ledger's applied state after a restart.
+#[derive(Debug, Default)]
+pub struct RecoveredApplied {
+    /// This cluster's positions, per vShard.
+    pub by_vshard: BTreeMap<u32, AppliedRecovery>,
+    /// Mirrored positions, per `(mirror database, vShard)`. They carry their
+    /// source's numbers, so they stay apart from this cluster's.
+    pub by_mirror: BTreeMap<(u64, u32), AppliedRecovery>,
+}
+
+impl RecoveredApplied {
+    /// Record the position `stamp` names in its ledger's state.
+    fn note(&mut self, stamp: &CalvinStamp) {
+        let scan = match stamp.mirror_database {
+            None => self
+                .by_vshard
+                .entry(stamp.vshard_id)
+                .or_insert_with(AppliedRecovery::empty),
+            Some(database) => self
+                .by_mirror
+                .entry((database, stamp.vshard_id))
+                .or_insert_with(AppliedRecovery::empty),
+        };
+        scan.note(stamp.epoch, stamp.position);
+    }
+}
+
+/// Every ledger's applied `(epoch, position)` markers in one pass over the
 /// WAL. `group_of` names a vShard's data group: a snapshot install of the
 /// group drops the vShard's markers before it. The install replaced the
 /// vShard's storage, and the applied state it brought replaced this node's
@@ -92,16 +119,9 @@ impl AppliedRecovery {
 fn scan_all(
     wal: &WalManager,
     group_of: &dyn Fn(u32) -> Option<u64>,
-) -> crate::Result<BTreeMap<u32, AppliedRecovery>> {
+) -> crate::Result<RecoveredApplied> {
     let records = wal.replay()?;
-    let mut scans: BTreeMap<u32, AppliedRecovery> = BTreeMap::new();
-    let note =
-        |scans: &mut BTreeMap<u32, AppliedRecovery>, vshard_id: u32, epoch: u64, position: u32| {
-            scans
-                .entry(vshard_id)
-                .or_insert_with(AppliedRecovery::empty)
-                .note(epoch, position);
-        };
+    let mut scans = RecoveredApplied::default();
 
     for record in &records {
         match record_type_of(record) {
@@ -112,7 +132,12 @@ fn scan_all(
                 else {
                     continue;
                 };
-                for (vshard_id, scan) in &mut scans {
+                for (vshard_id, scan) in &mut scans.by_vshard {
+                    if group_of(*vshard_id) == Some(installed) {
+                        *scan = AppliedRecovery::empty();
+                    }
+                }
+                for ((_, vshard_id), scan) in &mut scans.by_mirror {
                     if group_of(*vshard_id) == Some(installed) {
                         *scan = AppliedRecovery::empty();
                     }
@@ -121,7 +146,7 @@ fn scan_all(
             Some(RecordType::TransactionRedo) => match RedoRecord::from_bytes(&record.payload) {
                 Ok(redo) => {
                     if let Some(stamp) = redo.calvin_stamp {
-                        note(&mut scans, stamp.vshard_id, stamp.epoch, stamp.position);
+                        scans.note(&stamp);
                     }
                 }
                 Err(e) => {
@@ -155,16 +180,32 @@ pub fn recover_all_applied(
     wal: &WalManager,
     catalog: &crate::control::security::catalog::SystemCatalog,
     group_of: &dyn Fn(u32) -> Option<u64>,
-) -> crate::Result<BTreeMap<u32, AppliedRecovery>> {
+) -> crate::Result<RecoveredApplied> {
     let mut recovered = scan_all(wal, group_of)?;
     for saved in catalog.load_all_calvin_applied()? {
-        let from_wal = recovered
-            .remove(&saved.vshard_id)
-            .unwrap_or_else(AppliedRecovery::empty);
-        recovered.insert(
-            saved.vshard_id,
-            merge_saved(from_wal, saved.fully_applied_epoch, saved.tail),
-        );
+        match saved.mirror_database {
+            None => {
+                let from_wal = recovered
+                    .by_vshard
+                    .remove(&saved.vshard_id)
+                    .unwrap_or_else(AppliedRecovery::empty);
+                recovered.by_vshard.insert(
+                    saved.vshard_id,
+                    merge_saved(from_wal, saved.fully_applied_epoch, saved.tail),
+                );
+            }
+            Some(database) => {
+                let key = (database, saved.vshard_id);
+                let from_wal = recovered
+                    .by_mirror
+                    .remove(&key)
+                    .unwrap_or_else(AppliedRecovery::empty);
+                recovered.by_mirror.insert(
+                    key,
+                    merge_saved(from_wal, saved.fully_applied_epoch, saved.tail),
+                );
+            }
+        }
     }
     Ok(recovered)
 }
@@ -213,8 +254,8 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::types::{DatabaseId, TenantId, VShardId};
+    use crate::wal::RedoSubRecord;
     use crate::wal::manager::WalManager;
-    use crate::wal::{CalvinStamp, RedoRecord, RedoSubRecord};
 
     fn open_wal(dir: &TempDir) -> WalManager {
         WalManager::open(dir.path(), false).expect("open wal")
@@ -256,8 +297,58 @@ mod tests {
             epoch,
             position,
             vshard_id: vshard,
+            mirror_database: None,
         };
         append_redo(wal, vshard, &redo_record(Some(stamp)));
+    }
+
+    /// A mirrored slice's record and a local slice's record with the same
+    /// numbers recover into separate ledgers, with the saved state merged
+    /// into the mirror's, and a snapshot install of the group clears both.
+    #[test]
+    fn a_mirrored_marker_recovers_apart_from_a_local_one() {
+        let dir = TempDir::new().unwrap();
+        let wal = open_wal(&dir);
+        append_stamped(&wal, 1, 6, 0);
+        let mirrored = CalvinStamp {
+            epoch: 6,
+            position: 3,
+            vshard_id: 1,
+            mirror_database: Some(1024),
+        };
+        append_redo(&wal, 1, &redo_record(Some(mirrored)));
+        wal.sync().unwrap();
+        let catalog_dir = TempDir::new().unwrap();
+        let catalog = empty_catalog(&catalog_dir);
+        catalog
+            .save_calvin_applied(vec![
+                crate::control::security::catalog::calvin_applied::StoredCalvinApplied {
+                    mirror_database: Some(1024),
+                    vshard_id: 1,
+                    fully_applied_epoch: NOT_YET_APPLIED_EPOCH,
+                    tail: [(4, 1)].into_iter().collect(),
+                },
+            ])
+            .unwrap();
+
+        let recovered = recover_all_applied(&wal, &catalog, &|_| None).unwrap();
+        assert_eq!(
+            recovered.by_vshard[&1].applied_tail,
+            [(6, 0)].into_iter().collect()
+        );
+        assert_eq!(
+            recovered.by_mirror[&(1024, 1)].applied_tail,
+            [(4, 1), (6, 3)].into_iter().collect()
+        );
+
+        wal.appender(crate::wal::manager::NO_APPLY_KEY)
+            .append_snapshot_installed(8)
+            .unwrap();
+        wal.sync().unwrap();
+        let empty_dir = TempDir::new().unwrap();
+        let cleared = recover_all_applied(&wal, &empty_catalog(&empty_dir), &|_| Some(8)).unwrap();
+        assert!(cleared.by_mirror[&(1024, 1)].applied_tail.is_empty());
+        assert!(cleared.by_vshard[&1].applied_tail.is_empty());
     }
 
     /// The recovered state of `vshard` alone, from a catalog with nothing
@@ -268,6 +359,7 @@ mod tests {
         let group_of = |v: u32| if v == vshard { group_id } else { None };
         recover_all_applied(wal, &catalog, &group_of)
             .unwrap()
+            .by_vshard
             .remove(&vshard)
             .unwrap_or_else(AppliedRecovery::empty)
     }
@@ -364,6 +456,7 @@ mod tests {
         catalog
             .save_calvin_applied(vec![
                 crate::control::security::catalog::calvin_applied::StoredCalvinApplied {
+                    mirror_database: None,
                     vshard_id: 1,
                     fully_applied_epoch: 2,
                     tail: [(4, 1)].into_iter().collect(),
@@ -371,7 +464,9 @@ mod tests {
             ])
             .unwrap();
 
-        let recovered = recover_all_applied(&wal, &catalog, &|_| None).unwrap();
+        let recovered = recover_all_applied(&wal, &catalog, &|_| None)
+            .unwrap()
+            .by_vshard;
         let rec = &recovered[&1];
         assert_eq!(rec.fully_applied_epoch, 2);
         assert!(rec.applied_tail.contains(&(4, 1)));
@@ -410,7 +505,9 @@ mod tests {
         let catalog_dir = TempDir::new().unwrap();
         let catalog = empty_catalog(&catalog_dir);
 
-        let all = recover_all_applied(&wal, &catalog, &group_of).unwrap();
+        let all = recover_all_applied(&wal, &catalog, &group_of)
+            .unwrap()
+            .by_vshard;
 
         assert_eq!(all.keys().copied().collect::<Vec<_>>(), vec![1, 2, 3]);
         for (vshard, recovered) in &all {
@@ -439,7 +536,9 @@ mod tests {
         let catalog_dir = TempDir::new().unwrap();
         let catalog = empty_catalog(&catalog_dir);
 
-        let all = recover_all_applied(&wal, &catalog, &group_of).unwrap();
+        let all = recover_all_applied(&wal, &catalog, &group_of)
+            .unwrap()
+            .by_vshard;
 
         assert_eq!(all[&1].applied_tail, [(5, 2)].into_iter().collect());
         assert_eq!(all[&1].max_applied_epoch, 5);

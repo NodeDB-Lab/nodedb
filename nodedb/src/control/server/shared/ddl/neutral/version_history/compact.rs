@@ -70,18 +70,14 @@ pub async fn compact_history(
     )
     .await?;
 
-    state
-        .audit
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .record(
-            crate::control::security::audit::AuditEvent::AdminAction,
-            Some(tenant_id),
-            &identity.username,
-            &format!(
-                "COMPACT HISTORY on {collection}/{doc_id} before '{checkpoint_name}' ({deleted} checkpoints removed)"
-            ),
-        );
+    state.audit_record(
+        crate::control::security::audit::AuditEvent::AdminAction,
+        Some(tenant_id),
+        &identity.username,
+        &format!(
+            "COMPACT HISTORY on {collection}/{doc_id} before '{checkpoint_name}' ({deleted} checkpoints removed)"
+        ),
+    );
 
     Ok(vec![DdlResult::Status {
         command: "COMPACT HISTORY".to_string(),

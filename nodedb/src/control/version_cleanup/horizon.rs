@@ -38,9 +38,12 @@
 //! group's ordinal floor), and a restart (the window is a pure function of
 //! the commit's two ordinals).
 
+use nodedb_physical::physical_plan::MirrorHistoryFloor;
+
 use crate::control::cluster::linearizable_read::groups_hosted_here;
-use crate::control::read_cut::close::close_group_cuts;
+use crate::control::read_cut::close::{close_group_cuts, close_leader_cuts};
 use crate::control::read_cut::{snapshot_max_hold, statement_cap};
+use crate::control::server::shared::ddl::neutral::tenant::purge::data_groups;
 use crate::control::server::shared::session::StatementDeadline;
 use crate::control::state::SharedState;
 
@@ -73,6 +76,31 @@ pub async fn cleanup_horizon(state: &SharedState) -> crate::Result<CleanupHorizo
     Ok(horizon_of(board, cap.cap, window))
 }
 
+/// Compute the horizon a logged retention decision caps its cutoff at. Closes a
+/// cut at the clock on the leader of every data group, hosted here or not, with
+/// no wait for this node's own replicas.
+///
+/// A logged purge applies at one position of each group's log. So a replica needs
+/// no horizon of its own: every commit after the entry stamps above the closed cut,
+/// and every earlier commit concluded before it.
+pub async fn decided_cleanup_horizon(state: &SharedState) -> crate::Result<CleanupHorizon> {
+    let max_hold = snapshot_max_hold(state);
+    let now_ns = nodedb_types::wall_now_ns_i64();
+    let board =
+        state
+            .read_cut
+            .board()
+            .horizon(state.node_id, cluster_members(state), now_ns, max_hold);
+    let cap = statement_cap(state, nodedb_types::ordinal_to_ms(now_ns)).await?;
+    if state.cluster_routing.is_some() {
+        let groups: Vec<u64> = data_groups(state)?.into_keys().collect();
+        let deadline = StatementDeadline::of_statement(state);
+        close_leader_cuts(state, &groups, cap.cap, deadline).await?;
+    }
+    let window = i64::try_from(max_hold.as_nanos()).unwrap_or(i64::MAX);
+    Ok(horizon_of(board, cap.cap, window))
+}
+
 /// The horizon of a board horizon `board` and a closed cut `closed`, with
 /// the commit window `window_ns`.
 pub fn horizon_of(board: i64, closed: i64, window_ns: i64) -> CleanupHorizon {
@@ -81,6 +109,40 @@ pub fn horizon_of(board: i64, closed: i64, window_ns: i64) -> CleanupHorizon {
         board,
         closed,
     }
+}
+
+/// Each read-only mirror's limit on the horizon: one snapshot hold below its
+/// applied cut's cap.
+///
+/// A mirror's reads run at or below that cap, however far it trails the clock
+/// (`read_cut::mirror_cap`). A version newer than the cap can supersede one a
+/// read still needs, so no store of the mirror purges past the floor. Cleanup
+/// stays on, and a stopped mirror stops only its own database's cleanup. A
+/// mirror with no applied cut has a floor of `0`, which purges nothing.
+pub fn mirror_floors(state: &SharedState) -> crate::Result<Vec<MirrorHistoryFloor>> {
+    let window = i64::try_from(snapshot_max_hold(state).as_nanos()).unwrap_or(i64::MAX);
+    let catalog = state.credentials.catalog();
+    state
+        .mirror
+        .fence
+        .read_only_ids()
+        .into_iter()
+        .map(|database_id| {
+            let cap = catalog
+                .get_mirror_cut_state(nodedb_types::DatabaseId::new(database_id))?
+                .map_or(0, |cut| cut.cap_ordinal);
+            Ok(MirrorHistoryFloor {
+                database_id,
+                floor: mirror_floor(cap, window),
+            })
+        })
+        .collect()
+}
+
+/// The floor of a mirror whose applied cut caps at `cap`, with the snapshot hold
+/// `window_ns`. A floor is never negative: it purges nothing.
+pub(crate) fn mirror_floor(cap: i64, window_ns: i64) -> i64 {
+    cap.saturating_sub(window_ns).max(0)
 }
 
 /// Every node of the cluster topology, this one included. Empty on a node
@@ -102,6 +164,14 @@ fn cluster_members(state: &SharedState) -> Vec<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A lagging mirror keeps a full hold of history below its cap.
+    #[test]
+    fn a_mirror_floor_stays_a_hold_below_its_cap() {
+        assert_eq!(mirror_floor(10_000, 1_000), 9_000);
+        assert_eq!(mirror_floor(500, 1_000), 0, "a floor is never negative");
+        assert_eq!(mirror_floor(0, 1_000), 0, "no applied cut purges nothing");
+    }
 
     #[test]
     fn the_horizon_is_the_lower_bound() {

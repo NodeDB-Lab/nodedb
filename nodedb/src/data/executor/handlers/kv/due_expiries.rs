@@ -17,12 +17,13 @@ impl CoreLoop {
         &mut self,
         task: &ExecutionTask,
         limit: u32,
+        skip_databases: &[u64],
     ) -> Response {
         self.kv_engine
             .collect_due_expiries(crate::engine::kv::current_ms());
         let due: Vec<DueExpiry> = self
             .kv_engine
-            .due_expiries(usize::try_from(limit).unwrap_or(usize::MAX));
+            .due_expiries(usize::try_from(limit).unwrap_or(usize::MAX), skip_databases);
         match zerompk::to_msgpack_vec(&due) {
             Ok(payload) => self.response_with_payload(task, payload),
             Err(e) => self.response_error(
@@ -66,10 +67,13 @@ mod tests {
             TenantId::new(1),
             DatabaseId::DEFAULT,
             VShardId::new(0),
-            PhysicalPlan::Meta(MetaOp::KvDueExpiries { limit: 8 }),
+            PhysicalPlan::Meta(MetaOp::KvDueExpiries {
+                limit: 8,
+                skip_databases: Vec::new(),
+            }),
             None,
         );
-        let resp = core.execute_kv_due_expiries(&task, 8);
+        let resp = core.execute_kv_due_expiries(&task, 8, &[]);
         assert_eq!(resp.status, Status::Ok, "{:?}", resp.error_code);
         let due: Vec<DueExpiry> = zerompk::from_msgpack(resp.payload.as_bytes()).expect("decode");
         assert_eq!(due.len(), 1);

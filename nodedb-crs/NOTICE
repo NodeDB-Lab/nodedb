@@ -1,2 +1,16 @@
 Copyright 2026 Biz Impulse Solutions Sdn. Bhd. and the NodeDB contributors.
 This product is licensed under the Apache License, Version 2.0.
+
+The Apache License, Version 2.0 covers the source code of this crate.
+It does not state the terms of the EPSG data below.
+
+This crate ships coordinate reference system data from the EPSG Geodetic
+Parameter Registry:
+
+- data/epsg.tsv holds EPSG v12.029 data. scripts/gen_epsg.py generates it
+  from pyproj 3.8.0, which bundles PROJ 9.8.1.
+- data/epsg_supplement.tsv holds EPSG change 2026.081 data (GDM2020, EPSG
+  datum 1471, and its coordinate reference systems). It was entered from
+  the EPSG Geodetic Parameter Registry API (https://apps.epsg.org/api/v1/).
+
+Parameter values and formulas follow IOGP Guidance Note 7-2 and PROJ 9.8.1.

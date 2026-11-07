@@ -9,25 +9,51 @@ use nodedb_physical::physical_plan::AggregateIncarnation;
 
 use crate::bridge::envelope::Response;
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::handlers::timeseries::TimeseriesApplyMode;
 use crate::data::executor::task::ExecutionTask;
 
-use super::handlers::now_ms;
+/// Whether a partition's rows all lie before `cutoff`, on any replica.
+///
+/// A flush splits one interval's rows at a local moment. So a partition with an
+/// interval expires once the whole interval ended, whatever its own rows reach.
+fn event_time_expired(min_ts: i64, max_ts: i64, interval_ms: u64, cutoff: i64) -> bool {
+    match i64::try_from(interval_ms) {
+        Ok(interval) if interval > 0 => {
+            min_ts
+                .div_euclid(interval)
+                .saturating_add(1)
+                .saturating_mul(interval)
+                <= cutoff
+        }
+        Ok(_) | Err(_) => max_ts < cutoff,
+    }
+}
 
 impl CoreLoop {
     /// `MetaOp::EnforceTimeseriesRetention`: drop partitions older than
-    /// `max_age_ms`. Bitemporal collections use `max_system_ts` as the
-    /// retention axis; non-bitemporal partitions fall through to `max_ts`.
+    /// `decided_ms - max_age_ms`, the cutoff every replica applies at this log
+    /// position.
+    ///
+    /// The memtable flushes first, so a row past the cutoff never stays on one
+    /// replica after it left another.
+    ///
+    /// A bitemporal collection expires on `max_system_ts`, a partition's newest
+    /// write. A replica's flush moments decide which rows share a partition. So a
+    /// row past the cutoff can leave one replica while another holds it beside a
+    /// newer row. Every row newer than the cutoff stays on every replica, and the
+    /// held row leaves at the first pass whose cutoff passes its partition's
+    /// newest write.
     ///
     /// `aggregates` lists the continuous aggregates the catalog roots at
     /// `collection`. An expiring partition folds into each of them before it
     /// is removed, so the pass is refused, and nothing removed, while one of
-    /// them is not registered on this core yet. The enforcement loop retries
-    /// on its next pass.
+    /// them is not registered on this core yet. The entry's re-delivery retries.
     pub(in crate::data::executor::dispatch) fn meta_enforce_timeseries_retention(
         &mut self,
         task: &ExecutionTask,
         collection: &str,
         max_age_ms: i64,
+        decided_ms: i64,
         aggregates: &[AggregateIncarnation],
     ) -> Response {
         let unregistered = aggregates.iter().find(|agg| {
@@ -61,8 +87,16 @@ impl CoreLoop {
         if let Err(e) = self.roll_forward_ts_merge(&merge_key) {
             return self.response_error(task, e);
         }
-        let now_ms = now_ms();
-        let cutoff = now_ms - max_age_ms;
+        if let Err(e) = self.flush_ts_collection(
+            task.request.tenant_id,
+            task.request.database_id,
+            collection,
+            decided_ms,
+        ) {
+            return self.response_error(task, e);
+        }
+        let now_ms = decided_ms;
+        let cutoff = now_ms.saturating_sub(max_age_ms);
         let mut deleted = 0usize;
         let ts_base = crate::data::executor::handlers::timeseries::paths::ts_collection_dir(
             &self.data_dir,
@@ -93,13 +127,17 @@ impl CoreLoop {
                 registry
                     .iter()
                     .filter(|(_, e)| {
-                        let axis_ts = if bitemporal && e.meta.max_system_ts > 0 {
-                            nodedb_types::ordinal_to_ms(e.meta.max_system_ts)
+                        let expired = if bitemporal && e.meta.max_system_ts > 0 {
+                            nodedb_types::ordinal_to_ms(e.meta.max_system_ts) < cutoff
                         } else {
-                            e.meta.max_ts
+                            event_time_expired(
+                                e.meta.min_ts,
+                                e.meta.max_ts,
+                                e.meta.interval_ms,
+                                cutoff,
+                            )
                         };
-                        axis_ts < cutoff
-                            && e.meta.state != nodedb_types::timeseries::PartitionState::Deleted
+                        expired && e.meta.state != nodedb_types::timeseries::PartitionState::Deleted
                     })
                     .map(|(key, e)| (key.clone(), e.dir_name.clone(), e.meta.max_ts))
                     .collect()
@@ -167,17 +205,21 @@ impl CoreLoop {
         }
 
         if !removed.is_empty() {
+            self.release_ts_partitions(
+                task.request.database_id,
+                task.request.tenant_id,
+                collection,
+                &removed,
+            );
             self.continuous_agg_mgr
                 .forget_partitions(database_id, tenant_id, collection, &removed);
             self.persist_dirty_cagg_images();
         }
 
         // A last-value read below this ordinal finds the evicted series gone
-        // and refuses rather than answer without them.
-        let evict_ordinal = self.ts_batch_ordinal(
-            crate::data::executor::handlers::timeseries::TimeseriesApplyMode::Immediate,
-            now_ms,
-        );
+        // and refuses rather than answer without them. The ordinal comes from
+        // the leader's clock read, so every replica records one eviction.
+        let evict_ordinal = self.ts_batch_ordinal(TimeseriesApplyMode::Replay, now_ms);
         if let Some(lvc) = self.ts_last_value_caches.get_mut(&ts_key) {
             let evicted = lvc.evict_older_than(cutoff, evict_ordinal);
             if !evicted.is_empty() {
@@ -186,11 +228,11 @@ impl CoreLoop {
                     evicted = evicted.len(),
                     "evicted stale LVC entries"
                 );
-                // The catalog keeps the evicted series. This pass runs at a
-                // time local to each node, and the id a key resolves to
-                // depends on every key the catalog holds, so forgetting one
-                // here would let replicas give a later key different ids.
-                // Only a replicated drop or purge removes a catalog.
+                // The catalog keeps the evicted series. A key's id depends on
+                // every key the catalog holds, and a replica's own flush moment
+                // decides which series this pass evicts. Forgetting one would
+                // give a later key different ids on two replicas. Only a
+                // replicated drop or purge removes a catalog.
             }
         }
 
@@ -222,10 +264,73 @@ mod tests {
             PhysicalPlan::Meta(MetaOp::EnforceTimeseriesRetention {
                 collection: nodedb_types::QualifiedCollection::new(DatabaseId::DEFAULT, COLLECTION),
                 max_age_ms: 1,
+                decided_ms: now(),
                 aggregates: Vec::new(),
             }),
             None,
         )
+    }
+
+    fn now() -> i64 {
+        nodedb_types::ordinal_to_ms(nodedb_types::wall_now_ns_i64())
+    }
+
+    /// Two replicas flush one interval at two moments. Each piece expires only
+    /// with the whole interval, so neither replica drops rows the other keeps.
+    #[test]
+    fn a_partition_of_an_interval_expires_with_the_whole_interval() {
+        const HOUR: u64 = 3_600_000;
+        let early_piece = (0, 100);
+        let late_piece = (200, 3_000_000);
+        for (min_ts, max_ts) in [early_piece, late_piece] {
+            assert!(!super::event_time_expired(min_ts, max_ts, HOUR, 500));
+            assert!(super::event_time_expired(min_ts, max_ts, HOUR, HOUR as i64));
+        }
+    }
+
+    #[test]
+    fn a_partition_with_no_interval_reads_its_newest_row() {
+        assert!(!super::event_time_expired(0, 100, 0, 100));
+        assert!(super::event_time_expired(0, 100, 0, 101));
+    }
+
+    /// The memtable's rows leave with the drop. One replica's flush moment then
+    /// keeps no expired row another replica dropped.
+    #[test]
+    fn a_drop_flushes_the_memtable_first() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        assert_eq!(ingest(&mut core, ROWS_A, 1), Status::Ok);
+        assert_eq!(partitions(&core), 0, "the rows sit in the memtable");
+        let resp =
+            core.meta_enforce_timeseries_retention(&retention_task(), COLLECTION, 1, now(), &[]);
+        assert_eq!(resp.status, Status::Ok, "{:?}", resp.error_code);
+        assert_eq!(partitions(&core), 0);
+        let key = (
+            DatabaseId::DEFAULT,
+            TenantId::new(TENANT),
+            COLLECTION.to_string(),
+        );
+        assert!(
+            core.columnar_memtables
+                .get(&key)
+                .is_none_or(|memtable| memtable.is_empty()),
+            "no expired row stays in memory"
+        );
+    }
+
+    /// A drop reads the entry's cutoff, not this node's clock. A clock far ahead
+    /// of the decision drops nothing the decision keeps.
+    #[test]
+    fn a_drop_reads_the_decision_and_no_local_clock() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
+        assert_eq!(ingest(&mut core, ROWS_A, 1), Status::Ok);
+        flush(&mut core);
+        // The decision predates every row, whatever this node's clock reads.
+        let resp = core.meta_enforce_timeseries_retention(&retention_task(), COLLECTION, 1, 1, &[]);
+        assert_eq!(resp.status, Status::Ok, "{:?}", resp.error_code);
+        assert_eq!(partitions(&core), 1, "the decision keeps the partition");
     }
 
     /// Live partitions of the collection.
@@ -263,7 +368,8 @@ mod tests {
         );
         assert_eq!(ingest(&mut core, ROWS_A, 1), Status::Ok);
         let held = core.ts_series_catalogs.get(&key).expect("catalog").clone();
-        let resp = core.meta_enforce_timeseries_retention(&retention_task(), COLLECTION, 1, &[]);
+        let resp =
+            core.meta_enforce_timeseries_retention(&retention_task(), COLLECTION, 1, now(), &[]);
         assert_eq!(resp.status, Status::Ok, "{:?}", resp.error_code);
         assert!(
             core.ts_last_value_caches
@@ -288,8 +394,13 @@ mod tests {
             core.fold_pending_cagg_partitions(0);
             assert_eq!(ingest(&mut core, ROWS_A, 1), Status::Ok);
             flush(&mut core);
-            let resp =
-                core.meta_enforce_timeseries_retention(&retention_task(), COLLECTION, 1, &[]);
+            let resp = core.meta_enforce_timeseries_retention(
+                &retention_task(),
+                COLLECTION,
+                1,
+                now(),
+                &[],
+            );
             assert_eq!(resp.status, Status::Ok, "{:?}", resp.error_code);
             assert_eq!(partitions(&core), 0, "retention removed the raw rows");
             // A Manual aggregate parks the expiring rows for its next cut.
@@ -337,7 +448,8 @@ mod tests {
         std::fs::remove_file(&image).expect("remove the image");
         std::fs::create_dir_all(&image).expect("block the image path");
 
-        let resp = core.meta_enforce_timeseries_retention(&retention_task(), COLLECTION, 1, &[]);
+        let resp =
+            core.meta_enforce_timeseries_retention(&retention_task(), COLLECTION, 1, now(), &[]);
         assert_ne!(resp.status, Status::Ok);
         assert_eq!(partitions(&core), 1, "no partition is removed");
         assert_eq!(totals(&core, "by_host"), (3, 111));
@@ -357,8 +469,13 @@ mod tests {
             incarnation: host_def("by_host", RefreshPolicy::OnFlush).incarnation,
         }];
 
-        let resp =
-            core.meta_enforce_timeseries_retention(&retention_task(), COLLECTION, 1, &expected);
+        let resp = core.meta_enforce_timeseries_retention(
+            &retention_task(),
+            COLLECTION,
+            1,
+            now(),
+            &expected,
+        );
         assert_ne!(
             resp.status,
             Status::Ok,
@@ -367,8 +484,13 @@ mod tests {
         assert_eq!(partitions(&core), 1, "no partition is removed");
 
         register(&mut core, host_def("by_host", RefreshPolicy::OnFlush));
-        let resp =
-            core.meta_enforce_timeseries_retention(&retention_task(), COLLECTION, 1, &expected);
+        let resp = core.meta_enforce_timeseries_retention(
+            &retention_task(),
+            COLLECTION,
+            1,
+            now(),
+            &expected,
+        );
         assert_eq!(resp.status, Status::Ok, "{:?}", resp.error_code);
         assert_eq!(partitions(&core), 0);
         assert_eq!(
@@ -409,7 +531,8 @@ mod tests {
         assert_eq!(core.merge_ts_partitions(false).merged, 1);
         assert_eq!(partitions(&core), 1);
 
-        let resp = core.meta_enforce_timeseries_retention(&retention_task(), COLLECTION, 1, &[]);
+        let resp =
+            core.meta_enforce_timeseries_retention(&retention_task(), COLLECTION, 1, now(), &[]);
         assert_eq!(resp.status, Status::Ok, "{:?}", resp.error_code);
         assert_eq!(partitions(&core), 0);
         assert_eq!(totals(&core, "by_host"), (5, 11_111));
@@ -437,6 +560,7 @@ mod tests {
                 tenant_id: TENANT,
                 collection: nodedb_types::QualifiedCollection::new(DatabaseId::DEFAULT, COLLECTION),
                 cutoff_system_ms,
+                decided_ms: i64::MAX,
                 aggregates: expected.clone(),
             }),
             None,
@@ -447,6 +571,7 @@ mod tests {
             TENANT,
             COLLECTION,
             cutoff_system_ms,
+            i64::MAX,
             &expected,
         );
         assert_ne!(
@@ -462,6 +587,7 @@ mod tests {
             TENANT,
             COLLECTION,
             cutoff_system_ms,
+            i64::MAX,
             &expected,
         );
         assert_eq!(resp.status, Status::Ok, "{:?}", resp.error_code);

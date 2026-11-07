@@ -3,7 +3,7 @@
 //! Frame dispatch: `process_frame` routes incoming frames to the
 //! per-kind handler methods.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tracing::{debug, error, info, warn};
 
@@ -46,8 +46,8 @@ impl SyncSession {
         &mut self,
         frame: &SyncFrame,
         rls_store: Option<&RlsPolicyStore>,
-        audit_log: Option<&mut AuditLog>,
-        dlq: Option<&mut SyncDlq>,
+        audit_log: Option<&Mutex<AuditLog>>,
+        dlq: Option<&Mutex<SyncDlq>>,
         shared: Option<&Arc<SharedState>>,
     ) -> Option<SyncFrame> {
         match frame.msg_type {
@@ -71,8 +71,6 @@ impl SyncSession {
                 }
                 if let Some(shared) = shared {
                     // Authorize before session bookkeeping or a provisional ACK.
-                    // `authorize_delta_write` emits denial audit records through
-                    // `shared.audit`, so it must run before that mutex is locked.
                     // The Data-Plane finalizer repeats this check to cover a
                     // permission revocation between admission and dispatch.
                     if super::super::async_dispatch::authorize_delta_write(
@@ -85,13 +83,14 @@ impl SyncSession {
                         return super::super::async_dispatch::permission_denied_delta_reject(&msg);
                     }
 
-                    // Only an authorized DeltaPush needs the handler's audit/DLQ
-                    // state. Keeping these guards scoped to this synchronous call
-                    // avoids the audit-emitter self-deadlock and never spans await.
-                    // The audit guard exports the recorded rejections to SIEM after it unlocks.
-                    let mut audit = crate::control::security::audit::lock_audit_log(&shared.audit);
-                    let mut dlq = shared.sync_dlq.lock().unwrap_or_else(|p| p.into_inner());
-                    self.handle_delta_push(&msg, rls_store, Some(&mut *audit), Some(&mut dlq))
+                    // The handler takes each lock only for its own step, so no fsync wait
+                    // runs under the audit lock or the DLQ lock.
+                    self.handle_delta_push(
+                        &msg,
+                        rls_store,
+                        Some(&*shared.audit),
+                        Some(&shared.sync_dlq),
+                    )
                 } else {
                     self.handle_delta_push(&msg, rls_store, audit_log, dlq)
                 }

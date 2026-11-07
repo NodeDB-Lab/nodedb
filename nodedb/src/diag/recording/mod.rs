@@ -21,7 +21,9 @@ mod event_image;
 mod held_entry;
 mod index_rebuild;
 mod ingest;
+mod kv_expiry;
 mod lease;
+mod mirror;
 mod outcome_floor;
 mod quota;
 mod raft_apply;
@@ -37,14 +39,17 @@ mod version_cleanup;
 mod vshard_departure;
 
 pub use array_sync::array_snapshot_buffer_poisoned;
-pub use audit::{audit_flush_not_persisted, audit_wal_append_failed};
+pub use audit::{
+    audit_flush_not_persisted, audit_prune_not_applied, audit_wal_append_failed,
+    audit_wal_not_truncated, security_bus_lagged, security_bus_rows_not_recorded,
+};
 pub use catalog::{
     catalog_apply_orphan_row, collection_purge_row_missing, consumer_group_offsets_retained,
     metadata_apply_wedged, synonym_group_not_applied,
 };
 pub use columnar::{
-    columnar_segment_corrupt, timeseries_flush_not_installed, timeseries_idle_flush_failed,
-    timeseries_partition_unreadable,
+    columnar_segment_corrupt, quarantine_record_evicted, timeseries_flush_not_installed,
+    timeseries_idle_flush_failed, timeseries_partition_unreadable,
 };
 pub use continuous_agg::{continuous_aggregate_not_applied, continuous_aggregate_state_fault};
 pub use crdt::{
@@ -56,15 +61,21 @@ pub use cut_barrier::cut_barrier_not_placed;
 pub use data_plane::{
     calvin_apply_halted, calvin_completion_timeout, calvin_stage_refused_internal,
     data_plane_core_fail_stopped, data_plane_response_lost, data_plane_responses_lost,
-    vector_payload_undecodable,
+    redo_note_misnamed, vector_payload_undecodable,
 };
 pub use event_image::{strict_row_image_unrendered, timeseries_row_image_undecodable};
 pub use held_entry::{apply_panicked, held_entry_debt_not_recorded, redo_entry_malformed};
 pub use index_rebuild::{IndexRebuildTarget, index_rebuild_not_installed};
-pub use ingest::{ilp_invalid_utf8_drop, ilp_line_read_drop, wal_catchup_record_misnamed};
+pub use ingest::{
+    ilp_invalid_utf8_drop, ilp_killed_session_lines_refused, ilp_line_read_drop,
+    wal_catchup_record_misnamed,
+};
+pub use kv_expiry::kv_reap_entry_unusable;
 pub use lease::{
     ddl_cleanup_not_completed, descriptor_drain_not_ended, descriptor_lease_not_renewed,
+    descriptor_lease_release_dropped,
 };
+pub use mirror::{mirror_link_stopped, mirror_status_unread};
 pub use outcome_floor::{write_window_held, write_window_leaked};
 pub use quota::{
     quota_row_invalid, quota_row_undecodable, quota_row_write_failed, quota_scope_purge_incomplete,
@@ -83,7 +94,7 @@ pub use recovery::{
 pub use redo_stream::{
     redo_abandon_given_up, redo_snapshot_debt_not_recorded, redo_stream_lost_here,
 };
-pub use retention::retention_autowire_orphaned;
+pub use retention::{retention_autowire_orphaned, sequence_restart_failed};
 pub use shared::entry_kind;
 pub use storage_bytes::{
     storage_bytes_residue, storage_bytes_sample_failed, storage_bytes_underflow,

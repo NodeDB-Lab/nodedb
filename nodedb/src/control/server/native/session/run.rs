@@ -19,6 +19,7 @@ use super::NativeSession;
 use super::codec::{self, FrameFormat};
 use super::dispatch;
 use super::session_chunk::chunk_large_response;
+use crate::control::security::sessions::session_ended;
 use crate::control::server::native::sqlstate_code::sqlstate_error;
 
 /// Rollback dependencies retained independently from the connection future.
@@ -240,22 +241,42 @@ impl NativeSession {
                 return Ok(());
             }
 
-            // Read a frame with idle timeout.
-            let frame_result = if idle_timeout_secs > 0 {
-                match tokio::time::timeout(
-                    Duration::from_secs(idle_timeout_secs),
-                    codec::read_frame(&mut self.stream),
-                )
-                .await
-                {
-                    Ok(result) => result,
-                    Err(_) => {
-                        debug!("session idle timeout ({}s)", idle_timeout_secs);
-                        return Ok(());
-                    }
+            // Read a frame with idle timeout, racing the kill signal. A kill drops
+            // a partial read, which is safe because the connection closes.
+            // The kill is not raced against the request below: a dropped request
+            // can lose work that follows a committed proposal, such as the audit
+            // row of `REVOKE API KEY`. The request finishes, its response goes
+            // out, and this read observes the kill.
+            let read = async {
+                if idle_timeout_secs > 0 {
+                    tokio::time::timeout(
+                        Duration::from_secs(idle_timeout_secs),
+                        codec::read_frame(&mut self.stream),
+                    )
+                    .await
+                    .ok()
+                } else {
+                    Some(codec::read_frame(&mut self.stream).await)
                 }
-            } else {
-                codec::read_frame(&mut self.stream).await
+            };
+            let next = tokio::select! {
+                biased;
+                ended = session_ended(&mut self.binding) => {
+                    debug!(error = %ended, "session killed, closing connection");
+                    let response = dispatch::error_to_native(0, &ended);
+                    if let Ok(bytes) = codec::encode_response(
+                        &response,
+                        self.format.unwrap_or(FrameFormat::MessagePack),
+                    ) {
+                        let _ = codec::write_frame(&mut self.stream, &bytes).await;
+                    }
+                    return Ok(());
+                }
+                next = read => next,
+            };
+            let Some(frame_result) = next else {
+                debug!("session idle timeout ({}s)", idle_timeout_secs);
+                return Ok(());
             };
 
             let payload = match frame_result {
@@ -288,9 +309,22 @@ impl NativeSession {
                 });
             };
 
+            if let Some(binding) = &self.binding {
+                binding.touch(payload.len() as u64, 0);
+                binding.set_statement("native_request");
+            }
+
             // Decode and handle.
             let outcome = match codec::decode_request(&payload, format) {
-                Ok(req) => self.handle_request(req).await,
+                Ok(req) => {
+                    if let (Some(binding), nodedb_types::protocol::RequestFields::Text(fields)) =
+                        (&self.binding, &req.fields)
+                        && let Some(sql) = fields.sql.as_deref()
+                    {
+                        binding.set_statement_text(sql);
+                    }
+                    self.handle_request(req).await
+                }
                 Err(e) => dispatch::SqlOutcome::Response(Box::new(sqlstate_error(
                     0,
                     "42601",
@@ -329,10 +363,18 @@ impl NativeSession {
                     let resp_bytes = codec::encode_response(&response, format)?;
                     if resp_bytes.len() <= MAX_FRAME_SIZE as usize {
                         codec::write_frame(&mut self.stream, &resp_bytes).await?;
+                        if let Some(binding) = &self.binding {
+                            binding.touch(0, resp_bytes.len() as u64);
+                        }
                     } else {
                         // Response too large for a single frame — split rows.
+                        // A kill stops the rows at the next chunk.
                         let frames = chunk_large_response(*response, format)?;
                         for frame in &frames {
+                            if let Some(binding) = &self.binding {
+                                binding.check()?;
+                                binding.touch(0, frame.len() as u64);
+                            }
                             codec::write_frame(&mut self.stream, frame).await?;
                         }
                     }
@@ -344,9 +386,15 @@ impl NativeSession {
                         format,
                         self.state.as_ref(),
                         database_id,
+                        self.binding.as_ref(),
                     )
                     .await?;
                 }
+            }
+
+            if let Some(binding) = &self.binding {
+                binding.set_database(database_id);
+                binding.clear_statement();
             }
         }
     }

@@ -151,6 +151,11 @@ pub struct ConnSession {
     /// the block's first statement, not at `BEGIN`. `None` outside a block
     /// and before the block's first statement.
     pub tx_snapshot: Option<super::txn_snapshot::HeldTxnSnapshot>,
+    /// What this session's transaction does with a TRUNCATE of an edge-bearing
+    /// collection. Only the private session of an implicit transaction that
+    /// reads nothing after its TRUNCATE sets `CutAtCommit`, and that session
+    /// ends with the transaction.
+    pub tx_edge_truncate: crate::control::planner::calvin::node_delete_txn::TxnEdgeTruncate,
     /// Identity of the current session transaction block, minted on `BEGIN`
     /// and cleared on `COMMIT`/`ROLLBACK`. Keys the per-transaction staging
     /// overlay. `None` outside a transaction block.
@@ -237,6 +242,9 @@ pub struct ConnSession {
     /// is idle-eligible only when this is zero — a legitimately long-running
     /// statement (in flight) must never be idle-killed.
     pub in_flight: AtomicU32,
+    /// The pgwire connection's registry row and kill signal. Set at startup,
+    /// after authentication. Removing the session entry removes the row.
+    pub binding: Option<std::sync::Arc<crate::control::security::sessions::SessionBinding>>,
     /// Database- and tenant-scoped connection slots this session holds.
     ///
     /// pgwire takes them during the startup handshake, once the bound database
@@ -307,6 +315,8 @@ impl ConnSession {
             tx_body_tasks: BTreeSet::new(),
             tx_ts_preview_rejected: BTreeMap::new(),
             tx_snapshot: None,
+            tx_edge_truncate:
+                crate::control::planner::calvin::node_delete_txn::TxnEdgeTruncate::Refuse,
             tx_id: None,
             tx_vshards: BTreeSet::new(),
             tx_read_set: Vec::new(),
@@ -328,6 +338,7 @@ impl ConnSession {
             sequence_values: Arc::new(crate::control::sequence::SessionSequenceValues::new()),
             last_activity_ms: AtomicU64::new(now_unix_ms()),
             in_flight: AtomicU32::new(0),
+            binding: None,
             admission_permit: None,
         }
     }

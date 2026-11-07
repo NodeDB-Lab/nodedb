@@ -72,6 +72,8 @@ impl SharedState {
                 Arc::clone(&credentials),
                 wal_appender,
             ));
+            s.surrogate_assigner
+                .install_mirror_fence(Arc::clone(&s.mirror.fence));
             // Catalog-backed security stores, rebuilt for the same reason the
             // surrogate watermark above is: this constructor's whole purpose
             // is to resume a durable catalog, and a memory-only store here
@@ -100,6 +102,13 @@ impl SharedState {
             // restart never raises its marks again.
             s.tenant_marks =
                 crate::control::state::tenant_marks::TenantMarks::load(credentials.catalog())?;
+            // The new store replaces the one `new_inner` connected.
+            super::buses_init::connect_credential_store(
+                &credentials,
+                &s.session_invalidation_bus,
+                &s.user_change_bus,
+                &s.session_registry,
+            );
             s.credentials = credentials;
             // The metadata group restarts above its durable applied floor and
             // never applies the entries below it again. Every registry their

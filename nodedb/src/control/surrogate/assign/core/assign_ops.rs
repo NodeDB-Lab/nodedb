@@ -48,6 +48,7 @@ impl SurrogateAssigner {
         tenant_id: TenantId,
         pks: &[&[u8]],
     ) -> crate::Result<Vec<Surrogate>> {
+        self.refuse_mirror_bind(key)?;
         if !self.is_cluster()? {
             return self.assign_bound_many(key, tenant_id, pks).await;
         }

@@ -67,6 +67,8 @@ pub fn move_cutover(
         // Write to target database.
         let mut target_coll = coll.clone();
         target_coll.database_id = tgt;
+        // The cutover re-issued the rows as new writes in the row's mode.
+        target_coll.storage_conversion = None;
         catalog.put_collection(tgt, &target_coll).map_err(|e| {
             catalog_err(
                 &format!(

@@ -8,8 +8,8 @@ use nodedb_physical::physical_plan::PhysicalPlan;
 
 use super::core::Gateway;
 use super::version_set::{
-    GatewayVersionSet, permission_tree_version_key, rls_version_key, with_arrays,
-    with_continuous_aggregates,
+    GatewayVersionSet, collection_version, permission_tree_version_key, rls_version_key,
+    with_arrays, with_continuous_aggregates,
 };
 
 impl Gateway {
@@ -33,15 +33,11 @@ impl Gateway {
         database_id: DatabaseId,
     ) -> Result<GatewayVersionSet, Error> {
         let shared = self.shared()?;
-        let catalog = Some(shared.credentials.catalog());
+        let catalog = shared.credentials.catalog();
 
         let vs = GatewayVersionSet::from_plan(plan, |name| {
-            catalog
-                .and_then(|c| c.get_collection(database_id, tenant_id, name).ok())
-                .flatten()
-                .map(|col| col.descriptor_version.max(1))
-                .unwrap_or(0)
-        });
+            collection_version(catalog, database_id, tenant_id, name)
+        })?;
 
         let permission_tree_version = shared
             .permission_cache
@@ -52,12 +48,7 @@ impl Gateway {
 
         // A continuous aggregate read as a relation folds in its own catalog
         // version, so a cached plan over it stops matching once it changes.
-        let vs = match catalog {
-            Some(catalog) => {
-                with_continuous_aggregates(vs, plan, catalog, database_id.as_u64(), tenant_id)
-            }
-            None => vs,
-        };
+        let vs = with_continuous_aggregates(vs, plan, catalog, database_id.as_u64(), tenant_id)?;
         // An array read folds in its own catalog version, so a cached plan
         // over it stops matching once the array is altered or dropped.
         let vs = with_arrays(

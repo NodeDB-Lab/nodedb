@@ -25,6 +25,7 @@ mod dispatch;
 pub mod function;
 pub mod index_registry;
 pub mod materialized_view;
+pub mod mirror_cut;
 pub mod oidc_provider;
 pub mod outcome;
 pub mod owner;

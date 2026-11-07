@@ -6,7 +6,7 @@
 //! This test exercises the catalog-level read gate directly without
 //! requiring a live cross-cluster QUIC link.
 
-use nodedb_types::{DatabaseId, Lsn, MirrorMode, MirrorOrigin, MirrorStatus};
+use nodedb_types::{DatabaseId, MirrorMode, MirrorOrigin, MirrorStatus};
 use tempfile::TempDir;
 
 use nodedb::control::server::pgwire::ddl::database::{
@@ -14,14 +14,14 @@ use nodedb::control::server::pgwire::ddl::database::{
 };
 use nodedb::types::ReadConsistency;
 
-use super::helpers::{TEST_SOURCE_CLUSTER, now_ms, open_tmp_catalog};
+use super::helpers::{TEST_SOURCE_CLUSTER, TEST_SOURCE_DATABASE, now_ms, open_tmp_catalog};
 
 fn following_origin() -> MirrorOrigin {
     MirrorOrigin {
         source_cluster: TEST_SOURCE_CLUSTER.to_string(),
         source_database: DatabaseId::new(0),
+        source_database_name: TEST_SOURCE_DATABASE.to_string(),
         mode: MirrorMode::Async,
-        last_applied: Lsn::new(0),
         status: MirrorStatus::Following,
     }
 }
@@ -65,9 +65,9 @@ fn mirror_strong_read_rejected_degraded() {
     let origin = MirrorOrigin {
         source_cluster: TEST_SOURCE_CLUSTER.to_string(),
         source_database: DatabaseId::new(0),
+        source_database_name: TEST_SOURCE_DATABASE.to_string(),
         mode: MirrorMode::Async,
-        last_applied: Lsn::new(10),
-        status: MirrorStatus::Degraded { lag_ms: 8_000 },
+        status: MirrorStatus::Degraded,
     };
 
     let outcome =
@@ -94,8 +94,8 @@ fn mirror_strong_read_rejected_disconnected() {
     let origin = MirrorOrigin {
         source_cluster: TEST_SOURCE_CLUSTER.to_string(),
         source_database: DatabaseId::new(0),
+        source_database_name: TEST_SOURCE_DATABASE.to_string(),
         mode: MirrorMode::Async,
-        last_applied: Lsn::new(5),
         status: MirrorStatus::Disconnected,
     };
 

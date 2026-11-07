@@ -241,7 +241,13 @@ impl BlacklistStore {
             let parsed: IpAddr = addr.parse().map_err(|_| crate::Error::BadRequest {
                 detail: format!("invalid IP address '{addr}'"),
             })?;
-            self.add_entry(format!("ip:{parsed}"), "ip", reason, created_by, expires_at)
+            self.add_entry(
+                format!("ip:{}", parsed.to_canonical()),
+                "ip",
+                reason,
+                created_by,
+                expires_at,
+            )
         }
     }
 
@@ -371,7 +377,7 @@ impl BlacklistStore {
             return self.remove_entry(&format!("ip:{addr}"));
         }
         match addr.parse::<IpAddr>() {
-            Ok(parsed) => self.remove_entry(&format!("ip:{parsed}")),
+            Ok(parsed) => self.remove_entry(&format!("ip:{}", parsed.to_canonical())),
             // Not a valid address, so no canonical form exists and nothing
             // could have been stored under one.
             Err(_) => Ok(false),
@@ -450,6 +456,18 @@ impl BlacklistStore {
 impl Default for BlacklistStore {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// The id a user blacklist entry names an identity by: its decimal `user_id`.
+/// A token with no `user_id` claim carries `0`, shared by every such token, so
+/// it goes by its username, which is the token's subject. The JIT auth-user
+/// record of such a token has the same id.
+pub fn user_entry_id(user_id: u64, username: &str) -> String {
+    if user_id == 0 {
+        username.to_string()
+    } else {
+        user_id.to_string()
     }
 }
 
@@ -535,6 +553,37 @@ mod tests {
         let entry = store.check_ip("192.168.1.100").expect("exact match");
         assert_eq!(entry.reason, "abuse");
         assert!(store.check_ip("192.168.1.101").is_none());
+    }
+
+    /// A dual-stack listener reports an IPv4 peer in its mapped form, and an
+    /// entry may name it either way. Every combination matches.
+    #[test]
+    fn an_ipv4_mapped_entry_and_peer_match_as_ipv4() {
+        let store = BlacklistStore::new();
+        store
+            .blacklist_ip("::ffff:10.0.0.0/104", "mapped range", "admin", 0)
+            .expect("a mapped /104 is a valid range");
+        for peer in [
+            "10.1.2.3",
+            "::ffff:10.1.2.3",
+            "10.1.2.3:5432",
+            "[::ffff:10.1.2.3]:5432",
+        ] {
+            assert!(store.check_ip(peer).is_some(), "{peer}");
+        }
+        assert!(store.check_ip("::ffff:11.1.2.3").is_none());
+
+        store
+            .blacklist_ip("192.168.1.100", "v4 entry", "admin", 0)
+            .expect("blacklist");
+        assert!(store.check_ip("::ffff:192.168.1.100").is_some());
+
+        store
+            .blacklist_ip("::ffff:172.16.0.1", "mapped entry", "admin", 0)
+            .expect("blacklist");
+        assert!(store.check_ip("172.16.0.1").is_some());
+        assert!(store.unblacklist_ip("172.16.0.1").expect("lift the ban"));
+        assert!(store.check_ip("::ffff:172.16.0.1").is_none());
     }
 
     #[test]

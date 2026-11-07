@@ -15,8 +15,13 @@
 //! - Spatial: refused (use INSERT with geometry column directly).
 //! - Array: typed cell chunks of about 4 MiB.
 //!
+//! A row format reads the whole file under a governor reservation. It then
+//! passes over the file twice, holding one parsed row at a time. The first
+//! pass checks every row, so an unparsable row writes nothing. The second
+//! pass inserts.
+//!
 //! Transactions: outside a transaction block each document row and each
-//! array chunk commits on its own, so a refused row stops the load and
+//! array chunk commits on its own, so a refused insert stops the load and
 //! leaves the rows before it committed. An array load streams, so its
 //! memory stays at a few chunks whatever the input size. Inside a block
 //! every row and chunk stages into the transaction, and a refusal aborts
@@ -29,6 +34,7 @@ mod csv_import;
 mod entry;
 mod import_ctx;
 mod json_import;
+mod row_memory;
 mod source_file;
 
 pub(crate) use array_load::{ArrayLoadCtx, ArrayLoader, LoadInput, TextFormat};

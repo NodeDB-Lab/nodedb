@@ -13,7 +13,7 @@ use super::auth::AuditAuth;
 use super::entry::AuditEntry;
 use super::event::AuditEvent;
 use super::export_sink::AuditExportSink;
-use super::flush_control::{AuditFlushControl, BACKPRESSURE_MULTIPLE};
+use super::flush_control::{AuditFlushControl, BACKPRESSURE_MULTIPLE, HARD_BOUND_MULTIPLE};
 use super::level::AuditLevel;
 use super::wal_sink::AuditWalSink;
 
@@ -27,6 +27,17 @@ pub struct AuditRecordInput<'a> {
     pub auth: &'a AuditAuth,
 }
 
+/// The published entries that live only in the audit WAL, because the buffer was full.
+///
+/// They hold every seq from `first_seq` through `through_seq`, except a seq whose WAL append failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WalOnlyRange {
+    pub first_seq: u64,
+    pub through_seq: u64,
+    /// WAL position of the entry at `through_seq`.
+    pub position: u64,
+}
+
 /// Append-only audit log.
 ///
 /// Entries are immutable once appended.
@@ -34,10 +45,11 @@ pub struct AuditRecordInput<'a> {
 /// So WAL order equals seq order.
 /// Its entries wait in `staged` until the WAL sync covers them, and only then are published.
 /// Readers, flushes and export see published entries only, so they never see a non-durable entry.
-/// The buffer holds every published entry until a flush commits it to the catalog.
-/// The buffer never drops an entry to stay under its bound.
+/// The buffer holds published entries until a flush commits them to the catalog.
 /// At `flush_bound` entries the log requests an early flush.
 /// At `BACKPRESSURE_MULTIPLE * flush_bound` a recorder that can wait waits for a flush.
+/// At `HARD_BOUND_MULTIPLE * flush_bound` the buffer is full, and published entries stay in the WAL only.
+/// A flush commits those entries from the WAL, and until then readers read them from the WAL.
 ///
 /// Lives on the Control Plane (Send + Sync).
 pub struct AuditLog {
@@ -64,8 +76,14 @@ pub struct AuditLog {
     pub(super) flush_control: Arc<AuditFlushControl>,
     /// Durable append target. `None` only in a log built with no WAL.
     pub(super) wal_sink: Option<Arc<dyn AuditWalSink>>,
-    /// `(seq, WAL position)` of each staged or buffered entry the WAL sink took, in seq order.
+    /// `(seq, WAL position)` of each staged entry the WAL sink took, in seq order.
+    pub(super) staged_positions: VecDeque<(u64, u64)>,
+    /// `(seq, WAL position)` of each buffered entry the WAL sink took, in seq order.
     pub(super) wal_positions: VecDeque<(u64, u64)>,
+    /// The entries that live only in the WAL, when the buffer filled up.
+    pub(super) wal_only: Option<WalOnlyRange>,
+    /// Every entry at or below this seq, outside `wal_only`, is committed to the catalog.
+    pub(super) persisted_through: u64,
     /// Export target, such as the SIEM exporter.
     pub(super) export_sink: Option<Arc<dyn AuditExportSink>>,
     /// Entries published for export since the last [`Self::take_export_pending`].
@@ -87,7 +105,10 @@ impl AuditLog {
             level: AuditLevel::default(),
             flush_control: Arc::new(AuditFlushControl::default()),
             wal_sink: None,
+            staged_positions: VecDeque::new(),
             wal_positions: VecDeque::new(),
+            wal_only: None,
+            persisted_through: 0,
             export_sink: None,
             export_pending: Vec::new(),
         }
@@ -133,7 +154,43 @@ impl AuditLog {
 
     /// Whether the buffer is past the point where a recorder that can wait waits for a flush.
     pub fn needs_backpressure(&self) -> bool {
-        self.entries.len() >= self.flush_bound.saturating_mul(BACKPRESSURE_MULTIPLE)
+        self.wal_only.is_some()
+            || self.entries.len() >= self.flush_bound.saturating_mul(BACKPRESSURE_MULTIPLE)
+    }
+
+    /// Whether the buffer takes no more entries.
+    ///
+    /// A recorder with an error path refuses here. A best-effort entry stays in the WAL only.
+    pub fn is_full(&self) -> bool {
+        self.wal_only.is_some()
+            || self.entries.len() >= self.flush_bound.saturating_mul(HARD_BOUND_MULTIPLE)
+    }
+
+    /// The entries that live only in the WAL, if any.
+    pub fn wal_only(&self) -> Option<WalOnlyRange> {
+        self.wal_only
+    }
+
+    /// Record that the catalog committed every entry of `committed`.
+    ///
+    /// An entry published into that range meanwhile stays in the range.
+    pub fn note_wal_only_committed(&mut self, committed: WalOnlyRange) {
+        self.persisted_through = self.persisted_through.max(committed.through_seq);
+        self.wal_only = match self.wal_only {
+            Some(current) if current.through_seq > committed.through_seq => Some(WalOnlyRange {
+                first_seq: committed.through_seq.saturating_add(1),
+                ..current
+            }),
+            Some(_) | None => None,
+        };
+    }
+
+    /// Whether the catalog committed the entry at `seq`.
+    pub fn is_persisted(&self, seq: u64) -> bool {
+        self.persisted_through >= seq
+            && self
+                .wal_only
+                .is_none_or(|range| !(range.first_seq..=range.through_seq).contains(&seq))
     }
 
     /// The seq of the last published entry, or 0 when nothing is published.
@@ -155,6 +212,7 @@ impl AuditLog {
     pub fn set_next_seq(&mut self, seq: u64) {
         self.next_seq = seq;
         self.published_seq = seq.saturating_sub(1);
+        self.persisted_through = self.published_seq;
     }
 
     /// Set the last hash (used on startup to continue the chain from catalog).
@@ -163,7 +221,11 @@ impl AuditLog {
         self.staged_hash = hash;
     }
 
-    /// Record an audit event with hash chain (legacy — no auth context).
+    /// Test support: record an audit event while the caller keeps the audit lock.
+    ///
+    /// Production code records through [`super::log_commit::record_concurrent`] or
+    /// `SharedState::audit_record`, so no fsync wait runs under the audit lock.
+    #[cfg(test)]
     pub fn record(
         &mut self,
         event: AuditEvent,
@@ -181,7 +243,8 @@ impl AuditLog {
         )
     }
 
-    /// Record an audit event with database context.
+    /// Test support: [`Self::record`] with database context.
+    #[cfg(test)]
     pub fn record_with_database(
         &mut self,
         event: AuditEvent,
@@ -200,10 +263,10 @@ impl AuditLog {
         )
     }
 
-    /// Record an audit event with auth context enrichment (best-effort durability).
+    /// Test support: [`Self::record`] with auth context (best-effort durability).
     ///
     /// A WAL sink error is logged and reported, and the entry stays buffered.
-    /// Use [`Self::record_with_auth_durable`] when the caller must abort on that error.
+    #[cfg(test)]
     pub fn record_with_auth(
         &mut self,
         event: AuditEvent,
@@ -224,10 +287,11 @@ impl AuditLog {
         }
     }
 
-    /// Record an audit event and append it to the WAL sink.
+    /// Test support: [`Self::record_with_auth`] that returns the WAL error.
     ///
     /// The entry is buffered even when the WAL append fails.
     /// The error tells the caller that the entry is not crash-safe.
+    #[cfg(test)]
     pub fn record_with_auth_durable(
         &mut self,
         event: AuditEvent,
@@ -317,8 +381,9 @@ impl AuditLog {
     /// The caller must call this only after those entries are committed to the catalog.
     /// Buffered seqs ascend from front to back, so eviction stops at the first higher seq.
     /// Returns the highest WAL position among the evicted entries.
-    /// Every WAL record at or below it is in the catalog, so the WAL can drop through it.
+    /// Every buffered WAL record at or below it is in the catalog.
     pub fn evict_persisted(&mut self, through_seq: u64) -> Option<u64> {
+        self.persisted_through = self.persisted_through.max(through_seq);
         while self
             .entries
             .front()
@@ -631,6 +696,101 @@ mod tests {
         assert!(failed.is_err(), "the WAL error must reach a durable caller");
         assert_eq!(log.len(), 2, "the entry must stay buffered");
         assert_eq!(*sink.appended.lock().unwrap(), vec![1]);
+    }
+
+    #[test]
+    fn a_full_buffer_keeps_later_entries_in_the_wal_only() {
+        let sink = Arc::new(RecordingSink {
+            appended: std::sync::Mutex::new(Vec::new()),
+            fail_seq: u64::MAX,
+        });
+        let mut log = AuditLog::new(1);
+        log.set_wal_sink(Arc::clone(&sink) as Arc<dyn AuditWalSink>);
+        let total = HARD_BOUND_MULTIPLE as u64 + 3;
+        for i in 0..total {
+            log.record(AuditEvent::AdminAction, None, "src", &format!("entry-{i}"));
+        }
+
+        assert_eq!(log.len(), HARD_BOUND_MULTIPLE, "the buffer stays bounded");
+        assert!(log.is_full());
+        assert_eq!(
+            log.last_seq(),
+            total,
+            "the chain covers the WAL-only entries"
+        );
+        assert_eq!(
+            log.wal_only(),
+            Some(WalOnlyRange {
+                first_seq: HARD_BOUND_MULTIPLE as u64 + 1,
+                through_seq: total,
+                position: total * 10,
+            })
+        );
+        assert_eq!(sink.appended.lock().unwrap().len() as u64, total);
+    }
+
+    #[test]
+    fn a_full_buffer_with_a_refusing_wal_takes_no_seq() {
+        let sink = Arc::new(RecordingSink {
+            appended: std::sync::Mutex::new(Vec::new()),
+            fail_seq: HARD_BOUND_MULTIPLE as u64 + 1,
+        });
+        let mut log = AuditLog::new(1);
+        log.set_wal_sink(Arc::clone(&sink) as Arc<dyn AuditWalSink>);
+        for i in 0..HARD_BOUND_MULTIPLE {
+            log.record(AuditEvent::AdminAction, None, "src", &format!("entry-{i}"));
+        }
+        let (seq, hash) = (log.last_seq(), log.last_hash().to_string());
+
+        let lost = log.record_with_auth_durable(
+            AuditEvent::AdminAction,
+            None,
+            None,
+            "src",
+            "lost",
+            &AuditAuth::default(),
+        );
+
+        assert!(lost.is_err(), "the caller must see the error");
+        assert_eq!(log.last_seq(), seq, "a lost entry takes no seq");
+        assert_eq!(log.last_hash(), hash, "the chain stays whole");
+        assert_eq!(log.len(), HARD_BOUND_MULTIPLE);
+    }
+
+    #[test]
+    fn a_committed_range_ends_only_when_nothing_followed_it() {
+        let mut log = AuditLog::new(1);
+        let committed = WalOnlyRange {
+            first_seq: 5,
+            through_seq: 7,
+            position: 70,
+        };
+        log.wal_only = Some(WalOnlyRange {
+            through_seq: 9,
+            position: 90,
+            ..committed
+        });
+        assert!(!log.is_persisted(6));
+
+        log.note_wal_only_committed(committed);
+        assert_eq!(
+            log.wal_only(),
+            Some(WalOnlyRange {
+                first_seq: 8,
+                through_seq: 9,
+                position: 90,
+            })
+        );
+        assert!(log.is_persisted(6));
+        assert!(!log.is_persisted(8));
+
+        log.note_wal_only_committed(WalOnlyRange {
+            first_seq: 8,
+            through_seq: 9,
+            position: 90,
+        });
+        assert_eq!(log.wal_only(), None);
+        assert!(log.is_persisted(9));
     }
 
     #[test]

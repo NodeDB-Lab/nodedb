@@ -23,6 +23,7 @@ mod core;
 mod group_setup;
 mod hooks;
 mod loop_build;
+mod mirror_raft;
 mod observability;
 mod propose_error;
 mod proposer_wiring;

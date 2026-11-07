@@ -166,6 +166,17 @@ impl SessionStore {
             .unwrap_or_default()
     }
 
+    /// The databases of the publishes the transaction holds for its COMMIT.
+    pub fn pending_publish_databases(&self, addr: impl Into<SessionId>) -> Vec<u64> {
+        self.read_session(addr, |s| {
+            s.pending_publishes
+                .iter()
+                .map(|publish| publish.database_id)
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
     /// Discard all buffered NOTIFYs without delivery (called on ROLLBACK).
     pub fn discard_pending_notifies(&self, addr: impl Into<SessionId>) {
         self.write_session(addr, |s| s.pending_notifies.clear());

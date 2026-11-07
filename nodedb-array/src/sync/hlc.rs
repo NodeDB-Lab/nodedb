@@ -13,9 +13,9 @@
 //! spec's u48 intent while keeping byte alignment simple.
 
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use web_time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::{ArrayError, ArrayResult};
 use crate::sync::replica_id::ReplicaId;

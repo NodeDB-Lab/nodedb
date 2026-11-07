@@ -116,6 +116,11 @@ pub async fn reconcile_once(
         if proposed >= MAX_RECONCILE_PROPOSALS_PER_PASS {
             break;
         }
+        // The source's delivery reaches a mirror through the log. Delivery
+        // starts at PROMOTE, and `delivered` holds nothing for this database.
+        if shared.mirror.fence.is_read_only(database_id) {
+            continue;
+        }
         let key = (
             database_id,
             TenantId::new(stored.tenant_id),

@@ -166,6 +166,11 @@ pub(crate) async fn execute_plan_all_local_cores(
                          every core itself"
                     .into(),
             }),
+            MetaOp::ListTenantCollections { .. } => Err(crate::Error::Internal {
+                detail: "ListTenantCollections reached the all-core fan; a tenant purge sends \
+                         it to every core itself"
+                    .into(),
+            }),
             MetaOp::RefreshGraphCount { .. } => Err(crate::Error::Internal {
                 detail: "RefreshGraphCount reached the all-core fan; the graph count sampler \
                          sends it to every core itself"
@@ -205,6 +210,7 @@ pub(crate) async fn execute_plan_all_local_cores(
             | MetaOp::Compact
             | MetaOp::Checkpoint
             | MetaOp::RegisterContinuousAggregate { .. }
+            | MetaOp::InstallAggregateImage { .. }
             | MetaOp::UnregisterContinuousAggregate { .. }
             | MetaOp::ListContinuousAggregates
             | MetaOp::ContinuousAggregatesRegistered
@@ -220,7 +226,7 @@ pub(crate) async fn execute_plan_all_local_cores(
             | MetaOp::TemporalPurgeCrdt { .. }
             | MetaOp::TemporalPurgeArray { .. }
             | MetaOp::AlterArray { .. }
-            | MetaOp::ApplyContinuousAggRetention
+            | MetaOp::ApplyContinuousAggRetention { .. }
             | MetaOp::QueryAggregateWatermark { .. }
             | MetaOp::QueryLastValues { .. }
             | MetaOp::QueryLastValue { .. }

@@ -15,6 +15,7 @@ mod string_introspection;
 mod string_schema;
 mod string_streaming;
 mod string_versioning;
+mod sync_wait;
 mod typed_auth;
 mod typed_automation;
 mod typed_collection;

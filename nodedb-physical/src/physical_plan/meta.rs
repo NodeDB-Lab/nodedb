@@ -54,6 +54,11 @@ pub enum MetaOp {
     /// Register a continuous aggregate definition on this core's manager.
     RegisterContinuousAggregate { def: ContinuousAggregateDef },
 
+    /// Replace the state of every aggregate rooted at `root` with `image`, an
+    /// encoded image whose buckets count every row this replica holds. Only
+    /// the core that owns `root` acts on it.
+    InstallAggregateImage { root: String, image: Vec<u8> },
+
     /// Remove a continuous aggregate from this core's manager.
     UnregisterContinuousAggregate { name: String },
 
@@ -81,22 +86,27 @@ pub enum MetaOp {
     /// Convert a collection's storage mode.
     ///
     /// Scans all documents in the collection and re-encodes them for the
-    /// target type. The catalog update happens on the Control Plane after
-    /// the Data Plane confirms success.
+    /// target type. Every replica runs it at one position of the collection's
+    /// data-group log. The catalog update follows on the metadata log.
     ///
     /// `target_type`: "document_schemaless", "document_strict", "kv".
     /// `schema_json`: for "document_strict"/"kv", JSON-serialized column definitions.
     /// `source_storage_mode`: the collection's storage mode BEFORE this
-    /// conversion, read from the catalog by the Control Plane dispatcher.
-    /// The Data Plane's own `doc_configs` cache still reflects the OLD mode
-    /// at dispatch time (the catalog flip and re-register happen after this
-    /// op returns), so the handler cannot resolve the source format from
-    /// that cache. It must take it from the plan instead.
+    /// conversion, read from the catalog by the proposer. The plan carries
+    /// it, so every replica decodes with the same mode.
+    /// `target_storage_mode`: the mode the core's `doc_configs` takes in the
+    /// same step as the rewrite, so a later entry of the log encodes with it.
+    /// `generation`: one more than the catalog row's conversion generation.
+    /// A core that applied this generation answers without a rewrite.
+    /// `incarnation`: the collection incarnation the conversion rewrites.
     ConvertCollection {
         collection: QualifiedCollection,
         target_type: String,
         schema_json: String,
         source_storage_mode: super::document::StorageMode,
+        target_storage_mode: super::document::StorageMode,
+        generation: u64,
+        incarnation: nodedb_types::Hlc,
     },
 
     /// Snapshot a tenant's data from the sparse engine.
@@ -169,12 +179,27 @@ pub enum MetaOp {
         collections: Vec<super::meta_snapshot::DepartedCollection>,
     },
 
-    /// Purge ALL data for a tenant across every engine and cache.
+    /// Purge a tenant's data on one data group's vShards.
     ///
     /// Deletes documents, indexes, vectors, graph edges, timeseries,
-    /// KV entries, CRDT state, inverted index terms, and cache entries.
+    /// KV entries, CRDT state, inverted index terms, and cache entries of
+    /// each collection `vshards` homes, and of each edge and node label
+    /// `vshards` homes. Every collection keeps its definition.
     /// Idempotent: safe to re-run after a crash.
-    PurgeTenant { tenant_id: u64 },
+    ///
+    /// `collections` holds every collection of the tenant, by storage name.
+    /// `vshards` holds the vShards of the group whose log carries the purge.
+    /// Each array keeps its definition, and loses the cells `vshards` routes.
+    PurgeTenant {
+        tenant_id: u64,
+        collections: Vec<String>,
+        vshards: Vec<u32>,
+    },
+
+    /// Answer every collection this core stores rows of for the tenant, by
+    /// storage name, as one msgpack array. A tenant purge reads it first: a
+    /// store can hold a collection the catalog no longer names.
+    ListTenantCollections { tenant_id: u64 },
 
     /// Purge a single collection across every engine on this core.
     ///
@@ -236,16 +261,18 @@ pub enum MetaOp {
     VerifyHashChain { collection: QualifiedCollection },
 
     /// Enforce retention on a timeseries collection: drop segments older than
-    /// the cutoff. Called by the retention policy enforcement loop.
+    /// `decided_ms - max_age_ms`. `decided_ms` is the one clock read the leader
+    /// took, so every replica drops at one cutoff.
     ///
     /// `aggregates` lists every continuous aggregate the catalog roots at
     /// `collection`. Retention folds an expiring partition into those
     /// aggregates before it removes it, so the core refuses the pass while
-    /// one of them is not registered on it at that incarnation. The loop
-    /// retries on its next pass.
+    /// one of them is not registered on it at that incarnation. The pass
+    /// retries.
     EnforceTimeseriesRetention {
         collection: QualifiedCollection,
         max_age_ms: i64,
+        decided_ms: i64,
         aggregates: Vec<super::timeseries::AggregateIncarnation>,
     },
 
@@ -287,10 +314,12 @@ pub enum MetaOp {
     /// collection's purge removes partitions, so the core refuses it while
     /// one of them is not registered on it at that incarnation. A plain
     /// columnar collection roots no aggregate, and its list is empty.
+    /// `decided_ms` is the one clock read the leader took.
     TemporalPurgeColumnar {
         tenant_id: u64,
         collection: QualifiedCollection,
         cutoff_system_ms: i64,
+        decided_ms: i64,
         aggregates: Vec<super::timeseries::AggregateIncarnation>,
     },
 
@@ -344,8 +373,9 @@ pub enum MetaOp {
 
     /// Apply retention to continuous aggregate buckets managed by
     /// the aggregate manager. Drops materialized buckets older than
-    /// each aggregate's configured retention_period_ms.
-    ApplyContinuousAggRetention,
+    /// each aggregate's configured retention_period_ms, for the request's
+    /// database and tenant. `decided_ms` is the one clock read the leader took.
+    ApplyContinuousAggRetention { decided_ms: i64 },
 
     /// Query the watermark for a named continuous aggregate.
     /// Returns JSON-serialized `WatermarkState`.
@@ -397,8 +427,7 @@ pub enum MetaOp {
         /// Wall-clock ms read once on the sequencer leader at epoch creation.
         /// Used by engine handlers as the deterministic time anchor (bitemporal
         /// sys_from, KV TTL expire_at, timeseries system_ms) instead of reading
-        /// the wall clock independently. Wire-additive: defaults to 0 on decode
-        /// of older entries.
+        /// the wall clock independently.
         epoch_system_ms: i64,
         /// The transaction's read-set from the replicated `TxClass`. Each
         /// participant checks its own vShard's reads at stage and votes
@@ -599,8 +628,7 @@ pub enum MetaOp {
     /// every op and to discover which collections' overlay entries to serialize.
     /// An op class whose resolve serializer is not yet built raises a typed
     /// error rather than being silently omitted (a dropped op class would lose
-    /// those rows on install). Wire-additive: appended last so older log entries
-    /// decode unchanged.
+    /// those rows on install).
     ResolveTxn {
         txn_id: nodedb_types::id::TxnId,
         plans: Vec<super::PhysicalPlan>,
@@ -682,17 +710,27 @@ pub enum MetaOp {
     /// collection each) per request and answers `{"remaining": n}`, the
     /// stores still due. The sender repeats the request until every core
     /// answers `0`. A request at another horizon starts another pass.
+    ///
+    /// `mirror_floors` limits each read-only mirror's stores, whatever the
+    /// horizon or the retained list says.
     PurgeVersionsBelow {
         horizon: i64,
         batch_units: u32,
         retained: Vec<super::RetainedHistory>,
+        mirror_floors: Vec<super::MirrorHistoryFloor>,
     },
 
     /// Read at most `limit` KV keys whose TTL passed on this core. The core
     /// first hands its expiry wheel's passed entries to its due set. It
     /// answers one msgpack array of `DueExpiry` and reaps nothing: the data
     /// group's leader proposes each reap through write admission.
-    KvDueExpiries { limit: u32 },
+    ///
+    /// `skip_databases` names the read-only mirrors. Their expiries arrive
+    /// through the log, so their due entries take no share of `limit`.
+    KvDueExpiries {
+        limit: u32,
+        skip_databases: Vec<u64>,
+    },
 
     /// Count this core's share of the graph node and edge gauges, and move
     /// the gauges by the change since the core's last count.

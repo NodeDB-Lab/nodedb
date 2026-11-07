@@ -3,9 +3,11 @@
 //! Handler for `SHOW DATABASE MIRROR STATUS [FOR <name>]`.
 //!
 //! The tenant-admin gate, catalog list, mirror-only filtering, `FOR <name>`
-//! filter, status / mode / lag rendering, `mirror_lag` fallback reads, and
-//! the not-found error for a specific name run here. The result is the
+//! filter, status / mode / lag rendering, `mirror_cut_state` reads, and the
+//! not-found error for a specific name run here. The result is the
 //! protocol-neutral [`DdlResult`] over `ShapedRows`. Every column is `Text`.
+//! `lag_ms` is empty until a cut applied, and `failure` is empty unless the
+//! link failed.
 
 use serde_json::{Map, Value as JsonValue};
 
@@ -18,6 +20,9 @@ use crate::control::state::SharedState;
 use super::super::super::super::result::{DdlError, DdlResult};
 use super::super::gate::require_tenant_admin;
 use super::super::support::{ddl_err, text_rows};
+
+/// Nanoseconds in one millisecond, for the wall clock.
+const NANOS_PER_MS: u64 = 1_000_000;
 
 /// Handle `SHOW DATABASE MIRROR STATUS [FOR <name>]`.
 pub fn show_database_mirror_status(
@@ -37,14 +42,19 @@ pub fn show_database_mirror_status(
         "name".to_string(),
         "source_cluster".to_string(),
         "source_database".to_string(),
+        "source_database_name".to_string(),
         "mode".to_string(),
         "status".to_string(),
+        "failure".to_string(),
         "bytes_done".to_string(),
         "bytes_total".to_string(),
         "lag_ms".to_string(),
-        "last_applied_lsn".to_string(),
-        "last_apply_ms".to_string(),
+        "ready_cut".to_string(),
+        "applied_cut".to_string(),
+        "applied_cut_hlc_ns".to_string(),
     ];
+
+    let now_ms = nodedb_types::wall_now_ns() / NANOS_PER_MS;
 
     let mut rows: Vec<Map<String, JsonValue>> = Vec::new();
 
@@ -73,22 +83,34 @@ pub fn show_database_mirror_status(
             MirrorMode::Async => "async",
         };
 
-        let (status_str, bytes_done, bytes_total, lag_ms) = match &origin.status {
+        let (status_str, bytes_done, bytes_total, failure) = match &origin.status {
             MirrorStatus::Bootstrapping {
                 bytes_done,
                 bytes_total,
-            } => ("bootstrapping", *bytes_done, *bytes_total, 0u64),
-            MirrorStatus::Following => ("following", 0u64, 0u64, 0u64),
-            MirrorStatus::Degraded { lag_ms } => ("degraded", 0, 0, *lag_ms),
-            MirrorStatus::Disconnected => ("disconnected", 0, 0, 0),
-            MirrorStatus::Promoted => ("promoted", 0, 0, 0),
+            } => ("bootstrapping", *bytes_done, *bytes_total, String::new()),
+            MirrorStatus::Following => ("following", 0, 0, String::new()),
+            MirrorStatus::Degraded => ("degraded", 0, 0, String::new()),
+            MirrorStatus::Disconnected => ("disconnected", 0, 0, String::new()),
+            MirrorStatus::Promoting { .. } => ("promoting", 0, 0, String::new()),
+            MirrorStatus::Failed { failure } => ("failed", 0, 0, failure.to_string()),
+            MirrorStatus::Promoted => ("promoted", 0, 0, String::new()),
         };
 
-        // Load lag record from _system.mirror_lag for precise LSN / ms values.
-        let (last_applied_lsn, last_apply_ms) = match catalog.get_mirror_lag(db.id) {
-            Ok(Some(lag)) => (lag.last_applied_lsn.as_u64(), lag.last_apply_ms),
-            Ok(None) => (origin.last_applied.as_u64(), 0u64),
-            Err(_) => (origin.last_applied.as_u64(), 0u64),
+        let cut_state = catalog
+            .get_mirror_cut_state(db.id)
+            .map_err(|e| DdlError::from_error_in_context("mirror cut state read failed", &e))?
+            .unwrap_or_default();
+        // A promoted mirror keeps its cut state and follows nothing.
+        let lag_ms = match origin.status {
+            MirrorStatus::Promoted => String::new(),
+            MirrorStatus::Bootstrapping { .. }
+            | MirrorStatus::Following
+            | MirrorStatus::Degraded
+            | MirrorStatus::Disconnected
+            | MirrorStatus::Promoting { .. }
+            | MirrorStatus::Failed { .. } => cut_state
+                .lag_ms(now_ms)
+                .map_or_else(String::new, |lag_ms| lag_ms.to_string()),
         };
 
         let mut row = Map::new();
@@ -101,11 +123,16 @@ pub fn show_database_mirror_status(
             "source_database".to_string(),
             JsonValue::String(origin.source_database.as_u64().to_string()),
         );
+        row.insert(
+            "source_database_name".to_string(),
+            JsonValue::String(origin.source_database_name.clone()),
+        );
         row.insert("mode".to_string(), JsonValue::String(mode_str.to_string()));
         row.insert(
             "status".to_string(),
             JsonValue::String(status_str.to_string()),
         );
+        row.insert("failure".to_string(), JsonValue::String(failure));
         row.insert(
             "bytes_done".to_string(),
             JsonValue::String(bytes_done.to_string()),
@@ -114,14 +141,18 @@ pub fn show_database_mirror_status(
             "bytes_total".to_string(),
             JsonValue::String(bytes_total.to_string()),
         );
-        row.insert("lag_ms".to_string(), JsonValue::String(lag_ms.to_string()));
+        row.insert("lag_ms".to_string(), JsonValue::String(lag_ms));
         row.insert(
-            "last_applied_lsn".to_string(),
-            JsonValue::String(last_applied_lsn.to_string()),
+            "ready_cut".to_string(),
+            JsonValue::String(cut_state.ready_cut.to_string()),
         );
         row.insert(
-            "last_apply_ms".to_string(),
-            JsonValue::String(last_apply_ms.to_string()),
+            "applied_cut".to_string(),
+            JsonValue::String(cut_state.applied_cut.to_string()),
+        );
+        row.insert(
+            "applied_cut_hlc_ns".to_string(),
+            JsonValue::String(cut_state.applied_cut_hlc_ns.to_string()),
         );
         rows.push(row);
     }

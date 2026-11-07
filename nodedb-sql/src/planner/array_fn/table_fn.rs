@@ -107,28 +107,67 @@ pub fn try_plan_array_table_fn(
         _ => return Ok(None),
     };
     let fn_name = crate::parser::normalize::normalize_object_name_checked(name)?;
-    let (sql_name, allowed): (&str, &[&str]) = match fn_name.as_str() {
-        "array_slice" => ("ARRAY_SLICE", SLICE_NAMED_ARGS),
-        "array_project" => ("ARRAY_PROJECT", &[]),
-        "array_agg" => ("ARRAY_AGG", AGG_NAMED_ARGS),
-        "array_elementwise" => ("ARRAY_ELEMENTWISE", &[]),
-        _ => return Ok(None),
+    let Some(kind) = ArrayTableFnKind::from_name(&fn_name) else {
+        return Ok(None);
     };
+    let sql_name = kind.sql_name();
     let (arg_exprs, named) = split_args(&args.args, sql_name)?;
-    let named = collect_named_args(named, sql_name, allowed)?;
-    match fn_name.as_str() {
-        "array_slice" => Ok(Some(ArrayTableFn::Slice(plan_slice(
-            &arg_exprs, &named, catalog, temporal,
-        )?))),
-        "array_project" => Ok(Some(ArrayTableFn::Project(plan_project(
-            &arg_exprs, catalog, temporal,
-        )?))),
-        "array_agg" => Ok(Some(ArrayTableFn::Agg(plan_agg(
-            &arg_exprs, &named, catalog, temporal,
-        )?))),
-        _ => Ok(Some(ArrayTableFn::Elementwise(plan_elementwise(
-            &arg_exprs, catalog, temporal,
-        )?))),
+    let named = collect_named_args(named, sql_name, kind.named_args())?;
+    let call = match kind {
+        ArrayTableFnKind::Slice => {
+            ArrayTableFn::Slice(plan_slice(&arg_exprs, &named, catalog, temporal)?)
+        }
+        ArrayTableFnKind::Project => {
+            ArrayTableFn::Project(plan_project(&arg_exprs, catalog, temporal)?)
+        }
+        ArrayTableFnKind::Agg => {
+            ArrayTableFn::Agg(plan_agg(&arg_exprs, &named, catalog, temporal)?)
+        }
+        ArrayTableFnKind::Elementwise => {
+            ArrayTableFn::Elementwise(plan_elementwise(&arg_exprs, catalog, temporal)?)
+        }
+    };
+    Ok(Some(call))
+}
+
+/// The array table-valued functions, by name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArrayTableFnKind {
+    Slice,
+    Project,
+    Agg,
+    Elementwise,
+}
+
+impl ArrayTableFnKind {
+    /// The function `fn_name` names. `None` is no array function: the name
+    /// falls through to catalog resolution.
+    fn from_name(fn_name: &str) -> Option<Self> {
+        match fn_name {
+            "array_slice" => Some(Self::Slice),
+            "array_project" => Some(Self::Project),
+            "array_agg" => Some(Self::Agg),
+            "array_elementwise" => Some(Self::Elementwise),
+            _ => None,
+        }
+    }
+
+    fn sql_name(self) -> &'static str {
+        match self {
+            Self::Slice => "ARRAY_SLICE",
+            Self::Project => "ARRAY_PROJECT",
+            Self::Agg => "ARRAY_AGG",
+            Self::Elementwise => "ARRAY_ELEMENTWISE",
+        }
+    }
+
+    /// The named arguments the function accepts.
+    fn named_args(self) -> &'static [&'static str] {
+        match self {
+            Self::Slice => SLICE_NAMED_ARGS,
+            Self::Agg => AGG_NAMED_ARGS,
+            Self::Project | Self::Elementwise => &[],
+        }
     }
 }
 
@@ -450,6 +489,23 @@ mod tests {
             view: Some(view()),
             right_view: Some(view()),
         }
+    }
+
+    /// Each array function name maps to its own kind. Any other name is no
+    /// array function, never the last kind in the list.
+    #[test]
+    fn dispatch_names_each_function_and_no_other() {
+        use super::ArrayTableFnKind as Kind;
+        for (name, kind, sql_name) in [
+            ("array_slice", Kind::Slice, "ARRAY_SLICE"),
+            ("array_project", Kind::Project, "ARRAY_PROJECT"),
+            ("array_agg", Kind::Agg, "ARRAY_AGG"),
+            ("array_elementwise", Kind::Elementwise, "ARRAY_ELEMENTWISE"),
+        ] {
+            assert_eq!(Kind::from_name(name), Some(kind));
+            assert_eq!(kind.sql_name(), sql_name);
+        }
+        assert_eq!(Kind::from_name("array_frobnicate"), None);
     }
 
     fn plan_one(sql: &str) -> Result<SqlPlan> {

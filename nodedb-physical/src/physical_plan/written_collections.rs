@@ -9,6 +9,9 @@
 
 use std::collections::BTreeSet;
 
+use nodedb_array::types::ArrayId;
+use nodedb_types::QualifiedCollection;
+
 use super::{GraphOp, MetaOp, PhysicalPlan, SpatialOp, VectorOp};
 
 /// The written collections of `plans`, sorted and deduplicated.
@@ -44,18 +47,68 @@ fn collect_plan(plan: &PhysicalPlan, out: &mut BTreeSet<String>) {
         out.extend(edges.iter().map(|edge| edge.collection.to_string()));
     } else if let PhysicalPlan::Meta(MetaOp::RestoreRedo(batch)) = plan {
         out.extend(batch.collections.iter().cloned());
-        // The Data Plane keys an array's writes by its bare name, as it
-        // keys an array cell write's.
-        out.extend(batch.arrays.iter().map(|cells| cells.array_id.name.clone()));
+        out.extend(batch.arrays.iter().map(|cells| array_name(&cells.array_id)));
+    } else if let PhysicalPlan::Array(op) = plan {
+        out.insert(array_name(op.primary_array()));
+    } else if let PhysicalPlan::ClusterArray(op) = plan {
+        out.insert(array_name(op.array_id()));
     } else if let Some(collection) = plan.collection() {
         out.insert(collection.to_string());
     }
 }
 
+/// The name an array's writes go by here. An `ArrayId` holds the bare name and
+/// its database, and every collection here is database-qualified. A write note
+/// and a lock key both resolve this form.
+fn array_name(array_id: &ArrayId) -> String {
+    QualifiedCollection::new(array_id.database_id, &array_id.name)
+        .as_str()
+        .to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nodedb_types::{DatabaseId, QualifiedCollection};
+    use crate::physical_plan::ArrayOp;
+    use nodedb_types::{DatabaseId, TenantId};
+
+    /// A write note resolves every name here against its database, so an array
+    /// outside the default database names itself qualified.
+    #[test]
+    fn an_array_write_names_its_database() {
+        let array_id = ArrayId::in_database(TenantId::new(1), DatabaseId::new(7), "grid");
+        let put = PhysicalPlan::Array(ArrayOp::Put {
+            array_id: array_id.clone(),
+            cells_msgpack: Vec::new(),
+            wal_lsn: 0,
+            provenance: None,
+            vshard_id: 0,
+        });
+        let delete = PhysicalPlan::Array(ArrayOp::Delete {
+            array_id,
+            coords_msgpack: Vec::new(),
+            wal_lsn: 0,
+            provenance: None,
+            vshard_id: 0,
+        });
+        assert_eq!(
+            written_collections(&[put, delete]),
+            vec!["7/grid".to_string()]
+        );
+    }
+
+    /// The default database stores the bare name.
+    #[test]
+    fn an_array_write_in_the_default_database_stays_bare() {
+        let put = PhysicalPlan::Array(ArrayOp::Put {
+            array_id: ArrayId::new(TenantId::new(1), "grid"),
+            cells_msgpack: Vec::new(),
+            wal_lsn: 0,
+            provenance: None,
+            vshard_id: 0,
+        });
+        assert_eq!(written_collections(&[put]), vec!["grid".to_string()]);
+    }
 
     #[test]
     fn spatial_writes_name_their_collection_once() {

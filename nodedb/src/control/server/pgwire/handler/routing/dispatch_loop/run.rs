@@ -403,7 +403,14 @@ impl NodeDbPgHandler {
                         task_database_id.as_u64(),
                         tenant_id.as_u64(),
                         collection,
-                    );
+                    )
+                    .map_err(|error| {
+                        PgWireError::UserError(Box::new(ErrorInfo::new(
+                            "ERROR".to_owned(),
+                            "55000".to_owned(),
+                            error.to_string(),
+                        )))
+                    })?;
             }
 
             // An autocommit write reaching here fires no synchronous trigger

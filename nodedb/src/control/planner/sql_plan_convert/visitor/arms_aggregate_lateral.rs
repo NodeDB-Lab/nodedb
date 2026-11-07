@@ -49,6 +49,7 @@ macro_rules! impl_aggregate_lateral_arms_for_convert_visitor {
                 lateral_alias,
                 projection,
                 left_join,
+                temporal,
             } = args;
             super::super::lateral::convert_lateral_top_k(
                 super::super::lateral::ConvertLateralTopKParams {
@@ -62,6 +63,7 @@ macro_rules! impl_aggregate_lateral_arms_for_convert_visitor {
                     lateral_alias,
                     projection,
                     left_join,
+                    temporal,
                     tenant_id: self.tenant_id,
                     ctx: self.ctx,
                 },

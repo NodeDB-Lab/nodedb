@@ -18,9 +18,9 @@ use super::targets::{RefreshTarget, RefreshTargets};
 impl JwksRegistry {
     /// Create and initialize the registry.
     ///
-    /// Fetches JWKS from all providers on startup, loads disk cache as fallback,
-    /// and spawns the periodic refresh task. Every fetch goes through
-    /// `policy`, the server's `[egress]` policy.
+    /// Fetches JWKS from all providers on startup and loads disk cache as fallback.
+    /// [`Self::spawn_refresh_loop`] starts the periodic refresh.
+    /// Every fetch goes through `policy`, the server's `[egress]` policy.
     pub async fn init(config: JwtAuthConfig, policy: Arc<EgressPolicy>) -> crate::Result<Self> {
         // Registry construction is also a public entry point, so it must not
         // rely on the server-config loader to reject unsafe static providers.
@@ -45,8 +45,6 @@ impl JwksRegistry {
             .await;
         }
 
-        // Spawn periodic refresh. It runs with no static provider too: a
-        // catalog provider registered later joins its targets.
         let statics = config
             .providers
             .iter()
@@ -59,12 +57,6 @@ impl JwksRegistry {
         let targets = Arc::new(parking_lot::RwLock::new(RefreshTargets::with_statics(
             statics,
         )));
-        let refresh_handle = fetch::spawn_refresh_task(
-            Arc::clone(&targets),
-            cache.clone(),
-            config.jwks_refresh_secs,
-            policy.clone(),
-        );
 
         Ok(Self {
             providers: config.providers.clone(),
@@ -72,7 +64,28 @@ impl JwksRegistry {
             config,
             policy,
             targets,
-            _refresh_handle: Some(refresh_handle),
         })
+    }
+
+    /// Start the periodic key refresh, joined at the Control Plane drain.
+    ///
+    /// It runs with no static provider too: a catalog provider registered
+    /// later joins its targets.
+    pub fn spawn_refresh_loop(
+        &self,
+        registry: &crate::control::shutdown::LoopRegistry,
+        shutdown: &crate::control::shutdown::ShutdownWatch,
+    ) {
+        let targets = Arc::clone(&self.targets);
+        let cache = Arc::clone(&self.cache);
+        let policy = Arc::clone(&self.policy);
+        let refresh_secs = self.config.jwks_refresh_secs;
+        crate::control::shutdown::spawn_loop(
+            registry,
+            shutdown,
+            "jwks_refresh",
+            crate::control::shutdown::ShutdownPhase::DrainingControlPlane,
+            move |shutdown| fetch::run_refresh_loop(targets, cache, refresh_secs, policy, shutdown),
+        );
     }
 }

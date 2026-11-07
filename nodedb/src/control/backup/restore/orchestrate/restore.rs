@@ -85,11 +85,21 @@ pub async fn restore_tenant(
         RestoreMark {
             id: restore_id,
             cut: restore_cut,
+            event_source: crate::event::EventSource::Restore,
         },
     )
     .await?;
     stats.databases = database_blobs.len();
     stats.databases_created = databases.created();
+
+    // Before the first write into an existing database. A database this restore
+    // created has a fresh id, so no tombstone names it. A dry run has no target
+    // for a database this cluster lacks.
+    for (source, snap) in &merged {
+        if let Some(target) = databases.get(*source) {
+            rebind::record_tombstoned_restores(state, tenant_id, target, snap, dry_run)?;
+        }
+    }
 
     if !dry_run {
         restore_metadata(state, tenant_id, &env, &databases).await?;
@@ -98,21 +108,10 @@ pub async fn restore_tenant(
                 .await?;
     }
 
-    for (source, snap) in &merged {
+    for snap in merged.values() {
         stats.count_sections(snap);
         if dry_run {
             stats.columnar_engines += snap.columnar_engines.len();
-        }
-        // A dry run has no target for a database this cluster lacks: no
-        // tombstone of this cluster names it.
-        if let Some(target) = databases.get(*source) {
-            rebind::warn_on_tombstoned_restores(
-                state,
-                tenant_id,
-                target,
-                snap,
-                env.meta.snapshot_watermark,
-            );
         }
     }
 

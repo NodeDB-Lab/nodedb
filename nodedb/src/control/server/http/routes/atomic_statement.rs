@@ -9,6 +9,7 @@
 //! and answers as JSON rows. Every other statement comes back for the
 //! route's own per-task loop.
 
+use crate::control::mirror::source::sync::{await_mirror_sync, sync_database_of};
 use crate::control::server::response_shape::cell::row_to_wire_json;
 use crate::control::server::response_shape::types::FoldedTag;
 use crate::control::server::shared::session::DetachedTxnScope;
@@ -36,6 +37,7 @@ pub(super) async fn route_http_statement(
 ) -> crate::Result<RoutedStatement> {
     let detached = DetachedTxnScope::new();
     let session = detached.ctx();
+    let sync_database = sync_database_of(exec.state, &statement.tasks);
     let answer = match route_atomic_statement(exec, statement, &session).await {
         Ok(AtomicRoute::Implicit(answer)) => Ok(answer),
         Ok(AtomicRoute::Calvin(applied)) => calvin_answer(exec, applied),
@@ -43,6 +45,9 @@ pub(super) async fn route_http_statement(
         Err(error) => Err(error),
     };
     let answer = answer.map_err(|error| error.into_error(exec.tenant_id()))?;
+    if let Some(database) = sync_database {
+        await_mirror_sync(exec.state, database).await?;
+    }
     Ok(RoutedStatement::Answered(answer_json_rows(answer)))
 }
 

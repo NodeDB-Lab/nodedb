@@ -8,6 +8,7 @@ mod calvin_bases;
 mod calvin_counters;
 mod calvin_cuts;
 mod calvin_local;
+mod cross_shard;
 mod event_interest;
 mod fields;
 mod init;
@@ -32,7 +33,7 @@ pub mod collection_to_database;
 pub mod idle_timeout_cache;
 
 pub use self::calvin_ack_result::{
-    ACK_ROWS_FRAME_BUDGET, AckReply, AckReturning, AckSlice, CalvinAckResult,
+    ACK_ROWS_FRAME_BUDGET, AckReply, AckReturning, AckSlice, CalvinAckResult, UNREADABLE_ACK_REPORT,
 };
 pub use self::calvin_apply::CalvinApplyResult;
 pub use self::calvin_apply_sidecar::{CalvinApplySidecar, DEFAULT_APPLY_RESULT_TTL};
@@ -40,6 +41,7 @@ pub use self::calvin_bases::CalvinBases;
 pub use self::calvin_counters::CalvinCounters;
 pub use self::calvin_cuts::{CalvinCuts, cut_instant_hook};
 pub use self::calvin_local::CalvinLocalState;
+pub use self::cross_shard::CrossShardState;
 pub use self::fields::SharedState;
 pub use self::init_prod::{DataPlaneHandles, OpenConfig};
 pub use self::metadata_ddl::MetadataDdlState;

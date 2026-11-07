@@ -23,8 +23,8 @@ use crate::data::executor::core_loop::CoreLoop;
 /// The vector rebuild backstop runs after the replay within this function for
 /// the same reason it is an idempotent overlay — see the comment at the call.
 ///
-/// `Err` when replay cannot bring the core to the state the WAL holds. The
-/// rebuild then does not run, and the core must not serve.
+/// `Err` when replay cannot bring the core to the state the WAL holds, or the
+/// rebuild cannot read the store. The core then must not serve.
 pub(super) fn replay_wal_and_rebuild_indexes(
     core: &mut CoreLoop,
     wal_records: &[nodedb_wal::WalRecord],
@@ -56,7 +56,7 @@ pub(super) fn replay_wal_and_rebuild_indexes(
     // while the documents survived in redb. Idempotent (per-surrogate
     // remove-then-insert), so it safely overlays whatever the vector
     // checkpoint + WAL replay above already restored.
-    core.rebuild_vector_indexes_from_store(vector_index_param_seed);
+    core.rebuild_vector_indexes_from_store(vector_index_param_seed)?;
 
     // Replay applies inserts without settling. Full growing segments seal,
     // IVF-PQ buffers at their threshold train, and every segment sealed but

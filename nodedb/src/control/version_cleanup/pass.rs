@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use nodedb_physical::physical_plan::{MetaOp, PURGE_REMAINING_KEY, PhysicalPlan};
 
-use super::horizon::cleanup_horizon;
+use super::horizon::{cleanup_horizon, mirror_floors};
 use super::retained::retained_histories;
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TenantId, TraceId};
@@ -58,10 +58,18 @@ pub async fn run_cleanup_pass(
             return Err(e);
         }
     };
+    let mirror_floors = match mirror_floors(state) {
+        Ok(floors) => floors,
+        Err(e) => {
+            crate::diag::version_cleanup_failed(&e, "mirror floors", horizon);
+            return Err(e);
+        }
+    };
     let plan = PhysicalPlan::Meta(MetaOp::PurgeVersionsBelow {
         horizon,
         batch_units,
         retained,
+        mirror_floors,
     });
     let mut rounds = 0u64;
     loop {

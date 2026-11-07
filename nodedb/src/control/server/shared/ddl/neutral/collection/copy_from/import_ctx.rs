@@ -7,6 +7,8 @@
 //! `plan_and_dispatch`, so each helper takes a single `&ImportCtx` plus its
 //! format-specific arguments instead of a long positional list.
 
+use nodedb_mem::ScopedMemory;
+
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::shared::session::DmlTxnCtx;
 use crate::control::state::SharedState;
@@ -18,4 +20,6 @@ pub(super) struct ImportCtx<'a> {
     pub tenant_id: nodedb_types::TenantId,
     pub database_id: nodedb_types::DatabaseId,
     pub txn_ctx: &'a DmlTxnCtx<'a>,
+    /// What each parsed row reserves from.
+    pub memory: &'a ScopedMemory,
 }

@@ -92,7 +92,7 @@ pub(super) async fn handle_frame(ws: &mut Ws, ctx: InboundCtx<'_>, frame: &SyncF
     }
 
     if is_array_frame(frame.msg_type) {
-        return handle_array(ws, session, channels, shared, session_id, frame).await;
+        return handle_array(ws, session, channels, shared, frame).await;
     }
 
     handle_crdt(ws, session, shared, frame).await
@@ -180,7 +180,6 @@ async fn handle_array(
     session: &SyncSession,
     channels: &mut SessionChannels,
     shared: &Option<Arc<SharedState>>,
-    session_id: &str,
     frame: &SyncFrame,
 ) -> Flow {
     // Refuse before any engine is constructed or reused, so an unauthenticated
@@ -210,7 +209,7 @@ async fn handle_array(
         // Stamp the session's handshake-assigned identity so inbound array
         // provenance is server-authoritative.
         inbound.set_session_identity(session.producer_id, session.accepted_epoch);
-        if let Some(f) = dispatch_array_frame(frame, inbound, session_id).await
+        if let Some(f) = dispatch_array_frame(frame, inbound, session).await
             && !send(ws, &f).await
         {
             return Flow::Break;

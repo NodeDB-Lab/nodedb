@@ -28,6 +28,9 @@ pub struct SystemCatalog {
     /// Whether a barrier log row committed without persisting since the
     /// last `persist_calvin_barrier_logs`.
     pub(super) calvin_barrier_logs_pending: Arc<std::sync::atomic::AtomicBool>,
+    /// Moves on every committed write of a collection or array row. A count
+    /// cached at one value stays right until it moves.
+    pub(super) relations_generation: Arc<std::sync::atomic::AtomicU64>,
     /// Test-only fault switches and read counters.
     #[cfg(test)]
     pub(super) faults: super::test_faults::CatalogTestFaults,
@@ -79,6 +82,7 @@ impl SystemCatalog {
                 nodedb_crs::CustomCrsSet::new(),
             ))),
             calvin_barrier_logs_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            relations_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             #[cfg(test)]
             faults: super::test_faults::CatalogTestFaults::default(),
         };
@@ -86,6 +90,20 @@ impl SystemCatalog {
         catalog.reload_event_definitions()?;
         catalog.reload_custom_crs_set()?;
         Ok(catalog)
+    }
+
+    /// The generation of the collection and array rows. Read it before a scan
+    /// the caller caches: a write during the scan then moves it past the
+    /// value kept, and the next read scans again.
+    pub fn relations_generation(&self) -> u64 {
+        self.relations_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Record a committed write of a collection or array row.
+    pub(super) fn note_relations_written(&self) {
+        self.relations_generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     }
 
     /// Bootstrap every `_system.*` table from the canonical registry —

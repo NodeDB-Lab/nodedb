@@ -7,8 +7,8 @@ use tokio::sync::OwnedMutexGuard;
 use crate::bridge::envelope::PhysicalPlan;
 use crate::control::server::shared::write_admission::gate::admit_routed;
 use crate::control::server::shared::write_admission::{
-    AdmissionTicket, WriteAdmission, WriteAdmissionGuard, WriteTarget, check_storage_quota,
-    plan_adds_storage,
+    AdmissionTicket, WriteAdmission, WriteAdmissionGuard, WriteTarget, check_mirror_writable,
+    check_storage_quota, plan_adds_storage, plan_is_write,
 };
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TenantId, VShardId};
@@ -66,8 +66,11 @@ pub(super) async fn admit_write(
 ) -> crate::Result<AdmissionOutcome> {
     // An ordered write applies on every replica. Refusing it here splits replicas.
     if matches!(ordering, WriteOrdering::Gate) {
-        // A replicable write passes the same check at the leader gate and
+        // A replicable write passes the same checks at the leader gate and
         // never reaches this funnel with `Gate`.
+        check_mirror_writable(shared, target.database_id, target.event_source, || {
+            Ok(plan_is_write(target.plan))
+        })?;
         check_storage_quota(
             shared,
             target.database_id,

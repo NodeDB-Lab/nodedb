@@ -74,6 +74,12 @@ fn create_org(
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or_else(|| identity.tenant_id.as_u64());
 
+    super::audit_intent::record_action_intent(
+        state,
+        identity,
+        Some(identity.tenant_id),
+        &format!("CREATE ORG '{org_id}' in tenant {tenant_id}"),
+    )?;
     state
         .orgs
         .create_org(org_id, org_id, tenant_id)
@@ -104,6 +110,12 @@ fn alter_org(
     let org_id = parts[2].trim_matches('\'');
     let status_val = parts[5].to_lowercase();
 
+    super::audit_intent::record_action_intent(
+        state,
+        identity,
+        Some(identity.tenant_id),
+        &format!("ALTER ORG '{org_id}' SET STATUS {status_val}"),
+    )?;
     let found = state
         .orgs
         .set_status(org_id, &status_val)
@@ -136,6 +148,12 @@ fn drop_org(
     }
     let org_id = parts[2].trim_matches('\'');
 
+    super::audit_intent::record_action_intent(
+        state,
+        identity,
+        Some(identity.tenant_id),
+        &format!("DROP ORG '{org_id}'"),
+    )?;
     let found = state
         .orgs
         .drop_org(org_id)

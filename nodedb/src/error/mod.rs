@@ -9,7 +9,8 @@
 //! `dispatch_capacity` and `ollp` own payload types carried by variants.
 //!
 //! Conversions into the crate's *public* error type (`NodeDbError`) and
-//! cluster wire-error conversions live in `crate::error_from` rather than
+//! cluster wire-error conversions live in `crate::error_from` and
+//! `crate::error_from_cluster` rather than
 //! here — that module already isolates the "how does an internal `Error`
 //! present at the API boundary" concern from "what does an internal `Error`
 //! look like" — with the `Error` to `NodeDbError` mapping table itself in

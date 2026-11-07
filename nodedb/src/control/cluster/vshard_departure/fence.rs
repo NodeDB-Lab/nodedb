@@ -13,6 +13,13 @@
 //!   the purge to end. An install of a resident vShard never waits: the
 //!   purge keeps every record a resident vShard homes.
 //!
+//! A purge that fails or reaches its deadline ends its hold with a core still
+//! able to run it. An install that starts then lands after that core's purge
+//! all the same. Both requests take `DatabaseId::DEFAULT` and
+//! `Priority::Normal`, so they keep their dispatch order on the core's queues,
+//! the core runs a purge whole, and a purge that was queued past its deadline
+//! never starts.
+//!
 //! The purge takes the fence under the `MultiRaft` lock, at the residency
 //! read. A group installs here only once it mounts, so a group that mounts
 //! after that read installs after the purge.
@@ -147,6 +154,110 @@ mod tests {
     use crate::control::state::SharedState;
     use crate::types::TenantDataSnapshot;
     use crate::wal::WalManager;
+
+    /// Wait up to five seconds until core 0's ring holds `len` requests.
+    async fn core_ring_holds(sides: &[crate::bridge::dispatch::CoreChannelDataSide], len: usize) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while sides[0].request_rx.len() < len {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "core 0's ring holds {} requests, expected {len}",
+                sides[0].request_rx.len()
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    /// A purge that ends its hold with a core still able to run it stays safe
+    /// only while an install dispatched later runs behind it on that core.
+    /// That order holds while both take one priority and one database, so the
+    /// WFQ, the ring and the core's queue all keep them in dispatch order. A
+    /// change to either request's priority or database fails this test.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_install_dispatched_after_a_purge_stays_behind_it_on_the_core() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal = Arc::new(
+            WalManager::open_for_testing(&dir.path().join("order.wal")).expect("test WAL"),
+        );
+        let (dispatcher, mut sides) = Dispatcher::new(1, 64);
+        let shared = SharedState::new(dispatcher, wal).expect("shared state");
+
+        let purging = {
+            let shared = Arc::clone(&shared);
+            tokio::spawn(async move {
+                super::super::purge::purge_on_every_core(
+                    &shared,
+                    &BTreeSet::from([3]),
+                    &BTreeSet::from([1]),
+                    &[],
+                )
+                .await
+            })
+        };
+        core_ring_holds(&sides, 1).await;
+
+        let installing = {
+            let shared = Arc::clone(&shared);
+            tokio::spawn(async move {
+                crate::control::cluster::snapshot_install::install_on_every_core(
+                    &shared,
+                    1,
+                    vec![nodedb_physical::physical_plan::PhysicalPlan::Meta(
+                        nodedb_physical::physical_plan::MetaOp::RestoreTenantSnapshot {
+                            tenant_id: 0,
+                            snapshot: Vec::new(),
+                            replace_mode: true,
+                            collections_to_clear: Vec::new(),
+                            group_vshards: vec![3],
+                        },
+                    )],
+                    Duration::from_secs(60),
+                )
+                .await
+            })
+        };
+        core_ring_holds(&sides, 2).await;
+
+        let purge = sides[0]
+            .request_rx
+            .try_pop()
+            .expect("the purge is first on the ring")
+            .inner;
+        let install = sides[0]
+            .request_rx
+            .try_pop()
+            .expect("the install is second on the ring")
+            .inner;
+        assert!(
+            matches!(
+                purge.plan,
+                nodedb_physical::physical_plan::PhysicalPlan::Meta(
+                    nodedb_physical::physical_plan::MetaOp::PurgeDepartedVShards { .. }
+                )
+            ),
+            "the purge runs first"
+        );
+        assert!(
+            matches!(
+                install.plan,
+                nodedb_physical::physical_plan::PhysicalPlan::Meta(
+                    nodedb_physical::physical_plan::MetaOp::RestoreTenantSnapshot { .. }
+                )
+            ),
+            "the install runs second"
+        );
+        assert_eq!(
+            purge.priority, install.priority,
+            "one priority keeps both on one tier of the core's queue"
+        );
+        assert_eq!(
+            purge.database_id, install.database_id,
+            "one database keeps both on one WFQ sub-queue"
+        );
+
+        purging.abort();
+        installing.abort();
+    }
 
     #[test]
     fn a_purge_and_an_install_of_a_vshard_outside_its_residency_exclude_each_other() {

@@ -20,7 +20,9 @@ use nodedb_types::value::Value;
 use nodedb_wal::record::RecordType;
 
 use crate::Error;
+use crate::control::server::shared::session::StatementDeadline;
 use crate::control::state::SharedState;
+use crate::control::wal_replication::{ReplicatedEntry, ReplicatedWrite, propose_replicated_entry};
 use crate::types::{TenantId, TsFlushedCollectionBlob};
 use crate::wal::{RedoSubRecord, TimeseriesRestoreRedo, TimeseriesSeriesCatalogRedo};
 
@@ -179,14 +181,44 @@ pub(in crate::control::backup::restore) async fn reissue_timeseries_rows(
         }
         units.extend(ended_units(&name, blob, kek.as_ref())?);
         units.extend(chunk_units(&name, rows)?);
-        if units.is_empty() {
-            continue;
+        if !units.is_empty() {
+            let collection = CollectionUnits::rows(target.dest, name.bare.clone(), units);
+            commit_collection(state, tenant, target.mark(), collection).await?;
+            reissued += 1;
         }
-        let collection = CollectionUnits::rows(target.dest, name.bare.clone(), units);
-        commit_collection(state, tenant, target.mark(), collection).await?;
-        reissued += 1;
+        // A RESTORE appends beside the destination's rows, so it installs no
+        // aggregate state. A re-issue with no RESTORE fills an empty database.
+        if target.restore_id == 0 && !blob.cagg_copy_image.is_empty() {
+            install_aggregate_image(state, tenant_id, target, &name, &blob.cagg_copy_image).await?;
+        }
     }
     Ok(reissued)
+}
+
+/// Put `image`, the aggregate state of the root `name`, into the root's data
+/// group log. The rows it counts are ahead of it: each commit above returned
+/// with its redo in that log, so every replica applies them first.
+async fn install_aggregate_image(
+    state: &SharedState,
+    tenant_id: u64,
+    target: DatabaseTarget,
+    name: &RestoredName,
+    image: &[u8],
+) -> Result<(), Error> {
+    let proposer = state.async_raft_proposer()?;
+    let entry = ReplicatedEntry::new(
+        tenant_id,
+        target.dest.as_u64(),
+        name.key(target.dest).vshard().as_u32(),
+        ReplicatedWrite::TimeseriesAggregateImage {
+            collection: name.stored.as_str().to_string(),
+            image: image.to_vec(),
+        },
+    )
+    .with_event_source(target.event_source);
+    let deadline = StatementDeadline::of_statement(state).tokio_instant();
+    propose_replicated_entry(state, proposer, entry, deadline).await?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -202,6 +234,7 @@ mod tests {
             dest: crate::types::DatabaseId::DEFAULT,
             restore_id: 1,
             restore_cut: i64::MAX,
+            event_source: crate::event::EventSource::Restore,
         };
         let name = target.bare("cpu");
         let rows = vec![Value::Integer(1); ROWS_PER_CHUNK + 1];

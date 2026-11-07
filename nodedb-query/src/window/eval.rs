@@ -20,9 +20,10 @@ use nodedb_crs::CrsContext;
 /// its input order; each spec's partitions are ordered by that spec's own
 /// ORDER BY, independent of the row array order.
 ///
-/// Unknown window function names must be rejected by the planner before
-/// reaching this dispatcher; an unrecognised name here is an internal bug
-/// and panics rather than silently dropping the projection.
+/// The planner refuses a name outside [`super::spec::WINDOW_FUNCTION_NAMES`].
+/// A name this dispatcher does not know fails with
+/// `Err(EvalError::UnknownFunction)`. The spec arrives as text over the
+/// bridge, so the name is data here, and the core must not panic on it.
 ///
 /// A division/modulo-by-zero in any PARTITION BY / ORDER BY / argument
 /// expression propagates as `Err(EvalError::DivisionByZero)` rather than
@@ -58,9 +59,9 @@ pub fn evaluate_window_functions(
                     apply_aggregate_window(rows, partition_indices, spec, crs)?
                 }
                 other => {
-                    unreachable!(
-                        "invariant: SQL planner validates window function names before dispatch; '{other}' is unrecognized and should have been rejected at planning time"
-                    )
+                    return Err(crate::expr::EvalError::UnknownFunction {
+                        name: other.to_string(),
+                    });
                 }
             }
         }
@@ -347,19 +348,44 @@ mod tests {
         assert_eq!(col(&rows[4], "rnk"), json!(1)); // Eve, salary 110
     }
 
-    #[test]
-    #[should_panic(expected = "should have been rejected at planning time")]
-    fn unknown_function_panics_at_evaluator() {
+    fn evaluate_one(func_name: &str) -> Result<(), crate::expr::EvalError> {
         let mut rows = numbered(2);
         let spec = WindowFuncSpec {
             alias: "x".into(),
-            func_name: "frobnicate".into(),
+            func_name: func_name.into(),
             args: vec![],
             partition_by: vec![],
             order_by: vec![],
             frame: WindowFrame::default(),
         };
         evaluate_window_functions(&mut rows, &[spec], &nodedb_crs::CrsContext::builtin_only())
-            .unwrap();
+    }
+
+    /// A function the planner registers and the evaluator lacks fails the
+    /// statement with a typed error. The core stays up.
+    #[test]
+    fn unknown_function_is_a_typed_error() {
+        for name in ["frobnicate", "stddev", "ts_rate"] {
+            match evaluate_one(name) {
+                Err(crate::expr::EvalError::UnknownFunction { name: got }) => {
+                    assert_eq!(got, name);
+                }
+                other => panic!("{name}: expected UnknownFunction, got {other:?}"),
+            }
+        }
+    }
+
+    /// The list the planner checks names only functions this dispatcher runs.
+    #[test]
+    fn every_listed_function_has_an_evaluator() {
+        for name in super::super::spec::WINDOW_FUNCTION_NAMES {
+            assert!(
+                !matches!(
+                    evaluate_one(name),
+                    Err(crate::expr::EvalError::UnknownFunction { .. })
+                ),
+                "{name} is listed but has no evaluator"
+            );
+        }
     }
 }

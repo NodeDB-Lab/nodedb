@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Per-task routing: mirror checks, orchestrated DML, exchange
+//! Per-task routing: the mirror read check, orchestrated DML, exchange
 //! resolution, and the replicated-vs-local dispatch choice.
 
 use std::sync::Arc;
@@ -12,8 +12,8 @@ use crate::control::server::exchange::ReadScope;
 use crate::control::server::exchange::resolve::{
     DistributedReadCapture, Resolved, resolve_and_materialize,
 };
-use crate::control::server::shared::write_admission::plan_is_write;
-use crate::types::{ReadConsistency, TraceId};
+use crate::control::server::shared::write_admission::{check_mirror_read, plan_is_write};
+use crate::types::TraceId;
 use nodedb_physical::physical_task::PhysicalTask;
 
 use super::super::core::NodeDbPgHandler;
@@ -32,43 +32,11 @@ impl NodeDbPgHandler {
         use crate::control::security::identity::{Permission, required_permission};
         let perm = required_permission(&task.plan);
 
-        // Mirror enforcement: writes reject on non-promoted mirrors; reads gate by
-        // ReadConsistency. Catalog lookup skipped for db id=0 to stay allocation-free.
-        let catalog = self.state.credentials.catalog();
-        if task.database_id.as_u64() != 0
-            && let Ok(Some(descriptor)) = catalog.get_database(task.database_id)
-            && let Some(origin) = descriptor.mirror_origin.as_ref()
-            && !matches!(origin.status, nodedb_types::MirrorStatus::Promoted)
-        {
-            if matches!(perm, Permission::Write | Permission::Admin) {
-                return Err(crate::Error::MirrorReadOnly {
-                    database: descriptor.name.clone(),
-                });
-            }
-
-            use crate::control::server::pgwire::ddl::database::{
-                MirrorReadOutcome, check_mirror_read_consistency,
-            };
-            // Defaults to Strong: mirrors aren't the source leader, so reads reject
-            // unless the session opted into BoundedStaleness or Eventual.
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or(std::time::Duration::ZERO)
-                .as_millis() as u64;
-            let outcome = check_mirror_read_consistency(
-                catalog,
-                task.database_id,
-                origin,
-                ReadConsistency::Strong,
-                now_ms,
-            );
-            if let MirrorReadOutcome::Reject { message, .. } = outcome {
-                return Err(crate::Error::StaleReadNotLeader {
-                    database: descriptor.name.clone(),
-                    source_cluster: origin.source_cluster.clone(),
-                    detail: message,
-                });
-            }
+        // This path resolves Exchange reads before the dispatch capability gate
+        // runs its mirror read check, so a read checks here first. Writes pass
+        // the shared write gates below this method.
+        if matches!(perm, Permission::Read) {
+            check_mirror_read(&self.state, task.database_id)?;
         }
 
         if matches!(

@@ -49,6 +49,7 @@ impl CoreLoop {
             reply,
             // The Control Plane raises the write mark; the install writes rows.
             user_write: _,
+            mirror,
         } = install;
         let (epoch, position, epoch_system_ms) = (*epoch, *position, *epoch_system_ms);
         let vshard_id = task.request.vshard_id.as_u32();
@@ -79,11 +80,14 @@ impl CoreLoop {
             return response;
         }
         // The record installed: a staged entry of the slice and its overlay
-        // are spent.
-        self.calvin
-            .commit_pending
-            .remove(&(epoch, position, vshard_id));
-        self.drop_calvin_synthetic_overlay(epoch, position, vshard_id);
+        // are spent. A mirror's position is its source's: a staged entry at
+        // the same numbers belongs to another transaction of this cluster.
+        if !*mirror {
+            self.calvin
+                .commit_pending
+                .remove(&(epoch, position, vshard_id));
+            self.drop_calvin_synthetic_overlay(epoch, position, vshard_id);
+        }
 
         let prev_epoch_ms = self.epoch_system_ms;
         self.epoch_system_ms = Some(epoch_system_ms);

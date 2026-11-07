@@ -271,14 +271,82 @@ fn prepare_replicated<'a>(
                 origin,
             },
         ),
+        ReplicatedWrite::TenantPurge {
+            collections,
+            vshards,
+        } => super::tenant_purge::prepare_tenant_purge_entry(
+            ctx,
+            pos,
+            super::tenant_purge::TenantPurgeEntry {
+                database_id: entry_database,
+                tenant_id,
+                vshard_id: replicated.vshard_id,
+                collections,
+                vshards,
+            },
+        ),
+        ReplicatedWrite::TimeseriesAggregateImage { collection, image } => {
+            super::aggregate_image::prepare_aggregate_image_entry(
+                ctx,
+                pos,
+                super::aggregate_image::AggregateImageEntry {
+                    database_id: entry_database,
+                    tenant_id,
+                    vshard_id: replicated.vshard_id,
+                    collection,
+                    image,
+                },
+            )
+        }
+        ReplicatedWrite::RetentionDrop { op, .. } => {
+            super::retention_drop::prepare_retention_drop_entry(
+                ctx,
+                pos,
+                super::retention_drop::RetentionDropEntry {
+                    database_id: entry_database,
+                    tenant_id,
+                    vshard_id: replicated.vshard_id,
+                    op,
+                },
+            )
+        }
+        ReplicatedWrite::CollectionConvert {
+            collection,
+            target_type,
+            schema_json,
+            source_storage_mode,
+            target_storage_mode,
+            generation,
+            incarnation,
+        } => super::collection_convert::prepare_collection_convert_entry(
+            ctx,
+            pos,
+            super::collection_convert::CollectionConvertEntry {
+                database_id: entry_database,
+                tenant_id,
+                vshard_id: replicated.vshard_id,
+                incarnations: scope.incarnations,
+                collection,
+                target_type,
+                schema_json,
+                source_storage_mode,
+                target_storage_mode,
+                generation,
+                incarnation,
+            },
+        ),
         ReplicatedWrite::CutBarrier {
             hlc,
             restore_point,
             capture,
+            mirror,
         } => {
-            // Every entry after the barrier records above the cut, on this
-            // life and on every later one.
-            watch.raise_cut(pos.group_id, pos.log_index, hlc);
+            // Every entry after a restore cut's barrier records above the cut,
+            // on this life and on every later one. A mirror cut names no
+            // restore.
+            if mirror.is_none() {
+                watch.raise_cut(pos.group_id, pos.log_index, hlc);
+            }
             super::cut_barrier::prepare_cut_barrier(
                 ctx,
                 pos,
@@ -287,9 +355,20 @@ fn prepare_replicated<'a>(
                     hlc,
                     restore_point,
                     capture,
+                    mirror: mirror.map(|barrier| barrier.mark),
                 },
             )
         }
+        ReplicatedWrite::MirrorSeal {
+            last: _,
+            ref calvin_floors,
+        } => Prepared::Concluded(super::mirror_hold::apply_mirror_seal(
+            ctx,
+            pos,
+            replicated.database_id,
+            replicated.mirror,
+            calvin_floors,
+        )),
         ReplicatedWrite::CalvinReadResult {
             epoch,
             position,

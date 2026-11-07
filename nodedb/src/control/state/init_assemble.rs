@@ -6,7 +6,6 @@
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
-use crate::control::security::buses::{SessionInvalidationBus, UserChangeBus};
 use crate::control::security::tenant::{TenantIsolation, TenantQuota};
 use crate::control::server::sync::dlq::{DlqConfig, SyncDlq};
 
@@ -76,10 +75,11 @@ impl SharedState {
             bus_consumer_handle,
             permission_cache,
         } = buses;
-        // Credential mutations publish to the same buses the state holds.
-        credentials.set_buses(
-            Arc::new(SessionInvalidationBus::from_existing(si_bus.sender())),
-            Arc::new(UserChangeBus::from_existing(uc_bus.sender())),
+        super::buses_init::connect_credential_store(
+            &credentials,
+            &si_bus,
+            &uc_bus,
+            &session_registry,
         );
         let AuthInputs {
             metering_config,
@@ -157,6 +157,7 @@ impl SharedState {
             credentials,
             audit,
             audit_recorder: std::sync::OnceLock::new(),
+            bearer_refusal_throttle: Default::default(),
             api_keys,
             roles,
             permissions,
@@ -177,6 +178,7 @@ impl SharedState {
             sequencer_halt: std::sync::Arc::default(),
             core_stall: std::sync::Arc::default(),
             metadata_raft: std::sync::OnceLock::new(),
+            database_id_space: std::sync::OnceLock::new(),
             propose_tracker: std::sync::OnceLock::new(),
             raft_proposer: std::sync::OnceLock::new(),
             async_raft_proposer_pair: std::sync::OnceLock::new(),
@@ -186,6 +188,7 @@ impl SharedState {
             raft_compactor: std::sync::OnceLock::new(),
             raft_applied_index_sink: std::sync::OnceLock::new(),
             raft_apply_gates: std::sync::OnceLock::new(),
+            raft_disk_halts: std::sync::OnceLock::new(),
             raft_read_gate: std::sync::OnceLock::new(),
             multi_raft: std::sync::OnceLock::new(),
             cluster_epoch: std::sync::OnceLock::new(),
@@ -253,7 +256,11 @@ impl SharedState {
             array_merger_registry: std::sync::Arc::new(
                 crate::control::array_sync::MergerRegistry::new(),
             ),
-            mirror_link_registry: Arc::new(crate::control::mirror::MirrorLinkRegistry::new()),
+            mirror: {
+                let mirror = crate::control::mirror::MirrorState::default();
+                surrogate_assigner.install_mirror_fence(Arc::clone(&mirror.fence));
+                mirror
+            },
             database_registry,
             surrogate_registry,
             surrogate_assigner,
@@ -280,10 +287,7 @@ impl SharedState {
             consumer_assignments: crate::event::cdc::consumer_group::ConsumerAssignments::new(),
             watermark_tracker: Arc::new(crate::event::watermark_tracker::WatermarkTracker::new()),
             event_plane_budget: Arc::new(crate::event::budget::EventPlaneBudget::new()),
-            cross_shard_dispatcher: None,
-            cross_shard_dlq: None,
-            cross_shard_metrics: None,
-            cross_shard_dedup: std::sync::OnceLock::new(),
+            cross_shard: super::CrossShardState::default(),
             redo_chunks,
             departure_fence: Default::default(),
             kafka_manager,

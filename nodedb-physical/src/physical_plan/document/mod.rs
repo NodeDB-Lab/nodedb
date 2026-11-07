@@ -30,6 +30,6 @@ pub use timeseries_schema::TimeseriesSchema;
 pub use types::{
     BalancedDef, EnforcementOptions, GeneratedColumnSpec, MaterializedSumBinding, PeriodLockConfig,
     RegisteredIndex, RegisteredIndexState, ReturningColumns, ReturningItem, ReturningSpec,
-    StorageMode,
+    StorageConversion, StorageMode,
 };
 pub use update_value::UpdateValue;

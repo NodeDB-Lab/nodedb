@@ -259,10 +259,10 @@ pub(super) fn spawn_mv_persist(shared_state: &SharedState, shutdown: &ShutdownWa
 /// dispatcher, transport, metrics, and DLQ are all wired.
 pub(super) fn spawn_cross_shard_dispatcher(shared_state: &SharedState, shutdown: &ShutdownWatch) {
     let (Some(dispatcher), Some(transport), Some(metrics), Some(dlq)) = (
-        shared_state.cross_shard_dispatcher.as_ref(),
+        shared_state.cross_shard.dispatcher.as_ref(),
         shared_state.cluster_transport.as_ref(),
-        shared_state.cross_shard_metrics.as_ref(),
-        shared_state.cross_shard_dlq.as_ref(),
+        shared_state.cross_shard.metrics.as_ref(),
+        shared_state.cross_shard.dlq.as_ref(),
     ) else {
         return;
     };

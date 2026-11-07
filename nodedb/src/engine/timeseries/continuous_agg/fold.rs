@@ -31,6 +31,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use nodedb_types::{CollectionKey, DatabaseId, QualifiedCollection};
+
 use super::cut::folds_at_cuts;
 use super::manager::{AggKey, ContinuousAggregateManager};
 use super::partial::ColumnLayout;
@@ -63,6 +65,21 @@ pub enum FoldScope {
     Expiring,
 }
 
+/// The storage name of `source`, a catalog name. The Data Plane files a
+/// collection of a named database under its qualified name, and a root takes
+/// that name wherever per-root state and partitions meet.
+pub(super) fn storage_root(database_id: u64, source: &str) -> String {
+    QualifiedCollection::new(DatabaseId::new(database_id), source)
+        .as_str()
+        .to_string()
+}
+
+/// The catalog name a definition's `source` holds, from a root's storage name.
+pub(super) fn source_name(database_id: u64, root: &str) -> &str {
+    CollectionKey::from_qualified_str(DatabaseId::new(database_id), root)
+        .map_or(root, |key| key.name())
+}
+
 /// What one tier does with a partition's delta.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Take {
@@ -72,9 +89,10 @@ enum Take {
 }
 
 impl ContinuousAggregateManager {
-    /// Root raw source of `name`: the first source in its chain that is not
-    /// itself a registered aggregate. `None` when `name` is not registered
-    /// or its chain loops.
+    /// Root raw source of `name`, under the storage name the Data Plane files
+    /// its partitions by: the first source in its chain that is not itself a
+    /// registered aggregate. `None` when `name` is not registered or its chain
+    /// loops.
     pub fn root_of(&self, database_id: u64, tenant_id: u64, name: &str) -> Option<String> {
         let mut current = name.to_string();
         let mut seen = HashSet::new();
@@ -89,7 +107,7 @@ impl ContinuousAggregateManager {
                 .definitions
                 .contains_key(&(database_id, tenant_id, def.source.clone()))
             {
-                return Some(def.source.clone());
+                return Some(storage_root(database_id, &def.source));
             }
             current = def.source.clone();
         }
@@ -112,7 +130,7 @@ impl ContinuousAggregateManager {
     pub fn chain(&self, database_id: u64, tenant_id: u64, root: &str) -> Vec<String> {
         let mut order = Vec::new();
         let mut seen = HashSet::new();
-        let mut frontier = vec![root.to_string()];
+        let mut frontier = vec![source_name(database_id, root).to_string()];
         while !frontier.is_empty() {
             let mut next = Vec::new();
             for source in frontier {
@@ -188,6 +206,7 @@ impl ContinuousAggregateManager {
             partition,
         } = target;
         let tiers = self.chain(database_id, tenant_id, root);
+        let source = source_name(database_id, root);
         let mut deltas: HashMap<String, Buckets> = HashMap::new();
         let mut folded_into = Vec::new();
         let mut rows = 0u64;
@@ -199,7 +218,7 @@ impl ContinuousAggregateManager {
             let Some(def) = self.definitions.get(&key) else {
                 continue;
             };
-            let delta = if def.source == root {
+            let delta = if def.source == source {
                 let result = refresh::refresh_rows(def, src);
                 rows = result.rows_processed;
                 max_ts = max_ts.max(result.max_ts);
@@ -260,9 +279,10 @@ impl ContinuousAggregateManager {
         drain: &ColumnarDrainResult,
         now_ms: i64,
     ) -> Vec<String> {
+        let bare = source_name(database_id, source);
         if !self
             .dependencies
-            .contains_key(&(database_id, tenant_id, source.to_string()))
+            .contains_key(&(database_id, tenant_id, bare.to_string()))
         {
             return Vec::new();
         }
@@ -367,6 +387,35 @@ mod tests {
         partition: "p1",
     };
 
+    /// A collection of a named database carries a qualified storage name, and
+    /// its definition carries the catalog name. A flush and a tick meet on one
+    /// root, so a fold and a refresh cut complete there.
+    #[test]
+    fn a_named_databases_root_folds_under_its_storage_name() {
+        const DB: u64 = 1200;
+        const ROOT: &str = "1200/metrics";
+        let mut minute = exact_def("v_1m", "metrics", "1m");
+        minute.database_id = DB;
+        let mut hour = exact_def("v_1h", "v_1m", "1h");
+        hour.database_id = DB;
+        let mut mgr = loaded_manager(vec![minute, hour]);
+        assert_eq!(mgr.root_of(DB, 1, "v_1h").as_deref(), Some(ROOT));
+        assert_eq!(mgr.chain(DB, 1, ROOT), vec!["v_1m", "v_1h"]);
+        let rows = exact_rows();
+        assert_eq!(
+            mgr.on_flush(DB, 1, ROOT, "p1", &int_drain(&rows), T0),
+            vec!["v_1m", "v_1h"]
+        );
+        assert!(
+            !mgr.needs_fold(DB, 1, ROOT, "p1", FoldScope::Tick),
+            "the tick owes the root nothing"
+        );
+        assert_eq!(
+            mgr.get_watermark(DB, 1, "v_1m").map(|w| w.rows_aggregated),
+            Some(7)
+        );
+    }
+
     #[test]
     fn a_partition_folds_once_per_tier() {
         let mut mgr = loaded_manager(vec![exact_def("v_1m", "metrics", "1m")]);
@@ -415,7 +464,7 @@ mod tests {
         let mut mgr = loaded_manager(vec![minute, exact_def("v_1h", "v_1m", "1h")]);
         let rows = exact_rows();
         mgr.on_flush(0, 1, "metrics", "p1", &int_drain(&rows[..3]), T0);
-        mgr.apply_retention(T0 + 3_600_000 + 700_000, 1);
+        mgr.apply_retention(T0 + 3_600_000 + 700_000, 1, 0, 1);
         mgr.on_flush(0, 1, "metrics", "p2", &int_drain(&rows[3..]), T0);
         assert_eq!(materialized(&mgr, "v_1h"), ad_hoc(&rows, 3_600_000));
     }

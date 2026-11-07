@@ -20,6 +20,7 @@ use crate::control::lease::QueryLeaseScope;
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::security::request_scope::RequestAuthScope;
 use crate::control::sequence::SessionSequenceAccess;
+use crate::control::sequence::error_map::sequence_error_to_error;
 use crate::control::server::response_shape::schema::OutputSchema;
 use crate::control::server::response_shape::types::{describe_plan, replaced_write_outcome};
 use crate::control::server::shared::cluster_array_dispatch::{
@@ -33,8 +34,9 @@ use crate::control::server::shared::session::{
     DmlTxnCtx, ResponseReads, record_reads_for_response,
 };
 use crate::control::server::shared::txn_route::{
-    StatementEvents, TxnTaskContext, TxnTaskOutcome, route_txn_task,
+    StatementEvents, TxnTaskContext, TxnTaskOutcome, route_txn_task, statement_fires_joined_body,
 };
+use crate::control::server::shared::write_admission::plan_is_write;
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TenantId};
 
@@ -239,11 +241,16 @@ pub(crate) async fn run_statement_loop(
         // TRUNCATE RESTART IDENTITY. Autocommit only: a buffered truncate
         // restarts its sequences at COMMIT.
         if let Some((collection, true)) = plan.truncate_target() {
-            state.sequence_registry.restart_sequences_for_collection(
-                task_database_id.as_u64(),
-                exec.tenant_id().as_u64(),
-                collection.as_str(),
-            );
+            state
+                .sequence_registry
+                .restart_sequences_for_collection(
+                    task_database_id.as_u64(),
+                    exec.tenant_id().as_u64(),
+                    collection.as_str(),
+                )
+                .map_err(|error| {
+                    StatementError::Error(sequence_error_to_error(collection.as_str(), error))
+                })?;
         }
 
         fold.last_lsn = task_response.watermark_lsn.as_u64();
@@ -276,13 +283,30 @@ pub(crate) async fn run_implicit_statement(
     statement: PlannedStatement,
     client: &DmlTxnCtx<'_>,
 ) -> Result<StatementAnswer, StatementError> {
+    let cuts_at_commit = reads_nothing_after_truncate(exec.state, &statement.tasks);
     crate::control::trigger::statement_txn::with_statement_txn_lifted(
         exec.state,
         exec.identity,
         client,
         true,
         StatementError::Error,
-        async |txn: &DmlTxnCtx<'_>| run_statement_loop(exec, statement, Some(txn)).await,
+        async |txn: &DmlTxnCtx<'_>| {
+            if cuts_at_commit {
+                txn.sessions.allow_tx_edge_truncate(txn.session_id);
+            }
+            run_statement_loop(exec, statement, Some(txn)).await
+        },
     )
     .await
+}
+
+/// Whether an implicit transaction of `tasks` reads no edge after a TRUNCATE:
+/// no task after it reads, and no joined body runs. Its edge shares then cut the
+/// edges at the transaction's turn, and nothing observes them before that.
+fn reads_nothing_after_truncate(state: &SharedState, tasks: &[PhysicalTask]) -> bool {
+    tasks
+        .iter()
+        .skip_while(|task| !crate::control::planner::calvin::edge_truncate::is_truncate(&task.plan))
+        .all(|task| plan_is_write(&task.plan))
+        && !statement_fires_joined_body(state, tasks)
 }

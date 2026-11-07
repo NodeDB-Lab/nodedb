@@ -26,6 +26,7 @@ use super::query::{DatabaseQueryParam, resolve_database_id};
 use crate::control::security::audit::ArcAuditEmitter;
 use crate::control::security::identity::Permission;
 use crate::control::security::request_scope::RequestAuthScope;
+use crate::control::security::sessions::{SessionBindRequest, bind_session, stream_until_ended};
 use crate::control::server::shared::authorization::authorize_collection;
 use crate::control::state::SharedState;
 use crate::event::cdc::CdcSubscriberScope;
@@ -153,6 +154,12 @@ pub async fn stream_events(
             .roles
             .clone();
 
+    let binding = bind_session(
+        &state.shared,
+        SessionBindRequest::new(&identity.0, "sse", peer.as_str()).in_database(database_id),
+    )
+    .map_err(ApiError::from)?;
+
     let stream = async_stream::stream! {
         let mut subscriber = CdcSubscriberScope::new(subscriber_tenant, subscriber_roles);
 
@@ -252,7 +259,7 @@ pub async fn stream_events(
         // _guard dropped here on any exit → leave() called.
     };
 
-    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+    Ok(Sse::new(stream_until_ended(stream, binding)).keep_alive(KeepAlive::default()))
 }
 
 /// Generate a unique consumer ID using process ID + monotonic counter.

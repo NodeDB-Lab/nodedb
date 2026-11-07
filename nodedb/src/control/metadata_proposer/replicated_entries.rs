@@ -190,8 +190,48 @@ pub async fn propose_database_id_reserve(
         &MetadataEntry::DatabaseIdReserve {
             node_id,
             request_id,
+            id_space: shared.database_id_space()?,
         },
         "database_id_reserve",
+    )
+    .await
+}
+
+/// Propose a sequence counter entry and wait until this node applied it.
+///
+/// A counter stamps no descriptor version, so it takes no DDL preparation lease.
+/// A node that dies holding that lease then never stalls a `nextval`.
+pub async fn propose_sequence_entry(
+    shared: &SharedState,
+    entry: &crate::control::catalog_entry::CatalogEntry,
+) -> Result<u64, Error> {
+    let payload = crate::control::catalog_entry::encode(entry).map_err(|e| Error::Config {
+        detail: format!("sequence_counter encode: {e}"),
+    })?;
+    propose_and_wait(
+        shared,
+        &MetadataEntry::CatalogDdl { payload },
+        "sequence_counter",
+    )
+    .await
+}
+
+/// Propose a mirror's next cut state and wait until this node applied it. A
+/// source's catalog entries travel inside it, frozen as the source stamped them.
+pub async fn propose_mirror_cut(
+    shared: &SharedState,
+    database: u64,
+    advance: nodedb_types::MirrorCutAdvance,
+    catalog: Vec<Vec<u8>>,
+) -> Result<u64, Error> {
+    propose_and_wait(
+        shared,
+        &MetadataEntry::MirrorCut {
+            database,
+            advance,
+            catalog,
+        },
+        "mirror_cut",
     )
     .await
 }
@@ -204,7 +244,8 @@ pub async fn propose_database_id_reserve(
 /// stalls another node's cursor.
 ///
 /// The entry carries the running statement's audit context, if any: a user
-/// `COMMIT OFFSET` is audited, a system cursor is not.
+/// `COMMIT OFFSET` is audited, a system cursor is not. A cursor is reader
+/// state, so a mirror takes it and no mirror check runs here.
 pub async fn propose_cursor_commit(
     shared: &SharedState,
     commit: OffsetCommit,

@@ -64,6 +64,19 @@ pub async fn create_sequence(
         return Ok(status("CREATE SEQUENCE"));
     }
 
+    // A value holds a gap whenever its transaction rolls back or its node stops
+    // with a reserved range, so no option here can keep the promise.
+    if req.gap_free {
+        return Err(DdlError::new(
+            "0A000",
+            format!(
+                "sequence \"{}\": GAP_FREE is not supported, because a rollback or a node stop \
+                 leaves a gap; create the sequence without GAP_FREE",
+                req.name
+            ),
+        ));
+    }
+
     let mut def = StoredSequence::new(
         db,
         tenant_id,
@@ -195,6 +208,7 @@ async fn alter_restart(
         is_called: false,
         epoch: def.epoch,
         period_key: String::new(),
+        reservation: None,
     };
     let entry = crate::control::catalog_entry::CatalogEntry::PutSequenceState(Box::new(new_state));
     crate::control::metadata_proposer::propose_catalog_entry_async(state, &entry)

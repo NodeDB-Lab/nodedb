@@ -82,7 +82,7 @@ pub(crate) fn invalidate_gateway_cache_for_entry(entry: &CatalogEntry, shared: &
         CatalogEntry::DeleteSequence { .. } => {
             // no-op: same reason as PutSequence.
         }
-        CatalogEntry::PutSequenceState(_) => {
+        CatalogEntry::PutSequenceState(_) | CatalogEntry::ReserveSequenceRange { .. } => {
             // no-op: runtime counter state — the planner never reads seq state.
         }
 
@@ -344,6 +344,15 @@ pub(crate) fn invalidate_gateway_cache_for_entry(entry: &CatalogEntry, shared: &
         }
         CatalogEntry::PutBackupScheduleMark(_) => {
             // no-op: a backup schedule mark never enters a query plan.
+        }
+        CatalogEntry::PutMirrorCutState { .. } => {
+            // no-op: the read gate reads the row when a statement runs.
+        }
+        CatalogEntry::StepMirrorStatus { .. } | CatalogEntry::ClaimMirrorDatabase(_) => {
+            // no-op: every gate reads the fence or the row when a statement runs.
+        }
+        CatalogEntry::PutMirrorPin(_) | CatalogEntry::DeleteMirrorPin { .. } => {
+            // no-op: a retention pin never enters a query plan.
         }
         CatalogEntry::PutSpatialRefSys(_) => {
             // no-op: no cached plan resolved a code before it was defined.

@@ -10,6 +10,7 @@
 //! - [`status`]: observability snapshots (`group_statuses`,
 //!   `group_membership`).
 //! - [`proposals`]: leadership checks, proposals and log access.
+//! - [`committed_read`]: a bounded read of a group's committed log.
 //! - [`rpc_dispatch`]: inbound RPC routing to the correct group and the
 //!   corresponding response handlers.
 //! - [`conf_change`]: `propose_conf_change` / `apply_conf_change` with
@@ -28,6 +29,7 @@
 //! - [`sequencer_cut_floor`]: the cut floors of the markers this node
 //!   appends to its sequencer log, which every epoch it mints stays above.
 
+pub mod committed_read;
 pub mod conf_change;
 pub mod conf_change_gate;
 pub mod core;
@@ -43,9 +45,11 @@ pub mod rpc_dispatch;
 pub mod sequencer_cut_floor;
 pub mod status;
 
+pub use committed_read::{CommittedRead, LogProbeView};
 pub use core::{MultiRaft, MultiRaftReady, SnapshotRequirement};
 pub use leader_board::LeaderBoard;
 pub use mount::{GroupMountSpec, OpenedGroup};
 pub use ordinal_floor::{FloorAnswer, FloorRound};
 pub use peer_contact::PeerAckSample;
+pub use proposals::{AdmissionTerm, GatedPropose};
 pub use status::{GroupMembership, GroupStatus};

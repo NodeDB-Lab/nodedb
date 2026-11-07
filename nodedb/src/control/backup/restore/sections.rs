@@ -88,6 +88,8 @@ pub(in crate::control::backup) fn append_snapshot(
         // The restore installs the catalogs before it re-issues any row, so
         // every re-issued row keeps the `_ts_series` id it had.
         ts_series_catalogs,
+        // The restore re-issues the rows as new writes in the row's mode.
+        storage_conversions: _,
         columnar_engines,
         vector_params,
         index_configs,
@@ -222,6 +224,14 @@ pub(super) async fn apply_metadata_sections(
                     // The source cluster's incarnation names nothing here: an
                     // existing collection keeps its own, a new one gets one.
                     coll.incarnation = nodedb_types::Hlc::ZERO;
+                    // Restored rows arrive as new writes in the row's mode. An
+                    // existing collection keeps its conversion generation, so
+                    // its replicas stay in step with it. A new one has none.
+                    coll.storage_conversion = state
+                        .credentials
+                        .catalog()
+                        .get_collection(coll.database_id, coll.tenant_id, &coll.name)?
+                        .and_then(|existing| existing.storage_conversion);
                     // Propose the collection so every node's applier
                     // (`catalog_entry::apply::collection::put`) writes the
                     // row — mirroring CREATE COLLECTION and DROP COLLECTION.

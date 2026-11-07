@@ -148,6 +148,37 @@ impl DomainContext for CalvinApplyHalted<'_> {
     }
 }
 
+/// A settled redo record named a collection outside its database. The record
+/// stays applied.
+pub(in crate::diag) struct RedoNoteMisnamed<'a> {
+    pub core_id: usize,
+    pub lsn: u64,
+    pub collection: &'a str,
+}
+
+impl DomainContext for RedoNoteMisnamed<'_> {
+    fn domain_kind(&self) -> &'static str {
+        "nodedb.redo_note_misnamed"
+    }
+
+    fn grouping_key(&self) -> String {
+        // The name points at the code that built it. The LSN is the occurrence.
+        format!("collection={}", self.collection)
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "core_id": self.core_id,
+            "lsn": self.lsn,
+            "collection": self.collection,
+            "effect": "the record stays applied; the core forgot its newest-ordinal cache \
+                       and recomputes it",
+            "operator_action": "report this: the code that names this collection on a redo \
+                                record omits its database qualifier",
+        })
+    }
+}
+
 /// A Data-Plane core fail-stopped because its state is unknown: a rollback
 /// failed part way, or the work owed after a committed record's install
 /// failed.

@@ -5,6 +5,7 @@
 use super::images::{ReturningImageRow, RowLocation};
 use super::reply::{CalvinReply, InstalledTimeseries};
 use crate::bridge::envelope::ErrorCode;
+use crate::control::server::shared::sql::affected_payload::read_affected_fields;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::returning_rows::build_rejecting_rows_payload;
 use crate::data::executor::handlers::transaction::redo_apply::TsInstalled;
@@ -44,7 +45,13 @@ impl CoreLoop {
                 if counts.is_empty() {
                     return Ok(payload);
                 }
-                return counts.to_bytes().map_err(ErrorCode::from);
+                // The plans beside the ingests staged this count. A resolved
+                // ingest stages none of its own.
+                let plain = read_affected_fields(&payload).map_or(0, |fields| fields.affected);
+                return counts
+                    .with_plain_count(plain)
+                    .to_bytes()
+                    .map_err(ErrorCode::from);
             }
             CalvinReply::Rows(payload) => return Ok(payload),
             CalvinReply::InstalledTimeseries(installed) => {

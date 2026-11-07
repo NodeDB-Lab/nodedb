@@ -7,6 +7,7 @@ pub mod attr_col;
 pub mod column_codec;
 pub mod coord_delta;
 pub mod coord_rle;
+pub mod frame;
 pub mod limits;
 pub mod tag;
 pub mod tile_decode;

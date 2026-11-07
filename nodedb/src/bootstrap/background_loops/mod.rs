@@ -12,6 +12,5 @@ pub mod spawn;
 pub mod storage_bytes;
 pub mod timers;
 
-pub use mirror::log_mirror_restart_decisions;
 pub use response_poller::spawn_response_poller;
 pub use spawn::{EventPlaneComponents, spawn_background_loops};

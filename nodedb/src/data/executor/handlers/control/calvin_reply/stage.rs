@@ -26,6 +26,8 @@ use super::images::{ReturningImageRow, RowLocation, staged_row_image};
 use super::reply::{CalvinReply, CalvinStaging, InstalledTimeseries, PostImages};
 use super::target::{ReplyImage, ReturningTarget, RowEngine, returning_target};
 use crate::bridge::envelope::ErrorCode;
+use crate::control::server::response_shape::types::plan_count_reads_reply;
+use crate::control::server::shared::sql::affected_payload::read_affected_fields;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::columnar_write::row_values_to_user_object;
 use crate::data::executor::handlers::returning_rows::build_rows_payload;
@@ -42,11 +44,10 @@ use crate::util::rmpv_value::rmpv_to_value;
 type CollKey = (DatabaseId, TenantId, String);
 
 impl CoreLoop {
-    /// Stage one Calvin plan under `txn_id` and fold its reply into
-    /// `staging.reply`.
+    /// Stage one Calvin plan under `txn_id` and fold its reply into `staging`.
     ///
     /// A `RETURNING` plan's rows replace the reply. A later plan without
-    /// `RETURNING` keeps them, and replaces only an affected count.
+    /// `RETURNING` keeps them. A counted plan adds to `staging.total`.
     pub(in crate::data::executor) fn stage_calvin_plan(
         &mut self,
         task: &ExecutionTask,
@@ -91,9 +92,26 @@ impl CoreLoop {
                 // A plan that staged no reply here, such as a TRUNCATE's
                 // edge share, keeps the reply an earlier plan of the slice
                 // decided.
-                if !reply.has_rows() && !staged.is_empty() && !(derived && count_is_the_statements)
+                if is_resolved_ingest(plan) {
+                    // The install answers this plan's count, and a derived
+                    // plan's count never answers beside it.
+                    staging.resolved_ingest = true;
+                    staging.user_count = true;
+                } else if !reply.has_rows()
+                    && !staged.is_empty()
+                    && !(derived && count_is_the_statements)
                 {
-                    *reply = CalvinReply::Count(staged);
+                    // A count the statement's plans decided adds up: one plan
+                    // that matched no row never hides another's count, and no
+                    // plan without a count replaces their total.
+                    let counted = (!derived && plan_count_reads_reply(plan))
+                        .then(|| read_affected_fields(&staged))
+                        .flatten();
+                    match counted {
+                        Some(fields) => staging.total.get_or_insert_default().add(&fields),
+                        None if staging.total.is_none() => *reply = CalvinReply::Count(staged),
+                        None => {}
+                    }
                     staging.user_count |= !derived;
                 }
             }

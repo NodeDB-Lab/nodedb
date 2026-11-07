@@ -252,6 +252,7 @@ pub async fn assign_surrogates_routed(
     if missing.is_empty() {
         return finish(out, collection);
     }
+    state.surrogate_assigner.refuse_mirror_bind(collection)?;
     let winners = assign_unbound_routed(state, collection, tenant_id, &missing, trace_id).await?;
     fill(&mut out, pks, &missing, winners.into_iter().map(Some));
     finish(out, collection)

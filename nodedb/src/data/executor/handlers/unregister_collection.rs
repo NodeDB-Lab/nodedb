@@ -320,6 +320,13 @@ impl CoreLoop {
         // Lockstep: drop the surrogate sidecar for the same keys.
         self.columnar_flushed_surrogates
             .retain(|(d, t, c), _| !(*d == db && *t == tid && c == &coll));
+        // A re-CREATE restarts segment ids and reuses partition names, so no
+        // quarantine record of this collection outlives its segments.
+        if let Some(registry) = &self.quarantine_registry {
+            registry.release_collection(&crate::storage::quarantine::CollectionScope::new(
+                db_raw, tid_raw, collection,
+            ));
+        }
         // The dropped collection's row-version history releases its charge.
         self.recharge_columnar_history(&(db, tid, coll.clone()));
 
@@ -504,6 +511,33 @@ mod tests {
         )
         .expect("open core loop");
         (core, dir)
+    }
+
+    /// A dropped collection leaves no quarantine record. A re-CREATE restarts
+    /// segment ids, and the record of an old id must not meet the new segment.
+    #[test]
+    fn a_clear_releases_the_collections_quarantine_records() {
+        use crate::storage::quarantine::{CollectionScope, QuarantineRegistry, SegmentKey};
+
+        let (mut core, _dir) = open_core();
+        let registry = Arc::new(QuarantineRegistry::new());
+        core.set_quarantine_registry(Arc::clone(&registry));
+        let database = DatabaseId::DEFAULT;
+        let tenant = TenantId::new(7);
+        let segment = |collection: &str| SegmentKey::Columnar {
+            scope: CollectionScope::new(database.as_u64(), tenant.as_u64(), collection),
+            segment_id: 1,
+        };
+        for key in [segment("dropped"), segment("kept")] {
+            registry.record_failure(key.clone(), "crc").expect("strike");
+            registry.record_failure(key, "crc").expect_err("quarantine");
+        }
+
+        core.clear_collection_all_engines(database, tenant, "dropped", false, true, true)
+            .expect("clear");
+
+        assert!(!registry.is_quarantined(&segment("dropped")));
+        assert!(registry.is_quarantined(&segment("kept")));
     }
 
     #[test]

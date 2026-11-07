@@ -139,12 +139,27 @@ fn read_scope_tokens(
     let Some(doc_len) = prior_doc_length(txn, doc, index)? else {
         return Ok(None);
     };
+    tokens_from_postings(txn, doc, index, doc_len).map(Some)
+}
+
+/// The analyzed tokens of `doc` in `index`, in order, rebuilt from its
+/// postings. Indexing gives every token one position below `doc_len`.
+///
+/// A position past `doc_len` or a position no posting covers is an error, so
+/// a damaged index never yields a shorter text. The positions are counted
+/// before the token vector exists, so a corrupt length allocates nothing.
+pub(super) fn tokens_from_postings(
+    txn: &redb::WriteTransaction,
+    doc: IndexDocScope<'_>,
+    index: IndexScope<'_>,
+    doc_len: u32,
+) -> crate::Result<Vec<String>> {
     let terms = doc_terms::occupied_terms(txn, doc, index, true)?;
     let postings = txn
         .open_table(POSTINGS)
         .map_err(|e| inverted_err("open postings", e))?;
-    let mut tokens = vec![String::new(); doc_len as usize];
-    for term in terms {
+    let mut placed: Vec<(u32, usize)> = Vec::new();
+    for (term_at, term) in terms.iter().enumerate() {
         let Some(posting) = posting_rows::read_one(
             &postings,
             doc.database_id,
@@ -157,17 +172,30 @@ fn read_scope_tokens(
             continue;
         };
         for &position in &posting.positions {
-            let slot = tokens.get_mut(position as usize).ok_or_else(|| {
-                inverted_err(
+            if position >= doc_len {
+                return Err(inverted_err(
                     "document image",
                     format!(
                         "term '{term}' sits at position {position} past the document \
                          length {doc_len}"
                     ),
-                )
-            })?;
-            slot.clone_from(&term);
+                ));
+            }
+            placed.push((position, term_at));
         }
+    }
+    if placed.len() != doc_len as usize {
+        return Err(inverted_err(
+            "document image",
+            format!(
+                "postings cover {} positions of a document of length {doc_len}",
+                placed.len()
+            ),
+        ));
+    }
+    let mut tokens = vec![String::new(); doc_len as usize];
+    for (position, term_at) in placed {
+        tokens[position as usize].clone_from(&terms[term_at]);
     }
     if let Some(position) = tokens.iter().position(String::is_empty) {
         return Err(inverted_err(
@@ -175,5 +203,5 @@ fn read_scope_tokens(
             format!("no posting covers position {position} of {doc_len}"),
         ));
     }
-    Ok(Some(tokens))
+    Ok(tokens)
 }

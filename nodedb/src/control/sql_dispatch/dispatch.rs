@@ -185,6 +185,7 @@ pub async fn send_publish(state: &SharedState, publish: &PreparedPublish) -> cra
             tenant_id: crate::types::TenantId::new(publish.tenant_id),
             collection: t,
         }),
+        Err(PublishError::Refused(refusal)) => Err(*refusal),
         Err(PublishError::Persistence(e)) => Err(crate::Error::Dispatch {
             detail: format!("publish to '{topic_name}' failed: {e}"),
         }),

@@ -3,8 +3,8 @@
 //! Concurrent session store keyed by collision-free session identities.
 
 use std::collections::HashMap;
-use std::sync::RwLock;
 use std::sync::atomic::Ordering::Relaxed;
+use std::sync::{Arc, RwLock};
 
 use nodedb_types::DatabaseId;
 
@@ -89,6 +89,28 @@ impl SessionStore {
             session.admission_permit = Some(permit);
         })
         .is_some()
+    }
+
+    /// Park the session's registry binding on its entry. Returns `false` when no
+    /// session is registered under `id`, and the dropped binding removes its row.
+    pub fn set_binding(
+        &self,
+        id: impl Into<SessionId>,
+        binding: Arc<crate::control::security::sessions::SessionBinding>,
+    ) -> bool {
+        self.write_session(id, move |session| {
+            session.binding = Some(binding);
+        })
+        .is_some()
+    }
+
+    /// The session's registry binding, once startup has parked it.
+    pub fn binding(
+        &self,
+        id: impl Into<SessionId>,
+    ) -> Option<Arc<crate::control::security::sessions::SessionBinding>> {
+        self.read_session(id, |session| session.binding.clone())
+            .flatten()
     }
 
     /// Register one immutable typed connection. Existing registrations are

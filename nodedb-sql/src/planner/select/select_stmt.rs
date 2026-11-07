@@ -189,6 +189,7 @@ pub(super) fn plan_select(
                 &catalog.crs_context(),
             )? {
                 let mut plan = plan;
+                super::relation_leaf::refuse_leaf_over_statement_relation(&plan, catalog)?;
                 plan.set_search_temporal(temporal);
                 refuse_dropped_clauses(
                     &plan,

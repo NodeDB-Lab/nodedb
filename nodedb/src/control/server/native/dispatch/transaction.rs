@@ -114,6 +114,11 @@ pub(crate) fn handle_begin(ctx: &DispatchCtx<'_>, seq: u64, modes: &TxnModes) ->
 
 pub(crate) async fn handle_commit(ctx: &DispatchCtx<'_>, seq: u64) -> NativeResponse {
     let dp = NativeTxnDp { state: ctx.state };
+    let sync_database = crate::control::mirror::source::sync::commit_sync_database(
+        ctx.state,
+        ctx.sessions,
+        ctx.peer_addr,
+    );
     match commit::run_commit(
         ctx.sessions,
         ctx.peer_addr.into(),
@@ -123,7 +128,10 @@ pub(crate) async fn handle_commit(ctx: &DispatchCtx<'_>, seq: u64) -> NativeResp
     )
     .await
     {
-        CommitOutcome::Committed => NativeResponse::status_row(seq, "COMMIT"),
+        CommitOutcome::Committed => {
+            let response = NativeResponse::status_row(seq, "COMMIT");
+            super::sql_planned::mirror_confirmed(ctx, seq, sync_database, response).await
+        }
         CommitOutcome::Aborted { reason } => commit_abort_to_native(seq, &reason),
     }
 }

@@ -4,26 +4,21 @@
 //!
 //! This is the session-UNAWARE core of the implicit-edge dependent-predicate
 //! path, extracted from the pgwire `dispatch_calvin_multishard` OLLP branch so
-//! the native protocol path can share one implementation. Two items live here:
+//! the native protocol path can share one implementation.
 //!
-//! - [`plan_needs_implicit_edge_recon`] — the detection gate: given a task set,
-//!   return the collection + database of the first dependent-predicate task
-//!   (`BulkUpdate`/`BulkDelete`), CRDT document delete or TRUNCATE whose
-//!   target collection `has_implicit_edges`, else `None`. It does NOT check
-//!   the not-in-txn-block or registry-available guards — those are
-//!   per-protocol / session-state concerns and stay at the call sites.
-//! - [`dispatch_dependent_edge_recon`] — the OLLP orchestration body: pre-exec
-//!   recon scan → derive mirrored EdgeDelete/EdgePut tasks, and for a delete
-//!   the node guards and incident-edge deletes → atomic Calvin submit → OLLP
-//!   drift-retry loop. It returns a protocol-neutral
-//!   [`DependentReconOutcome`]; each protocol synthesises its own command tags
-//!   from the original task list AFTER this returns `Ok`.
+//! [`dispatch_dependent_edge_recon`] is the OLLP orchestration body: pre-exec
+//! recon scan → derive mirrored EdgeDelete/EdgePut tasks, and for a delete the
+//! node guards and incident-edge deletes → atomic Calvin submit → OLLP
+//! drift-retry loop. It returns a protocol-neutral [`DependentReconOutcome`];
+//! each protocol synthesises its own command tags from the original task list
+//! AFTER this returns `Ok`. The detection gate lives in
+//! [`super::dependent_recon_gate`].
 
 use crate::Error;
 use crate::control::cluster::calvin::executor::ollp::error::OllpError;
 use crate::control::planner::calvin::preexec::PreexecScan;
 use crate::control::planner::calvin::{
-    DependentOutcome, DependentRetryArgs, build_single_vshard_predicted_tx_class,
+    DependentOutcome, DependentRetryArgs, TxnReads, build_single_vshard_predicted_tx_class,
     is_dependent_predicate, predicate_class_for_filters, run_dependent_with_retry,
     submit_calvin_routed_assign,
 };
@@ -31,6 +26,7 @@ use crate::control::planner::implicit_edges::{
     EdgeUpdateCtx, append_implicit_edge_delete_tasks, append_implicit_edge_update_tasks,
 };
 use crate::control::server::shared::session::StatementDeadline;
+use crate::control::server::shared::session::read_set::ReadSetEntry;
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TenantId, TraceId};
 use nodedb_physical::physical_plan::OllpPredictedEdge;
@@ -61,62 +57,13 @@ pub struct DependentReconOutcome {
     pub apply_result: Option<crate::bridge::envelope::Response>,
 }
 
-/// Detect whether `tasks` carry a dependent predicate or a TRUNCATE on an
-/// implicit-edge-bearing collection, requiring the edge recon path.
-///
-/// Returns `Some((collection, database_id))` of the FIRST dependent-predicate
-/// task (`BulkUpdate`/`BulkDelete`) or TRUNCATE whose target collection has
-/// `has_implicit_edges` set in the catalog, else `None`.
-///
-/// A genuine catalog READ error propagates as a typed [`crate::Error`]:
-/// misrouting a delete on a real I/O fault will silently skip edge cleanup
-/// (dangling edges). An ABSENT catalog (`None`) or absent collection row
-/// (`Ok(None)`) is treated as non-edge-bearing and yields `None`.
-///
-/// This does NOT check the not-in-transaction-block or registry-available
-/// guards — those differ per protocol / are session-state concerns and stay at
-/// the call sites.
-pub fn plan_needs_implicit_edge_recon(
-    state: &SharedState,
-    tasks: &[PhysicalTask],
-    tenant_id: TenantId,
-) -> crate::Result<Option<(String, DatabaseId)>> {
-    let Some(dep_task) = tasks.iter().find(|t| is_edge_recon_plan(&t.plan)) else {
-        return Ok(None);
-    };
-    // Every edge recon plan names its database-qualified collection.
-    let coll = dep_task
-        .plan
-        .collection()
-        .ok_or_else(|| Error::Internal {
-            detail: "internal invariant break: an edge recon plan names no collection".into(),
-        })?
-        .to_owned();
-    let db = dep_task.database_id;
-    let edge_bearing = {
-        // The plan names the collection database-qualified. The catalog keys
-        // collections by the bare name.
-        let bare = nodedb_types::CollectionKey::from_qualified_str(db, &coll)?.name();
-        let catalog = state.credentials.catalog();
-        catalog
-            .get_collection(db, tenant_id.as_u64(), bare)?
-            .map(|c| c.has_implicit_edges)
-            .unwrap_or(false)
-    };
-    if edge_bearing {
-        Ok(Some((coll, db)))
-    } else {
-        Ok(None)
-    }
-}
-
-/// Whether `plan` takes the edge recon path when its collection is
-/// edge-bearing: a dependent predicate write, a CRDT document delete, or a
-/// TRUNCATE.
-pub fn is_edge_recon_plan(plan: &nodedb_physical::physical_plan::PhysicalPlan) -> bool {
-    is_dependent_predicate(plan)
-        || super::dependent_recon_crdt::is_crdt_doc_delete(plan)
-        || super::edge_truncate::is_truncate(plan)
+/// The settlement reads a recon route carries into its transaction, with the
+/// snapshot ordinal its stages validate them at.
+#[derive(Clone, Copy)]
+pub(super) struct SettledReads<'a> {
+    pub reads: &'a [ReadSetEntry],
+    /// `None` when `reads` is empty.
+    pub snapshot_ordinal: Option<i64>,
 }
 
 /// Drive the implicit-edge OLLP/Calvin reconnaissance dispatch for `tasks`.
@@ -144,19 +91,26 @@ pub fn is_edge_recon_plan(plan: &nodedb_physical::physical_plan::PhysicalPlan) -
 /// typed [`crate::Error`]; the caller maps them to its protocol's error shape.
 ///
 /// `database_id` is supplied by the caller (it comes from the detection gate,
-/// [`plan_needs_implicit_edge_recon`]) so it does not have to be re-derived.
+/// [`super::dependent_recon_gate::plan_needs_implicit_edge_recon`]) so it does
+/// not have to be re-derived.
 ///
 /// The `TxClass` this builds accepts a write set on one vShard
 /// ([`build_single_vshard_predicted_tx_class`]). A delete whose row, node
 /// guard and edges all home on one vShard is a legitimate one-vShard
 /// transaction, and so is a contended single-collection predicate write
 /// routed here by the write-admission gate.
+///
+/// `reads` are the images materialized-sum settlement folded the tasks' balance
+/// deltas from, each at its own cut. Every attempt carries them unchanged and
+/// validates them at the lowest cut. A fresh reconnaissance cannot refresh them:
+/// the shipped deltas stay the ones folded from those images.
 pub async fn dispatch_authorized_dependent_edge_recon(
     state: &SharedState,
     authorized: crate::control::server::shared::authorization::AuthorizedTaskSet,
     identity: &crate::control::security::identity::AuthenticatedIdentity,
     tenant_id: TenantId,
     database_id: DatabaseId,
+    reads: &[ReadSetEntry],
 ) -> crate::Result<DependentReconOutcome> {
     let tasks = authorized
         .into_tasks()
@@ -171,6 +125,7 @@ pub async fn dispatch_authorized_dependent_edge_recon(
         tenant_id,
         database_id,
         user_roles,
+        reads,
     )
     .await
 }
@@ -185,7 +140,8 @@ pub(crate) async fn dispatch_dependent_edge_recon(
     database_id: DatabaseId,
     user_roles: Vec<String>,
 ) -> crate::Result<DependentReconOutcome> {
-    dispatch_dependent_edge_recon_inner(state, tasks, None, tenant_id, database_id, user_roles)
+    // The caller settled no materialized sum, so it holds no read to carry.
+    dispatch_dependent_edge_recon_inner(state, tasks, None, tenant_id, database_id, user_roles, &[])
         .await
 }
 
@@ -196,11 +152,27 @@ async fn dispatch_dependent_edge_recon_inner(
     tenant_id: TenantId,
     database_id: DatabaseId,
     user_roles: Vec<String>,
+    reads: &[ReadSetEntry],
 ) -> crate::Result<DependentReconOutcome> {
+    super::settling_writes::refuse_several_returning_tasks(&tasks)?;
+    // A stage validates nothing without a snapshot ordinal, so every route
+    // below stamps this one on its transaction.
+    let snapshot_ordinal = TxnReads::autocommit(reads)?.snapshot_ordinal;
+    let settled = SettledReads {
+        reads,
+        snapshot_ordinal,
+    };
     // A TRUNCATE empties the collection and tombstones its edges on every
     // vShard, in one transaction.
-    if let Some(truncated) =
-        super::edge_truncate::dispatch_truncate(state, &tasks, identity, tenant_id).await?
+    if let Some(truncated) = super::edge_truncate::dispatch_truncate(
+        state,
+        &tasks,
+        identity,
+        tenant_id,
+        &user_roles,
+        settled,
+    )
+    .await?
     {
         return Ok(DependentReconOutcome {
             tasks_dispatched: tasks.len() as u64,
@@ -215,6 +187,8 @@ async fn dispatch_dependent_edge_recon_inner(
             identity,
             tenant_id,
             database_id,
+            &user_roles,
+            settled,
         )
         .await?
     {
@@ -238,6 +212,20 @@ async fn dispatch_dependent_edge_recon_inner(
             detail: "dependent-edge recon dispatch invoked without a dependent-predicate task"
                 .to_owned(),
         })?;
+
+    // A request of several predicate writes runs as an implicit transaction, so
+    // each reads the rows the one before it wrote. Recon scans one write.
+    if tasks
+        .iter()
+        .filter(|t| is_dependent_predicate(&t.plan))
+        .count()
+        > 1
+    {
+        return Err(Error::Internal {
+            detail: "dependent-edge recon dispatch invoked with several predicate writes"
+                .to_owned(),
+        });
+    }
 
     let orc = orchestrator.ok_or(Error::SequencerUnavailable)?;
     // Hoisted across the retry loop so both `submit` and `rescan` can borrow them.
@@ -376,6 +364,8 @@ async fn dispatch_dependent_edge_recon_inner(
                     .collect();
             }
 
+            #[cfg(feature = "failpoints")]
+            crate::control::fail_gate::before_recon_submit(state.node_id).await;
             orc.submit_with_retry_via(
                 pred_class,
                 tenant_id,
@@ -400,11 +390,12 @@ async fn dispatch_dependent_edge_recon_inner(
                         tenant_id,
                         dep_collection,
                         &surrogates,
-                        &[],
+                        reads,
                     )
                     .map_err(|e| OllpError::Terminal(Box::new(e)))?;
                     if let Some(class) = tx_class.as_mut() {
                         class.set_user_roles(user_roles.to_vec());
+                        class.set_snapshot_ordinal(snapshot_ordinal);
                     }
                     Ok(tx_class)
                 },

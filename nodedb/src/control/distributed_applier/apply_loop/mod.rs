@@ -51,16 +51,20 @@
 //! - [`helpers`]: shared response/result classification helpers.
 //! - [`metadata_floor`]: holds a write until this node's catalog reached the
 //!   one its proposer planned it against.
+//! - [`mirror_hold`]: holds a mirror's entry until the metadata log decides
+//!   its cut, and applies a mirror's seal.
 //! - [`array_cell_route`]: routes an array cell write to the incarnation its
 //!   proposer wrote against.
 //! - [`collection_route`]: applies a collection write only while each
 //!   collection it names holds the incarnation its proposer planned against.
 
+mod aggregate_image;
 mod array_cell_route;
 mod barrier_prefold;
 mod bookkeeping;
 mod calvin_read_result;
 mod calvin_redo;
+mod collection_convert;
 mod collection_route;
 mod context;
 mod cut_barrier;
@@ -70,14 +74,17 @@ mod held_entry;
 mod helpers;
 mod lane;
 mod metadata_floor;
+mod mirror_hold;
 mod panicked;
 mod pipeline;
 mod proposal_gate;
 mod redo_chunk;
+mod retention_drop;
 mod settle;
 mod snapshot_gate;
 mod start;
 mod surrogate_bind;
+mod tenant_purge;
 mod topic_publish;
 mod transaction_redo;
 mod write_dispatch;

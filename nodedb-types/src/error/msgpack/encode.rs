@@ -316,6 +316,9 @@ impl ToMessagePack for ErrorDetails {
             ErrorDetails::MirrorNotPromoted { database } => {
                 write1(writer, TAG_MIRROR_NOT_PROMOTED, database)
             }
+            ErrorDetails::MirrorSyncTimeout { database } => {
+                write1(writer, TAG_MIRROR_SYNC_TIMEOUT, database)
+            }
             ErrorDetails::BackupTenantMismatch { expected, actual } => {
                 write2(writer, TAG_BACKUP_TENANT_MISMATCH, expected, actual)
             }

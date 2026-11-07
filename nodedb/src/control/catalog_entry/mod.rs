@@ -38,6 +38,7 @@ pub mod descriptor_validate;
 pub mod entry;
 pub mod incarnation;
 pub mod kind;
+pub mod mirror_scope;
 pub mod persist_collection;
 pub mod post_apply;
 pub mod role_rules;

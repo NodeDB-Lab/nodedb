@@ -170,6 +170,14 @@ pub async fn build_and_persist(
         // WAL tombstone boundary is the current `next_lsn`: every pre-drop
         // row sits below it and is shadowed on replay, while every row the
         // new collection writes sits at or above it and survives.
+        //
+        // The purge precedes the CREATE's catalog entry, so it needs its own record.
+        super::super::super::audit_intent::record_action_intent(
+            state,
+            identity,
+            Some(tenant_id),
+            &format!("CREATE COLLECTION {name} purges its soft-deleted incarnation"),
+        )?;
         let purge_lsn = state.wal.next_lsn().as_u64();
         // Fail closed: if the hard-purge cannot remove the old
         // catalog row, ABORT the CREATE rather than build a new
@@ -295,6 +303,7 @@ pub async fn build_and_persist(
         owner: identity.username.clone(),
         created_at: now,
         deactivated_at_ns: 0,
+        storage_conversion: None,
         descriptor_version: 0,
         constraint_version: 0,
         crdt_signing_required,

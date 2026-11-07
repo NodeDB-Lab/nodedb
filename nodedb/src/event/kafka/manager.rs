@@ -64,6 +64,8 @@ impl KafkaManager {
             .list_all()
             .into_iter()
             .filter(|def| def.kafka.enabled)
+            // The source delivers a mirror's changes. Delivery starts at PROMOTE.
+            .filter(|def| !state.mirror.fence.is_read_only(def.database_id))
             .collect();
         let registered: std::collections::HashSet<TaskKey> = streams
             .iter()

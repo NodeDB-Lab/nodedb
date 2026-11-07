@@ -2,14 +2,17 @@
 
 //! Per-connection DDL audit context.
 //!
-//! The pgwire statement loop installs a snapshot of the authenticated
-//! identity + the text of each statement on the connection slot before
-//! it dispatches that statement. A statement that carries a secret
-//! installs its redacted text, so no secret reaches the metadata log.
+//! Each protocol's statement entry calls [`AuditScope::statement`] before it
+//! runs the statement: pgwire simple and extended, native SQL, HTTP
+//! `/v1/query`, HTTP NDJSON and WebSocket RPC. The entry is the one place
+//! every DDL path shares: NDJSON and WebSocket RPC never reach the DDL router,
+//! and their `CREATE ARRAY` proposes its catalog entry from the planned path.
+//! A statement that carries a secret installs its redacted text, so no secret
+//! reaches the metadata log.
 //! Every `propose_catalog_entry` call that fires inside that scope picks
 //! up the context and attaches it to the replicated
 //! [`MetadataEntry::CatalogDdlAudited`]
-//! so the applier can emit the J.4 audit record on every replica —
+//! so the applier can emit the audit record on every replica —
 //! including followers that never saw the raw SQL.
 //!
 //! The slot is connection-scoped, not thread-scoped: the statement
@@ -17,10 +20,11 @@
 //! the task to another worker at any of those awaits.
 
 use std::cell::RefCell;
+use std::future::Future;
 
 use crate::control::security::identity::AuthenticatedIdentity;
 
-/// Minimal identity/SQL snapshot captured at pgwire statement entry.
+/// Minimal identity/SQL snapshot captured at a statement's entry.
 ///
 /// Cloned into every `CatalogDdlAudited` entry proposed while it's
 /// active. [`AuditScope::drop`] restores the outer context on scope exit.
@@ -80,6 +84,27 @@ impl Drop for AuditScope {
 /// Return a clone of the currently-installed audit context, if any.
 pub fn current() -> Option<AuditCtx> {
     with_slot(None, |c| c.borrow().clone())
+}
+
+/// Run `future`, an action with no statement text, in slots of its own with
+/// `action` as its audit text.
+///
+/// The future proposes outside any transaction.
+pub async fn with_action_context<F: Future>(
+    identity: &AuthenticatedIdentity,
+    action: String,
+    future: F,
+) -> F::Output {
+    let ctx = AuditCtx {
+        auth_user_id: identity.user_id.to_string(),
+        auth_user_name: identity.username.clone(),
+        sql_text: action,
+    };
+    super::conn_scope::scoped(async move {
+        let _scope = AuditScope::new(ctx);
+        future.await
+    })
+    .await
 }
 
 #[cfg(test)]
@@ -142,6 +167,24 @@ mod tests {
             }
             assert!(current().is_none());
         })
+        .await;
+    }
+
+    /// A session-less request has no connection future, so its request wrapper
+    /// supplies the slots the audit context lives in.
+    #[tokio::test]
+    async fn a_session_less_request_keeps_its_context() {
+        super::super::read_scope::with_request_consistency(
+            crate::types::ReadConsistency::Strong,
+            async {
+                let _g = AuditScope::new(ctx("alice", "CREATE ARRAY a"));
+                tokio::task::yield_now().await;
+                assert_eq!(
+                    current().expect("the request has slots").sql_text,
+                    "CREATE ARRAY a"
+                );
+            },
+        )
         .await;
     }
 

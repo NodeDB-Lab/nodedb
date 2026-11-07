@@ -32,6 +32,7 @@
 //!    nothing was proposed. A forward with no answer returns
 //!    `Error::DeadlineExceeded`: the outcome is unknown.
 
+pub(crate) mod audit_intent;
 pub mod catalog;
 pub mod catalog_batch;
 pub mod ddl_owner;
@@ -52,7 +53,8 @@ pub(crate) use ddl_prepare::{
 pub use handle::{MetadataRaftHandle, ProposeFuture, RaftLoopProposerHandle};
 pub use replicated_entries::{
     propose_cursor_commit, propose_cursor_commit_audited, propose_database_id_reserve,
-    propose_restore_point, propose_surrogate_hwm, propose_surrogate_reserve,
-    propose_sync_peer_bind, propose_sync_producer_fence, propose_sync_producer_register,
+    propose_mirror_cut, propose_restore_point, propose_sequence_entry, propose_surrogate_hwm,
+    propose_surrogate_reserve, propose_sync_peer_bind, propose_sync_producer_fence,
+    propose_sync_producer_register,
 };
 pub use timeouts::DEFAULT_DRAIN_TIMEOUT;

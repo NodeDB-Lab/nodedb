@@ -335,6 +335,7 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             | MetaOp::Compact
             | MetaOp::Checkpoint
             | MetaOp::RegisterContinuousAggregate { .. }
+            | MetaOp::InstallAggregateImage { .. }
             | MetaOp::UnregisterContinuousAggregate { .. }
             | MetaOp::ListContinuousAggregates
             | MetaOp::ContinuousAggregatesRegistered
@@ -345,6 +346,7 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             | MetaOp::PurgeDepartedVShards { .. }
             | MetaOp::PurgeVersionsBelow { .. }
             | MetaOp::KvDueExpiries { .. }
+            | MetaOp::ListTenantCollections { .. }
             | MetaOp::RefreshGraphCount { .. }
             | MetaOp::QueryStorageBytes { .. }
             | MetaOp::PurgeTenant { .. }
@@ -358,7 +360,7 @@ pub fn plan_requires_txn_buffering(plan: &PhysicalPlan) -> bool {
             | MetaOp::TemporalPurgeCrdt { .. }
             | MetaOp::TemporalPurgeArray { .. }
             | MetaOp::AlterArray { .. }
-            | MetaOp::ApplyContinuousAggRetention
+            | MetaOp::ApplyContinuousAggRetention { .. }
             | MetaOp::QueryAggregateWatermark { .. }
             | MetaOp::QueryLastValues { .. }
             | MetaOp::QueryLastValue { .. }
@@ -1981,6 +1983,9 @@ mod tests {
                 target_type: "kv".into(),
                 schema_json: "{}".into(),
                 source_storage_mode: nodedb_physical::physical_plan::StorageMode::Schemaless,
+                target_storage_mode: nodedb_physical::physical_plan::StorageMode::Schemaless,
+                generation: 1,
+                incarnation: nodedb_types::Hlc::ZERO,
             }),
             PhysicalPlan::Meta(MetaOp::CreateTenantSnapshot {
                 tenant_id: 1,
@@ -1995,7 +2000,11 @@ mod tests {
                 collections_to_clear: Vec::new(),
                 group_vshards: Vec::new(),
             }),
-            PhysicalPlan::Meta(MetaOp::PurgeTenant { tenant_id: 1 }),
+            PhysicalPlan::Meta(MetaOp::PurgeTenant {
+                tenant_id: 1,
+                collections: Vec::new(),
+                vshards: Vec::new(),
+            }),
             PhysicalPlan::Meta(MetaOp::UnregisterCollection {
                 tenant_id: 1,
                 name: "c".into(),
@@ -2016,6 +2025,7 @@ mod tests {
             PhysicalPlan::Meta(MetaOp::EnforceTimeseriesRetention {
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 max_age_ms: 0,
+                decided_ms: 0,
                 aggregates: Vec::new(),
             }),
             PhysicalPlan::Meta(MetaOp::TemporalPurgeEdgeStore {
@@ -2032,6 +2042,7 @@ mod tests {
                 tenant_id: 1,
                 collection: QualifiedCollection::new(DatabaseId::DEFAULT, "c"),
                 cutoff_system_ms: 0,
+                decided_ms: 0,
                 aggregates: Vec::new(),
             }),
             PhysicalPlan::Meta(MetaOp::TemporalPurgeCrdt {
@@ -2050,7 +2061,7 @@ mod tests {
                 minimum_audit_retain_ms: None,
                 schema_msgpack: None,
             }),
-            PhysicalPlan::Meta(MetaOp::ApplyContinuousAggRetention),
+            PhysicalPlan::Meta(MetaOp::ApplyContinuousAggRetention { decided_ms: 0 }),
             PhysicalPlan::Meta(MetaOp::QueryAggregateWatermark {
                 aggregate_name: "agg".into(),
             }),

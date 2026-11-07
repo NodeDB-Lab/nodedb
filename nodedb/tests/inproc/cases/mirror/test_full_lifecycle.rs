@@ -11,19 +11,18 @@
 
 use std::time::Duration;
 
-use nodedb_types::{DatabaseId, Lsn, MirrorLagRecord, MirrorMode, MirrorOrigin, MirrorStatus};
+use nodedb_types::{DatabaseId, MirrorMode, MirrorOrigin, MirrorStatus, MirrorStatusStep};
 use tempfile::TempDir;
 
+use nodedb::control::catalog_entry::CatalogEntry;
+use nodedb::control::catalog_entry::apply::apply_to;
 use nodedb::control::security::catalog::database_types::{DatabaseDescriptor, DatabaseStatus};
-use nodedb::control::server::pgwire::ddl::database::mirror::{
-    MirrorDdlKind, apply_mirror_ddl_entry,
-};
 use nodedb::control::server::pgwire::ddl::database::{
     MirrorReadOutcome, check_mirror_read_consistency,
 };
 use nodedb::types::ReadConsistency;
 
-use super::helpers::{now_ms, open_tmp_catalog};
+use super::helpers::{TEST_SOURCE_DATABASE, applied_cut_state, now_ms, open_tmp_catalog};
 
 #[test]
 fn mirror_full_lifecycle() {
@@ -44,8 +43,8 @@ fn mirror_full_lifecycle() {
         mirror_origin: Some(MirrorOrigin {
             source_cluster: "prod_us_cluster".to_string(),
             source_database: DatabaseId::new(0),
+            source_database_name: TEST_SOURCE_DATABASE.to_string(),
             mode: MirrorMode::Async,
-            last_applied: Lsn::new(0),
             status: MirrorStatus::Bootstrapping {
                 bytes_done: 0,
                 bytes_total: 0,
@@ -73,18 +72,16 @@ fn mirror_full_lifecycle() {
     let mut desc = desc.clone();
     if let Some(ref mut o) = desc.mirror_origin {
         o.status = MirrorStatus::Following;
-        o.last_applied = Lsn::new(10);
     }
     catalog.put_database(&desc).expect("update to Following");
-    catalog
-        .put_mirror_lag(
-            db_id,
-            &MirrorLagRecord {
-                last_applied_lsn: Lsn::new(10),
-                last_apply_ms: now_ms(),
-            },
-        )
-        .expect("write lag record");
+    apply_to(
+        &CatalogEntry::PutMirrorCutState {
+            database_id: db_id.as_u64(),
+            state: Box::new(applied_cut_state(10, now_ms(), 0)),
+        },
+        &catalog,
+    )
+    .expect("apply cut state");
 
     let desc = catalog.get_database(db_id).expect("get").expect("missing");
     assert!(
@@ -95,28 +92,7 @@ fn mirror_full_lifecycle() {
         "status must be Following after bootstrap"
     );
 
-    // ── Phase 3: DDL replication ──────────────────────────────────────────
-    let applied = apply_mirror_ddl_entry(
-        &catalog,
-        db_id,
-        Lsn::new(11),
-        now_ms(),
-        "orders",
-        MirrorDdlKind::CreateCollection,
-    )
-    .expect("DDL apply must succeed");
-    assert!(applied, "DDL entry must be applied");
-
-    let mapping = catalog
-        .get_mirror_collection_mapping(db_id, "orders")
-        .expect("get mapping");
-    assert_eq!(
-        mapping,
-        Some("orders".to_string()),
-        "collection mapping must exist after DDL apply"
-    );
-
-    // ── Phase 4: BoundedStaleness read succeeds ───────────────────────────
+    // ── Phase 3: BoundedStaleness read succeeds ───────────────────────────
     let desc = catalog.get_database(db_id).expect("get").expect("missing");
     let origin = desc.mirror_origin.as_ref().unwrap();
     match check_mirror_read_consistency(
@@ -132,16 +108,26 @@ fn mirror_full_lifecycle() {
         }
     }
 
-    // ── Phase 5: PROMOTE ──────────────────────────────────────────────────
-    // Simulate PROMOTE: flip status and persist.
-    let mut desc = desc.clone();
-    desc.status = DatabaseStatus::Active;
-    if let Some(ref mut o) = desc.mirror_origin {
-        o.status = MirrorStatus::Promoted;
+    // ── Phase 4: PROMOTE ──────────────────────────────────────────────────
+    // Apply what PROMOTE proposes. The apply keeps the cut state, which a
+    // replica behind the promotion still reads.
+    for step in [MirrorStatusStep::Seal, MirrorStatusStep::Promote] {
+        apply_to(
+            &CatalogEntry::StepMirrorStatus {
+                database_id: db_id.as_u64(),
+                step,
+            },
+            &catalog,
+        )
+        .expect("PROMOTE: apply the step");
     }
-    catalog
-        .put_database(&desc)
-        .expect("PROMOTE: write descriptor");
+    assert!(
+        catalog
+            .get_mirror_cut_state(db_id)
+            .expect("read cut state")
+            .is_some(),
+        "the promotion's apply must keep the cut state"
+    );
 
     let desc = catalog.get_database(db_id).expect("get").expect("missing");
     assert_eq!(desc.status, DatabaseStatus::Active);
@@ -153,7 +139,7 @@ fn mirror_full_lifecycle() {
         "status must be Promoted after PROMOTE"
     );
 
-    // ── Phase 6: Promoted mirror serves all read consistency levels ───────
+    // ── Phase 5: Promoted mirror serves all read consistency levels ───────
     let origin = desc.mirror_origin.as_ref().unwrap();
     for consistency in [
         ReadConsistency::Strong,
@@ -168,17 +154,14 @@ fn mirror_full_lifecycle() {
         }
     }
 
-    // ── Phase 7: DROP DATABASE (catalog cleanup) ──────────────────────────
-    // Simulate DROP: delete the descriptor row. In production, the drop handler
-    // also deletes mirror_lag and mirror_collection_map — verify those are gone.
-    catalog.delete_mirror_lag(db_id).expect("delete mirror_lag");
-    catalog
-        .delete_mirror_collection_map(db_id)
-        .expect("delete mirror_collection_map");
-    // Remove the database descriptor.
-    catalog
-        .delete_database(db_id)
-        .expect("DROP DATABASE: delete descriptor");
+    // ── Phase 6: DROP DATABASE (catalog cleanup) ──────────────────────────
+    apply_to(
+        &CatalogEntry::DeleteDatabase {
+            db_id: db_id.as_u64(),
+        },
+        &catalog,
+    )
+    .expect("DROP DATABASE: apply");
 
     assert!(
         catalog

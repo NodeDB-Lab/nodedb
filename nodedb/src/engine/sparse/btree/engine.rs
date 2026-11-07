@@ -13,6 +13,7 @@ use tracing::info;
 use super::chain_head::CHAIN_HEADS;
 use super::crdt_dead_letter::CRDT_DEAD_LETTERS;
 use super::storage_bytes::SPARSE_COUNTER;
+use super::storage_conversion::STORAGE_CONVERSIONS;
 use super::tables::redb_err;
 use super::write_set_capture::WRITE_SET_CAPTURES;
 use crate::engine::durability_gate::GatedDatabase;
@@ -52,6 +53,10 @@ impl SparseEngine {
             let _ = write_txn
                 .open_table(WRITE_SET_CAPTURES)
                 .map_err(|e| redb_err("open write set captures table", e))?;
+            // Boot reads the records before any core converts a collection.
+            let _ = write_txn
+                .open_table(STORAGE_CONVERSIONS)
+                .map_err(|e| redb_err("open storage conversions table", e))?;
         }
         // Read transactions open the stored-bytes counter before any write.
         ensure_storage_bytes_table(&write_txn, SPARSE_COUNTER)?;

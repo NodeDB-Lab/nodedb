@@ -147,6 +147,7 @@ impl CoreLoop {
             columnar_flushed_surrogates: HashMap::new(),
             ts_replay: super::ts_replay_state::TsReplayState::default(),
             last_ts_ingest: None,
+            array_retention_floors: HashMap::new(),
             ts_last_value_caches: HashMap::new(),
             ts_series_catalogs: HashMap::new(),
             ts_registries: HashMap::new(),
@@ -173,7 +174,7 @@ impl CoreLoop {
             array_engine,
             array_catalog,
             crs_set: Arc::new(nodedb_crs::CustomCrsSet::new()),
-            uring_reader: crate::data::io::uring_reader::UringReader::new(),
+            uring_reader: std::cell::RefCell::new(crate::data::io::uring_reader::UringReader::new()),
             segment_keks: crate::data::executor::core_loop::SegmentKeks {
                 vector_checkpoint_kek: None,
                 spatial_checkpoint_kek: None,

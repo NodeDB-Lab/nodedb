@@ -134,7 +134,7 @@ mod tests {
             guard.tick().expect("tick");
             assert!(guard.is_group_leader(7), "a single voter elects itself");
             // The no-op commits once the disk holds it.
-            guard.wait_all_durable_blocking();
+            guard.wait_all_durable_blocking().expect("durable");
             guard.tick().expect("tick");
             guard
                 .lease_read_index(7)

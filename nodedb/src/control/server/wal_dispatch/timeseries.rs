@@ -65,7 +65,10 @@ pub(super) fn wal_append_timeseries_op(
             provenance,
             ..
         } => {
-            let now_ms = now_override.unwrap_or_else(|| wal.ordinal_now_ms());
+            let now_ms = match now_override {
+                Some(now_ms) => now_ms,
+                None => wal.ordinal_now_ms()?,
+            };
             // WAL bypass: skip WAL if collection has wal=false in timeseries_config.
             let bypassed = credentials.is_some_and(|creds| {
                 matches!(

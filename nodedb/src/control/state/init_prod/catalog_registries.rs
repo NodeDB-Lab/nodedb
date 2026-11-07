@@ -165,13 +165,14 @@ impl SharedState {
         }
         .load(catalog)?;
         load_catalog_caches(self, catalog);
+        self.mirror.load_from_catalog(catalog)?;
         crate::control::array_catalog::persist::register_loaded(
             &mut self
                 .array_catalog
                 .write()
                 .unwrap_or_else(|p| p.into_inner()),
             catalog.load_all_arrays(),
-        );
+        )?;
         // The authorization fence holds this cache's source index, so the
         // definitions load into the cache in place. Nothing else holds the
         // lock while a constructor runs.

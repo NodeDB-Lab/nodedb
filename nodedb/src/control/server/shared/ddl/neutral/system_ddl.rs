@@ -63,6 +63,12 @@ pub fn alter_system(
                     "deactivated_collection_retention_days must be a non-negative integer",
                 )
             })?;
+            super::audit_intent::record_action_intent(
+                state,
+                identity,
+                None,
+                &format!("ALTER SYSTEM SET {field} = {days}"),
+            )?;
             let mut w = state
                 .retention_settings
                 .write()

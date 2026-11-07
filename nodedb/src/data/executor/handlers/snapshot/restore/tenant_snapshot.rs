@@ -61,6 +61,23 @@ impl CoreLoop {
                     },
                 );
             }
+            // The cleared rows' conversion record goes with them. The snapshot
+            // carries the record of the rows that replace them.
+            if let Err(e) = self.sparse.delete_storage_conversion(
+                target.database_id,
+                target.tenant_id,
+                &target.collection,
+            ) {
+                return self.response_error(
+                    task,
+                    ErrorCode::Internal {
+                        detail: format!(
+                            "clear-then-install conversion record of '{}' failed: {e}",
+                            target.collection
+                        ),
+                    },
+                );
+            }
         }
 
         let snap: crate::types::TenantDataSnapshot = match zerompk::from_msgpack(snapshot_bytes) {
@@ -74,6 +91,16 @@ impl CoreLoop {
                 );
             }
         };
+        for (key, bytes) in &snap.storage_conversions {
+            if let Err(e) = self.sparse.put_storage_conversion_raw(key, bytes) {
+                return self.response_error(
+                    task,
+                    ErrorCode::Internal {
+                        detail: format!("restore: conversion record of {key} failed: {e}"),
+                    },
+                );
+            }
+        }
 
         // Arrays: the group's vShards take the snapshot's cell versions.
         if let Err(e) = self.install_group_arrays(group_vshards, &snap.arrays) {

@@ -25,6 +25,7 @@
 //! - `0x52` Throttle (client → server)
 //! - `0x60` TokenRefresh (client → server)
 //! - `0x61` TokenRefreshAck (server → client)
+//! - `0x62` TokenRefreshRequired (server → client)
 //! - `0x70` DefinitionSync (server → client)
 //! - `0x80` PresenceUpdate (client → server)
 //! - `0x81` PresenceBroadcast (server → all subscribers)
@@ -97,7 +98,7 @@ pub use provenance::SyncProvenance;
 pub use resync::{ResyncReason, ResyncRequestMsg, ThrottleMsg};
 pub use session::{
     HandshakeAckMsg, HandshakeMsg, PingPongMsg, SYNC_WIRE_VERSION, SyncWireVersionMismatch,
-    TokenRefreshAckMsg, TokenRefreshMsg,
+    TokenRefreshAckMsg, TokenRefreshMsg, TokenRefreshRequiredMsg,
 };
 pub use shape::{
     ShapeDeltaMsg, ShapeSnapshotMsg, ShapeSubscribeMsg, ShapeUnsubscribeMsg, VectorClockSyncMsg,

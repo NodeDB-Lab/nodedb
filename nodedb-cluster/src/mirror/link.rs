@@ -1,288 +1,304 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Cross-cluster QUIC link: connection establishment, cluster-id
-//! authentication, and exponential backoff reconnect.
+//! Cross-cluster QUIC link: one mirror's connection to one source replica at a
+//! time, with its hello, reconnect backoff, and move to another seed.
 //!
-//! [`CrossClusterLink`] is the mirror-side manager for a single outbound
-//! connection to a source cluster.  It is `Send + Sync` and lives on the
-//! Control Plane (Tokio).
-//!
-//! # Lifecycle
-//!
-//! 1. Call [`CrossClusterLink::connect`] to establish the initial QUIC
-//!    connection and run the [`handshake`] exchange.
-//! 2. On success the link is in `Connected` state; callers open bidi streams
-//!    to stream AppendEntries or snapshot chunks.
-//! 3. On disconnect, call [`CrossClusterLink::schedule_reconnect`].  The
-//!    link drives an exponential backoff loop (base 500 ms, max 30 s, ±25 %
-//!    jitter) and re-runs the handshake before returning.
-//! 4. The source enforces `PeerRole::Observer`: any voter-class RPC from
-//!    this link is rejected by the source's RPC handler.
-//!
-//! # Observer-role contract
-//!
-//! This link is used exclusively for mirror replication.  The mirror never
-//! sends `RequestVote`, `ConfChange`, or any write proposal over this link.
-//! The source's RPC handler validates this and returns an error for any
-//! voter-class message.
+//! [`CrossClusterLink`] lives on the Control Plane. Each request runs on its own
+//! bidi stream, so a long poll on one group never blocks another.
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use rand::RngExt as _;
+use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
+use crate::transport::config::TlsCredentials;
+
+use super::allowlist::make_mirror_client_config;
 use super::error::MirrorError;
-use super::handshake::{
-    MIRROR_HELLO_ERR_BAD_VERSION, MIRROR_HELLO_ERR_CLUSTER_ID, MIRROR_HELLO_ERR_OBSERVER_ONLY,
-    MIRROR_PROTOCOL_VERSION, MirrorHello, MirrorHelloAck, recv_ack, send_hello,
+use super::handshake::{MIRROR_PROTOCOL_VERSION, MirrorHello, MirrorHelloAck};
+use super::tail_wire::{
+    MAX_REQUEST_FRAME, MAX_RESPONSE_FRAME, MAX_TAIL_WAIT_MS, MirrorRefusal, MirrorRequest,
+    MirrorResponse, encode_frame, read_frame, write_frame,
 };
 use super::throttle::SendThrottle;
 
 /// Base reconnect delay.
 const RECONNECT_BASE_MS: u64 = 500;
-/// Maximum reconnect delay (30 seconds, as per spec).
+/// Maximum reconnect delay.
 const RECONNECT_MAX_MS: u64 = 30_000;
 /// Jitter fraction: ±25 % of the current delay.
 const JITTER_FRACTION: f64 = 0.25;
+/// How long a request waits for its response, past the source's longest poll.
+const RESPONSE_TIMEOUT: Duration = Duration::from_millis(MAX_TAIL_WAIT_MS + 15_000);
 
-/// State of the cross-cluster link.
-#[derive(Debug)]
-enum LinkState {
-    /// No connection is open.
-    Disconnected,
-    /// A QUIC connection is open and the handshake has completed.
-    Connected(quinn::Connection),
+/// What names one link.
+#[derive(Debug, Clone)]
+pub struct MirrorLinkConfig {
+    /// The name this mirror knows the source cluster by.
+    pub source_cluster: String,
+    /// The source database's name.
+    pub source_database: String,
+    /// This cluster's id.
+    pub mirror_cluster_id: u64,
+    /// The link's id on the source.
+    pub link_id: u64,
+    /// Whether a write on the source waits for this mirror.
+    pub mode: nodedb_types::MirrorMode,
+    /// The source's mirror listeners. A link moves on when a replica cannot
+    /// answer.
+    pub seeds: Vec<SocketAddr>,
+    /// The name every source certificate carries.
+    pub server_name: String,
 }
 
-/// Cross-cluster QUIC link from a mirror to its source cluster.
-///
-/// Manages connection establishment, cluster-id authentication, exponential
-/// backoff reconnect, and per-mirror bytes-in-flight throttle.
+#[derive(Debug, Default)]
+struct LinkState {
+    /// The next seed to dial.
+    seed: usize,
+    connection: Option<quinn::Connection>,
+}
+
+/// The id of the link of `mirror_cluster_id` to the source database
+/// `source_database`. Every node of a mirror derives the same one, and so does
+/// a restart.
+pub fn derive_link_id(mirror_cluster_id: u64, source_database: &str) -> u64 {
+    let mut hasher = Sha256::new();
+    hasher.update(mirror_cluster_id.to_le_bytes());
+    hasher.update(source_database.as_bytes());
+    let digest = hasher.finalize();
+    let mut id = [0u8; 8];
+    id.copy_from_slice(&digest[..8]);
+    u64::from_le_bytes(id)
+}
+
+/// One mirror's connection to its source.
 pub struct CrossClusterLink {
-    /// Source cluster's cluster-id string.  The source verifies that the
-    /// `source_cluster` field in the handshake matches its own id.
-    source_cluster_id: String,
-    /// Database id on the source cluster being mirrored.
-    source_database_id: String,
-    /// Remote address of the source cluster's mirror-listener endpoint.
-    source_addr: SocketAddr,
-    /// QUIC client config used to open outbound connections.
+    config: MirrorLinkConfig,
     client_config: quinn::ClientConfig,
-    /// QUIC endpoint used to originate connections.
     endpoint: quinn::Endpoint,
-    /// Current connection state, protected by a mutex so `schedule_reconnect`
-    /// can be awaited concurrently.
     state: Mutex<LinkState>,
-    /// Bytes-in-flight throttle shared with the snapshot / log sender.
+    /// Whether each hello asks for a new pin: the mirror starts over.
+    fresh: AtomicBool,
+    /// Bytes-in-flight throttle of a bootstrap's transfer.
     pub throttle: SendThrottle,
 }
 
 impl CrossClusterLink {
-    /// Create a new (disconnected) link.
-    ///
-    /// Call [`connect`](Self::connect) to open the initial connection.
     pub fn new(
-        source_cluster_id: String,
-        source_database_id: String,
-        source_addr: SocketAddr,
+        config: MirrorLinkConfig,
         endpoint: quinn::Endpoint,
         client_config: quinn::ClientConfig,
         throttle: SendThrottle,
     ) -> Self {
         Self {
-            source_cluster_id,
-            source_database_id,
-            source_addr,
+            config,
             client_config,
             endpoint,
-            state: Mutex::new(LinkState::Disconnected),
+            state: Mutex::new(LinkState::default()),
+            fresh: AtomicBool::new(false),
             throttle,
         }
     }
 
-    /// The source cluster-id this link is targeting.
+    /// Say whether each later hello asks for a new pin.
+    pub fn set_fresh(&self, fresh: bool) {
+        self.fresh.store(fresh, Ordering::Release);
+    }
+
+    /// A link that dials from its own client endpoint, as `creds` identify it.
+    pub fn open(config: MirrorLinkConfig, creds: &TlsCredentials) -> Result<Self, MirrorError> {
+        let client_config =
+            make_mirror_client_config(creds).map_err(|e| MirrorError::Transport {
+                detail: format!("mirror client TLS config: {e}"),
+            })?;
+        let bind = SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, 0));
+        let endpoint = quinn::Endpoint::client(bind).map_err(|e| MirrorError::Transport {
+            detail: format!("mirror client endpoint: {e}"),
+        })?;
+        Ok(Self::new(
+            config,
+            endpoint,
+            client_config,
+            SendThrottle::default_cap(),
+        ))
+    }
+
+    /// The source cluster this link follows.
     pub fn source_cluster_id(&self) -> &str {
-        &self.source_cluster_id
+        &self.config.source_cluster
     }
 
-    /// Establish the initial QUIC connection and run the cross-cluster
-    /// handshake.  Returns the [`MirrorHelloAck`] on success.
-    ///
-    /// If the source rejects the connection (cluster-id mismatch, observer
-    /// violation, etc.) this returns a [`MirrorError`] immediately — no
-    /// backoff is applied, because these are hard-configuration errors that
-    /// won't be fixed by retrying.
-    pub async fn connect(&self, last_applied_lsn: u64) -> Result<MirrorHelloAck, MirrorError> {
-        let conn = self.dial().await?;
-        let ack = self.run_handshake(&conn, last_applied_lsn).await?;
-        let mut state = self.state.lock().await;
-        *state = LinkState::Connected(conn);
-        Ok(ack)
+    /// The link's id on the source.
+    pub fn link_id(&self) -> u64 {
+        self.config.link_id
     }
 
-    /// Open a new QUIC bidi stream on the existing connection.
-    ///
-    /// Returns an error when the link is in `Disconnected` state; the caller
-    /// should call [`schedule_reconnect`](Self::schedule_reconnect) first.
-    pub async fn open_bidi_stream(
-        &self,
-    ) -> Result<(quinn::SendStream, quinn::RecvStream), MirrorError> {
-        let state = self.state.lock().await;
-        match &*state {
-            LinkState::Disconnected => Err(MirrorError::Transport {
-                detail: "cross-cluster link is disconnected".into(),
-            }),
-            LinkState::Connected(conn) => {
-                conn.open_bi().await.map_err(|e| MirrorError::Transport {
-                    detail: format!("open bidi stream to source: {e}"),
-                })
+    /// How many replicas this link can try.
+    pub fn seed_count(&self) -> usize {
+        self.config.seeds.len()
+    }
+
+    /// Dial the current seed and run the hello. A refusal comes back as is:
+    /// retrying it fixes nothing an operator did not fix.
+    pub async fn connect(&self) -> Result<MirrorHelloAck, MirrorError> {
+        let (address, seed) = {
+            let state = self.state.lock().await;
+            let seed = state.seed;
+            let address =
+                self.config
+                    .seeds
+                    .get(seed)
+                    .copied()
+                    .ok_or_else(|| MirrorError::Transport {
+                        detail: format!(
+                            "mirror link {} has no source seed to dial",
+                            self.config.link_id
+                        ),
+                    })?;
+            (address, seed)
+        };
+        let connection = self.dial(address).await?;
+        let hello = MirrorRequest::Hello(MirrorHello {
+            source_cluster: self.config.source_cluster.clone(),
+            source_database: self.config.source_database.clone(),
+            mirror_cluster_id: self.config.mirror_cluster_id,
+            link_id: self.config.link_id,
+            protocol_version: MIRROR_PROTOCOL_VERSION,
+            fresh: self.fresh.load(Ordering::Acquire),
+            mode: self.config.mode,
+        });
+        match exchange_on(&connection, &hello).await? {
+            MirrorResponse::Hello(ack) => {
+                let mut state = self.state.lock().await;
+                if state.seed == seed {
+                    state.connection = Some(connection);
+                }
+                Ok(ack)
+            }
+            MirrorResponse::Refused(refusal) => Err(MirrorError::Refused(refusal)),
+            MirrorResponse::Tail(_) | MirrorResponse::Ack | MirrorResponse::Bootstrap(_) => {
+                Err(MirrorError::Refused(MirrorRefusal::Malformed {
+                    detail: "the source answered a hello with another response".to_string(),
+                }))
             }
         }
     }
 
-    /// Reconnect with exponential backoff after a disconnect.
-    ///
-    /// Drives the following sequence:
-    /// 1. Mark link as `Disconnected`, reset throttle.
-    /// 2. Sleep for the current backoff duration.
-    /// 3. Dial + handshake.
-    /// 4. On success, mark `Connected` and return the ack.
-    /// 5. On failure, double the delay (capped at `RECONNECT_MAX_MS`) and
-    ///    repeat from step 2.
-    pub async fn schedule_reconnect(
-        &self,
-        last_applied_lsn: u64,
-    ) -> Result<MirrorHelloAck, MirrorError> {
-        {
-            let mut state = self.state.lock().await;
-            *state = LinkState::Disconnected;
+    /// Drop the connection and aim at the next seed.
+    pub async fn next_seed(&self) {
+        let mut state = self.state.lock().await;
+        state.connection = None;
+        let count = self.config.seeds.len().max(1);
+        state.seed = (state.seed + 1) % count;
+    }
+
+    /// Run `request` on the live connection, connecting first when there is
+    /// none. A transport error drops the connection.
+    pub async fn exchange(&self, request: &MirrorRequest) -> Result<MirrorResponse, MirrorError> {
+        let live = self.state.lock().await.connection.clone();
+        let connection = match live {
+            Some(connection) => connection,
+            None => {
+                self.connect().await?;
+                self.state.lock().await.connection.clone().ok_or_else(|| {
+                    MirrorError::Transport {
+                        detail: "the mirror link moved seeds while it connected".to_string(),
+                    }
+                })?
+            }
+        };
+        let answered = exchange_on(&connection, request).await;
+        if matches!(answered, Err(MirrorError::Transport { .. })) {
+            self.state.lock().await.connection = None;
         }
+        answered
+    }
+
+    /// Reconnect with exponential backoff, trying each seed in turn. Only a
+    /// refusal the next attempt can clear retries.
+    pub async fn schedule_reconnect(&self) -> Result<MirrorHelloAck, MirrorError> {
+        self.state.lock().await.connection = None;
         self.throttle.reset();
-
         let mut delay_ms = RECONNECT_BASE_MS;
-
         loop {
-            let jitter = jitter_for(delay_ms);
-            let sleep_ms = delay_ms.saturating_add_signed(jitter);
+            let sleep_ms = delay_ms.saturating_add_signed(jitter_for(delay_ms));
             info!(
-                source_cluster = %self.source_cluster_id,
-                source_addr = %self.source_addr,
+                source_cluster = %self.config.source_cluster,
                 sleep_ms,
                 "mirror link: reconnecting after disconnect"
             );
             tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
-
-            match self.dial().await {
-                Err(e) => {
+            match self.connect().await {
+                Ok(ack) => return Ok(ack),
+                Err(MirrorError::Refused(refusal)) if !refusal.is_transient() => {
+                    return Err(MirrorError::Refused(refusal));
+                }
+                Err(error) => {
                     warn!(
-                        source_cluster = %self.source_cluster_id,
-                        error = %e,
-                        "mirror link: dial failed, will retry"
+                        source_cluster = %self.config.source_cluster,
+                        %error,
+                        "mirror link: connect failed, will retry on the next seed"
                     );
                 }
-                Ok(conn) => match self.run_handshake(&conn, last_applied_lsn).await {
-                    Err(e @ MirrorError::ClusterIdMismatch { .. })
-                    | Err(e @ MirrorError::ObserverRoleViolation { .. })
-                    | Err(e @ MirrorError::ProtocolVersionMismatch { .. })
-                    | Err(e @ MirrorError::MirrorPromoted { .. }) => {
-                        // Hard config errors: surface immediately.
-                        return Err(e);
-                    }
-                    Err(e) => {
-                        warn!(
-                            source_cluster = %self.source_cluster_id,
-                            error = %e,
-                            "mirror link: handshake failed, will retry"
-                        );
-                    }
-                    Ok(ack) => {
-                        let mut state = self.state.lock().await;
-                        *state = LinkState::Connected(conn);
-                        return Ok(ack);
-                    }
-                },
             }
-
+            self.next_seed().await;
             delay_ms = (delay_ms * 2).min(RECONNECT_MAX_MS);
         }
     }
 
-    /// Dial the source cluster address.
-    async fn dial(&self) -> Result<quinn::Connection, MirrorError> {
+    async fn dial(&self, address: SocketAddr) -> Result<quinn::Connection, MirrorError> {
         self.endpoint
             .connect_with(
                 self.client_config.clone(),
-                self.source_addr,
-                &self.source_cluster_id,
+                address,
+                &self.config.server_name,
             )
             .map_err(|e| MirrorError::Transport {
-                detail: format!("connect to source {}: {e}", self.source_addr),
+                detail: format!("connect to source {address}: {e}"),
             })?
             .await
             .map_err(|e| MirrorError::Transport {
-                detail: format!("QUIC handshake with source {}: {e}", self.source_addr),
+                detail: format!("QUIC handshake with source {address}: {e}"),
             })
-    }
-
-    /// Run the cross-cluster mirror handshake on a freshly opened connection.
-    async fn run_handshake(
-        &self,
-        conn: &quinn::Connection,
-        last_applied_lsn: u64,
-    ) -> Result<MirrorHelloAck, MirrorError> {
-        let (mut send, mut recv) = conn.open_bi().await.map_err(|e| MirrorError::Transport {
-            detail: format!("open handshake stream: {e}"),
-        })?;
-
-        let hello = MirrorHello {
-            source_cluster: self.source_cluster_id.clone(),
-            source_database_id: self.source_database_id.clone(),
-            last_applied_lsn,
-            protocol_version: MIRROR_PROTOCOL_VERSION,
-        };
-        send_hello(&mut send, &hello).await?;
-        let _ = send.finish();
-
-        let ack = recv_ack(&mut recv).await?;
-
-        if !ack.accepted {
-            return Err(match ack.error_code {
-                MIRROR_HELLO_ERR_CLUSTER_ID => MirrorError::ClusterIdMismatch {
-                    declared: self.source_cluster_id.clone(),
-                    remote: ack.source_cluster_id,
-                },
-                MIRROR_HELLO_ERR_OBSERVER_ONLY => MirrorError::ObserverRoleViolation {
-                    detail: ack.error_detail,
-                },
-                MIRROR_HELLO_ERR_BAD_VERSION => MirrorError::ProtocolVersionMismatch {
-                    local: MIRROR_PROTOCOL_VERSION,
-                    detail: ack.error_detail,
-                },
-                other => MirrorError::Transport {
-                    detail: format!(
-                        "source rejected mirror handshake: code={other:#04x} {}",
-                        ack.error_detail
-                    ),
-                },
-            });
-        }
-
-        // Verify the source's self-reported cluster-id matches what we expect.
-        if ack.source_cluster_id != self.source_cluster_id {
-            return Err(MirrorError::ClusterIdMismatch {
-                declared: self.source_cluster_id.clone(),
-                remote: ack.source_cluster_id,
-            });
-        }
-
-        Ok(ack)
     }
 }
 
+/// One request and one response on a fresh stream of `connection`. The source's
+/// frame is bounded before the read allocates, and the wait is bounded too.
+async fn exchange_on(
+    connection: &quinn::Connection,
+    request: &MirrorRequest,
+) -> Result<MirrorResponse, MirrorError> {
+    let (mut send, mut recv) = connection
+        .open_bi()
+        .await
+        .map_err(|e| MirrorError::Transport {
+            detail: format!("open a mirror stream: {e}"),
+        })?;
+    let payload = encode_frame(request, MAX_REQUEST_FRAME)?;
+    write_frame(&mut send, &payload).await?;
+    send.finish().map_err(|e| MirrorError::Transport {
+        detail: format!("finish a mirror request: {e}"),
+    })?;
+    let bytes = tokio::time::timeout(RESPONSE_TIMEOUT, read_frame(&mut recv, MAX_RESPONSE_FRAME))
+        .await
+        .map_err(|_| MirrorError::Transport {
+            detail: format!(
+                "the source sent no response within {} ms",
+                RESPONSE_TIMEOUT.as_millis()
+            ),
+        })??;
+    zerompk::from_msgpack(&bytes).map_err(|e| MirrorError::HandshakeCodec {
+        detail: format!("decode a mirror response: {e}"),
+    })
+}
+
 /// Compute ±`JITTER_FRACTION` jitter for a given delay, returning a signed
-/// offset.  The offset is at most ±25 % of `delay_ms`.
+/// offset.
 fn jitter_for(delay_ms: u64) -> i64 {
     let max = (delay_ms as f64 * JITTER_FRACTION) as i64;
     if max == 0 {

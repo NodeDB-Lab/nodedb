@@ -213,6 +213,11 @@ impl DataPlaneSnapshotBuilder {
                 merged.ts_series_catalogs.push((k, v));
             }
         }
+        for (k, v) in snap.storage_conversions {
+            if in_group_db_tenant_scoped(&k) {
+                merged.storage_conversions.push((k, v));
+            }
+        }
         // kv_tables / flushed_ts_segments / columnar_engines: db-scoped keys.
         for (k, v) in snap.kv_tables {
             if in_group_db_scoped(&k) {

@@ -84,6 +84,15 @@ async fn alert_eval_loop(
             .as_millis() as u64;
 
         for alert in &alerts {
+            // The source notifies for a mirror's rows. A second notification
+            // starts at PROMOTE.
+            if state
+                .mirror
+                .fence
+                .is_read_only(crate::types::DatabaseId::new(alert.database_id))
+            {
+                continue;
+            }
             if let Err(e) = evaluate_alert(&state, alert, hysteresis, now_ms).await {
                 warn!(
                     alert = alert.name,

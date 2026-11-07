@@ -16,8 +16,8 @@ pub use nodedb_types::sync::wire::{
     RowPushRejectMsg, SYNC_WIRE_VERSION, ShapeDeltaMsg, ShapeSnapshotMsg, ShapeSubscribeMsg,
     ShapeUnsubscribeMsg, SpatialDeleteAckMsg, SpatialDeleteMsg, SpatialInsertAckMsg,
     SpatialInsertMsg, SyncFrame, SyncMessageType, SyncProvenance, ThrottleMsg, TimeseriesAckMsg,
-    TimeseriesPushMsg, TokenRefreshAckMsg, TokenRefreshMsg, VectorClockSyncMsg, VectorDeleteAckMsg,
-    VectorDeleteMsg, VectorInsertAckMsg, VectorInsertMsg,
+    TimeseriesPushMsg, TokenRefreshAckMsg, TokenRefreshMsg, TokenRefreshRequiredMsg,
+    VectorClockSyncMsg, VectorDeleteAckMsg, VectorDeleteMsg, VectorInsertAckMsg, VectorInsertMsg,
 };
 
 // ── Re-export CompensationHint (used by dlq.rs and session.rs) ──

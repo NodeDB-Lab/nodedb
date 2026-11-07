@@ -37,6 +37,7 @@ const TENANT_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(120);
 pub(crate) async fn capture_at_barrier(
     state: &SharedState,
     group_id: u64,
+    barrier_index: u64,
     request: &CutCaptureRequest,
 ) {
     if !state
@@ -49,7 +50,10 @@ pub(crate) async fn capture_at_barrier(
         return;
     }
     let capture = match capture_group(state, group_id, request).await {
-        Ok(tenants) => GroupCapture::Taken(tenants),
+        Ok(tenants) => GroupCapture::Taken {
+            tenants,
+            barrier_index,
+        },
         Err(error) => GroupCapture::Failed(error.to_string()),
     };
     state
@@ -144,6 +148,16 @@ pub(crate) fn keep_group_records(
         }
     }
     snap.index_configs = kept_configs;
+    // A conversion record names the rows of its own group. Another group's cut
+    // sits at another log position, so its record can name rows this capture
+    // does not hold.
+    let mut kept_conversions = Vec::with_capacity(snap.storage_conversions.len());
+    for entry in std::mem::take(&mut snap.storage_conversions) {
+        if owned(&entry.0)? {
+            kept_conversions.push(entry);
+        }
+    }
+    snap.storage_conversions = kept_conversions;
     zerompk::to_msgpack_vec(&snap).map_err(|e| Error::Serialization {
         format: "msgpack".into(),
         detail: format!("cut capture: encode the tenant {tenant_id} snapshot: {e}"),

@@ -35,15 +35,26 @@ const POLAR_LAT_DEG: f64 = 80.0;
 /// buffer distance.
 const METRES_PER_DEGREE_MIN: f64 = 110_000.0;
 
+/// Most `segments` a buffer takes. Each round join and cap allocates this many
+/// vertices, and a query argument chooses the count, so the cap bounds them.
+pub const MAX_BUFFER_SEGMENTS: usize = 4096;
+
 /// Buffer `geom` (coordinates in `def`) by `metres`. A negative distance
 /// shrinks polygons and erases points and lines. An EMPTY input or result
-/// is `POLYGON EMPTY`.
+/// is `POLYGON EMPTY`. `segments` over [`MAX_BUFFER_SEGMENTS`] is
+/// [`SpatialError::BufferSegments`].
 pub fn buffer(
     geom: &Geometry,
     metres: f64,
     segments: usize,
     def: &CrsDef,
 ) -> Result<Geometry, SpatialError> {
+    if segments > MAX_BUFFER_SEGMENTS {
+        return Err(SpatialError::BufferSegments {
+            requested: segments,
+            max: MAX_BUFFER_SEGMENTS,
+        });
+    }
     if geom.is_empty() {
         return Ok(Geometry::empty(GeometryKind::Polygon));
     }
@@ -293,6 +304,41 @@ mod tests {
         CrsContext::builtin_only()
             .resolve(Srid::new(code).unwrap())
             .unwrap()
+    }
+
+    /// The refusal comes before any geometry work, so a huge count never
+    /// reaches the allocation of a circle's vertices.
+    #[test]
+    fn segments_over_the_cap_are_refused() {
+        let wgs84 = def(4326);
+        for segments in [MAX_BUFFER_SEGMENTS + 1, usize::MAX] {
+            assert_eq!(
+                buffer(&Geometry::point(0.0, 0.0), 100.0, segments, &wgs84),
+                Err(SpatialError::BufferSegments {
+                    requested: segments,
+                    max: MAX_BUFFER_SEGMENTS,
+                })
+            );
+        }
+        let empty = Geometry::empty(GeometryKind::Point);
+        assert!(buffer(&empty, 100.0, usize::MAX, &wgs84).is_err());
+    }
+
+    #[test]
+    fn segments_at_the_cap_are_admitted_and_bound_the_vertices() {
+        let wgs84 = def(4326);
+        let out = buffer(
+            &Geometry::point(101.7, 3.1),
+            1_000.0,
+            MAX_BUFFER_SEGMENTS,
+            &wgs84,
+        )
+        .unwrap();
+        assert!(
+            out.coord_count() <= MAX_BUFFER_SEGMENTS + 1,
+            "{}",
+            out.coord_count()
+        );
     }
 
     /// A geographic point buffer is a geodesic circle: every vertex lies

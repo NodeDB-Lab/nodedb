@@ -3,6 +3,7 @@
 //! Raft single-group state machine.
 //!
 //! Split across files:
+//! - [`compaction_ceiling`]: Named outside bounds on log compaction.
 //! - [`config`]: `RaftConfig` (including voter/learner lists).
 //! - [`core`]: `RaftNode` struct, constructors, simple accessors, `tick`,
 //!   `propose`, and the `Ready` output type.
@@ -29,6 +30,7 @@
 //! - [`staleness`]: How far behind the leader a replica is, for
 //!   bounded-staleness reads.
 
+pub mod compaction_ceiling;
 pub mod config;
 pub mod core;
 pub mod durability;
@@ -45,6 +47,7 @@ pub mod rpc;
 pub mod snapshot_debt;
 pub mod staleness;
 
+pub use self::compaction_ceiling::CompactionCeilings;
 pub use self::config::RaftConfig;
 pub use self::core::{RaftNode, Ready};
 pub use self::read_index::{ReadIndexProbe, ReadIndexStatus};

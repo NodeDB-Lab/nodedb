@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! The storage-growth predicate for a replicated entry.
+//! The storage-growth and database-write predicates for a replicated entry.
 //!
 //! A leader proposal gate classifies the entry a proposer built. A
 //! plan-carrying entry decodes to its plan. A session transaction's redo
@@ -9,8 +9,31 @@
 use crate::control::wal_replication::decode::decode_parsed_entry;
 use crate::control::wal_replication::{ReplicatedEntry, ReplicatedWrite};
 
-use super::leader_gate::{EntryScope, entry_scope};
-use super::predicate::plan_adds_storage;
+use super::entry_scope::{EntryScope, entry_scope};
+use super::predicate::{plan_adds_storage, plan_is_write};
+
+/// Whether `entry` writes its database, for the mirror gate.
+///
+/// Calvin redo, Calvin bookkeeping, a backup cut, a surrogate binding and an
+/// array schema are exempt: their writes passed the Calvin submit or the
+/// metadata proposer, or they write no row. A redo stream's first chunk stands
+/// for the stream, so a refused stream opens nothing. Its later chunks and an
+/// abandon pass, so a stream already open still ends.
+pub fn entry_writes_database(entry: &ReplicatedEntry) -> crate::Result<bool> {
+    let database_id = crate::types::DatabaseId::new(entry.database_id);
+    Ok(
+        match entry_scope(&entry.write, &entry.incarnations, database_id) {
+            EntryScope::Collections(_) => true,
+            EntryScope::Plan => {
+                decode_parsed_entry(entry)?.is_some_and(|(_, (_, _, plan, _))| plan_is_write(&plan))
+            }
+            EntryScope::Exempt => matches!(
+                &entry.write,
+                ReplicatedWrite::TopicPublish { .. } | ReplicatedWrite::RedoChunk { index: 0, .. }
+            ),
+        },
+    )
+}
 
 /// Whether `entry` can add stored bytes.
 ///
@@ -24,6 +47,16 @@ pub fn entry_adds_storage(entry: &ReplicatedEntry) -> crate::Result<bool> {
         ReplicatedWrite::TransactionRedo { adds_storage, .. } => return Ok(*adds_storage),
         // A put binds a cell surrogate. A delete or erasure names none.
         ReplicatedWrite::ArrayOp { cell_surrogate, .. } => return Ok(cell_surrogate.is_some()),
+        // A purge removes rows, and it must pass at any tenant size. A
+        // conversion rewrites the rows the tenant already holds. A retention
+        // drop removes rows. An aggregate image comes from a bootstrap, which
+        // the mirror's tenant limits do not stop midway.
+        ReplicatedWrite::TenantPurge { .. }
+        | ReplicatedWrite::CollectionConvert { .. }
+        | ReplicatedWrite::RetentionDrop { .. }
+        | ReplicatedWrite::TimeseriesAggregateImage { .. } => {
+            return Ok(false);
+        }
         _ => {}
     }
     let database_id = crate::types::DatabaseId::new(entry.database_id);
@@ -117,5 +150,45 @@ mod tests {
             returning: false,
         };
         assert!(!entry_adds_storage(&redo_entry(inline(), true, Some(meta))).expect("classify"));
+    }
+
+    fn chunk(index: u32) -> ReplicatedEntry {
+        ReplicatedEntry::new(
+            1,
+            0,
+            0,
+            ReplicatedWrite::RedoChunk {
+                stream: crate::wal::RedoStreamId::Session {
+                    vshard: 0,
+                    idempotency_key: 1,
+                },
+                index,
+                len: 3,
+                bytes: vec![1, 2, 3],
+            },
+        )
+    }
+
+    #[test]
+    fn a_session_redo_writes_its_database() {
+        assert!(entry_writes_database(&redo_entry(inline(), false, None)).expect("classify"));
+    }
+
+    #[test]
+    fn a_calvin_redo_passed_its_submit() {
+        let meta = crate::control::wal_replication::types::CalvinRedoMeta {
+            epoch_system_ms: 1,
+            reply: nodedb_physical::physical_plan::CalvinReplySpec::Count(Vec::new()),
+            primary_write: true,
+            user_write: true,
+            returning: false,
+        };
+        assert!(!entry_writes_database(&redo_entry(inline(), true, Some(meta))).expect("classify"));
+    }
+
+    #[test]
+    fn a_redo_stream_is_judged_at_its_first_chunk() {
+        assert!(entry_writes_database(&chunk(0)).expect("classify"));
+        assert!(!entry_writes_database(&chunk(1)).expect("classify"));
     }
 }

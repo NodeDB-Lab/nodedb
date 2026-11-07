@@ -539,6 +539,55 @@ mod tests {
     }
 
     #[test]
+    fn push_hook_runs_once_per_successful_push() {
+        use std::sync::atomic::AtomicUsize;
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let hook_calls = Arc::clone(&calls);
+        let hook: PushHook = Arc::new(move || {
+            hook_calls.fetch_add(1, Ordering::SeqCst);
+        });
+        let (mut tx, mut rx) = RingBuffer::channel_with_push_hook::<u64>(2, hook);
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        tx.try_push(1).unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        tx.try_push(2).unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        // A push that fails with Full must not run the hook.
+        assert!(matches!(tx.try_push(3), Err(BridgeError::Full { .. })));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        // Popping never runs the hook.
+        assert_eq!(rx.try_pop().unwrap(), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        // A push after room opens runs it again.
+        tx.try_push(3).unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn push_hook_not_run_after_consumer_dropped() {
+        use std::sync::atomic::AtomicUsize;
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let hook_calls = Arc::clone(&calls);
+        let hook: PushHook = Arc::new(move || {
+            hook_calls.fetch_add(1, Ordering::SeqCst);
+        });
+        let (mut tx, rx) = RingBuffer::channel_with_push_hook::<u64>(4, hook);
+        drop(rx);
+
+        assert!(matches!(
+            tx.try_push(1),
+            Err(BridgeError::Disconnected { .. })
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
     fn metrics_counting() {
         let (mut tx, mut rx) = RingBuffer::channel::<u64>(8);
 

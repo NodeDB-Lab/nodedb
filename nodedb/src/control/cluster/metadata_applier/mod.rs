@@ -52,6 +52,7 @@ mod dispatch;
 mod host_state;
 mod lease_events;
 mod membership_effects;
+mod mirror_cut;
 mod pending_ddl;
 mod restore_point;
 mod surrogate;
@@ -61,6 +62,7 @@ mod test_fixture;
 mod types;
 mod wedge;
 
+pub(crate) use audit_describe::describe_entry;
 pub use boot_seed::{seed_host_tables, seed_metadata_cache};
 pub use catalog_ddl::BACKUP_MARK_FAIL_POINT;
 pub use dispatch::METADATA_APPLY_HOLD_POINT;

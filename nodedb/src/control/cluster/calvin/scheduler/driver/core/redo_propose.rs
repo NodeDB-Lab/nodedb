@@ -368,7 +368,7 @@ mod tests {
             if let Some(entry) = entries.into_iter().find(|entry| entry.index == index) {
                 return entry.data;
             }
-            mr.wait_all_durable_blocking();
+            mr.wait_all_durable_blocking().expect("durable");
             mr.tick().expect("tick");
         }
         panic!("the entry at {index} never committed");
@@ -465,6 +465,7 @@ mod tests {
             hlc: scheduler.shared.hlc_clock.now().wall_ns,
             restore_point: 0,
             capture: None,
+            mirror: None,
         };
         scheduler.process_scheduler_input(SchedulerInput::CutMarker {
             hlc: cut.hlc,

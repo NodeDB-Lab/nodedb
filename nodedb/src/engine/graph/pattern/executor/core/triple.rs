@@ -1356,4 +1356,41 @@ pub(in crate::engine::graph::pattern::executor) mod tests {
         assert_eq!(rows[0]["who"], "Alice", "property keyed by alias");
         assert_eq!(rows[0]["a"], "alice", "non-dotted identity unchanged");
     }
+
+    /// The clause names the collection bare, and outside the default database
+    /// the CSR holds another name. The filter takes the name the CSR holds.
+    #[test]
+    fn a_scoped_match_filters_on_the_stored_name_and_not_the_bare_one() {
+        let (csr, store, _dir) = make_csr(&[("alice", "KNOWS", "bob")]);
+        let (sparse, _sparse_dir) = make_sparse();
+        let bare = parse("MATCH (a)-[:KNOWS]->(b) IN 'bare_name' RETURN a, b").unwrap();
+        let count_with = |collection: Option<&str>| -> usize {
+            let props = PropertyLookup {
+                sparse: &sparse,
+                csr: &csr,
+                database_id: 0,
+                tenant_id: 1,
+                collection,
+                document_cut: Default::default(),
+            };
+            execute(
+                &bare,
+                MatchExecCtx {
+                    csr: &csr,
+                    edge_store: &store,
+                    frontier_bitmap: None,
+                    is_remote_node: None,
+                    varlen_caps: expansion::VarLenCaps::default(),
+                    props: &props,
+                    overlay: None,
+                },
+            )
+            .unwrap()
+            .rows
+            .len()
+        };
+        assert_eq!(count_with(Some("col")), 1, "the stored name matches");
+        assert_eq!(count_with(Some("other")), 0, "another collection is out");
+        assert_eq!(count_with(None), 0, "a scoped query never reads unscoped");
+    }
 }

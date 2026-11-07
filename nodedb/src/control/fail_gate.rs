@@ -93,6 +93,21 @@ pub(crate) async fn after_calvin_stamp(
     }
 }
 
+/// The recon submit gate of node `node_id`, `recon::before_submit`: a
+/// dependent predicate write, a TRUNCATE or a CRDT document delete settled its
+/// materialized sums and parks before it submits its Calvin transaction. A
+/// test changes a row the settlement read, then releases the gate.
+pub(crate) async fn before_recon_submit(node_id: u64) {
+    wait(FailScope::Node(node_id), "recon::before_submit").await;
+}
+
+/// The statement routing gate of node `node_id`, `stmt::before_route`: a
+/// pgwire statement planned and parks before the gateway forward and the
+/// Calvin classification.
+pub(crate) async fn before_route(node_id: u64) {
+    wait(FailScope::Node(node_id), "stmt::before_route").await;
+}
+
 /// The Calvin scheduler's redo gate on node `node_id`: after a committed
 /// slice's redo is resolved and before the data-group leader proposes it.
 /// Named per collection, `calvin::before_redo_propose::<collection>`.
@@ -189,6 +204,54 @@ pub(crate) async fn action_firing(
     shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> bool {
     delivery_gate(node_id, &format!("trigger::{point}"), shutdown).await
+}
+
+/// The gate before a node finishes a sealed PROMOTE, named
+/// [`crate::control::mirror::applier::PROMOTE_FINISH_FAIL_POINT`].
+///
+/// Returns `false` when the node shuts down while parked.
+pub(crate) async fn before_promote_finish(
+    node_id: u64,
+    shutdown: tokio::sync::watch::Receiver<bool>,
+) -> bool {
+    delivery_gate(
+        node_id,
+        crate::control::mirror::applier::PROMOTE_FINISH_FAIL_POINT,
+        shutdown,
+    )
+    .await
+}
+
+/// The gate between a source cut's mark and its barriers, named
+/// [`crate::control::mirror::source::cut_loop::CUT_BARRIER_FAIL_POINT`].
+///
+/// Returns `false` when the node shuts down while parked.
+pub(crate) async fn before_mirror_cut_barrier(
+    node_id: u64,
+    shutdown: tokio::sync::watch::Receiver<bool>,
+) -> bool {
+    delivery_gate(
+        node_id,
+        crate::control::mirror::source::cut_loop::CUT_BARRIER_FAIL_POINT,
+        shutdown,
+    )
+    .await
+}
+
+/// The gate between a mirror cut's commit in its groups and its raise, named
+/// [`crate::control::mirror::applier::CUT_RAISE_FAIL_POINT`].
+///
+/// Returns `false` when the node shuts down while parked.
+pub(crate) async fn before_mirror_cut_raise(
+    node_id: u64,
+    shutdown: tokio::sync::watch::Receiver<bool>,
+) -> bool {
+    delivery_gate(
+        node_id,
+        crate::control::mirror::applier::CUT_RAISE_FAIL_POINT,
+        shutdown,
+    )
+    .await
 }
 
 /// Park on gate `name` of node `node_id` until it is released or the node

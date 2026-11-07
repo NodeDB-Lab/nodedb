@@ -73,6 +73,7 @@ impl CoreLoop {
             removed.push(dir_name);
         }
         if !removed.is_empty() {
+            self.release_ts_partitions(database_id, tid, collection, &removed);
             self.continuous_agg_mgr.forget_partitions(
                 database_id.as_u64(),
                 tid.as_u64(),

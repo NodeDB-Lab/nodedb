@@ -11,7 +11,7 @@
 use nodedb_crdt::validator::ValidationOutcome;
 use nodedb_types::Surrogate;
 
-use super::core::{TenantCrdtEngine, TenantRowLookup};
+use super::core::{TenantCrdtEngine, TenantRowLookup, loro_root};
 
 impl TenantCrdtEngine {
     /// Validate the committed row `(collection, row_id)` against the
@@ -32,9 +32,13 @@ impl TenantCrdtEngine {
         let Some(state) = self.collections.get(collection) else {
             return ValidationOutcome::Accepted;
         };
-        let Some(change) = state.build_change_from_row(collection, row_id, surrogate) else {
+        let Some(mut change) =
+            state.build_change_from_row(loro_root(collection), row_id, surrogate)
+        else {
             return ValidationOutcome::Accepted;
         };
+        // The validator scopes constraints and policies by the stored name.
+        change.collection = collection.to_owned();
         let view = TenantRowLookup {
             collections: &self.collections,
             array_surrogate_ids: &self.array_surrogate_ids,

@@ -16,7 +16,7 @@ use pgwire::api::results::{DataRowEncoder, QueryResponse, Response, Tag};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 
 use crate::control::security::identity::{AuthMethod, AuthenticatedIdentity};
-use crate::control::server::session_auth::identity::stored_user_identity;
+use crate::control::security::session_identity::stored_user_identity;
 
 use super::super::types::text_field;
 use super::connection_admin;
@@ -51,6 +51,9 @@ impl NodeDbPgHandler {
         for stmt in statements {
             // Each statement's DDL proposals carry that statement's own text.
             let _audit = AuditScope::statement(identity, &stmt);
+            if let Some(binding) = self.sessions.binding(session_id) {
+                binding.set_statement_text(&stmt);
+            }
             let mut resp = self
                 .execute_single_sql(identity, session_id, &stmt, requested)
                 .await?;
@@ -438,7 +441,7 @@ impl NodeDbPgHandler {
             );
         }
 
-        if let Some(result) = crate::control::server::shared::ddl::dispatch(
+        if let Some(mut result) = crate::control::server::shared::ddl::dispatch(
             &self.state,
             identity,
             sql_trimmed,
@@ -447,6 +450,12 @@ impl NodeDbPgHandler {
         )
         .await
         {
+            // A notice is its own protocol message, so the session sends it with the reply.
+            if let Ok(results) = &mut result {
+                for notice in crate::control::server::pgwire::ddl_encode::take_notices(results) {
+                    self.sessions.push_notice(session_id, notice);
+                }
+            }
             return crate::control::server::pgwire::ddl_encode::ddl_results_to_pgwire(
                 result, requested,
             );

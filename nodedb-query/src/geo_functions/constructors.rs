@@ -155,7 +155,8 @@ fn circle(
 
 /// Segment count for a circular approximation, floored at 3 — fewer than three
 /// segments cannot enclose an area, and a caller asking for 0 receives the
-/// default rather than a degenerate geometry.
+/// default rather than a degenerate geometry. `nodedb_spatial::ops::buffer`
+/// refuses a count over its cap, so both callers share that bound.
 pub(super) fn segments_arg(args: &[Value], idx: usize) -> usize {
     num_arg(args, idx)
         .filter(|n| n.is_finite() && *n >= 3.0)
@@ -550,6 +551,45 @@ mod tests {
                 &[Value::Integer(1), Value::Integer(5), Value::Integer(0)]
             ),
             Some(Err(EvalError::Geometry { .. }))
+        ));
+    }
+
+    /// A float argument past `usize` saturates, and the cap refuses it too.
+    #[test]
+    fn circle_segments_over_the_cap_are_a_typed_error() {
+        let over = nodedb_spatial::ops::MAX_BUFFER_SEGMENTS as f64 + 1.0;
+        for segments in [over, 1e300] {
+            assert!(matches!(
+                eval(
+                    "geo_circle",
+                    &[
+                        Value::Float(0.0),
+                        Value::Float(0.0),
+                        Value::Float(1000.0),
+                        Value::Float(segments),
+                    ],
+                ),
+                Some(Err(EvalError::Geometry {
+                    source: nodedb_spatial::SpatialError::BufferSegments { .. },
+                    ..
+                }))
+            ));
+        }
+    }
+
+    #[test]
+    fn circle_with_a_null_centre_stays_null_past_the_segment_check() {
+        assert!(matches!(
+            eval(
+                "geo_circle",
+                &[
+                    Value::Null,
+                    Value::Float(0.0),
+                    Value::Float(1000.0),
+                    Value::Float(1e300),
+                ],
+            ),
+            Some(Ok(Value::Null))
         ));
     }
 

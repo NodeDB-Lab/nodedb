@@ -374,6 +374,10 @@ impl<'a> FromMessagePack<'a> for ErrorDetails {
                 let (database,) = read1_str(reader, field_count)?;
                 Ok(ErrorDetails::MirrorNotPromoted { database })
             }
+            TAG_MIRROR_SYNC_TIMEOUT => {
+                let (database,) = read1_str(reader, field_count)?;
+                Ok(ErrorDetails::MirrorSyncTimeout { database })
+            }
             TAG_UNDEFINED_OBJECT => {
                 let (object,) = read1_str(reader, field_count)?;
                 Ok(ErrorDetails::UndefinedObject { object })
@@ -414,6 +418,47 @@ mod tests {
     fn roundtrip(d: &ErrorDetails) -> ErrorDetails {
         let bytes = zerompk::to_msgpack_vec(d).expect("encode");
         zerompk::from_msgpack(&bytes).expect("decode")
+    }
+
+    /// A `CloneDependency` payload whose string array claims `claimed` items.
+    /// The array header is a msgpack `array 32`, and no item follows it.
+    fn clone_dependency_claiming(claimed: u32) -> Vec<u8> {
+        let empty = ErrorDetails::CloneDependency { dependents: vec![] };
+        let mut bytes = zerompk::to_msgpack_vec(&empty).expect("encode");
+        assert_eq!(
+            bytes.pop(),
+            Some(0x90),
+            "the payload ends in an empty array"
+        );
+        bytes.push(0xdd);
+        bytes.extend_from_slice(&claimed.to_be_bytes());
+        bytes
+    }
+
+    /// A claim of `u32::MAX` strings is about 100 GiB of `String` headers. The
+    /// claim never reaches an allocation, so the decode fails at no cost.
+    #[test]
+    fn a_hostile_string_array_length_is_a_decode_error() {
+        for claimed in [1, 1 << 20, u32::MAX] {
+            let bytes = clone_dependency_claiming(claimed);
+            assert!(zerompk::from_msgpack::<ErrorDetails>(&bytes).is_err());
+        }
+    }
+
+    #[test]
+    fn a_string_array_shorter_than_its_length_is_a_decode_error() {
+        let mut bytes = clone_dependency_claiming(2);
+        bytes.extend_from_slice(&[0xa1, b'a']);
+        assert!(zerompk::from_msgpack::<ErrorDetails>(&bytes).is_err());
+    }
+
+    #[test]
+    fn an_empty_string_array_decodes() {
+        let bytes = clone_dependency_claiming(0);
+        assert_eq!(
+            zerompk::from_msgpack::<ErrorDetails>(&bytes).expect("decode"),
+            ErrorDetails::CloneDependency { dependents: vec![] }
+        );
     }
 
     #[test]

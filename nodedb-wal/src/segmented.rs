@@ -25,11 +25,13 @@ use crate::error::{Result, WalError};
 use crate::record::{RecordTarget, WalRecord};
 use crate::segment::orphan::discard_unused_segment;
 use crate::segment::{
-    DEFAULT_SEGMENT_TARGET_SIZE, SegmentContinuity, SegmentMeta, TruncateResult,
-    check_resume_above_previous, check_retained_floor, discover_segments, segment_path,
-    truncate_segments,
+    DEFAULT_SEGMENT_TARGET_SIZE, SegmentMeta, TruncateResult, check_resume_above_previous,
+    discover_segments, segment_path, truncate_segments,
 };
-use crate::writer::{WalWriter, WalWriterConfig};
+pub use crate::segmented_scan::{
+    SegmentScanner, replay_all_segments, replay_from_limit_dir, visit_records_dir,
+};
+use crate::writer::{PendingSync, WalWriter, WalWriterConfig};
 
 /// Configuration for the segmented WAL.
 #[derive(Debug, Clone)]
@@ -230,6 +232,37 @@ impl SegmentedWal {
         self.writer.sync()
     }
 
+    /// Write the buffered records to the file and return the fsync still owed.
+    ///
+    /// The caller runs [`PendingSync::fsync`] with no lock on this WAL, then calls
+    /// [`Self::finish_sync`]. A roll between the steps is safe.
+    /// A roll fsyncs the old segment under the seal, and the pending fsync still holds its file.
+    /// Returns `None` when every written record is already durable.
+    pub fn begin_sync(&mut self) -> Result<Option<PendingSync>> {
+        let pending = self.writer.begin_sync()?;
+        Ok(pending.map(|mut pending| {
+            pending.segment_first_lsn = self.active_first_lsn;
+            pending
+        }))
+    }
+
+    /// Record the outcome of `pending`'s fsync.
+    ///
+    /// A failed fsync latches the active writer, even when a roll replaced the fsynced file.
+    pub fn finish_sync(
+        &mut self,
+        pending: PendingSync,
+        fsynced: std::io::Result<()>,
+    ) -> Result<()> {
+        let same_file = pending.segment_first_lsn == self.active_first_lsn;
+        self.writer.finish_sync(pending, fsynced, same_file)
+    }
+
+    /// A record reader for this WAL's directory, which holds no borrow of this WAL.
+    pub fn scanner(&self) -> SegmentScanner {
+        SegmentScanner::new(self.wal_dir.clone(), self.encryption_ring.clone())
+    }
+
     /// Seal the active segment and start the next one, so every record
     /// appended so far sits in a sealed segment. A no-op when the active
     /// segment holds no record.
@@ -409,91 +442,176 @@ impl SegmentedWal {
     }
 }
 
-/// Replay all records from all segments in a WAL directory, in LSN order.
-///
-/// Segments are read in order of their first_lsn. Within each segment,
-/// records are read sequentially. This produces a globally ordered stream.
-///
-/// This is `replay_from_limit_dir` with no LSN floor and no record cap, so the
-/// per-segment continuity/torn-tail checks live in exactly one place.
-///
-/// `keys` must be the key ring the directory was written under, or `None` for a
-/// WAL that was never encrypted. It is a required argument rather than an
-/// opt-in so that no caller can reach ciphertext by omission: an encrypted
-/// record met with `keys == None` fails with
-/// [`WalError::EncryptedRecordWithoutKey`].
-pub fn replay_all_segments(wal_dir: &Path, keys: Option<&KeyRing>) -> Result<Vec<WalRecord>> {
-    Ok(replay_from_limit_dir(wal_dir, 0, usize::MAX, keys)?.0)
-}
-
-/// Paginated replay from a WAL directory: reads at most `max_records` from `from_lsn`.
-///
-/// Uses sequential I/O (not mmap) and does NOT require the WAL mutex — safe
-/// to call concurrently with writes. Sealed segments are immutable; the active
-/// segment is read via buffered I/O which sees data after the writer's fsync.
-///
-/// Returns `(records, has_more)` where `has_more` is `true` if the limit was hit.
-///
-/// Records are returned as plaintext. See [`replay_all_segments`] for why
-/// `keys` is mandatory.
-///
-/// A `from_lsn` below the earliest LSN the directory still retains fails with
-/// [`WalError::ReplayBelowRetainedFloor`] instead of returning the surviving
-/// (shorter) suffix.
-pub fn replay_from_limit_dir(
-    wal_dir: &Path,
-    from_lsn: u64,
-    max_records: usize,
-    keys: Option<&KeyRing>,
-) -> Result<(Vec<WalRecord>, bool)> {
-    let segments = discover_segments(wal_dir)?;
-    // Before any record is read: the answer to "is the requested suffix still
-    // here?" is in the segment set, and once records start flowing back a short
-    // result is indistinguishable from a complete one.
-    check_retained_floor(&segments, from_lsn)?;
-    let mut records = Vec::with_capacity(max_records.min(4096));
-    let mut continuity = SegmentContinuity::new();
-
-    for seg in &segments {
-        continuity.check(seg)?;
-        // The reader decrypts: records reach the caller as plaintext or not at
-        // all.
-        let mut reader = crate::reader::WalReader::open(&seg.path, keys)?;
-        // Tracked over everything the segment contains, not over what survives
-        // the `from_lsn` filter — continuity is a property of the log, not of
-        // the caller's window into it.
-        let mut last_lsn = 0u64;
-        while let Some(record) = reader
-            .next_record()
-            .map_err(|error| error.with_segment_path(&seg.path))?
-        {
-            last_lsn = record.header.lsn;
-            if record.header.lsn >= from_lsn {
-                records.push(record);
-                if records.len() >= max_records {
-                    // Stopping short leaves the rest of this segment unread, so
-                    // its end LSN is unknown and no boundary can be judged.
-                    return Ok((records, true));
-                }
-            }
-        }
-        // A segment that stops early may be an interrupted final write, or it
-        // may be a hole with committed records behind it. Only the first is a
-        // legal end of the log.
-        crate::torn_tail::verify_committed_prefix(&seg.path, reader.stop_reason(), last_lsn)?;
-        continuity.completed(seg, last_lsn);
-    }
-
-    Ok((records, false))
-}
-
 #[cfg(test)]
 mod tests {
+    use std::ops::ControlFlow;
+
     use super::*;
     use crate::record::RecordType;
 
     fn test_config(dir: &Path) -> SegmentedWalConfig {
         SegmentedWalConfig::for_testing(dir.to_path_buf())
+    }
+
+    fn open_with_rows(dir: &Path, rows: u32) -> SegmentedWal {
+        let mut wal = SegmentedWal::open(test_config(dir)).unwrap();
+        for _ in 0..rows {
+            wal.append(RecordType::Put as u32, 1, 0, 0, b"row").unwrap();
+        }
+        wal
+    }
+
+    /// Run a whole split sync, as a caller with no lock during the fsync does.
+    fn split_sync(wal: &mut SegmentedWal) -> Result<()> {
+        match wal.begin_sync()? {
+            Some(pending) => {
+                let fsynced = pending.fsync();
+                wal.finish_sync(pending, fsynced)
+            }
+            None => Ok(()),
+        }
+    }
+
+    #[test]
+    fn an_append_during_a_split_sync_is_not_claimed_and_syncs_next() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut wal = open_with_rows(&dir.path().join("wal"), 2);
+
+        let pending = wal.begin_sync().unwrap().expect("two rows are owed");
+        assert_eq!(pending.through_lsn(), 2);
+
+        // The fsync has not run, and the WAL takes an append.
+        let late = wal
+            .append(RecordType::Put as u32, 1, 0, 0, b"late")
+            .unwrap();
+        assert_eq!(late, 3);
+
+        let fsynced = pending.fsync();
+        wal.finish_sync(pending, fsynced).unwrap();
+
+        let next = wal.begin_sync().unwrap().expect("the late row is owed");
+        assert_eq!(next.through_lsn(), 3);
+        let fsynced = next.fsync();
+        wal.finish_sync(next, fsynced).unwrap();
+        assert!(wal.begin_sync().unwrap().is_none(), "nothing is owed");
+        assert_eq!(wal.replay().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn a_flush_during_a_split_sync_keeps_the_next_fsync_owed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut wal = open_with_rows(&dir.path().join("wal"), 1);
+        let pending = wal.begin_sync().unwrap().expect("one row is owed");
+
+        // A second begin flushes the late row to the file with no fsync behind it yet.
+        wal.append(RecordType::Put as u32, 1, 0, 0, b"late")
+            .unwrap();
+        let second = wal.begin_sync().unwrap().expect("the late row is owed");
+        drop(second);
+
+        let fsynced = pending.fsync();
+        wal.finish_sync(pending, fsynced).unwrap();
+        assert!(
+            wal.begin_sync().unwrap().is_some(),
+            "the flush after the fsync started still owes an fsync"
+        );
+    }
+
+    #[test]
+    fn a_roll_during_a_split_sync_keeps_every_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+        let mut wal = open_with_rows(&wal_dir, 2);
+
+        let pending = wal.begin_sync().unwrap().expect("two rows are owed");
+        wal.append(RecordType::Put as u32, 1, 0, 0, b"late")
+            .unwrap();
+        // The seal fsyncs the old segment, so the late row is durable with it.
+        wal.seal_active_segment().unwrap();
+        assert_eq!(wal.list_segments().unwrap().len(), 2);
+        wal.append(RecordType::Put as u32, 1, 0, 0, b"next")
+            .unwrap();
+
+        let fsynced = pending.fsync();
+        wal.finish_sync(pending, fsynced).unwrap();
+
+        // The active writer's own flush is still owed.
+        assert!(wal.begin_sync().unwrap().is_some());
+        assert_eq!(wal.replay().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn a_failed_fsync_of_a_rolled_segment_latches_the_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut wal = open_with_rows(&dir.path().join("wal"), 1);
+        let pending = wal.begin_sync().unwrap().expect("one row is owed");
+        wal.seal_active_segment().unwrap();
+
+        let failed = wal.finish_sync(pending, Err(std::io::Error::other("injected EIO")));
+        assert!(matches!(failed, Err(WalError::DurabilityLost { .. })));
+        assert!(matches!(
+            wal.append(RecordType::Put as u32, 1, 0, 0, b"x"),
+            Err(WalError::DurabilityLost { .. })
+        ));
+        assert!(matches!(wal.sync(), Err(WalError::DurabilityLost { .. })));
+    }
+
+    #[test]
+    fn a_latched_writer_refuses_a_later_fsync_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut wal = open_with_rows(&dir.path().join("wal"), 1);
+        let first = wal.begin_sync().unwrap().expect("one row is owed");
+        let second_row = wal.append(RecordType::Put as u32, 1, 0, 0, b"x").unwrap();
+        let second = wal.begin_sync().unwrap().expect("one more row is owed");
+        assert_eq!(second.through_lsn(), second_row);
+
+        assert!(
+            wal.finish_sync(first, Err(std::io::Error::other("EIO")))
+                .is_err()
+        );
+        let fsynced = second.fsync();
+        assert!(
+            matches!(
+                wal.finish_sync(second, fsynced),
+                Err(WalError::DurabilityLost { .. })
+            ),
+            "an fsync that succeeds after a failure cannot vouch for the lost pages"
+        );
+    }
+
+    #[test]
+    fn split_sync_and_inline_sync_agree() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut wal = open_with_rows(&dir.path().join("wal"), 3);
+        split_sync(&mut wal).unwrap();
+        wal.append(RecordType::Put as u32, 1, 0, 0, b"x").unwrap();
+        wal.sync().unwrap();
+        split_sync(&mut wal).unwrap();
+        assert_eq!(wal.replay().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn a_scanner_visits_one_record_at_a_time_and_can_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut wal = open_with_rows(&dir.path().join("wal"), 5);
+        wal.sync().unwrap();
+
+        let scanner = wal.scanner();
+        // The scanner holds no borrow of the WAL, so appends run during a scan.
+        let mut seen = Vec::new();
+        scanner
+            .visit::<WalError>(|record| {
+                seen.push(record.header.lsn);
+                wal.append(RecordType::Put as u32, 1, 0, 0, b"during")
+                    .unwrap();
+                Ok(if seen.len() == 3 {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                })
+            })
+            .unwrap();
+        assert_eq!(seen, vec![1, 2, 3]);
     }
 
     #[test]

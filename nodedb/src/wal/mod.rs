@@ -22,8 +22,8 @@ pub(crate) use crdt_payload::{
 };
 pub use manager::WalManager;
 pub use redo::{
-    ARRAY_RESTORE, ArrayRestoreRedo, COLUMNAR_RESTORE, CalvinStamp, CapturedEntry,
-    CarriedRedoStream, ColumnarRestoreRedo, ColumnarRestoreVersion, ContinuedRedo,
+    ARRAY_RESTORE, ArrayRestoreRedo, COLUMNAR_RESTORE, CalvinPositionId, CalvinStamp,
+    CapturedEntry, CarriedRedoStream, ColumnarRestoreRedo, ColumnarRestoreVersion, ContinuedRedo,
     CrossShardAppliedKey, DocumentDeleteRedo, DocumentPutRedo, DocumentPutStamp, EVERY_ROW,
     EdgeCutRedo, EdgeDeleteRedo, EdgePutRedo, GroupMembership, KV_RESTORE, KvRestoreLive,
     KvRestoreRedo, KvRestoreVersion, NodeLabelRedo, OriginAppend, PublishPosition, RedoChunkHeader,

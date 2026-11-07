@@ -11,6 +11,7 @@
 use nodedb_codec::error::CodecError;
 use nodedb_types::Surrogate;
 
+use crate::codec::frame::{take_bytes, take_len};
 use crate::error::{ArrayError, ArrayResult};
 
 // ---------------------------------------------------------------------------
@@ -52,22 +53,10 @@ pub fn encode_row_kinds(row_kinds: &[u8]) -> Vec<u8> {
 }
 
 pub fn decode_row_kinds(data: &[u8]) -> ArrayResult<Vec<u8>> {
-    if data.len() < 4 {
-        return Err(ArrayError::SegmentCorruption {
-            detail: "row_kinds: truncated count".into(),
-        });
-    }
-    let count = u32::from_le_bytes(
-        data[0..4]
-            .try_into()
-            .expect("invariant: bounds-checked above (data.len() >= 4)"),
-    ) as usize;
-    if data.len() < 4 + count {
-        return Err(ArrayError::SegmentCorruption {
-            detail: "row_kinds: truncated body".into(),
-        });
-    }
-    Ok(data[4..4 + count].to_vec())
+    let mut pos = 0;
+    let count = take_len(data, &mut pos, "row_kinds: truncated count")?;
+    let kinds = take_bytes(data, &mut pos, count, "row_kinds: truncated body")?;
+    Ok(kinds.to_vec())
 }
 
 // ---------------------------------------------------------------------------
@@ -116,6 +105,24 @@ mod tests {
         let data = encode_row_kinds(&kinds);
         let out = decode_row_kinds(&data).unwrap();
         assert_eq!(out, kinds);
+    }
+
+    #[test]
+    fn a_hostile_row_kind_count_is_corruption() {
+        let mut data = u32::MAX.to_le_bytes().to_vec();
+        data.extend_from_slice(&[0, 0, 0]);
+        assert!(matches!(
+            decode_row_kinds(&data),
+            Err(ArrayError::SegmentCorruption { .. })
+        ));
+    }
+
+    #[test]
+    fn a_short_row_kind_header_is_corruption() {
+        assert!(matches!(
+            decode_row_kinds(&[1, 0]),
+            Err(ArrayError::SegmentCorruption { .. })
+        ));
     }
 
     #[test]

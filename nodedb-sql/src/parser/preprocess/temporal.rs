@@ -120,6 +120,11 @@ pub fn extract_bounded(
         working = rewritten;
         scope.valid_time = vt;
         any = true;
+        if strip_valid_time(&working)?.is_some() {
+            return Err(TemporalParseError(
+                "multiple FOR VALID_TIME clauses in one statement".into(),
+            ));
+        }
     }
     // AS OF VALID TIME <expr> (array read style)
     if let Some((rewritten, ms)) = strip_as_of_valid_time(&working, boundary)? {
@@ -131,6 +136,11 @@ pub fn extract_bounded(
         working = rewritten;
         scope.valid_time = ValidTime::At(ms);
         any = true;
+        if strip_as_of_valid_time(&working, boundary)?.is_some() {
+            return Err(TemporalParseError(
+                "multiple valid-time AS OF clauses in one statement".into(),
+            ));
+        }
     }
 
     if any {
@@ -269,11 +279,13 @@ pub(crate) fn parse_temporal_expr(token: &str) -> Result<i64, TemporalParseError
 
     // NOW() — case-insensitive
     if t.to_uppercase() == "NOW()" {
-        let ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
-        return Ok(ms);
+        return nodedb_types::checked_wall_now_ms().ok_or_else(|| {
+            TemporalParseError(
+                "AS OF NOW(): the system clock reads before the Unix epoch; \
+                 correct the NTP or RTC config, or pass an explicit time"
+                    .into(),
+            )
+        });
     }
 
     // ISO-8601 string literal: 'YYYY-MM-DDTHH:MM:SSZ' (with surrounding quotes)
@@ -387,11 +399,7 @@ fn parse_as_of_expr(
 
     // If the next non-whitespace character opens a quoted string, consume
     // through the closing quote.
-    if trimmed.starts_with('\'') || trimmed.starts_with('"') {
-        let quote = trimmed
-            .chars()
-            .next()
-            .expect("invariant: trimmed.starts_with('\\'' | '\"') guarantees at least one char");
+    if let Some(quote) = trimmed.chars().next().filter(|c| matches!(c, '\'' | '"')) {
         let inner_start = 1;
         let close = trimmed[inner_start..].find(quote).ok_or_else(|| {
             TemporalParseError(format!(
@@ -491,6 +499,22 @@ fn parse_trailing_i64(sql: &str, offset: usize) -> Result<(i64, usize), Temporal
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One statement holds one valid-time qualifier, read by every relation.
+    /// A second clause, on a LATERAL inner side say, is refused.
+    #[test]
+    fn a_second_valid_time_clause_is_refused() {
+        for sql in [
+            "SELECT * FROM a FOR VALID_TIME CONTAINS 1 JOIN LATERAL \
+             (SELECT * FROM b FOR VALID_TIME CONTAINS 2 WHERE b.k = a.k) x ON true",
+            "SELECT * FROM a AS OF VALID TIME 1 JOIN LATERAL \
+             (SELECT * FROM b AS OF VALID TIME 2 WHERE b.k = a.k) x ON true",
+            "SELECT * FROM a FOR VALID_TIME CONTAINS 1 JOIN LATERAL \
+             (SELECT * FROM b AS OF VALID TIME 2 WHERE b.k = a.k) x ON true",
+        ] {
+            assert!(extract(sql).is_err(), "{sql}");
+        }
+    }
 
     #[test]
     fn passthrough_no_temporal() {
@@ -724,5 +748,28 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!(matches!(ex.temporal.system_time, SystemTimeScope::AsOf(_)));
+    }
+
+    /// A quoted expression parses with either quote. A lone quote is a typed
+    /// error, never a panic.
+    #[test]
+    fn a_quoted_as_of_expression_parses_or_errors() {
+        for sql in [
+            "SELECT * FROM t AS OF SYSTEM TIME '2024-01-15T00:00:00Z'",
+            "SELECT * FROM t AS OF SYSTEM TIME \"2024-01-15T00:00:00Z\"",
+        ] {
+            let ex = extract(sql).unwrap().unwrap();
+            assert_eq!(
+                ex.temporal.system_time,
+                SystemTimeScope::AsOf(1_705_276_800_000),
+                "{sql}"
+            );
+        }
+        for sql in [
+            "SELECT * FROM t AS OF SYSTEM TIME '",
+            "SELECT * FROM t AS OF SYSTEM TIME \"",
+        ] {
+            assert!(extract(sql).is_err(), "{sql}");
+        }
     }
 }

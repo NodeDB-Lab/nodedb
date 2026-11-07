@@ -7,8 +7,9 @@
 //! like WCC, LCC, centrality) or at superstep barriers (iterative algorithms
 //! like PageRank).
 //!
-//! Uses `std::thread::scope` for TPC compatibility (no rayon dependency,
-//! no thread pool contention with the Data Plane runtime).
+//! Uses `std::thread::scope`, with no rayon dependency. These functions join
+//! before they return, so a Data Plane core must not call them: the join
+//! stalls its whole shard. No production path calls them.
 //!
 //! ArcadeDB does per-processor range partitioning with zero GC. NodeDB does
 //! the same with Rust's ownership model — no GC needed.

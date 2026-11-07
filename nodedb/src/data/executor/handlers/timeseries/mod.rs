@@ -4,6 +4,7 @@
 
 mod admission;
 pub mod aggregate;
+pub mod cagg_copy;
 pub mod cagg_cut;
 pub mod cagg_fold;
 pub mod cagg_persist;

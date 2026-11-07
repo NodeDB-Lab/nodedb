@@ -168,6 +168,8 @@ impl SystemMetrics {
                     ),
                     None => (String::new(), String::new(), ""),
                 };
+                // A collection name is client text, so it can hold a quote or a newline.
+                let collection = crate::control::metrics::database_render::escape_label(collection);
                 let labels = format!(
                     r#"engine="{}",database_id="{database_id}",tenant_id="{tenant_id}",collection="{collection}""#,
                     key.engine
@@ -193,5 +195,31 @@ impl SystemMetrics {
         for (labels, count) in &series {
             let _ = writeln!(out, "nodedb_segments_quarantined_total{{{labels}}} {count}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+    use crate::storage::quarantine::{CollectionScope, QuarantineCountKey, QuarantineEngine};
+
+    #[test]
+    fn a_collection_name_cannot_break_out_of_its_label() {
+        let mut counts = HashMap::new();
+        counts.insert(
+            QuarantineCountKey {
+                engine: QuarantineEngine::Columnar,
+                scope: Some(CollectionScope::new(1, 2, "a\"b\\c\nd")),
+            },
+            1u64,
+        );
+        let mut out = String::new();
+        SystemMetrics::prometheus_segment_quarantine_active(&mut out, &counts);
+        assert!(
+            out.contains(r#"collection="a\"b\\c\nd""#),
+            "the label must be escaped: {out}"
+        );
     }
 }

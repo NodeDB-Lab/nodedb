@@ -63,6 +63,8 @@ impl WebhookManager {
             .list_all()
             .into_iter()
             .filter(|def| def.webhook.is_configured())
+            // The source delivers a mirror's changes. Delivery starts at PROMOTE.
+            .filter(|def| !state.mirror.fence.is_read_only(def.database_id))
             .collect();
         let registered: std::collections::HashSet<TaskKey> = streams
             .iter()

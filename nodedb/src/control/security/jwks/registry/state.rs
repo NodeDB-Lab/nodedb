@@ -25,8 +25,6 @@ pub struct JwksRegistry {
     /// The endpoints the refresh task fetches: static providers and every
     /// catalog provider registered on this node.
     pub(super) targets: Arc<parking_lot::RwLock<RefreshTargets>>,
-    /// Background refresh task handle.
-    pub(super) _refresh_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// JWT broken into its three base64url-encoded parts plus the decoded

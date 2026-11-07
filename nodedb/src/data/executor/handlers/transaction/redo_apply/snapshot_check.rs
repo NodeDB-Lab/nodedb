@@ -44,8 +44,9 @@ impl CoreLoop {
                  a store: {error}"
             ),
         };
-        // A snapshot this far behind the commit's own ordinal can predate a
-        // history purge on some replica. Every replica refuses it alike.
+        // A snapshot more than the commit window behind the commit's ordinal
+        // can predate a history purge on some replica. The window check reads
+        // only values the commit carries, so every replica refuses it alike.
         let ordinal = self.apply_scope.replicated_ordinal;
         if !self.snapshot_within_window(snapshot, ordinal) {
             return Err(ErrorCode::SerializationConflict {

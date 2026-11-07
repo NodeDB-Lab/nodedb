@@ -164,6 +164,12 @@ pub async fn crdt_merge(
         },
     )
     .with_type_guards_from(state, database_id);
+    super::super::audit_intent::record_action_intent(
+        state,
+        identity,
+        Some(tenant_id),
+        &format!("CRDT merge: {source_id} → {target_id} in '{collection}'"),
+    )?;
     crate::control::crdt_admission::dispatch_authorized_crdt_apply_admitted(
         state,
         crate::control::crdt_admission::AuthorizedCrdtApplyAdmissionRequest {

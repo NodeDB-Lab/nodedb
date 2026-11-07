@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 
+mod native_array_batch_quota;
 mod native_backup_database;
 mod native_check_constraints;
 mod native_clone_read_intercept;
@@ -21,6 +22,7 @@ mod native_multi_search_txn_overlay;
 mod native_primary_key_nullability;
 mod native_protocol;
 mod native_result_projection;
+mod native_session_kill;
 mod native_session_parameters;
 mod native_show_dispatch;
 mod native_sorted_index_range;

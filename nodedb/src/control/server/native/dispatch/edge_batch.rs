@@ -11,11 +11,35 @@
 
 use nodedb_types::protocol::{EdgeDeleteBatch, EdgePutBatch, NativeResponse, TextFields};
 
-use crate::control::server::native::sqlstate_code::sqlstate_error;
 use crate::control::server::shared::ddl::neutral::graph_ops::{edge_delete, edge_insert};
 use crate::control::server::shared::session::DmlTxnCtx;
 
-use super::{DispatchCtx, ddl_result_to_native, error_to_native, error_to_native_with_sqlstate};
+use super::batch_admission::{batch_size_refusal, decode_batch};
+use super::sql_planned::{autocommit_sync_database, mirror_confirmed};
+use super::{DispatchCtx, ddl_result_to_native, error_to_native};
+
+/// The name a request over `max_batch_size` is refused under.
+const EDGE_BATCH_LIMIT: &str = "max_batch_size(edges)";
+
+/// The request's lower-cased `collection` and its `payload` decoded as `B`.
+/// A refused request is the boxed error response to send.
+fn decode<B>(
+    ctx: &DispatchCtx<'_>,
+    op: &str,
+    seq: u64,
+    fields: &TextFields,
+) -> Result<(String, B), Box<NativeResponse>>
+where
+    B: for<'a> zerompk::FromMessagePack<'a>,
+{
+    let (collection, batch) = decode_batch(ctx, op, seq, fields)?;
+    let collection = crate::control::server::shared::request_collection::request_collection(
+        ctx.database_id(),
+        collection,
+    )
+    .map_err(|e| Box::new(error_to_native(seq, &e)))?;
+    Ok((collection, batch))
+}
 
 /// Insert the request's edges into the collection it names.
 pub(crate) async fn handle_edge_put_batch(
@@ -27,7 +51,7 @@ pub(crate) async fn handle_edge_put_batch(
         Ok(decoded) => decoded,
         Err(response) => return *response,
     };
-    if let Some(refusal) = batch_size_refusal(ctx, seq, batch.edges.len()) {
+    if let Some(refusal) = batch_size_refusal(ctx, seq, EDGE_BATCH_LIMIT, batch.edges.len()) {
         return refusal;
     }
     let txn_ctx = DmlTxnCtx {
@@ -49,7 +73,8 @@ pub(crate) async fn handle_edge_put_batch(
         }
         Err(e) => Err(e),
     };
-    ddl_result_to_native(seq, result)
+    let sync_database = autocommit_sync_database(ctx);
+    mirror_confirmed(ctx, seq, sync_database, ddl_result_to_native(seq, result)).await
 }
 
 /// Delete the request's edges from the collection it names.
@@ -62,7 +87,7 @@ pub(crate) async fn handle_edge_delete_batch(
         Ok(decoded) => decoded,
         Err(response) => return *response,
     };
-    if let Some(refusal) = batch_size_refusal(ctx, seq, batch.edges.len()) {
+    if let Some(refusal) = batch_size_refusal(ctx, seq, EDGE_BATCH_LIMIT, batch.edges.len()) {
         return refusal;
     }
     let txn_ctx = DmlTxnCtx {
@@ -79,66 +104,6 @@ pub(crate) async fn handle_edge_delete_batch(
         &txn_ctx,
     )
     .await;
-    ddl_result_to_native(seq, result)
-}
-
-/// The request's lower-cased `collection` and its `payload` decoded as `B`,
-/// after the tenant quota check. A missing field, a refused quota or an
-/// undecodable payload is the boxed error response to send.
-fn decode<B>(
-    ctx: &DispatchCtx<'_>,
-    op: &str,
-    seq: u64,
-    fields: &TextFields,
-) -> Result<(String, B), Box<NativeResponse>>
-where
-    B: for<'a> zerompk::FromMessagePack<'a>,
-{
-    let Some(collection) = fields.collection.as_deref() else {
-        return Err(Box::new(sqlstate_error(
-            seq,
-            "42601",
-            format!("{op}: missing 'collection' field"),
-        )));
-    };
-    let Some(payload) = fields.payload.as_deref() else {
-        return Err(Box::new(sqlstate_error(
-            seq,
-            "42601",
-            format!("{op}: missing 'payload' field"),
-        )));
-    };
-    if let Err(e) = ctx.state.check_tenant_quota(ctx.tenant_id()) {
-        return Err(Box::new(error_to_native(seq, &e)));
-    }
-    let batch = zerompk::from_msgpack(payload).map_err(|e| {
-        Box::new(sqlstate_error(
-            seq,
-            "22P02",
-            format!("{op}: payload is not an {op} payload: {e}"),
-        ))
-    })?;
-    let collection = crate::control::server::shared::request_collection::request_collection(
-        ctx.database_id(),
-        collection,
-    )
-    .map_err(|e| Box::new(error_to_native(seq, &e)))?;
-    Ok((collection, batch))
-}
-
-/// The refusal for a request of `count` edges over the configured
-/// `max_batch_size`, with the error the other batch opcodes return. `None`
-/// when no cap is configured or `count` is within it.
-fn batch_size_refusal(ctx: &DispatchCtx<'_>, seq: u64, count: usize) -> Option<NativeResponse> {
-    let max = u64::from(ctx.state.limits.max_batch_size?);
-    let value = count as u64;
-    if value <= max {
-        return None;
-    }
-    let error = crate::Error::LimitExceeded {
-        limit_name: "max_batch_size(edges)",
-        value,
-        max,
-    };
-    Some(error_to_native_with_sqlstate(seq, "0A000", &error))
+    let sync_database = autocommit_sync_database(ctx);
+    mirror_confirmed(ctx, seq, sync_database, ddl_result_to_native(seq, result)).await
 }

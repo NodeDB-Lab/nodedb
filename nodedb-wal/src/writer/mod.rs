@@ -32,6 +32,8 @@ pub(crate) mod durability;
 mod dwb;
 mod flush;
 mod open;
+mod split_sync;
 
 pub use config::{DEFAULT_WRITE_BUFFER_SIZE, WalWriterConfig};
 pub use core::WalWriter;
+pub use split_sync::PendingSync;

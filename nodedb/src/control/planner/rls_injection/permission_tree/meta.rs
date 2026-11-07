@@ -83,6 +83,7 @@ pub(super) fn apply_meta(ctx: &PermCtx<'_>, op: &mut MetaOp) -> crate::Result<()
         | MetaOp::Compact
         | MetaOp::Checkpoint
         | MetaOp::RegisterContinuousAggregate { .. }
+        | MetaOp::InstallAggregateImage { .. }
         | MetaOp::UnregisterContinuousAggregate { .. }
         | MetaOp::ListContinuousAggregates
         | MetaOp::ContinuousAggregatesRegistered
@@ -92,6 +93,7 @@ pub(super) fn apply_meta(ctx: &PermCtx<'_>, op: &mut MetaOp) -> crate::Result<()
         | MetaOp::PurgeDepartedVShards { .. }
         | MetaOp::PurgeVersionsBelow { .. }
         | MetaOp::KvDueExpiries { .. }
+        | MetaOp::ListTenantCollections { .. }
         | MetaOp::RefreshGraphCount { .. }
         | MetaOp::QueryStorageBytes { .. }
         | MetaOp::PurgeTenant { .. }
@@ -104,7 +106,7 @@ pub(super) fn apply_meta(ctx: &PermCtx<'_>, op: &mut MetaOp) -> crate::Result<()
         | MetaOp::TemporalPurgeCrdt { .. }
         | MetaOp::TemporalPurgeArray { .. }
         | MetaOp::AlterArray { .. }
-        | MetaOp::ApplyContinuousAggRetention
+        | MetaOp::ApplyContinuousAggRetention { .. }
         | MetaOp::QueryAggregateWatermark { .. }
         | MetaOp::RebuildIndex { .. }
         | MetaOp::PutSynonymGroup { .. }

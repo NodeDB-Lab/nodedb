@@ -93,6 +93,7 @@ async fn kill_session_by_id_signals_kill_tx() {
         credential_version: 0,
         current_database: Some(DatabaseId::DEFAULT),
         token_expiry_ms: None,
+        api_key_id: None,
     };
     let mut kill_rx = state
         .session_registry

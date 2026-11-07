@@ -51,6 +51,24 @@ KILL SESSION '550e8400-e29b-41d4-a716-446655440000';
 
 **Audit:** Emits a `SessionRevoked` audit entry with `reason = AdminKill` before the connection closes.
 
+## Killing Every Session of a User
+
+```sql
+-- End the sessions of credential-store user 42
+KILL USER SESSIONS '42';
+
+-- End the OIDC sessions whose token claims carry user_id 42
+KILL USER SESSIONS '42' OIDC;
+```
+
+A credential-store user and an OIDC principal share no id space, so they can hold the same number. Each form ends one principal's sessions and leaves the other connected. `SHOW SESSIONS` lists each session's `user_id` and `auth_method`.
+
+**Permissions:** Superuser.
+
+**Errors:** `42601` for any other trailing word. `22003` for a non-numeric id.
+
+**Blacklist:** `BLACKLIST AUTH USER '42'` names no auth method. It refuses every identity with that `user_id`, stored or OIDC, and `WITH KILL SESSIONS` ends the same set. A token with no `user_id` claim goes by its subject: `BLACKLIST AUTH USER 'subject'`.
+
 ## Idle Timeout
 
 Per-database setting to automatically close sessions idle beyond a threshold.
@@ -87,7 +105,7 @@ Every session termination is recorded with a reason code in the audit log. Possi
 | `UserDropped`    | User account was deleted (DROP USER)               |
 | `IdleTimeout`    | Exceeded idle_timeout_secs threshold               |
 | `TokenExpired`   | OIDC bearer token TTL expired                      |
-| `AdminKill`      | Admin executed KILL SESSION                        |
+| `AdminKill`      | Admin executed KILL SESSION or KILL USER SESSIONS  |
 | `SessionRevoked` | User role/database grant was revoked (soft-revoke) |
 
 Audit log shows `KillReason` in the `reason` field of `SessionRevoked` events.

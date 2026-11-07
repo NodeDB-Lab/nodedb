@@ -90,6 +90,7 @@ impl Scheduler {
             epoch: txn_id.epoch,
             position: txn_id.position,
             vshard_id: self.vshard_id,
+            mirror_database: None,
         });
         // Every replica judges a role-guarded state transition against the
         // roles of the identity whose writes the transaction commits.

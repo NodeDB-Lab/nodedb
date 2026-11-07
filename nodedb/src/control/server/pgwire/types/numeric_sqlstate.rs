@@ -84,6 +84,8 @@ pub(crate) fn numeric_code_to_sqlstate(code: nodedb_types::error::ErrorCode) -> 
         Ec::STORAGE_QUOTA_EXCEEDED => sqlstate::DISK_FULL,
         // Mirrors the `MirrorReadOnly` arm.
         Ec::MIRROR_READ_ONLY => sqlstate::READ_ONLY_SQL_TRANSACTION,
+        // Mirrors the `MirrorSyncTimeout` arm.
+        Ec::MIRROR_SYNC_TIMEOUT => sqlstate::MIRROR_SYNC_TIMEOUT,
         // Mirrors the `StaleReadNotLeader` arm.
         Ec::STALE_READ_NOT_LEADER => sqlstate::STALE_READ_NOT_LEADER,
         // The codes below mirror the Data-Plane code table

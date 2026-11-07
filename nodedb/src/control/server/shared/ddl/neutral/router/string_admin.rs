@@ -127,8 +127,8 @@ pub(super) async fn try_string(
     // Tenant management. `CREATE TENANT`, `DROP TENANT`, and `PURGE TENANT`
     // parse into no typed AST variant — the router dispatches all three by
     // string prefix from the raw token slice, before the parse gate, with
-    // `IF [NOT] EXISTS` stripping. `PURGE TENANT` dispatches an async Data
-    // Plane meta op.
+    // `IF [NOT] EXISTS` stripping. `PURGE TENANT` proposes one entry to each
+    // data group's log.
     //
     // `ALTER TENANT ` is ambiguous: `ALTER TENANT <id|name> SET QUOTA ...`
     // (this string form) and `ALTER TENANT <name> IN DATABASE <db> SET QUOTA

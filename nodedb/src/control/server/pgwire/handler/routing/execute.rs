@@ -11,6 +11,7 @@ use std::sync::Arc;
 use pgwire::api::results::{Response, Tag};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 
+use crate::control::mirror::source::sync::{await_mirror_sync, sync_database_of};
 use crate::control::planner::calvin::{DispatchClass, classify_dispatch};
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::shared::session::{SessionId, TransactionState};
@@ -154,6 +155,13 @@ impl NodeDbPgHandler {
             return Err(sql_error(&revoked));
         }
         let read_only = tasks.iter().all(|task| !plan_is_write(&task.plan));
+        // A statement in a block waits at its COMMIT.
+        let sync_database =
+            if self.sessions.transaction_state(session_id) == TransactionState::InBlock {
+                None
+            } else {
+                sync_database_of(&self.state, &tasks)
+            };
         let guard_scope = Arc::clone(&plan_lease_scope);
         let body = async {
             if tasks.is_empty() {
@@ -223,22 +231,29 @@ impl NodeDbPgHandler {
                 .maybe_dispatch_implicit_edge_recon(
                     &tasks,
                     tenant_id,
-                    identity,
-                    session_id,
-                    ResultShaping {
+                    super::calvin_dispatch::CalvinDispatchSession {
+                        identity,
+                        session_id,
+                        result_formats: shaping.formats,
+                        auth: &auth_ctx,
                         projection: effective_schema,
-                        formats: shaping.formats,
                     },
-                    &auth_ctx,
+                    &sum_target_reads,
                 )
                 .await?
             {
                 return Ok(responses);
             }
 
+            #[cfg(feature = "failpoints")]
+            crate::control::fail_gate::before_route(self.state.node_id).await;
+
             // Read once, ahead of the gateway gate: an in-block write must never
-            // forward here, or it applies durably outside the transaction.
+            // forward here, or it applies durably outside the transaction. A
+            // settled statement commits through Calvin below: a forward applies
+            // its tasks one by one and checks no read.
             if tx_state != TransactionState::InBlock
+                && !crate::control::planner::calvin::ships_balance_delta(&tasks, &sum_target_reads)
                 && let Some(responses) = self
                     .maybe_dispatch_tasks_via_gateway(
                         &tasks,
@@ -279,6 +294,25 @@ impl NodeDbPgHandler {
                     // applies it deterministically. Edge-bearing dependent
                     // predicates are already preempted onto Calvin above; only
                     // genuine multi-shard bulk writes need OLLP. Fall through.
+                    //
+                    // A zero-net settlement is the exception: it ships no task,
+                    // and only Calvin checks its reads.
+                    if tx_state != TransactionState::InBlock && !sum_target_reads.is_empty() {
+                        return self
+                            .dispatch_calvin_multishard(
+                                tasks,
+                                tenant_id,
+                                super::calvin_dispatch::CalvinDispatchSession {
+                                    identity,
+                                    session_id,
+                                    result_formats: shaping.formats,
+                                    auth: &auth_ctx,
+                                    projection: effective_schema,
+                                },
+                                &sum_target_reads,
+                            )
+                            .await;
+                    }
                 }
                 DispatchClass::MultiShard { .. } => {
                     // Dispatching to Calvin here will apply the statement durably
@@ -344,7 +378,13 @@ impl NodeDbPgHandler {
                 Err(revoked) => Err(sql_error(&revoked)),
             }
         } else {
-            body.await
+            let responses = body.await?;
+            if let Some(database) = sync_database {
+                await_mirror_sync(&self.state, database)
+                    .await
+                    .map_err(|error| sql_error(&error))?;
+            }
+            Ok(responses)
         }
     }
 }

@@ -41,6 +41,17 @@ impl CoreLoop {
                 },
             );
         };
+        let storage_mode = match self.resolve_storage_mode(
+            task.request.database_id,
+            tid,
+            collection.as_str(),
+            storage_mode,
+            enforcement.storage_conversion.as_ref(),
+            *incarnation,
+        ) {
+            Ok(mode) => mode,
+            Err(e) => return self.response_error(task, ErrorCode::from(e)),
+        };
         self.execute_register_document_collection(
             task,
             RegisterDocumentCollectionParams {
@@ -48,7 +59,7 @@ impl CoreLoop {
                 collection: collection.as_str(),
                 indexes,
                 crdt_enabled: *crdt_enabled,
-                storage_mode,
+                storage_mode: &storage_mode,
                 enforcement,
                 bitemporal: *bitemporal,
                 conflict_policy: conflict_policy.as_deref(),

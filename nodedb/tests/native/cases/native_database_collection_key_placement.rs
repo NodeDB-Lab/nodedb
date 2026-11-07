@@ -81,17 +81,44 @@ fn core_of(vshard: nodedb_types::id::VShardId) -> usize {
 /// A collection name whose canonical key and raw qualified string hash to
 /// different cores in `database_id`. Without the canonical key, the SQL path
 /// and the native path would place its rows on different cores.
-fn split_placement_name(database_id: DatabaseId, prefix: &str) -> String {
-    for i in 0..256u32 {
-        let name = format!("{prefix}_{i}");
-        let qualified = QualifiedCollection::new(database_id, &name);
-        let canonical = CollectionKey::from_bare(database_id, &name).vshard();
+///
+/// The hash is `h * 31 + b`, so the core distance between the two keys is fixed by the database id.
+/// A database id with distance 0 has no such name, and this returns `None`.
+fn split_placement_name(database_id: DatabaseId, prefix: &str) -> Option<String> {
+    (0..256u32).map(|i| format!("{prefix}_{i}")).find(|name| {
+        let qualified = QualifiedCollection::new(database_id, name);
+        let canonical = CollectionKey::from_bare(database_id, name).vshard();
         let raw_qualified = CollectionKey::from_bare(database_id, qualified.as_str()).vshard();
-        if core_of(canonical) != core_of(raw_qualified) {
-            return name;
+        core_of(canonical) != core_of(raw_qualified)
+    })
+}
+
+/// Create databases until one has a collection name that splits placement, and enter it.
+async fn enter_database_with_split_name(
+    srv: &TestServer,
+    prefix: &str,
+) -> (String, DatabaseId, String) {
+    for attempt in 0..32u32 {
+        let database = format!("{prefix}_db_{attempt}");
+        srv.exec(&format!("CREATE DATABASE {database}"))
+            .await
+            .expect("create database");
+        let database_id = srv
+            .shared
+            .credentials
+            .catalog()
+            .get_database_id_by_name(&database)
+            .expect("read database id")
+            .expect("database exists");
+        assert_ne!(database_id, DatabaseId::DEFAULT);
+        if let Some(collection) = split_placement_name(database_id, prefix) {
+            srv.exec(&format!("USE DATABASE {database}"))
+                .await
+                .expect("use database");
+            return (database, database_id, collection);
         }
     }
-    panic!("no collection name under '{prefix}' splits bare and qualified hashes across cores");
+    panic!("no database id under '{prefix}' lets a collection name split placement across cores");
 }
 
 /// Open a native session bound to `database`.
@@ -240,23 +267,7 @@ fn surrogates(
 /// Run the cross-path scenario for one engine.
 async fn cross_path_rows_share_placement_and_identity(engine: Engine, prefix: &str) {
     let srv = TestServer::start_multicores(NUM_CORES).await;
-    let database = format!("{prefix}_db");
-    srv.exec(&format!("CREATE DATABASE {database}"))
-        .await
-        .expect("create database");
-    srv.exec(&format!("USE DATABASE {database}"))
-        .await
-        .expect("use database");
-    let database_id = srv
-        .shared
-        .credentials
-        .catalog()
-        .get_database_id_by_name(&database)
-        .expect("read database id")
-        .expect("database exists");
-    assert_ne!(database_id, DatabaseId::DEFAULT);
-
-    let collection = split_placement_name(database_id, prefix);
+    let (database, database_id, collection) = enter_database_with_split_name(&srv, prefix).await;
     srv.exec(&engine.create_sql(&collection))
         .await
         .expect("create collection");

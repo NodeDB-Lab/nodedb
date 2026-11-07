@@ -223,6 +223,22 @@ impl UnifiedQuantizedVector {
             }
         }
 
+        Ok(Self::build(header, packed_bits, outliers))
+    }
+
+    /// Construct a vector that carries no outliers.
+    ///
+    /// Clears `header.outlier_bitmask`, so the layout is always valid and
+    /// construction cannot fail.
+    pub fn without_outliers(mut header: QuantHeader, packed_bits: &[u8]) -> Self {
+        header.outlier_bitmask = 0;
+        Self::build(header, packed_bits, &[])
+    }
+
+    /// Write the header, packed bits, and outliers into a 128-byte padded buffer.
+    ///
+    /// The caller has already checked that `outliers` matches the bitmask.
+    fn build(header: QuantHeader, packed_bits: &[u8], outliers: &[(u32, f32)]) -> Self {
         let header_bytes = QUANT_HEADER_BYTES;
         let outlier_bytes = outliers.len() * OUTLIER_ENTRY_BYTES;
         let raw = header_bytes + packed_bits.len() + outlier_bytes;
@@ -245,11 +261,11 @@ impl UnifiedQuantizedVector {
             off += OUTLIER_ENTRY_BYTES;
         }
 
-        Ok(Self {
+        Self {
             header,
             buf,
             packed_bits_len: packed_bits.len(),
-        })
+        }
     }
 
     // ── Accessors ────────────────────────────────────────────────────────────

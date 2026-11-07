@@ -51,6 +51,25 @@ impl CredentialKek {
     pub(super) fn bytes(&self) -> &[u8; KEK_LEN] {
         &self.0
     }
+
+    /// Whether `other` is this same key.
+    pub fn same_bytes(&self, other: &[u8; KEK_LEN]) -> bool {
+        self.bytes() == other
+    }
+
+    /// Whether `wal_key` is this same key, wherever the WAL key came from.
+    ///
+    /// The WAL key never leaves its type, so this compares a subkey both derive.
+    pub fn same_key_as_wal(
+        &self,
+        wal_key: &nodedb_wal::crypto::WalEncryptionKey,
+    ) -> crate::Result<bool> {
+        let domain = b"nodedb-credential-kek-reuse-check";
+        let candidate = nodedb_wal::crypto::WalEncryptionKey::with_epoch(self.bytes(), [0u8; 4]);
+        let own = candidate.derive_subkey(domain).map_err(crate::Error::Wal)?;
+        let wal = wal_key.derive_subkey(domain).map_err(crate::Error::Wal)?;
+        Ok(own == wal)
+    }
 }
 
 impl std::fmt::Debug for CredentialKek {

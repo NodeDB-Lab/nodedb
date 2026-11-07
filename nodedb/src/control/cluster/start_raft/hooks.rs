@@ -96,23 +96,29 @@ pub(super) async fn build_hooks(
         shared.credentials.catalog(),
         &group_of,
     )?;
-    for (vshard_id, state) in recovered {
+    for (vshard_id, state) in recovered.by_vshard {
         shared
             .calvin
             .applied
             .install(vshard_id, state.fully_applied_epoch, state.applied_tail);
     }
+    for ((mirror_database, vshard_id), state) in recovered.by_mirror {
+        shared.calvin.applied.install_mirror(
+            mirror_database,
+            vshard_id,
+            state.fully_applied_epoch,
+            state.applied_tail,
+        );
+    }
     // A chunk stream of an applied position installs nothing more: a copy
     // of the position's redo installed already.
-    shared
-        .redo_chunks
-        .drop_applied_calvin_streams(|vshard_id, epoch, position| {
-            shared
-                .calvin
-                .applied
-                .get(vshard_id)
-                .is_some_and(|ledger| ledger.is_applied(epoch, position))
-        });
+    shared.redo_chunks.drop_applied_calvin_streams(|at| {
+        let ledger = match at.mirror_database {
+            None => shared.calvin.applied.get(at.vshard),
+            Some(mirror_database) => shared.calvin.applied.get_mirror(mirror_database, at.vshard),
+        };
+        ledger.is_some_and(|ledger| ledger.is_applied(at.epoch, at.position))
+    });
 
     // Every stored dependent-read barrier log of an unfinished txn waits in
     // its vShard's buffer, and the rows of finished txns go. A barrier entry

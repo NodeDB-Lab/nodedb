@@ -189,7 +189,7 @@ impl ExtendedQueryHandler for NodeDbPgHandler {
     {
         let session_id = self.session_id;
         // Keep long-running prepared statements ineligible for idle teardown.
-        let _in_flight = InFlightGuard::new(&self.sessions, session_id);
+        let _in_flight = InFlightGuard::new(&self.sessions, session_id, "extended_query");
 
         // Same statement scope the simple-query path installs: one pinned
         // deadline for every request this statement fans out into.
@@ -197,6 +197,8 @@ impl ExtendedQueryHandler for NodeDbPgHandler {
             self.sessions.statement_timeout(session_id),
             self.state.tuning.network.default_deadline_secs,
         );
+        let _read_scope =
+            crate::control::server::shared::session::read_scope::enter(&self.sessions, session_id);
 
         let result = self.execute_prepared(client, portal, max_rows).await;
         // Mirror the simple-query path: surface any queued NOTICE messages

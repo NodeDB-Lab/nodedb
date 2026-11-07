@@ -186,6 +186,7 @@ pub fn classify(error: &crate::Error) -> ApplyFailureClass {
         | crate::Error::RoleInheritanceDepthExceeded { .. }
         | crate::Error::OllpExhausted { .. }
         | crate::Error::MirrorReadOnly { .. }
+        | crate::Error::MirrorSyncTimeout { .. }
         | crate::Error::StaleReadNotLeader { .. } => ApplyFailureClass::Transient,
     }
 }

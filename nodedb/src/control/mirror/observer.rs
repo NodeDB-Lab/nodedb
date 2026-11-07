@@ -4,22 +4,22 @@
 //!
 //! # Status transitions
 //!
-//! The observer apply loop computes a wall-clock lag as:
+//! The lag is the wall-clock age of the newest cut every mirror group applied:
 //!
-//!   `lag_ms = now_ms - last_apply_ms`
+//!   `lag_ms = now_ms - applied_cut_ms`
 //!
-//! Wall-clock comparison is intentional: the bounded-staleness read rejection
-//! path in `read.rs` also uses wall-clock, so both sides are consistent.
-//! No clock-skew correction is applied — doing so would create an asymmetry
-//! where the read gate and the lag metric disagree, which is more confusing
-//! than a modest ± offset between machines in the same region.
+//! The bounded-staleness read gate in `read.rs` uses the same basis, so the
+//! gate and the metric never disagree. No clock-skew correction applies.
 //!
 //! Transitions:
 //!
-//! - `Following`  →  `Degraded { lag_ms }`  when `lag_ms > LAG_DEGRADED_MS`
-//! - `Degraded`   →  `Disconnected`         when no AppendEntries for `LAG_DISCONNECTED_MS`
-//! - `Disconnected` → `Bootstrapping` if LSN gap exceeds source log window,
-//!   → `Following` once entries resume and lag drops below floor
+//! - `Following`  →  `Degraded`      when `lag_ms > LAG_DEGRADED_MS`
+//! - `Degraded`   →  `Disconnected`  when no frame arrives for `LAG_DISCONNECTED_MS`
+//! - `Degraded` or `Disconnected` → `Following` once lag drops to the threshold
+//!
+//! `Bootstrapping`, `Promoting`, `Failed` and `Promoted` change only by an
+//! explicit step. A truncated source log stops the link at `Failed`, because
+//! a rebuild removes the readable copy and an operator asks for it.
 //!
 //! # Metric
 //!
@@ -29,7 +29,7 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use nodedb_types::{DatabaseId, Lsn, MirrorLagRecord, MirrorStatus};
+use nodedb_types::{DatabaseId, MirrorStatus};
 use tracing::{info, warn};
 
 use crate::control::metrics::DatabaseMetricsRegistry;
@@ -40,7 +40,7 @@ use crate::control::security::catalog::SystemCatalog;
 /// the rejection path and the status machine use the same wall-clock basis.
 pub const LAG_DEGRADED_MS: u64 = 5_000;
 
-/// Inactivity threshold for `Degraded → Disconnected`. No AppendEntries
+/// Inactivity threshold for `Degraded → Disconnected`. No source frame
 /// received for this duration triggers disconnected status. Locked as a
 /// constant for the same reason as `LAG_DEGRADED_MS`.
 pub const LAG_DISCONNECTED_MS: u64 = 30_000;
@@ -60,95 +60,75 @@ fn now_ms() -> u64 {
 pub enum LagTransition {
     /// Status unchanged; no catalog mutation needed.
     Unchanged,
-    /// Status should change to `Following`.
+    /// Status changes to `Following`.
     BecomeFollowing,
-    /// Status should change to `Degraded { lag_ms }`.
-    BecomeDegraded { lag_ms: u64 },
-    /// Status should change to `Disconnected`.
+    /// Status changes to `Degraded`.
+    BecomeDegraded,
+    /// Status changes to `Disconnected`.
     BecomeDisconnected,
-    /// Status should change back to `Bootstrapping` (LSN gap too large).
-    BecomeBootstrapping { bytes_done: u64, bytes_total: u64 },
 }
 
 /// Compute the lag transition for a mirror database given its current status
-/// and the `MirrorLagRecord` from `_system.mirror_lag`.
+/// and its lag.
 ///
-/// `last_entry_received_ms` is the wall-clock time the last AppendEntries
-/// was received from the source.  This is distinct from `last_apply_ms`
-/// in the lag record: an entry may be received but not yet applied (apply
-/// queue backlog). The disconnect timer runs on the receive side.
+/// `last_entry_received_ms` is the wall-clock time the last source frame
+/// arrived. An entry can arrive long before its cut applies, so the disconnect
+/// timer runs on the receive side.
 ///
 /// `current_status` is the `MirrorStatus` field from `MirrorOrigin` as
-/// stored in the `DatabaseDescriptor`. Only `Following` and `Degraded`
-/// transitions are computed here; `Bootstrapping` and `Disconnected` are
-/// set by the apply loop when it detects an LSN gap or timeout.
+/// stored in the `DatabaseDescriptor`.
 pub fn compute_lag_transition(
     current_status: &MirrorStatus,
     lag_ms: u64,
     last_entry_received_ms: u64,
-    needs_fresh_snapshot: bool,
 ) -> LagTransition {
     let now = now_ms();
 
     match current_status {
-        // A promoted mirror is a normal database — no transition applies.
-        MirrorStatus::Promoted => LagTransition::Unchanged,
+        MirrorStatus::Promoted
+        | MirrorStatus::Promoting { .. }
+        | MirrorStatus::Failed { .. }
+        | MirrorStatus::Bootstrapping { .. } => LagTransition::Unchanged,
 
         MirrorStatus::Following => {
             if lag_ms > LAG_DEGRADED_MS {
-                LagTransition::BecomeDegraded { lag_ms }
+                LagTransition::BecomeDegraded
             } else {
                 LagTransition::Unchanged
             }
         }
 
-        MirrorStatus::Degraded {
-            lag_ms: current_lag,
-        } => {
+        MirrorStatus::Degraded => {
             let no_entry_duration = now.saturating_sub(last_entry_received_ms);
             if no_entry_duration > LAG_DISCONNECTED_MS {
                 LagTransition::BecomeDisconnected
             } else if lag_ms <= LAG_DEGRADED_MS {
                 LagTransition::BecomeFollowing
-            } else if *current_lag != lag_ms {
-                // Lag changed but still above threshold — update the value.
-                LagTransition::BecomeDegraded { lag_ms }
             } else {
                 LagTransition::Unchanged
             }
         }
 
         MirrorStatus::Disconnected => {
-            // Check if we can reconnect without a fresh snapshot.
-            if needs_fresh_snapshot {
-                LagTransition::BecomeBootstrapping {
-                    bytes_done: 0,
-                    bytes_total: 0,
-                }
-            } else if lag_ms <= LAG_DEGRADED_MS {
+            if lag_ms <= LAG_DEGRADED_MS {
                 LagTransition::BecomeFollowing
             } else {
                 LagTransition::Unchanged
             }
         }
-
-        MirrorStatus::Bootstrapping { .. } => LagTransition::Unchanged,
     }
 }
 
 /// Update the lag metric and evaluate whether the mirror status needs to
-/// transition based on the current `mirror_lag` catalog entry.
+/// transition based on the database's cut state.
 ///
-/// Returns the new `MirrorStatus` that the caller should persist, or `None`
-/// if no change is needed.
+/// Returns the new `MirrorStatus` that the caller persists, or `None` if no
+/// change is needed.
 ///
 /// `last_entry_received_ms` is the wall-clock time of the most recent inbound
-/// frame from the source, as tracked by the link registry. When `None` (link
-/// not yet registered, e.g. before the cluster layer has reconnected after a
-/// restart) the function falls back to `lag_record.last_apply_ms`: applies
-/// drive forward only when frames arrive, so `last_apply_ms` is a sound — if
-/// slightly conservative — proxy. Falling back to `now_ms()` here would be
-/// wrong: it would silently disable the `Degraded → Disconnected` transition.
+/// frame from the source, as tracked by the link registry. With no link in
+/// the registry, the age of the applied cut stands in. Frames drive cuts, so
+/// the disconnect timer keeps running.
 ///
 /// Side effect: updates `nodedb_database_mirror_lag_ms{database=db_name}`
 /// in the metrics registry.
@@ -158,38 +138,28 @@ pub fn update_lag_status(
     db_name: &str,
     current_status: &MirrorStatus,
     last_entry_received_ms: Option<u64>,
-    needs_fresh_snapshot: bool,
     db_metrics: &DatabaseMetricsRegistry,
 ) -> Option<MirrorStatus> {
-    // Read the current lag record.
-    let lag_record = match catalog.get_mirror_lag(db_id) {
-        Ok(Some(r)) => r,
-        Ok(None) => {
-            // No lag record yet — mirror has not applied any entries.
-            // Treat as maximally stale: do not transition to Following.
-            return None;
-        }
+    let cut_state = match catalog.get_mirror_cut_state(db_id) {
+        Ok(state) => state,
         Err(e) => {
             warn!(
                 db_id = db_id.as_u64(),
                 error = %e,
-                "mirror observer: failed to read mirror_lag; skipping transition"
+                "mirror observer: failed to read mirror_cut_state; skipping transition"
             );
             return None;
         }
     };
+    // With no applied cut the mirror has no lag to judge: it stays as it is.
+    let applied_cut_ms = cut_state.as_ref()?.applied_cut_ms()?;
 
-    let now = now_ms();
-    let lag_ms = now.saturating_sub(lag_record.last_apply_ms);
-
-    // Publish the metric: now_ms - last_apply_ms.
+    let lag_ms = now_ms().saturating_sub(applied_cut_ms);
     db_metrics.set_mirror_lag_ms(db_id, lag_ms);
 
-    // Fall back to apply-time when the registry has no entry.
-    let last_received = last_entry_received_ms.unwrap_or(lag_record.last_apply_ms);
+    let last_received = last_entry_received_ms.unwrap_or(applied_cut_ms);
 
-    let transition =
-        compute_lag_transition(current_status, lag_ms, last_received, needs_fresh_snapshot);
+    let transition = compute_lag_transition(current_status, lag_ms, last_received);
 
     match transition {
         LagTransition::Unchanged => None,
@@ -200,12 +170,12 @@ pub fn update_lag_status(
             );
             Some(MirrorStatus::Following)
         }
-        LagTransition::BecomeDegraded { lag_ms } => {
+        LagTransition::BecomeDegraded => {
             info!(
                 db = db_name,
                 lag_ms, "mirror observer: lag exceeded threshold — Degraded"
             );
-            Some(MirrorStatus::Degraded { lag_ms })
+            Some(MirrorStatus::Degraded)
         }
         LagTransition::BecomeDisconnected => {
             warn!(
@@ -214,38 +184,7 @@ pub fn update_lag_status(
             );
             Some(MirrorStatus::Disconnected)
         }
-        LagTransition::BecomeBootstrapping {
-            bytes_done,
-            bytes_total,
-        } => {
-            warn!(
-                db = db_name,
-                "mirror observer: LSN gap requires fresh snapshot — Bootstrapping"
-            );
-            Some(MirrorStatus::Bootstrapping {
-                bytes_done,
-                bytes_total,
-            })
-        }
     }
-}
-
-/// Write an updated `MirrorLagRecord` for the given mirror database,
-/// advancing `last_applied_lsn` and `last_apply_ms`.
-///
-/// This is the hot path: called on every AppendEntries apply.
-pub fn record_apply(
-    catalog: &SystemCatalog,
-    db_id: DatabaseId,
-    lsn: Lsn,
-) -> crate::Result<MirrorLagRecord> {
-    let apply_ms = now_ms();
-    let record = MirrorLagRecord {
-        last_applied_lsn: lsn,
-        last_apply_ms: apply_ms,
-    };
-    catalog.put_mirror_lag(db_id, &record)?;
-    Ok(record)
 }
 
 #[cfg(test)]
@@ -257,14 +196,14 @@ mod tests {
         let now = now_ms();
         // Simulate lag above 5 s.
         let lag = LAG_DEGRADED_MS + 1;
-        let t = compute_lag_transition(&MirrorStatus::Following, lag, now, false);
-        assert_eq!(t, LagTransition::BecomeDegraded { lag_ms: lag });
+        let t = compute_lag_transition(&MirrorStatus::Following, lag, now);
+        assert_eq!(t, LagTransition::BecomeDegraded);
     }
 
     #[test]
     fn following_unchanged_when_lag_below_threshold() {
         let now = now_ms();
-        let t = compute_lag_transition(&MirrorStatus::Following, 100, now, false);
+        let t = compute_lag_transition(&MirrorStatus::Following, 100, now);
         assert_eq!(t, LagTransition::Unchanged);
     }
 
@@ -273,66 +212,60 @@ mod tests {
         // Simulate last_entry_received 31 s ago.
         let old_received = now_ms().saturating_sub(LAG_DISCONNECTED_MS + 1_000);
         let lag = LAG_DEGRADED_MS + 1;
-        let t = compute_lag_transition(
-            &MirrorStatus::Degraded { lag_ms: lag },
-            lag,
-            old_received,
-            false,
-        );
+        let t = compute_lag_transition(&MirrorStatus::Degraded, lag, old_received);
         assert_eq!(t, LagTransition::BecomeDisconnected);
+    }
+
+    #[test]
+    fn degraded_stays_while_lag_moves_above_the_threshold() {
+        let now = now_ms();
+        let t = compute_lag_transition(&MirrorStatus::Degraded, LAG_DEGRADED_MS + 9, now);
+        assert_eq!(t, LagTransition::Unchanged);
     }
 
     #[test]
     fn degraded_recovers_to_following_when_lag_drops() {
         let now = now_ms();
-        let t = compute_lag_transition(
-            &MirrorStatus::Degraded { lag_ms: 8_000 },
-            100, // now below threshold
-            now,
-            false,
-        );
+        let t = compute_lag_transition(&MirrorStatus::Degraded, 100, now);
         assert_eq!(t, LagTransition::BecomeFollowing);
     }
 
     #[test]
-    fn disconnected_triggers_bootstrap_on_lsn_gap() {
+    fn disconnected_recovers_to_following_when_lag_drops() {
         let now = now_ms();
-        let t = compute_lag_transition(&MirrorStatus::Disconnected, 0, now, true);
-        assert_eq!(
-            t,
-            LagTransition::BecomeBootstrapping {
-                bytes_done: 0,
-                bytes_total: 0
-            }
-        );
-    }
-
-    #[test]
-    fn disconnected_recovers_to_following_without_lsn_gap() {
-        let now = now_ms();
-        let t = compute_lag_transition(&MirrorStatus::Disconnected, 100, now, false);
+        let t = compute_lag_transition(&MirrorStatus::Disconnected, 100, now);
         assert_eq!(t, LagTransition::BecomeFollowing);
     }
 
     #[test]
-    fn promoted_is_always_unchanged() {
+    fn disconnected_never_rebuilds_on_its_own() {
         let now = now_ms();
-        let t = compute_lag_transition(&MirrorStatus::Promoted, 999_999, now, true);
+        let t = compute_lag_transition(&MirrorStatus::Disconnected, LAG_DEGRADED_MS + 1, now);
         assert_eq!(t, LagTransition::Unchanged);
     }
 
     #[test]
-    fn bootstrapping_is_always_unchanged() {
+    fn explicit_statuses_never_move_on_lag() {
         let now = now_ms();
-        let t = compute_lag_transition(
-            &MirrorStatus::Bootstrapping {
+        for status in [
+            MirrorStatus::Promoted,
+            MirrorStatus::Promoting { final_cut: 3 },
+            MirrorStatus::Failed {
+                failure: nodedb_types::MirrorFailure::LogTruncated {
+                    group: 1,
+                    first_available: 2,
+                },
+            },
+            MirrorStatus::Bootstrapping {
                 bytes_done: 0,
                 bytes_total: 0,
             },
-            100,
-            now,
-            false,
-        );
-        assert_eq!(t, LagTransition::Unchanged);
+        ] {
+            assert_eq!(
+                compute_lag_transition(&status, 999_999, now),
+                LagTransition::Unchanged,
+                "{status:?}"
+            );
+        }
     }
 }

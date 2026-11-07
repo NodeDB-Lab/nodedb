@@ -18,6 +18,7 @@ use super::super::timeseries;
 use super::super::topic;
 use super::super::topic_subscribe;
 use super::route_tokens::{RouteTokens, mentions};
+use super::sync_wait::confirmed_unless_staged;
 
 pub(super) async fn try_string(
     state: &SharedState,
@@ -137,7 +138,8 @@ pub(super) async fn try_string(
         return Some(topic::show_topics(state, identity, database_id));
     }
     if upper.starts_with("PUBLISH TO ") {
-        return Some(topic::handle_publish(state, identity, database_id, sql, txn_ctx).await);
+        let result = topic::handle_publish(state, identity, database_id, sql, txn_ctx).await;
+        return Some(confirmed_unless_staged(state, database_id, txn_ctx, result).await);
     }
 
     // Stream consumption: `SELECT * FROM STREAM <name> CONSUMER GROUP <group>

@@ -132,6 +132,7 @@ impl SystemCatalog {
                 .map_err(|e| catalog_err("insert collection", e))?;
         }
         write_txn.commit().map_err(|e| catalog_err("commit", e))?;
+        self.note_relations_written();
         self.event_defs.install(database_id, coll);
         Ok(())
     }
@@ -173,6 +174,7 @@ impl SystemCatalog {
         };
         write_txn.commit().map_err(|e| catalog_err("commit", e))?;
         if inserted {
+            self.note_relations_written();
             self.event_defs.install(database_id, coll);
         }
         Ok(inserted)
@@ -273,6 +275,7 @@ impl SystemCatalog {
         }
         write_txn.commit().map_err(|e| catalog_err("commit", e))?;
         if removed {
+            self.note_relations_written();
             self.event_defs.remove(database_id, tenant_id, name);
         }
         Ok(removed)

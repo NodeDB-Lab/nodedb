@@ -13,7 +13,7 @@
 
 use nodedb_fts::IndexScope;
 use nodedb_types::Surrogate;
-use redb::{TableDefinition, WriteTransaction};
+use redb::{ReadableDatabase, TableDefinition, WriteTransaction};
 
 use super::core::RedbFtsBackend;
 use super::shared::redb_err;
@@ -29,6 +29,7 @@ use crate::engine::sparse::fts_redb::tables::{
     DOC_FIELDS, DOC_LENGTHS, DOC_TERMS, INDEX_META, POSTINGS, SEGMENTS, STATS,
 };
 use crate::engine::storage_bytes::StorageDelta;
+use crate::storage::quarantine::{CollectionScope, QuarantineEngine};
 
 /// Index metadata sub-keys that configure a collection rather than hold its
 /// indexed data: they survive a data-only purge.
@@ -50,13 +51,25 @@ pub(super) fn collection(
     tid: u64,
     coll: &str,
 ) -> crate::Result<usize> {
-    purge(
+    let removed = purge(
         backend,
         database_id,
         tid,
         KeyOwner::collection(database_id, tid, coll),
         MetaRows::All,
-    )
+    )?;
+    release_collection_segments(backend, database_id, tid, coll);
+    Ok(removed)
+}
+
+/// Forget the quarantine records of the segments a collection purge removed.
+fn release_collection_segments(backend: &RedbFtsBackend, database_id: u64, tid: u64, coll: &str) {
+    if let Some(registry) = &backend.quarantine_registry {
+        registry.release_collection_engine(
+            QuarantineEngine::Fts,
+            &CollectionScope::new(database_id, tid, coll),
+        );
+    }
 }
 
 /// Drop every indexed row of one collection, keeping its configuration.
@@ -66,13 +79,15 @@ pub(super) fn collection_data(
     tid: u64,
     coll: &str,
 ) -> crate::Result<usize> {
-    purge(
+    let removed = purge(
         backend,
         database_id,
         tid,
         KeyOwner::collection(database_id, tid, coll),
         MetaRows::KeepConfig,
-    )
+    )?;
+    release_collection_segments(backend, database_id, tid, coll);
+    Ok(removed)
 }
 
 pub(super) fn tenant(backend: &RedbFtsBackend, database_id: u64, tid: u64) -> crate::Result<usize> {
@@ -83,6 +98,28 @@ pub(super) fn tenant(backend: &RedbFtsBackend, database_id: u64, tid: u64) -> cr
         KeyOwner::tenant(database_id, tid),
         MetaRows::All,
     )
+}
+
+/// Every collection of the tenant that holds index stats, each once.
+pub(super) fn tenant_collections(
+    backend: &RedbFtsBackend,
+    database_id: u64,
+    tid: u64,
+) -> crate::Result<Vec<String>> {
+    let read_txn = backend
+        .db
+        .begin_read()
+        .map_err(|e| redb_err("read txn", e))?;
+    let stats = read_txn
+        .open_table(STATS)
+        .map_err(|e| redb_err("open stats", e))?;
+    let mut collections: Vec<String> = scan::stats_keys(&stats, KeyOwner::tenant(database_id, tid))
+        .map_err(|e| redb_err("stats range", e))?
+        .into_iter()
+        .map(|(collection, _)| collection)
+        .collect();
+    collections.dedup();
+    Ok(collections)
 }
 
 /// Drop every row `owner` covers from every FTS table, with metadata rows

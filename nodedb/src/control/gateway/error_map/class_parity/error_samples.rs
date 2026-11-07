@@ -404,6 +404,10 @@ pub(crate) fn error_samples() -> Vec<crate::Error> {
         E::MirrorReadOnly {
             database: "db".into(),
         },
+        E::MirrorSyncTimeout {
+            database: "db".into(),
+            waited_ms: 1,
+        },
         E::StaleReadNotLeader {
             database: "db".into(),
             source_cluster: "src".into(),

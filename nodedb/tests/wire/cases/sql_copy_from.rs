@@ -247,3 +247,32 @@ async fn copy_ndjson_row_failure_aborts() {
     // No rows should have been committed (all-or-nothing semantics).
     assert_eq!(count_rows(&srv, "copy_fail_test").await, 0);
 }
+
+/// A malformed row late in the file writes no row, whatever the format.
+#[tokio::test]
+async fn copy_csv_and_json_array_bad_row_writes_nothing() {
+    let srv = TestServer::start().await;
+
+    srv.exec("CREATE COLLECTION copy_bad_csv (id INT, name TEXT)")
+        .await
+        .expect("CREATE COLLECTION");
+    let f = write_temp("id,name\n1,alice\n2,bob\n3\n", ".csv");
+    let path = f.path().to_string_lossy().to_string();
+    let result = srv.exec(&format!("COPY copy_bad_csv FROM '{path}'")).await;
+    assert!(result.is_err(), "row 4 has one column");
+    assert_eq!(count_rows(&srv, "copy_bad_csv").await, 0);
+
+    srv.exec("CREATE COLLECTION copy_bad_json (id INT, name TEXT)")
+        .await
+        .expect("CREATE COLLECTION");
+    for json in [
+        r#"[{"id": 1, "name": "alice"}, {"id": 2, "name": "bob"}, 3]"#,
+        r#"[{"id": 1, "name": "alice"}, {"id": 2, "name": "bob"}] trailing"#,
+    ] {
+        let f = write_temp(json, ".json");
+        let path = f.path().to_string_lossy().to_string();
+        let result = srv.exec(&format!("COPY copy_bad_json FROM '{path}'")).await;
+        assert!(result.is_err(), "{json} must be refused");
+        assert_eq!(count_rows(&srv, "copy_bad_json").await, 0, "{json}");
+    }
+}

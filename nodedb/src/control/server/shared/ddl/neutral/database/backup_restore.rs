@@ -86,6 +86,13 @@ pub async fn backup_database(
         admit_backup_restore_quota(state, &scope, tenant_id).map_err(|e| failed(&e))?;
     }
 
+    // A backup copies every row out of the database, so its record comes first.
+    super::super::audit_intent::record_action_intent(
+        state,
+        identity,
+        None,
+        &format!("BACKUP DATABASE {name} TO '{}'", object.uri()),
+    )?;
     let shared = state.self_arc().map_err(|e| failed(&e))?;
     let bytes = database::backup_database(&shared, db_id, name, &tenants)
         .await
@@ -177,6 +184,12 @@ pub async fn restore_database(
             admit_restore_write_quota(state, &scope, *tenant_id, &stats.collection_rows)
                 .map_err(|e| failed(&e))?;
         }
+        super::super::audit_intent::record_action_intent(
+            state,
+            identity,
+            None,
+            &format!("RESTORE DATABASE {name} FROM '{}'", object.uri()),
+        )?;
         database::apply_database(&shared, &backup, force)
             .await
             .map_err(|e| failed(&e))?

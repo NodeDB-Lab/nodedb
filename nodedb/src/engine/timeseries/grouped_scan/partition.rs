@@ -113,8 +113,7 @@ pub struct PartitionAggParams<'a> {
     pub bucket_interval_ms: i64,
     pub uring_reader: Option<&'a mut crate::data::io::uring_reader::UringReader>,
     /// Priority of the originating request, forwarded to `UringReader` for
-    /// per-tier IO wait metrics.  `None` when the caller does not have
-    /// `UringReader` access (e.g. parallel fallback threads).
+    /// per-tier IO wait metrics. `None` when the caller has no `UringReader`.
     pub io_priority: Option<Priority>,
     /// IO metrics sink.  `None` when `uring_reader` is `None`.
     pub io_metrics: Option<&'a IoMetrics>,
@@ -206,6 +205,24 @@ pub fn aggregate_partition(p: PartitionAggParams<'_>) -> crate::Result<Option<Gr
     } else {
         row_count
     };
+    // The strategies index every decoded column by row. A column of another
+    // length is corruption.
+    if let Some((i, column)) = col_data.iter().enumerate().find_map(|(i, c)| {
+        c.as_ref()
+            .filter(|c| c.len() != effective_row_count)
+            .map(|c| (i, c))
+    }) {
+        return Err(partition_corrupt(
+            dir,
+            "column",
+            SITE,
+            format!(
+                "column '{}' holds {} rows, the partition holds {effective_row_count}",
+                schema.columns[i].0,
+                column.len()
+            ),
+        ));
+    }
 
     // A `.sym` file is written only for a symbol or text column that has a
     // dictionary, so an absent one is no dictionary. A present one that does
@@ -494,5 +511,29 @@ mod tests {
             aggregate(dir.path()),
             Err(crate::Error::SegmentCorrupted { .. })
         ));
+    }
+
+    /// A column shorter than the partition's row count refuses the aggregate.
+    /// The strategies index it by row, so reading it panics the core.
+    #[test]
+    fn a_short_column_refuses_the_aggregate() {
+        use crate::engine::timeseries::columnar_segment::test_partition::write_ramp_partition;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_ramp_partition(dir.path(), "ts-full", 10);
+        write_ramp_partition(dir.path(), "ts-short", 3);
+        std::fs::copy(
+            dir.path().join("ts-short/value.col"),
+            dir.path().join("ts-full/value.col"),
+        )
+        .expect("swap the column");
+
+        let result = aggregate(&dir.path().join("ts-full"));
+
+        assert!(
+            matches!(result, Err(crate::Error::SegmentCorrupted { .. })),
+            "{:?}",
+            result.map(|_| "aggregated")
+        );
     }
 }

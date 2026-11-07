@@ -84,50 +84,15 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
         // framing in that case. The sender frames every non-empty chunk
         // with `encode_snapshot_chunk`.
         if !req.data.is_empty() {
-            // Short-circuit immediately if this chunk has already been
-            // quarantined after two consecutive CRC failures. Without
-            // this check a quarantined chunk would re-attempt the
-            // (always-failing) decode on every incoming RPC and never
-            // surface a stable, operator-visible error.
-            if let Some(ref hook) = self.snapshot_quarantine_hook
-                && hook.is_quarantined(req.group_id, req.last_included_index)
-            {
-                return Err(crate::error::ClusterError::Codec {
-                    detail: format!(
-                        "InstallSnapshot chunk quarantined: group={} index={}",
-                        req.group_id, req.last_included_index
-                    ),
-                });
-            }
-
-            match nodedb_raft::decode_snapshot_chunk(&req.data) {
-                Ok((_engine_id, payload)) => {
-                    // Successful decode — reset any prior strike so a
-                    // single transient CRC error does not permanently
-                    // count against a healthy peer.
-                    let stripped = payload.to_vec();
-                    if let Some(ref hook) = self.snapshot_quarantine_hook {
-                        hook.record_success(req.group_id, req.last_included_index);
-                    }
-                    // Replace the framed chunk with its raw payload so the
-                    // accumulator writes unframed bytes (offsets/CRC below
-                    // are payload-space).
-                    req.data = stripped;
-                }
-                Err(e) => {
-                    let is_crc_class = matches!(
-                        e,
-                        nodedb_raft::snapshot_framing::SnapshotFramingError::CrcMismatch { .. }
-                            | nodedb_raft::snapshot_framing::SnapshotFramingError::Truncated(_)
-                    );
-                    if is_crc_class && let Some(ref hook) = self.snapshot_quarantine_hook {
-                        hook.record_failure(req.group_id, req.last_included_index, &e.to_string());
-                    }
-                    return Err(crate::error::ClusterError::Codec {
-                        detail: format!("InstallSnapshot framing: {e}"),
-                    });
-                }
-            }
+            // Replace the framed chunk with its raw payload so the
+            // accumulator writes unframed bytes (offsets/CRC below are
+            // payload-space).
+            req.data = admit_snapshot_chunk(
+                self.snapshot_quarantine_hook.as_deref(),
+                req.group_id,
+                req.last_included_index,
+                &req.data,
+            )?;
         }
 
         let last_included_index = req.last_included_index;
@@ -266,5 +231,140 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
                 "failed to stage hard state after timeout-now election trigger"
             );
         }
+    }
+}
+
+/// Check one framed snapshot chunk and return its payload.
+///
+/// Every chunk decodes, a quarantined one included. A leader whose group takes
+/// no writes resends the snapshot at the same index, and a replica awaiting a
+/// snapshot neither replicates nor campaigns. So refusing good bytes at that
+/// index holds the replica behind until a write or a restart. Bytes that check
+/// out clear the record. A bad chunk never reaches the partial file, so the
+/// good retransmit replaces it. Bad bytes stay refused, with a stable error
+/// that names the quarantine.
+fn admit_snapshot_chunk(
+    hook: Option<&dyn crate::raft_loop::SnapshotQuarantineHook>,
+    group_id: u64,
+    last_included_index: u64,
+    framed: &[u8],
+) -> Result<Vec<u8>> {
+    use nodedb_raft::snapshot_framing::SnapshotFramingError;
+
+    match nodedb_raft::decode_snapshot_chunk(framed) {
+        Ok((_engine_id, payload)) => {
+            if let Some(hook) = hook {
+                hook.record_success(group_id, last_included_index);
+            }
+            Ok(payload.to_vec())
+        }
+        Err(e) => {
+            let is_crc_class = matches!(
+                e,
+                SnapshotFramingError::CrcMismatch { .. } | SnapshotFramingError::Truncated(_)
+            );
+            let quarantined = is_crc_class
+                && hook.is_some_and(|hook| {
+                    hook.record_failure(group_id, last_included_index, &e.to_string())
+                });
+            let detail = if quarantined {
+                format!(
+                    "InstallSnapshot chunk quarantined: group={group_id} \
+                     index={last_included_index}: {e}"
+                )
+            } else {
+                format!("InstallSnapshot framing: {e}")
+            };
+            Err(crate::error::ClusterError::Codec { detail })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use nodedb_raft::snapshot_framing::{SnapshotEngineId, encode_snapshot_chunk};
+
+    use super::*;
+    use crate::raft_loop::SnapshotQuarantineHook;
+
+    /// Two consecutive failures quarantine, and a success clears everything.
+    #[derive(Default)]
+    struct Strikes(Mutex<u32>);
+
+    impl SnapshotQuarantineHook for Strikes {
+        fn is_quarantined(&self, _group_id: u64, _index: u64) -> bool {
+            *self.0.lock().expect("strikes") >= 2
+        }
+
+        fn record_success(&self, _group_id: u64, _index: u64) {
+            *self.0.lock().expect("strikes") = 0;
+        }
+
+        fn record_failure(&self, _group_id: u64, _index: u64, _error: &str) -> bool {
+            let mut strikes = self.0.lock().expect("strikes");
+            *strikes += 1;
+            *strikes >= 2
+        }
+    }
+
+    fn good_chunk() -> Vec<u8> {
+        encode_snapshot_chunk(SnapshotEngineId::Composite, b"payload")
+    }
+
+    fn bad_chunk() -> Vec<u8> {
+        let mut chunk = good_chunk();
+        if let Some(last) = chunk.last_mut() {
+            *last ^= 0xFF;
+        }
+        chunk
+    }
+
+    fn detail(result: Result<Vec<u8>>) -> String {
+        match result {
+            Err(crate::error::ClusterError::Codec { detail }) => detail,
+            other => panic!("expected a codec error, got {other:?}"),
+        }
+    }
+
+    /// A retransmit at a quarantined index with good bytes is admitted and
+    /// clears the record. An idle group resends at this index until it lands.
+    #[test]
+    fn a_good_retransmit_clears_a_quarantined_chunk() {
+        let hook = Strikes::default();
+        let bad = bad_chunk();
+        assert!(admit_snapshot_chunk(Some(&hook), 1, 9, &bad).is_err());
+        assert!(admit_snapshot_chunk(Some(&hook), 1, 9, &bad).is_err());
+        assert!(hook.is_quarantined(1, 9));
+
+        let payload = admit_snapshot_chunk(Some(&hook), 1, 9, &good_chunk()).expect("good bytes");
+
+        assert_eq!(payload, b"payload");
+        assert!(!hook.is_quarantined(1, 9));
+    }
+
+    /// Bad bytes at a quarantined index stay refused, and the error names the
+    /// quarantine once it applies.
+    #[test]
+    fn bad_bytes_stay_refused_with_a_stable_error() {
+        let hook = Strikes::default();
+        let bad = bad_chunk();
+        let first = detail(admit_snapshot_chunk(Some(&hook), 1, 9, &bad));
+        assert!(first.contains("framing"), "{first}");
+        for _ in 0..2 {
+            let later = detail(admit_snapshot_chunk(Some(&hook), 1, 9, &bad));
+            assert!(later.contains("quarantined: group=1 index=9"), "{later}");
+        }
+        assert!(hook.is_quarantined(1, 9));
+    }
+
+    #[test]
+    fn no_hook_still_checks_the_frame() {
+        assert!(admit_snapshot_chunk(None, 1, 9, &bad_chunk()).is_err());
+        assert_eq!(
+            admit_snapshot_chunk(None, 1, 9, &good_chunk()).expect("good"),
+            b"payload"
+        );
     }
 }

@@ -493,7 +493,11 @@ mod tests {
         let rows = per_collection(&counted(&store));
         assert_eq!(rows.len(), 4);
         assert_exact(&store);
-        store.purge_tenant(0, TenantId::new(1)).unwrap();
+        for collection in ["x", "y"] {
+            store
+                .purge_collection(0, TenantId::new(1), collection)
+                .unwrap();
+        }
         let after = per_collection(&counted(&store));
         assert_eq!(after.len(), 2);
         assert_eq!(

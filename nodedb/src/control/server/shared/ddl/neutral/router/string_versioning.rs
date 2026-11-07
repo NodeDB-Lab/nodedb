@@ -16,6 +16,7 @@ use super::super::maintenance;
 use super::super::tree_ops;
 use super::super::version_history;
 use super::route_tokens::{RouteTokens, mentions};
+use super::sync_wait;
 
 pub(super) async fn try_string(
     state: &SharedState,
@@ -63,9 +64,9 @@ pub(super) async fn try_string(
                 &crate::Error::CrdtApplyForbiddenInTransaction,
             )));
         }
-        return Some(
-            version_history::restore::restore_version(state, identity, database_id, sql).await,
-        );
+        let result =
+            version_history::restore::restore_version(state, identity, database_id, sql).await;
+        return Some(sync_wait::confirmed(state, database_id, result).await);
     }
     if upper.starts_with("COMPACT HISTORY ON ") {
         return Some(

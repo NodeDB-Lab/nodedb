@@ -201,8 +201,7 @@ mod tests {
                 reserved: [0; 8],
             };
             let packed = vec![0u8; v.len().div_ceil(8)];
-            let uqv = UnifiedQuantizedVector::new(header, &packed, &[])
-                .expect("stub encode: layout construction must succeed");
+            let uqv = UnifiedQuantizedVector::without_outliers(header, &packed);
             StubQuantized(uqv)
         }
 

@@ -22,9 +22,19 @@ use nodedb_crdt::constraint::ConstraintSet;
 use nodedb_crdt::row_lookup::RowLookup;
 use nodedb_crdt::state::CrdtState;
 use nodedb_crdt::validator::Validator;
-use nodedb_types::Hlc;
+use nodedb_types::{Hlc, QualifiedCollection};
 
 use crate::types::TenantId;
+
+/// The Loro root map of the collection the engine stores as `collection`.
+///
+/// The root is the bare name, because a client writes a delta with no database
+/// id in it. Loro cannot rename a root inside delta bytes, so every document
+/// uses the client's form, and a replica of any database agrees on it. The
+/// engine's own maps stay keyed by the stored name.
+pub(super) fn loro_root(collection: &str) -> &str {
+    QualifiedCollection::bare_of_stored(collection)
+}
 
 /// Tenant-wide row/field lookup view passed to the constraint validator.
 ///
@@ -41,7 +51,7 @@ impl RowLookup for TenantRowLookup<'_> {
     fn row_exists(&self, collection: &str, row_id: &str) -> bool {
         self.collections
             .get(collection)
-            .is_some_and(|s| s.row_exists(collection, row_id))
+            .is_some_and(|s| s.row_exists(loro_root(collection), row_id))
             || self.array_surrogate_ids.contains(row_id)
     }
 
@@ -52,9 +62,9 @@ impl RowLookup for TenantRowLookup<'_> {
         value: &LoroValue,
         exclude_row_id: Option<&str>,
     ) -> bool {
-        self.collections
-            .get(collection)
-            .is_some_and(|s| s.field_value_exists(collection, field, value, exclude_row_id))
+        self.collections.get(collection).is_some_and(|s| {
+            s.field_value_exists(loro_root(collection), field, value, exclude_row_id)
+        })
     }
 
     fn field_value_exists_live(
@@ -64,9 +74,9 @@ impl RowLookup for TenantRowLookup<'_> {
         value: &LoroValue,
         exclude_row_id: Option<&str>,
     ) -> bool {
-        self.collections
-            .get(collection)
-            .is_some_and(|s| s.field_value_exists_live(collection, field, value, exclude_row_id))
+        self.collections.get(collection).is_some_and(|s| {
+            s.field_value_exists_live(loro_root(collection), field, value, exclude_row_id)
+        })
     }
 }
 
@@ -223,6 +233,8 @@ impl TenantCrdtEngine {
     /// document the collection already holds under this incarnation, loaded
     /// before the binding, mints its later operations under the derived peer
     /// id.
+    ///
+    /// On `Err` the collection keeps the incarnation it had.
     pub fn bind_incarnation(&mut self, collection: &str, incarnation: Hlc) -> crate::Result<()> {
         let previous = self.incarnations.insert(collection.to_owned(), incarnation);
         if previous == Some(incarnation) {
@@ -235,8 +247,14 @@ impl TenantCrdtEngine {
             return Ok(());
         }
         let peer_id = self.peer_id_of(collection);
-        if let Some(state) = self.collections.get_mut(collection) {
-            state.set_peer_id(peer_id).map_err(crate::Error::Crdt)?;
+        if let Some(state) = self.collections.get_mut(collection)
+            && let Err(e) = state.set_peer_id(peer_id)
+        {
+            match previous {
+                Some(previous) => self.incarnations.insert(collection.to_owned(), previous),
+                None => self.incarnations.remove(collection),
+            };
+            return Err(crate::Error::Crdt(e));
         }
         Ok(())
     }

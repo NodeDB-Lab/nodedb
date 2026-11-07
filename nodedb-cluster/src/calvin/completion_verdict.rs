@@ -156,9 +156,12 @@ impl CalvinCompletionRegistry {
     /// verdict to every locally parked Calvin scheduler.
     ///
     /// Idempotent: re-applying the same verdict is a no-op. A verdict that
-    /// differs from a previously stored one is a determinism bug (the tally is
-    /// computed deterministically from replicated votes) — it is logged at
-    /// `warn` and the latest value is stored.
+    /// differs from the stored one is a determinism fault: the tally is a
+    /// pure function of replicated votes. The first verdict stays, the fault
+    /// reaches a faultbox capture, and the conflicting verdict reaches no
+    /// scheduler. Every replica applies the log in one order, so every
+    /// replica keeps the same verdict, and sequencing continues. A commit
+    /// or abort that flipped and a changed abort cause both count.
     ///
     /// Store-and-notify run under the ONE `inner` mutex so a scheduler that
     /// probes `verdict(txn)` after the store is guaranteed to see it, and the
@@ -171,23 +174,32 @@ impl CalvinCompletionRegistry {
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let participants = {
             let entry = inner.entry_mut(txn);
-            let differs = entry
-                .verdict
-                .as_ref()
-                .map(|existing| existing.is_commit() != commit);
-            match differs {
-                Some(true) => {
-                    tracing::warn!(
+            match &entry.verdict {
+                Some(stored) if *stored != verdict => {
+                    let difference = if stored.is_commit() != commit {
+                        "commit_or_abort"
+                    } else {
+                        "abort_cause"
+                    };
+                    tracing::error!(
                         epoch = txn.epoch,
                         position = txn.position,
-                        existing = ?entry.verdict,
-                        proposed = ?verdict,
-                        "calvin verdict differs from a previously applied one; \
-                         determinism bug — overwriting with the latest"
+                        kept = ?stored,
+                        refused = ?verdict,
+                        difference,
+                        "calvin verdict differs from the stored verdict of its transaction; \
+                         determinism fault. The first verdict stays on every replica."
                     );
-                    entry.verdict = Some(verdict);
+                    crate::diag::calvin_verdict_conflict(
+                        txn.epoch,
+                        txn.position,
+                        difference,
+                        &format!("{stored:?}"),
+                        &format!("{verdict:?}"),
+                    );
+                    return;
                 }
-                Some(false) => {}
+                Some(_) => {}
                 None => entry.verdict = Some(verdict),
             }
             entry.participants.clone()
@@ -616,6 +628,52 @@ mod tests {
                 commit: true,
             }
         );
+    }
+
+    /// A verdict that flips the stored decision changes nothing: the first
+    /// stays, on the gate and for the coordinator, and no scheduler hears the
+    /// second.
+    #[tokio::test]
+    async fn a_conflicting_verdict_keeps_the_first_and_signals_nothing() {
+        let reg = CalvinCompletionRegistry::new_detached();
+        let (tx, mut rx) = mpsc::channel(8);
+        reg.register_verdict_signal_sender(7, tx);
+        let txn = TxnId::new(53, 0);
+
+        reg.note_verdict(txn, VerdictOutcome::Commit);
+        assert!(rx.try_recv().expect("the first verdict signals").commit);
+
+        reg.note_verdict(
+            txn,
+            VerdictOutcome::Abort(AbortReason::SerializationConflict.into()),
+        );
+        assert_eq!(reg.verdict(txn), Some(true), "the first verdict stays");
+        assert!(rx.try_recv().is_err(), "the conflict signals no scheduler");
+
+        // The same decision again is a plain re-apply, and it signals.
+        reg.note_verdict(txn, VerdictOutcome::Commit);
+        assert!(rx.try_recv().expect("a re-apply signals").commit);
+    }
+
+    /// A changed abort cause keeps the first cause too.
+    #[tokio::test]
+    async fn a_changed_abort_cause_keeps_the_first_cause() {
+        let reg = CalvinCompletionRegistry::new_detached();
+        let txn = TxnId::new(53, 1);
+        let first = VerdictOutcome::Abort(AbortReason::SerializationConflict.into());
+        reg.note_verdict(txn, first.clone());
+        reg.note_verdict(
+            txn,
+            VerdictOutcome::Abort(AbortReason::ParticipantError.into()),
+        );
+        let stored = reg
+            .inner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .completions
+            .get(&txn)
+            .and_then(|entry| entry.verdict.clone());
+        assert_eq!(stored, Some(first));
     }
 
     #[tokio::test]

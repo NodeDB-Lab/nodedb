@@ -6,4 +6,4 @@ pub mod registry;
 
 pub use allocate::allocate_database_id;
 pub use persist::DatabaseHwmPersist;
-pub use registry::{DatabaseAllocError, DatabaseRegistry, USER_DB_START};
+pub use registry::{DatabaseAllocError, DatabaseRegistry, USER_DB_START, database_id_space};

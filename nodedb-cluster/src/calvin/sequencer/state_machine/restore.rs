@@ -171,7 +171,10 @@ mod tests {
             &encode(&SequencerEntry::CutMarker {
                 hlc: 1_000,
                 restore_point: 77,
-                barrier: Some(CutBarrierWire { capture: None }),
+                barrier: Some(CutBarrierWire {
+                    capture: None,
+                    mirror: None,
+                }),
                 floor: 0,
             }),
         );

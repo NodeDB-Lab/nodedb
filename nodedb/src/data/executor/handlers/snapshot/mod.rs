@@ -8,3 +8,4 @@ mod departure;
 mod install_arrays;
 pub mod restore;
 mod restore_segments;
+mod tenant_graph_purge;

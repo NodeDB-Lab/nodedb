@@ -22,7 +22,8 @@ pub mod vector_restore;
 pub use array_restore::{ARRAY_RESTORE, ArrayRestoreRedo};
 pub use capture::{CapturedEffect, CapturedEntry, OriginAppend, WriteSetCapture};
 pub use chunk::{
-    CarriedRedoStream, RedoChunkHeader, RedoChunkPiece, RedoChunkRecord, RedoStreamId,
+    CalvinPositionId, CarriedRedoStream, RedoChunkHeader, RedoChunkPiece, RedoChunkRecord,
+    RedoStreamId,
 };
 pub use columnar_restore::{COLUMNAR_RESTORE, ColumnarRestoreRedo, ColumnarRestoreVersion};
 pub use continuation::{ContinuedRedo, SplitRedo, split_redo};

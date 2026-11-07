@@ -57,6 +57,28 @@ impl CoreLoop {
         }
     }
 
+    /// The name of every partition of `root` not deleted, sorted.
+    pub(super) fn ts_live_partitions(
+        &self,
+        database_id: DatabaseId,
+        tenant_id: TenantId,
+        root: &str,
+    ) -> Vec<String> {
+        let mut live: Vec<String> = self
+            .ts_registries
+            .get(&(database_id, tenant_id, root.to_string()))
+            .map(|registry| {
+                registry
+                    .iter()
+                    .filter(|(_, entry)| entry.meta.state != PartitionState::Deleted)
+                    .map(|(_, entry)| entry.dir_name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        live.sort_unstable();
+        live
+    }
+
     fn apply_cagg_refresh_cut(
         &mut self,
         database_id: DatabaseId,
@@ -71,18 +93,7 @@ impl CoreLoop {
         // Every row of every record before the cut lands in a partition, and
         // no row after it can: nothing else of the group is in flight.
         self.flush_ts_collection(tenant_id, database_id, root, now_ms)?;
-        let mut live: Vec<String> = self
-            .ts_registries
-            .get(&(database_id, tenant_id, root.to_string()))
-            .map(|registry| {
-                registry
-                    .iter()
-                    .filter(|(_, entry)| entry.meta.state != PartitionState::Deleted)
-                    .map(|(_, entry)| entry.dir_name.clone())
-                    .collect()
-            })
-            .unwrap_or_default();
-        live.sort_unstable();
+        let live = self.ts_live_partitions(database_id, tenant_id, root);
         let outcome = self.continuous_agg_mgr.apply_cut(db, tid, root, cut, &live);
         tracing::debug!(
             core = self.core_id,

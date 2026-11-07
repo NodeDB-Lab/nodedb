@@ -95,6 +95,7 @@ fn install_plan(
             epoch_system_ms: 0,
             reply,
             user_write: true,
+            mirror: false,
         }),
         reads: Vec::new(),
         snapshot_ordinal: None,

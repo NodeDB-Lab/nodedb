@@ -390,7 +390,7 @@ pub(crate) fn read_single_cert(path: &Path) -> crate::Result<CertificateDer<'sta
     }
 }
 
-fn read_private_key(path: &Path) -> crate::Result<PrivateKeyDer<'static>> {
+pub(crate) fn read_private_key(path: &Path) -> crate::Result<PrivateKeyDer<'static>> {
     ensure_secret_file_perms(path)?;
     let bytes = fs::read(path).map_err(|e| crate::Error::Config {
         detail: format!("read key {}: {e}", path.display()),

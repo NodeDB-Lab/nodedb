@@ -59,8 +59,8 @@ pub use document::{
     DocumentResolvedMutation, EnforcementOptions, GeneratedColumnSpec, IndexProbe,
     MaterializedSumBinding, OllpPredictedEdge, PeriodLockConfig, QuerySource, RedoSumTargets,
     RegisteredIndex, RegisteredIndexState, ResolvedSumTarget, ReturningColumns, ReturningItem,
-    ReturningSpec, RowSource, StorageMode, SumTargetKey, TimeseriesSchema, UpdateValue,
-    resolved_sum_surrogate,
+    ReturningSpec, RowSource, StorageConversion, StorageMode, SumTargetKey, TimeseriesSchema,
+    UpdateValue, resolved_sum_surrogate,
 };
 pub use exchange::{ExchangeMode, ExchangeOp};
 pub use gathered_source::GatheredSource;
@@ -80,7 +80,7 @@ pub use meta_restore::{
 };
 pub use meta_restore_keys::{RestoredColumnarKey, RestoredVectorRow};
 pub use meta_snapshot::{CutCaptureRequest, DepartedCollection, SnapshotClearTarget};
-pub use meta_version_purge::{PURGE_REMAINING_KEY, RetainedHistory};
+pub use meta_version_purge::{MirrorHistoryFloor, PURGE_REMAINING_KEY, RetainedHistory};
 pub use plan::PhysicalPlan;
 pub use query::{AggregateSpec, GroupKeySpec, JoinProjection, QueryOp};
 pub use redo_origin::RedoOrigin;

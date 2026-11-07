@@ -491,6 +491,7 @@ fn calvin_install() -> PhysicalPlan {
             epoch_system_ms: 0,
             reply: CalvinReplySpec::Count(Vec::new()),
             user_write: true,
+            mirror: false,
         }),
         reads: Vec::new(),
         snapshot_ordinal: None,
@@ -512,6 +513,7 @@ fn recovered_positions(wal: &WalManager) -> BTreeSet<(u64, u32)> {
     let catalog = SystemCatalog::open_in_memory().expect("in-memory catalog");
     recover_all_applied(wal, &catalog, &|_| None)
         .expect("recover applied positions")
+        .by_vshard
         .remove(&0)
         .map(|recovered| recovered.applied_tail)
         .unwrap_or_default()

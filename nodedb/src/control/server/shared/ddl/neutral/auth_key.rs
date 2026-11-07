@@ -78,6 +78,12 @@ pub fn create_auth_key(
         })
         .unwrap_or(0);
 
+    super::audit_intent::record_action_intent(
+        state,
+        identity,
+        Some(identity.tenant_id),
+        &format!("CREATE AUTH KEY for user '{auth_user_id}'"),
+    )?;
     let token = state.auth_api_keys.create_key(
         auth_user_id,
         identity.tenant_id.as_u64(),
@@ -125,6 +131,12 @@ pub fn rotate_auth_key(
         .and_then(|s| s.trim_end_matches('h').parse::<u64>().ok())
         .unwrap_or(24);
 
+    super::audit_intent::record_action_intent(
+        state,
+        identity,
+        Some(identity.tenant_id),
+        &format!("ROTATE AUTH KEY '{key_id}' (overlap {overlap_hours}h)"),
+    )?;
     let new_token = state
         .auth_api_keys
         .rotate(key_id, overlap_hours)?

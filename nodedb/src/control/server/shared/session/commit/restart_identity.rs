@@ -16,14 +16,24 @@ use crate::types::TenantId;
 /// `TRUNCATE ... RESTART IDENTITY` names, whichever engine stores it
 /// (`PhysicalPlan::truncate_target`). Called after every abort branch of
 /// the commit has returned.
+///
+/// The commit already holds the truncate, so an error here cannot fail it. The
+/// report names it instead. A counter that stayed ahead repeats no value.
 pub(super) fn restart_truncated_identities(
     state: &SharedState,
     tenant_id: TenantId,
     buffered: &[PhysicalTask],
 ) {
     for task in buffered {
-        if let Some((collection, true)) = task.plan.truncate_target() {
-            state.sequence_registry.restart_sequences_for_collection(
+        if let Some((collection, true)) = task.plan.truncate_target()
+            && let Err(error) = state.sequence_registry.restart_sequences_for_collection(
+                task.database_id.as_u64(),
+                tenant_id.as_u64(),
+                collection.as_str(),
+            )
+        {
+            crate::diag::sequence_restart_failed(
+                &error.to_string(),
                 task.database_id.as_u64(),
                 tenant_id.as_u64(),
                 collection.as_str(),

@@ -89,6 +89,25 @@ pub fn calvin_apply_halted(
     .emit();
 }
 
+/// Report a settled redo record that names a collection outside its database.
+/// The record stays applied. A name reaches this site only through a bug in the
+/// code that named it.
+pub fn redo_note_misnamed(core_id: usize, lsn: u64, collection: &str, err: &crate::Error) {
+    let ctx = context::RedoNoteMisnamed {
+        core_id,
+        lsn,
+        collection,
+    };
+    let _ = Capture::new(
+        EventKind::InvariantViolation,
+        "committed redo: a settled record names a collection outside its database",
+    )
+    .error_chain(error_chain_of(err))
+    .domain(&ctx)
+    .with_backtrace()
+    .emit();
+}
+
 /// Report a Data-Plane core that fail-stopped because its state is unknown.
 /// Called once per core, from its fail-stop latch on the first cause.
 pub fn data_plane_core_fail_stopped(core_id: usize, cause: &str, detail: &str) {

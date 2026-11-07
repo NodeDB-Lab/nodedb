@@ -30,7 +30,6 @@ const ALLOWED: &[&str] = &[
     // `retention_policy/autowire.rs` is absent: a policy's downsample tiers
     // register on every core of the node, not through the system door.
     "engine/timeseries/retention_policy/enforcement.rs",
-    "engine/bitemporal/enforcement.rs",
     // `backup/restore/durable.rs` is absent: every restore re-issue proposes
     // a replicated entry, and each replica applies it. Backup capture, the
     // cluster snapshot builder, PURGE TENANT and the MOVE TENANT snapshot
@@ -40,7 +39,9 @@ const ALLOWED: &[&str] = &[
     // dispatcher, not through the system door.
     // Committed DDL applied to engine state, and catalog maintenance.
     "control/server/shared/ddl/engine_apply.rs",
-    "control/server/shared/ddl/neutral/convert/driver.rs",
+    // A committed CONVERT entry on each replica. The statement's identity is
+    // checked on the proposing node, and the log entry carries no user.
+    "control/distributed_applier/apply_loop/collection_convert.rs",
     // `continuous_agg/create.rs`, `drop.rs` and `register.rs` are absent: a
     // continuous aggregate replicates as a catalog entry, and each node's
     // post-apply lane registers or removes it on every core. `show.rs` is

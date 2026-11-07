@@ -154,6 +154,10 @@ impl RasterReader for TiffReader {
         self.image.layout.block_count()
     }
 
+    fn block_bytes(&self) -> u64 {
+        self.image.layout.block_bytes()
+    }
+
     fn block_window(&self, index: u32) -> Result<BlockWindow, RasterError> {
         self.image.layout.window(index)
     }

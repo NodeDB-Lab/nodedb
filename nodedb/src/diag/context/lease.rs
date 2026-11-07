@@ -83,6 +83,35 @@ impl DomainContext for DdlCleanupNotCompleted<'_> {
     }
 }
 
+/// A release of idle descriptor leases that was not proposed.
+pub(in crate::diag) struct DescriptorLeaseReleaseDropped<'a> {
+    /// How many descriptors the release named.
+    pub descriptors: usize,
+    /// What failed, without the per-occurrence detail.
+    pub error_class: &'a str,
+}
+
+impl DomainContext for DescriptorLeaseReleaseDropped<'_> {
+    fn domain_kind(&self) -> &'static str {
+        "nodedb.descriptor_lease_release_dropped"
+    }
+
+    fn grouping_key(&self) -> String {
+        // The descriptors are the occurrence.
+        format!("cause={}", self.error_class)
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "descriptors": self.descriptors,
+            "error_class": self.error_class,
+            "why_fatal": "a DDL that drains these descriptors waits until the leases expire",
+            "operator_action": "the renewal loop releases idle leases at expiry; check \
+                                metadata-group leadership if the report repeats",
+        })
+    }
+}
+
 /// A descriptor drain whose holder gave up and whose end did not apply.
 pub(in crate::diag) struct DescriptorDrainNotEnded<'a> {
     /// Debug form of the descriptor id.

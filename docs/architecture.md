@@ -160,6 +160,8 @@ SET cross_shard_txn = 'strict';
 SET cross_shard_txn = 'best_effort_non_atomic';
 ```
 
+In this mode a predicate write and the shipped balance of a materialized sum commit as separate groups. A failure of one group leaves the balance unequal to the source sum.
+
 (Bare `best_effort` is deliberately rejected; invalid values return SQLSTATE `22023`.)
 
 **Single-node deployments always run Calvin.** A node with no `[cluster]` section synthesizes a one-node cluster with its own sequencer group, so transactions spanning multiple cores (vShards) commit atomically. Uncontended single-shard point writes bypass the sequencer entirely and go directly through the relevant data-group Raft; contended or predicate/bulk writes route through the deterministic scheduler.
@@ -324,13 +326,16 @@ All resource consumption is observable via Prometheus metrics prefixed `nodedb_`
 - `bridge_queue_depth` — Pending requests in SPSC bridge virtual queue
 - `wal_commit_latency_p99_us` — 99th percentile WAL commit latency (microseconds)
 - `maintenance_lease_seconds_total` — Cumulative wall seconds holding a maintenance lease
-- `mirror_lag_ms` — Replication lag to follower replicas (distributed deployments)
+- `mirror_lag_ms` — A mirror database's lag behind its source cluster. Zero for other databases and for a promoted mirror. See [Databases](databases.md#mirror)
 
-**Per-Tenant Metrics** (`nodedb_tenant_*{database="<name>", tenant="<tenant>"}`):
+**Per-Tenant Metrics in a Database** (`nodedb_tenant_*{tenant_id="<id>", database="<name>"}`):
 
-- `qps` — Requests per second
-- `memory_bytes` — Total memory reserved
-- `storage_bytes` — Cumulative storage on-disk
+- `qps_total` — Cumulative requests admitted
+
+**Per-Tenant Metrics** (`nodedb_tenant_*{tenant_id="<id>"}`):
+
+- `memory_used_bytes` — Current memory consumption
+- `storage_used_bytes` — Current storage consumption
 
 Counters are incremented at the sites where resources are consumed:
 

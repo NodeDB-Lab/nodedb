@@ -280,8 +280,12 @@ impl MirrorBootstrapReceiver {
             "cross-cluster snapshot transfer complete"
         );
 
-        // Emit final progress (100 %) and Following transition.
-        (self.on_progress)(MirrorStatus::Following);
+        // The file landed, and the mirror holds no row of it yet. The caller
+        // reports `Following` once the re-issue finished.
+        (self.on_progress)(MirrorStatus::Bootstrapping {
+            bytes_done: ps.bytes_done,
+            bytes_total: ps.total_bytes,
+        });
 
         Ok(BootstrapChunkOutcome::Committed {
             snapshot_lsn,
@@ -396,10 +400,17 @@ mod tests {
             "unexpected outcome: {r2:?}"
         );
 
+        // The file landed. The mirror holds no row until its caller re-issues
+        // it, so the receiver never reports `Following`.
         let log = status_log.lock().unwrap();
-        assert!(
-            log.contains(&MirrorStatus::Following),
-            "Following status not reported; log: {log:?}"
+        assert!(!log.contains(&MirrorStatus::Following), "log: {log:?}");
+        assert_eq!(
+            log.last(),
+            Some(&MirrorStatus::Bootstrapping {
+                bytes_done: 6,
+                bytes_total: 6,
+            }),
+            "log: {log:?}"
         );
     }
 

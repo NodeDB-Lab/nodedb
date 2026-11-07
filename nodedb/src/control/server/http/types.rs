@@ -18,6 +18,9 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub struct HttpQueryRequest {
     pub sql: String,
+    /// `strong` (the default), `eventual` or `bounded_staleness:<secs>`.
+    #[serde(default)]
+    pub read_consistency: Option<String>,
 }
 
 /// `POST /v1/query/stream` request body.
@@ -25,6 +28,9 @@ pub struct HttpQueryRequest {
 #[serde(rename_all = "snake_case")]
 pub struct HttpQueryStreamRequest {
     pub sql: String,
+    /// `strong` (the default), `eventual` or `bounded_staleness:<secs>`.
+    #[serde(default)]
+    pub read_consistency: Option<String>,
 }
 
 /// `POST /v1/auth/exchange-key` request body.

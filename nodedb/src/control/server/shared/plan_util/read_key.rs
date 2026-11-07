@@ -303,6 +303,7 @@ fn meta_read_key(op: &MetaOp) -> ReadKey {
         | MetaOp::Compact
         | MetaOp::Checkpoint
         | MetaOp::RegisterContinuousAggregate { .. }
+        | MetaOp::InstallAggregateImage { .. }
         | MetaOp::UnregisterContinuousAggregate { .. }
         | MetaOp::ListContinuousAggregates
         | MetaOp::ContinuousAggregatesRegistered
@@ -313,6 +314,7 @@ fn meta_read_key(op: &MetaOp) -> ReadKey {
         | MetaOp::PurgeDepartedVShards { .. }
         | MetaOp::PurgeVersionsBelow { .. }
         | MetaOp::KvDueExpiries { .. }
+        | MetaOp::ListTenantCollections { .. }
         | MetaOp::RefreshGraphCount { .. }
         | MetaOp::QueryStorageBytes { .. }
         | MetaOp::PurgeTenant { .. }
@@ -327,7 +329,7 @@ fn meta_read_key(op: &MetaOp) -> ReadKey {
         | MetaOp::TemporalPurgeCrdt { .. }
         | MetaOp::TemporalPurgeArray { .. }
         | MetaOp::AlterArray { .. }
-        | MetaOp::ApplyContinuousAggRetention
+        | MetaOp::ApplyContinuousAggRetention { .. }
         | MetaOp::QueryAggregateWatermark { .. }
         | MetaOp::QueryLastValues { .. }
         | MetaOp::QueryLastValue { .. }

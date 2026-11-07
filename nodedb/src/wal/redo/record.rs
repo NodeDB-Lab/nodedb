@@ -187,6 +187,10 @@ pub struct CalvinStamp {
     pub position: u32,
     /// The vshard that applied this transaction.
     pub vshard_id: u32,
+    /// The mirror database whose source issued `(epoch, position)`. `None`
+    /// names a position of this cluster's sequencer. The two number
+    /// independently, so each has its own applied ledger.
+    pub mirror_database: Option<u64>,
 }
 
 /// Payload of a graph edge upsert: the bytes of an autocommit
@@ -448,6 +452,7 @@ mod tests {
                 epoch: 42,
                 position: 7,
                 vshard_id: 3,
+                mirror_database: Some(1024),
             }),
             cross_shard_applied: None,
             row_sources: Vec::new(),

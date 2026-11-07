@@ -235,7 +235,8 @@ pub async fn metrics(
     output.push_str("# TYPE nodedb_users_active gauge\n");
     output.push_str(&format!("nodedb_users_active {user_count}\n\n"));
 
-    // Per-database quota metrics (QPS, memory, storage, connections, bridge, WAL, maintenance).
+    // Per-database quota metrics (QPS, memory, storage, connections, bridge, WAL, maintenance),
+    // and per-database tenant QPS.
     match crate::control::metrics::database_sync::database_names(state.shared.credentials.catalog())
     {
         Ok(names) => state
@@ -243,28 +244,6 @@ pub async fn metrics(
             .database_metrics
             .render_prometheus(&names, &mut output),
         Err(e) => tracing::warn!(error = %e, "metrics: database list read error"),
-    }
-
-    // Per-tenant quota metrics (QPS, memory, storage) with both database + tenant labels.
-    if let Ok(tenants) = state.shared.tenants.lock() {
-        output.push_str(
-            "# HELP nodedb_tenant_qps_total Cumulative requests per tenant (database+tenant labeled)\n",
-        );
-        output.push_str("# TYPE nodedb_tenant_qps_total counter\n");
-        for (tid, usage, _quota) in tenants.iter_usage() {
-            let t = tid.as_u64();
-            // Tenant label only — database label requires tenant→DB lookup which can
-            // be expensive; include tenant_id as a proxy for now. Full database+tenant
-            // labeling is done in the expanded tenant loop below.
-            let _ = std::fmt::write(
-                &mut output,
-                format_args!(
-                    "nodedb_tenant_qps_total{{tenant_id=\"{t}\",database=\"default\"}} {}\n",
-                    usage.total_requests
-                ),
-            );
-        }
-        output.push('\n');
     }
 
     // SystemMetrics (if available): contention, subscriptions, WAL fsync, etc.
@@ -276,6 +255,13 @@ pub async fn metrics(
             &mut output,
             &active,
         );
+    }
+
+    // Fail-stopped Raft group disks. A node with no Raft running reports 0,
+    // so the gauge is always there to alert on.
+    match state.shared.raft_disk_halts.get() {
+        Some(halts) => halts.write_prometheus(&mut output),
+        None => nodedb_cluster::group_disk::GroupDiskHalts::default().write_prometheus(&mut output),
     }
 
     // Auth observability: method-specific counters, duration histograms, anomaly detection.

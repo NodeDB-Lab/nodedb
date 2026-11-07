@@ -52,45 +52,97 @@ pub fn bind_aggregate_calls(
     name: BindName,
     scope: &TableScope,
 ) -> Result<ast::Expr> {
-    let resolved = resolve_select_aliases(expr, projection);
+    let resolved = resolve_select_aliases(expr, projection, functions);
     bind(&resolved, aggregates, functions, name, scope)
 }
 
-/// Substitute SELECT-list output aliases referenced by the expression.
+/// Substitute SELECT-list output aliases referenced by the expression, at any
+/// depth: inside a scalar function, a CASE, a CAST, an IN list, and every
+/// other expression position.
 ///
 /// `SELECT SUM(amount) AS total ... HAVING total > 0` names an output column
 /// that does not exist yet when the clause runs. Replacing it with the
 /// underlying expression lets the aggregate binding below address the column
 /// that does exist.
-fn resolve_select_aliases(expr: &ast::Expr, projection: &[ast::SelectItem]) -> ast::Expr {
-    match expr {
-        ast::Expr::Identifier(ident) => {
-            let needle = normalize_ident(ident);
-            projection
-                .iter()
-                .find_map(|item| match item {
-                    ast::SelectItem::ExprWithAlias { expr, alias }
-                        if normalize_ident(alias) == needle =>
-                    {
-                        Some(expr.clone())
-                    }
-                    _ => None,
-                })
-                .unwrap_or_else(|| expr.clone())
+fn resolve_select_aliases(
+    expr: &ast::Expr,
+    projection: &[ast::SelectItem],
+    functions: &FunctionRegistry,
+) -> ast::Expr {
+    let mut resolved = expr.clone();
+    let mut resolver = AliasResolver {
+        projection,
+        functions,
+        query_depth: 0,
+        aggregate_depth: 0,
+    };
+    let _ = resolved.visit(&mut resolver);
+    resolved
+}
+
+/// Replaces each identifier that names a SELECT-list alias with the aliased
+/// expression.
+///
+/// A subquery resolves its own names, and an aggregate argument names an
+/// input column. Neither takes an alias.
+struct AliasResolver<'a> {
+    projection: &'a [ast::SelectItem],
+    functions: &'a FunctionRegistry,
+    /// How many subqueries enclose the expression being visited.
+    query_depth: usize,
+    /// How many aggregate calls enclose the expression being visited.
+    aggregate_depth: usize,
+}
+
+impl AliasResolver<'_> {
+    fn aliased(&self, ident: &ast::Ident) -> Option<ast::Expr> {
+        let needle = normalize_ident(ident);
+        self.projection.iter().find_map(|item| match item {
+            ast::SelectItem::ExprWithAlias { expr, alias } if normalize_ident(alias) == needle => {
+                Some(expr.clone())
+            }
+            _ => None,
+        })
+    }
+
+    fn is_aggregate(&self, expr: &ast::Expr) -> bool {
+        matches!(expr, ast::Expr::Function(func) if is_aggregate_call(func, self.functions))
+    }
+}
+
+impl VisitorMut for AliasResolver<'_> {
+    type Break = ();
+
+    fn pre_visit_query(&mut self, _query: &mut ast::Query) -> ControlFlow<Self::Break> {
+        self.query_depth += 1;
+        ControlFlow::Continue(())
+    }
+
+    fn post_visit_query(&mut self, _query: &mut ast::Query) -> ControlFlow<Self::Break> {
+        self.query_depth -= 1;
+        ControlFlow::Continue(())
+    }
+
+    fn pre_visit_expr(&mut self, expr: &mut ast::Expr) -> ControlFlow<Self::Break> {
+        if self.is_aggregate(expr) {
+            self.aggregate_depth += 1;
         }
-        ast::Expr::BinaryOp { left, op, right } => ast::Expr::BinaryOp {
-            left: Box::new(resolve_select_aliases(left, projection)),
-            op: op.clone(),
-            right: Box::new(resolve_select_aliases(right, projection)),
-        },
-        ast::Expr::UnaryOp { op, expr } => ast::Expr::UnaryOp {
-            op: *op,
-            expr: Box::new(resolve_select_aliases(expr, projection)),
-        },
-        ast::Expr::Nested(inner) => {
-            ast::Expr::Nested(Box::new(resolve_select_aliases(inner, projection)))
+        ControlFlow::Continue(())
+    }
+
+    /// The walk does not revisit a post-visit replacement, so an alias whose
+    /// expression reads a column of the same name (`SUM(x) AS x`) ends here.
+    fn post_visit_expr(&mut self, expr: &mut ast::Expr) -> ControlFlow<Self::Break> {
+        if self.is_aggregate(expr) {
+            self.aggregate_depth -= 1;
+        } else if self.query_depth == 0
+            && self.aggregate_depth == 0
+            && let ast::Expr::Identifier(ident) = &*expr
+            && let Some(aliased) = self.aliased(ident)
+        {
+            *expr = aliased;
         }
-        other => other.clone(),
+        ControlFlow::Continue(())
     }
 }
 
@@ -232,4 +284,78 @@ fn register_aggregate(
     agg.alias = key.clone();
     aggregates.push(agg);
     Ok(key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::statement::parse_sql;
+
+    /// The HAVING clause of `sql` with its SELECT-list aliases substituted.
+    fn resolved_having(sql: &str) -> String {
+        let statements = parse_sql(sql).expect("parses");
+        let ast::Statement::Query(query) = &statements[0] else {
+            panic!("not a query: {sql}");
+        };
+        let ast::SetExpr::Select(select) = query.body.as_ref() else {
+            panic!("not a SELECT: {sql}");
+        };
+        let having = select.having.as_ref().expect("a HAVING clause");
+        resolve_select_aliases(having, &select.projection, &FunctionRegistry::new()).to_string()
+    }
+
+    #[test]
+    fn an_alias_resolves_at_any_expression_depth() {
+        for predicate in [
+            "total > 0",
+            "(total) > 0",
+            "-total > 0",
+            "ROUND(total, 1) > 0",
+            "CASE WHEN total > 0 THEN 1 ELSE total END = 1",
+            "CAST(total AS BIGINT) > 0",
+            "total IN (1, 2)",
+            "total BETWEEN 1 AND 2",
+        ] {
+            let resolved = resolved_having(&format!(
+                "SELECT SUM(a) AS total FROM t GROUP BY k HAVING {predicate}"
+            ));
+            assert!(resolved.contains("SUM(a)"), "{predicate}: {resolved}");
+            assert!(!resolved.contains("total"), "{predicate}: {resolved}");
+        }
+    }
+
+    /// An alias over a column of its own name does not resolve twice.
+    #[test]
+    fn an_alias_expression_is_not_walked_again() {
+        assert_eq!(
+            resolved_having("SELECT SUM(x) AS x FROM t GROUP BY k HAVING ROUND(x) > 0"),
+            "ROUND(SUM(x)) > 0"
+        );
+    }
+
+    #[test]
+    fn an_aggregate_argument_keeps_its_column() {
+        assert_eq!(
+            resolved_having("SELECT k AS b, SUM(b) AS t FROM x GROUP BY k HAVING SUM(b) > 0"),
+            "SUM(b) > 0"
+        );
+    }
+
+    #[test]
+    fn a_subquery_keeps_its_own_names() {
+        assert_eq!(
+            resolved_having(
+                "SELECT SUM(a) AS total FROM t GROUP BY k HAVING total IN (SELECT total FROM y)"
+            ),
+            "SUM(a) IN (SELECT total FROM y)"
+        );
+    }
+
+    #[test]
+    fn a_name_no_alias_holds_stays() {
+        assert_eq!(
+            resolved_having("SELECT SUM(a) AS total FROM t GROUP BY k HAVING k > 0"),
+            "k > 0"
+        );
+    }
 }

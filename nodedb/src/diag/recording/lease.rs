@@ -37,9 +37,27 @@ pub fn descriptor_lease_not_renewed(
     .emit();
 }
 
+/// Report a release of idle descriptor leases that was not proposed: its queue
+/// was full, or every attempt failed. Called only from the background lease
+/// releaser. The leases end at their expiry.
+pub fn descriptor_lease_release_dropped(err: &crate::Error, descriptors: usize) {
+    let class = error_class(err);
+    let ctx = context::DescriptorLeaseReleaseDropped {
+        descriptors,
+        error_class: &class,
+    };
+    let _ = Capture::new(
+        EventKind::Error,
+        "descriptor lease release: idle leases stay held until they expire",
+    )
+    .error_chain(error_chain_of(err))
+    .domain(&ctx)
+    .emit();
+}
+
 /// Report a DDL preparation lease whose failure cleanup (cancel its pending
-/// record, release it) did not apply on any attempt. Called only from the
-/// background lease releaser's give-up arm.
+/// record, release it) was not proposed or did not apply on any attempt.
+/// Called only from the background lease releaser's give-up arm.
 pub fn ddl_cleanup_not_completed(err: &crate::Error, step: &'static str, token: u64) {
     let class = error_class(err);
     let ctx = context::DdlCleanupNotCompleted {
@@ -58,8 +76,8 @@ pub fn ddl_cleanup_not_completed(err: &crate::Error, step: &'static str, token: 
 }
 
 /// Report a descriptor drain whose holder gave up and whose end did not apply
-/// on any attempt. Called only from the background lease releaser's give-up
-/// arm.
+/// on any attempt of a round, or was still waiting when the releaser stopped.
+/// Called only from the background lease releaser's give-up arm.
 pub fn descriptor_drain_not_ended(
     err: &crate::Error,
     descriptor: &nodedb_cluster::DescriptorId,

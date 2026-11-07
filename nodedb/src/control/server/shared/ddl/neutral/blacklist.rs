@@ -3,13 +3,19 @@
 //! Protocol-neutral blacklist DDL commands.
 //!
 //! ```sql
-//! BLACKLIST AUTH USER 'user_42' [UNTIL '2026-12-31T00:00:00Z'] REASON 'spam'
+//! BLACKLIST AUTH USER '42' [UNTIL '2026-12-31T00:00:00Z'] REASON 'spam'
+//! BLACKLIST AUTH USER '42' REASON 'spam' WITH KILL SESSIONS
 //! BLACKLIST IP '192.168.1.100' REASON 'abuse'
+//! BLACKLIST IP '192.168.1.100' REASON 'abuse' WITH KILL SESSIONS
 //! BLACKLIST IP '10.0.0.0/8' REASON 'blocked network'
-//! UNBLACKLIST AUTH USER 'user_42'
+//! UNBLACKLIST AUTH USER '42'
 //! UNBLACKLIST IP '10.0.0.0/8'
 //! SHOW BLACKLIST [IP | USER | ALL]
 //! ```
+//!
+//! A user entry holds a decimal `user_id`, or the token subject of an identity
+//! whose `user_id` is `0`. It names no auth method, so a number refuses stored
+//! and OIDC identities alike. `WITH KILL SESSIONS` ends exactly that set.
 //!
 //! Every ban this module can create it can also lift: an entry is persisted to
 //! the system catalog and reloaded at boot, so without a removal command an
@@ -96,7 +102,7 @@ fn handle_blacklist_user(
     let kill_sessions = parts.iter().any(|p| p.to_uppercase() == "KILL");
     let mut killed = 0;
     if kill_sessions {
-        killed = state.session_registry.kill_sessions_for_username(
+        killed = state.session_registry.kill_sessions_for_blacklisted_user(
             user_id,
             crate::control::security::sessions::KillReason::AdminKill,
         );
@@ -139,11 +145,22 @@ fn handle_blacklist_ip(
         .blacklist_ip(addr, &reason, &identity.username, expires_at)
         .map_err(|e| DdlError::from_error(&e))?;
 
+    // WITH KILL SESSIONS ends the sessions the entry refuses. An expired entry
+    // never matches, and a CIDR entry matches its whole range.
+    let killed = if parts.iter().any(|p| p.eq_ignore_ascii_case("KILL")) {
+        state.session_registry.kill_sessions_for_ip(
+            crate::control::security::sessions::KillReason::AdminKill,
+            |ip| state.blacklist.check_ip(ip).is_some(),
+        )
+    } else {
+        0
+    };
+
     state.audit_record(
         crate::control::security::audit::AuditEvent::AdminAction,
         Some(identity.tenant_id),
         &identity.username,
-        &format!("blacklisted IP '{addr}': {reason}"),
+        &format!("blacklisted IP '{addr}': {reason}, killed {killed} session(s)"),
     );
 
     Ok(status("BLACKLIST"))
@@ -218,6 +235,13 @@ fn lift(
         &crate::control::security::blacklist::store::BlacklistStore,
     ) -> crate::Result<bool>,
 ) -> Result<Vec<DdlResult>, DdlError> {
+    // Lifting a block restores access, so its record comes first.
+    super::audit_intent::record_action_intent(
+        state,
+        identity,
+        Some(identity.tenant_id),
+        &format!("UNBLACKLIST {kind} '{key}'"),
+    )?;
     let removed = remove(&state.blacklist).map_err(|e| DdlError::from_error(&e))?;
     if !removed {
         return Err(err(

@@ -89,9 +89,47 @@ pub(crate) async fn cut_at_point(
             hlc: watermark,
             restore_point,
             capture: None,
+            mirror: None,
         },
     )
     .await
+}
+
+/// Take a mirror cut at `watermark`, stamped `mark`: place its Calvin marker
+/// and wait for its barrier in every group this node hosts, until `deadline`.
+///
+/// The cut waits for no local write window: a mirror reads the data-group logs
+/// alone, and a write the funnel appends here never reaches one.
+pub(crate) async fn cut_for_mirror(
+    state: &SharedState,
+    watermark: u64,
+    mark: nodedb_types::MirrorCutMark,
+    deadline: tokio::time::Instant,
+) -> Result<(), Error> {
+    let cut = OrderedCut {
+        hlc: watermark,
+        restore_point: 0,
+        capture: None,
+        mirror: Some(mark),
+    };
+    state
+        .hlc_clock
+        .update(Hlc::new(cut.hlc.saturating_add(1), 0));
+    let groups = hosted_data_groups(state);
+    if !groups.is_empty() {
+        ensure_driver(&state.self_arc()?, &cut);
+    }
+    let marker = Marker {
+        hlc: cut.hlc,
+        restore_point: 0,
+        barrier: Some(&cut),
+    };
+    let (barriers, calvin) = tokio::join!(
+        await_group_barriers(state, &cut, &groups, deadline),
+        place_marker(state, marker, &groups, deadline),
+    );
+    calvin?;
+    barriers
 }
 
 /// [`cut_at`] whose barriers carry a database backup's capture `request`.
@@ -108,6 +146,7 @@ pub(crate) async fn cut_with_capture(
             hlc: watermark,
             restore_point: 0,
             capture: Some(request.clone()),
+            mirror: None,
         },
     )
     .await

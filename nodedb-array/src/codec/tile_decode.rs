@@ -9,6 +9,7 @@
 use crate::codec::attr_col::decode_attr_col;
 use crate::codec::column_codec::{decode_row_kinds, decode_surrogates, decode_timestamps_col};
 use crate::codec::coord_rle::decode_coord_axis_rle;
+use crate::codec::frame::{take_bytes, take_len};
 use crate::codec::limits::{
     MAX_ATTRS_PER_TILE, MAX_AXES_PER_TILE, MAX_CELLS_PER_TILE, check_decoded_size, checked_capacity,
 };
@@ -22,28 +23,8 @@ use crate::types::coord::value::CoordValue;
 const SUPPORTED_PAYLOAD_VERSION: u8 = 1;
 
 fn read_framed<'a>(data: &'a [u8], pos: &mut usize) -> ArrayResult<&'a [u8]> {
-    if *pos + 4 > data.len() {
-        return Err(ArrayError::SegmentCorruption {
-            detail: "framed block: truncated length".into(),
-        });
-    }
-    let len = u32::from_le_bytes(
-        data[*pos..*pos + 4]
-            .try_into()
-            .expect("invariant: bounds-checked above (*pos + 4 <= data.len())"),
-    ) as usize;
-    *pos += 4;
-    if *pos + len > data.len() {
-        return Err(ArrayError::SegmentCorruption {
-            detail: format!(
-                "framed block: body truncated (need {len}, have {})",
-                data.len() - *pos
-            ),
-        });
-    }
-    let slice = &data[*pos..*pos + len];
-    *pos += len;
-    Ok(slice)
+    let len = take_len(data, pos, "framed block: truncated length")?;
+    take_bytes(data, pos, len, "framed block: body truncated")
 }
 
 /// Decode a tile payload previously written by `encode_sparse_tile`.
@@ -104,24 +85,9 @@ fn decode_raw(body: &[u8]) -> ArrayResult<SparseTile> {
 fn decode_structural(body: &[u8], stored_mbr: Option<TileMBR>) -> ArrayResult<SparseTile> {
     let mut pos = 0;
 
-    if pos + 8 > body.len() {
-        return Err(ArrayError::SegmentCorruption {
-            detail: "structural tile: truncated counts".into(),
-        });
-    }
-    let cell_count = u32::from_le_bytes(
-        body[pos..pos + 4]
-            .try_into()
-            .expect("invariant: bounds-checked above (pos + 8 <= body.len())"),
-    ) as usize;
-    pos += 4;
+    let cell_count = take_len(body, &mut pos, "structural tile: truncated cell count")?;
     check_decoded_size(cell_count, MAX_CELLS_PER_TILE, "cell_count")?;
-    let axis_count = u32::from_le_bytes(
-        body[pos..pos + 4]
-            .try_into()
-            .expect("invariant: bounds-checked above (pos + 4 <= body.len())"),
-    ) as usize;
-    pos += 4;
+    let axis_count = take_len(body, &mut pos, "structural tile: truncated axis count")?;
     let axis_capacity = checked_capacity(
         axis_count,
         MAX_AXES_PER_TILE,
@@ -159,17 +125,7 @@ fn decode_structural(body: &[u8], stored_mbr: Option<TileMBR>) -> ArrayResult<Sp
     let valid_until_ms = decode_timestamps_col(vu_bytes)?;
 
     // Attr columns.
-    if pos + 4 > body.len() {
-        return Err(ArrayError::SegmentCorruption {
-            detail: "structural tile: truncated attr count".into(),
-        });
-    }
-    let attr_count = u32::from_le_bytes(
-        body[pos..pos + 4]
-            .try_into()
-            .expect("invariant: bounds-checked above (pos + 4 <= body.len())"),
-    ) as usize;
-    pos += 4;
+    let attr_count = take_len(body, &mut pos, "structural tile: truncated attr count")?;
     let attr_capacity = checked_capacity(
         attr_count,
         MAX_ATTRS_PER_TILE,
@@ -430,6 +386,50 @@ mod tests {
             spread_live_surrogates(&kinds, vec![Surrogate::new(1), Surrogate::new(2)]).unwrap(),
             vec![Some(Surrogate::new(1)), None, Some(Surrogate::new(2))]
         );
+    }
+
+    #[test]
+    fn a_hostile_frame_length_is_corruption() {
+        let data = u32::MAX.to_le_bytes();
+        let mut pos = 0;
+        let error = read_framed(&data, &mut pos).unwrap_err();
+        assert!(matches!(error, ArrayError::SegmentCorruption { .. }));
+    }
+
+    #[test]
+    fn a_position_near_the_top_of_the_address_space_is_corruption() {
+        let mut pos = usize::MAX - 2;
+        assert!(read_framed(&[0u8; 16], &mut pos).is_err());
+    }
+
+    #[test]
+    fn a_structural_body_of_every_short_length_is_corruption() {
+        for len in 0..8 {
+            let error = decode_structural(&vec![0u8; len], None).unwrap_err();
+            assert!(matches!(error, ArrayError::SegmentCorruption { .. }));
+        }
+    }
+
+    /// A body holds no axes, so the next frame is the surrogates. Its length
+    /// field is all ones.
+    #[test]
+    fn a_hostile_length_inside_a_tile_is_corruption() {
+        let mut payload = vec![CodecTag::Structural as u8, SUPPORTED_PAYLOAD_VERSION];
+        payload.extend_from_slice(&0u32.to_le_bytes());
+        payload.extend_from_slice(&0u32.to_le_bytes());
+        payload.extend_from_slice(&u32::MAX.to_le_bytes());
+        let error = decode_sparse_tile(&payload).unwrap_err();
+        assert!(matches!(error, ArrayError::SegmentCorruption { .. }));
+    }
+
+    #[test]
+    fn every_truncation_of_a_real_tile_is_refused_without_a_panic() {
+        let s = schema();
+        let mut buf = Vec::new();
+        encode_sparse_tile(&make_tile(&s, 50), &mut buf).unwrap();
+        for len in 0..buf.len() {
+            assert!(decode_sparse_tile(&buf[..len]).is_err(), "length {len}");
+        }
     }
 
     #[test]

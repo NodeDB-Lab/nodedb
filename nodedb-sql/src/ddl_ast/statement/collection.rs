@@ -42,8 +42,13 @@ pub enum AlterDatabaseOperation {
     /// clone/mirror subsystem lands.
     Materialize,
     /// `ALTER DATABASE <name> PROMOTE` — promotes a mirror to writable primary.
-    /// Returns `FEATURE_NOT_YET_IMPLEMENTED` until the mirror subsystem lands.
     Promote,
+    /// `ALTER DATABASE <name> MIRROR RESUME` — a failed mirror's link retries from
+    /// its replicated positions.
+    MirrorResume,
+    /// `ALTER DATABASE <name> MIRROR REBOOTSTRAP` — a failed mirror removes what
+    /// it holds and takes a new capture of its source.
+    MirrorRebootstrap,
     /// `ALTER DATABASE <name> SET AUDIT_DML = <mode>` — sets the DML audit level.
     SetAuditDml(AuditDmlMode),
     /// `ALTER DATABASE <name> SET IDLE_TIMEOUT = <secs>` — sets the idle session

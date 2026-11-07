@@ -128,6 +128,9 @@ pub struct CalvinInstall {
     /// Whether the install raises the tenant's write mark. A slice that only
     /// installs schema raises none.
     pub user_write: bool,
+    /// Whether the slice's position is a mirror source's. It names no staged
+    /// entry on this cluster.
+    pub mirror: bool,
 }
 
 /// The answer of `MetaOp::CalvinResolve`: the slice's resolved redo record

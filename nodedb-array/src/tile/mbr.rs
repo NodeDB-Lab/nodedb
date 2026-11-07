@@ -74,7 +74,6 @@ pub struct MbrBuilder {
     attr_distinct: Vec<std::collections::HashSet<Vec<u8>>>,
     attr_nulls: Vec<u32>,
     attr_is_categorical: Vec<bool>,
-    attr_total: Vec<u32>,
     nnz: u32,
 }
 
@@ -90,7 +89,6 @@ impl MbrBuilder {
             attr_distinct: vec![Default::default(); n_attrs],
             attr_nulls: vec![0; n_attrs],
             attr_is_categorical: vec![false; n_attrs],
-            attr_total: vec![0; n_attrs],
             nnz: 0,
         }
     }
@@ -128,7 +126,6 @@ impl MbrBuilder {
     }
 
     fn fold_attr(&mut self, i: usize, a: &CellValue) {
-        self.attr_total[i] += 1;
         match a {
             CellValue::Null => self.attr_nulls[i] += 1,
             CellValue::Int64(_)
@@ -160,23 +157,20 @@ impl MbrBuilder {
         let dim_maxs = self.dim_maxs.iter().map(coord_to_bound).collect();
         let mut attr_stats = Vec::with_capacity(self.n_attrs);
         for i in 0..self.n_attrs {
-            let s = if self.attr_total[i] == self.attr_nulls[i] {
-                AttrStats::AllNull {
-                    null_count: self.attr_nulls[i],
-                }
-            } else if self.attr_is_categorical[i] {
+            // A column with no non-null cell has neither a category nor bounds.
+            let s = if self.attr_is_categorical[i] {
                 AttrStats::Categorical {
                     distinct: self.attr_distinct[i].len() as u32,
                     null_count: self.attr_nulls[i],
                 }
-            } else {
-                // Numeric branch is reached only when at least one
-                // non-null numeric cell was folded (the if/else above
-                // excludes all-null and categorical), so attr_min /
-                // attr_max are populated.
+            } else if let (Some(min), Some(max)) = (self.attr_min[i], self.attr_max[i]) {
                 AttrStats::Numeric {
-                    min: self.attr_min[i].expect("numeric branch implies min is set"),
-                    max: self.attr_max[i].expect("numeric branch implies max is set"),
+                    min,
+                    max,
+                    null_count: self.attr_nulls[i],
+                }
+            } else {
+                AttrStats::AllNull {
                     null_count: self.attr_nulls[i],
                 }
             };
@@ -214,6 +208,37 @@ fn coord_to_bound(c: &Option<CoordValue>) -> DomainBound {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mbr_of_a_column_with_no_cells_is_all_null() {
+        let m = MbrBuilder::new(1, 1).build();
+        assert!(matches!(
+            m.attr_stats[0],
+            AttrStats::AllNull { null_count: 0 }
+        ));
+    }
+
+    #[test]
+    fn mbr_of_a_nan_cell_keeps_numeric_stats() {
+        let mut b = MbrBuilder::new(1, 1);
+        b.fold(&[CoordValue::Int64(0)], &[CellValue::Float64(f64::NAN)]);
+        assert!(matches!(
+            b.build().attr_stats[0],
+            AttrStats::Numeric { null_count: 0, .. }
+        ));
+    }
+
+    /// A categorical cell wins over a numeric one in a mixed column.
+    #[test]
+    fn mbr_of_a_mixed_column_is_categorical() {
+        let mut b = MbrBuilder::new(1, 1);
+        b.fold(&[CoordValue::Int64(0)], &[CellValue::Int64(1)]);
+        b.fold(&[CoordValue::Int64(1)], &[CellValue::String("a".into())]);
+        assert!(matches!(
+            b.build().attr_stats[0],
+            AttrStats::Categorical { distinct: 1, .. }
+        ));
+    }
 
     #[test]
     fn mbr_tracks_min_max_per_dim() {

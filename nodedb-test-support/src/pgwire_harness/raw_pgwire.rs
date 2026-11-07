@@ -83,6 +83,17 @@ impl RawPgConn {
     /// callers that expect the query to fail must not route it through
     /// here.
     pub async fn simple_query(&mut self, sql: &str) -> Vec<(u8, Vec<u8>)> {
+        match self.try_simple_query(sql).await {
+            Ok(messages) => messages,
+            Err(body) => panic!("query error: {}", String::from_utf8_lossy(&body)),
+        }
+    }
+
+    /// Send a Simple Query (`Q`) and read every reply through the terminating
+    /// `ReadyForQuery`. A backend `ErrorResponse` returns its body as `Err`,
+    /// so the connection stays usable. Callers match the body with
+    /// [`error_sqlstate`].
+    pub async fn try_simple_query(&mut self, sql: &str) -> Result<Vec<(u8, Vec<u8>)>, Vec<u8>> {
         let mut qbody = sql.as_bytes().to_vec();
         qbody.push(0);
         let mut qmsg = vec![b'Q'];
@@ -91,16 +102,39 @@ impl RawPgConn {
         self.stream.write_all(&qmsg).await.expect("send query");
 
         let mut messages = Vec::new();
+        let mut error = None;
         loop {
             let (tag, body) = self.read_message().await;
             match tag {
                 b'Z' => break,
-                b'E' => panic!("query error: {}", String::from_utf8_lossy(&body)),
+                b'E' => {
+                    error.get_or_insert(body);
+                }
                 _ => messages.push((tag, body)),
             }
         }
-        messages
+        match error {
+            Some(body) => Err(body),
+            None => Ok(messages),
+        }
     }
+}
+
+/// The SQLSTATE (`C`) field of an `ErrorResponse` body.
+pub fn error_sqlstate(body: &[u8]) -> Option<String> {
+    // Fields are `code byte, NUL-terminated string`, closed by a NUL code byte.
+    let mut rest = body;
+    while let Some((&code, tail)) = rest.split_first() {
+        if code == 0 {
+            break;
+        }
+        let end = tail.iter().position(|b| *b == 0).unwrap_or(tail.len());
+        if code == b'C' {
+            return Some(String::from_utf8_lossy(&tail[..end]).into_owned());
+        }
+        rest = tail.get(end + 1..).unwrap_or_default();
+    }
+    None
 }
 
 /// The message (`M`) field of every `NoticeResponse` (`N`) in `messages`, in

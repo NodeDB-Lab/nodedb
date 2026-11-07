@@ -69,8 +69,18 @@ impl TenantCrdtEngine {
         if !self.advance_constraint_version(collection, constraint_version) {
             return false;
         }
+        // The catalog derives a constraint under the bare name. The validator
+        // finds it by the stored name a write carries, so the install scopes
+        // it to that name.
+        let scoped = constraints
+            .into_iter()
+            .map(|mut constraint| {
+                constraint.collection = collection.to_owned();
+                constraint
+            })
+            .collect();
         self.validator
-            .set_collection_constraints(collection, constraints);
+            .set_collection_constraints(collection, scoped);
         true
     }
 

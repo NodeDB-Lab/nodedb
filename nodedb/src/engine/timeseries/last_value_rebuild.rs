@@ -43,7 +43,10 @@ impl LastValueScan {
     /// memtable. `source` names the batch in an error.
     ///
     /// A batch with rows and no `_ts_series` column is an error: its rows
-    /// name no series, so the cache cannot hold their values.
+    /// name no series, so the cache cannot hold their values. A batch with no
+    /// `_ts_system` column is an error too: every schema gains both columns
+    /// together, and ordinal `0` would lose a tie to an older write. So is a
+    /// column shorter than the batch, or a float column of another type.
     pub fn fold(
         &mut self,
         source: &str,
@@ -65,30 +68,47 @@ impl LastValueScan {
             Some(ColumnData::Int64(v)) => v.as_slice(),
             _ => return Err(missing("_ts_series")),
         };
-        let ordinals: &[i64] = match schema.ts_system_idx().and_then(|idx| columns.get(idx)) {
+        let ordinals = match schema.ts_system_idx().and_then(|idx| columns.get(idx)) {
             Some(ColumnData::Int64(v)) => v.as_slice(),
-            _ => &[],
+            _ => return Err(missing("_ts_system")),
         };
-        let floats: Vec<&[f64]> = schema
-            .columns
+        let short = |what: &str| crate::Error::SegmentCorrupted {
+            detail: format!(
+                "last-value cache rebuild: {source} column '{what}' holds fewer than \
+                 {row_count} rows"
+            ),
+        };
+        let mut floats: Vec<&[f64]> = Vec::new();
+        for ((name, ty), column) in schema.columns.iter().zip(columns) {
+            if !matches!(ty, ColumnType::Float64) {
+                continue;
+            }
+            match column {
+                ColumnData::Float64(v) if v.len() >= row_count => floats.push(v.as_slice()),
+                _ => return Err(short(name)),
+            }
+        }
+        if timestamps.len() < row_count {
+            return Err(short("time"));
+        }
+        if series.len() < row_count {
+            return Err(short("_ts_series"));
+        }
+        if ordinals.len() < row_count {
+            return Err(short("_ts_system"));
+        }
+        let rows = timestamps
             .iter()
-            .zip(columns)
-            .filter_map(|((_, ty), column)| match (ty, column) {
-                (ColumnType::Float64, ColumnData::Float64(v)) => Some(v.as_slice()),
-                _ => None,
-            })
-            .collect();
-        for row in 0..row_count {
-            let (Some(&ts), Some(&id)) = (timestamps.get(row), series.get(row)) else {
-                return Err(crate::Error::SegmentCorrupted {
-                    detail: format!("last-value cache rebuild: {source} row {row} is short"),
-                });
-            };
+            .zip(series)
+            .zip(ordinals)
+            .take(row_count)
+            .enumerate();
+        for (row, ((&ts, &id), &ordinal)) in rows {
             let id = SeriesId::from_ne_bytes(id.to_ne_bytes());
-            let ordinal = ordinals.get(row).copied().unwrap_or(0);
+            // A row with no value cell records `0.0`, as a live update does.
             let value = floats
                 .iter()
-                .filter_map(|column| column.get(row).copied())
+                .map(|column| column[row])
                 .find(|value| !value.is_nan())
                 .unwrap_or(0.0);
             let next = Newest { ts, ordinal, value };
@@ -173,5 +193,39 @@ mod tests {
         short.columns.pop();
         short.codecs.pop();
         assert!(LastValueScan::new().fold("p", &short, &columns, 1).is_err());
+    }
+
+    /// Ordinal `0` would lose a tie to an older write, so a missing or short
+    /// `_ts_system` column is an error and never a default.
+    #[test]
+    fn rows_without_their_ordinal_are_refused() {
+        let mut no_ordinal_schema = schema();
+        no_ordinal_schema.columns.remove(3);
+        no_ordinal_schema.codecs.remove(3);
+        let mut no_ordinal = batch(&[(1, 1.0, 1.0, 1, 1)]);
+        no_ordinal.remove(3);
+        let refused = LastValueScan::new().fold("p", &no_ordinal_schema, &no_ordinal, 1);
+        assert!(matches!(
+            refused,
+            Err(crate::Error::SegmentCorrupted { .. })
+        ));
+
+        let rows = batch(&[(1, 1.0, 1.0, 1, 1)]);
+        let refused = LastValueScan::new().fold("p", &schema(), &rows, 2);
+        assert!(matches!(
+            refused,
+            Err(crate::Error::SegmentCorrupted { .. })
+        ));
+    }
+
+    #[test]
+    fn a_short_float_column_is_refused() {
+        let mut rows = batch(&[(1, 1.0, 1.0, 1, 1), (2, 2.0, 2.0, 2, 1)]);
+        rows[2] = ColumnData::Float64(vec![1.0]);
+        let refused = LastValueScan::new().fold("p", &schema(), &rows, 2);
+        assert!(matches!(
+            refused,
+            Err(crate::Error::SegmentCorrupted { .. })
+        ));
     }
 }

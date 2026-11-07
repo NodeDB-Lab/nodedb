@@ -1,4 +1,4 @@
-//! Collection- and tenant-level teardown for the KV engine.
+//! Collection-level teardown for the KV engine.
 
 use super::KvEngine;
 use crate::engine::kv::engine_helpers::expiry_prefix;
@@ -49,31 +49,6 @@ impl KvEngine {
             );
         }
 
-        removed
-    }
-
-    /// Remove all hash tables and indexes belonging to a specific tenant.
-    ///
-    /// Uses the `hash_to_tenant` reverse map to identify which tables belong
-    /// to the tenant. Returns the number of tables removed.
-    pub fn purge_tenant(&mut self, tenant_id: u64) -> usize {
-        let keys_to_remove: Vec<u64> = self
-            .hash_to_tenant
-            .iter()
-            .filter(|(_, tid)| **tid == tenant_id)
-            .map(|(hash, _)| *hash)
-            .collect();
-
-        let removed = keys_to_remove.len();
-        for key in &keys_to_remove {
-            self.bump_write_epoch(*key);
-            self.tables.remove(key);
-            self.release_table(*key);
-            self.indexes.remove(key);
-            self.hash_to_tenant.remove(key);
-            self.hash_to_database.remove(key);
-            self.hash_to_collection.remove(key);
-        }
         removed
     }
 }

@@ -20,7 +20,7 @@ use nodedb_physical::physical_plan::{GraphReadScope, GraphSystemCut};
 use nodedb_physical::physical_task::PhysicalTask;
 use nodedb_types::SystemTimeScope;
 
-use crate::control::read_cut::{StatementCap, statement_cap};
+use crate::control::read_cut::{StatementCap, mirror_cap, statement_cap};
 use crate::control::state::SharedState;
 
 use super::sites::{for_each_cut_site, for_each_cut_site_ref};
@@ -48,14 +48,34 @@ pub async fn pin_statement_cuts(
     let Some(latest_as_of_ms) = latest else {
         return Ok(CutPinning::default());
     };
-    let cap = statement_cap(state, latest_as_of_ms).await?;
+    // A task on a read-only mirror pins under the mirror's cap. Any other task
+    // shares one local read cut, taken only if one needs it.
+    let mut local = None;
     let mut pinning = CutPinning::default();
     for task in tasks.iter_mut() {
+        let cap = match mirror_cap(state, task.database_id)? {
+            Some(cap) => cap,
+            None => match local {
+                Some(cap) => cap,
+                None => {
+                    let cap = statement_cap(state, latest_as_of_ms).await?;
+                    local = Some(cap);
+                    cap
+                }
+            },
+        };
         for_each_cut_site(&mut task.plan, &mut |site| {
             pinning.capped |= pin_site(site, cap);
         });
     }
     Ok(pinning)
+}
+
+/// Whether `tasks` hold an `AS OF SYSTEM TIME` cut no statement pinned yet.
+pub fn holds_unpinned_cut(tasks: &[PhysicalTask]) -> bool {
+    tasks
+        .iter()
+        .any(|task| latest_unpinned_ms(&task.plan).is_some())
 }
 
 /// The latest millisecond of a cut in `plan` no statement pinned yet, or
@@ -250,6 +270,48 @@ mod tests {
             }
         );
         assert_eq!(system_time.marked_cut(), Some((CAP.cap, 3)));
+    }
+
+    /// A LATERAL join's inner cut pins with the statement's. It sizes the read
+    /// cut and takes the marker every serving node waits for.
+    #[test]
+    fn a_lateral_inner_cut_pins_with_the_marker() {
+        use nodedb_physical::physical_plan::{PhysicalPlan, QueryOp};
+        let mut plan = PhysicalPlan::Query(QueryOp::LateralTopK {
+            outer_plan: Box::new(PhysicalPlan::Query(QueryOp::FacetCounts {
+                collection: nodedb_types::QualifiedCollection::new(
+                    nodedb_types::DatabaseId::DEFAULT,
+                    "outer",
+                ),
+                filters: Vec::new(),
+                fields: Vec::new(),
+                limit_per_facet: 0,
+                system_time: SystemTimeScope::AsOf(1_700_000_000_000),
+            })),
+            outer_alias: "o".to_string(),
+            inner_collection: nodedb_types::QualifiedCollection::new(
+                nodedb_types::DatabaseId::DEFAULT,
+                "inner",
+            ),
+            inner_filters: Vec::new(),
+            inner_order_by: Vec::new(),
+            inner_limit: 1,
+            correlation_keys: Vec::new(),
+            lateral_alias: "l".to_string(),
+            projection: Vec::new(),
+            left_join: false,
+            inner_system_time: SystemTimeScope::AsOf(1_800_000_000_000),
+        });
+        assert_eq!(latest_unpinned_ms(&plan), Some(1_800_000_000_000));
+        for_each_cut_site(&mut plan, &mut |scope| {
+            pin_site(scope, CAP);
+        });
+        for scope in super::super::plan_scopes(&plan) {
+            assert!(
+                matches!(scope, SystemTimeScope::Pinned { cut_marker: 3, .. }),
+                "{scope:?}"
+            );
+        }
     }
 
     #[test]

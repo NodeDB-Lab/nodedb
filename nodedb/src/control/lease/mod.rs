@@ -24,6 +24,7 @@ pub mod admission;
 pub mod descriptor_lookup;
 pub mod drain;
 pub mod drain_apply;
+mod drain_end_backlog;
 mod drain_hold;
 pub mod drain_propose;
 pub mod drain_propose_async;

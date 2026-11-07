@@ -31,6 +31,10 @@ pub enum AckReturning {
     Failed { detail: String },
 }
 
+/// A report that decodes as nothing: `0xc1` is the one byte MessagePack never
+/// uses. The coordinator fails the statement on it.
+pub const UNREADABLE_ACK_REPORT: &[u8] = &[0xc1];
+
 /// A participant's report to its coordinator.
 #[derive(
     Debug, Clone, Default, PartialEq, Eq, zerompk::ToMessagePack, zerompk::FromMessagePack,
@@ -118,6 +122,23 @@ impl CalvinAckResult {
     /// Whether the report carries nothing for the coordinator.
     pub fn is_empty(&self) -> bool {
         self.counts.is_empty() && self.returning.is_none() && self.reply.is_none()
+    }
+
+    /// The encoded report. A report that does not encode becomes one that
+    /// fails the statement, so its count never goes missing. The install
+    /// committed, so the statement answers the failure with the writes stored.
+    pub fn to_bytes_or_failed(&self) -> Vec<u8> {
+        self.to_bytes().unwrap_or_else(|error| {
+            let failed = Self {
+                reply: Some(AckReply::Failed {
+                    detail: format!("the completion report did not encode: {error}"),
+                }),
+                ..Self::default()
+            };
+            failed
+                .to_bytes()
+                .unwrap_or_else(|_| UNREADABLE_ACK_REPORT.to_vec())
+        })
     }
 
     /// The encoded report. Empty for a report that carries nothing.

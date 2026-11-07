@@ -11,6 +11,7 @@ mod egress;
 mod env;
 mod env_expand;
 mod log_format;
+mod mirror;
 mod observability;
 mod paths;
 mod pitr;
@@ -32,6 +33,7 @@ pub use config::ServerConfig;
 pub use egress::{CredentialEncryptionSettings, EgressSettings};
 pub use env::{apply_env_overrides, parse_memory_size, parse_seed_nodes};
 pub use log_format::LogFormat;
+pub use mirror::{MirrorClientSettings, MirrorSettings, MirrorSourceSettings, MirrorTlsPaths};
 pub use observability::{
     ObservabilityConfig, OtlpConfig, OtlpExportConfig, OtlpReceiverConfig, PromqlConfig,
     validate_feature_availability,

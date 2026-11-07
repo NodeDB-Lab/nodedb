@@ -293,10 +293,9 @@ fn crdt_apply_byte_identical() {
 
 // ── Engine determinism tests (fixes verified by assert_deterministic) ───────
 //
-// These tests were previously #[ignore]'d while the violations were documented.
-// All four engines are now fixed: epoch_system_ms threads the deterministic
-// epoch timestamp through the Calvin write path so all replicas produce
-// byte-identical responses.
+// These tests cover the engines whose writes stamp a time. `epoch_system_ms`
+// carries the deterministic epoch timestamp through the Calvin write path.
+// All replicas then produce byte-identical responses.
 
 /// Document engine (bitemporal): two independent `CoreLoop` instances
 /// receiving the same ops produce byte-identical response payloads.

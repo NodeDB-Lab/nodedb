@@ -13,17 +13,52 @@ mod crash_harness;
 use std::time::{Duration, Instant};
 
 use crash_harness::CrashHarness;
+use crash_harness::log_fields::{boot_section, log_field};
 
 const CHECKPOINT_WAIT: Duration = Duration::from_secs(20);
 
-/// Long enough for several 1-second checkpoint cycles after a restart.
-const POST_RESTART_CHECKPOINT_WAIT: Duration = Duration::from_secs(3);
+/// The boot that follows the test's single `kill_9` and `reopen`.
+const RESTART_BOOT: u32 = 2;
+
+/// The line each Data Plane core logs when it finishes a checkpoint.
+const CORE_CHECKPOINT_DONE: &str = "core checkpoint complete";
 
 /// Server env for a harness that must actually produce a checkpoint file
 /// within the test's runtime. A 1-second interval guarantees at least one
-/// flush fires well inside the `CHECKPOINT_WAIT` poll budget below.
+/// flush fires well inside the `CHECKPOINT_WAIT` poll budget below. The log
+/// filter keeps the per-core checkpoint line, which the restart wait reads.
 fn checkpoint_every_second() -> CrashHarness {
-    CrashHarness::new().with_env("NODEDB_CHECKPOINT_INTERVAL_SECS", "1")
+    CrashHarness::new()
+        .with_env("NODEDB_CHECKPOINT_INTERVAL_SECS", "1")
+        .with_env("RUST_LOG", "error,nodedb=info")
+}
+
+/// Wait until a full checkpoint cycle has run after the restart, bounded by
+/// `CHECKPOINT_WAIT`. A core that logs the completion line twice proves the
+/// first cycle finished on every core, since a cycle waits for all of them.
+/// A restarted core that still holds the dropped collection's index writes
+/// its files in that cycle, so a file check before it proves nothing.
+async fn wait_for_post_restart_checkpoint_cycle(h: &CrashHarness) {
+    let deadline = Instant::now() + CHECKPOINT_WAIT;
+    loop {
+        let log = boot_section(&h.server_log(), RESTART_BOOT);
+        let cores = log_field(&log, CORE_CHECKPOINT_DONE, "core");
+        let max_per_core = cores
+            .iter()
+            .map(|core| cores.iter().filter(|c| *c == core).count())
+            .max()
+            .unwrap_or(0);
+        if max_per_core >= 2 {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no full checkpoint cycle ran after the restart within {CHECKPOINT_WAIT:?}; a file \
+             check now would pass whether or not the dropped collection's index was reloaded.{}",
+            h.keep_data_dir_note()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 /// Recursively collect every file path under `root` (root need not exist —
@@ -166,7 +201,7 @@ async fn dropped_vector_collection_does_not_resurrect_after_restart() {
 
     assert_collection_missing(&h, &format!("SELECT id FROM {COLLECTION}"), COLLECTION).await;
     // Same rationale as the spatial test below.
-    tokio::time::sleep(POST_RESTART_CHECKPOINT_WAIT).await;
+    wait_for_post_restart_checkpoint_cycle(&h).await;
 
     let leaked = any_file_name_contains(&ckpt_root, &needle);
     assert!(
@@ -220,10 +255,10 @@ async fn dropped_spatial_collection_does_not_resurrect_after_restart() {
     h.reopen();
 
     assert_collection_missing(&h, &format!("SELECT id FROM {COLLECTION}"), COLLECTION).await;
-    // Let the 1-second checkpoint cycles run after the restart. A restarted
-    // core that still holds the dropped collection's index writes its files
-    // again on the first cycle, so a check before any cycle proves nothing.
-    tokio::time::sleep(POST_RESTART_CHECKPOINT_WAIT).await;
+    // A restarted core that still holds the dropped collection's index writes
+    // its files again on the first cycle, so a check before any cycle proves
+    // nothing.
+    wait_for_post_restart_checkpoint_cycle(&h).await;
 
     let leaked = any_file_name_contains(&ckpt_root, COLLECTION);
     assert!(
@@ -283,7 +318,7 @@ async fn dropped_columnar_collection_does_not_resurrect_after_restart() {
 
     assert_collection_missing(&h, &format!("SELECT id FROM {COLLECTION}"), COLLECTION).await;
     // Same rationale as the spatial test above.
-    tokio::time::sleep(POST_RESTART_CHECKPOINT_WAIT).await;
+    wait_for_post_restart_checkpoint_cycle(&h).await;
     let leaked = any_file_name_contains(&ckpt_root, &needle);
     assert!(
         leaked.is_none(),

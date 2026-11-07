@@ -211,12 +211,20 @@ impl KvEngine {
         self.purge_table_versions_below(tkey, horizon)
     }
 
-    /// [`Self::purge_kv_versions_below`] over every table on this core.
-    pub fn purge_all_kv_versions_below(&mut self, horizon: i64) -> usize {
+    /// [`Self::purge_kv_versions_below`] over every table on this core, each at
+    /// `horizon_of` its database.
+    pub fn purge_all_kv_versions_below(&mut self, horizon_of: impl Fn(u64) -> i64) -> usize {
         let tables: Vec<u64> = self.tables.keys().copied().collect();
         tables
             .into_iter()
-            .map(|tkey| self.purge_table_versions_below(tkey, horizon))
+            .map(|tkey| {
+                // Every table registers its identity before it exists. A table with no
+                // database has no horizon to judge it by, so it keeps its versions.
+                let Some(database_id) = self.hash_to_database.get(&tkey).copied() else {
+                    return 0;
+                };
+                self.purge_table_versions_below(tkey, horizon_of(database_id.as_u64()))
+            })
             .sum()
     }
 

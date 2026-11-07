@@ -98,8 +98,8 @@ impl SyncSession {
                 }
                 Err(e) => dispatch_outcome(&e, msg.seq),
             },
-            Err(reason) => KvPushOutcome::Refused {
-                reason,
+            Err(error) => KvPushOutcome::Refused {
+                reason: error.to_string(),
                 mark_moved: false,
             },
         };
@@ -156,8 +156,17 @@ impl SyncSession {
     }
 }
 
+/// Why Origin refuses a KV push on its content.
+#[derive(Debug, thiserror::Error)]
+pub enum KvPushRowError {
+    #[error("KV push row does not decode: {0}")]
+    RowUndecodable(nodedb_query::msgpack_scan::KvBodyError),
+    #[error("KV push row does not encode as a body: {0}")]
+    BodyUnencodable(nodedb_query::msgpack_scan::KvBodyError),
+}
+
 /// The write a push applies, or why Origin refuses it on its content.
-fn push_write(msg: &KvPushMsg, provenance: SyncProvenance) -> Result<KvPushWrite, String> {
+fn push_write(msg: &KvPushMsg, provenance: SyncProvenance) -> Result<KvPushWrite, KvPushRowError> {
     let op = match &msg.op {
         KvPushOp::Delete => KvPushWriteOp::Delete,
         KvPushOp::Put { row, expire_at_ms } => {
@@ -166,10 +175,10 @@ fn push_write(msg: &KvPushMsg, provenance: SyncProvenance) -> Result<KvPushWrite
                 KvPushWriteOp::Delete
             } else {
                 let key = String::from_utf8_lossy(&msg.key);
-                let (fields, shape) = kv_row_to_body_fields(&key, row)
-                    .map_err(|e| format!("KV push row does not decode: {e}"))?;
+                let (fields, shape) =
+                    kv_row_to_body_fields(&key, row).map_err(KvPushRowError::RowUndecodable)?;
                 let body = row_to_kv_body(&Value::Object(fields), shape)
-                    .map_err(|e| format!("KV push row does not encode as a body: {e}"))?;
+                    .map_err(KvPushRowError::BodyUnencodable)?;
                 let ttl_ms = if *expire_at_ms == 0 {
                     0
                 } else {
@@ -373,6 +382,25 @@ mod tests {
         assert_eq!(ack.status, AckStatus::Duplicate);
         assert!(ack.accepted);
         assert_eq!(session.mutations_deduplicated, 1);
+    }
+
+    #[test]
+    fn a_row_that_does_not_decode_is_a_typed_error_that_reaches_the_central_enum() {
+        let msg = put_msg("k1", b"v1".to_vec(), 6);
+        let provenance = SyncProvenance {
+            producer_id: 1,
+            epoch: 1,
+            stream_id: 0,
+            seq: 6,
+        };
+        let Err(error) = push_write(&msg, provenance) else {
+            panic!("a raw byte string is no row map");
+        };
+        assert!(matches!(error, KvPushRowError::RowUndecodable(_)));
+        assert!(matches!(
+            crate::Error::from(error),
+            crate::Error::BadRequest { .. }
+        ));
     }
 
     #[tokio::test]

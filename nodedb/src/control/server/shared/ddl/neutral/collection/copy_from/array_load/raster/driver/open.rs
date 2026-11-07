@@ -14,15 +14,18 @@ use nodedb_raster::{
 
 use super::super::fetch::RangeFetch;
 use super::error::DriveError;
+use super::memory::OpenReservation;
 
 /// Rounds before an open gives up.
 const MAX_OPEN_ROUNDS: usize = 64;
 
-/// Open the sources `openers` name, one per object, under `limits`.
+/// Open the sources `openers` name, one per object, under `limits`. Each
+/// round reserves its ranges in `memory` before it fetches them.
 pub async fn open_sources<F: RangeFetch>(
     fetch: &F,
     openers: &[TiffOpener],
     limits: RasterLimits,
+    memory: &mut OpenReservation,
 ) -> Result<Vec<TiffReader>, DriveError> {
     let mut caches: Vec<RangeCache> = openers
         .iter()
@@ -56,6 +59,7 @@ pub async fn open_sources<F: RangeFetch>(
             return Err(stalled(index));
         }
         let merged = coalesce(need, COALESCE_GAP);
+        memory.reserve(merged.iter().map(|range| range.len()).sum())?;
         let answers = fetch.fetch(&merged).await?;
         for (range, bytes) in merged.into_iter().zip(answers) {
             let index = range.object.0 as usize;

@@ -74,6 +74,7 @@ pub fn log_reservation(
         is_called: true,
         epoch: 0,
         period_key: entry.user.clone(),
+        reservation: None,
     };
     if let Err(e) = catalog.put_sequence_state(&synthetic_state) {
         tracing::warn!(

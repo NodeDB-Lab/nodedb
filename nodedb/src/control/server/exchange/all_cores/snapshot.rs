@@ -111,6 +111,7 @@ pub(super) fn merge_core_snapshots(
             timeseries,
             flushed_ts_segments,
             ts_series_catalogs,
+            storage_conversions,
             columnar_engines,
             vector_params,
             index_configs,
@@ -163,6 +164,7 @@ pub(super) fn merge_core_snapshots(
         merged.timeseries.extend(timeseries);
         merged.flushed_ts_segments.extend(flushed_ts_segments);
         merged.ts_series_catalogs.extend(ts_series_catalogs);
+        merged.storage_conversions.extend(storage_conversions);
         merged.columnar_engines.extend(columnar_engines);
         merged.vector_params.extend(vector_params);
         merged.index_configs.extend(index_configs);

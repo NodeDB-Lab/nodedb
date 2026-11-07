@@ -31,7 +31,7 @@ use crate::types::TenantId;
 
 use super::super::lookup::RefusalCtx;
 use super::reads::{Clause, NodeReads};
-use super::{columnar, document, kv, query, search};
+use super::{array, columnar, document, kv, query, search};
 
 /// The stores a refusal reads: the policy lookups, and the catalog that
 /// names each collection's key column.
@@ -89,6 +89,7 @@ fn walk(
     for child in children(plan) {
         renamed.extend(walk(child, ctx, catalog)?);
     }
+    array::refuse_array_reads(plan, ctx)?;
     let mut reads = NodeReads::default();
     node_reads(plan, &mut reads)?;
     if reads.is_empty() {
@@ -190,8 +191,9 @@ fn refuse_key_lookup(
 /// The columns `plan` itself reads. Exhaustive over [`PhysicalPlan`].
 ///
 /// A graph traversal over a redacted collection is refused whole by the
-/// graph check. CRDT, maintenance, and array operations carry no column
-/// predicate or expression.
+/// graph check. An array read under a policy is refused whole by
+/// [`array::refuse_array_reads`]. CRDT and maintenance operations carry no
+/// column predicate or expression.
 fn node_reads(plan: &PhysicalPlan, out: &mut NodeReads) -> crate::Result<()> {
     match plan {
         PhysicalPlan::Query(op) => query::reads(op, out),
@@ -208,5 +210,71 @@ fn node_reads(plan: &PhysicalPlan, out: &mut NodeReads) -> crate::Result<()> {
         | PhysicalPlan::Array(_)
         | PhysicalPlan::ClusterArray(_)
         | PhysicalPlan::ClusterEvent(_) => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nodedb_physical::physical_plan::{ClusterArrayOp, QueryOp};
+    use nodedb_types::SystemTimeScope;
+
+    use super::*;
+    use crate::control::security::credential::CredentialStore;
+    use crate::control::security::redaction::{RedactionMode, RedactionPolicy, RedactionRule};
+
+    /// The walk reaches an array read under a post-processing tail, the shape
+    /// `SELECT x FROM ARRAY_SLICE(...) WHERE secret > 0` plans to.
+    #[test]
+    fn the_walk_refuses_an_array_read_under_a_tail() {
+        let store = RedactionStore::new();
+        store.create_policy(RedactionPolicy {
+            name: "p".to_string(),
+            tenant_id: 1,
+            collection: "grid".to_string(),
+            display_collection: "grid".to_string(),
+            for_role: "support".to_string(),
+            rules: vec![RedactionRule {
+                field: "secret".to_string(),
+                mode: RedactionMode::Hash,
+            }],
+        });
+        let slice = PhysicalPlan::ClusterArray(ClusterArrayOp::Slice {
+            array_id: nodedb_array::types::ArrayId::new(TenantId::new(1), "grid"),
+            slice_msgpack: Vec::new(),
+            attr_projection: Vec::new(),
+            limit: 0,
+            slice_tile_keys: Vec::new(),
+            prefix_bits: 8,
+            system_time: SystemTimeScope::Current,
+            valid_at_ms: None,
+            zone_msgpack: Vec::new(),
+            physical: false,
+        });
+        let tail = PhysicalPlan::Query(QueryOp::PostProcess {
+            input: Box::new(slice),
+            filters: Vec::new(),
+            projection: Vec::new(),
+            computed_columns: Vec::new(),
+            window_functions: Vec::new(),
+            sort_keys: Vec::new(),
+            limit: None,
+            offset: 0,
+            distinct: false,
+        });
+
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let credentials =
+            CredentialStore::open(&tmp.path().join("system.redb")).expect("credential store");
+        let roles = vec!["support".to_string()];
+        let ctx = RefusalCtx {
+            store: &store,
+            tenant_id: 1,
+            roles: &roles,
+            database_id: nodedb_types::DatabaseId::DEFAULT,
+        };
+        assert!(matches!(
+            walk(&tail, &ctx, credentials.catalog()),
+            Err(crate::Error::RejectedAuthz { .. })
+        ));
     }
 }

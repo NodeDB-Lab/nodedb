@@ -46,12 +46,61 @@ pub async fn reissue_into_database(
             // MOVE TENANT drains the source before it re-issues: no write
             // follows it into the target.
             restore_cut: i64::MAX,
+            event_source: crate::event::EventSource::Restore,
         },
         snap,
         &mut stats,
     )
     .await?;
     Ok(stats)
+}
+
+/// Re-issue `snap`, one tenant's capture from a mirror's source, into the mirror.
+///
+/// A mirror keeps its source's database id, so each row lands under its source
+/// key, its surrogate and its stamps. The writes pass the mirror's gates as a
+/// follower's. They carry no mirror stamp: no cut holds them, and each one
+/// applies in its own turn.
+///
+/// The surrogate binds re-issue first, so no key mints. A key the capture does
+/// not bind reaches the assigner's mirror refusal, and fails the bootstrap.
+pub(crate) async fn reissue_mirror_capture(
+    state: &SharedState,
+    tenant_id: u64,
+    database: DatabaseId,
+    snap: TenantDataSnapshot,
+) -> Result<RestoreStats, Error> {
+    super::super::quorum::require_quorum(state)?;
+    let mut stats = RestoreStats {
+        tenant_id,
+        ..Default::default()
+    };
+    reissue_database(
+        state,
+        tenant_id,
+        mirror_capture_target(database),
+        snap,
+        &mut stats,
+    )
+    .await?;
+    Ok(stats)
+}
+
+/// Where a mirror's capture re-issues to. The target carries the event source
+/// every write path of the re-issue takes: the commit, the durable write, the CRDT
+/// import and the conversion record each read it from here.
+fn mirror_capture_target(database: DatabaseId) -> DatabaseTarget {
+    DatabaseTarget {
+        source: database,
+        dest: database,
+        // A bootstrap fills an empty database once, as MOVE TENANT fills a
+        // drained target. It is no RESTORE, and no write marks under one.
+        restore_id: 0,
+        // Every write of this database comes after the capture, from the
+        // source's log.
+        restore_cut: i64::MAX,
+        event_source: crate::event::EventSource::RaftFollower,
+    }
 }
 
 /// Re-issue every section of `snap`, the merged backup of the source
@@ -211,4 +260,22 @@ pub(super) async fn reissue_database(
             .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A capture's writes take the one source a bootstrapping mirror's gates
+    /// admit, and their mark carries it to the Calvin commit.
+    #[test]
+    fn a_mirror_capture_marks_its_writes_as_a_followers() {
+        let target = mirror_capture_target(DatabaseId::new(7));
+        assert_eq!(target.dest, DatabaseId::new(7));
+        assert_eq!(target.event_source, crate::event::EventSource::RaftFollower);
+        assert_eq!(
+            target.mark().event_source,
+            crate::event::EventSource::RaftFollower
+        );
+    }
 }

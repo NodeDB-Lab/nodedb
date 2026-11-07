@@ -4,12 +4,16 @@
 //! flushed partition in the time range. Shared by the raw scan and by the
 //! generic collection scan (`scan_collection`), so both read the same rows.
 
+use crate::bridge::envelope::Priority;
 use crate::bridge::scan_filter::ScanFilter;
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::deadline::DeadlineCheck;
+use crate::data::executor::handlers::timeseries::partition_read::PartitionIo;
+use crate::data::executor::task::ExecutionTask;
 use crate::engine::timeseries::columnar_agg::timestamp_range_filter;
 use crate::types::{DatabaseId, TenantId};
 
-use super::partition_scan::{PartitionScan, scan_partitions_parallel};
+use super::partition_scan::{PartitionScan, ScanDeadline, scan_partitions};
 use super::row_emit::{emit_memtable_row, render_system_time, row_admitted_by_policy};
 
 /// Inputs to [`CoreLoop::gather_ts_rows`].
@@ -28,6 +32,9 @@ pub(in crate::data::executor) struct TsGatherParams<'a> {
     /// The row versions the read sees. A partition a TRUNCATE ended at or
     /// below the cut is not read.
     pub cut: nodedb_columnar::VersionCut,
+    /// The request the rows answer, whose deadline and priority the read
+    /// takes. `None` is internal work with no deadline, at normal priority.
+    pub task: Option<&'a ExecutionTask>,
 }
 
 impl CoreLoop {
@@ -54,7 +61,15 @@ impl CoreLoop {
             rls_predicates,
             limit,
             cut,
+            task,
         } = p;
+        let deadline_check = task.map(DeadlineCheck::for_task);
+        let deadline = task
+            .zip(deadline_check.as_ref())
+            .map(|(task, check)| ScanDeadline {
+                check,
+                request_id: task.request_id(),
+            });
         let has_filters = !filter_predicates.is_empty();
         let key = (database_id, tid, collection.to_string());
         let mut results: Vec<rmpv::Value> = Vec::new();
@@ -109,6 +124,13 @@ impl CoreLoop {
                 if results.len() >= limit {
                     break;
                 }
+                // Safe point: a row boundary. The check reads the clock once
+                // per stride.
+                if let Some(deadline) = deadline
+                    && deadline.check.expired()
+                {
+                    return Err(deadline.exceeded());
+                }
                 let row = emit_memtable_row(mt, &columns, idx as usize)?;
                 if need_row_filter {
                     let mut buf = Vec::new();
@@ -156,7 +178,8 @@ impl CoreLoop {
             }
             let remaining = limit.saturating_sub(results.len());
             if remaining > 0 && !partition_dirs.is_empty() {
-                let partition_rows = scan_partitions_parallel(
+                let quarantine = self.ts_partition_quarantine(database_id, tid, collection);
+                let partition_rows = scan_partitions(
                     &partition_dirs,
                     &PartitionScan {
                         time_range,
@@ -165,6 +188,13 @@ impl CoreLoop {
                         has_filters,
                         rls_predicates,
                         kek: self.segment_keks.ts_segment_kek.as_ref(),
+                        quarantine: quarantine.as_ref(),
+                        io: Some(PartitionIo {
+                            reader: &self.uring_reader,
+                            priority: task.map_or(Priority::Normal, |task| task.request.priority),
+                            metrics: &self.io_metrics,
+                        }),
+                        deadline,
                     },
                     &crs,
                 )?;

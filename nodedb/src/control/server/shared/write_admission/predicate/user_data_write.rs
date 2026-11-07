@@ -117,6 +117,7 @@ mod tests {
                 epoch_system_ms: 0,
                 reply: nodedb_physical::physical_plan::CalvinReplySpec::Count(Vec::new()),
                 user_write,
+                mirror: false,
             }),
         })
     }

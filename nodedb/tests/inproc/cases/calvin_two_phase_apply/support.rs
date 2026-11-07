@@ -142,6 +142,7 @@ pub(super) fn stamped_install(
             epoch_system_ms: 0,
             reply: answer.reply,
             user_write: true,
+            mirror: false,
         }),
         reads: Vec::new(),
         snapshot_ordinal: None,

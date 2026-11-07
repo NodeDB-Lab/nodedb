@@ -274,8 +274,7 @@ impl RaBitQCodec {
             reserved: [0u8; 8],
         };
 
-        UnifiedQuantizedVector::new(header, &packed, &[])
-            .expect("RaBitQ encode: layout construction must succeed")
+        UnifiedQuantizedVector::without_outliers(header, &packed)
     }
 }
 

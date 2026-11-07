@@ -11,6 +11,6 @@ pub use client::{
     outbound_client,
 };
 pub use global_unicast::is_global_unicast;
-pub use policy::{EgressError, EgressPolicy};
+pub use policy::{EgressError, EgressPolicy, url_host_for_log};
 pub use remote::RemoteSources;
 pub use resolver::{EgressResolver, HostLookup, SystemLookup};

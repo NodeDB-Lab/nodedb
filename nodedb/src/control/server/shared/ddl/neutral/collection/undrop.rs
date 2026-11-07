@@ -93,10 +93,10 @@ pub async fn undrop_collection(
         ));
     }
 
-    // Audit intent BEFORE the catalog mutation (symmetric with drop;
-    // if we crash mid-propose, the audit record still captures that
-    // an UNDROP was requested, with the owner-missing flag for
-    // post-hoc investigation). Detail is a JSON-serialized
+    // Best-effort operator trail, which carries the owner-missing flag. This
+    // row is buffered and can be lost in a crash. The durable record is the
+    // proposer's `ActionIntent` row, which syncs before the propose below and
+    // refuses the statement if it fails. Detail is a JSON-serialized
     // `UndropAuditDetail` so SIEM / compliance consumers filter on
     // `owner_user_missing` without string-scraping.
     let intent = UndropAuditDetail::new(name, UndropStage::Requested, owner_user_missing).to_json();

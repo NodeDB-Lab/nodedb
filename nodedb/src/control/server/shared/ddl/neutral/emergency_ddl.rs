@@ -81,6 +81,14 @@ pub fn emergency_unlock(
         return Err(err("42501", "permission denied: requires superuser"));
     }
 
+    // An unlock restores access, so its record comes first.
+    // A lockdown removes access, so it runs even when the audit log is down.
+    super::audit_intent::record_action_intent(
+        state,
+        identity,
+        Some(identity.tenant_id),
+        "EMERGENCY UNLOCK",
+    )?;
     state.emergency.unlock();
 
     state.audit_record(
@@ -119,21 +127,26 @@ pub fn bulk_blacklist(
     let all_users = state.auth_users.list(false);
     let mut blacklisted_count = 0u32;
     let mut killed_count = 0usize;
+    let mut write_error = None;
 
     for user in &all_users {
         let matches = crate::bridge::scan_filter::sql_like_match(&user.email, pattern, false)
             || crate::bridge::scan_filter::sql_like_match(&user.username, pattern, false);
         if matches {
-            let _ = state.blacklist.blacklist_user(
+            let written = state.blacklist.blacklist_user(
                 &user.id,
                 &format!("bulk blacklist: pattern '{pattern}'"),
                 &identity.username,
                 0, // Permanent.
             );
+            if let Err(error) = written {
+                write_error = Some(error);
+                break;
+            }
             blacklisted_count += 1;
 
             if kill_sessions {
-                killed_count += state.session_registry.kill_sessions_for_username(
+                killed_count += state.session_registry.kill_sessions_for_blacklisted_user(
                     &user.id,
                     crate::control::security::sessions::KillReason::AdminKill,
                 );
@@ -149,6 +162,11 @@ pub fn bulk_blacklist(
             "bulk blacklist: pattern '{pattern}', {blacklisted_count} users, {killed_count} sessions killed"
         ),
     );
+
+    // The audit record covers the entries written before a write error.
+    if let Some(error) = write_error {
+        return Err(DdlError::from_error(&error));
+    }
 
     Ok(status(format!("BLACKLIST {blacklisted_count}")))
 }

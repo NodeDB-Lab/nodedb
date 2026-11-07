@@ -66,8 +66,8 @@ pub fn segments(sql: &str) -> Vec<SqlSegment<'_>> {
             while i < len {
                 match bytes[i] {
                     b'\\' if escape => {
-                        // backslash escape: skip two chars
-                        i += 2;
+                        // Backslash escape: skip two bytes. The statement can end after the backslash.
+                        i = (i + 2).min(len);
                     }
                     b'\'' => {
                         i += 1;
@@ -533,5 +533,23 @@ mod tests {
         let sql = "SELECT ﬀﬀ FROM records";
         let pos = keyword_position_outside_literals(sql, "FROM").unwrap();
         assert_eq!(&sql[pos..pos + "FROM".len()], "FROM");
+    }
+
+    /// An escape string can end right after its backslash, at any byte.
+    #[test]
+    fn an_escape_string_ending_in_a_backslash_does_not_panic() {
+        for sql in ["E'\\", "SELECT E'a\\", "e'\\é", "E'\\é'"] {
+            let joined: usize = segments(sql)
+                .iter()
+                .map(|segment| match segment {
+                    SqlSegment::Text(t)
+                    | SqlSegment::SingleQuotedString(t)
+                    | SqlSegment::QuotedIdent(t)
+                    | SqlSegment::LineComment(t)
+                    | SqlSegment::BlockComment(t) => t.len(),
+                })
+                .sum();
+            assert_eq!(joined, sql.len(), "{sql}");
+        }
     }
 }

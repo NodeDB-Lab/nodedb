@@ -50,6 +50,10 @@ impl CoreLoop {
                 self.response_ok(task)
             }
 
+            MetaOp::InstallAggregateImage { root, image } => {
+                self.execute_cagg_copy_install(task, root, image)
+            }
+
             MetaOp::UnregisterContinuousAggregate { name } => {
                 self.continuous_agg_mgr.unregister(
                     task.request.database_id.as_u64(),
@@ -125,9 +129,23 @@ impl CoreLoop {
                 horizon,
                 batch_units,
                 retained,
-            } => self.meta_purge_versions_below(task, *horizon, *batch_units, retained),
+                mirror_floors,
+            } => self.meta_purge_versions_below(
+                task,
+                *horizon,
+                *batch_units,
+                retained,
+                mirror_floors,
+            ),
 
-            MetaOp::KvDueExpiries { limit } => self.execute_kv_due_expiries(task, *limit),
+            MetaOp::KvDueExpiries {
+                limit,
+                skip_databases,
+            } => self.execute_kv_due_expiries(task, *limit, skip_databases),
+
+            MetaOp::ListTenantCollections { tenant_id } => {
+                self.execute_list_tenant_collections(task, *tenant_id)
+            }
 
             MetaOp::RefreshGraphCount { hosted_vshards } => {
                 self.execute_refresh_graph_count(task, hosted_vshards)
@@ -142,16 +160,28 @@ impl CoreLoop {
                 target_type,
                 schema_json,
                 source_storage_mode,
+                target_storage_mode,
+                generation,
+                incarnation,
             } => self.execute_convert_collection(
                 task,
-                tid,
-                collection.as_str(),
-                target_type,
-                schema_json,
-                source_storage_mode,
+                crate::data::executor::handlers::convert::ConvertParams {
+                    tid,
+                    collection: collection.as_str(),
+                    target_type,
+                    schema_json,
+                    source_storage_mode,
+                    target_storage_mode,
+                    generation: *generation,
+                    incarnation: *incarnation,
+                },
             ),
 
-            MetaOp::PurgeTenant { tenant_id } => self.execute_purge_tenant(task, *tenant_id),
+            MetaOp::PurgeTenant {
+                tenant_id,
+                collections,
+                vshards,
+            } => self.execute_purge_tenant(task, *tenant_id, collections, vshards),
 
             MetaOp::UnregisterCollection {
                 tenant_id,
@@ -184,14 +214,18 @@ impl CoreLoop {
             MetaOp::EnforceTimeseriesRetention {
                 collection,
                 max_age_ms,
+                decided_ms,
                 aggregates,
             } => self.meta_enforce_timeseries_retention(
                 task,
                 collection.as_str(),
                 *max_age_ms,
+                *decided_ms,
                 aggregates,
             ),
-            MetaOp::ApplyContinuousAggRetention => self.meta_apply_continuous_agg_retention(task),
+            MetaOp::ApplyContinuousAggRetention { decided_ms } => {
+                self.meta_apply_continuous_agg_retention(task, *decided_ms)
+            }
             MetaOp::QueryAggregateWatermark { aggregate_name } => {
                 self.meta_query_aggregate_watermark(task, aggregate_name)
             }

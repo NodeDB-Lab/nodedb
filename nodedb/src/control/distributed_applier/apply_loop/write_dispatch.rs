@@ -302,7 +302,7 @@ async fn enqueue_generic_entry<'a>(
 
 /// Resolve a generic entry's waiter from what the funnel returned, and report
 /// the outcome its group's prefix records.
-fn conclude_generic_entry(
+pub(super) fn conclude_generic_entry(
     tracker: &ProposeTracker,
     pos: AppliedPosition,
     submitted: crate::Result<crate::bridge::envelope::Response>,

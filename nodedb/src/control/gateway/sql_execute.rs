@@ -65,18 +65,18 @@ impl Gateway {
             let rls_key = rls_version_key(tenant_id);
             let current_vs = stored_vs.reverify(|name| {
                 if name == ptree_key.as_str() {
-                    return permission_tree_version;
+                    return Ok(permission_tree_version);
                 }
                 if name == rls_key.as_str() {
-                    return rls_version;
+                    return Ok(rls_version);
                 }
                 if let Some(array) = array_of_key(name, ctx.database_id.as_u64(), tenant_id) {
-                    return super::version_set::array_version(
+                    return Ok(super::version_set::array_version(
                         &shared.array_catalog,
                         ctx.database_id.as_u64(),
                         tenant_id,
                         array,
-                    );
+                    ));
                 }
                 if let Some(aggregate) =
                     continuous_aggregate_of_key(name, ctx.database_id.as_u64(), tenant_id)
@@ -88,13 +88,8 @@ impl Gateway {
                         aggregate,
                     );
                 }
-                catalog
-                    .get_collection(ctx.database_id, tenant_id, name)
-                    .ok()
-                    .flatten()
-                    .map(|collection| collection.descriptor_version.max(1))
-                    .unwrap_or(0)
-            });
+                super::version_set::collection_version(catalog, ctx.database_id, tenant_id, name)
+            })?;
             if current_vs == stored_vs {
                 let full_key = PlanCacheKey {
                     sql_text_hash: sql_hash,

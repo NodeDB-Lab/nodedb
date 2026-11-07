@@ -60,6 +60,12 @@ pub async fn verify_bearer_token(
     match verify_catalog_token(state, token, &mut attempt).await {
         Ok((identity, verified)) => {
             attempt.accept(state, &identity, &verified.claims().sub);
+            let identity = match state.jwks_registry.as_ref() {
+                Some(registry) => {
+                    identity.with_token_expiry_ms(registry.session_expiry_ms(&verified))
+                }
+                None => identity,
+            };
             Ok((identity, verified))
         }
         Err(refusal) => {

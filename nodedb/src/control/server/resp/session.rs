@@ -34,6 +34,25 @@ pub struct RespSession {
     /// once the stream is borrowed for reads. AUTH hands it to the TLS-policy
     /// guard together with the resolved identity.
     pub transport: crate::control::security::tls_policy::TransportSecurity,
+
+    /// The registry row and kill signal of the identity AUTH established. A
+    /// later AUTH replaces both together.
+    pub binding: Option<crate::control::security::sessions::SessionBinding>,
+}
+
+impl RespSession {
+    /// Check the kill and bring the identity up to date for the next command.
+    pub(super) fn refresh(
+        &mut self,
+        state: &crate::control::state::SharedState,
+    ) -> crate::Result<()> {
+        if let (Some(binding), Some(identity)) = (self.binding.as_mut(), self.identity.as_mut()) {
+            binding.refresh(state, identity)?;
+            binding.touch(0, 0);
+            self.tenant_id = identity.tenant_id;
+        }
+        Ok(())
+    }
 }
 
 impl Default for RespSession {
@@ -46,6 +65,7 @@ impl Default for RespSession {
             // Fail-safe default for a session that was never bound to a
             // socket: the listener overwrites it at accept.
             transport: crate::control::security::tls_policy::TransportSecurity::Cleartext,
+            binding: None,
         }
     }
 }

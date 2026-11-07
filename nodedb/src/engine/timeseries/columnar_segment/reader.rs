@@ -102,7 +102,8 @@ impl ColumnarSegmentReader {
         decode_column(&data, col_type, codec)
     }
 
-    /// Decode a column from pre-read raw bytes (already decrypted by caller).
+    /// Decode a column from the bytes of its file, read by the caller. An
+    /// encrypted file decrypts here with `kek`, as [`Self::read_column`] does.
     pub fn decode_column_from_bytes(
         partition_dir: &Path,
         col_name: &str,
@@ -115,7 +116,8 @@ impl ColumnarSegmentReader {
             Some(codec) => codec,
             None => Self::stored_codec(partition_dir, col_name, kek)?,
         };
-        decode_column(raw_bytes, col_type, codec)
+        let data = decrypt_segment_file(kek, raw_bytes)?;
+        decode_column(&data, col_type, codec)
     }
 
     /// Read the symbol dictionary for a tag column.
@@ -137,14 +139,19 @@ impl ColumnarSegmentReader {
     /// Each column decodes with the codec the meta's column stats record,
     /// else the codec `schema.json` records for it in the same writer pass.
     /// A re-encoded backup partition carries no meta. A column neither file
-    /// names a codec for is an error.
+    /// names a codec for is an error. A file that exists and does not read is
+    /// an error too: the other file's codec never stands in for a corrupt one.
     pub fn read_columns(
         partition_dir: &Path,
         requested: &[(String, ColumnType)],
         kek: Option<&WalEncryptionKey>,
     ) -> Result<Vec<ColumnData>, SegmentError> {
-        let meta = Self::read_meta(partition_dir, kek).ok();
-        let schema = Self::read_schema(partition_dir, kek).ok();
+        let meta = read_if_present(partition_dir, "partition.meta", || {
+            Self::read_meta(partition_dir, kek)
+        })?;
+        let schema = read_if_present(partition_dir, "schema.json", || {
+            Self::read_schema(partition_dir, kek)
+        })?;
         let mut result = Vec::with_capacity(requested.len());
         for (name, ty) in requested {
             let codec = meta
@@ -165,6 +172,20 @@ impl ColumnarSegmentReader {
                 codec,
                 kek,
             )?);
+        }
+        // Columns of one partition hold one row count. A caller indexes every
+        // column by a row of the first, so another length is refused here.
+        if let Some(first) = result.first()
+            && let Some(pos) = result.iter().position(|column| column.len() != first.len())
+        {
+            return Err(SegmentError::Corrupt(format!(
+                "partition {} column '{}' holds {} rows, column '{}' holds {}",
+                partition_dir.display(),
+                requested[pos].0,
+                result[pos].len(),
+                requested[0].0,
+                first.len()
+            )));
         }
         Ok(result)
     }
@@ -414,6 +435,20 @@ impl ColumnarSegmentReader {
     }
 }
 
+/// `read`'s result when `file` exists in `partition_dir`, `None` when it does
+/// not.
+fn read_if_present<T>(
+    partition_dir: &Path,
+    file: &str,
+    read: impl FnOnce() -> Result<T, SegmentError>,
+) -> Result<Option<T>, SegmentError> {
+    let path = partition_dir.join(file);
+    let present = path
+        .try_exists()
+        .map_err(|e| SegmentError::Io(format!("stat {}: {e}", path.display())))?;
+    if present { read().map(Some) } else { Ok(None) }
+}
+
 /// Sniff + conditionally decrypt a raw file buffer.
 ///
 /// - `kek = None`, file is plaintext → return as-is.
@@ -441,10 +476,76 @@ mod tests {
     use super::super::super::columnar_memtable::{
         ColumnValue, ColumnarMemtable, ColumnarMemtableConfig, TimeKind,
     };
+    use super::super::test_partition::write_ramp_partition;
     use super::super::writer::ColumnarSegmentWriter;
     use super::*;
 
     const MILLIS: ColumnType = ColumnType::Timestamp(TimeKind::Millis);
+
+    /// A batched read hands over a file's on-disk bytes. An encrypted file
+    /// decodes with the key, and the same bytes do not decode without it.
+    #[test]
+    fn column_file_bytes_decrypt_with_the_segment_key() {
+        let kek = WalEncryptionKey::from_bytes(&[0x42u8; 32]).expect("key");
+        let dir = TempDir::new().expect("tempdir");
+        let mut memtable = ColumnarMemtable::new_metric(ColumnarMemtableConfig::default());
+        for i in 0..10 {
+            memtable
+                .ingest_row(
+                    1,
+                    &[ColumnValue::Timestamp(1_000 + i), ColumnValue::Float64(1.0)],
+                )
+                .expect("row");
+        }
+        ColumnarSegmentWriter::new(dir.path())
+            .write_partition("ts-enc", &memtable.drain().view(), 0, 1, Some(&kek))
+            .expect("write");
+        let part = dir.path().join("ts-enc");
+        let raw = std::fs::read(part.join("value.col")).expect("read file");
+        let codec = ColumnarSegmentReader::read_meta(&part, Some(&kek))
+            .expect("meta")
+            .column_stats
+            .get("value")
+            .map(|stats| stats.codec);
+
+        let column = ColumnarSegmentReader::decode_column_from_bytes(
+            &part,
+            "value",
+            ColumnType::Float64,
+            codec,
+            &raw,
+            Some(&kek),
+        )
+        .expect("decodes with the key");
+
+        assert_eq!(column.len(), 10);
+        assert!(
+            ColumnarSegmentReader::decode_column_from_bytes(
+                &part,
+                "value",
+                ColumnType::Float64,
+                codec,
+                &raw,
+                None,
+            )
+            .is_err()
+        );
+    }
+
+    /// Columns of unequal length refuse the read. The RESTORE decode indexes
+    /// every column by a row of the first, which panics on a short column.
+    #[test]
+    fn read_columns_refuses_columns_of_unequal_length() {
+        let dir = TempDir::new().expect("tempdir");
+        let full = write_ramp_partition(dir.path(), "ts-full", 10);
+        let short = write_ramp_partition(dir.path(), "ts-short", 3);
+        std::fs::copy(short.join("value.col"), full.join("value.col")).expect("swap column");
+        let schema = ColumnarSegmentReader::read_schema(&full, None).expect("schema");
+
+        let result = ColumnarSegmentReader::read_columns(&full, &schema.columns, None);
+
+        assert!(matches!(result, Err(SegmentError::Corrupt(_))));
+    }
 
     fn test_config() -> ColumnarMemtableConfig {
         ColumnarMemtableConfig {
@@ -691,6 +792,28 @@ mod tests {
             ColumnarSegmentReader::read_sparse_index(&part_dir, None),
             Err(SegmentError::Io(_))
         ));
+    }
+
+    /// A corrupt meta is an error, even though `schema.json` names a codec.
+    /// A meta that is absent falls to `schema.json`.
+    #[test]
+    fn read_columns_refuses_a_corrupt_meta_and_reads_without_one() {
+        let (tmp, drain) = build_simple_drain();
+        let writer = ColumnarSegmentWriter::new(tmp.path());
+        writer
+            .write_partition("ts-meta", &drain.view(), 86_400_000, 0, None)
+            .unwrap();
+        let part_dir = tmp.path().join("ts-meta");
+        let requested = [("value".to_string(), ColumnType::Float64)];
+        let meta_path = part_dir.join("partition.meta");
+
+        std::fs::write(&meta_path, b"not a meta").unwrap();
+        assert!(ColumnarSegmentReader::read_columns(&part_dir, &requested, None).is_err());
+
+        std::fs::remove_file(&meta_path).unwrap();
+        let columns = ColumnarSegmentReader::read_columns(&part_dir, &requested, None)
+            .expect("schema.json names the codec");
+        assert_eq!(columns[0].len(), 100);
     }
 
     /// A meta that records no codec for a column refuses the read instead of

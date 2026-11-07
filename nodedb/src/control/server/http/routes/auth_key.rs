@@ -49,6 +49,14 @@ pub async fn exchange_key(
     let rate_limit_burst = body.rate_limit_burst.unwrap_or(0);
     let expires_days = body.expires_days.unwrap_or(0);
 
+    // The record is durable before the key exists, so a failed record issues no key.
+    state.shared.audit_record_strict(
+        crate::control::security::audit::AuditEvent::ActionIntent,
+        Some(identity.tenant_id),
+        &identity.username,
+        &format!("JWT exchange issues auth API key for user '{auth_user_id}'"),
+    )?;
+
     let token = state.shared.auth_api_keys.create_key(
         &auth_user_id,
         identity.tenant_id.as_u64(),

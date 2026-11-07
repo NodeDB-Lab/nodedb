@@ -12,7 +12,7 @@ use nodedb_types::DatabaseId;
 use super::database::{DatabaseCounters, DatabaseMetricsRegistry};
 
 /// Escape a label value per the Prometheus text format.
-fn escape_label(v: &str) -> String {
+pub(crate) fn escape_label(v: &str) -> String {
     v.replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('\n', "\\n")
@@ -43,6 +43,31 @@ fn load(
     }
 }
 
+/// Render `nodedb_tenant_qps_total`, one series per database and tenant.
+fn emit_tenant_qps(out: &mut String, rows: &[(String, Arc<DatabaseCounters>)]) {
+    let name = "nodedb_tenant_qps_total";
+    let _ = write!(
+        out,
+        "# HELP {name} Cumulative requests admitted per database and tenant\n\
+         # TYPE {name} counter\n"
+    );
+    for (label, counters) in rows {
+        let tenants = counters
+            .tenant_qps_total
+            .read()
+            .unwrap_or_else(|p| p.into_inner());
+        let mut series: Vec<(u64, u64)> = tenants.iter().map(|(t, n)| (*t, *n)).collect();
+        series.sort_unstable();
+        for (tenant_id, total) in series {
+            let _ = writeln!(
+                out,
+                r#"{name}{{tenant_id="{tenant_id}",database="{label}"}} {total}"#
+            );
+        }
+    }
+    out.push('\n');
+}
+
 impl DatabaseMetricsRegistry {
     /// Render all series as Prometheus text format 0.0.4.
     ///
@@ -68,6 +93,7 @@ impl DatabaseMetricsRegistry {
             &rows,
             load(|c| &c.qps_total),
         );
+        emit_tenant_qps(out, &rows);
         emit(
             out,
             "nodedb_database_errors_total",
@@ -201,6 +227,22 @@ mod tests {
         );
         assert!(out.contains("wall seconds each database held a maintenance lease"));
         assert!(out.contains("nodedb_database_wal_commit_latency_p99_us{database=\"a\"}"));
+    }
+
+    #[test]
+    fn a_tenant_series_names_the_database_that_admitted_it() {
+        let reg = DatabaseMetricsRegistry::new();
+        reg.ensure_database(db(1));
+        reg.ensure_database(db(2));
+        reg.record_tenant_qps(db(1), 7);
+        reg.record_tenant_qps(db(2), 7);
+        reg.record_tenant_qps(db(2), 7);
+        let names = HashMap::from([(db(1), "prod".to_string()), (db(2), "stage".to_string())]);
+        let mut out = String::new();
+        reg.render_prometheus(&names, &mut out);
+        assert!(out.contains(r#"nodedb_tenant_qps_total{tenant_id="7",database="prod"} 1"#));
+        assert!(out.contains(r#"nodedb_tenant_qps_total{tenant_id="7",database="stage"} 2"#));
+        assert!(!out.contains(r#"database="default""#), "{out}");
     }
 
     #[test]

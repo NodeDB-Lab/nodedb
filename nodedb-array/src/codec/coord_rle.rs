@@ -16,6 +16,7 @@
 // all-ones 4-byte value is reserved as the RLE sentinel.
 
 use crate::codec::coord_delta::{decode_coord_axis, encode_coord_axis};
+use crate::codec::frame::{take_bytes, take_len, take_u32_le};
 use crate::codec::limits::{
     MAX_CELLS_PER_TILE, MAX_DICT_CARDINALITY, MAX_RLE_RUN_LEN, MAX_RLE_RUNS, check_decoded_size,
     checked_capacity,
@@ -96,19 +97,11 @@ fn encode_rle(dict: &DimDict, out: &mut Vec<u8>) -> ArrayResult<()> {
 
 /// Decode a DimDict from bytes previously encoded by `encode_coord_axis_rle`.
 pub fn decode_coord_axis_rle(data: &[u8], pos: &mut usize) -> ArrayResult<DimDict> {
-    if *pos + 4 > data.len() {
-        return Err(ArrayError::SegmentCorruption {
-            detail: "rle coord: truncated mode marker".into(),
-        });
-    }
-    let first_u32 = u32::from_le_bytes(
-        data[*pos..*pos + 4]
-            .try_into()
-            .expect("invariant: bounds check at line 96 guarantees 4 bytes available"),
-    );
+    let mut after_marker = *pos;
+    let first_u32 = take_u32_le(data, &mut after_marker, "rle coord: truncated mode marker")?;
 
     if first_u32 == RLE_MARKER {
-        *pos += 4;
+        *pos = after_marker;
         decode_rle(data, pos)
     } else {
         // Delta mode — don't advance pos; coord_delta reads dict_count first.
@@ -117,17 +110,7 @@ pub fn decode_coord_axis_rle(data: &[u8], pos: &mut usize) -> ArrayResult<DimDic
 }
 
 fn decode_rle(data: &[u8], pos: &mut usize) -> ArrayResult<DimDict> {
-    if *pos + 4 > data.len() {
-        return Err(ArrayError::SegmentCorruption {
-            detail: "rle coord: truncated run count".into(),
-        });
-    }
-    let run_count = u32::from_le_bytes(
-        data[*pos..*pos + 4]
-            .try_into()
-            .expect("invariant: bounds check at line 113 guarantees 4 bytes available"),
-    ) as usize;
-    *pos += 4;
+    let run_count = take_len(data, pos, "rle coord: truncated run count")?;
     checked_capacity(
         run_count,
         MAX_RLE_RUNS,
@@ -139,21 +122,8 @@ fn decode_rle(data: &[u8], pos: &mut usize) -> ArrayResult<DimDict> {
     let mut indices: Vec<u32> = Vec::new();
     let mut total_len: usize = 0;
     for _ in 0..run_count {
-        if *pos + 8 > data.len() {
-            return Err(ArrayError::SegmentCorruption {
-                detail: "rle coord: truncated run entry".into(),
-            });
-        }
-        let val =
-            u32::from_le_bytes(data[*pos..*pos + 4].try_into().expect(
-                "invariant: bounds check at line 125 guarantees 8 bytes available; first 4",
-            ));
-        *pos += 4;
-        let len =
-            u32::from_le_bytes(data[*pos..*pos + 4].try_into().expect(
-                "invariant: bounds check at line 125 guarantees 8 bytes available; second 4",
-            )) as usize;
-        *pos += 4;
+        let val = take_u32_le(data, pos, "rle coord: truncated run entry")?;
+        let len = take_len(data, pos, "rle coord: truncated run entry")?;
         check_decoded_size(len, MAX_RLE_RUN_LEN, "rle run len")?;
         total_len = total_len.saturating_add(len);
         check_decoded_size(total_len, MAX_CELLS_PER_TILE, "rle indices total_len")?;
@@ -163,17 +133,7 @@ fn decode_rle(data: &[u8], pos: &mut usize) -> ArrayResult<DimDict> {
     }
 
     // Dict values.
-    if *pos + 4 > data.len() {
-        return Err(ArrayError::SegmentCorruption {
-            detail: "rle coord: truncated dict count".into(),
-        });
-    }
-    let dict_count = u32::from_le_bytes(
-        data[*pos..*pos + 4]
-            .try_into()
-            .expect("invariant: bounds check at line 143 guarantees 4 bytes available"),
-    ) as usize;
-    *pos += 4;
+    let dict_count = take_len(data, pos, "rle coord: truncated dict count")?;
     let capacity = checked_capacity(
         dict_count,
         MAX_DICT_CARDINALITY,
@@ -184,28 +144,12 @@ fn decode_rle(data: &[u8], pos: &mut usize) -> ArrayResult<DimDict> {
 
     let mut values: Vec<CoordValue> = Vec::with_capacity(capacity);
     for _ in 0..dict_count {
-        if *pos + 4 > data.len() {
-            return Err(ArrayError::SegmentCorruption {
-                detail: "rle coord: truncated dict entry len".into(),
-            });
-        }
-        let len = u32::from_le_bytes(
-            data[*pos..*pos + 4]
-                .try_into()
-                .expect("invariant: bounds check at line 154 guarantees 4 bytes available"),
-        ) as usize;
-        *pos += 4;
-        if *pos + len > data.len() {
-            return Err(ArrayError::SegmentCorruption {
-                detail: "rle coord: truncated dict entry bytes".into(),
-            });
-        }
-        let cv: CoordValue = zerompk::from_msgpack(&data[*pos..*pos + len]).map_err(|e| {
-            ArrayError::SegmentCorruption {
+        let len = take_len(data, pos, "rle coord: truncated dict entry len")?;
+        let entry = take_bytes(data, pos, len, "rle coord: truncated dict entry bytes")?;
+        let cv: CoordValue =
+            zerompk::from_msgpack(entry).map_err(|e| ArrayError::SegmentCorruption {
                 detail: format!("rle coord dict decode: {e}"),
-            }
-        })?;
-        *pos += len;
+            })?;
         values.push(cv);
     }
 
@@ -226,6 +170,25 @@ mod tests {
         encode_coord_axis_rle(dict, &mut buf).unwrap();
         let mut pos = 0;
         decode_coord_axis_rle(&buf, &mut pos).unwrap()
+    }
+
+    #[test]
+    fn a_hostile_dict_entry_length_is_corruption() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&RLE_MARKER.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(&u32::MAX.to_le_bytes());
+        assert!(matches!(
+            decode_coord_axis_rle(&data, &mut 0),
+            Err(crate::error::ArrayError::SegmentCorruption { .. })
+        ));
+    }
+
+    #[test]
+    fn a_position_past_the_end_is_corruption() {
+        let mut pos = usize::MAX - 1;
+        assert!(decode_coord_axis_rle(&[0u8; 8], &mut pos).is_err());
     }
 
     #[test]

@@ -108,30 +108,40 @@ impl StoredSequence {
     }
 }
 
-/// Runtime state of a sequence on this node.
+/// Who wrote a reserved row. A proposer reads it to learn its entry won.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, zerompk::ToMessagePack, zerompk::FromMessagePack)]
+#[msgpack(map)]
+pub struct SequenceReservation {
+    pub node_id: u64,
+    pub request_id: u64,
+}
+
+/// The durable counter of a sequence.
 ///
-/// Persisted to catalog periodically and on shutdown. Not synced via CRDT —
-/// each node maintains its own counter within an allocated range.
+/// Every node's row is equal in a cluster: the row changes only through the
+/// metadata log. A node hands out values of a range the row already covers.
 ///
 /// Stored in redb under `_system.sequence_state` with key
 /// `"{database_id}:{tenant_id}:{name}"` — the same key as the definition in
 /// `_system.sequences`, so counter and definition share one identity.
-#[derive(Debug, Clone, zerompk::ToMessagePack, zerompk::FromMessagePack)]
+#[derive(Debug, Clone, PartialEq, Eq, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 #[msgpack(map)]
 pub struct SequenceState {
     pub database_id: u64,
     pub tenant_id: u64,
     pub name: String,
-    /// Last value nextval returned once `is_called`. Before that, the value
+    /// Last value any node reserved once `is_called`. Before that, the value
     /// the next nextval returns.
     pub current_value: i64,
-    /// Whether nextval has been called at least once on this node.
+    /// Whether any node reserved a value.
     pub is_called: bool,
     /// Epoch of the range allocation. Must match the sequence definition's epoch.
     pub epoch: u64,
     /// Current period key for reset scope (e.g. "2026-04", "2026-Q2").
     /// Empty string means no period tracking (ResetScope::Never).
     pub period_key: String,
+    /// The reservation that wrote this row. `None` for a row an operator set.
+    pub reservation: Option<SequenceReservation>,
 }
 
 impl SequenceState {
@@ -151,6 +161,7 @@ impl SequenceState {
             is_called: false,
             epoch,
             period_key: String::new(),
+            reservation: None,
         }
     }
 }

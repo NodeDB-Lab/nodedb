@@ -117,7 +117,11 @@ pub use json_msgpack::{
 };
 pub use kv::{KV_DEFAULT_INLINE_THRESHOLD, KvConfig, KvTtlPolicy, is_valid_kv_key_type};
 pub use lsn::Lsn;
-pub use mirror::{MirrorLagRecord, MirrorMode, MirrorOrigin, MirrorStatus};
+pub use mirror::{
+    MirrorCutAdvance, MirrorCutMark, MirrorCutState, MirrorEntryStamp, MirrorEpochRange,
+    MirrorFailure, MirrorGroupPosition, MirrorMode, MirrorOrigin, MirrorPin, MirrorPinState,
+    MirrorStatus, MirrorStatusStep,
+};
 pub use multi_vector::{MultiVector, MultiVectorError, MultiVectorScoreMode};
 pub use namespace::Namespace;
 pub use path_component::is_plain_path_component;
@@ -155,4 +159,4 @@ pub use vector_index_stats::{
 };
 pub use vector_model::{VectorModelEntry, VectorModelMetadata};
 pub use volatility::Volatility;
-pub use wall_clock::{wall_now_ns, wall_now_ns_i64};
+pub use wall_clock::{checked_wall_now_ms, wall_now_ns, wall_now_ns_i64};

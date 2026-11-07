@@ -36,6 +36,12 @@ impl CoreLoop {
             ));
         };
         engine.restore_truncated(rows);
+        // Any segment flushed after the truncate leaves here, and its id can
+        // return.
+        self.release_quarantined_segments(
+            crate::storage::quarantine::QuarantineEngine::Columnar,
+            &collection_key,
+        );
         match flushed_segments {
             Some(segments) => {
                 self.columnar_flushed_segments

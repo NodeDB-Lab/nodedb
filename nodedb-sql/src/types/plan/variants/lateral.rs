@@ -2,6 +2,7 @@
 
 //! LATERAL join plan payloads.
 
+use crate::temporal::TemporalScope;
 use crate::types::filter::Filter;
 use crate::types::query::{Projection, SortKey};
 
@@ -30,6 +31,9 @@ pub struct LateralTopKPlan {
     pub projection: Vec<Projection>,
     /// LEFT join semantics: preserve outer rows even when inner is empty.
     pub left_join: bool,
+    /// The statement's `AS OF`. Each inner scan reads at its system time, the
+    /// cut `outer` reads at. A loop's inner plan carries its own.
+    pub temporal: TemporalScope,
 }
 
 /// Payload of [`SqlPlan::LateralLoop`](crate::types::SqlPlan::LateralLoop).

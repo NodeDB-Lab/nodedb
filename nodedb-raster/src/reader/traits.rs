@@ -45,6 +45,10 @@ pub trait RasterReader: Send + Sync {
     /// Blocks per band. Block indexes run `0..block_count()`.
     fn block_count(&self) -> u32;
 
+    /// Decoded bytes of the largest block, across all bands. A caller reserves
+    /// memory for a block from this before it reads the block.
+    fn block_bytes(&self) -> u64;
+
     /// The pixel window of block `index`, cropped to the image.
     fn block_window(&self, index: u32) -> Result<BlockWindow, RasterError>;
 

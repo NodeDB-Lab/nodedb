@@ -3,16 +3,17 @@
 //! In-memory sequence registry with lock-free counters.
 //!
 //! Loaded from catalog on startup. Provides nextval/currval/setval operations.
-//! State is persisted back to the catalog on checkpoint/shutdown.
+//! A server's registry draws values from ranges its reserver made durable.
 
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{Arc, OnceLock, RwLock};
 
 use crate::control::security::catalog::sequence_types::{SequenceState, StoredSequence};
 use crate::control::security::catalog::types::SystemCatalog;
 
 use super::format::{self, FormatContext, ResetScope};
 use super::gap_free::GapFreeManager;
+use super::reserve::SequenceRangeReserver;
 use super::types::{SequenceError, SequenceHandle};
 
 /// In-memory registry of all sequences, keyed by
@@ -25,9 +26,12 @@ use super::types::{SequenceError, SequenceHandle};
 /// a same-named sequence, and a shared key makes both hand out one counter.
 pub struct SequenceRegistry {
     /// Sequences keyed by `"{database_id}:{tenant_id}:{name}"`.
-    sequences: RwLock<HashMap<String, SequenceHandle>>,
+    pub(super) sequences: RwLock<HashMap<String, SequenceHandle>>,
     /// GAP_FREE reservation manager (shared across all sequences).
     gap_free: GapFreeManager,
+    /// Makes a committed sequence's values durable before they leave this node.
+    /// A registry with none counts in memory.
+    pub(super) reserver: OnceLock<Arc<dyn SequenceRangeReserver>>,
 }
 
 impl SequenceRegistry {
@@ -35,7 +39,25 @@ impl SequenceRegistry {
         Self {
             sequences: RwLock::new(HashMap::new()),
             gap_free: GapFreeManager::new(),
+            reserver: OnceLock::new(),
         }
+    }
+
+    /// Install `def` at the counter the catalog row `state` holds.
+    pub fn create_at(
+        &self,
+        def: StoredSequence,
+        state: Option<SequenceState>,
+    ) -> Result<(), SequenceError> {
+        let key = registry_key(def.database_id, def.tenant_id, &def.name);
+        let mut map = self.sequences.write().unwrap_or_else(|p| p.into_inner());
+        if map.contains_key(&key) {
+            return Err(SequenceError::AlreadyExists {
+                name: def.name.clone(),
+            });
+        }
+        map.insert(key, SequenceHandle::new(def, state));
+        Ok(())
     }
 
     /// Access the GAP_FREE manager (for commit/rollback from transaction lifecycle).
@@ -97,17 +119,7 @@ impl SequenceRegistry {
 
     /// Create a new sequence. Returns error if it already exists.
     pub fn create(&self, def: StoredSequence) -> Result<(), SequenceError> {
-        let key = registry_key(def.database_id, def.tenant_id, &def.name);
-        let mut map = self.sequences.write().unwrap_or_else(|p| p.into_inner());
-
-        if map.contains_key(&key) {
-            return Err(SequenceError::AlreadyExists {
-                name: def.name.clone(),
-            });
-        }
-
-        map.insert(key, SequenceHandle::new(def, None));
-        Ok(())
+        self.create_at(def, None)
     }
 
     /// Remove a sequence. Returns error if not found.
@@ -140,6 +152,9 @@ impl SequenceRegistry {
         tenant_id: u64,
         name: &str,
     ) -> Result<i64, SequenceError> {
+        if let Some(value) = self.next_reserved(database_id, tenant_id, name)? {
+            return Ok(value);
+        }
         let key = registry_key(database_id, tenant_id, name);
         let map = self.sequences.read().unwrap_or_else(|p| p.into_inner());
         if let Some(handle) = map.get(&key) {
@@ -170,11 +185,17 @@ impl SequenceRegistry {
         tenant_code: &str,
         session_vars: &std::collections::HashMap<String, String>,
     ) -> Result<SequenceValue, SequenceError> {
+        let reserved = self.next_reserved(database_id, tenant_id, name)?;
         let key = registry_key(database_id, tenant_id, name);
         let map = self.sequences.read().unwrap_or_else(|p| p.into_inner());
         if let Some(handle) = map.get(&key) {
-            self.check_period_reset(handle);
-            let raw = handle.nextval()?;
+            let raw = match reserved {
+                Some(raw) => raw,
+                None => {
+                    self.check_period_reset(handle);
+                    handle.nextval()?
+                }
+            };
             return Ok(Self::format_nextval(handle, raw, tenant_code, session_vars));
         }
         drop(map);
@@ -261,6 +282,13 @@ impl SequenceRegistry {
         name: &str,
         n: usize,
     ) -> Result<Vec<i64>, SequenceError> {
+        if self.reserver.get().is_some() {
+            let mut values = Vec::with_capacity(n);
+            for _ in 0..n {
+                values.push(self.nextval(database_id, tenant_id, name)?);
+            }
+            return Ok(values);
+        }
         let key = registry_key(database_id, tenant_id, name);
         let map = self.sequences.read().unwrap_or_else(|p| p.into_inner());
         let handle = map.get(&key).ok_or_else(|| SequenceError::NotFound {
@@ -300,6 +328,9 @@ impl SequenceRegistry {
         name: &str,
         value: i64,
     ) -> Result<i64, SequenceError> {
+        if self.publish_state(database_id, tenant_id, name, value, true)? {
+            return Ok(value);
+        }
         let key = registry_key(database_id, tenant_id, name);
         let map = self.sequences.read().unwrap_or_else(|p| p.into_inner());
         if let Some(handle) = map.get(&key) {
@@ -351,30 +382,6 @@ impl SequenceRegistry {
             .collect()
     }
 
-    /// Persist all sequence states to the catalog (for checkpoint/shutdown).
-    pub fn persist_all(&self, catalog: &SystemCatalog) {
-        let map = self.sequences.read().unwrap_or_else(|p| p.into_inner());
-
-        for handle in map.values() {
-            let state = SequenceState {
-                database_id: handle.def.database_id,
-                tenant_id: handle.def.tenant_id,
-                name: handle.def.name.clone(),
-                current_value: handle.persisted_value(),
-                is_called: handle.is_called(),
-                epoch: handle.def.epoch,
-                period_key: handle.period_key(),
-            };
-            if let Err(e) = catalog.put_sequence_state(&state) {
-                tracing::warn!(
-                    sequence = %handle.def.name,
-                    error = %e,
-                    "failed to persist sequence state"
-                );
-            }
-        }
-    }
-
     /// Read-lock the sequences map (for GAP_FREE rollback access).
     pub fn sequences_read(
         &self,
@@ -416,23 +423,31 @@ impl SequenceRegistry {
         database_id: u64,
         tenant_id: u64,
         collection: &str,
-    ) {
+    ) -> Result<(), SequenceError> {
+        // A plan names a named database's collection by its qualified name. The
+        // implicit sequence's name holds the bare one.
+        let collection = nodedb_types::CollectionKey::from_qualified_str(
+            nodedb_types::DatabaseId::new(database_id),
+            collection,
+        )
+        .map_or(collection, |key| key.name());
         let prefix = format!("{database_id}:{tenant_id}:{collection}_");
         let suffix = "_seq";
-        let map = self.sequences.read().unwrap_or_else(|p| p.into_inner());
-
-        for (key, handle) in map.iter() {
-            if key.starts_with(&prefix) && handle.def.name.ends_with(suffix) {
-                let start = handle.def.start_value;
-                if let Err(e) = handle.restart_at(start) {
-                    tracing::warn!(
-                        sequence = %handle.def.name,
-                        error = %e,
-                        "failed to restart sequence during TRUNCATE RESTART IDENTITY"
-                    );
-                }
+        // The lock never spans a propose, whose apply can take it for write.
+        let matching: Vec<(String, i64)> = self
+            .sequences
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .filter(|(key, handle)| key.starts_with(&prefix) && handle.def.name.ends_with(suffix))
+            .map(|(_, handle)| (handle.def.name.clone(), handle.def.start_value))
+            .collect();
+        for (name, start) in matching {
+            if !self.publish_state(database_id, tenant_id, &name, start, false)? {
+                self.restart(database_id, tenant_id, &name, start)?;
             }
         }
+        Ok(())
     }
 }
 

@@ -17,7 +17,6 @@
 //! 3. A machine-readable `CompensationHint` suggesting how to fix it.
 
 use std::collections::VecDeque;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -107,9 +106,9 @@ pub struct DeadLetter {
 
     /// Timestamp when the rejection occurred (unix millis).
     ///
-    /// Node-local and NON-DETERMINISTIC: sourced from `SystemTime::now()` at
-    /// enqueue time, so two replicas that reject the same delta will record
-    /// different values. Safe today because the DLQ is a per-replica in-memory
+    /// Node-local and NON-DETERMINISTIC: sourced from the wall clock
+    /// (`nodedb_types::wall_now_ns`) at enqueue time, so two replicas that
+    /// reject the same delta will record different values. Safe today because the DLQ is a per-replica in-memory
     /// structure that is never replicated or compared across nodes. If the DLQ
     /// is ever replicated, snapshotted into shared state, or diffed between
     /// replicas, this field MUST first be switched to a deterministic stamp
@@ -179,10 +178,7 @@ impl DeadLetterQueue {
         let id = self.next_id;
         self.next_id += 1;
 
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
+        let now = nodedb_types::wall_now_ns() / nodedb_types::NANOS_PER_MS as u64;
 
         self.entries.push_back(DeadLetter {
             id,

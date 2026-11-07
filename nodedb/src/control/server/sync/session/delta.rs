@@ -5,6 +5,7 @@
 //! Exact RLS is evaluated later by CRDT admission against the authoritative
 //! post-merge preview, never against raw attacker-controlled delta bytes.
 
+use std::sync::Mutex;
 use std::time::Instant;
 
 use tracing::{debug, warn};
@@ -26,8 +27,8 @@ impl SyncSession {
         &mut self,
         msg: &DeltaPushMsg,
         _rls_store: Option<&RlsPolicyStore>,
-        audit_log: Option<&mut AuditLog>,
-        dlq: Option<&mut SyncDlq>,
+        audit_log: Option<&Mutex<AuditLog>>,
+        dlq: Option<&Mutex<SyncDlq>>,
     ) -> Option<SyncFrame> {
         self.last_activity = Instant::now();
 
@@ -114,6 +115,7 @@ impl SyncSession {
                 log_silent_rejection(audit, &self.session_id, &identity, msg, &reason);
             }
             if let Some(q) = dlq {
+                let mut q = q.lock().unwrap_or_else(|p| p.into_inner());
                 q.enqueue(DlqEnqueueParams {
                     session_id: self.session_id.clone(),
                     tenant_id: identity.tenant_id.as_u64(),
@@ -253,6 +255,8 @@ fn compute_clock_skew_warning(device_valid_time_ms: Option<i64>) -> Option<i64> 
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::SyncSession;
     use super::compute_clock_skew_warning;
     use crate::control::security::audit::AuditLog;
@@ -357,8 +361,8 @@ mod tests {
             })
             .unwrap();
 
-        let mut audit_log = AuditLog::new(100);
-        let mut dlq = SyncDlq::new(DlqConfig::default());
+        let audit_log = Mutex::new(AuditLog::new(100));
+        let dlq = Mutex::new(SyncDlq::new(DlqConfig::default()));
 
         let data = serde_json::json!({"status": "draft"});
         let delta = nodedb_types::json_to_msgpack(&data).unwrap();
@@ -379,7 +383,7 @@ mod tests {
         };
 
         let response =
-            session.handle_delta_push(&msg, Some(&rls_store), Some(&mut audit_log), Some(&mut dlq));
+            session.handle_delta_push(&msg, Some(&rls_store), Some(&audit_log), Some(&dlq));
 
         assert_eq!(
             response.expect("preliminary ack").msg_type,
@@ -387,15 +391,15 @@ mod tests {
         );
         assert_eq!(session.mutations_silent_dropped, 0);
         assert_eq!(session.mutations_processed, 1);
-        assert_eq!(audit_log.len(), 0);
-        assert_eq!(dlq.total_entries(), 0);
+        assert_eq!(audit_log.lock().unwrap().len(), 0);
+        assert_eq!(dlq.lock().unwrap().total_entries(), 0);
     }
 
     #[test]
     fn oversized_delta_rejects_before_rate_limit_or_dlq_clone() {
         let mut session = make_authenticated_session();
-        let mut audit_log = AuditLog::new(100);
-        let mut dlq = SyncDlq::new(DlqConfig::default());
+        let audit_log = Mutex::new(AuditLog::new(100));
+        let dlq = Mutex::new(SyncDlq::new(DlqConfig::default()));
         let msg = DeltaPushMsg {
             collection: "orders".into(),
             document_id: "o1".into(),
@@ -413,14 +417,14 @@ mod tests {
         };
 
         let response = session
-            .handle_delta_push(&msg, None, Some(&mut audit_log), Some(&mut dlq))
+            .handle_delta_push(&msg, None, Some(&audit_log), Some(&dlq))
             .expect("oversized reject");
         assert_eq!(response.msg_type, SyncMessageType::DeltaReject);
         assert_eq!(session.mutations_rejected, 1);
         assert_eq!(session.mutations_processed, 0);
         assert_eq!(session.mutations_silent_dropped, 0);
-        assert_eq!(audit_log.len(), 0);
-        assert_eq!(dlq.total_entries(), 0);
+        assert_eq!(audit_log.lock().unwrap().len(), 0);
+        assert_eq!(dlq.lock().unwrap().total_entries(), 0);
     }
 
     #[test]
@@ -466,8 +470,8 @@ mod tests {
         assert!(r1.is_some());
         assert_eq!(session.mutations_processed, 1);
 
-        let mut audit_log = AuditLog::new(100);
-        let mut dlq = SyncDlq::new(DlqConfig::default());
+        let audit_log = Mutex::new(AuditLog::new(100));
+        let dlq = Mutex::new(SyncDlq::new(DlqConfig::default()));
 
         let msg2 = DeltaPushMsg {
             collection: "docs".into(),
@@ -484,10 +488,10 @@ mod tests {
             epoch: 0,
             seq: 0,
         };
-        let r2 = session.handle_delta_push(&msg2, None, Some(&mut audit_log), Some(&mut dlq));
+        let r2 = session.handle_delta_push(&msg2, None, Some(&audit_log), Some(&dlq));
         assert!(r2.is_none());
         assert_eq!(session.mutations_silent_dropped, 1);
-        assert_eq!(dlq.total_entries(), 1);
+        assert_eq!(dlq.lock().unwrap().total_entries(), 1);
     }
 
     /// The Control Plane no longer keeps an in-memory replay-dedup map: every

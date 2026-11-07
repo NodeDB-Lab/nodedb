@@ -10,19 +10,9 @@ use thiserror::Error;
 /// boundary so callers have a single error type to handle.
 #[derive(Debug, Error)]
 pub enum MirrorError {
-    /// The remote cluster refused our connection because the `source_cluster`
-    /// we declared does not match their own cluster id.
-    #[error(
-        "cluster-id mismatch: we declared source_cluster={declared:?}, \
-         remote reports its id as {remote:?}"
-    )]
-    ClusterIdMismatch { declared: String, remote: String },
-
-    /// The remote cluster rejected the mirror link because the connecting
-    /// peer presented `Observer` role credentials but tried to perform a
-    /// voter operation (vote request, conf change, etc.).
-    #[error("observer-role violation: peer attempted voter operation: {detail}")]
-    ObserverRoleViolation { detail: String },
+    /// The source answered the request with a typed refusal.
+    #[error("the source refused: {0}")]
+    Refused(super::tail_wire::MirrorRefusal),
 
     /// Snapshot transfer was aborted because a chunk arrived out of order.
     ///
@@ -48,22 +38,16 @@ pub enum MirrorError {
         computed: u32,
     },
 
-    /// The cross-cluster handshake wire message could not be decoded.
+    /// The cross-cluster handshake wire message did not decode.
     #[error("cross-cluster handshake codec error: {detail}")]
     HandshakeCodec { detail: String },
-
-    /// The mirror declared a wire protocol version the source does not
-    /// implement (or vice versa).  Surfaced immediately without retry — the
-    /// peers must be upgraded in lockstep.
-    #[error("cross-cluster protocol version mismatch: local={local}, remote_detail={detail:?}")]
-    ProtocolVersionMismatch { local: u16, detail: String },
 
     /// QUIC transport error during cross-cluster operations.
     #[error("cross-cluster transport error: {detail}")]
     Transport { detail: String },
 
-    /// Observer-side bytes-in-flight cap was exceeded; the source should
-    /// pause sending until the observer drains.
+    /// The observer's bytes-in-flight cap was exceeded. The source pauses until
+    /// the observer drains.
     #[error(
         "bytes-in-flight cap exceeded: in_flight={in_flight}, cap={cap} for mirror {database_id:?}"
     )]
@@ -72,8 +56,4 @@ pub enum MirrorError {
         in_flight: u64,
         cap: u64,
     },
-
-    /// The mirror is in `Promoted` state and can no longer accept replication.
-    #[error("mirror {database_id:?} is promoted and no longer accepts replication")]
-    MirrorPromoted { database_id: String },
 }

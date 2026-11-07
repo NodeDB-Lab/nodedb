@@ -8,9 +8,11 @@ use std::time::Instant;
 
 use tracing::{info, warn};
 
+use crate::control::security::sessions::{SessionBindRequest, bind_session};
 use crate::control::state::SharedState;
 
 use super::super::dlq::DeviceMetadata;
+use super::super::security::{UpgradeAuthResult, validate_upgrade_token};
 use super::super::wire::*;
 use super::fencing::FencingDecision;
 use super::state::SyncSession;
@@ -105,6 +107,9 @@ impl SyncSession {
                 remote_addr: std::mem::take(&mut self.device_metadata.remote_addr),
                 peer_id: 0,
             };
+            if let Err(error) = self.bind_identity(shared) {
+                return self.session_refused_frame(&current_server_clock, &error);
+            }
 
             let tenant_id = self.tenant_id.map(|t| t.as_u64()).unwrap_or(0);
             match self
@@ -154,36 +159,33 @@ impl SyncSession {
         // policy. Without `SharedState` there is no gate at all, so the token
         // is unverifiable and the handshake is refused rather than falling
         // through to the trust branch above.
-        let identity = match shared {
-            Some(state) => crate::control::server::session_auth::authenticate_bearer_jwt(
-                state,
-                &msg.jwt_token,
-                &self.device_metadata.remote_addr,
-                &self.session_id,
-            )
-            .await
-            .map(|(identity, _claims)| identity),
-            None => None,
-        };
-        let Some(identity) = identity else {
-            warn!(
-                session = %self.session_id,
-                "sync handshake FAILED: bearer token not authenticated"
-            );
-            let ack = HandshakeAckMsg {
-                success: false,
-                session_id: self.session_id.clone(),
-                server_clock: HashMap::new(),
-                // Deliberately generic, matching the HTTP bearer route: the
-                // client learns it is unauthenticated, never why.
-                error: Some("invalid bearer token".into()),
-                fork_detected: false,
-                server_wire_version: SYNC_WIRE_VERSION,
-                producer_id: 0,
-                accepted_epoch: 0,
-                delta_signing_key: [0; 32],
-            };
-            return SyncFrame::try_encode(SyncMessageType::HandshakeAck, &ack);
+        let identity = match validate_upgrade_token(
+            shared.map(Arc::as_ref),
+            &msg.jwt_token,
+            &self.device_metadata.remote_addr,
+            &self.session_id,
+        )
+        .await
+        {
+            UpgradeAuthResult::Authenticated { identity, .. } => identity,
+            UpgradeAuthResult::Rejected { reason } => {
+                warn!(
+                    session = %self.session_id,
+                    "sync handshake FAILED: bearer token not authenticated"
+                );
+                let ack = HandshakeAckMsg {
+                    success: false,
+                    session_id: self.session_id.clone(),
+                    server_clock: HashMap::new(),
+                    error: Some(reason.into()),
+                    fork_detected: false,
+                    server_wire_version: SYNC_WIRE_VERSION,
+                    producer_id: 0,
+                    accepted_epoch: 0,
+                    delta_signing_key: [0; 32],
+                };
+                return SyncFrame::try_encode(SyncMessageType::HandshakeAck, &ack);
+            }
         };
 
         self.tenant_id = Some(identity.tenant_id);
@@ -206,6 +208,9 @@ impl SyncSession {
             remote_addr: std::mem::take(&mut self.device_metadata.remote_addr),
             peer_id: 0,
         };
+        if let Err(error) = self.bind_identity(shared) {
+            return self.session_refused_frame(&current_server_clock, &error);
+        }
 
         let tenant_id = identity.tenant_id.as_u64();
         match self
@@ -276,6 +281,37 @@ impl SyncSession {
         SyncFrame::try_encode(SyncMessageType::HandshakeAck, &ack)
     }
 
+    /// Register the handshake's identity in the session registry, so a session cap
+    /// refuses the handshake itself. A sync session has its own idle timeout, so it
+    /// stays marked busy for the idle sweep.
+    fn bind_identity(&mut self, shared: Option<&Arc<SharedState>>) -> crate::Result<()> {
+        let (Some(state), Some(identity)) = (shared, self.identity.as_ref()) else {
+            return Ok(());
+        };
+        let binding = bind_session(
+            state,
+            SessionBindRequest {
+                session_id: Some(self.session_id.clone()),
+                ..SessionBindRequest::new(identity, "sync", &self.device_metadata.remote_addr)
+            },
+        )?;
+        binding.set_statement("sync");
+        self.binding = Some(binding);
+        Ok(())
+    }
+
+    /// A retryable rejection for a bind the session registry refused.
+    fn session_refused_frame(
+        &mut self,
+        server_clock: &HashMap<String, u64>,
+        error: &crate::Error,
+    ) -> Option<SyncFrame> {
+        self.transient_reject_frame(
+            server_clock,
+            &format!("SYNC_UNAVAILABLE: session refused: {error}"),
+        )
+    }
+
     /// Clear all state derived from a successful handshake or from the
     /// candidate currently being authenticated. Connection lifetime, activity,
     /// rate-limiting, and telemetry counters deliberately survive.
@@ -284,6 +320,7 @@ impl SyncSession {
         self.username = None;
         self.identity = None;
         self.authenticated = false;
+        self.binding = None;
         self.client_clock.clear();
         self.server_clock.clear();
         self.subscribed_shapes.clear();
@@ -291,6 +328,7 @@ impl SyncSession {
         self.producer_id = 0;
         self.accepted_epoch = 0;
         self.delta_signing_key = None;
+        self.refresh_hinted_expiry_ms = None;
         // The peer address is a property of the accepted TCP connection, not
         // of the authentication binding: it is stamped once before any frame
         // is read and is the same address whether this handshake succeeds or
@@ -439,6 +477,62 @@ mod tests {
         assert!(!ack.success);
         assert!(ack.error.is_some());
         assert!(!session.authenticated);
+    }
+
+    /// A killed or refused bind reaches the client as a failed handshake, with
+    /// no success ack in front of it.
+    #[tokio::test]
+    async fn a_refused_bind_fails_the_handshake() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal = Arc::new(
+            WalManager::open_for_testing(&dir.path().join("sync-cap.wal")).expect("open WAL"),
+        );
+        let (dispatcher, _data_sides) = Dispatcher::new(1, 64);
+        let auth_config = crate::config::auth::AuthConfig::default();
+        let state = SharedState::open(
+            crate::control::state::DataPlaneHandles {
+                dispatcher,
+                quiesce: crate::bridge::quiesce::CollectionQuiesce::new(),
+                array_catalog: crate::control::array_catalog::ArrayCatalog::handle(),
+                system_metrics: Arc::new(crate::control::metrics::SystemMetrics::new()),
+            },
+            wal,
+            &dir.path().join("system.redb"),
+            crate::control::state::OpenConfig {
+                max_active_sessions: 1,
+                ..crate::control::state::OpenConfig::strict(&auth_config)
+            },
+            nodedb_types::config::TuningConfig::default(),
+            false,
+            crate::data::executor::core_loop::test_governor(),
+        )
+        .expect("open state");
+        state
+            .credentials
+            .bootstrap_trust_superuser("nodedb")
+            .expect("bootstrap trust superuser");
+        let msg = make_handshake(SYNC_WIRE_VERSION);
+        let mut first = SyncSession::new("first".into());
+        let accepted: HandshakeAckMsg = first
+            .handle_handshake(&msg, HashMap::new(), Some(&state))
+            .await
+            .expect("handshake response")
+            .decode_body()
+            .expect("decode ack");
+        assert!(accepted.success, "{:?}", accepted.error);
+
+        let mut second = SyncSession::new("second".into());
+        let refused: HandshakeAckMsg = second
+            .handle_handshake(&msg, HashMap::new(), Some(&state))
+            .await
+            .expect("handshake response")
+            .decode_body()
+            .expect("decode ack");
+
+        assert!(!refused.success);
+        assert!(!refused.fork_detected, "the client retries a refused bind");
+        assert!(!second.authenticated);
+        assert!(second.binding.is_none());
     }
 
     #[tokio::test]

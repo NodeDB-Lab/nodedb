@@ -264,3 +264,35 @@ async fn a_cut_answers_the_same_graph_after_later_writes() {
     assert_nodes(&second, &["b", "c"], &["b", "c", "d", "z"], "second read");
     assert_nodes(&first, &["b", "c"], &["b", "c", "d", "z"], "first read");
 }
+
+/// Outside the default database the edge store and the CSR hold the collection
+/// under its qualified name, while `IN` names it bare.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn match_in_a_named_database_reads_its_collection() {
+    let server = TestServer::start().await;
+    server
+        .exec("CREATE DATABASE bt_named")
+        .await
+        .expect("create database");
+    server
+        .exec("USE DATABASE bt_named")
+        .await
+        .expect("use database");
+    let cut = changed_graph(&server, "bt_named_match").await;
+
+    let mut before = server
+        .query_text(&format!(
+            "MATCH (x)-[:l]->(y) IN 'bt_named_match' AS OF SYSTEM TIME {cut} RETURN y"
+        ))
+        .await
+        .expect("historical match");
+    before.sort();
+    assert_eq!(before, vec!["b".to_string(), "c".to_string()]);
+
+    let mut now = server
+        .query_text("MATCH (x)-[:l]->(y) IN 'bt_named_match' RETURN y")
+        .await
+        .expect("current match");
+    now.sort();
+    assert_eq!(now, vec!["c".to_string(), "d".to_string()]);
+}

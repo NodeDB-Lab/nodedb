@@ -16,9 +16,9 @@ use std::thread::JoinHandle;
 use nodedb_raft::message::LogEntry;
 use nodedb_raft::state::HardState;
 use nodedb_raft::storage::LogStorage;
-use tokio::sync::Notify;
 use tracing::error;
 
+use super::signals::DiskSignals;
 use super::ticket::DurabilityTicket;
 use super::writer::{GroupDisk, StorageOp};
 
@@ -31,12 +31,12 @@ pub struct StagedLogStorage {
 }
 
 impl StagedLogStorage {
-    /// Open `group_id`'s log at `path` and start its writer thread. `wake` is
-    /// notified each time the writer makes a batch durable. Blocks on disk:
-    /// call it off the async threads.
-    pub fn open(group_id: u64, path: &Path, wake: Arc<Notify>) -> crate::Result<Self> {
-        let disk = Arc::new(GroupDisk::open(group_id, path, wake)?);
-        let snapshot = disk.storage().snapshot_metadata();
+    /// Open `group_id`'s log at `path` and start its writer thread. The disk
+    /// reports through `signals`. Blocks on disk: call it off the async
+    /// threads.
+    pub fn open(group_id: u64, path: &Path, signals: DiskSignals) -> crate::Result<Self> {
+        let disk = Arc::new(GroupDisk::open(group_id, path, signals)?);
+        let snapshot = disk.read_storage(|storage| Ok(storage.snapshot_metadata()))?;
         disk.set_restored_stable(snapshot);
         let writer = {
             let disk = Arc::clone(&disk);
@@ -76,6 +76,11 @@ impl StagedLogStorage {
     pub fn reply_ticket(&self, mark: u64) -> Option<DurabilityTicket> {
         DurabilityTicket::for_reply(&self.disk, mark)
     }
+
+    /// Whether the group's disk fail-stopped.
+    pub fn disk_failed(&self) -> bool {
+        self.disk.is_failed()
+    }
 }
 
 impl Drop for StagedLogStorage {
@@ -97,6 +102,7 @@ impl Drop for StagedLogStorage {
 
 impl LogStorage for StagedLogStorage {
     fn append(&mut self, entries: &[LogEntry]) -> nodedb_raft::error::Result<()> {
+        self.disk.check_running()?;
         if !entries.is_empty() {
             self.disk.stage(StorageOp::Append(entries.to_vec()));
         }
@@ -104,12 +110,15 @@ impl LogStorage for StagedLogStorage {
     }
 
     fn truncate(&mut self, index: u64) -> nodedb_raft::error::Result<()> {
+        self.disk.check_running()?;
         self.disk.stage(StorageOp::Truncate(index));
         Ok(())
     }
 
     fn load_entries_after(&self, snapshot_index: u64) -> nodedb_raft::error::Result<Vec<LogEntry>> {
-        let entries = self.disk.storage().load_entries_after(snapshot_index)?;
+        let entries = self
+            .disk
+            .read_storage(|storage| storage.load_entries_after(snapshot_index))?;
         if let Some(last) = entries.last() {
             self.disk.set_restored_stable((last.index, last.term));
         }
@@ -117,6 +126,7 @@ impl LogStorage for StagedLogStorage {
     }
 
     fn compact(&mut self, index: u64, term: u64) -> nodedb_raft::error::Result<()> {
+        self.disk.check_running()?;
         if index > self.snapshot.0 {
             self.snapshot = (index, term);
         }
@@ -128,22 +138,27 @@ impl LogStorage for StagedLogStorage {
         self.snapshot
     }
 
+    /// Never refuses: a refusal here aborts the tick of every group on this
+    /// node. A hard state on a stopped disk only takes a sequence number, so
+    /// a reply that depends on it waits on a ticket that fails.
     fn save_hard_state(&mut self, state: &HardState) -> nodedb_raft::error::Result<()> {
         self.disk.stage(StorageOp::HardState(state.clone()));
         Ok(())
     }
 
     fn load_hard_state(&self) -> nodedb_raft::error::Result<HardState> {
-        self.disk.storage().load_hard_state()
+        self.disk.read_storage(|storage| storage.load_hard_state())
     }
 
     fn save_applied_index(&mut self, index: u64) -> nodedb_raft::error::Result<()> {
+        self.disk.check_running()?;
         self.disk.stage(StorageOp::AppliedIndex(index));
         Ok(())
     }
 
     fn load_applied_index(&self) -> nodedb_raft::error::Result<u64> {
-        self.disk.storage().load_applied_index()
+        self.disk
+            .read_storage(|storage| storage.load_applied_index())
     }
 
     fn stable_through(&self) -> Option<(u64, u64)> {
@@ -169,7 +184,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("group-7.redb");
         {
-            let mut storage = StagedLogStorage::open(7, &path, Arc::default()).expect("open");
+            let mut storage =
+                StagedLogStorage::open(7, &path, DiskSignals::default()).expect("open");
             storage
                 .append(&[entry(1, 1), entry(2, 1), entry(3, 1)])
                 .expect("stage");
@@ -187,7 +203,7 @@ mod tests {
             assert_eq!(storage.stable_through(), Some((3, 2)));
             assert!(storage.ticket().is_none(), "nothing is left to write");
         }
-        let storage = StagedLogStorage::open(7, &path, Arc::default()).expect("reopen");
+        let storage = StagedLogStorage::open(7, &path, DiskSignals::default()).expect("reopen");
         let entries = storage.load_entries_after(0).expect("load");
         let terms: Vec<(u64, u64)> = entries.iter().map(|e| (e.index, e.term)).collect();
         assert_eq!(terms, vec![(1, 1), (2, 1), (3, 2)]);
@@ -201,12 +217,47 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("group-8.redb");
         {
-            let mut storage = StagedLogStorage::open(8, &path, Arc::default()).expect("open");
+            let mut storage =
+                StagedLogStorage::open(8, &path, DiskSignals::default()).expect("open");
             storage.append(&[entry(1, 1)]).expect("stage");
             storage.save_applied_index(1).expect("stage");
         }
-        let storage = StagedLogStorage::open(8, &path, Arc::default()).expect("reopen");
+        let storage = StagedLogStorage::open(8, &path, DiskSignals::default()).expect("reopen");
         assert_eq!(storage.load_entries_after(0).expect("load").len(), 1);
         assert_eq!(storage.load_applied_index().expect("load"), 1);
+    }
+
+    /// A replica whose disk fail-stopped refuses every log write, so its
+    /// in-memory log never runs ahead of its disk. A hard state still stages,
+    /// and the ticket on it fails.
+    #[test]
+    fn a_fail_stopped_disk_refuses_log_writes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("group-9.redb");
+        let mut storage = StagedLogStorage::open(9, &path, DiskSignals::default()).expect("open");
+        storage
+            .disk
+            .inject_for_test(crate::raft_storage_ops::LogWriteError::Deterministic {
+                context: "serialize entry",
+                detail: "bad bytes".to_owned(),
+            });
+        storage.append(&[entry(1, 1)]).expect("stage");
+        let ticket = storage.ticket().expect("a write is staged");
+        assert!(!ticket.wait_blocking());
+        assert!(storage.disk_failed());
+
+        assert!(storage.append(&[entry(2, 1)]).is_err());
+        assert!(storage.truncate(1).is_err());
+        assert!(storage.compact(1, 1).is_err());
+        assert!(storage.save_applied_index(1).is_err());
+        storage
+            .save_hard_state(&HardState {
+                current_term: 3,
+                voted_for: 1,
+                ordinal_floor: 0,
+            })
+            .expect("a hard state stages");
+        let ticket = storage.ticket().expect("the hard state is not durable");
+        assert!(!ticket.wait_blocking());
     }
 }

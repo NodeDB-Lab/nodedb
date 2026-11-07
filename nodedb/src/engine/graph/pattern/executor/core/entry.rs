@@ -71,8 +71,7 @@ fn execute_query<'a>(
     // collection interning; every edge expansion in this execution is filtered
     // by it so a collection-scoped MATCH never traverses another collection's
     // edges (they share one CSR partition).
-    state.collection_filter =
-        expansion::resolve_collection_filter(query.collection.as_deref(), csr);
+    state.collection_filter = expansion::query_collection_filter(query, props.collection, csr);
 
     for clause in &query.clauses {
         let clause_rows = execute_clause(clause, csr, &rows, &mut state, frontier_bitmap, overlay)?;

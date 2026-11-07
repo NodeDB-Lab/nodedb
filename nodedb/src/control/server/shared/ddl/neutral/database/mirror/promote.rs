@@ -2,17 +2,15 @@
 
 //! Handler for `ALTER DATABASE <name> PROMOTE`.
 //!
-//! The catalog lookup, superuser gate (after db-id resolution), idempotent
-//! already-promoted short-circuit, not-a-mirror rejection, observer-link
-//! teardown BEFORE the descriptor mutation, status flip, Raft propose /
-//! single-node fallback, mirror-only catalog cleanup, and `DatabasePromoted`
-//! audit run here. The result is the protocol-neutral [`DdlResult`].
+//! The catalog lookup, the superuser gate (after db-id resolution), the
+//! idempotent already-promoted answer, the not-a-mirror and first-capture
+//! refusals, and the `DatabasePromoted` audit run here. The steps of the
+//! promotion live in `control::mirror::applier::promote`. The result is the
+//! protocol-neutral [`DdlResult`].
 
 use nodedb_types::MirrorStatus;
 
-use crate::control::catalog_entry::entry::CatalogEntry;
-use crate::control::metadata_proposer::propose_catalog_entry_async;
-use crate::control::security::catalog::database_types::DatabaseStatus;
+use crate::control::mirror::applier::{finish_promote, seal_mirror};
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::state::SharedState;
 
@@ -23,6 +21,9 @@ use super::super::support::{ddl_err, status};
 /// Handle `ALTER DATABASE <name> PROMOTE`.
 ///
 /// Required role: `Superuser`.
+///
+/// A statement that ends in an error after the seal leaves a sealed mirror. The
+/// metadata leader finishes it, and running the statement again waits for it.
 pub async fn promote_database(
     state: &SharedState,
     identity: &AuthenticatedIdentity,
@@ -45,87 +46,56 @@ pub async fn promote_database(
 
     // A name row whose descriptor is gone is a database a concurrent DROP
     // removed between the two reads.
-    let mut descriptor = catalog
+    let descriptor = catalog
         .get_database(db_id)
         .map_err(|e| DdlError::from_error_in_context("catalog read failed", &e))?
         .ok_or_else(|| ddl_err("3D000", format!("database '{name}' does not exist")))?;
 
-    // Idempotent: if already promoted (or Active without any mirror_origin),
-    // return success immediately.
-    let already_promoted = match &descriptor.mirror_origin {
-        Some(origin) => matches!(origin.status, MirrorStatus::Promoted),
-        None => descriptor.status == DatabaseStatus::Active,
-    };
-    if already_promoted {
-        return Ok(status("ALTER DATABASE"));
+    match descriptor
+        .mirror_origin
+        .as_ref()
+        .map(|origin| &origin.status)
+    {
+        // A promoted mirror keeps its origin row, so a real promotion never
+        // lands here: a repeat takes the `Promoted` arm.
+        None => {
+            return Err(ddl_err(
+                "0A000",
+                format!("database '{name}' is not a mirror database"),
+            ));
+        }
+        Some(MirrorStatus::Promoted) => return Ok(status("ALTER DATABASE")),
+        Some(MirrorStatus::Bootstrapping { .. }) => {
+            return Err(ddl_err(
+                "55000",
+                format!(
+                    "mirror database '{name}' is taking its first capture and holds no \
+                     consistent state; wait for it to finish, or DROP DATABASE"
+                ),
+            ));
+        }
+        Some(
+            MirrorStatus::Following
+            | MirrorStatus::Degraded
+            | MirrorStatus::Disconnected
+            | MirrorStatus::Failed { .. }
+            | MirrorStatus::Promoting { .. },
+        ) => {}
     }
 
-    // Reject PROMOTE on a database that is not a mirror at all
-    // (not Mirroring status and has no mirror_origin).
-    if descriptor.mirror_origin.is_none() && descriptor.status != DatabaseStatus::Mirroring {
-        return Err(ddl_err(
-            "0A000",
-            format!("database '{name}' is not a mirror database"),
-        ));
-    }
-
-    // Tear down the cross-cluster observer link BEFORE the descriptor
-    // mutation lands. This ensures there is no window where the database
-    // is Promoted (writes accepted) but the observer is still streaming
-    // entries from the source.
-    //
-    // If the teardown fails — e.g. the source is unreachable and the link
-    // was never established, or it already dropped due to a disconnect —
-    // we log and continue. The operator's intent is to stop following; the
-    // link will be garbage-collected when the Arc reference count reaches
-    // zero. The database must become writable regardless.
-    state.mirror_link_registry.teardown_link(db_id);
-
-    // Flip status to Promoted in the mirror_origin record and set
-    // the database status to Active so writes are accepted.
-    if let Some(ref mut origin) = descriptor.mirror_origin {
-        origin.status = MirrorStatus::Promoted;
-    }
-    descriptor.status = DatabaseStatus::Active;
-
-    // Persist atomically through Raft. On restart the descriptor is reloaded
-    // with status=Active + origin.status=Promoted, so the database remains
-    // writable without any further intervention.
-    propose_catalog_entry_async(
-        state,
-        &CatalogEntry::PutDatabase(Box::new(descriptor.clone())),
-    )
-    .await
-    .map_err(|e| DdlError::from_error_in_context("catalog propose failed", &e))?;
-
-    // The database is writable. Clear the mirror-only catalog state so
-    // it does not linger as stale data:
-    //   - mirror_collection_map: source→local collection name routing used
-    //     by the observer-side DDL applier; meaningless once writes are local.
-    //   - mirror_lag: replication lag observed against the source; no longer
-    //     advancing once the observer link is gone.
-    // The descriptor's `mirror_origin` is intentionally retained as historical
-    // lineage (origin cluster, mode, last applied LSN at promotion). DROP
-    // DATABASE relies on this cleanup having happened — see drop.rs.
-    if let Err(e) = catalog.delete_mirror_collection_map(db_id) {
-        return Err(DdlError::from_error_in_context(
-            "PROMOTE: failed to clear mirror_collection_map",
-            &e,
-        ));
-    }
-    if let Err(e) = catalog.delete_mirror_lag(db_id) {
-        return Err(DdlError::from_error_in_context(
-            "PROMOTE: failed to clear mirror_lag",
-            &e,
-        ));
-    }
+    let final_cut = seal_mirror(state, db_id)
+        .await
+        .map_err(|e| DdlError::from_error_in_context("PROMOTE did not seal the mirror", &e))?;
+    finish_promote(state, db_id)
+        .await
+        .map_err(|e| DdlError::from_error_in_context("PROMOTE did not finish", &e))?;
 
     state.audit_record_with_db(
         crate::control::security::audit::AuditEvent::DatabasePromoted,
         None,
         Some(db_id),
         &identity.username,
-        &format!("ALTER DATABASE {name} PROMOTE"),
+        &format!("ALTER DATABASE {name} PROMOTE at source cut {final_cut}"),
     );
 
     Ok(status("ALTER DATABASE"))

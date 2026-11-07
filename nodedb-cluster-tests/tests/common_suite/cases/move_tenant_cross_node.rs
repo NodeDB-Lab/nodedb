@@ -11,6 +11,7 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
+use nodedb::control::security::sessions::{KillReason, SessionParams};
 use nodedb_types::id::VShardId;
 use nodedb_types::{CollectionKey, DatabaseId};
 
@@ -134,6 +135,41 @@ async fn move_tenant_rows_are_readable_through_the_target_from_every_node() {
         .exec_ddl_on_any_leader(&format!("CREATE TENANT {MOVED_TENANT} ID 77"))
         .await
         .unwrap_or_else(|e| panic!("CREATE TENANT {MOVED_TENANT}: {e}"));
+    // One session of the moved tenant on every node, and one of another tenant.
+    let session = |tenant_id: u64| SessionParams {
+        user_id: 5,
+        username: "moved_user".to_string(),
+        db_user: "moved_user".to_string(),
+        peer_addr: "127.0.0.1:1".to_string(),
+        protocol: "test".to_string(),
+        auth_method: "password".to_string(),
+        tenant_id,
+        credential_version: 0,
+        current_database: None,
+        token_expiry_ms: None,
+        api_key_id: None,
+    };
+    let moved_sessions: Vec<_> = cluster
+        .nodes
+        .iter()
+        .map(|node| {
+            node.shared
+                .session_registry
+                .register("moved", &session(77))
+                .expect("register")
+        })
+        .collect();
+    let other_sessions: Vec<_> = cluster
+        .nodes
+        .iter()
+        .map(|node| {
+            node.shared
+                .session_registry
+                .register("other", &session(78))
+                .expect("register")
+        })
+        .collect();
+
     cluster
         .exec_ddl_on_any_leader(&format!(
             "MOVE TENANT {MOVED_TENANT} FROM {SOURCE} TO {TARGET}"
@@ -143,6 +179,14 @@ async fn move_tenant_rows_are_readable_through_the_target_from_every_node() {
     cluster
         .wait_for_full_apply_convergence(Duration::from_secs(10))
         .await;
+
+    // The cutover's post-apply ends the tenant's sessions on every node.
+    for (node_idx, kill) in moved_sessions.iter().enumerate() {
+        assert_eq!(*kill.borrow(), KillReason::AdminKill, "node {node_idx}");
+    }
+    for (node_idx, kill) in other_sessions.iter().enumerate() {
+        assert_eq!(*kill.borrow(), KillReason::Alive, "node {node_idx}");
+    }
 
     // Every row, read through the target from every node.
     use_database(&cluster, TARGET).await;

@@ -89,6 +89,10 @@ impl CoreLoop {
                 self.columnar_engines.remove(&collection_key);
                 self.columnar_flushed_segments.remove(&collection_key);
                 self.columnar_flushed_surrogates.remove(&collection_key);
+                self.release_quarantined_segments(
+                    crate::storage::quarantine::QuarantineEngine::Columnar,
+                    &collection_key,
+                );
                 self.recharge_columnar_history(&collection_key);
                 Ok(())
             }

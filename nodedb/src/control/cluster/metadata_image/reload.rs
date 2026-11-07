@@ -53,6 +53,17 @@ pub(super) async fn reload_registries(
     shared.scope_grants.reload_from_catalog(catalog)?;
     shared.quota_manager.load_from(catalog)?;
     reload_tenants(shared, before, after);
+    // An image carries a `MOVE TENANT` cutover as finished state, so no post-apply
+    // ended the moved sessions on this node.
+    for (database, tenant) in before.moved_tenant_scopes(after) {
+        shared
+            .session_registry
+            .kill_sessions_for_tenant_in_database(
+                tenant,
+                crate::types::DatabaseId::new(database),
+                crate::control::security::sessions::KillReason::AdminKill,
+            );
+    }
 
     // DDL objects.
     triggers::repair_triggers(&shared.trigger_registry, catalog)?;
@@ -83,6 +94,7 @@ pub(super) async fn reload_registries(
     shared.audit_dml_cache.load_from_catalog(catalog)?;
     shared.collection_to_database.load_from_catalog(catalog)?;
     shared.idle_timeout_cache.load_from_catalog(catalog)?;
+    shared.mirror.load_from_catalog(catalog)?;
 
     // Replicated watermarks.
     shared.database_registry.restore_persisted(
@@ -117,6 +129,11 @@ pub(super) async fn reload_registries(
     *raft.token_state.lock().unwrap_or_else(|p| p.into_inner()) = tokens;
     if let Some(transport) = raft.transport.as_ref() {
         reload_preauthorizations(transport, before, after);
+    }
+
+    // Catalog OIDC providers, through the registration boot runs.
+    if let Some(registry) = shared.jwks_registry.as_ref() {
+        registry.sync_catalog_providers(&catalog.list_oidc_providers()?);
     }
 
     // Authorization state last: it reads everything above.

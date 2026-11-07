@@ -10,6 +10,7 @@
 use loro::LoroValue;
 
 use super::TenantCrdtEngine;
+use super::core::loro_root;
 
 impl TenantCrdtEngine {
     /// Insert a populated block map into a row-owned movable list.
@@ -22,7 +23,7 @@ impl TenantCrdtEngine {
         fields: &[(String, LoroValue)],
     ) -> crate::Result<()> {
         self.state_mut(collection)?
-            .list_insert_fields(collection, row_id, list_path, index, fields)
+            .list_insert_fields(loro_root(collection), row_id, list_path, index, fields)
             .map_err(crate::Error::Crdt)
     }
 
@@ -35,7 +36,7 @@ impl TenantCrdtEngine {
         index: usize,
     ) -> crate::Result<()> {
         self.state_mut(collection)?
-            .list_delete(collection, row_id, list_path, index)
+            .list_delete(loro_root(collection), row_id, list_path, index)
             .map_err(crate::Error::Crdt)
     }
 
@@ -49,7 +50,13 @@ impl TenantCrdtEngine {
         to_index: usize,
     ) -> crate::Result<()> {
         self.state_mut(collection)?
-            .list_move(collection, row_id, list_path, from_index, to_index)
+            .list_move(
+                loro_root(collection),
+                row_id,
+                list_path,
+                from_index,
+                to_index,
+            )
             .map_err(crate::Error::Crdt)
     }
 
@@ -61,7 +68,7 @@ impl TenantCrdtEngine {
         list_path: &str,
     ) -> crate::Result<usize> {
         self.state_mut(collection)?
-            .list_length(collection, row_id, list_path)
+            .list_length(loro_root(collection), row_id, list_path)
             .map_err(crate::Error::Crdt)
     }
 
@@ -74,7 +81,7 @@ impl TenantCrdtEngine {
         index: usize,
     ) -> crate::Result<Option<LoroValue>> {
         self.state_mut(collection)?
-            .list_get(collection, row_id, list_path, index)
+            .list_get(loro_root(collection), row_id, list_path, index)
             .map_err(crate::Error::Crdt)
     }
 }

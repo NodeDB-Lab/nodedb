@@ -50,6 +50,7 @@ impl SurrogateAssigner {
         n: usize,
         pk_of: impl Fn(Surrogate) -> P,
     ) -> crate::Result<Vec<(Surrogate, P)>> {
+        self.refuse_mirror_bind(key)?;
         let mut out = Vec::with_capacity(n);
         loop {
             let complete = {

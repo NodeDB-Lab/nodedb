@@ -20,6 +20,7 @@ pub mod execute;
 pub mod frame_refusal;
 pub mod header;
 pub mod leader_status;
+pub mod log_probe;
 pub mod mac;
 pub mod metadata;
 pub mod ordinal_floor;
@@ -65,6 +66,9 @@ pub use execute::{
 pub use frame_refusal::FrameRefusal;
 pub use header::{HEADER_SIZE, MAX_RPC_PAYLOAD_SIZE};
 pub use leader_status::{LeaderMembership, LeaderStatusRequest, LeaderStatusResponse};
+pub use log_probe::{
+    LogProbeItem, LogProbeRequest, LogProbeResponse, MAX_LOG_PROBE_ITEMS, log_entry_digest,
+};
 pub use mac::{MAC_LEN, MacKey};
 pub use metadata::{MetadataProposeRequest, MetadataProposeResponse};
 pub use ordinal_floor::{OrdinalFloorRequest, OrdinalFloorResponse};

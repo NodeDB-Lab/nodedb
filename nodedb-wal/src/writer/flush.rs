@@ -80,6 +80,7 @@ impl WalWriter {
         // before the buffer's contents are forgotten so a later `sync` still
         // knows an fsync is owed.
         self.durability.record_flush();
+        self.flush_epoch += 1;
         Ok(())
     }
 }

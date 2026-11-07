@@ -181,53 +181,6 @@ impl SparseEngine {
         Ok(())
     }
 
-    /// Remove every chain head belonging to `tenant_id`, in every database.
-    ///
-    /// Mirrors the tenant-wide in-memory sweep in the purge handler: the
-    /// persisted heads and the in-memory map must drop the same keys, or a
-    /// recreated tenant resumes a chain whose rows are gone.
-    ///
-    /// Returns the number of heads removed.
-    pub fn delete_chain_heads_for_tenant(&self, tenant_id: u64) -> crate::Result<usize> {
-        let doomed: Vec<String> = {
-            let read_txn = self.db.begin_read().map_err(|e| redb_err("read txn", e))?;
-            let table = read_txn
-                .open_table(CHAIN_HEADS)
-                .map_err(|e| redb_err("open chain heads", e))?;
-            let mut out = Vec::new();
-            for entry in table.iter().map_err(|e| redb_err("iter chain heads", e))? {
-                let (k, _) = entry.map_err(|e| redb_err("scan chain head", e))?;
-                let key = k.value().to_string();
-                let (_, tid, _) = parse_chain_head_key(&key)?;
-                if tid == tenant_id {
-                    out.push(key);
-                }
-            }
-            out
-        };
-        if doomed.is_empty() {
-            return Ok(0);
-        }
-
-        let txn = self
-            .db
-            .begin_write()
-            .map_err(|e| redb_err("write txn", e))?;
-        {
-            let mut table = txn
-                .open_table(CHAIN_HEADS)
-                .map_err(|e| redb_err("open chain heads", e))?;
-            for key in &doomed {
-                table
-                    .remove(key.as_str())
-                    .map_err(|e| redb_err("remove chain head", e))?;
-            }
-        }
-        txn.commit()
-            .map_err(|e| redb_err("commit chain head purge", e))?;
-        Ok(doomed.len())
-    }
-
     /// Load every persisted chain head, keyed for the core's in-memory map.
     ///
     /// Called once per core at open so the first INSERT after a restart chains
@@ -306,9 +259,9 @@ mod tests {
         );
     }
 
-    /// A dropped head must not be resurrected by the tenant sweep or by a reopen.
+    /// A dropped head must not be resurrected, and other heads stay.
     #[test]
-    fn chain_heads_are_removable_per_collection_and_per_tenant() {
+    fn chain_heads_are_removable_per_collection() {
         let (engine, _dir) = open_temp();
         engine
             .put_chain_head(0, 1, "ledger", &head(1, "h1"))
@@ -323,8 +276,10 @@ mod tests {
         engine.delete_chain_head(0, 1, "ledger").unwrap();
         assert_eq!(engine.get_chain_head(0, 1, "ledger").unwrap(), None);
 
-        assert_eq!(engine.delete_chain_heads_for_tenant(1).unwrap(), 1);
-        assert_eq!(engine.get_chain_head(0, 1, "audit").unwrap(), None);
+        assert_eq!(
+            engine.get_chain_head(0, 1, "audit").unwrap(),
+            Some(head(2, "h2"))
+        );
         assert_eq!(
             engine.get_chain_head(0, 2, "ledger").unwrap(),
             Some(head(3, "h3"))

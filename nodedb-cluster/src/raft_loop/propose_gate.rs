@@ -16,9 +16,15 @@
 //! The gate also stamps the entry with what only the leader decides: the
 //! host returns the stamped bytes, and the leader proposes those in place of
 //! the bytes the proposer sent.
+//!
+//! Leadership can move between the gate and the log. Each admission names the
+//! leadership it ran for, and the propose rechecks that leadership under the
+//! lock that appends the entry. On a mismatch the entry passes the gate again.
+//! So no leader appends an entry its gate did not admit at its current term.
 
-use crate::error::{ClusterError, Result};
+use crate::error::{CalvinError, ClusterError, Result};
 use crate::forward::PlanExecutor;
+use crate::multi_raft::{AdmissionTerm, GatedPropose};
 
 use super::loop_core::{CommitApplier, RaftLoop};
 
@@ -77,38 +83,57 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
     /// propose refuses with `NotLeader`, and the caller forwards the entry to
     /// the leader, which gates it there. A propose that fails after the gate
     /// admitted the entry drops its hold, which releases the keys.
+    ///
+    /// When leadership moves before the entry lands, the hold drops and the
+    /// entry passes the gate again. Past `deadline` it refuses with
+    /// `CalvinError::AdmissionTimedOut`, and nothing is proposed.
     pub(super) async fn propose_admitted(
         &self,
         vshard_id: u32,
         data: &[u8],
         deadline: tokio::time::Instant,
     ) -> Result<(u64, u64)> {
-        let Admitted { hold, entry } = match (&self.data_propose_gate, self.led_group_of(vshard_id))
-        {
-            (Some(gate), Some(group_id)) => {
-                let floor = self.admission_floor(group_id, deadline).await?;
-                gate.admit(vshard_id, data, deadline, floor).await?
-            }
-            (Some(_) | None, _) => Admitted::default(),
+        let Some(gate) = &self.data_propose_gate else {
+            return self.propose(vshard_id, data.to_vec());
         };
-        let entry = entry.unwrap_or_else(|| data.to_vec());
-        let (group_id, log_index) = self.propose(vshard_id, entry)?;
-        if let Some(hold) = hold {
-            hold.landed(group_id, log_index);
+        loop {
+            let led = self
+                .multi_raft
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .admission_term(vshard_id);
+            let Admitted { hold, entry } = match led {
+                Some(AdmissionTerm { group_id, .. }) => {
+                    let floor = self.admission_floor(group_id, deadline).await?;
+                    gate.admit(vshard_id, data, deadline, floor).await?
+                }
+                None => Admitted::default(),
+            };
+            let entry = entry.unwrap_or_else(|| data.to_vec());
+            let proposed = self
+                .multi_raft
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .propose_gated(vshard_id, entry, led)?;
+            match proposed {
+                GatedPropose::Landed {
+                    group_id,
+                    log_index,
+                } => {
+                    if let Some(hold) = hold {
+                        hold.landed(group_id, log_index);
+                    }
+                    return Ok((group_id, log_index));
+                }
+                GatedPropose::Readmit => {
+                    // The keys free before the next admission asks for them.
+                    drop(hold);
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(ClusterError::Calvin(CalvinError::AdmissionTimedOut));
+                    }
+                }
+            }
         }
-        Ok((group_id, log_index))
-    }
-
-    /// The data group that owns `vshard_id`, when this node leads it.
-    fn led_group_of(&self, vshard_id: u32) -> Option<u64> {
-        let mr = self.multi_raft.lock().unwrap_or_else(|p| p.into_inner());
-        let group_id = mr
-            .routing()
-            .read()
-            .unwrap_or_else(|p| p.into_inner())
-            .group_for_vshard(vshard_id)
-            .ok()?;
-        mr.is_group_leader(group_id).then_some(group_id)
     }
 
     /// The ordinal floor a write this leader admits to `group_id` stamps
@@ -131,5 +156,221 @@ impl<A: CommitApplier, P: PlanExecutor> RaftLoop<A, P> {
             }
             other => other,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, OnceLock, RwLock};
+    use std::time::{Duration, Instant};
+
+    use nodedb_raft::message::{LogEntry, RequestVoteRequest};
+
+    use super::*;
+    use crate::multi_raft::MultiRaft;
+    use crate::routing::RoutingTable;
+    use crate::topology::ClusterTopology;
+    use crate::transport::NexarTransport;
+
+    const GROUP: u64 = 1;
+
+    struct NoCommits;
+
+    impl CommitApplier for NoCommits {
+        fn apply_committed(&self, _group_id: u64, entries: &[LogEntry]) -> u64 {
+            entries.last().map_or(0, |entry| entry.index)
+        }
+    }
+
+    /// A single voter elected in `group`.
+    fn elect(mr: &mut MultiRaft, group: u64) {
+        let node = mr.groups_mut().get_mut(&group).expect("group mounted");
+        node.election_deadline_override(Instant::now() - Duration::from_millis(1));
+        for _ in 0..5 {
+            if mr.is_group_leader(group) {
+                return;
+            }
+            mr.tick().expect("tick");
+        }
+        panic!("a single voter elects itself in group {group}");
+    }
+
+    /// A gate that moves this leader to a later term during its first
+    /// admission, as a node deposed and re-elected between the two lock holds.
+    /// It stamps each admission with its ordinal, and a hold reports whether
+    /// it dropped or landed.
+    struct TermMovingGate {
+        multi_raft: OnceLock<Arc<Mutex<MultiRaft>>>,
+        admissions: AtomicUsize,
+        floors: Mutex<Vec<i64>>,
+        landed: Arc<AtomicUsize>,
+        dropped: Arc<AtomicUsize>,
+    }
+
+    struct CountedHold {
+        landed: Arc<AtomicUsize>,
+        dropped: Arc<AtomicUsize>,
+    }
+
+    impl ProposeHold for CountedHold {
+        fn landed(self: Box<Self>, _group_id: u64, _log_index: u64) {
+            self.landed.fetch_add(1, Ordering::SeqCst);
+            std::mem::forget(self);
+        }
+    }
+
+    impl Drop for CountedHold {
+        fn drop(&mut self) {
+            self.dropped.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl DataProposeGate for TermMovingGate {
+        async fn admit(
+            &self,
+            _vshard_id: u32,
+            _entry: &[u8],
+            _deadline: tokio::time::Instant,
+            ordinal_floor: i64,
+        ) -> Result<Admitted> {
+            let admission = self.admissions.fetch_add(1, Ordering::SeqCst) + 1;
+            self.floors
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(ordinal_floor);
+            if admission == 1
+                && let Some(multi_raft) = self.multi_raft.get()
+            {
+                let mut mr = multi_raft.lock().unwrap_or_else(|p| p.into_inner());
+                let (_, term) = mr.group_leader_at_term(GROUP);
+                // A vote request of a later term deposes this leader.
+                mr.handle_request_vote(&RequestVoteRequest {
+                    term: term + 1,
+                    candidate_id: 9,
+                    last_log_index: 0,
+                    last_log_term: 0,
+                    group_id: GROUP,
+                    transfer: true,
+                })
+                .expect("the group is mounted");
+                assert!(!mr.is_group_leader(GROUP), "the vote deposed the leader");
+                elect(&mut mr, GROUP);
+            }
+            Ok(Admitted {
+                hold: Some(Box::new(CountedHold {
+                    landed: Arc::clone(&self.landed),
+                    dropped: Arc::clone(&self.dropped),
+                })),
+                entry: Some(format!("admission {admission}").into_bytes()),
+            })
+        }
+    }
+
+    /// Leadership moves while the gate admits. The first admission's entry
+    /// never reaches the log and its hold drops. The entry lands with the
+    /// stamp of the second admission, at the new term.
+    #[tokio::test]
+    async fn an_entry_admitted_at_an_earlier_term_passes_the_gate_again() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut mr = MultiRaft::new(
+            1,
+            RoutingTable::uniform(1, &[1], 1),
+            dir.path().to_path_buf(),
+        );
+        mr.add_group(GROUP, vec![]).expect("add group");
+        elect(&mut mr, GROUP);
+        let transport = Arc::new(
+            NexarTransport::new(
+                1,
+                "127.0.0.1:0".parse().expect("loopback"),
+                crate::transport::credentials::TransportCredentials::Insecure,
+            )
+            .expect("transport"),
+        );
+        let topology = Arc::new(RwLock::new(ClusterTopology::new()));
+        let landed = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new(TermMovingGate {
+            multi_raft: OnceLock::new(),
+            admissions: AtomicUsize::new(0),
+            floors: Mutex::new(Vec::new()),
+            landed: Arc::clone(&landed),
+            dropped: Arc::clone(&dropped),
+        });
+        let raft_loop =
+            RaftLoop::new(mr, transport, topology, NoCommits).with_data_propose_gate(gate.clone());
+        assert!(gate.multi_raft.set(raft_loop.multi_raft_handle()).is_ok());
+        let term_before = raft_loop
+            .multi_raft_handle()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .group_leader_at_term(GROUP)
+            .1;
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let (group_id, log_index) = raft_loop
+            .propose_admitted(0, b"sent", deadline)
+            .await
+            .expect("the second admission lands");
+
+        assert_eq!(group_id, GROUP);
+        assert_eq!(gate.admissions.load(Ordering::SeqCst), 2);
+        assert_eq!(landed.load(Ordering::SeqCst), 1, "the second hold landed");
+        assert_eq!(dropped.load(Ordering::SeqCst), 1, "the first hold dropped");
+        let handle = raft_loop.multi_raft_handle();
+        let mut mr = handle.lock().unwrap_or_else(|p| p.into_inner());
+        assert!(mr.group_leader_at_term(GROUP).1 > term_before);
+        let node = mr.groups_mut().get(&GROUP).expect("group mounted");
+        let stored = node
+            .log_entry_at(log_index)
+            .expect("the entry is in the log");
+        assert_eq!(stored.data, b"admission 2");
+    }
+
+    /// A deadline that passed when leadership moved refuses the entry
+    /// unproposed.
+    #[tokio::test]
+    async fn a_deadline_past_a_leadership_move_refuses_unproposed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut mr = MultiRaft::new(
+            1,
+            RoutingTable::uniform(1, &[1], 1),
+            dir.path().to_path_buf(),
+        );
+        mr.add_group(GROUP, vec![]).expect("add group");
+        elect(&mut mr, GROUP);
+        let transport = Arc::new(
+            NexarTransport::new(
+                1,
+                "127.0.0.1:0".parse().expect("loopback"),
+                crate::transport::credentials::TransportCredentials::Insecure,
+            )
+            .expect("transport"),
+        );
+        let topology = Arc::new(RwLock::new(ClusterTopology::new()));
+        let gate = Arc::new(TermMovingGate {
+            multi_raft: OnceLock::new(),
+            admissions: AtomicUsize::new(0),
+            floors: Mutex::new(Vec::new()),
+            landed: Arc::new(AtomicUsize::new(0)),
+            dropped: Arc::new(AtomicUsize::new(0)),
+        });
+        let raft_loop =
+            RaftLoop::new(mr, transport, topology, NoCommits).with_data_propose_gate(gate.clone());
+        assert!(gate.multi_raft.set(raft_loop.multi_raft_handle()).is_ok());
+
+        let refused = raft_loop
+            .propose_admitted(0, b"sent", tokio::time::Instant::now())
+            .await;
+        assert!(
+            matches!(
+                refused,
+                Err(ClusterError::Calvin(CalvinError::AdmissionTimedOut))
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(gate.admissions.load(Ordering::SeqCst), 1);
     }
 }

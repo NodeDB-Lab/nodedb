@@ -11,6 +11,7 @@ use crate::Error;
 use crate::control::backup::snapshot_keys::{
     extract_db_scoped_collection, extract_db_tenant_scoped_collection,
 };
+use crate::control::security::audit::{AuditAuth, AuditEvent, AuditRecordInput};
 use crate::control::state::SharedState;
 use crate::engine::graph::edge_store::parse_versioned_edge_key;
 use crate::types::{SurrogateBindEntry, TenantDataSnapshot, TenantId};
@@ -67,28 +68,38 @@ pub(super) fn rebind_surrogates(
     Ok(())
 }
 
-pub(super) fn warn_on_tombstoned_restores(
+/// Warn about each restored collection this cluster hard-deleted, and record it durably.
+///
+/// A restore that writes calls this before its first write to the destination.
+/// A failed record refuses the restore, so no hard-deleted collection returns unrecorded.
+/// A dry run writes nothing, so it only warns.
+/// An unreadable tombstone table refuses too: the record cannot be skipped unseen.
+pub(super) fn record_tombstoned_restores(
     state: &SharedState,
     tenant_id: u64,
     target: DatabaseTarget,
     merged: &TenantDataSnapshot,
-    snapshot_watermark: u64,
-) {
+    dry_run: bool,
+) -> Result<(), Error> {
     let catalog = state.credentials.catalog();
-    let Ok(tombstones) = catalog.load_wal_tombstones() else {
-        return;
-    };
+    let tombstones = catalog.load_wal_tombstones()?;
     if tombstones.is_empty() {
-        return;
+        return Ok(());
     }
 
+    let mut details = Vec::new();
     for name in &restored_collection_names(tenant_id, target, merged) {
         let Some(purge_lsn) =
             tombstones.purge_lsn(CollectionKey::from_bare(target.dest, name), tenant_id)
         else {
             continue;
         };
-        if snapshot_watermark != 0 && snapshot_watermark >= purge_lsn {
+        // A collection live under this name was created after the purge.
+        // The catalog still holds the pre-restore rows, because no write ran yet.
+        let live = catalog
+            .get_collection(target.dest, tenant_id, name)?
+            .is_some_and(|collection| collection.is_active);
+        if live {
             continue;
         }
         tracing::warn!(
@@ -96,20 +107,27 @@ pub(super) fn warn_on_tombstoned_restores(
             database_id = target.dest.as_u64(),
             collection = %name,
             purge_lsn,
-            snapshot_watermark,
             "RESTORE: bringing back a collection that was hard-deleted on this cluster"
         );
-        state.audit_record(
-            crate::control::security::audit::AuditEvent::AdminAction,
-            Some(TenantId::new(tenant_id)),
-            "__restore",
-            &format!(
-                "restore resurrected tombstoned collection '{name}' in database {} \
-                 (purge_lsn={purge_lsn}, snapshot_watermark={snapshot_watermark})",
-                target.dest.as_u64()
-            ),
-        );
+        details.push(format!(
+            "restore brings back tombstoned collection '{name}' in database {} \
+             (purge_lsn={purge_lsn})",
+            target.dest.as_u64()
+        ));
     }
+    if dry_run || details.is_empty() {
+        return Ok(());
+    }
+
+    let auth = AuditAuth::default();
+    state.audit_record_batch_strict(details.iter().map(|detail| AuditRecordInput {
+        event: AuditEvent::ActionIntent,
+        tenant_id: Some(TenantId::new(tenant_id)),
+        database_id: Some(target.dest),
+        source: "__restore",
+        detail,
+        auth: &auth,
+    }))
 }
 
 /// The bare catalog name of every collection the backup restores rows into
@@ -158,6 +176,7 @@ mod collection_name_tests {
         dest: DatabaseId::DEFAULT,
         restore_id: 0,
         restore_cut: i64::MAX,
+        event_source: crate::event::EventSource::Restore,
     };
 
     #[test]
@@ -193,6 +212,7 @@ mod collection_name_tests {
             dest: DatabaseId::new(1030),
             restore_id: 0,
             restore_cut: i64::MAX,
+            event_source: crate::event::EventSource::Restore,
         };
         let snap = TenantDataSnapshot {
             documents_versioned: vec![(

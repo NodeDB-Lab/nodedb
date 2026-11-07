@@ -153,8 +153,8 @@ pub(super) const BOOTSTRAP_TABLES: &[BootstrapTable] = bootstrap_tables![
     "cut_floors" => super::cut_floors::CUT_FLOORS,
     // ── Scheduled backups ──
     "backup_schedule_marks" => super::backup_schedule_marks::BACKUP_SCHEDULE_MARKS,
-    "mirror_collection_map" => MIRROR_COLLECTION_MAP,
-    "mirror_lag" => MIRROR_LAG,
+    "mirror_cut_state" => MIRROR_CUT_STATE,
+    "mirror_pins" => MIRROR_PINS,
     // ── Tenant relocation ──
     "move_tenant_journal" => super::move_tenant_journal_types::MOVE_TENANT_JOURNAL,
 ];

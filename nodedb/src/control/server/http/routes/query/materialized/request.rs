@@ -12,6 +12,8 @@ use crate::control::server::shared::authorization::authorize_database;
 use crate::control::server::shared::plan_admission::{
     PlanAdmissionRequest, plan_authorize_and_admit,
 };
+use crate::control::server::shared::session::read_consistency::parse_request_field;
+use crate::control::server::shared::session::read_scope::with_request_consistency;
 use crate::control::server::shared::statement_exec::{AtomicStatement, StatementExec};
 
 use super::super::super::super::auth::{
@@ -28,15 +30,32 @@ use super::shape::{TaskLoopParams, run_task_loop};
 
 /// POST /v1/query — execute a SQL/DDL statement.
 ///
-/// Body: `{ "sql": "..." }`. Database context via `X-NodeDB-Database` header
-/// or `?database=` param.
+/// Body: `{ "sql": "...", "read_consistency": "..." }`. `read_consistency` is
+/// optional and defaults to `strong`. Database context via `X-NodeDB-Database`
+/// header or `?database=` param.
 pub async fn query(
+    headers: HeaderMap,
+    peer: PeerAddr,
+    transport: ClientTransport,
+    db_param: QueryParams<DatabaseQueryParam>,
+    state: State<AppState>,
+    axum::Json(body): axum::Json<HttpQueryRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let consistency = parse_request_field(body.read_consistency.as_deref())?;
+    with_request_consistency(
+        consistency,
+        query_at_consistency(headers, peer, transport, db_param, state, body),
+    )
+    .await
+}
+
+async fn query_at_consistency(
     headers: HeaderMap,
     peer: PeerAddr,
     transport: ClientTransport,
     QueryParams(db_param): QueryParams<DatabaseQueryParam>,
     State(state): State<AppState>,
-    axum::Json(body): axum::Json<HttpQueryRequest>,
+    body: HttpQueryRequest,
 ) -> Result<impl IntoResponse, ApiError> {
     let (identity, verified_jwt) =
         resolve_auth_parts(&headers, &state, peer.as_str(), transport.security()).await?;
@@ -46,6 +65,12 @@ pub async fn query(
     authorize_database(&identity, database_id, &emitter).map_err(crate::Error::from)?;
 
     let sql = body.sql.as_str();
+    // The statement's DDL proposals carry its text. A credential statement
+    // installs its redacted text.
+    let _audit = crate::control::server::shared::session::audit_context::AuditScope::statement(
+        &identity,
+        sql.trim(),
+    );
 
     // Request-selected database is authoritative for RLS vars; passing it as the
     // session database makes `scope.database_id()` resolve to `database_id`.
@@ -173,6 +198,8 @@ pub async fn query(
         RoutedStatement::PerTask(statement) => statement,
     };
 
+    let sync_database =
+        crate::control::mirror::source::sync::sync_database_of(&state.shared, &tasks);
     let read_only = tasks
         .iter()
         .all(|task| !crate::control::server::shared::write_admission::plan_is_write(&task.plan));
@@ -191,7 +218,13 @@ pub async fn query(
     let result_rows = if read_only {
         lease_scope.guard(run).await.map_err(ApiError::from)??
     } else {
-        run.await?
+        let rows = run.await?;
+        if let Some(database) = sync_database {
+            crate::control::mirror::source::sync::await_mirror_sync(&state.shared, database)
+                .await
+                .map_err(ApiError::from)?;
+        }
+        rows
     };
 
     Ok((

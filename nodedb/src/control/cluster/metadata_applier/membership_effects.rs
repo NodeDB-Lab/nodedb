@@ -110,6 +110,10 @@ impl MetadataCommitApplier {
         raft_index: u64,
     ) -> Result<(), crate::Error> {
         let shared = self.shared_state()?;
+        // The node no longer holds a snapshot here. Its last report leaves
+        // the board with it, and a node that rejoins under this id starts
+        // from a fresh report.
+        shared.read_cut.board().forget_peer(node_id);
         self.credentials
             .catalog()
             .enqueue_pending_leave_cleanup(node_id, raft_index)?;
@@ -125,5 +129,30 @@ impl MetadataCommitApplier {
             }
         });
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::super::test_fixture::applier_with_shared_at;
+
+    /// A node that left takes its oldest-snapshot report off the board: a
+    /// node that rejoins under its id counts as one with no report.
+    #[tokio::test]
+    async fn a_node_that_left_is_forgotten_by_the_snapshot_board() {
+        const HOUR: Duration = Duration::from_secs(3_600);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (applier, state) = applier_with_shared_at(dir.path(), "leave.wal");
+        let board = state.read_cut.board();
+        let now = nodedb_types::wall_now_ns_i64();
+        board.record_peer(2, now - 5);
+        assert_eq!(board.horizon(1, [1, 2], now, HOUR), now - 5);
+
+        applier.apply_node_leave(2, 10).expect("apply the leave");
+
+        let no_report = now - i64::try_from(HOUR.as_nanos()).expect("in range");
+        assert_eq!(board.horizon(1, [1, 2], now, HOUR), no_report);
     }
 }

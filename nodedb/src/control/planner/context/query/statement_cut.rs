@@ -7,7 +7,9 @@ use nodedb_sql::types::PlanCacheEligibility;
 
 use super::QueryContext;
 use crate::control::planner::sql_plan_convert::PlanningPurpose;
-use crate::control::planner::system_cut::{pin_statement_cuts, pin_txn_snapshot};
+use crate::control::planner::system_cut::{
+    holds_unpinned_cut, pin_statement_cuts, pin_txn_snapshot,
+};
 use crate::control::version_cleanup::check_history_window;
 
 impl QueryContext {
@@ -25,9 +27,12 @@ impl QueryContext {
     /// snapshot age limit is refused: the cleanup horizon purges its history
     /// (`version_cleanup::check_history_window`).
     ///
-    /// Metadata tasks are never dispatched and take no cut. A context with
-    /// no booted node leaves the cuts unpinned. The Data Plane then reads
-    /// each at the last ordinal of its millisecond.
+    /// Metadata tasks are never dispatched and take no cut.
+    ///
+    /// A context with no live node takes no read cut. A statement that names
+    /// an `AS OF SYSTEM TIME` is refused there: run unpinned, a future time
+    /// reads later writes, and no node waits for the cut's marker. A statement
+    /// that names no cut needs no node.
     pub(super) async fn pin_statement_cut(
         &self,
         tasks: &mut [PhysicalTask],
@@ -38,6 +43,14 @@ impl QueryContext {
             return Ok(eligibility);
         }
         let state = self.cut_state.as_ref().and_then(|weak| weak.upgrade());
+        if state.is_none() && holds_unpinned_cut(tasks) {
+            return Err(crate::Error::Internal {
+                detail: "AS OF SYSTEM TIME: no live node can pin the statement's read cut; \
+                         the gateway is not installed or the node is shutting down. Retry once \
+                         the node serves"
+                    .into(),
+            });
+        }
         if let Some(snapshot) = self.txn_snapshot() {
             pin_txn_snapshot(tasks, snapshot.statement_cap());
             if let Some(state) = &state {
@@ -69,6 +82,10 @@ mod tests {
     use crate::control::server::shared::session::TxnSnapshotCut;
 
     fn scan_task() -> PhysicalTask {
+        scan_task_at(SystemTimeScope::Current)
+    }
+
+    fn scan_task_at(system_time: SystemTimeScope) -> PhysicalTask {
         PhysicalTask {
             tenant_id: crate::types::TenantId::new(1),
             database_id: crate::types::DatabaseId::DEFAULT,
@@ -86,7 +103,7 @@ mod tests {
                 projection: Vec::new(),
                 computed_columns: Vec::new(),
                 window_functions: Vec::new(),
-                system_time: SystemTimeScope::Current,
+                system_time,
                 valid_at_ms: None,
                 prefilter: None,
             }),
@@ -97,6 +114,58 @@ mod tests {
 
     fn scope_of(task: &PhysicalTask) -> Vec<SystemTimeScope> {
         crate::control::planner::system_cut::plan_scopes(&task.plan)
+    }
+
+    /// A statement that names a cut is refused when no node can pin it, in
+    /// and out of a block. A context with no gateway has no such node. A
+    /// metadata task is never dispatched, so it stays allowed.
+    #[tokio::test]
+    async fn an_unpinned_cut_with_no_live_node_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal = std::sync::Arc::new(
+            crate::wal::WalManager::open_for_testing(&dir.path().join("test.wal")).expect("wal"),
+        );
+        let (dispatcher, _data_sides) = crate::bridge::dispatch::Dispatcher::new(1, 64);
+        let state = crate::control::state::SharedState::new(dispatcher, wal).expect("state");
+        let ctx = QueryContext::for_state(&state);
+        let as_of = SystemTimeScope::AsOf(1_800_000_000_000);
+
+        let mut autocommit = vec![scan_task_at(as_of)];
+        let err = ctx
+            .pin_statement_cut(
+                &mut autocommit,
+                PlanningPurpose::Execute,
+                PlanCacheEligibility::Cacheable,
+            )
+            .await
+            .expect_err("no node can pin the cut");
+        assert!(matches!(err, crate::Error::Internal { .. }), "{err:?}");
+        assert_eq!(scope_of(&autocommit[0]), vec![as_of]);
+
+        ctx.set_txn_snapshot(Some(TxnSnapshotCut {
+            ordinal: 42,
+            cut_marker: 0,
+        }));
+        let mut in_block = vec![scan_task_at(as_of)];
+        let err = ctx
+            .pin_statement_cut(
+                &mut in_block,
+                PlanningPurpose::Execute,
+                PlanCacheEligibility::Cacheable,
+            )
+            .await
+            .expect_err("no node can check the cut's history window");
+        assert!(matches!(err, crate::Error::Internal { .. }), "{err:?}");
+        ctx.set_txn_snapshot(None);
+
+        let mut metadata = vec![scan_task_at(as_of)];
+        ctx.pin_statement_cut(
+            &mut metadata,
+            PlanningPurpose::Metadata,
+            PlanCacheEligibility::Cacheable,
+        )
+        .await
+        .expect("a metadata task takes no cut");
     }
 
     /// A SELECT planned inside a transaction block reads the block's

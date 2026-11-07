@@ -111,6 +111,7 @@ fn classified_sqlstates() -> Vec<(usize, &'static str)> {
         (103, sqlstate::SYNTAX_ERROR),
         (104, sqlstate::SYNTAX_ERROR),
         (106, sqlstate::READ_ONLY_SQL_TRANSACTION),
+        (128, sqlstate::MIRROR_SYNC_TIMEOUT),
         (107, sqlstate::STALE_READ_NOT_LEADER),
         (108, sqlstate::DEPENDENT_OBJECTS_STILL_EXIST),
         (109, sqlstate::DEPENDENT_OBJECTS_STILL_EXIST),

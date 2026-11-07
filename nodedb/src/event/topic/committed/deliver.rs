@@ -63,8 +63,12 @@ fn ledger(state: &SharedState) -> Option<&PublishLedger> {
 /// watermark never passes a message this node does not hold. A ledger write
 /// the disk refuses is retried until it lands.
 pub async fn hold_committed_publish(event: &WriteEvent, state: &Arc<SharedState>) {
-    // A restored record re-issues rows, never messages.
-    if event.source == EventSource::Restore {
+    // A restored record re-issues rows, never messages. A mirror's applier
+    // re-issues its source's entries, and the source delivers their messages.
+    if matches!(
+        event.source,
+        EventSource::Restore | EventSource::RaftFollower
+    ) {
         return;
     }
     let Some(bytes) = event.new_value.as_deref() else {

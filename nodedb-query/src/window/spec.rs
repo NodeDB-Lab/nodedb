@@ -4,6 +4,27 @@
 
 use crate::expr::types::SqlExpr;
 
+/// Every function the window evaluators compute. The planner refuses any
+/// other name in `<func>() OVER (...)`.
+pub const WINDOW_FUNCTION_NAMES: [&str; 16] = [
+    "row_number",
+    "rank",
+    "dense_rank",
+    "ntile",
+    "percent_rank",
+    "cume_dist",
+    "lag",
+    "lead",
+    "nth_value",
+    "sum",
+    "count",
+    "avg",
+    "min",
+    "max",
+    "first_value",
+    "last_value",
+];
+
 /// A window function specification.
 #[derive(
     Debug,

@@ -4,7 +4,7 @@
 //! and cut wait reads wall time here.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use web_time::{SystemTime, UNIX_EPOCH};
 
 /// Wall-clock nanoseconds since the Unix epoch. A clock before the epoch
 /// reads `0` and logs once. A clock past `u64::MAX` saturates.
@@ -16,6 +16,20 @@ pub fn wall_now_ns() -> u64 {
 /// `i64::MAX` (the year 2262) saturates.
 pub fn wall_now_ns_i64() -> i64 {
     i64::try_from(wall_now_nanos()).unwrap_or(i64::MAX)
+}
+
+/// Wall-clock milliseconds since the Unix epoch. `None` when the clock reads
+/// before the epoch. A clock past `i64::MAX` saturates.
+///
+/// A value that stamps or selects stored data calls this and refuses on
+/// `None`: a reader takes epoch 0 for a real time.
+pub fn checked_wall_now_ms() -> Option<i64> {
+    ms_since_epoch(SystemTime::now())
+}
+
+fn ms_since_epoch(now: SystemTime) -> Option<i64> {
+    let since = now.duration_since(UNIX_EPOCH).ok()?;
+    Some(i64::try_from(since.as_millis()).unwrap_or(i64::MAX))
 }
 
 fn wall_now_nanos() -> u128 {
@@ -46,5 +60,16 @@ mod tests {
         let later = wall_now_ns();
         assert!(unsigned > 0, "the wall clock is past the epoch");
         assert!(u64::try_from(signed).is_ok_and(|s| s >= unsigned && s <= later));
+    }
+
+    #[test]
+    fn a_clock_before_the_epoch_reads_no_milliseconds() {
+        use std::time::Duration;
+        assert_eq!(ms_since_epoch(UNIX_EPOCH - Duration::from_secs(1)), None);
+        assert_eq!(ms_since_epoch(UNIX_EPOCH), Some(0));
+        assert_eq!(
+            ms_since_epoch(UNIX_EPOCH + Duration::from_secs(5)),
+            Some(5_000)
+        );
     }
 }

@@ -44,6 +44,9 @@ const ARCHIVE_INTERVAL: Duration = Duration::from_secs(10);
 /// Most entries one archive object holds.
 const MAX_ENTRIES_PER_CHUNK: u64 = 4096;
 
+/// The owner name of the archiver's ceiling on group 0's log compaction.
+const ARCHIVE_CEILING: &str = "pitr_metadata_log_archive";
+
 /// Copy group 0's committed log to cold storage, and bound its compaction
 /// by what the archive holds. Starts nothing with PITR off, no cold storage,
 /// or no WAL key: the archive is encrypted with the WAL key.
@@ -67,7 +70,7 @@ pub fn spawn_metadata_log_archiver(shared: &Arc<SharedState>, multi_raft: Arc<Mu
     multi_raft
         .lock()
         .unwrap_or_else(|p| p.into_inner())
-        .set_compaction_ceiling(METADATA_GROUP_ID, Arc::clone(&ceiling));
+        .set_compaction_ceiling(METADATA_GROUP_ID, ARCHIVE_CEILING, Arc::clone(&ceiling));
     let mut archiver = MetadataLogArchiver {
         cold,
         multi_raft,

@@ -399,6 +399,28 @@ impl SparseEngine {
 }
 
 #[cfg(test)]
+impl SparseEngine {
+    /// Store a version of the row that does not decode, as corruption does.
+    pub(crate) fn corrupt_current_version_for_test(
+        &self,
+        database_id: u64,
+        tenant: u64,
+        coll: &str,
+        doc_id: &StorageKey,
+    ) {
+        let txn = self.db.begin_write().expect("write txn");
+        {
+            let mut table = txn.open_table(DOCUMENTS_VERSIONED).expect("open table");
+            let key = versioned_doc_key(database_id, tenant, coll, doc_id, 1);
+            table
+                .insert(key.as_str(), b"short".as_slice())
+                .expect("insert");
+        }
+        txn.commit().expect("commit");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::super::value::VersionedScanParams;
     use super::*;

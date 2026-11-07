@@ -42,6 +42,12 @@ pub struct TenantDataSnapshot {
     /// install puts each catalog in place before it restores any row.
     pub ts_series_catalogs: Vec<(String, Vec<u8>)>,
 
+    /// The conversion record of each collection a conversion touched:
+    /// `[("{db}:{tid}:{collection}", encoded_record), ...]`. It names the mode
+    /// the snapshot's rows hold, so an install reads them with that mode.
+    /// A backup leaves it out: its rows restore as new writes.
+    pub storage_conversions: Vec<(String, Vec<u8>)>,
+
     /// Plain-columnar (and spatial) engine state per collection.
     ///
     /// Each entry is `(collection_key, msgpack_bytes)` where:
@@ -353,6 +359,12 @@ pub struct TsFlushedCollectionBlob {
     /// so the image and the partitions stay in step. It carries the buckets
     /// folded from partitions raw retention has removed.
     pub cagg_image: Vec<u8>,
+    /// The same aggregates for a copy that re-issues the collection's rows,
+    /// or empty when no aggregate is rooted here. A re-issue keeps no partition
+    /// name, so this image names none. A `Manual` or `Periodic` aggregate
+    /// parks the rows it has not folded until its next cut. Any other holds
+    /// them in its buckets.
+    pub cagg_copy_image: Vec<u8>,
 }
 
 /// Wire blob for one flushed partition directory.
@@ -425,6 +437,7 @@ mod tests {
             collection_key: "1:42:metrics".to_string(),
             partitions: vec![partition],
             cagg_image: vec![1, 2, 3],
+            cagg_copy_image: vec![4, 5],
         };
 
         let bytes = zerompk::to_msgpack_vec(&blob).expect("encode blob");

@@ -237,9 +237,7 @@ impl VectorCodec for BbqCodec {
             reserved,
         };
 
-        let uqv = UnifiedQuantizedVector::new(header, &packed, &[]).expect(
-            "BBQ encode: UnifiedQuantizedVector construction must succeed with no outliers",
-        );
+        let uqv = UnifiedQuantizedVector::without_outliers(header, &packed);
         BbqQuantized(uqv)
     }
 

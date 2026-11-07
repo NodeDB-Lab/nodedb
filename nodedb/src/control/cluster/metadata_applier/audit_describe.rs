@@ -8,7 +8,7 @@ use crate::control::catalog_entry;
 /// stamped `CatalogEntry`. Delete* variants return `version_after = 0`
 /// since the object is being removed. A soft delete keeps its row, so it
 /// reports the version and HLC it stamped.
-pub(super) fn describe_entry(e: &catalog_entry::CatalogEntry) -> (String, u64, String) {
+pub(crate) fn describe_entry(e: &catalog_entry::CatalogEntry) -> (String, u64, String) {
     use catalog_entry::CatalogEntry as E;
     match e {
         E::PutCollection(c) => (
@@ -40,6 +40,7 @@ pub(super) fn describe_entry(e: &catalog_entry::CatalogEntry) -> (String, u64, S
         ),
         E::DeleteSequence { name, .. } => (name.clone(), 0, String::new()),
         E::PutSequenceState(s) => (s.name.clone(), 0, String::new()),
+        E::ReserveSequenceRange { next, .. } => (next.name.clone(), 0, String::new()),
         E::PutTrigger(t) => (
             t.name.clone(),
             t.descriptor_version,
@@ -196,6 +197,15 @@ pub(super) fn describe_entry(e: &catalog_entry::CatalogEntry) -> (String, u64, S
             0,
             String::new(),
         ),
+        E::PutMirrorCutState { database_id, .. } => {
+            (format!("mirror_cut_state:{database_id}"), 0, String::new())
+        }
+        E::ClaimMirrorDatabase(descriptor) => (descriptor.name.clone(), 0, String::new()),
+        E::StepMirrorStatus { database_id, .. } => {
+            (format!("mirror_status:{database_id}"), 0, String::new())
+        }
+        E::PutMirrorPin(pin) => (format!("mirror_pin:{}", pin.link_id), 0, String::new()),
+        E::DeleteMirrorPin { link_id } => (format!("mirror_pin:{link_id}"), 0, String::new()),
         E::PutSpatialRefSys(def) => (format!("spatial_ref_sys:{}", def.srid), 0, String::new()),
         E::DropSpatialRefSys { srid } => (format!("spatial_ref_sys:{srid}"), 0, String::new()),
         E::PutCredential(row) => (

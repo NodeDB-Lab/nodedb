@@ -18,10 +18,8 @@ pub const PROGRESS_REPORT_CHUNK_BYTES: u64 = 1024 * 1024;
 
 /// Wire envelope that wraps a cross-cluster snapshot chunk.
 ///
-/// Encoded with zerompk (MessagePack) and placed in the `data` field of the
-/// existing [`nodedb_raft::InstallSnapshotRequest`].  The in-cluster Raft
-/// machinery transfers the bytes unchanged; the mirror receiver unwraps this
-/// envelope.
+/// Encoded with zerompk (MessagePack) in one bounded mirror-link response. The
+/// source holds the whole payload until the mirror fetched its last chunk.
 ///
 /// # Integrity
 ///
@@ -32,15 +30,23 @@ pub const PROGRESS_REPORT_CHUNK_BYTES: u64 = 1024 * 1024;
 /// validates it against `total_crc32c` when `done = true`; mismatch raises
 /// [`super::super::error::MirrorError::SnapshotCrcMismatch`] and the partial
 /// file is discarded.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
 pub struct CrossClusterSnapshotEnvelope {
     /// Cluster-id of the source cluster that produced this snapshot.
     pub source_cluster_id: String,
     /// Database id on the source cluster being mirrored.
     pub source_database_id: String,
-    /// WAL LSN at which this snapshot was taken.  After the snapshot is
-    /// fully applied the mirror sets `last_applied` to this value and
-    /// begins streaming AppendEntries from `snapshot_lsn + 1`.
+    /// Names one capture on its source: the capture's HLC wall time. A chunk
+    /// of another capture restarts the transfer.
     pub snapshot_lsn: u64,
     /// Total snapshot size in bytes (same value in every chunk of the same
     /// snapshot transfer).
@@ -62,9 +68,8 @@ pub struct CrossClusterSnapshotEnvelope {
 pub enum BootstrapChunkOutcome {
     /// More chunks expected; `bytes_done` is the total received so far.
     Pending { bytes_done: u64 },
-    /// All chunks received, CRC validated, file committed.
-    /// The mirror should now set `status = MirrorStatus::Following` and
-    /// begin streaming AppendEntries from `snapshot_lsn + 1`.
+    /// All chunks received, CRC validated, file committed. The transfer is not
+    /// the bootstrap: the mirror holds no row until it re-issues the file.
     Committed {
         snapshot_lsn: Lsn,
         snapshot_path: PathBuf,

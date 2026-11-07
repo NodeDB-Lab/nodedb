@@ -25,6 +25,64 @@ pub fn audit_wal_append_failed(err: &crate::Error, seq: u64) {
     .emit();
 }
 
+/// Report a security bus lag, so the audit rows of `dropped` events are lost.
+/// Called from the bus consumer, the one reader of these buses.
+pub fn security_bus_lagged(bus: &str, dropped: u64) {
+    let ctx = context::SecurityBusLagged { bus, dropped };
+    let _ = Capture::new(
+        EventKind::InvariantViolation,
+        "security bus: the consumer lagged, so the bus lost events before their audit rows",
+    )
+    .domain(&ctx)
+    .emit();
+}
+
+/// Report a batch of security bus audit rows whose blocking task did not finish.
+/// Called from the bus consumer that awaits that task.
+pub fn security_bus_rows_not_recorded(rows: usize) {
+    let ctx = context::SecurityBusRowsNotRecorded { rows };
+    let _ = Capture::new(
+        EventKind::InvariantViolation,
+        "security bus: an audit batch task did not finish, so its rows are not recorded",
+    )
+    .domain(&ctx)
+    .emit();
+}
+
+/// Report a flush that committed entries but could not drop their records from the audit WAL.
+/// Called from the flush arm that continues past the truncation error.
+pub fn audit_wal_not_truncated(err: &crate::Error, position: u64) {
+    let class = error_class(err);
+    let ctx = context::AuditWalNotTruncated {
+        position,
+        error_class: &class,
+    };
+    let _ = Capture::new(
+        EventKind::Error,
+        "audit flush: the WAL truncation failed, so the WAL keeps records the catalog holds",
+    )
+    .error_chain(error_chain_of(err))
+    .domain(&ctx)
+    .emit();
+}
+
+/// Report a retention prune that did not run, so the catalog keeps rows past the limit.
+/// Called from each prune arm that logs the error and returns.
+pub fn audit_prune_not_applied(err: &crate::Error, source: &str) {
+    let class = error_class(err);
+    let ctx = context::AuditPruneNotApplied {
+        source,
+        error_class: &class,
+    };
+    let _ = Capture::new(
+        EventKind::Error,
+        "audit prune: the catalog refused the prune, so rows stay past the retention limit",
+    )
+    .error_chain(error_chain_of(err))
+    .domain(&ctx)
+    .emit();
+}
+
 /// Report an audit flush whose catalog commit failed, so its entries stay buffered.
 /// Called from the flush arm that keeps the entries and returns.
 pub fn audit_flush_not_persisted(err: &crate::Error, entry_count: usize, through_seq: u64) {

@@ -90,4 +90,8 @@ pub enum GraphError {
     /// The snapshot a rebuild carries does not decode into an index.
     #[error("CSR rebuild snapshot is invalid: {detail}")]
     RebuildSnapshotInvalid { detail: String },
+
+    /// The CSR snapshot did not serialize into checkpoint bytes.
+    #[error("CSR checkpoint serialization failed: {detail}")]
+    CheckpointSerialize { detail: String },
 }

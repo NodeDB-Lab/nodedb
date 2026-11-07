@@ -2,15 +2,12 @@
 
 //! Identity resolution: TLS client certificate, API key, and trust mode.
 
-use nodedb_types::id::DatabaseId;
-use smallvec::SmallVec;
-
 use crate::control::security::audit::AuditEvent;
-use crate::control::security::credential::record::UserRecord;
 use crate::control::security::escalation::{
     AuthViolation, ViolationSubject, record_auth_violation,
 };
-use crate::control::security::identity::{AuthMethod, AuthenticatedIdentity, DatabaseSet};
+use crate::control::security::identity::{AuthMethod, AuthenticatedIdentity};
+use crate::control::security::session_identity::{api_key_record_identity, stored_user_identity};
 use crate::control::state::SharedState;
 use crate::types::TenantId;
 
@@ -52,48 +49,6 @@ pub fn resolve_certificate_identity(
     Ok(identity)
 }
 
-/// Build the owner's `DatabaseSet` from a `UserRecord`.
-///
-/// - Superuser → `DatabaseSet::All`.
-/// - Service account with non-empty `accessible_databases` → `DatabaseSet::Some(...)`.
-/// - Regular user → databases from `_system.database_grants`, always including `DEFAULT`.
-fn build_owner_database_set(state: &SharedState, user: &UserRecord) -> DatabaseSet {
-    if user.is_superuser {
-        return DatabaseSet::All;
-    }
-    if user.is_service_account && !user.accessible_databases.is_empty() {
-        return DatabaseSet::Some(SmallVec::from_iter(
-            user.accessible_databases.iter().copied(),
-        ));
-    }
-    // Regular user or legacy service account: read from database_grants.
-    let db_ids = state
-        .credentials
-        .catalog()
-        .list_user_grant_databases(user.user_id)
-        .ok()
-        .unwrap_or_else(|| vec![DatabaseId::DEFAULT]);
-    DatabaseSet::Some(SmallVec::from_iter(db_ids))
-}
-
-/// Build a session identity from a persisted user, including live database grants.
-///
-/// [`CredentialStore::to_identity`](crate::control::security::credential::CredentialStore::to_identity)
-/// only materializes credential fields. Session bind must additionally resolve the
-/// user's default database and the current `_system.database_grants` set.
-pub fn stored_user_identity(
-    state: &SharedState,
-    username: &str,
-    method: AuthMethod,
-) -> Option<AuthenticatedIdentity> {
-    let user = state.credentials.get_user(username)?;
-    let mut identity = state.credentials.to_identity(username, method)?;
-    identity.default_database =
-        (user.default_database_id != 0).then(|| DatabaseId::new(user.default_database_id));
-    identity.accessible_databases = build_owner_database_set(state, &user);
-    Some(identity)
-}
-
 /// Verify an API key token and build an authenticated identity.
 ///
 /// Shared by native protocol and HTTP API authentication paths.
@@ -105,29 +60,7 @@ pub fn verify_api_key_identity(
     protocol: &str,
 ) -> Option<AuthenticatedIdentity> {
     let key_record = state.api_keys.verify_key(token)?;
-
-    let user = state.credentials.get_user(&key_record.username)?;
-
-    let owner_set = build_owner_database_set(state, &user);
-
-    // Compute effective database set: owner_set ∩ key_set.
-    // Empty key.accessible_databases means "inherit from owner at this bind" — live,
-    // not a snapshot, so subsequent owner narrowing is automatically honored.
-    let key_set = if key_record.accessible_databases.is_empty() {
-        owner_set.clone()
-    } else {
-        DatabaseSet::Some(SmallVec::from_iter(
-            key_record.accessible_databases.iter().copied(),
-        ))
-    };
-    let effective = owner_set.intersect(&key_set);
-
-    let mut identity =
-        state
-            .api_keys
-            .to_identity(&key_record, user.roles, user.is_superuser, effective);
-    identity.default_database =
-        (user.default_database_id != 0).then(|| DatabaseId::new(user.default_database_id));
+    let identity = api_key_record_identity(state, &key_record)?;
 
     state.audit_record(
         AuditEvent::AuthSuccess,
@@ -158,6 +91,8 @@ pub fn configured_trust_identity(state: &SharedState) -> Option<AuthenticatedIde
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+
+    use nodedb_types::id::DatabaseId;
 
     use crate::bridge::dispatch::Dispatcher;
     use crate::control::security::apikey::CreateKeyParams;

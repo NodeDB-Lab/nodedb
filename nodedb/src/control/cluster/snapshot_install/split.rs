@@ -197,6 +197,7 @@ pub fn split_by_core(
         timeseries,
         flushed_ts_segments,
         ts_series_catalogs,
+        storage_conversions,
         columnar_engines,
         vector_params,
         index_configs,
@@ -281,6 +282,13 @@ pub fn split_by_core(
         ts_series_catalogs,
         db_tenant_scoped,
         |t| &mut t.ts_series_catalogs,
+    )?;
+    // A record goes to the core its collection's rows go to.
+    s.keyed(
+        "storage_conversions",
+        storage_conversions,
+        db_tenant_scoped,
+        |t| &mut t.storage_conversions,
     )?;
     s.keyed("kv_tables", kv_tables, db_scoped, |t| &mut t.kv_tables)?;
     s.keyed("columnar_engines", columnar_engines, db_scoped, |t| {

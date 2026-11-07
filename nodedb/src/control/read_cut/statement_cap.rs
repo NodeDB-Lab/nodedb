@@ -111,13 +111,20 @@ pub(crate) async fn statement_cap(
 /// this node's active-snapshot registry until the block ends.
 ///
 /// The snapshot opens before the cut is taken, so no report this node sends
-/// in between passes the cut (`super::snapshots`).
+/// in between passes the cut (`super::snapshots`). A block on a mirror reads
+/// the mirror's cap (`super::mirror_cap`).
 pub async fn open_txn_snapshot(
     state: &SharedState,
+    database: nodedb_types::DatabaseId,
 ) -> crate::Result<(StatementCap, super::snapshots::SnapshotGuard)> {
     let mut guard = state.read_cut.snapshots.open();
-    let now_ms = nodedb_types::ordinal_to_ms(nodedb_types::wall_now_ns_i64());
-    let cap = statement_cap(state, now_ms).await?;
+    let cap = match super::mirror_cap::mirror_cap(state, database)? {
+        Some(cap) => cap,
+        None => {
+            let now_ms = nodedb_types::ordinal_to_ms(nodedb_types::wall_now_ns_i64());
+            statement_cap(state, now_ms).await?
+        }
+    };
     guard.pin(cap.cap);
     Ok((cap, guard))
 }
@@ -220,12 +227,17 @@ async fn await_wall_past(ordinal: i64) -> bool {
 /// The one system-time ordinal every read of a historical statement reads
 /// at: `AS OF SYSTEM TIME as_of_ms`, pinned under the statement's
 /// read cut ([`statement_cap`]). Every hop of a walk carries it, so the walk
-/// reads one graph.
+/// reads one graph. A walk on a mirror pins under the mirror's cap.
 pub(crate) async fn pin_historical_cut(
     state: &SharedState,
+    database: nodedb_types::DatabaseId,
     as_of_ms: i64,
 ) -> crate::Result<HistoricalCut> {
-    Ok(statement_cap(state, as_of_ms).await?.pin(as_of_ms))
+    let cap = match super::mirror_cap::mirror_cap(state, database)? {
+        Some(cap) => cap,
+        None => statement_cap(state, as_of_ms).await?,
+    };
+    Ok(cap.pin(as_of_ms))
 }
 
 /// The clock part of a statement's cap: a fresh ordinal of `clock`. Every

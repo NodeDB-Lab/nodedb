@@ -83,7 +83,7 @@ async fn delivery_loop(
 ) {
     info!(
         stream = %stream_name,
-        url = %config.url,
+        host = %crate::control::security::egress::url_host_for_log(&config.url),
         "webhook delivery task started"
     );
 

@@ -133,7 +133,11 @@ pub fn explain_permission(
     });
 
     // 7. Blacklist check.
-    let blacklisted = state.blacklist.check_user(&user_id).is_some();
+    let entry_id = crate::control::security::blacklist::store::user_entry_id(
+        identity.user_id,
+        &identity.username,
+    );
+    let blacklisted = state.blacklist.check_user(&entry_id).is_some();
     steps.push(ExplainStep {
         check: "blacklist".into(),
         result: if blacklisted { "DENY" } else { "PASS" }.into(),

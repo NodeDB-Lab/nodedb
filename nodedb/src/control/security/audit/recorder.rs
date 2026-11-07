@@ -6,14 +6,16 @@
 //! The Event Plane must do neither, so it hands its records to this recorder.
 //! The channel is bounded. A full channel makes the sender's `await` wait, and no record is dropped.
 //! That wait slows the Event Plane consumer, and its ring backpressure then applies.
-//! The sender gets an answer only once every record of its batch is recorded.
+//! The sender gets an answer once the recorder finished with its batch.
+//! The answer is `Ok` only when every record of the batch is durable.
 //! So the Event Plane watermark never passes an event whose audit record is not durable.
 //!
 //! The recorder records a whole batch in one call, so the batch costs one WAL sync.
-//! Commit is per batch: either the batch is recorded, or the sender gets all of it back.
+//! A batch ends in one of three states, and the sender reads which one:
+//! durable, staged in the log with no durable WAL record, or not recorded at all.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use nodedb_types::DatabaseId;
 use tokio::sync::{mpsc, oneshot};
@@ -35,36 +37,73 @@ pub struct PendingAudit {
     pub detail: String,
 }
 
-/// The commit mark of one batch.
+/// Why a batch has no durable answer yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordFailure {
+    /// No record of the batch reached the log, so the sender records them again.
+    Unrecorded(Vec<PendingAudit>),
+    /// The batch is in the log, but its WAL append or sync failed.
+    /// It becomes durable once a flush commits it to the catalog. Recording it again duplicates it.
+    NotDurable { through_seq: u64 },
+}
+
+/// The commit marks of one batch.
 ///
-/// The record callback calls [`Self::mark_committed`] once the batch is in the audit log.
-/// It must do so before any later step that can panic, such as export.
-/// An unmarked batch goes back to the sender whole.
+/// The record callback calls [`Self::mark_staged`] once the batch is in the audit log.
+/// It must do so before any later step that can panic, such as the sync wait or export.
+/// It calls [`Self::mark_durable`] once the WAL sync covered the batch.
+/// A batch with no mark goes back to the sender whole.
 #[derive(Clone, Default)]
-pub struct BatchCommit(Arc<AtomicBool>);
+pub struct BatchCommit(Arc<BatchMarks>);
+
+#[derive(Default)]
+struct BatchMarks {
+    /// The batch's last seq once it is staged, 0 before that. A log's first seq is 1.
+    staged_through: AtomicU64,
+    durable: AtomicBool,
+}
 
 impl BatchCommit {
-    /// Record that the whole batch is in the audit log.
-    pub fn mark_committed(&self) {
-        self.0.store(true, Ordering::Release);
+    /// Record that the whole batch is in the audit log, ending at `through_seq`.
+    pub fn mark_staged(&self, through_seq: u64) {
+        self.0.staged_through.store(through_seq, Ordering::Release);
     }
 
-    fn is_committed(&self) -> bool {
-        self.0.load(Ordering::Acquire)
+    /// Record that a WAL sync covered the whole batch.
+    pub fn mark_durable(&self) {
+        self.0.durable.store(true, Ordering::Release);
+    }
+
+    fn is_staged(&self) -> bool {
+        self.0.staged_through.load(Ordering::Acquire) != 0
+    }
+
+    /// The sender's answer for `records`, from the marks the callback left.
+    pub fn outcome(&self, records: Arc<Vec<PendingAudit>>) -> Result<(), RecordFailure> {
+        if self.0.durable.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let through_seq = self.0.staged_through.load(Ordering::Acquire);
+        if through_seq != 0 {
+            return Err(RecordFailure::NotDurable { through_seq });
+        }
+        Err(RecordFailure::Unrecorded(
+            Arc::try_unwrap(records).unwrap_or_else(|shared| shared.as_ref().clone()),
+        ))
     }
 }
 
-/// Records one whole batch and marks it committed.
+/// Records one whole batch and leaves its marks on the [`BatchCommit`].
 /// Returns `false` when it cannot record the batch, which returns the batch to the sender.
 pub type RecordBatch = Arc<dyn Fn(&[PendingAudit], &BatchCommit) -> bool + Send + Sync>;
 
-/// Runs once after each committed batch, such as the backpressure wait. It records nothing.
+/// Runs once after each staged batch, such as the backpressure wait. It records nothing.
 pub type AfterBatch = Arc<dyn Fn() + Send + Sync>;
 
 /// One batch on the channel, with the commit mark and answer the sender reads.
 ///
 /// The sender keeps its own references to `records` and `commit`.
-/// So after any failure the sender knows whether the batch is recorded.
+/// So after any failure the sender knows what state the batch is in.
 struct AuditBatch {
     records: Arc<Vec<PendingAudit>>,
     commit: BatchCommit,
@@ -93,7 +132,7 @@ impl AuditRecorder {
                 let record_batch = Arc::clone(&record_batch);
                 let after_batch = Arc::clone(&after_batch);
                 let outcome = tokio::task::spawn_blocking(move || {
-                    if record_batch(&records, &commit) && commit.is_committed() {
+                    if record_batch(&records, &commit) && commit.is_staged() {
                         after_batch();
                     }
                 })
@@ -108,12 +147,13 @@ impl AuditRecorder {
         Self { tx }
     }
 
-    /// Hand `records` to the recorder and wait until every one is recorded.
+    /// Hand `records` to the recorder and wait until it finished with them.
     ///
     /// A full channel makes this wait. The wait yields to the runtime and never blocks a thread.
-    /// Returns all of `records` when the recorder did not commit the batch, so the caller records them another way.
-    /// A committed batch is never returned, so no record is recorded twice.
-    pub async fn record(&self, records: Vec<PendingAudit>) -> Result<(), Vec<PendingAudit>> {
+    /// Returns `Ok` only when every record is durable.
+    /// [`RecordFailure::Unrecorded`] gives all of `records` back, so the caller records them another way.
+    /// A staged batch is never given back, so no record is recorded twice.
+    pub async fn record(&self, records: Vec<PendingAudit>) -> Result<(), RecordFailure> {
         if records.is_empty() {
             return Ok(());
         }
@@ -129,10 +169,7 @@ impl AuditRecorder {
         if self.tx.send(batch).await.is_ok() {
             let _ = answer.await;
         }
-        if commit.is_committed() {
-            return Ok(());
-        }
-        Err(Arc::try_unwrap(records).unwrap_or_else(|shared| shared.as_ref().clone()))
+        commit.outcome(records)
     }
 }
 
@@ -148,15 +185,14 @@ mod tests {
         Arc::new(|| {})
     }
 
-    /// A batch callback that appends each record's detail to `recorded`, then marks the commit.
+    /// A batch callback that appends each record's detail to `recorded`, then marks it durable.
     fn collecting(recorded: &Arc<Mutex<Vec<String>>>) -> RecordBatch {
         let recorded = Arc::clone(recorded);
         Arc::new(move |batch: &[PendingAudit], commit: &BatchCommit| {
-            recorded
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .extend(batch.iter().map(|record| record.detail.clone()));
-            commit.mark_committed();
+            let mut recorded = recorded.lock().unwrap_or_else(|p| p.into_inner());
+            recorded.extend(batch.iter().map(|record| record.detail.clone()));
+            commit.mark_staged(recorded.len() as u64);
+            commit.mark_durable();
             true
         })
     }
@@ -226,7 +262,30 @@ mod tests {
             no_after_batch(),
         );
         let back = recorder.record(vec![pending(1), pending(2)]).await;
-        assert_eq!(back, Err(vec![pending(1), pending(2)]));
+        assert_eq!(
+            back,
+            Err(RecordFailure::Unrecorded(vec![pending(1), pending(2)]))
+        );
+    }
+
+    /// A batch whose WAL sync failed is not durable, and it never comes back to be recorded twice.
+    #[tokio::test]
+    async fn staged_batch_with_no_durable_mark_is_not_durable() {
+        let after = Arc::new(AtomicUsize::new(0));
+        let runs = Arc::clone(&after);
+        let recorder = AuditRecorder::spawn(
+            4,
+            Arc::new(|_batch: &[PendingAudit], commit: &BatchCommit| {
+                commit.mark_staged(7);
+                true
+            }),
+            Arc::new(move || {
+                runs.fetch_add(1, Ordering::AcqRel);
+            }),
+        );
+        let answer = recorder.record(vec![pending(1)]).await;
+        assert_eq!(answer, Err(RecordFailure::NotDurable { through_seq: 7 }));
+        assert_eq!(after.load(Ordering::Acquire), 1, "a staged batch waits");
     }
 
     #[tokio::test]
@@ -246,10 +305,10 @@ mod tests {
         };
         let recorder = AuditRecorder::spawn(4, record, no_after_batch());
 
-        let back = recorder
-            .record((0..5).map(pending).collect())
-            .await
-            .expect_err("the panic must stop the batch");
+        let back = match recorder.record((0..5).map(pending).collect()).await {
+            Err(RecordFailure::Unrecorded(back)) => back,
+            other => panic!("the panic must stop the batch: {other:?}"),
+        };
         assert_eq!(back, (0..5).map(pending).collect::<Vec<_>>());
 
         // The caller records the returned batch, as `hold_audits` does.
@@ -263,19 +322,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn panic_after_commit_returns_nothing() {
+    async fn panic_after_durable_returns_nothing() {
         let recorded = Arc::new(Mutex::new(Vec::<String>::new()));
         let record: RecordBatch = {
             let inner = collecting(&recorded);
             Arc::new(move |batch: &[PendingAudit], commit: &BatchCommit| {
                 inner(batch, commit);
-                // A later step, such as export, dies after the batch is in the log.
-                panic!("injected recorder panic after the commit");
+                // A later step, such as export, dies after the batch is durable.
+                panic!("injected recorder panic after the sync");
             })
         };
         let recorder = AuditRecorder::spawn(4, record, no_after_batch());
         assert_eq!(recorder.record((0..3).map(pending).collect()).await, Ok(()));
         assert_eq!(recorded.lock().expect("recorded").len(), 3);
+    }
+
+    /// A panic in the sync wait leaves a staged batch. It must not read as durable.
+    #[tokio::test]
+    async fn panic_before_the_sync_returns_is_not_durable() {
+        let record: RecordBatch = Arc::new(|_batch: &[PendingAudit], commit: &BatchCommit| {
+            commit.mark_staged(3);
+            panic!("injected recorder panic in the sync");
+        });
+        let recorder = AuditRecorder::spawn(4, record, no_after_batch());
+        assert_eq!(
+            recorder.record(vec![pending(1)]).await,
+            Err(RecordFailure::NotDurable { through_seq: 3 })
+        );
     }
 
     #[tokio::test]

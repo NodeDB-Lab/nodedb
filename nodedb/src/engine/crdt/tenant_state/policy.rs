@@ -14,6 +14,29 @@ impl TenantCrdtEngine {
         self.validator.policies().get_owned(collection)
     }
 
+    /// The policy registered for a collection, or `None` when it has none.
+    pub fn registered_collection_policy(&self, collection: &str) -> Option<CollectionPolicy> {
+        let policies = self.validator.policies();
+        policies
+            .has(collection)
+            .then(|| policies.get_owned(collection))
+    }
+
+    /// Put back what [`Self::registered_collection_policy`] returned. `None`
+    /// removes the collection's policy.
+    pub fn restore_collection_policy(
+        &mut self,
+        collection: &str,
+        previous: Option<CollectionPolicy>,
+    ) {
+        match previous {
+            Some(policy) => self.validator.policies_mut().set(collection, policy),
+            None => {
+                self.validator.policies_mut().remove(collection);
+            }
+        }
+    }
+
     /// Set conflict resolution policy for a collection from JSON.
     ///
     /// Called when the Data Plane receives a `SetCollectionPolicy` physical plan

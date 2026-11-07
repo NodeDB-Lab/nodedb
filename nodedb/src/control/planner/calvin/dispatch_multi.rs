@@ -180,9 +180,11 @@ fn admit_legacy_multi_shard_dispatch(
 
 /// Drive the authorized strict Calvin multi-shard path.
 ///
-/// This API serves multi-shard dispatch only. Its strict branch delegates to
-/// [`dispatch_strict_atomic_tasks_to_calvin`], while best-effort remains
-/// rejected because this helper has no non-atomic dispatch implementation.
+/// This API serves multi-shard dispatch, and a one-vShard autocommit set that
+/// holds settlement reads. Its strict branch delegates to
+/// [`dispatch_strict_atomic_tasks_to_calvin`], while multi-shard best-effort
+/// remains rejected because this helper has no non-atomic dispatch
+/// implementation.
 /// The transaction carries the roles of the identity the tasks were
 /// authorized for. `reads` are a statement's plan-derivation reads, each at
 /// the cut it pinned.
@@ -204,10 +206,28 @@ pub async fn dispatch_authorized_tasks_to_calvin(
         .into_iter()
         .map(|task| task.into_physical_task())
         .collect();
+    super::settling_writes::refuse_several_returning_tasks(&tasks)?;
     let read_vshards = read_vshards_of(reads)?;
     match classify_dispatch(&tasks, &read_vshards) {
         DispatchClass::MultiShard { .. } => {
             admit_legacy_multi_shard_dispatch(cross_shard_mode, position)?;
+            dispatch_strict_atomic_tasks_to_calvin(
+                state,
+                &tasks,
+                tenant_id,
+                position,
+                TxnReads::autocommit(reads)?,
+                lock_owner,
+                TxnProvenance::client(user_roles),
+            )
+            .await
+        }
+        // A zero-net settlement ships no task, so its set can hold one vShard.
+        // Its reads still guard the balance, so it commits through the
+        // scheduler in every cross-shard mode.
+        DispatchClass::SingleShard { .. }
+            if !reads.is_empty() && position == TxnDispatchPosition::Autocommit =>
+        {
             dispatch_strict_atomic_tasks_to_calvin(
                 state,
                 &tasks,

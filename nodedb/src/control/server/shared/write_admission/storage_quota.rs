@@ -251,7 +251,11 @@ mod tests {
             admit(
                 500,
                 &limits,
-                &PhysicalPlan::Meta(MetaOp::PurgeTenant { tenant_id: 7 })
+                &PhysicalPlan::Meta(MetaOp::PurgeTenant {
+                    tenant_id: 7,
+                    collections: Vec::new(),
+                    vshards: Vec::new(),
+                })
             )
             .is_ok()
         );

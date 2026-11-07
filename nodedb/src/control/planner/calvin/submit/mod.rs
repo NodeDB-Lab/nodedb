@@ -37,8 +37,8 @@ pub mod local;
 pub mod parts;
 pub mod prepare;
 pub mod routed;
-pub mod storage_gate;
 pub mod stream;
+pub mod submit_gate;
 pub mod unique_claims;
 pub mod wait;
 

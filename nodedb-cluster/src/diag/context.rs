@@ -175,9 +175,143 @@ impl DomainContext for SequencerParticipantsUnderivable<'_> {
     }
 }
 
+/// One failed commit of a Raft group's disk writer.
+pub(super) struct RaftDiskWriteFailure<'a> {
+    /// `io_error_retried`, `fail_stopped` or `abandoned_on_close`.
+    pub cause: &'static str,
+    pub group_id: u64,
+    pub attempt: u32,
+    /// The kinds of the writes of the failed run.
+    pub ops: &'a [&'static str],
+    pub error: &'a str,
+}
+
+impl DomainContext for RaftDiskWriteFailure<'_> {
+    fn domain_kind(&self) -> &'static str {
+        "nodedb_cluster.raft_disk_write_failure"
+    }
+
+    fn grouping_key(&self) -> String {
+        // The cause names the bug. The group, the attempt and the error text
+        // are the occurrence: one full disk fails every group's writes.
+        self.cause.to_owned()
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "cause": self.cause,
+            "group_id": self.group_id,
+            "attempt": self.attempt,
+            "ops": self.ops,
+            "error": self.error,
+            "why_fatal": "every later write of the group depends on this one, so the group's \
+                          disk makes no progress here. 'fail_stopped': this replica leads \
+                          nothing and answers no Raft request until a restart. \
+                          'abandoned_on_close': the writes never became durable, and their \
+                          waiters got an error",
+            "operator_action": "'io_error_retried': check the disk holding the group's log, \
+                                 for space and I/O errors; the writer resumes when it recovers. \
+                                 'fail_stopped': fix the cause named in the error and restart \
+                                 the node; the other replicas carry the group meanwhile",
+        })
+    }
+}
+
+/// A Calvin verdict that differs from the verdict stored for its transaction.
+pub(super) struct CalvinVerdictConflict<'a> {
+    pub epoch: u64,
+    pub position: u32,
+    /// `commit_or_abort` or `abort_cause`.
+    pub difference: &'static str,
+    pub kept: &'a str,
+    pub refused: &'a str,
+}
+
+impl DomainContext for CalvinVerdictConflict<'_> {
+    fn domain_kind(&self) -> &'static str {
+        "nodedb_cluster.calvin_verdict_conflict"
+    }
+
+    fn grouping_key(&self) -> String {
+        // A flipped decision and a changed cause are different bugs. The
+        // transaction identifies the occurrence.
+        self.difference.to_owned()
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "epoch": self.epoch,
+            "position": self.position,
+            "difference": self.difference,
+            "kept": self.kept,
+            "refused": self.refused,
+            "why_fatal": "a verdict is a pure function of replicated votes, so two verdicts for \
+                          one transaction mean the tally or the votes differ between the two \
+                          proposers. Participants act on the first verdict the log holds, and \
+                          every replica keeps that one",
+            "operator_action": "compare the votes of this transaction in the sequencer log with \
+                                 the two verdicts, and find the proposer whose tally differs",
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_disk_failure_groups_by_cause_alone() {
+        let early = RaftDiskWriteFailure {
+            cause: "io_error_retried",
+            group_id: 1,
+            attempt: 1,
+            ops: &["append"],
+            error: "no space",
+        };
+        let late = RaftDiskWriteFailure {
+            cause: "io_error_retried",
+            group_id: 9,
+            attempt: 40,
+            ops: &["hard_state"],
+            error: "bad block",
+        };
+        let stopped = RaftDiskWriteFailure {
+            cause: "fail_stopped",
+            group_id: 1,
+            attempt: 1,
+            ops: &["append"],
+            error: "no space",
+        };
+        assert_eq!(early.grouping_key(), late.grouping_key());
+        assert_ne!(early.grouping_key(), stopped.grouping_key());
+    }
+
+    #[test]
+    fn a_verdict_conflict_groups_by_its_difference() {
+        let flipped = CalvinVerdictConflict {
+            epoch: 1,
+            position: 0,
+            difference: "commit_or_abort",
+            kept: "Commit",
+            refused: "Abort",
+        };
+        let other_txn = CalvinVerdictConflict {
+            epoch: 9,
+            position: 3,
+            difference: "commit_or_abort",
+            kept: "Abort",
+            refused: "Commit",
+        };
+        let cause = CalvinVerdictConflict {
+            epoch: 1,
+            position: 0,
+            difference: "abort_cause",
+            kept: "Abort",
+            refused: "Abort",
+        };
+        assert_eq!(flipped.grouping_key(), other_txn.grouping_key());
+        assert_ne!(flipped.grouping_key(), cause.grouping_key());
+    }
 
     #[test]
     fn epoch_gap_grouping_ignores_the_exact_epochs() {

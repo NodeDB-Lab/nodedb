@@ -204,7 +204,7 @@ pub fn execute_continuation<'a>(
 
     let mut state = ExecutionState::new(is_remote_node, varlen_caps);
     state.collection_filter =
-        super::expansion::resolve_collection_filter(query.collection.as_deref(), csr);
+        super::expansion::query_collection_filter(query, props.collection, csr);
 
     // Resume the chain from the originating shard's stopping point. The seed
     // row already carries the bindings for triples [0, seed.triple_idx).
@@ -320,7 +320,7 @@ pub fn execute_varlen_resume<'a>(
 
     let mut state = ExecutionState::new(is_remote_node, varlen_caps);
     state.collection_filter =
-        super::expansion::resolve_collection_filter(query.collection.as_deref(), csr);
+        super::expansion::query_collection_filter(query, props.collection, csr);
 
     // Rebuild the pattern shape for the truncated triple verbatim (no
     // re-optimization). `want_path` matches the from-scratch branch in

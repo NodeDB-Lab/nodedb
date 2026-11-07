@@ -71,6 +71,15 @@ pub(crate) async fn flush_authenticated_ilp_batch(
         ClientRequestScope::for_database(identity, state.auth_stores(), database_id, peer_addr)?;
     crate::control::server::session_auth::check_blacklist_and_status(state, &request)?;
 
+    // Before the preflight, whose refusal carries no class. A mirror refuses
+    // the batch whatever its lines hold, and creates no measurement.
+    crate::control::server::shared::write_admission::check_mirror_writable(
+        state,
+        database_id,
+        crate::event::EventSource::User,
+        || Ok(true),
+    )?;
+
     let audit = ArcAuditEmitter(Arc::clone(&state.audit));
     let groups = preflight_ilp_batch(
         identity,
@@ -461,6 +470,46 @@ mod tests {
                 None,
             )
             .expect("in-memory grant succeeds");
+    }
+
+    /// A batch for a mirror writes no row and creates no collection for its
+    /// measurement.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_batch_for_a_mirror_writes_nothing() {
+        let cluster = crate::control::cluster::test_one_node::boot_with(|_| {}).await;
+        let database_id = DatabaseId::new(7);
+        cluster
+            .state
+            .mirror
+            .fence
+            .mark_read_only_for_test(database_id, "mirror_db");
+
+        let result = flush_authenticated_ilp_batch(
+            &cluster.state,
+            &identity(database_id),
+            database_id,
+            "127.0.0.1:9009",
+            "cpu value=1i\n",
+        )
+        .await;
+
+        // ILP has no per-line answer: the connection ends with this error, so
+        // the protocol carries no code to assert.
+        assert!(
+            matches!(&result, Err(crate::Error::MirrorReadOnly { database }) if database == "mirror_db"),
+            "a mirror refuses the batch with its typed error: {result:?}"
+        );
+        assert!(
+            cluster
+                .state
+                .credentials
+                .catalog()
+                .get_collection(database_id, 9, "cpu")
+                .expect("read catalog collection projection")
+                .is_none(),
+            "a refused batch must not create a collection"
+        );
+        cluster.shutdown().await;
     }
 
     #[tokio::test]

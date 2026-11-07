@@ -33,13 +33,18 @@ pub fn check_ip_against_cidrs<'a>(ip_str: &str, entries: &'a [String]) -> Option
 /// silently defeat every lookup (exact-match and CIDR alike), so this is
 /// the single normalization point both are run through.
 ///
+/// A dual-stack listener reports an IPv4 peer as `::ffff:a.b.c.d`. It returns
+/// the IPv4 form, the form an exact entry is keyed under.
+///
 /// Returns `None` if `s` is neither a valid `IpAddr` nor a valid
 /// `SocketAddr`.
 pub fn normalize_peer_ip(s: &str) -> Option<IpAddr> {
     if let Ok(ip) = s.parse::<IpAddr>() {
-        return Some(ip);
+        return Some(ip.to_canonical());
     }
-    s.parse::<SocketAddr>().ok().map(|sa| sa.ip())
+    s.parse::<SocketAddr>()
+        .ok()
+        .map(|sa| sa.ip().to_canonical())
 }
 
 /// A set of CIDR-range entries, each keyed by a string and carrying an
@@ -167,6 +172,13 @@ mod tests {
             Some("10.0.0.5".parse().unwrap())
         );
         assert_eq!(normalize_peer_ip("::1"), Some("::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn normalize_peer_ip_returns_a_mapped_peer_in_its_ipv4_form() {
+        let v4 = Some("10.0.0.5".parse().unwrap());
+        assert_eq!(normalize_peer_ip("::ffff:10.0.0.5"), v4);
+        assert_eq!(normalize_peer_ip("[::ffff:10.0.0.5]:54321"), v4);
     }
 
     #[test]

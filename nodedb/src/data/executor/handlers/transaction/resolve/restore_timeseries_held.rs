@@ -22,15 +22,18 @@ use nodedb_types::value::Value;
 
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::timeseries::partition_read::{
-    TsPartitionColumns, read_ts_partition,
+    TsPartitionColumns, account_partition_read, partition_corrupt, read_ts_partition,
 };
 use crate::engine::timeseries::columnar_memtable::ColumnData;
 use crate::engine::timeseries::row_cells::{
-    insert_non_null, memtable_cell, partition_cell, row_identity,
+    PartitionCellError, insert_non_null, memtable_cell, read_partition_cell, row_identity,
 };
 use crate::types::TenantId;
 
 use super::restore_reassert::RestoreScope;
+
+/// The read path the corruption report names.
+const SITE: &str = "restore_resolve";
 
 /// Identity counts of stored rows.
 pub(super) type HeldRows = HashMap<Vec<u8>, usize>;
@@ -130,6 +133,8 @@ impl CoreLoop {
         let Some(registry) = self.ts_registries.get(&key) else {
             return Ok(held);
         };
+        let quarantine =
+            self.ts_partition_quarantine(scope.database_id, TenantId::new(scope.tid), collection);
         let everything = nodedb_types::timeseries::TimeRange::new(i64::MIN, i64::MAX);
         let base = crate::data::executor::handlers::timeseries::paths::ts_collection_dir(
             &self.data_dir,
@@ -144,14 +149,15 @@ impl CoreLoop {
             if entry.meta.max_system_ts > 0 && entry.meta.max_system_ts < lowest {
                 continue;
             }
+            let part_dir = base.join(&entry.dir_name);
             let TsPartitionColumns {
                 schema,
                 columns,
                 sym_dicts,
-            } = read_ts_partition(
-                &base.join(&entry.dir_name),
-                "restore_resolve",
-                self.segment_keks.ts_segment_kek.as_ref(),
+            } = account_partition_read(
+                quarantine.as_ref(),
+                &part_dir,
+                read_ts_partition(&part_dir, SITE, self.segment_keks.ts_segment_kek.as_ref()),
             )?;
             let row_count = columns
                 .get(schema.timestamp_idx)
@@ -174,8 +180,18 @@ impl CoreLoop {
                     let Some(data) = columns.get(col_idx).and_then(Option::as_ref) else {
                         continue;
                     };
-                    let cell = partition_cell(data, *ty, col_idx, &sym_dicts, idx)
-                        .map_err(|e| cell_error(collection, name, e))?;
+                    let cell =
+                        read_partition_cell(data, *ty, col_idx, &sym_dicts, idx).map_err(|e| {
+                            match e {
+                                PartitionCellError::Instant(e) => cell_error(collection, name, e),
+                                corrupt => partition_corrupt(
+                                    &part_dir,
+                                    "cell",
+                                    SITE,
+                                    format!("column '{name}': {corrupt}"),
+                                ),
+                            }
+                        })?;
                     insert_non_null(&mut fields, name, cell);
                 }
                 if let Some(system) = system {

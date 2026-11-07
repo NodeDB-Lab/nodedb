@@ -57,6 +57,24 @@ pub fn put_state(state: &SequenceState, catalog: &SystemCatalog) -> crate::Resul
     })
 }
 
+/// Write `next` only over the row `expected` names.
+///
+/// Every node reads the same row in log order, so each reaches one verdict. A
+/// replayed entry finds the row past it and changes nothing.
+pub fn reserve_range(
+    expected: Option<&SequenceState>,
+    next: &SequenceState,
+    catalog: &SystemCatalog,
+) -> crate::Result<()> {
+    let held = catalog
+        .get_sequence_state(next.database_id, next.tenant_id, &next.name)
+        .map_err(|e| catalog_err(&format!("get_sequence_state '{}'", next.name), e))?;
+    if held.as_ref() != expected {
+        return Ok(());
+    }
+    put_state(next, catalog)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -75,6 +93,55 @@ mod tests {
             CredentialStore::open(&tmp.path().join("system.redb")).expect("open credential store"),
         );
         (store, tmp)
+    }
+
+    fn row(value: i64, node_id: u64) -> SequenceState {
+        SequenceState {
+            current_value: value,
+            is_called: true,
+            reservation: Some(
+                crate::control::security::catalog::sequence_types::SequenceReservation {
+                    node_id,
+                    request_id: 1,
+                },
+            ),
+            ..SequenceState::new(3, 1, "counter".into(), 1, 1)
+        }
+    }
+
+    /// Of two entries that read one row, the first in the log wins. A replay of
+    /// the first finds the row past it, and every node stays on one counter.
+    #[test]
+    fn a_reservation_applies_only_over_the_row_it_read() {
+        let (store, _tmp) = open_catalog();
+        let catalog = store.catalog();
+        let read = |value: i64| {
+            catalog
+                .get_sequence_state(3, 1, "counter")
+                .expect("read")
+                .is_some_and(|held| held.current_value == value)
+        };
+        let first = CatalogEntry::ReserveSequenceRange {
+            expected: None,
+            next: Box::new(row(64, 1)),
+        };
+        let lost = CatalogEntry::ReserveSequenceRange {
+            expected: None,
+            next: Box::new(row(64, 2)),
+        };
+        let second = CatalogEntry::ReserveSequenceRange {
+            expected: Some(Box::new(row(64, 1))),
+            next: Box::new(row(128, 3)),
+        };
+        apply_to(&first, catalog).expect("first");
+        apply_to(&lost, catalog).expect("lost");
+        assert_eq!(
+            catalog.get_sequence_state(3, 1, "counter").expect("read"),
+            Some(row(64, 1))
+        );
+        apply_to(&second, catalog).expect("second");
+        apply_to(&first, catalog).expect("replay");
+        assert!(read(128));
     }
 
     #[test]

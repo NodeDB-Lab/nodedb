@@ -2,21 +2,26 @@
 
 //! Audit-log consumer for the session-invalidation and user-change buses.
 //!
+//! This task writes audit rows and does nothing else. A hard revoke ends its
+//! sessions on the credential mutation's own path
+//! (`CredentialStore::end_sessions_on_hard_revoke`), so a lagging consumer
+//! costs audit rows and never a revocation.
+//!
 //! `spawn_bus_consumer` launches a single Tokio task that:
 //!
-//! 1. Selects across the two broadcast receivers.
-//! 2. On `SessionInvalidated` with a hard-revoke reason: writes the
-//!    `AuditEvent::SessionRevoked` row first (durable before close),
-//!    then calls `session_registry.kill_sessions_for_user` to signal
-//!    open sessions.
-//! 3. On `SessionInvalidated` with a soft-revoke reason: writes the
-//!    `AuditEvent::SessionRevoked` audit row.  Identity rehydrate is
-//!    driven by the version check at request-entry time — no explicit
-//!    session signal needed here.
-//! 4. On `UserChanged`: writes an `AuditEvent::PrivilegeChange` row.
-//! 5. On receiver lag (`RecvError::Lagged`): writes an
-//!    `AuditEvent::AuditBusLagged` row so operators can detect dropped events.
-//! 6. On `RecvError::Closed` (both senders dropped): exits cleanly.
+//! 1. Waits on the two broadcast receivers.
+//! 2. Takes every event ready on both as one batch, up to [`MAX_BATCH`].
+//! 3. Records the batch with one WAL sync, on a blocking thread, so the wait
+//!    never holds a Tokio worker. It waits for that sync before the next batch.
+//!
+//! Each event maps to one row:
+//!
+//! - `SessionInvalidated`: `AuditEvent::SessionRevoked`.
+//! - `UserChanged`: `AuditEvent::PrivilegeChange`.
+//! - A receiver lag (`Lagged`): `AuditEvent::AuditBusLagged`, naming how many
+//!   rows it lost, plus a diagnostics report.
+//!
+//! The task exits once both senders are gone and both receivers are drained.
 //!
 //! The returned `JoinHandle` is stored as `SharedState::bus_consumer_handle`.
 //! Graceful shutdown drops the `SessionInvalidationBus` / `UserChangeBus`
@@ -25,21 +30,108 @@
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::broadcast;
+use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 
 use crate::control::security::audit::event::AuditEvent;
 use crate::control::security::audit::log::AuditLog;
-use crate::control::security::audit::{AuditAuth, AuditRecordInput, record_concurrent};
-use crate::control::security::sessions::SessionRegistry;
+use crate::control::security::audit::{AuditAuth, AuditRecordInput, record_batch_best_effort};
 
-use super::session_invalidation::SessionInvalidated;
-use super::user_change::UserChanged;
+use super::session_invalidation::{SESSION_INVALIDATION_CHANNEL_CAPACITY, SessionInvalidated};
+use super::user_change::{USER_CHANGE_CHANNEL_CAPACITY, UserChanged};
+
+/// The most rows one sync covers: a full buffer of each bus.
+const MAX_BATCH: usize = SESSION_INVALIDATION_CHANNEL_CAPACITY + USER_CHANGE_CHANNEL_CAPACITY;
+
+const SESSION_INVALIDATION_BUS: &str = "session_invalidation_bus";
+const USER_CHANGE_BUS: &str = "user_change_bus";
+
+/// One audit row a bus event produces.
+struct BusRow {
+    event: AuditEvent,
+    source: &'static str,
+    detail: String,
+    /// The bus and event count of a lag this row records.
+    lag: Option<(&'static str, u64)>,
+}
+
+impl From<&SessionInvalidated> for BusRow {
+    fn from(event: &SessionInvalidated) -> Self {
+        Self {
+            event: AuditEvent::SessionRevoked,
+            source: SESSION_INVALIDATION_BUS,
+            detail: format!("user_id={} reason={}", event.user_id, event.reason.as_str()),
+            lag: None,
+        }
+    }
+}
+
+impl From<&UserChanged> for BusRow {
+    fn from(event: &UserChanged) -> Self {
+        Self {
+            event: AuditEvent::PrivilegeChange,
+            source: USER_CHANGE_BUS,
+            detail: format!("user_id={} credential_mutation", event.user_id),
+            lag: None,
+        }
+    }
+}
+
+/// The row for `dropped` events a lag lost on `bus`.
+fn lag_row(bus: &'static str, dropped: u64) -> BusRow {
+    BusRow {
+        event: AuditEvent::AuditBusLagged,
+        source: "bus_consumer",
+        detail: format!("{bus} lagged; dropped={dropped}"),
+        lag: Some((bus, dropped)),
+    }
+}
+
+/// One receiver and whether its bus still has senders.
+struct BusFeed<T> {
+    rx: broadcast::Receiver<T>,
+    bus: &'static str,
+    open: bool,
+}
+
+impl<T: Clone> BusFeed<T>
+where
+    for<'a> BusRow: From<&'a T>,
+{
+    fn new(rx: broadcast::Receiver<T>, bus: &'static str) -> Self {
+        Self {
+            rx,
+            bus,
+            open: true,
+        }
+    }
+
+    /// Add the outcome of one awaited receive to `batch`.
+    fn note_received(&mut self, result: Result<T, RecvError>, batch: &mut Vec<BusRow>) {
+        match result {
+            Ok(event) => batch.push(BusRow::from(&event)),
+            Err(RecvError::Lagged(dropped)) => batch.push(lag_row(self.bus, dropped)),
+            Err(RecvError::Closed) => self.open = false,
+        }
+    }
+
+    /// Add every event ready now to `batch`, up to [`MAX_BATCH`].
+    fn drain_ready(&mut self, batch: &mut Vec<BusRow>) {
+        while self.open && batch.len() < MAX_BATCH {
+            match self.rx.try_recv() {
+                Ok(event) => batch.push(BusRow::from(&event)),
+                Err(TryRecvError::Lagged(dropped)) => batch.push(lag_row(self.bus, dropped)),
+                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Closed) => self.open = false,
+            }
+        }
+    }
+}
 
 /// Spawn the bus consumer task.
 ///
 /// - `si_rx`: pre-subscribed receiver for the session-invalidation bus.
 /// - `uc_rx`: pre-subscribed receiver for the user-change bus.
 /// - `audit`: shared audit log.
-/// - `session_registry`: active session registry; used for hard-revoke.
 ///
 /// Returns a `JoinHandle` suitable for storing in `SharedState::bus_consumer_handle`,
 /// or `None` when there is no Tokio runtime to spawn onto — a `SharedState` built
@@ -49,7 +141,6 @@ pub fn spawn_bus_consumer(
     si_rx: broadcast::Receiver<SessionInvalidated>,
     uc_rx: broadcast::Receiver<UserChanged>,
     audit: Arc<Mutex<AuditLog>>,
-    session_registry: Arc<SessionRegistry>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
         tracing::debug!(
@@ -57,150 +148,63 @@ pub fn spawn_bus_consumer(
         );
         return None;
     };
-    Some(handle.spawn(run_bus_consumer(si_rx, uc_rx, audit, session_registry)))
+    Some(handle.spawn(run_bus_consumer(si_rx, uc_rx, audit)))
 }
 
 async fn run_bus_consumer(
-    mut si_rx: broadcast::Receiver<SessionInvalidated>,
-    mut uc_rx: broadcast::Receiver<UserChanged>,
+    si_rx: broadcast::Receiver<SessionInvalidated>,
+    uc_rx: broadcast::Receiver<UserChanged>,
     audit: Arc<Mutex<AuditLog>>,
-    session_registry: Arc<SessionRegistry>,
 ) {
-    loop {
+    let mut si = BusFeed::new(si_rx, SESSION_INVALIDATION_BUS);
+    let mut uc = BusFeed::new(uc_rx, USER_CHANGE_BUS);
+    while si.open || uc.open {
+        let mut batch = Vec::new();
         tokio::select! {
             biased;
 
-            result = si_rx.recv() => {
-                match result {
-                    Ok(event) => {
-                        handle_session_invalidated(&audit, &session_registry, &event);
-                    }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        record_lagged(
-                            &audit,
-                            &format!("session_invalidation_bus lagged; dropped={n}"),
-                        );
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        drain_user_change_to_closed(&mut uc_rx, &audit).await;
-                        return;
-                    }
-                }
-            }
-
-            result = uc_rx.recv() => {
-                match result {
-                    Ok(event) => {
-                        handle_user_changed(&audit, &event);
-                    }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        record_lagged(
-                            &audit,
-                            &format!("user_change_bus lagged; dropped={n}"),
-                        );
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        drain_session_invalidation_to_closed(
-                            &mut si_rx,
-                            &audit,
-                            &session_registry,
-                        )
-                        .await;
-                        return;
-                    }
-                }
-            }
+            result = si.rx.recv(), if si.open => si.note_received(result, &mut batch),
+            result = uc.rx.recv(), if uc.open => uc.note_received(result, &mut batch),
         }
+        si.drain_ready(&mut batch);
+        uc.drain_ready(&mut batch);
+        record_off_worker(&audit, batch).await;
     }
 }
 
-async fn drain_session_invalidation_to_closed(
-    si_rx: &mut broadcast::Receiver<SessionInvalidated>,
-    audit: &Arc<Mutex<AuditLog>>,
-    session_registry: &Arc<SessionRegistry>,
-) {
-    loop {
-        match si_rx.recv().await {
-            Ok(event) => handle_session_invalidated(audit, session_registry, &event),
-            Err(broadcast::error::RecvError::Lagged(n)) => {
-                record_lagged(
-                    audit,
-                    &format!("session_invalidation_bus lagged; dropped={n}"),
-                );
-            }
-            Err(broadcast::error::RecvError::Closed) => return,
-        }
+/// Record `batch` on a blocking thread and wait for it.
+async fn record_off_worker(audit: &Arc<Mutex<AuditLog>>, batch: Vec<BusRow>) {
+    if batch.is_empty() {
+        return;
+    }
+    let rows = batch.len();
+    let audit = Arc::clone(audit);
+    let recorded = tokio::task::spawn_blocking(move || record_rows(&audit, &batch)).await;
+    if let Err(error) = recorded {
+        tracing::error!(%error, rows, "bus_consumer: the audit batch task did not finish");
+        crate::diag::security_bus_rows_not_recorded(rows);
     }
 }
 
-async fn drain_user_change_to_closed(
-    uc_rx: &mut broadcast::Receiver<UserChanged>,
-    audit: &Arc<Mutex<AuditLog>>,
-) {
-    loop {
-        match uc_rx.recv().await {
-            Ok(event) => handle_user_changed(audit, &event),
-            Err(broadcast::error::RecvError::Lagged(n)) => {
-                record_lagged(audit, &format!("user_change_bus lagged; dropped={n}"));
-            }
-            Err(broadcast::error::RecvError::Closed) => return,
-        }
-    }
-}
-
-fn handle_session_invalidated(
-    audit: &Arc<Mutex<AuditLog>>,
-    session_registry: &Arc<SessionRegistry>,
-    event: &SessionInvalidated,
-) {
-    // Audit row written BEFORE closing any connection — durable even if
-    // the close subsequently fails.
-    let detail = format!("user_id={} reason={}", event.user_id, event.reason.as_str());
-    record_bus_audit(
+/// Record `rows` in order with one WAL sync, outside the audit lock. A lag row
+/// also files its diagnostics report. Runs off the Tokio workers because both
+/// the sync and the report wait on disk.
+fn record_rows(audit: &Mutex<AuditLog>, rows: &[BusRow]) {
+    let auth = AuditAuth::default();
+    record_batch_best_effort(
         audit,
-        AuditEvent::SessionRevoked,
-        "session_invalidation_bus",
-        &detail,
-    );
-
-    // Hard revoke: signal every open session for this user to close.
-    if event.reason.is_hard_revoke() {
-        session_registry.kill_sessions_for_user(
-            event.user_id,
-            crate::control::security::sessions::KillReason::UserDropped,
-        );
-    }
-    // Soft revoke: identity rehydrate is driven by the per-user version
-    // counter at the next request-entry boundary — no explicit signal needed.
-}
-
-fn handle_user_changed(audit: &Arc<Mutex<AuditLog>>, event: &UserChanged) {
-    let detail = format!("user_id={} credential_mutation", event.user_id);
-    record_bus_audit(
-        audit,
-        AuditEvent::PrivilegeChange,
-        "user_change_bus",
-        &detail,
-    );
-}
-
-fn record_lagged(audit: &Arc<Mutex<AuditLog>>, detail: &str) {
-    record_bus_audit(audit, AuditEvent::AuditBusLagged, "bus_consumer", detail);
-}
-
-/// Record one bus entry, with the sync wait outside the audit lock.
-fn record_bus_audit(audit: &Mutex<AuditLog>, event: AuditEvent, source: &str, detail: &str) {
-    record_concurrent(
-        audit,
-        AuditRecordInput {
-            event,
+        rows.iter().map(|row| AuditRecordInput {
+            event: row.event.clone(),
             tenant_id: None,
             database_id: None,
-            source,
-            detail,
-            auth: &AuditAuth::default(),
-        },
+            source: row.source,
+            detail: &row.detail,
+            auth: &auth,
+        }),
     );
+    for (bus, dropped) in rows.iter().filter_map(|row| row.lag) {
+        crate::diag::security_bus_lagged(bus, dropped);
+    }
 }
 
 #[cfg(test)]
@@ -210,29 +214,27 @@ mod tests {
         SessionInvalidationBus, SessionInvalidationReason,
     };
     use crate::control::security::buses::user_change::UserChangeBus;
-    use crate::control::security::sessions::registry::{SessionParams, SessionRegistry};
 
     fn make_audit() -> Arc<Mutex<AuditLog>> {
         Arc::new(Mutex::new(AuditLog::new(1_000)))
     }
 
-    fn make_registry() -> Arc<SessionRegistry> {
-        Arc::new(SessionRegistry::new())
+    fn invalidated(user_id: u64) -> SessionInvalidated {
+        SessionInvalidated {
+            user_id,
+            reason: SessionInvalidationReason::UserDropped,
+        }
     }
 
     #[tokio::test]
     async fn session_invalidated_produces_audit_row() {
         let audit = make_audit();
-        let registry = make_registry();
         let (si_bus, si_rx) = SessionInvalidationBus::new();
         let (uc_bus, uc_rx) = UserChangeBus::new();
 
-        let handle = spawn_bus_consumer(si_rx, uc_rx, Arc::clone(&audit), Arc::clone(&registry));
+        let handle = spawn_bus_consumer(si_rx, uc_rx, Arc::clone(&audit));
 
-        si_bus.publish(SessionInvalidated {
-            user_id: 99,
-            reason: SessionInvalidationReason::UserDropped,
-        });
+        si_bus.publish(invalidated(99));
 
         drop(si_bus);
         drop(uc_bus);
@@ -249,68 +251,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_invalidation_consumer_hard_revoke() {
-        let audit = make_audit();
-        let registry = Arc::new(SessionRegistry::new());
-        let (si_bus, si_rx) = SessionInvalidationBus::new();
-        let (uc_bus, uc_rx) = UserChangeBus::new();
-
-        // Register a session for user 42.
-        let params = SessionParams {
-            user_id: 42,
-            username: "alice".into(),
-            db_user: "alice".into(),
-            peer_addr: "127.0.0.1:5000".into(),
-            protocol: "native".into(),
-            auth_method: "password".into(),
-            tenant_id: 1,
-            credential_version: 0,
-            current_database: None,
-            token_expiry_ms: None,
-        };
-        let mut kill_rx = registry.register("session-42", &params).unwrap();
-
-        let handle = spawn_bus_consumer(si_rx, uc_rx, Arc::clone(&audit), Arc::clone(&registry));
-
-        si_bus.publish(SessionInvalidated {
-            user_id: 42,
-            reason: SessionInvalidationReason::UserDropped,
-        });
-
-        drop(si_bus);
-        drop(uc_bus);
-        handle
-            .expect("bus consumer spawns under #[tokio::test]")
-            .await
-            .expect("consumer task panicked");
-
-        // Audit row must be present.
-        {
-            let log = audit.lock().unwrap();
-            let rows = log.query_by_event(&AuditEvent::SessionRevoked);
-            assert_eq!(rows.len(), 1, "audit row must exist before session close");
-        }
-
-        // Kill signal must have fired.
-        assert!(
-            kill_rx.has_changed().unwrap_or(false),
-            "kill_rx must be signalled for hard revoke"
-        );
-        assert_ne!(
-            *kill_rx.borrow_and_update(),
-            crate::control::security::sessions::KillReason::Alive,
-            "kill value must not be Alive"
-        );
-    }
-
-    #[tokio::test]
     async fn user_changed_produces_audit_row() {
         let audit = make_audit();
-        let registry = make_registry();
         let (si_bus, si_rx) = SessionInvalidationBus::new();
         let (uc_bus, uc_rx) = UserChangeBus::new();
 
-        let handle = spawn_bus_consumer(si_rx, uc_rx, Arc::clone(&audit), Arc::clone(&registry));
+        let handle = spawn_bus_consumer(si_rx, uc_rx, Arc::clone(&audit));
 
         uc_bus.publish(UserChanged { user_id: 55 });
 
@@ -330,11 +276,10 @@ mod tests {
     #[tokio::test]
     async fn both_buses_produce_rows() {
         let audit = make_audit();
-        let registry = make_registry();
         let (si_bus, si_rx) = SessionInvalidationBus::new();
         let (uc_bus, uc_rx) = UserChangeBus::new();
 
-        let handle = spawn_bus_consumer(si_rx, uc_rx, Arc::clone(&audit), Arc::clone(&registry));
+        let handle = spawn_bus_consumer(si_rx, uc_rx, Arc::clone(&audit));
 
         si_bus.publish(SessionInvalidated {
             user_id: 1,
@@ -354,22 +299,78 @@ mod tests {
         assert_eq!(log.query_by_event(&AuditEvent::PrivilegeChange).len(), 1);
     }
 
+    /// A publisher that overruns the consumer costs audit rows only. The lost
+    /// count reaches the audit log, and the events still held are recorded.
+    #[tokio::test]
+    async fn a_lag_records_how_many_rows_it_lost() {
+        let audit = make_audit();
+        let (si_bus, si_rx) = SessionInvalidationBus::new();
+        let (uc_bus, uc_rx) = UserChangeBus::new();
+
+        // The consumer starts after the overrun, so the lag is certain.
+        let overrun = 3;
+        for user_id in 0..(SESSION_INVALIDATION_CHANNEL_CAPACITY as u64 + overrun) {
+            si_bus.publish(invalidated(user_id));
+        }
+        let handle = spawn_bus_consumer(si_rx, uc_rx, Arc::clone(&audit));
+
+        drop(si_bus);
+        drop(uc_bus);
+        handle
+            .expect("bus consumer spawns under #[tokio::test]")
+            .await
+            .expect("consumer task panicked");
+
+        let log = audit.lock().unwrap();
+        let lagged = log.query_by_event(&AuditEvent::AuditBusLagged);
+        assert_eq!(lagged.len(), 1);
+        assert!(lagged[0].detail.contains(SESSION_INVALIDATION_BUS));
+        assert!(lagged[0].detail.contains(&format!("dropped={overrun}")));
+        assert_eq!(
+            log.query_by_event(&AuditEvent::SessionRevoked).len(),
+            SESSION_INVALIDATION_CHANNEL_CAPACITY
+        );
+    }
+
+    /// A lag on the user-change bus costs its audit rows and nothing else.
+    #[tokio::test]
+    async fn a_user_change_lag_records_how_many_rows_it_lost() {
+        let audit = make_audit();
+        let (si_bus, si_rx) = SessionInvalidationBus::new();
+        let (uc_bus, uc_rx) = UserChangeBus::new();
+
+        for user_id in 0..(USER_CHANGE_CHANNEL_CAPACITY as u64 + 1) {
+            uc_bus.publish(UserChanged { user_id });
+        }
+        let handle = spawn_bus_consumer(si_rx, uc_rx, Arc::clone(&audit));
+
+        drop(si_bus);
+        drop(uc_bus);
+        handle
+            .expect("bus consumer spawns under #[tokio::test]")
+            .await
+            .expect("consumer task panicked");
+
+        let log = audit.lock().unwrap();
+        let lagged = log.query_by_event(&AuditEvent::AuditBusLagged);
+        assert_eq!(lagged.len(), 1);
+        assert!(lagged[0].detail.contains(USER_CHANGE_BUS));
+    }
+
     #[test]
     fn bus_consumer_entries_survive_a_crash() {
         use crate::control::security::audit::restore::{audit_with_test_wal, replay_after_crash};
 
         let dir = tempfile::tempdir().expect("tempdir");
         let (audit, wal) = audit_with_test_wal(dir.path());
-        handle_session_invalidated(
+        record_rows(
             &audit,
-            &make_registry(),
-            &SessionInvalidated {
-                user_id: 41,
-                reason: SessionInvalidationReason::UserDropped,
-            },
+            &[
+                BusRow::from(&invalidated(41)),
+                BusRow::from(&UserChanged { user_id: 42 }),
+                lag_row(USER_CHANGE_BUS, 3),
+            ],
         );
-        handle_user_changed(&audit, &UserChanged { user_id: 42 });
-        record_lagged(&audit, "lagged by 3");
         drop(audit);
 
         let sources: Vec<String> = replay_after_crash(&wal)

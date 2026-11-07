@@ -30,6 +30,12 @@ pub enum SpatialError {
     /// `ST_MakeValid` cannot repair the input.
     #[error("cannot repair geometry: {reason}")]
     Repair { reason: Box<str> },
+    /// A buffer's segments per circle exceed the cap, which bounds its vertices.
+    #[error(
+        "a buffer takes at most {max} segments per circle, got {requested}; \
+         pass a smaller segment count"
+    )]
+    BufferSegments { requested: usize, max: usize },
     /// A DE-9IM pattern is not 9 characters of `0 1 2 T F *`.
     #[error("invalid DE-9IM pattern '{pattern}': {reason}")]
     Pattern { pattern: Box<str>, reason: Box<str> },

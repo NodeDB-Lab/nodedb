@@ -25,6 +25,7 @@
 
 use crate::types::TenantId;
 
+use super::super::super::buses::SessionInvalidationReason;
 use super::super::super::catalog::StoredUser;
 use super::super::super::identity::Role;
 use super::super::record::UserRecord;
@@ -156,32 +157,27 @@ impl CredentialStore {
             users.insert(stored.username.clone(), record);
         }
         let user_id = stored.user_id;
-        if let Err(error) = self.bump_version(user_id) {
-            tracing::error!(user_id, error = %error, "replicated user version update failed");
-        }
-        if let Some(bus) = self.uc_bus.get() {
-            bus.publish(super::super::super::buses::UserChanged { user_id });
-        }
-        if let Some(reason) = invalidation
-            && let Some(bus) = self.si_bus.get()
-        {
-            bus.publish(super::super::super::buses::SessionInvalidated { user_id, reason });
-        }
+        self.bump_version(user_id);
+        self.publish_user_mutation(user_id, stored.is_active, invalidation);
     }
 
-    /// Remove a replicated dropped user from the in-memory cache and
-    /// publish `UserDropped` so open sessions are hard-revoked.
+    /// Remove a replicated dropped user from the in-memory cache and end its
+    /// sessions.
     ///
-    /// The redb delete is also performed by the catalog applier;
-    /// `purge_user`'s catalog delete is idempotent, so a double
-    /// delete is harmless.
+    /// The catalog applier owns the redb delete: `apply::user::delete` runs ahead
+    /// of this post-apply, and its error halts the applier at this entry. This
+    /// step does no I/O, so it has no error to raise.
     pub fn install_replicated_drop(&self, username: &str) {
         let record = {
             let mut users = write_lock(&self.users);
             users.remove(username)
         };
         if let Some(record) = record {
-            let _ = self.purge_user(&record);
+            self.end_sessions_on_hard_revoke(
+                record.user_id,
+                &SessionInvalidationReason::UserDropped,
+            );
+            self.announce_user_gone(record.user_id);
         }
     }
 }
@@ -194,7 +190,100 @@ mod tests {
     };
 
     use crate::control::security::identity::Role;
+    use crate::control::security::sessions::{KillReason, SessionParams, SessionRegistry};
     use crate::types::TenantId;
+
+    fn registered(
+        store: &CredentialStore,
+        user_id: u64,
+    ) -> tokio::sync::watch::Receiver<KillReason> {
+        let registry = std::sync::Arc::new(SessionRegistry::new());
+        store.set_session_registry(std::sync::Arc::clone(&registry));
+        registry
+            .register(
+                "s1",
+                &SessionParams {
+                    user_id,
+                    username: "u".into(),
+                    db_user: "u".into(),
+                    peer_addr: "127.0.0.1:5000".into(),
+                    protocol: "native".into(),
+                    auth_method: "password".into(),
+                    tenant_id: 9,
+                    credential_version: 0,
+                    current_database: None,
+                    token_expiry_ms: None,
+                    api_key_id: None,
+                },
+            )
+            .expect("register session")
+    }
+
+    #[test]
+    fn a_replicated_deactivation_ends_the_users_sessions() {
+        let store = CredentialStore::new().expect("in-memory credential store");
+        let user_id = store
+            .create_user(
+                "deactivated",
+                "password",
+                TenantId::new(9),
+                vec![Role::ReadWrite],
+            )
+            .expect("create user");
+        let kill = registered(&store, user_id);
+        let mut stored = store
+            .get_user("deactivated")
+            .expect("user exists")
+            .to_stored();
+        stored.is_active = false;
+
+        store.install_replicated_user(
+            &stored,
+            Some(crate::control::security::buses::SessionInvalidationReason::RoleAltered),
+        );
+
+        assert_eq!(*kill.borrow(), KillReason::UserDropped);
+    }
+
+    #[test]
+    fn a_replicated_role_change_leaves_sessions_open() {
+        let store = CredentialStore::new().expect("in-memory credential store");
+        let user_id = store
+            .create_user(
+                "altered",
+                "password",
+                TenantId::new(9),
+                vec![Role::ReadWrite],
+            )
+            .expect("create user");
+        let kill = registered(&store, user_id);
+        let stored = store.get_user("altered").expect("user exists").to_stored();
+
+        store.install_replicated_user(
+            &stored,
+            Some(crate::control::security::buses::SessionInvalidationReason::RoleAltered),
+        );
+
+        assert_eq!(*kill.borrow(), KillReason::Alive);
+    }
+
+    #[test]
+    fn a_replicated_drop_ends_the_users_sessions() {
+        let store = CredentialStore::new().expect("in-memory credential store");
+        let user_id = store
+            .create_user(
+                "dropped",
+                "password",
+                TenantId::new(9),
+                vec![Role::ReadWrite],
+            )
+            .expect("create user");
+        let kill = registered(&store, user_id);
+
+        store.install_replicated_drop("dropped");
+
+        assert_eq!(*kill.borrow(), KillReason::UserDropped);
+    }
 
     #[test]
     fn prepare_user_rejects_empty_password_without_id_allocation_or_proposal() {

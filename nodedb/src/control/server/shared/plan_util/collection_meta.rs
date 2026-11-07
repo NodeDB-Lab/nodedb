@@ -78,7 +78,7 @@ pub(super) fn meta_collection(op: &MetaOp) -> Option<&str> {
         | MetaOp::CreateSnapshot
         | MetaOp::Compact
         | MetaOp::Checkpoint
-        | MetaOp::ApplyContinuousAggRetention => None,
+        | MetaOp::ApplyContinuousAggRetention { .. } => None,
         // These carry several plans or collections. A redo install names
         // its collections through `PhysicalPlan::named_collections`.
         MetaOp::TransactionBatch { .. }
@@ -98,12 +98,15 @@ pub(super) fn meta_collection(op: &MetaOp) -> Option<&str> {
         MetaOp::PurgeVersionsBelow { .. } => None,
         // Every KV collection's due expiries on the core, in every tenant.
         MetaOp::KvDueExpiries { .. } => None,
+        // Every collection of the tenant on the core.
+        MetaOp::ListTenantCollections { .. } => None,
         // Every graph CSR on the core, in every tenant.
         MetaOp::RefreshGraphCount { .. } => None,
         // Every collection's stored bytes on the core, in every tenant.
         MetaOp::QueryStorageBytes { .. } => None,
         // The continuous-aggregate registry: no row is read or written.
         MetaOp::RegisterContinuousAggregate { .. }
+        | MetaOp::InstallAggregateImage { .. }
         | MetaOp::UnregisterContinuousAggregate { .. }
         | MetaOp::ListContinuousAggregates
         | MetaOp::ContinuousAggregatesRegistered
@@ -283,11 +286,15 @@ mod tests {
                     target_type: "kv".into(),
                     schema_json: "{}".into(),
                     source_storage_mode: StorageMode::Schemaless,
+                    target_storage_mode: StorageMode::Schemaless,
+                    generation: 1,
+                    incarnation: nodedb_types::Hlc::ZERO,
                 }),
                 PhysicalPlan::Meta(MetaOp::VerifyHashChain { collection: docs() }),
                 PhysicalPlan::Meta(MetaOp::EnforceTimeseriesRetention {
                     collection: docs(),
                     max_age_ms: 0,
+                    decided_ms: 0,
                     aggregates: Vec::new(),
                 }),
                 PhysicalPlan::Meta(MetaOp::TemporalPurgeEdgeStore {
@@ -304,6 +311,7 @@ mod tests {
                     tenant_id: 1,
                     collection: docs(),
                     cutoff_system_ms: 0,
+                    decided_ms: 0,
                     aggregates: Vec::new(),
                 }),
                 PhysicalPlan::Meta(MetaOp::TemporalPurgeCrdt {

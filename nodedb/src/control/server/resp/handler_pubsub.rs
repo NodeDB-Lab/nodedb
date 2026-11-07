@@ -9,10 +9,12 @@
 use std::sync::Arc;
 
 use tokio::io::AsyncWriteExt;
+use tokio::sync::watch;
 use tracing::debug;
 
 use crate::control::security::audit::ArcAuditEmitter;
 use crate::control::security::identity::{AuthenticatedIdentity, Permission};
+use crate::control::security::sessions::{KillReason, kill_signal_ended};
 use crate::control::server::conn_stream::ConnStream;
 use crate::control::state::SharedState;
 use crate::types::DatabaseId;
@@ -27,6 +29,15 @@ pub(crate) const MAX_PUBSUB_SUBSCRIPTIONS: usize = 128;
 pub(crate) const MAX_PUBSUB_NAME_BYTES: usize = 256;
 /// Maximum byte length of a PUBLISH payload.
 pub(crate) const MAX_PUBSUB_PAYLOAD_BYTES: usize = 1024 * 1024;
+
+/// The kill signal a push loop races. A subscribed connection reads nothing from
+/// its client, so it is not idle, and the kill ends it between messages.
+fn enter_push_mode(session: &RespSession) -> Option<watch::Receiver<KillReason>> {
+    session.binding.as_ref().map(|binding| {
+        binding.set_statement("subscribe");
+        binding.kill_signal()
+    })
+}
 
 /// Handle SUBSCRIBE command: enter subscription mode.
 ///
@@ -101,12 +112,21 @@ pub async fn handle_subscribe(
 
     debug!(channels = ?channels, "RESP SUBSCRIBE: entering subscription mode");
 
+    let mut kill = enter_push_mode(session);
     loop {
         let receives: Vec<_> = subscriptions
             .iter_mut()
             .map(|subscription| Box::pin(subscription.recv()))
             .collect();
-        match futures::future::select_all(receives).await.0 {
+        let received = tokio::select! {
+            biased;
+            ended = kill_signal_ended(&mut kill) => {
+                let _ = write_value(stream, RespValue::from_error(&ended)).await;
+                break;
+            }
+            received = futures::future::select_all(receives) => received.0,
+        };
+        match received {
             Ok(message) => {
                 let msg = RespValue::array(vec![
                     RespValue::bulk_str("message"),
@@ -179,8 +199,17 @@ pub async fn handle_psubscribe(
 
     debug!(patterns = ?patterns, "RESP PSUBSCRIBE: entering pattern subscription mode");
 
+    let mut kill = enter_push_mode(session);
     loop {
-        match subscription.recv().await {
+        let received = tokio::select! {
+            biased;
+            ended = kill_signal_ended(&mut kill) => {
+                let _ = write_value(stream, RespValue::from_error(&ended)).await;
+                break;
+            }
+            received = subscription.recv() => received,
+        };
+        match received {
             Ok(message) => {
                 let Some(pattern) = matching_topic_pattern(&message, tenant_id, &patterns) else {
                     continue;
@@ -267,6 +296,9 @@ pub async fn handle_publish(
         Ok(_) => RespValue::integer(1),
         Err(PublishError::TopicNotFound(topic)) => {
             RespValue::err(format!("ERR no such topic '{topic}'"))
+        }
+        Err(PublishError::Refused(error)) => {
+            RespValue::err(format!("ERR publish refused: {error}"))
         }
         Err(PublishError::Persistence(error)) => {
             RespValue::err(format!("ERR publish failed: {error}"))

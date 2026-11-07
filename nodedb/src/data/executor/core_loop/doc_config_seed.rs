@@ -32,9 +32,32 @@ pub type DocConfigSeedEntry = (
 impl CoreLoop {
     /// Insert every `(database, tenant, collection) -> CollectionConfig` entry
     /// into `doc_configs`. Called once at core startup, before WAL replay.
+    ///
+    /// The catalog row can stand apart from this core's rows after a restart
+    /// inside a conversion, so each entry takes the mode its rows hold. A
+    /// record that does not read keeps the catalog mode and files an error.
     pub fn seed_doc_configs(&mut self, entries: &[DocConfigSeedEntry]) {
         for (key, config) in entries {
-            self.doc_configs.insert(key.clone(), config.clone());
+            let mut config = config.clone();
+            match self.resolve_storage_mode(
+                key.0,
+                key.1.as_u64(),
+                &key.2,
+                &config.storage_mode,
+                config.enforcement.storage_conversion.as_ref(),
+                config.incarnation,
+            ) {
+                Ok(mode) => config.storage_mode = mode,
+                Err(error) => {
+                    tracing::error!(
+                        core = self.core_id,
+                        collection = %key.2,
+                        %error,
+                        "boot seed: the collection's storage conversion record does not read"
+                    );
+                }
+            }
+            self.doc_configs.insert(key.clone(), config);
         }
     }
 }

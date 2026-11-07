@@ -8,6 +8,9 @@
 //! atomically with the document write. Without this gate such a delete
 //! classifies as `SingleShard`, dispatches directly to the Data Plane, and
 //! leaves its mirrored CSR edges dangling.
+//!
+//! A recon plan on one vShard that holds settlement reads takes the same
+//! coordinator, so the reads guard its write.
 
 use std::sync::Arc;
 
@@ -15,10 +18,12 @@ use nodedb_physical::physical_task::PhysicalTask;
 
 use crate::bridge::envelope::{PhysicalPlan, Response};
 use crate::control::planner::calvin::{
-    dispatch_authorized_dependent_edge_recon, plan_needs_implicit_edge_recon,
+    DispatchClass, classify_dispatch, dispatch_authorized_dependent_edge_recon, is_edge_recon_plan,
+    plan_needs_implicit_edge_recon, read_vshards_of,
 };
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::shared::authorization::AuthorizedTaskSet;
+use crate::control::server::shared::session::read_set::ReadSetEntry;
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TenantId};
 
@@ -49,12 +54,16 @@ pub(crate) enum EdgeRecon {
 /// client's transaction needs a two-phase commit across its boundary. A
 /// catalog I/O error propagates. Misrouting on a real fault skips the edge
 /// cleanup.
+///
+/// `reads` are the images materialized-sum settlement folded the tasks' balance
+/// deltas from. The coordinator carries them into its transaction.
 pub(crate) async fn try_edge_recon(
     state: &Arc<SharedState>,
     identity: &AuthenticatedIdentity,
     in_txn_block: bool,
     tasks: Vec<PhysicalTask>,
     authorized: AuthorizedTaskSet,
+    reads: &[ReadSetEntry],
 ) -> crate::Result<EdgeRecon> {
     if in_txn_block {
         return Ok(EdgeRecon::NotFired(tasks, authorized));
@@ -65,6 +74,77 @@ pub(crate) async fn try_edge_recon(
     else {
         return Ok(EdgeRecon::NotFired(tasks, authorized));
     };
+    run_recon(state, identity, tasks, authorized, database_id, reads).await
+}
+
+/// Route `tasks` through the OLLP/Calvin coordinator when they hold a recon
+/// plan and settlement reads on one vShard, outside a transaction block.
+///
+/// A zero-net settlement ships no balance task, and the source rows it folded
+/// are still owed its guard. The per-task route checks no read, so a source row
+/// that moved after settlement leaves the balance unequal to the source sum.
+pub(crate) async fn try_settled_recon(
+    state: &Arc<SharedState>,
+    identity: &AuthenticatedIdentity,
+    in_txn_block: bool,
+    tasks: Vec<PhysicalTask>,
+    authorized: AuthorizedTaskSet,
+    reads: &[ReadSetEntry],
+) -> crate::Result<EdgeRecon> {
+    if in_txn_block || reads.is_empty() {
+        return Ok(EdgeRecon::NotFired(tasks, authorized));
+    }
+    let read_vshards = read_vshards_of(reads)?;
+    if matches!(
+        classify_dispatch(&tasks, &read_vshards),
+        DispatchClass::MultiShard { .. }
+    ) {
+        return Ok(EdgeRecon::NotFired(tasks, authorized));
+    }
+    let Some(database_id) = tasks
+        .iter()
+        .find(|task| is_edge_recon_plan(&task.plan))
+        .map(|task| task.database_id)
+    else {
+        return Ok(EdgeRecon::NotFired(tasks, authorized));
+    };
+    run_recon(state, identity, tasks, authorized, database_id, reads).await
+}
+
+/// Route `tasks` through the OLLP/Calvin coordinator when one of them is a recon
+/// plan and the statement spans several vShards, outside a transaction block.
+///
+/// The caller classified the statement as multi-shard. A predicate write that
+/// reaches Calvin must carry the rows it matched, which only the coordinator
+/// reads. A shipped balance puts a single-collection write on two vShards, so
+/// the edge-bearing gate does not see it.
+///
+/// `reads` are the images settlement folded that balance from.
+pub(crate) async fn try_multi_shard_predicate_recon(
+    state: &Arc<SharedState>,
+    identity: &AuthenticatedIdentity,
+    tasks: Vec<PhysicalTask>,
+    authorized: AuthorizedTaskSet,
+    reads: &[ReadSetEntry],
+) -> crate::Result<EdgeRecon> {
+    let Some(database_id) = tasks
+        .iter()
+        .find(|task| is_edge_recon_plan(&task.plan))
+        .map(|task| task.database_id)
+    else {
+        return Ok(EdgeRecon::NotFired(tasks, authorized));
+    };
+    run_recon(state, identity, tasks, authorized, database_id, reads).await
+}
+
+async fn run_recon(
+    state: &Arc<SharedState>,
+    identity: &AuthenticatedIdentity,
+    tasks: Vec<PhysicalTask>,
+    authorized: AuthorizedTaskSet,
+    database_id: DatabaseId,
+    reads: &[ReadSetEntry],
+) -> crate::Result<EdgeRecon> {
     // Captured before the coordinator consumes the tasks, so the answer can
     // shape a RETURNING dependent write's rows and read a plain write's
     // count from the applied response.
@@ -73,8 +153,9 @@ pub(crate) async fn try_edge_recon(
         state,
         authorized,
         identity,
-        tenant_id,
+        identity.tenant_id,
         database_id,
+        reads,
     )
     .await?;
     Ok(EdgeRecon::Applied(CalvinApplied {

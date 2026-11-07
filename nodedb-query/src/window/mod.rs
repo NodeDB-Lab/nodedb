@@ -20,5 +20,5 @@ pub mod value_eval;
 pub mod value_partition;
 
 pub use eval::evaluate_window_functions;
-pub use spec::{FrameBound, WindowFrame, WindowFuncSpec};
+pub use spec::{FrameBound, WINDOW_FUNCTION_NAMES, WindowFrame, WindowFuncSpec};
 pub use value_eval::{WindowError, evaluate_window_functions_value};

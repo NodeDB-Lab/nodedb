@@ -66,6 +66,40 @@ impl CoreLoop {
         self.publish_write(db, tenant, collection, key, stamp)
     }
 
+    /// Note a collection a settled redo record names, with no row key.
+    ///
+    /// The record is installed and durable, so a name this database does not
+    /// write cannot refuse it. Every replica reads the same name, so a refusal
+    /// here halts the whole cluster's sequencer on one bookkeeping value, and a
+    /// re-delivery halts it again.
+    ///
+    /// Only the newest-ordinal cache needs the name, and it recomputes what it
+    /// lacks. So the note forgets the whole cache, applies the LSN, and files a
+    /// report. Nothing a replica stores depends on the cache.
+    pub(in crate::data::executor) fn note_settled_collection(
+        &mut self,
+        db: DatabaseId,
+        tenant: TenantId,
+        collection: &str,
+        stamp: WriteStamp,
+    ) -> crate::Result<()> {
+        if let Err(error) = collection_vshard(db, collection) {
+            tracing::error!(
+                core = self.core_id,
+                lsn = stamp.lsn.as_u64(),
+                collection,
+                %error,
+                "a settled redo record names a collection outside its database; \
+                 the record stays applied"
+            );
+            crate::diag::redo_note_misnamed(self.core_id, stamp.lsn.as_u64(), collection, &error);
+            self.newest_ordinals.clear();
+            self.publish_applied(stamp);
+            return Ok(());
+        }
+        self.note_write(db, tenant, collection, None, stamp)
+    }
+
     /// Publish a write note: the write lands in the newest-ordinal cache, and
     /// its LSN is applied.
     pub(in crate::data::executor) fn publish_write(

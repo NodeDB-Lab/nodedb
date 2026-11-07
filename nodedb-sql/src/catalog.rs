@@ -183,6 +183,13 @@ pub trait SqlCatalog {
         }))
     }
 
+    /// Whether `name` resolves to a relation of the statement itself: a CTE
+    /// or a derived-table alias. It holds no stored rows, so an operator that
+    /// reads a collection by name cannot read it.
+    fn is_statement_relation(&self, _name: &str) -> bool {
+        false
+    }
+
     /// Look up an array by name. Returns `None` if no array with that
     /// name is registered. The default implementation returns `None` so
     /// that catalog adapters predating array support compile without

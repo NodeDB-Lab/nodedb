@@ -16,6 +16,11 @@ on:
       - nodedb-srid/**
       - nodedb-crs/**
       - nodedb-spatial/**
+      - nodedb-array/**
+      - nodedb-graph/**
+      - nodedb-fts/**
+      - nodedb-vector/**
+      - nodedb-mem/**
       - nodedb-columnar/**
       - nodedb-strict/**
       - nodedb-wal/**
@@ -87,7 +92,7 @@ jobs:
       - name: Run bounded ASan fuzzing
         run: |
           cargo fuzz run --sanitizer address --target x86_64-unknown-linux-gnu "${{ matrix.target.name }}" -- \
-            -max_total_time=60 -runs=0 -max_len=1048576 -timeout=10 \
+            -max_total_time=60 -max_len=1048576 -timeout=10 \
             -rss_limit_mb=2048 -dict="${{ matrix.target.dictionary }}"
       - name: Upload crash artifacts
         if: always()
@@ -101,7 +106,9 @@ jobs:
   # nodedb-lite-wasm. Guards the same class the decoders check with
   # checked_mul/checked_add — size math that only overflows where usize is 32
   # bits. A build check, not a fuzz run: the decode invariants are asserted by
-  # the crates' own unit tests, which the main suite runs.
+  # the crates' own unit tests, which the main suite runs. All crates stay on one
+  # command line: `getrandom` picks its wasm backend through feature unification
+  # with nodedb-wal, so a crate checked alone can lose the backend.
   wasm32-decoders:
     name: 32-bit build check (wasm32)
     runs-on: ubuntu-latest
@@ -120,4 +127,6 @@ jobs:
           cargo check --target wasm32-unknown-unknown \
             -p nodedb-codec -p nodedb-columnar -p nodedb-strict \
             -p nodedb-raster -p nodedb-raster-load \
-            -p nodedb-srid -p nodedb-crs -p nodedb-spatial
+            -p nodedb-srid -p nodedb-crs -p nodedb-spatial \
+            -p nodedb-array -p nodedb-graph -p nodedb-fts \
+            -p nodedb-vector -p nodedb-types

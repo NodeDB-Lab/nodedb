@@ -9,7 +9,7 @@ use super::helpers::convert_projection;
 use crate::error::{Result, SqlError};
 use crate::planner::lateral::plan::{LateralJoinArgs, plan_lateral_join};
 use crate::planner::lateral::subquery::{
-    is_lateral_derived, lateral_alias_from_factor, subquery_from_factor,
+    is_lateral_derived, lateral_alias_from_factor, lateral_subquery,
 };
 use crate::resolver::columns::TableScope;
 use crate::temporal::TemporalScope;
@@ -63,8 +63,7 @@ pub(super) fn try_plan_comma_lateral(
         lateral_alias_from_factor(&lateral_twj.relation)?.ok_or_else(|| SqlError::Unsupported {
             detail: "LATERAL subquery requires an alias (e.g. LATERAL (...) AS x)".into(),
         })?;
-    let subquery = subquery_from_factor(&lateral_twj.relation)
-        .expect("is_lateral_derived guarantees Derived variant");
+    let subquery = lateral_subquery(&lateral_twj.relation)?;
     let projection = convert_projection(&select.projection, scope)?;
     plan_lateral_join(LateralJoinArgs {
         outer_plan: outer_scan,

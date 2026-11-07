@@ -55,12 +55,16 @@ impl KvEngine {
         moved
     }
 
-    /// At most `limit` due entries, in key order.
-    pub fn due_expiries(&self, limit: usize) -> Vec<DueExpiry> {
+    /// At most `limit` due entries, in key order, none of `skip_databases`.
+    /// The entries of a skipped database stay due, and take no share of `limit`.
+    pub fn due_expiries(&self, limit: usize, skip_databases: &[u64]) -> Vec<DueExpiry> {
         self.due
             .iter()
             .filter_map(|(composite, expire_at_ms)| {
                 let (database_id, tenant_id, collection, key) = parse_expiry_key(composite)?;
+                if skip_databases.contains(&database_id) {
+                    return None;
+                }
                 Some(DueExpiry {
                     database_id,
                     tenant_id,
@@ -103,7 +107,7 @@ impl KvEngine {
     #[cfg(test)]
     pub fn tick_expiry(&mut self, now_ms: u64) -> Vec<ExpiredKey> {
         self.collect_due_expiries(now_ms);
-        let due: Vec<DueExpiry> = self.due_expiries(usize::MAX);
+        let due: Vec<DueExpiry> = self.due_expiries(usize::MAX, &[]);
         due.into_iter()
             .filter_map(|entry| {
                 self.reap_due(
@@ -153,7 +157,12 @@ mod tests {
         let mut e = engine();
         put(&mut e, b"s", 500);
         assert_eq!(e.collect_due_expiries(10_000), 1);
-        let due = e.due_expiries(16);
+        assert!(
+            e.due_expiries(16, &[0]).is_empty(),
+            "a mirror's expiry arrives through the log"
+        );
+        assert_eq!(e.due_len(), 1, "the skipped entry stays due");
+        let due = e.due_expiries(16, &[]);
         assert_eq!(due.len(), 1);
         assert_eq!(
             (due[0].key.as_slice(), due[0].expire_at_ms),

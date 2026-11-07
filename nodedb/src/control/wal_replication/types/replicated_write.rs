@@ -930,6 +930,9 @@ pub enum ReplicatedWrite {
         /// the request's tenants when it applies the first barrier of the
         /// request, before it applies the next entry.
         capture: Option<nodedb_physical::physical_plan::CutCaptureRequest>,
+        /// Set on a mirror cut's barrier: the mark every mirror reads. Such a
+        /// barrier raises no restore floor.
+        mirror: Option<super::wire_shapes::MirrorBarrier>,
     },
     /// One message published to a durable topic whose home vShard is this
     /// entry's vShard. Every replica appends it to its topic log at apply, in
@@ -979,6 +982,63 @@ pub enum ReplicatedWrite {
         epoch: u64,
         position: u32,
         tenant_id: u64,
+    },
+    /// A mirror's mark in this group's log. Its envelope's stamp names the
+    /// cut. Every replica's apply records that the group applied the cut, once
+    /// every earlier entry of the group concluded.
+    MirrorSeal {
+        /// PROMOTE's barrier: it applies whatever its stamp's epoch, so a new
+        /// applier that resumes PROMOTE finishes it.
+        last: bool,
+        /// The source's fully applied Calvin epochs through this cut. Every
+        /// replica folds each into the mirror's ledger of its vShard.
+        calvin_floors: Vec<super::wire_shapes::MirrorCalvinFloor>,
+    },
+    /// `PURGE TENANT` in one data group's log. Every replica of the group
+    /// removes the entry's tenant's data on `vshards` at this log position.
+    /// One entry goes to each group, so every write of a group lands wholly
+    /// before or wholly after the purge on every replica.
+    TenantPurge {
+        /// Bare catalog name of every collection of the tenant.
+        collections: Vec<String>,
+        /// The vShards of this entry's group.
+        vshards: Vec<u32>,
+    },
+    /// `CONVERT COLLECTION` in the collection's data-group log. Every replica
+    /// re-encodes the rows at this log position and reads the same inputs, so
+    /// every replica stores the same bytes. A write earlier in the log is
+    /// rewritten. A later write encodes in the target mode.
+    CollectionConvert {
+        /// Bare catalog name.
+        collection: String,
+        target_type: String,
+        /// The target strict columns as JSON. Empty for a schemaless target.
+        schema_json: String,
+        source_storage_mode: nodedb_physical::physical_plan::StorageMode,
+        target_storage_mode: nodedb_physical::physical_plan::StorageMode,
+        /// One more than the catalog row's conversion generation.
+        generation: u64,
+        /// The collection incarnation the conversion rewrites.
+        incarnation: nodedb_types::Hlc,
+    },
+    /// One retention decision in one data group's log. The leader read the clock
+    /// once and the entry carries the result, so every replica and every mirror
+    /// drops the same rows at this log position. One entry goes to each group.
+    RetentionDrop {
+        op: super::retention_op::RetentionOp,
+        /// The vShards of this entry's group.
+        vshards: Vec<u32>,
+    },
+    /// A mirror bootstrap's aggregate state for the root `collection`. It
+    /// follows every re-issued row of the root in the group's log. Each replica
+    /// flushes the root at this position, counts every partition it holds as
+    /// folded, and takes the image's buckets. The entry stays in the mirror's
+    /// cluster: a source's tail never ships it.
+    TimeseriesAggregateImage {
+        /// The root, as the Data Plane stores it.
+        collection: String,
+        /// The encoded image. Its buckets count every row of the root.
+        image: Vec<u8>,
     },
 }
 
@@ -1145,6 +1205,31 @@ mod tests {
                     position: 1,
                     attempt: 0,
                 },
+            },
+            ReplicatedWrite::TenantPurge {
+                collections: vec!["orders".into()],
+                vshards: vec![0, 1],
+            },
+            ReplicatedWrite::CollectionConvert {
+                collection: "orders".into(),
+                target_type: "document_schemaless".into(),
+                schema_json: String::new(),
+                source_storage_mode: nodedb_physical::physical_plan::StorageMode::Schemaless,
+                target_storage_mode: nodedb_physical::physical_plan::StorageMode::Schemaless,
+                generation: 1,
+                incarnation: nodedb_types::Hlc::new(7, 0),
+            },
+            ReplicatedWrite::RetentionDrop {
+                op: super::super::retention_op::RetentionOp::TimeseriesPartitions {
+                    collection: "metrics".into(),
+                    max_age_ms: 60_000,
+                    decided_ms: 1_700_000_000_000,
+                },
+                vshards: vec![0, 1],
+            },
+            ReplicatedWrite::TimeseriesAggregateImage {
+                collection: "metrics".into(),
+                image: vec![1, 2, 3],
             },
         ];
 
