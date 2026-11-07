@@ -27,7 +27,12 @@ pub fn purge_below<S: FtsHistoryWrite + ?Sized>(
 
     let mut live = Vec::new();
     store.scan_live(&mut |row| {
-        if at_or_below(row.database_id, row.tid, row.index.collection(), row.sys_from) {
+        if at_or_below(
+            row.database_id,
+            row.tid,
+            row.index.collection(),
+            row.sys_from,
+        ) {
             live.push(row.to_key());
         }
     })?;
@@ -45,10 +50,16 @@ mod tests {
     use crate::scope::IndexScope;
 
     fn docs_at(store: &MemoryBackend, collection: &str, at: i64) -> usize {
-        cut_view(store, 0, 1, IndexScope::document(collection), TextCut::at(at))
-            .expect("cut view")
-            .docs
-            .len()
+        cut_view(
+            store,
+            0,
+            1,
+            IndexScope::document(collection),
+            TextCut::at(at),
+        )
+        .expect("cut view")
+        .docs
+        .len()
     }
 
     /// Versions `[10, 20)`, `[20, 30)`, and live from 30. A purge at 25
@@ -63,7 +74,10 @@ mod tests {
         start(&mut store, 1, 30);
         assert_eq!(docs_at(&store, "docs", 15), 1);
 
-        assert_eq!(purge_below(&mut store, &|_, _, _| Some(25)).expect("purge"), 1);
+        assert_eq!(
+            purge_below(&mut store, &|_, _, _| Some(25)).expect("purge"),
+            1
+        );
         assert_eq!(docs_at(&store, "docs", 15), 0, "purged below 25");
         assert_eq!(docs_at(&store, "docs", 25), 1, "the version at 25 stays");
     }
@@ -77,7 +91,9 @@ mod tests {
         start(&mut store, 2, 40);
         purge_below(&mut store, &|_, _, _| Some(10)).expect("purge");
         let mut live = Vec::new();
-        store.scan_live(&mut |row| live.push(row.surrogate.as_u32())).expect("scan");
+        store
+            .scan_live(&mut |row| live.push(row.surrogate.as_u32()))
+            .expect("scan");
         assert_eq!(live, vec![2], "only the start above the horizon stays");
     }
 

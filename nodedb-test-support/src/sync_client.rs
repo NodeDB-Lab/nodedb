@@ -20,8 +20,8 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungsten
 
 use nodedb_types::Hlc;
 use nodedb_types::sync::wire::{
-    CollectionDescriptor, CollectionSchemaRejectMsg, CollectionSchemaSyncMsg, DeltaAckMsg, DeltaPushMsg, DeltaRejectMsg,
-    HandshakeAckMsg, HandshakeMsg, SyncFrame, SyncMessageType,
+    CollectionDescriptor, CollectionSchemaRejectMsg, CollectionSchemaSyncMsg, DeltaAckMsg,
+    DeltaPushMsg, DeltaRejectMsg, HandshakeAckMsg, HandshakeMsg, SyncFrame, SyncMessageType,
 };
 
 /// Bound on how long a single frame receive may take before the test client

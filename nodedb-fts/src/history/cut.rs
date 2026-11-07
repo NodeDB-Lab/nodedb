@@ -103,7 +103,10 @@ mod tests {
         let view = view_at(&store, 20);
         assert_eq!(doc_ids(&view), vec![1]);
         assert_eq!(view.docs[0].tokens, vec!["alpha".to_string()]);
-        assert!(view.hidden.contains(Surrogate::new(1)), "the live text hides");
+        assert!(
+            view.hidden.contains(Surrogate::new(1)),
+            "the live text hides"
+        );
     }
 
     /// A document indexed after the cut is hidden and adds no text.

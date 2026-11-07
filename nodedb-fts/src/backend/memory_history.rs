@@ -150,11 +150,10 @@ impl FtsHistoryWrite for MemoryBackend {
     ) -> Result<(), MemoryError> {
         let key = index_key(database_id, tid, index);
         let history = self.history.get_mut();
-        if let Some(prior) = history
-            .live_from
-            .insert((key.clone(), surrogate), sys_from)
-        {
-            history.live_by_from.remove(&(key.clone(), prior, surrogate));
+        if let Some(prior) = history.live_from.insert((key.clone(), surrogate), sys_from) {
+            history
+                .live_by_from
+                .remove(&(key.clone(), prior, surrogate));
         }
         history.live_by_from.insert((key, sys_from, surrogate));
         Ok(())

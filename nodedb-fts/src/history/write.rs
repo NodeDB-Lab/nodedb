@@ -121,7 +121,9 @@ mod tests {
     fn a_replayed_write_ends_nothing() {
         let mut store = MemoryBackend::new();
         start(&mut store, 1, 10);
-        let replay = end_version(&mut store, doc(1), 10, || panic!("a replay reads no tokens"));
+        let replay = end_version(&mut store, doc(1), 10, || {
+            panic!("a replay reads no tokens")
+        });
         replay.expect("replay");
         assert_eq!(ended_count(&store), 0);
         let live = store
@@ -147,7 +149,9 @@ mod tests {
         let mut store = MemoryBackend::new();
         end(&mut store, 1, 20, &["alpha"]);
         let mut rows = Vec::new();
-        store.scan_ended(&mut |row| rows.push(row.to_key())).expect("scan");
+        store
+            .scan_ended(&mut |row| rows.push(row.to_key()))
+            .expect("scan");
         assert_eq!(rows.len(), 1);
         assert_eq!((rows[0].sys_from, rows[0].sys_to), (UNVERSIONED, 20));
     }
@@ -164,6 +168,9 @@ mod tests {
         assert_eq!((restored.sys_from, restored.sys_to), (10, 20));
         assert_eq!(restored.tokens, vec!["alpha".to_string()]);
         assert_eq!(ended_count(&store), 0);
-        assert_eq!(undo_at(&mut store, doc(1), 20).expect("again"), UndoStep::default());
+        assert_eq!(
+            undo_at(&mut store, doc(1), 20).expect("again"),
+            UndoStep::default()
+        );
     }
 }

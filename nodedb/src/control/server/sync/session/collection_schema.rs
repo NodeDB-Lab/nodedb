@@ -403,7 +403,9 @@ mod tests {
     fn refusal_of(reply: Option<SyncFrame>) -> CollectionSchemaRejectMsg {
         let reply = reply.expect("every announce is answered");
         assert_eq!(reply.msg_type, SyncMessageType::CollectionSchemaReject);
-        reply.decode_body().expect("decode CollectionSchemaRejectMsg")
+        reply
+            .decode_body()
+            .expect("decode CollectionSchemaRejectMsg")
     }
 
     /// The held collection an announce answered.
@@ -522,7 +524,11 @@ mod tests {
         );
         assert_eq!(held.descriptor.name, "selected_database_schema");
         assert_eq!(held.descriptor.database_id, selected_database);
-        assert_ne!(held.creation_hlc, Hlc::ZERO, "a committed collection has an incarnation");
+        assert_ne!(
+            held.creation_hlc,
+            Hlc::ZERO,
+            "a committed collection has an incarnation"
+        );
         assert_eq!(
             held.creation_hlc,
             catalog_incarnation(&shared, selected_database, "selected_database_schema"),
@@ -638,7 +644,10 @@ mod tests {
         assert_eq!(held.descriptor.name, name);
         assert_eq!(held.descriptor.database_id, database);
         assert_eq!(held.creation_hlc, created);
-        assert_eq!(held.creation_hlc, catalog_incarnation(&shared, database, name));
+        assert_eq!(
+            held.creation_hlc,
+            catalog_incarnation(&shared, database, name)
+        );
         assert_eq!(permission_denied_audits(&shared), 0);
         cluster.shutdown().await;
     }
