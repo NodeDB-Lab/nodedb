@@ -92,7 +92,7 @@ jobs:
       - name: Run bounded ASan fuzzing
         run: |
           cargo fuzz run --sanitizer address --target x86_64-unknown-linux-gnu "${{ matrix.target.name }}" -- \
-            -max_total_time=60 -runs=0 -max_len=1048576 -timeout=10 \
+            -max_total_time=60 -max_len=1048576 -timeout=10 \
             -rss_limit_mb=2048 -dict="${{ matrix.target.dictionary }}"
       - name: Upload crash artifacts
         if: always()
