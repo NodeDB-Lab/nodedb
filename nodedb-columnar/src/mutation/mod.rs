@@ -26,3 +26,6 @@ pub use history::StoredVersion;
 pub use install::InstallRow;
 pub use snapshot::{ColumnDataSnapshot, ColumnarEngineSnapshot};
 pub use truncate::TruncatedRows;
+
+#[cfg(test)]
+mod primary_key_tests;

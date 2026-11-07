@@ -74,6 +74,9 @@ pub enum ColumnarError {
     #[error("null violation: column '{0}' is NOT NULL")]
     NullViolation(String),
 
+    #[error("collection has no primary key. Define a primary key before indexed row mutations")]
+    MissingPrimaryKey,
+
     #[error("duplicate primary key")]
     DuplicatePrimaryKey,
 

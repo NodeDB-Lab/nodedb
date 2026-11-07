@@ -161,6 +161,7 @@ impl MutationEngine {
         &self,
         pk_bytes: &[u8],
     ) -> Result<Option<Vec<Value>>, ColumnarError> {
+        self.require_primary_key()?;
         let Some(loc) = self.pk_index.get(pk_bytes).copied() else {
             return Ok(None);
         };
@@ -182,6 +183,7 @@ impl MutationEngine {
         pk_value: &Value,
         stamp: i64,
     ) -> Result<MutationResult, ColumnarError> {
+        self.require_primary_key()?;
         let pk_bytes = encode_pk(pk_value);
 
         let location = self
@@ -344,6 +346,7 @@ impl MutationEngine {
         flushed_surrogate: Option<Surrogate>,
         stamp: i64,
     ) -> Result<MutationResult, ColumnarError> {
+        self.require_primary_key()?;
         let old_pk_bytes = encode_pk(old_pk);
         let old_location = self
             .pk_index
