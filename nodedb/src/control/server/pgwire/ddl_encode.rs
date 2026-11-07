@@ -91,12 +91,21 @@ fn ddl_result_to_response(ddl: DdlResult, requested: &Format) -> PgWireResult<Re
     }
 }
 
+/// Take each row set's notice out of `results`, for the caller to queue on its session.
+pub fn take_notices(results: &mut [DdlResult]) -> Vec<String> {
+    results
+        .iter_mut()
+        .filter_map(|ddl| match ddl {
+            DdlResult::Rows(shaped) => shaped.notice.take(),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Build a `Response::Query` from a protocol-neutral shaped row set, in the
 /// client's `requested` result formats.
 ///
-/// The `notice` field is intentionally ignored: the pgwire DDL router never
-/// attached a NOTICE to a `Response::Query` (notices are a separate protocol
-/// message), so honouring it here would diverge from the captured wire shape.
+/// A notice is a separate protocol message, so [`take_notices`] handles it.
 fn rows_to_response(shaped: ShapedRows, requested: &Format) -> PgWireResult<Response> {
     let ShapedRows {
         columns,

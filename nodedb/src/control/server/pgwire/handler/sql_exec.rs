@@ -441,7 +441,7 @@ impl NodeDbPgHandler {
             );
         }
 
-        if let Some(result) = crate::control::server::shared::ddl::dispatch(
+        if let Some(mut result) = crate::control::server::shared::ddl::dispatch(
             &self.state,
             identity,
             sql_trimmed,
@@ -450,6 +450,12 @@ impl NodeDbPgHandler {
         )
         .await
         {
+            // A notice is its own protocol message, so the session sends it with the reply.
+            if let Ok(results) = &mut result {
+                for notice in crate::control::server::pgwire::ddl_encode::take_notices(results) {
+                    self.sessions.push_notice(session_id, notice);
+                }
+            }
             return crate::control::server::pgwire::ddl_encode::ddl_results_to_pgwire(
                 result, requested,
             );
