@@ -144,12 +144,10 @@ pub fn coalesce_binding_deltas(deltas: Vec<BindingDelta>) -> Vec<(String, Decima
 /// unassigned, so it is left unassigned here too. An expression that will not
 /// evaluate fails the statement, exactly as it does on the write path.
 ///
-/// Generated columns are NOT recomputed here: their definitions are catalog
-/// state and the write path recomputes them from the stored row. A binding
-/// whose value or join column is itself a generated column therefore folds from
-/// the assigned columns only — the same approximation
-/// [`binding_join_keys`](super::materialized_sum_keys::binding_join_keys)
-/// makes.
+/// Generated columns are not recomputed here. Their definitions are catalog
+/// state. The materialized-sum planner recomputes them on the result with the
+/// Data Plane evaluator before it folds a cross-shard delta. Other callers get
+/// the assigned columns only.
 pub fn apply_update_assignments(
     doc: &serde_json::Value,
     updates: &[(String, UpdateValue)],

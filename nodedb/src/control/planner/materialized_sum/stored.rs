@@ -252,7 +252,7 @@ pub(super) async fn extend_with_stored_row(
     )
     .await?;
 
-    let outcome = StoredImages {
+    let mut outcome = StoredImages {
         images: images_of(
             scope,
             row.as_ref(),
@@ -260,6 +260,13 @@ pub(super) async fn extend_with_stored_row(
         )?,
         observed_at,
     };
+    // The Data Plane recomputes generated columns on the row it stores, so the
+    // post-image does too. Join values below are read off these images.
+    super::generated::source_generated(state, scope.collection, tenant_id, database_id)?
+        .recompute_post_images(
+            &mut outcome.images,
+            &crate::control::crs_context::crs_context_for(state),
+        )?;
 
     if row.is_none() {
         // Nothing stored: the body-driven resolution already covers the only

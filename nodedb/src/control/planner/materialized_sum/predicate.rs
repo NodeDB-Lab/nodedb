@@ -109,7 +109,10 @@ pub(super) async fn resolve_predicate_sum_targets(
     // Folded from the SAME scan the resolution came from: a second scan will
     // see a different snapshot, and two snapshots is two totals.
     let crs = crate::control::crs_context::crs_context_for(state);
-    let images = predicate_images(&scope, &rows, &crs)?;
+    let mut images = predicate_images(&scope, &rows, &crs)?;
+    // The Data Plane recomputes generated columns on each row it stores.
+    super::generated::source_generated(state, &scope.collection, tenant_id, database_id)?
+        .recompute_post_images(&mut images, &crs)?;
     let input = SettleInput {
         source_collection: &scope.collection,
         images: &images,

@@ -60,7 +60,7 @@ pub fn append_cross_shard_balance_tasks(
         };
         let Some(SettleableInsert {
             collection,
-            docs,
+            mut docs,
             resolved,
         }) = settleable_insert(op)?
         else {
@@ -77,6 +77,10 @@ pub fn append_cross_shard_balance_tasks(
         else {
             continue;
         };
+        // The Data Plane stores each body with its generated columns
+        // recomputed, so the credited value is read after the same step.
+        super::generated::source_generated(state, collection, tenant_id, database_id)?
+            .recompute_docs(&mut docs, &crs)?;
 
         let mut for_task = Vec::new();
         for binding in bindings.iter() {
