@@ -94,6 +94,7 @@ mod database_scoped_ddl_introspection;
 mod ddl_float_width_aliases_strict_kv;
 mod ddl_int_width_aliases_strict_kv;
 mod ddl_numeric_width_schemaless;
+mod ddl_router_error_aborts_block;
 mod declared_key_scan_rows;
 mod declared_width_computed_writes;
 mod define_field_type_update;
