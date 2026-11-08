@@ -5,7 +5,7 @@
 //! Transaction commands (BEGIN/COMMIT/ROLLBACK/SAVEPOINT) are in `transaction_cmds.rs`.
 //! Session commands (SET/SHOW/RESET/DISCARD) are in `session_cmds.rs`.
 //! Cursor commands (DECLARE/FETCH/MOVE/CLOSE) are in `cursor_cmds.rs`.
-//! SQL statement splitting is in `sql_split.rs`.
+//! SQL statement splitting is in `shared/sql_split.rs`.
 
 use std::sync::Arc;
 
@@ -21,9 +21,9 @@ use crate::control::security::session_identity::stored_user_identity;
 use super::super::types::text_field;
 use super::connection_admin;
 use super::core::NodeDbPgHandler;
-use super::sql_split::split_sql_statements;
 use crate::control::server::shared::session::audit_context::AuditScope;
 use crate::control::server::shared::session::{SessionId, TransactionState};
+use crate::control::server::shared::sql_split::split_sql_statements;
 use crate::control::server::shared::txn_control::{TxnControl, classify as classify_txn_control};
 
 impl NodeDbPgHandler {

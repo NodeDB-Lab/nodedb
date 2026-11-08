@@ -18,6 +18,9 @@ pub mod retry;
 pub mod returning;
 pub mod session;
 pub mod sql;
+pub(crate) mod sql_split;
+#[cfg(test)]
+mod sql_split_syntax_tests;
 pub mod statement_exec;
 pub mod txn_control;
 pub mod txn_route;
