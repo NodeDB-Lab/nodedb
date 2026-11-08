@@ -477,6 +477,7 @@ mod sum_native_governed_direct_op;
 mod sum_predicate_after_write;
 mod sum_skip_page;
 mod sum_skip_route_matrix;
+mod sum_truncate_restart;
 mod sum_truncate_zero_net;
 mod sum_unbound_rewrite;
 mod timeseries_aggregate_derived_reads;
