@@ -2,13 +2,16 @@
 
 //! Direct operations that orchestrate on the Control Plane and never reach the
 //! Data Plane as a single op: `INSERT ... SELECT`, autocommit `MERGE`,
-//! autocommit `UPDATE ... FROM <source>`, and governed-predicate writes.
+//! autocommit `UPDATE ... FROM <source>`, and governed-predicate writes that
+//! feed no materialized sum.
 
 use nodedb_types::protocol::NativeResponse;
 
 use crate::bridge::envelope::PhysicalPlan;
+use crate::control::planner::materialized_sum::source_drives_bindings;
 use crate::control::server::shared::txn_route::statement_needs_implicit_txn;
-use crate::types::VShardId;
+use crate::control::state::SharedState;
+use crate::types::{DatabaseId, TenantId, VShardId};
 use nodedb_physical::physical_task::{PhysicalTask, PostSetOp};
 
 use super::response::data_plane_response_to_native;
@@ -23,6 +26,27 @@ fn bare_task(ctx: &DispatchCtx<'_>, plan: &PhysicalPlan, vshard_id: VShardId) ->
         plan: plan.clone(),
         post_set_op: PostSetOp::None,
         txn_id: None,
+    }
+}
+
+/// Whether `plan` writes `collection` as the source of a materialized sum.
+/// `collection` is the db-qualified name the plan's resolver routes by.
+///
+/// Settlement covers document writes only. A catalog error answers `true`:
+/// the general path reads the same bindings and reports the error.
+fn settles_materialized_sum(
+    state: &SharedState,
+    plan: &PhysicalPlan,
+    collection: &str,
+    tenant_id: TenantId,
+    database_id: DatabaseId,
+) -> bool {
+    if !matches!(plan, PhysicalPlan::Document(_)) {
+        return false;
+    }
+    match source_drives_bindings(state, collection, tenant_id, database_id) {
+        Ok(bindings) => bindings.is_some(),
+        Err(_) => true,
     }
 }
 
@@ -138,8 +162,18 @@ pub(super) async fn dispatch_orchestrated(
     }
 
     // A governed predicate resolves to a concrete row set before proposing — see
-    // `control::write_resolve`.
-    if let Some(resolver) = crate::control::write_resolve::resolver_for_plan(plan) {
+    // `control::write_resolve`. This branch proposes without settling, so a
+    // write to the source of a materialized sum takes the general path, which
+    // settles the balance and then resolves the governed write on its route.
+    if let Some(resolver) = crate::control::write_resolve::resolver_for_plan(plan)
+        && !settles_materialized_sum(
+            ctx.state,
+            plan,
+            resolver.collection(),
+            tenant_id,
+            ctx.database_id(),
+        )
+    {
         let task = bare_task(ctx, plan, vshard_id);
         let authorized = match super::sql_gateway::authorize_native_task(ctx, &task) {
             Ok(authorized) => authorized,
