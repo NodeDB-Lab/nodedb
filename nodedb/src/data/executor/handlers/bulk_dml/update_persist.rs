@@ -44,11 +44,16 @@ impl CoreLoop {
     /// The row lands at `p.sys_from` through the same write the point update
     /// lands. `old_doc` is the row's pre-image: the old side of the index
     /// diff and of the materialized-sum fold.
+    ///
+    /// `user_roles` are the roles of the identity that writes. They reach the
+    /// transition check that runs here, against the row this transaction
+    /// reads, not the image the statement's projection saw.
     pub(super) fn persist_bulk_update_row(
         &mut self,
         p: UpdateReindex<'_>,
         old_doc: &serde_json::Value,
         hook: &HookCtx<'_>,
+        user_roles: &[String],
     ) -> crate::Result<PersistedBulkUpdateRow> {
         // Hoisted before the transaction opens: the images below borrow them,
         // and a collection that declares no image-folding enforcement must not
@@ -61,6 +66,14 @@ impl CoreLoop {
         let folds = write_hook::folds_images(self, hook);
 
         let txn = self.sparse.begin_write()?;
+        // The statement's gate judged each row against the image the
+        // projection read. The apply loop commits one transaction per row, so
+        // a writer that lands in between moves the pre-image. The body this
+        // transaction reads is the one the write replaces. A bitemporal write
+        // appends a version, so it keeps the projected judgement.
+        if !self.is_bitemporal(p.database_id, p.tid, p.collection) {
+            self.judge_stored_transition(&txn, &p, user_roles)?;
+        }
         let text = crate::data::executor::handlers::point::update_reindex_text::UpdateTextReindex {
             database_id: p.database_id,
             tid: p.tid,
@@ -109,6 +122,38 @@ impl CoreLoop {
             detail: format!("bulk update commit of row {doc_id}: {e}"),
         })?;
         Ok(PersistedBulkUpdateRow { target_writes })
+    }
+
+    /// Judge the transition this write lands: the row's current body, read
+    /// inside `txn`, against the post-image the caller built.
+    ///
+    /// A row that is no longer stored is not judged, because the write then
+    /// creates it rather than moving it. A collection with no rule costs one
+    /// read and no decode.
+    fn judge_stored_transition(
+        &self,
+        txn: &redb::WriteTransaction,
+        p: &UpdateReindex<'_>,
+        user_roles: &[String],
+    ) -> crate::Result<()> {
+        let Some(current) =
+            self.current_row_body_in_txn(txn, p.database_id, p.tid, p.collection, p.doc_id)?
+        else {
+            return Ok(());
+        };
+        let config_key = (
+            crate::types::DatabaseId::new(p.database_id),
+            crate::types::TenantId::new(p.tid),
+            p.collection.to_string(),
+        );
+        self.check_stored_update_transitions(
+            &config_key,
+            p.collection,
+            &current,
+            p.new_body,
+            user_roles,
+        )
+        .map_err(crate::Error::DataPlane)
     }
 }
 
@@ -215,6 +260,7 @@ mod tests {
                 deferred_sum_targets: &[],
                 wal_lsn: None,
             },
+            &[],
         )
         .map(|_| ())
     }
