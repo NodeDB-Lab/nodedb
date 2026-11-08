@@ -22,9 +22,7 @@ use nodedb_wal::{TombstoneSet, WalRecord};
 use crate::bootstrap::write_group_settle::StoredWriteSets;
 use crate::bootstrap::write_group_settle::settle::settle_against;
 use crate::bridge::dispatch::JournalGroup;
-use crate::bridge::envelope::{
-    Admission, PhysicalPlan, Priority, Request, Response, Status, WriteSetEntry,
-};
+use crate::bridge::envelope::{Admission, PhysicalPlan, Priority, Request, Status, WriteSetEntry};
 use crate::control::cluster::calvin::scheduler::recover_all_applied;
 use crate::control::security::catalog::SystemCatalog;
 use crate::control::server::wal_dispatch::{
@@ -126,18 +124,24 @@ impl Live {
     fn journalled_in(&mut self, collection: &str, plan: PhysicalPlan, stored: bool) -> GroupOrigin {
         let origin = self.append_origin(&plan);
         let task = ExecutionTask::new(request(plan, origin));
-        self.core.begin_journalled();
-        let response: Response = self.core.execute(&task);
-        assert_eq!(response.status, Status::Ok, "{response:?}");
+        let group = JournalGroup {
+            origin: origin.lsn,
+            collection: collection.to_string(),
+            apply_key: NO_APPLY_KEY,
+            commit_hlc: None,
+            change_position: None,
+        };
         if stored {
-            let group = JournalGroup {
-                origin: origin.lsn,
-                collection: collection.to_string(),
-                apply_key: NO_APPLY_KEY,
-                commit_hlc: None,
-                change_position: None,
-            };
-            self.core.finish_journalled_task(&task, group, &response);
+            let permit = self.core.begin_task_journal(&task, group);
+            let mut response = self.core.execute_with_journal(&task, permit);
+            assert_eq!(response.status, Status::Ok, "{response:?}");
+            self.core
+                .finish_journalled_task(&task, &mut response)
+                .expect("finish journal");
+        } else {
+            self.core.begin_journalled();
+            let response = self.core.execute(&task);
+            assert_eq!(response.status, Status::Ok, "{response:?}");
         }
         self.wal.sync().expect("sync");
         origin

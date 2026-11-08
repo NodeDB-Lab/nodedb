@@ -5,9 +5,9 @@
 use tracing::debug;
 
 use crate::bridge::dispatch::JournalGroup;
-use crate::bridge::envelope::{ErrorCode, PhysicalPlan, Response};
+use crate::bridge::envelope::{ErrorCode, PhysicalPlan, Response, Status};
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::core_loop::fail_stop::FailStopCause;
+use crate::data::executor::core_loop::redo_image::{submitted_row_image, versioned_point_images};
 use crate::data::executor::enforcement::unique::{SubmittedWrite, UniqueJudge};
 use crate::data::executor::handlers::point::apply_put::{PointPutOutcome, PointPutParams};
 use crate::data::executor::task::ExecutionTask;
@@ -30,10 +30,9 @@ fn is_batchable_put(task: &ExecutionTask) -> bool {
 }
 
 impl CoreLoop {
-    /// Whether a put writes a `HASH_CHAIN` collection. Each of its rows links
-    /// after the one before through `execute_point_put`, which this path does
-    /// not run, so such a put is never absorbed.
-    fn chains_rows(&self, task: &ExecutionTask) -> bool {
+    /// Whether a put requires the canonical row-image hooks and statement boundary.
+    /// Shared batches bypass these hooks, so these puts run through `poll_one`.
+    fn requires_point_put_hooks(&self, task: &ExecutionTask) -> bool {
         let PhysicalPlan::Document(DocumentOp::PointPut { collection, .. }) = task.plan() else {
             return false;
         };
@@ -42,9 +41,9 @@ impl CoreLoop {
             task.request.tenant_id,
             collection.as_str().to_string(),
         );
-        self.doc_configs
-            .get(&key)
-            .is_some_and(|config| config.enforcement.hash_chain)
+        self.doc_configs.get(&key).is_some_and(|config| {
+            config.enforcement.hash_chain || config.enforcement.has_image_enforcement()
+        })
     }
 
     /// Judge the UNIQUE claims of the last put in `tasks`. Every task is its
@@ -109,10 +108,9 @@ impl CoreLoop {
     /// back to `poll_one`).
     pub fn poll_write_batch(&mut self) -> usize {
         // Check if the front of the queue is a non-expired batchable PointPut.
-        let front_is_put = self
-            .task_queue
-            .front()
-            .is_some_and(|t| is_batchable_put(t) && !t.is_expired() && !self.chains_rows(t));
+        let front_is_put = self.task_queue.front().is_some_and(|t| {
+            is_batchable_put(t) && !t.is_expired() && !self.requires_point_put_hooks(t)
+        });
         // While a staged Calvin transaction owns rows, every write passes the
         // fence in `poll_one` one at a time.
         if !front_is_put || !self.calvin.commit_pending.is_empty() {
@@ -122,10 +120,9 @@ impl CoreLoop {
         // Collect consecutive non-expired PointPuts (max 64).
         let mut batch: Vec<ExecutionTask> = Vec::with_capacity(64);
         while batch.len() < 64 {
-            let is_put = self
-                .task_queue
-                .front()
-                .is_some_and(|t| is_batchable_put(t) && !t.is_expired() && !self.chains_rows(t));
+            let is_put = self.task_queue.front().is_some_and(|t| {
+                is_batchable_put(t) && !t.is_expired() && !self.requires_point_put_hooks(t)
+            });
             if !is_put {
                 break;
             }
@@ -157,7 +154,7 @@ impl CoreLoop {
             Ok(t) => t,
             Err(_) => {
                 if journalled {
-                    self.finish_journalled(&[]);
+                    self.end_empty_journalled();
                 }
                 // Can't open txn — put tasks back, let poll_one handle individually.
                 for t in batch.into_iter().rev() {
@@ -255,36 +252,42 @@ impl CoreLoop {
 
         let count = batch.len();
         let mut responses = Vec::with_capacity(count);
-        for (task, result) in batch.iter().zip(results.iter()) {
-            let response = match (&commit_result, &fatal) {
-                (Err(_), Some(code)) => self.response_error(task, code.clone()),
-                (Ok(()), _) => {
+        for (task, result) in batch.iter().zip(results) {
+            let response = match (&commit_result, &fatal, result) {
+                (Err(_), Some(code), _) => self.response_error(task, code.clone()),
+                (Ok(()), _, Ok(outcome)) => {
+                    let mut response = self.response_ok(task);
                     // Emit write event for each successful batched PointPut.
                     // The Insert vs Update tag is derived from the prior
                     // bytes captured per row above.
                     if let PhysicalPlan::Document(DocumentOp::PointPut {
                         collection,
                         document_id,
+                        surrogate,
                         value,
                         ..
                     }) = task.plan()
                     {
                         let tid = task.request.tenant_id.as_u64();
-                        let prior = match result {
-                            Ok(p) => p.prior_value.as_deref(),
-                            Err(_) => None,
-                        };
+                        let prior = outcome.prior_value.as_deref();
                         // The plan's `document_id` is the row's client identity,
                         // the same one `execute_point_put` emits and the WAL
                         // journals.
                         let identity = crate::engine::document::store::RowIdentity::from_user_key(
                             document_id.as_str(),
                         );
+                        response.write_set = versioned_point_images(submitted_row_image(
+                            surrogate.as_u32(),
+                            identity.clone(),
+                            value.to_vec(),
+                            outcome.version_sys_from,
+                        ));
                         self.emit_put_event(task, tid, collection.as_str(), identity, value, prior);
                     }
-                    self.response_ok(task)
+                    response
                 }
-                (Err(e), None) => self.response_error(
+                (Ok(()), _, Err(response)) => response,
+                (Err(e), None, _) => self.response_error(
                     task,
                     ErrorCode::Internal {
                         detail: format!("batch commit: {e}"),
@@ -360,7 +363,7 @@ impl CoreLoop {
         &mut self,
         batch: &[ExecutionTask],
         groups: Vec<Option<JournalGroup>>,
-        responses: Vec<(Response, crate::diag::LostResponseWrite)>,
+        mut responses: Vec<(Response, crate::diag::LostResponseWrite)>,
     ) {
         if groups.iter().any(Option::is_some) {
             let mut captures = Vec::new();
@@ -374,9 +377,18 @@ impl CoreLoop {
                     Err(error) => unstored = Some(error),
                 }
             }
-            self.finish_journalled(&captures);
-            if let Some(error) = unstored {
-                self.fail_stop_core(FailStopCause::WriteSetUnpersisted, &error.to_string());
+            let stored = if let Some(error) = unstored {
+                self.abandon_journalled(&error);
+                Err(error)
+            } else {
+                self.finish_journalled(&captures)
+            };
+            if let Err(error) = stored {
+                let code = ErrorCode::from(error);
+                for (response, _) in &mut responses {
+                    response.status = Status::Error;
+                    response.error_code = Some(Box::new(code.clone()));
+                }
             }
         }
         for (response, write) in responses {

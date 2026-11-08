@@ -8,6 +8,7 @@
 
 use crate::bridge::envelope::Response;
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::core_loop::write_set_journal::RootJournalPermit;
 use crate::data::executor::task::ExecutionTask;
 use nodedb_physical::PhysicalTaskVisitor;
 use nodedb_physical::physical_plan::{
@@ -24,6 +25,7 @@ pub(super) struct DataPlaneVisitor<'a, 'b> {
     pub(super) core_loop: &'a mut CoreLoop,
     pub(super) task: &'b ExecutionTask,
     pub(super) tid: u64,
+    pub(super) permit: Option<RootJournalPermit>,
 }
 
 impl<'a, 'b> PhysicalTaskVisitor for DataPlaneVisitor<'a, 'b> {
@@ -59,7 +61,9 @@ impl<'a, 'b> PhysicalTaskVisitor for DataPlaneVisitor<'a, 'b> {
     }
 
     fn meta(&mut self, op: &MetaOp) -> Result<Response, Self::Error> {
-        Ok(self.core_loop.dispatch_meta(self.task, self.tid, op))
+        Ok(self
+            .core_loop
+            .dispatch_meta_with_journal(self.task, self.tid, op, self.permit.take()))
     }
 
     fn columnar(&mut self, op: &ColumnarOp) -> Result<Response, Self::Error> {

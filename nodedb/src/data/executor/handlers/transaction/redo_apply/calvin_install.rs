@@ -22,6 +22,7 @@ use tracing::info_span;
 
 use crate::bridge::envelope::{Payload, Response, Status};
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::core_loop::write_set_journal::RootJournalPermit;
 use crate::data::executor::handlers::control::calvin_reply::CalvinReply;
 use crate::data::executor::task::ExecutionTask;
 
@@ -41,6 +42,7 @@ impl CoreLoop {
         committed: CommittedRedo<'_>,
         origin: RedoOrigin,
         install: &CalvinInstall,
+        permit: Option<RootJournalPermit>,
     ) -> Response {
         let CalvinInstall {
             epoch,
@@ -73,8 +75,14 @@ impl CoreLoop {
         // Every KV write of the slice stamps the transaction's ordinal, which
         // every replica derives alike.
         let kv_scope = self.kv_engine.open_write_scope(Some(txn_ordinal));
-        let mut response =
-            self.install_committed_redo_into(task, tid, committed, origin, &mut ts_installs);
+        let mut response = self.install_committed_redo_into(
+            task,
+            tid,
+            committed,
+            origin,
+            &mut ts_installs,
+            permit,
+        );
         self.kv_engine.close_write_scope(kv_scope);
         if response.status != Status::Ok {
             return response;

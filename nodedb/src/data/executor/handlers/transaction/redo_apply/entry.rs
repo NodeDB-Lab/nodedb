@@ -39,6 +39,7 @@ use nodedb_wal::record::{RecordType, WalRecordArgs};
 use crate::bridge::envelope::{ErrorCode, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::fail_stop::FailStopCause;
+use crate::data::executor::core_loop::write_set_journal::RootJournalPermit;
 use crate::data::executor::enforcement::write_hook::target_write_set;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::TenantId;
@@ -64,6 +65,12 @@ pub(in crate::data::executor) struct RedoSnapshot<'a> {
     pub ordinal: i64,
 }
 
+#[derive(Default)]
+struct RedoInstallBoundary<'a> {
+    snapshot: Option<RedoSnapshot<'a>>,
+    permit: Option<RootJournalPermit>,
+}
+
 impl CoreLoop {
     /// Apply one committed redo record. The request carries the LSN of the
     /// `TransactionRedo` WAL record the funnel appended for it.
@@ -77,7 +84,7 @@ impl CoreLoop {
         self.install_redo(task, tid, committed, RedoOrigin::Commit)
     }
 
-    /// [`Self::install_redo`] for a committed record from `origin` that also
+    /// [`Self::install_redo_authorized`] for a committed record from `origin` that also
     /// hands back what each resolved timeseries batch of the record stored,
     /// in `ts_installs`.
     pub(in crate::data::executor) fn install_committed_redo_into(
@@ -87,9 +94,20 @@ impl CoreLoop {
         committed: CommittedRedo<'_>,
         origin: RedoOrigin,
         ts_installs: &mut Vec<TsInstalled>,
+        permit: Option<RootJournalPermit>,
     ) -> Response {
         // A Calvin slice's stage vote validated its snapshot.
-        self.install_redo_into(task, tid, committed, origin, ts_installs, None)
+        self.install_redo_into(
+            task,
+            tid,
+            committed,
+            origin,
+            ts_installs,
+            RedoInstallBoundary {
+                snapshot: None,
+                permit,
+            },
+        )
     }
 
     /// Install one committed redo record at the LSN the request carries:
@@ -97,6 +115,7 @@ impl CoreLoop {
     /// decides the commit-boundary checks the validate pass runs.
     /// Every committed transaction installs here, whichever path committed it,
     /// and restart replay drives the same arms over the same record.
+    #[cfg(test)]
     pub(in crate::data::executor) fn install_redo(
         &mut self,
         task: &ExecutionTask,
@@ -104,13 +123,14 @@ impl CoreLoop {
         committed: CommittedRedo<'_>,
         origin: RedoOrigin,
     ) -> Response {
-        self.install_redo_into(task, tid, committed, origin, &mut Vec::new(), None)
+        self.install_redo_authorized(task, tid, committed, origin, None, None)
     }
 
-    /// [`Self::install_redo`] for a single-shard snapshot commit: the record
+    /// [`Self::install_redo_authorized`] for a single-shard snapshot commit: the record
     /// installs only while nothing its transaction read or replaces holds a
     /// committed version above `snapshot.ordinal`. A record that fails the
     /// check is refused with `SerializationConflict` on every replica.
+    #[cfg(test)]
     pub(in crate::data::executor) fn install_snapshot_redo(
         &mut self,
         task: &ExecutionTask,
@@ -119,13 +139,25 @@ impl CoreLoop {
         origin: RedoOrigin,
         snapshot: RedoSnapshot<'_>,
     ) -> Response {
+        self.install_redo_authorized(task, tid, committed, origin, Some(snapshot), None)
+    }
+
+    pub(in crate::data::executor) fn install_redo_authorized(
+        &mut self,
+        task: &ExecutionTask,
+        tid: u64,
+        committed: CommittedRedo<'_>,
+        origin: RedoOrigin,
+        snapshot: Option<RedoSnapshot<'_>>,
+        permit: Option<RootJournalPermit>,
+    ) -> Response {
         self.install_redo_into(
             task,
             tid,
             committed,
             origin,
             &mut Vec::new(),
-            Some(snapshot),
+            RedoInstallBoundary { snapshot, permit },
         )
     }
 
@@ -139,8 +171,9 @@ impl CoreLoop {
         committed: CommittedRedo<'_>,
         origin: RedoOrigin,
         ts_installs: &mut Vec<TsInstalled>,
-        snapshot: Option<RedoSnapshot<'_>>,
+        boundary: RedoInstallBoundary<'_>,
     ) -> Response {
+        let RedoInstallBoundary { snapshot, permit } = boundary;
         let Some(lsn) = task.wal_lsn() else {
             return self.response_error(
                 task,
@@ -242,6 +275,35 @@ impl CoreLoop {
             Ok(scope) => scope,
             Err(refusal) => return self.response_error(task, refusal.into_code()),
         };
+        let write_set = target_write_set(&scope.target_writes);
+        if let Some(permit) = permit {
+            let capture = match self.prepare_redo_capture(task, permit, &write_set) {
+                Ok(capture) => capture,
+                Err(error) => {
+                    let kv_scope = self.kv_engine.open_write_scope(apply_ordinal);
+                    let detail = error.to_string();
+                    let refusal = self.roll_back_redo(
+                        &target,
+                        std::mem::take(&mut scope.undo),
+                        ErrorCode::from(error),
+                    );
+                    self.kv_engine.close_write_scope(kv_scope);
+                    let error = crate::Error::Storage {
+                        engine: "journal".into(),
+                        detail,
+                    };
+                    let code = refusal.into_code();
+                    self.fail_stop_on_rollback_code(&code);
+                    self.fail_journalled(&error);
+                    return self.response_error(task, code);
+                }
+            };
+            if let Err(error) = self.persist_redo_capture(capture, &write_set) {
+                let mut response = self.response_error(task, error);
+                response.write_set = write_set;
+                return response;
+            }
+        }
         // The install applied the record: every flush the settle runs, and
         // every later checkpoint, names it. No artifact written before this
         // point names it: its stamp prefix is an outcome floor the record was
@@ -255,6 +317,7 @@ impl CoreLoop {
         // fail-stops. The funnel keeps the record for restart replay.
         let settled = self.settle_redo_install(task, &mut scope);
         if let Err(error) = settled {
+            self.seal_journalled();
             self.fail_stop_core(
                 FailStopCause::PostInstallFailed,
                 &format!(
@@ -262,7 +325,9 @@ impl CoreLoop {
                     lsn.as_u64()
                 ),
             );
-            return self.response_error(task, error);
+            let mut response = self.response_error(task, error);
+            response.write_set = write_set;
+            return response;
         }
         // Write notes and the watermark move only once the record is
         // settled.
@@ -276,6 +341,7 @@ impl CoreLoop {
                 }
             };
             if let Err(error) = published {
+                self.seal_journalled();
                 self.fail_stop_core(
                     FailStopCause::PostInstallFailed,
                     &format!(
@@ -283,7 +349,9 @@ impl CoreLoop {
                         lsn.as_u64()
                     ),
                 );
-                return self.response_error(task, error);
+                let mut response = self.response_error(task, error);
+                response.write_set = write_set;
+                return response;
             }
         }
         // Events leave only once the record is settled. Every
@@ -333,6 +401,7 @@ impl CoreLoop {
             } else if let Err(error) =
                 self.note_settled_collection(task.request.database_id, tenant, collection, stamp)
             {
+                self.seal_journalled();
                 self.fail_stop_core(
                     FailStopCause::PostInstallFailed,
                     &format!(
@@ -340,10 +409,11 @@ impl CoreLoop {
                         lsn.as_u64()
                     ),
                 );
-                return self.response_error(task, error);
+                let mut response = self.response_error(task, error);
+                response.write_set = write_set;
+                return response;
             }
         }
-        let write_set = target_write_set(&scope.target_writes);
         self.emit_committed_redo_events(task, scope.doc_writes, kv_images, labels, &rows);
         self.emit_committed_publishes(task, &redo.publishes);
 

@@ -3,6 +3,7 @@
 //! Dispatch for MetaOp variants (WAL, snapshots, retention, continuous aggregates).
 
 use crate::bridge::envelope::{ErrorCode, Response};
+use crate::data::executor::core_loop::write_set_journal::RootJournalPermit;
 use nodedb_physical::physical_plan::MetaOp;
 
 use crate::data::executor::core_loop::CoreLoop;
@@ -11,12 +12,13 @@ use crate::data::executor::response_codec;
 use crate::data::executor::task::ExecutionTask;
 
 impl CoreLoop {
-    /// Run `op`. [`Self::dispatch_meta`] wraps it.
+    /// Run `op`. [`Self::dispatch_meta_with_journal`] wraps it.
     pub(super) fn dispatch_meta_op(
         &mut self,
         task: &ExecutionTask,
         tid: u64,
         op: &MetaOp,
+        permit: Option<RootJournalPermit>,
     ) -> Response {
         match op {
             MetaOp::WalAppend { payload } => self.execute_wal_append(task, payload),
@@ -380,19 +382,20 @@ impl CoreLoop {
                 match (calvin, snapshot_ordinal) {
                     // A Calvin slice's stage vote validated its snapshot.
                     (Some(install), _) => {
-                        self.install_calvin_redo(task, tid, committed, *origin, install)
+                        self.install_calvin_redo(task, tid, committed, *origin, install, permit)
                     }
-                    (None, Some(ordinal)) => self.install_snapshot_redo(
+                    (None, Some(ordinal)) => self.install_redo_authorized(
                         task,
                         tid,
                         committed,
                         *origin,
-                        crate::data::executor::handlers::transaction::redo_apply::RedoSnapshot {
+                        Some(crate::data::executor::handlers::transaction::redo_apply::RedoSnapshot {
                             reads,
                             ordinal: *ordinal,
-                        },
+                        }),
+                        permit,
                     ),
-                    (None, None) => self.install_redo(task, tid, committed, *origin),
+                    (None, None) => self.install_redo_authorized(task, tid, committed, *origin, None, permit),
                 }
             }
 

@@ -26,10 +26,11 @@ pub(crate) async fn resolve_on_response(
     response: &Response,
     minted: MintedRecords,
 ) -> crate::Result<()> {
-    let refusal = response
-        .error_code
-        .as_deref()
-        .filter(|code| response.status != Status::Ok && write_definitely_not_applied(code));
+    let refusal = response.error_code.as_deref().filter(|code| {
+        response.status != Status::Ok
+            && response.write_set.is_empty()
+            && write_definitely_not_applied(code)
+    });
     match refusal {
         Some(code) => {
             let marker_key = if refusal_is_final(code) {
@@ -190,6 +191,29 @@ mod tests {
             false,
         );
         resolve_on_response(&wal, owner(), 0, &internal, minted)
+            .await
+            .expect("resolve");
+        wal.sync().expect("sync");
+        assert!(replayed(&wal).contains(&lsn.as_u64()));
+        assert_eq!(floor.floor(), lsn);
+    }
+
+    #[tokio::test]
+    async fn accepted_rows_keep_the_origin_despite_a_typed_refusal() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal = Arc::new(WalManager::open_for_testing(&dir.path().join("wal")).expect("wal"));
+        let floor = OutcomeFloor::new();
+        let (minted, lsn) = minted_record(&wal, &floor);
+        let mut accepted = refusal();
+        accepted
+            .write_set
+            .push(crate::bridge::envelope::WriteSetEntry::put(
+                1,
+                nodedb_types::RowIdentity::from_user_key("accepted"),
+                vec![1],
+                crate::bridge::envelope::RowVersion::open(1),
+            ));
+        resolve_on_response(&wal, owner(), 0, &accepted, minted)
             .await
             .expect("resolve");
         wal.sync().expect("sync");

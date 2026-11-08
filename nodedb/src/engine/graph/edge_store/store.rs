@@ -10,7 +10,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use nodedb_types::{DatabaseId, TenantId};
-use redb::{Database, TableDefinition};
+use redb::TableDefinition;
 
 use super::home_bytes::ensure_edge_storage_bytes_table;
 use super::node_labels::{NODE_LABEL_LSN, NODE_LABEL_VERSIONS};
@@ -104,7 +104,7 @@ impl EdgeStore {
             std::fs::create_dir_all(parent)?;
         }
 
-        let db = Database::create(path).map_err(|e| redb_err("open", e))?;
+        let db = GatedDatabase::create(path).map_err(|e| redb_err("open", e))?;
 
         let write_txn = db.begin_write().map_err(|e| redb_err("begin_write", e))?;
         {
@@ -139,7 +139,7 @@ impl EdgeStore {
         let label_lsn_floor = Self::read_label_lsn(&db)?;
 
         Ok(Self {
-            db: Arc::new(GatedDatabase::new(db)),
+            db: Arc::new(db),
             label_lsn_floor,
         })
     }

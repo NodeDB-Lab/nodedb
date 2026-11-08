@@ -107,10 +107,9 @@ impl CoreLoop {
             }
         } else {
             task.state = TaskState::Running;
-            if journal.is_some() {
-                self.begin_journalled();
-            }
-            let resp = self.execute(&task);
+            let journalled = journal.is_some();
+            let permit = journal.and_then(|group| self.begin_task_journal(&task, group));
+            let mut resp = self.execute_with_journal(&task, permit);
             // Every engine's next checkpoint, flush or manifest stamps what
             // this core applied, so a record applied here is noted whichever
             // engine applied it. A refused record carries a durable abort
@@ -134,8 +133,11 @@ impl CoreLoop {
                     );
                 }
             }
-            if let Some(group) = journal {
-                self.finish_journalled_task(&task, group, &resp);
+            if journalled {
+                if let Err(error) = self.finish_journalled_task(&task, &mut resp) {
+                    resp.status = Status::Error;
+                    resp.error_code = Some(Box::new(ErrorCode::from(error)));
+                }
                 // A crash test kills the process here: the write's write set
                 // is stored and its parts are not journalled yet.
                 #[cfg(feature = "failpoints")]

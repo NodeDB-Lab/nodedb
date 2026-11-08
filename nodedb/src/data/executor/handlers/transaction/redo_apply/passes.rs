@@ -111,7 +111,7 @@ impl CoreLoop {
     }
 
     /// Reverse `undo` after a pass failed with `cause`.
-    fn roll_back_redo(
+    pub(super) fn roll_back_redo(
         &mut self,
         target: &RedoTarget<'_>,
         undo: Vec<UndoEntry>,

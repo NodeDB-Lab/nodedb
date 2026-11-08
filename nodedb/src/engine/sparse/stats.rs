@@ -403,8 +403,6 @@ impl StatsStore {
 
 #[cfg(test)]
 mod tests {
-    use redb::Database;
-
     use super::*;
 
     #[test]
@@ -462,9 +460,7 @@ mod tests {
     #[test]
     fn stats_store_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
-        let db = Arc::new(GatedDatabase::new(
-            Database::create(dir.path().join("stats.redb")).unwrap(),
-        ));
+        let db = Arc::new(GatedDatabase::create(dir.path().join("stats.redb")).unwrap());
         let store = StatsStore::open(db).unwrap();
 
         let mut stats = ColumnStats::new();
