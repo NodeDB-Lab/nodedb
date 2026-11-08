@@ -25,6 +25,7 @@ pub mod resolve;
 pub mod resolve_target;
 pub mod settle;
 pub mod stored;
+mod unbound_key;
 
 pub use cross_shard::append_cross_shard_balance_tasks;
 pub use extract::join_value_from_body;

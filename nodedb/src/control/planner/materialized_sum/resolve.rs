@@ -156,7 +156,7 @@ pub async fn resolve_materialized_sum_targets(
                     let input = SettleInput {
                         source_collection: collection,
                         images: &images.images,
-                        source_row: Some(scope.surrogate),
+                        source_row: scope.surrogate,
                         observed_at: images.observed_at,
                         crs: &crs,
                     };

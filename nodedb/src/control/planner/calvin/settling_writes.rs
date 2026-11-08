@@ -51,10 +51,10 @@ pub fn refuse_several_returning_tasks(tasks: &[PhysicalTask]) -> crate::Result<(
 ///
 /// Every write of a task set settles before any write stages, so a later write
 /// of a row folds its delta from an image the earlier write changes. `reads`
-/// names each settled point write by its source row, so a row that ships no
-/// delta does not count. Two writes of different rows each fold their own image
-/// and pass. The rows of one `BatchUpsert` page settle the same way, so a page
-/// that names a row twice is refused too.
+/// names each settled point write by its source row, absent rows included. Two
+/// writes of different rows each fold their own image and pass. The rows of one
+/// `BatchUpsert` page settle the same way, so a page that names a row twice is
+/// refused too.
 pub fn refuse_repeated_settled_rows(reads: &[ReadSetEntry]) -> crate::Result<()> {
     let mut settled_rows = BTreeSet::new();
     for read in reads {

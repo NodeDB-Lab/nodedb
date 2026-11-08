@@ -90,7 +90,9 @@ pub(super) struct SettleInput<'a> {
     pub images: &'a [(Option<serde_json::Value>, Option<serde_json::Value>)],
     /// The ONE source row a point-shaped write rewrites, so the OCC entry names
     /// that row. `None` for a predicate-shaped write, whose observation is the
-    /// whole collection and whose entry is collection-scoped accordingly.
+    /// whole collection, and for a point write of an unbound key: an insert of
+    /// that key mints a surrogate no point entry can name. Both entries are
+    /// collection-scoped.
     pub source_row: Option<Surrogate>,
     /// The ordinal of the read cut the images' read took before it read.
     pub observed_at: i64,
@@ -148,6 +150,7 @@ pub(super) fn settle_cross_shard_images(
     database_id: DatabaseId,
 ) -> crate::Result<Settlement> {
     let mut settlement = Settlement::empty();
+    let mut cross_shard = false;
     let source = CollectionKey::from_qualified_str(database_id, input.source_collection)?;
     for binding in bindings {
         if sum_target_is_co_resident(source, &binding.target_collection) {
@@ -155,6 +158,7 @@ pub(super) fn settle_cross_shard_images(
             // transaction and is atomic for free.
             continue;
         }
+        cross_shard = true;
         let mut folded: Vec<crate::query::BindingDelta> = Vec::new();
         for (old, new) in input.images {
             folded.extend(crate::query::binding_image_deltas(
@@ -198,7 +202,11 @@ pub(super) fn settle_cross_shard_images(
         }
     }
 
-    if !settlement.tasks.is_empty() || !settlement.shipped.is_empty() {
+    // A settlement that folded nothing still observed the source: the row was
+    // absent, held no join value, or no row matched. A write that creates that
+    // row or joins that match set before this write applies owes a delta, so
+    // the empty observation is stamped too.
+    if cross_shard {
         settlement
             .reads
             .push(image_read_entry(input, tenant_id, database_id));
@@ -253,10 +261,10 @@ pub(super) fn balance_task(spec: BalanceTaskSpec<'_>) -> PhysicalTask {
 /// The read-set entry covering the images a settlement was folded from.
 ///
 /// A point-shaped write names the ONE row it rewrites, so the entry is that
-/// row's surrogate and only a write to THAT row invalidates it. A
-/// predicate-shaped write observed which rows matched, which is a
-/// collection-scoped observation: any write to the source collection can add a
-/// row the scan never saw or move one it did, so the entry is the
+/// row's surrogate and only a write to THAT row invalidates it. A write that
+/// names no surrogate observed which rows matched, or that a key has no row,
+/// which is a collection-scoped observation: any write to the source collection
+/// can add a row the scan never saw or move one it did, so the entry is the
 /// collection-scoped predicate — the phantom-safe floor, never an
 /// under-approximation.
 fn image_read_entry(

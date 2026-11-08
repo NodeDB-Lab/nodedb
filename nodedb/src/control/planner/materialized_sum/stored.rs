@@ -29,6 +29,7 @@ use nodedb_types::id::TxnId;
 use super::recon::{read_cut, recon_point_row};
 use super::resolve::lookup_join_value;
 use super::resolve_target::ResolvedTargets;
+use super::unbound_key::refuse_key_bound_since_planning;
 use crate::control::state::SharedState;
 use crate::types::{DatabaseId, TenantId, TraceId};
 
@@ -62,7 +63,9 @@ pub(super) struct StoredRowScope<'a> {
     /// for storage addressing is `surrogate` and only `surrogate`.
     pub document_id: &'a str,
     /// Catalog-bound identity of the row, which is what actually addresses it.
-    pub surrogate: Surrogate,
+    /// `None` when the key was unbound at planning: no row exists to read, and
+    /// the settlement's read is collection-scoped.
+    pub surrogate: Option<Surrogate>,
     /// The statement's assignments, so a write that rewrites the join column
     /// resolves the target it moves the row ONTO as well as the one it moves it
     /// off. Empty for the shapes that carry no assignments — a delete, and a put
@@ -100,17 +103,18 @@ pub(super) fn stored_row_scope(
     txn_id: Option<TxnId>,
 ) -> Option<StoredRowScope<'_>> {
     match op {
-        // A key unbound in its database names no stored row.
+        // A key unbound at planning has no row yet, but an insert can bind it
+        // before this write applies, so the write still settles.
         DocumentOp::PointUpdate {
             collection,
             document_id,
             surrogate,
             updates,
             ..
-        } => surrogate.map(|surrogate| StoredRowScope {
+        } => Some(StoredRowScope {
             collection: collection.as_str(),
             document_id: document_id.as_str(),
-            surrogate,
+            surrogate: *surrogate,
             updates: updates.as_slice(),
             post_image: PostImage::Assigned,
             txn_id,
@@ -122,10 +126,10 @@ pub(super) fn stored_row_scope(
             document_id,
             surrogate,
             ..
-        } => surrogate.map(|surrogate| StoredRowScope {
+        } => Some(StoredRowScope {
             collection: collection.as_str(),
             document_id: document_id.as_str(),
-            surrogate,
+            surrogate: *surrogate,
             updates: &[],
             post_image: PostImage::Removed,
             txn_id,
@@ -142,7 +146,7 @@ pub(super) fn stored_row_scope(
         } => Some(StoredRowScope {
             collection: collection.as_str(),
             document_id: document_id.as_str(),
-            surrogate: *surrogate,
+            surrogate: Some(*surrogate),
             updates: &[],
             post_image: PostImage::Body(value.as_slice()),
             txn_id,
@@ -161,7 +165,7 @@ pub(super) fn stored_row_scope(
         } => Some(StoredRowScope {
             collection: collection.as_str(),
             document_id: document_id.as_str(),
-            surrogate: *surrogate,
+            surrogate: Some(*surrogate),
             updates: on_conflict_updates.as_slice(),
             post_image: PostImage::BodyOrAssigned(value.as_slice()),
             txn_id,
@@ -210,7 +214,7 @@ pub(super) fn stored_row_scopes(op: &DocumentOp, txn_id: Option<TxnId>) -> Vec<S
             .map(|((document_id, value), surrogate)| StoredRowScope {
                 collection: collection.as_str(),
                 document_id: document_id.as_str(),
-                surrogate: *surrogate,
+                surrogate: Some(*surrogate),
                 updates: on_conflict_updates.as_slice(),
                 post_image: PostImage::BodyOrAssigned(value.as_slice()),
                 txn_id,
@@ -230,6 +234,10 @@ pub(super) fn stored_row_scopes(op: &DocumentOp, txn_id: Option<TxnId>) -> Vec<S
 /// path reaches the same conclusion about the same absent row. A put or upsert
 /// with no stored row still writes: it INSERTS, and its post-image is the
 /// submitted body, so it still owes its target the row's whole value.
+///
+/// An unbound key has no row to read. [`refuse_key_bound_since_planning`] covers
+/// an insert that bound it before the cut, and the settlement's read covers one
+/// after.
 pub(super) async fn extend_with_stored_row(
     state: &SharedState,
     bindings: &Arc<Vec<MaterializedSumBinding>>,
@@ -241,16 +249,31 @@ pub(super) async fn extend_with_stored_row(
 ) -> crate::Result<StoredImages> {
     // The cut the stored image is validated at, taken before the read.
     let observed_at = read_cut(state).await?;
-    let row = recon_point_row(
-        state,
-        tenant_id,
-        database_id,
-        scope.txn_id,
-        scope.collection,
-        scope.document_id,
-        scope.surrogate,
-    )
-    .await?;
+    let row = match scope.surrogate {
+        Some(surrogate) => {
+            recon_point_row(
+                state,
+                tenant_id,
+                database_id,
+                scope.txn_id,
+                scope.collection,
+                scope.document_id,
+                surrogate,
+            )
+            .await?
+        }
+        None => {
+            refuse_key_bound_since_planning(
+                state,
+                bindings,
+                scope,
+                (tenant_id, database_id),
+                trace_id,
+            )
+            .await?;
+            None
+        }
+    };
 
     let mut outcome = StoredImages {
         images: images_of(
@@ -463,7 +486,8 @@ mod tests {
             assert_eq!(scope.collection, "entries");
             assert_eq!(scope.document_id, "e1");
             assert_eq!(
-                scope.surrogate, ROW,
+                scope.surrogate,
+                Some(ROW),
                 "the row is addressed by its surrogate, never by the primary-key string"
             );
         }
