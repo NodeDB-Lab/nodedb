@@ -3,6 +3,8 @@
 //! Core row-ingest path: per-row value coercion, ON CONFLICT DO UPDATE merge
 //! resolution, and the row-level `MutationEngine` insert call.
 
+use std::borrow::Cow;
+
 use nodedb_columnar::{BatchConflict, BatchRow};
 use nodedb_types::columnar::{ColumnarSchema, RestoredVersion};
 use nodedb_types::surrogate::Surrogate;
@@ -16,6 +18,7 @@ use crate::data::executor::task::ExecutionTask;
 use nodedb_physical::physical_plan::ColumnarInsertIntent;
 use nodedb_physical::physical_plan::document::UpdateValue;
 
+use super::geometry_prepare::PreparedGeometryRow;
 use super::restore_ingest::schema_row_values;
 use super::schema::{ndb_field_to_value, row_values_to_object};
 use super::system_stamp::RowStampInput;
@@ -58,6 +61,7 @@ pub(in crate::data::executor) struct RowIngestOutcome {
     /// Schema-ordered stored values, one entry per accepted row, in insert
     /// order. Empty unless `collect_stored_rows` was set.
     pub stored_rows: Vec<Vec<Value>>,
+    pub(super) geometry_rows: Vec<(PreparedGeometryRow, i64)>,
 }
 
 impl CoreLoop {
@@ -104,6 +108,32 @@ impl CoreLoop {
             }
         };
 
+        let geometry_rows = {
+            let engine = self.columnar_engines.get(engine_key).ok_or_else(|| {
+                self.response_error(
+                    task,
+                    ErrorCode::Internal {
+                        detail: "columnar engine vanished during geometry preparation".into(),
+                    },
+                )
+            })?;
+            let mut seen = std::collections::HashSet::new();
+            let mut candidates = Vec::with_capacity(resolved.len());
+            for row in &resolved {
+                let skipped = if conflict == BatchConflict::Skip {
+                    let pk = engine
+                        .encode_pk_from_row(&row.values)
+                        .map_err(|error| self.response_error(task, crate::Error::from(error)))?;
+                    engine.pk_index().contains(&pk) || !seen.insert(pk)
+                } else {
+                    false
+                };
+                candidates.push((!skipped).then_some(row.values.as_slice()));
+            }
+            self.prepare_columnar_geometry(task, params.schema, &engine_key.2, candidates)
+                .map_err(|error| self.response_error(task, error))?
+        };
+
         let Some(engine) = self.columnar_engines.get_mut(engine_key) else {
             return Err(self.response_error(
                 task,
@@ -129,11 +159,20 @@ impl CoreLoop {
         // row is neither counted nor returned, as it was never stored.
         let mut accepted = 0u64;
         let mut stored_rows: Vec<Vec<Value>> = Vec::new();
-        for (row, result) in resolved.into_iter().zip(results) {
-            if result.wal_records.is_empty() {
+        let mut accepted_geometry = Vec::new();
+        for ((row, result), geometry) in resolved.into_iter().zip(results).zip(geometry_rows) {
+            let Some(sys_from) = result.wal_records.iter().find_map(|record| match record {
+                nodedb_columnar::wal_record::ColumnarWalRecord::InsertRow { sys_from, .. } => {
+                    Some(*sys_from)
+                }
+                _ => None,
+            }) else {
                 continue;
-            }
+            };
             accepted += 1;
+            if let Some(geometry) = geometry {
+                accepted_geometry.push((geometry, sys_from));
+            }
             if collect_stored_rows {
                 stored_rows.push(row.values);
             }
@@ -142,6 +181,7 @@ impl CoreLoop {
         Ok(RowIngestOutcome {
             accepted,
             stored_rows,
+            geometry_rows: accepted_geometry,
         })
     }
 
@@ -257,10 +297,10 @@ impl CoreLoop {
                     // A prior row that does not read refuses the statement:
                     // merging against "no prior row" would insert a
                     // duplicate key.
-                    let prior_row = match batch_rows.get(&pk_bytes) {
-                        Some(row) => Some(row.clone()),
+                    let prior_row: Option<Cow<'_, [Value]>> = match batch_rows.get(&pk_bytes) {
+                        Some(row) => Some(Cow::Borrowed(row)),
                         None => match self.read_columnar_row_by_pk(engine_key, &pk_bytes) {
-                            Ok(row) => row,
+                            Ok(row) => row.map(Cow::Owned),
                             Err(e) => return Err(self.response_error(task, e)),
                         },
                     };

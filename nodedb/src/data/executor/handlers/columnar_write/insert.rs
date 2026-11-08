@@ -156,12 +156,6 @@ impl CoreLoop {
             Err(e) => return self.response_error(task, ErrorCode::from(e)),
         };
 
-        // A geometry in an SRID its column's R-tree refuses fails the insert
-        // before any row is written.
-        if let Err(e) = self.check_columnar_geometry_srids(task, &schema, collection, &ndb_rows) {
-            return self.response_error(task, ErrorCode::from(e));
-        }
-
         let outcome = match self.insert_columnar_rows(
             task,
             RowIngestParams {
@@ -182,35 +176,17 @@ impl CoreLoop {
             Err(response) => return response,
         };
         let accepted = outcome.accepted;
+        let geometry_deltas =
+            self.publish_columnar_geometry(task, collection, outcome.geometry_rows);
+        if let Some(undo_log) = spatial_undo {
+            for delta in geometry_deltas {
+                Self::push_geometry_index_undo(undo_log, delta);
+            }
+        }
 
         if let Err(response) = self.flush_columnar_memtable_if_needed(task, &engine_key, collection)
         {
             return response;
-        }
-
-        // Populate R-tree for geometry columns so spatial predicates work.
-        // The SRID check above ran on the same rows, so this changes the
-        // index or fails before touching it. A restore indexes only the open
-        // versions: the R-tree holds each key's current geometry.
-        let open_rows: Vec<nodedb_types::Value>;
-        let indexed_rows: &[nodedb_types::Value] = if restored_versions.is_empty() {
-            &ndb_rows
-        } else {
-            open_rows = ndb_rows
-                .iter()
-                .zip(restored_versions)
-                .filter(|(_, version)| version.sys_to.is_none())
-                .map(|(row, _)| row.clone())
-                .collect();
-            &open_rows
-        };
-        let geometry_delta =
-            match self.index_columnar_geometry_columns(task, &schema, collection, indexed_rows) {
-                Ok(delta) => delta,
-                Err(e) => return self.response_error(task, ErrorCode::from(e)),
-            };
-        if let Some(undo_log) = spatial_undo {
-            Self::push_geometry_index_undo(undo_log, geometry_delta);
         }
 
         tracing::debug!(
