@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! SQL statement splitter for multi-statement pgwire messages.
+//! SQL statement splitter for multi-statement requests.
 
 /// Split a SQL string at top-level semicolons into individual statements.
 ///
@@ -13,7 +13,7 @@
 /// This handles the case where psql sends multiple statements in one simple
 /// query message (e.g. heredoc input), ensuring `parts[2]` in DDL handlers
 /// never contains a trailing semicolon.
-pub(super) fn split_sql_statements(sql: &str) -> Vec<String> {
+pub(crate) fn split_sql_statements(sql: &str) -> Vec<String> {
     let mut stmts = Vec::new();
     let mut current = String::new();
     let mut chars = sql.chars().peekable();

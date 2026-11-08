@@ -23,9 +23,6 @@ mod session_show;
 pub(in crate::control::server::pgwire) mod shape_encode;
 mod sql_exec;
 mod sql_prepared;
-mod sql_split;
-#[cfg(test)]
-mod sql_split_syntax_tests;
 mod stream_response;
 mod submit;
 mod tenant_session;
