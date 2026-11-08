@@ -32,3 +32,13 @@ pub async fn dispatch(
 ) -> Option<Result<Vec<DdlResult>, DdlError>> {
     super::neutral::try_dispatch(state, identity, sql, database_id, txn_ctx).await
 }
+
+/// Mark the open transaction block failed when a router statement answered
+/// with an error, as an error of a planned statement does.
+///
+/// Outside a block this changes nothing.
+pub fn abort_block_on_error<T>(txn_ctx: &DmlTxnCtx<'_>, result: &Result<T, DdlError>) {
+    if result.is_err() {
+        txn_ctx.sessions.fail_transaction(txn_ctx.session_id);
+    }
+}

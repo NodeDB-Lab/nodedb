@@ -17,7 +17,9 @@ use pgwire::api::results::{DataRowEncoder, QueryResponse, Response, Tag};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 
 use crate::control::server::response_shape::types::{DdlColType, ShapedRows};
+use crate::control::server::shared::ddl::abort_block_on_error;
 use crate::control::server::shared::ddl::result::{DdlError, DdlResult};
+use crate::control::server::shared::session::DmlTxnCtx;
 
 use super::command_tag::dml_tag;
 use super::handler::shape_encode::encode_cell;
@@ -71,6 +73,17 @@ pub fn ddl_results_to_pgwire(
         responses.push(ddl_result_to_response(ddl, requested)?);
     }
     Ok(responses)
+}
+
+/// Encode the result of a DDL router statement, first marking the open
+/// transaction block failed when the router answered with an error.
+pub fn ddl_router_results_to_pgwire(
+    txn_ctx: &DmlTxnCtx<'_>,
+    result: Result<Vec<DdlResult>, DdlError>,
+    requested: &Format,
+) -> PgWireResult<Vec<Response>> {
+    abort_block_on_error(txn_ctx, &result);
+    ddl_results_to_pgwire(result, requested)
 }
 
 /// Map a single [`DdlResult`] to a pgwire [`Response`].
