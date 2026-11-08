@@ -2,11 +2,9 @@
 
 //! Shared decode for the Data Plane's [`SyncAckResult`] reply.
 //!
-//! Every per-engine sync session (vector / fts / spatial / columnar /
-//! timeseries) receives a msgpack-encoded [`SyncAckResult`] in the Data Plane
-//! response payload and needs identical handling for the two cases it cannot
-//! answer with a plain status: a terminal refusal, and an envelope that will
-//! not decode. This module is the single place those decisions live.
+//! Typed outcomes preserve their applied sequence. Legacy sessions use
+//! [`decode_sync_ack`] for malformed payloads. Vector sessions close on
+//! unreadable replies before calling [`EngineAck::from_result`].
 
 use tracing::warn;
 
@@ -21,7 +19,10 @@ pub(super) enum EngineAck {
     /// session must surface a refusal rather than any status — reporting a
     /// status here would tell the sender its write landed, or is still coming,
     /// when neither is true.
-    Rejected(ViolationType),
+    Rejected {
+        violation: ViolationType,
+        applied_seq: u64,
+    },
 }
 
 /// The four fields every per-engine wire ack carries to describe an outcome.
@@ -38,6 +39,19 @@ pub(super) struct EngineAckWire {
 }
 
 impl EngineAck {
+    pub(super) fn from_result(result: SyncAckResult) -> Self {
+        match result.outcome {
+            SyncOutcome::Ack(status) => Self::Status {
+                status,
+                applied_seq: result.applied_seq,
+            },
+            SyncOutcome::Rejected(violation) => Self::Rejected {
+                violation,
+                applied_seq: result.applied_seq,
+            },
+        }
+    }
+
     pub(super) fn into_wire(self) -> EngineAckWire {
         match self {
             Self::Status {
@@ -49,13 +63,16 @@ impl EngineAck {
                 applied_seq,
                 status,
             },
-            Self::Rejected(violation) => {
+            Self::Rejected {
+                violation,
+                applied_seq,
+            } => {
                 let reason = violation.to_string();
                 EngineAckWire {
                     accepted: false,
                     reject_reason: Some(reason.clone()),
-                    // Nothing applied at this sequence, so no mark is claimed.
-                    applied_seq: 0,
+                    // A deterministic refusal consumes its sequence.
+                    applied_seq,
                     status: AckStatus::Rejected { reason },
                 }
             }
@@ -99,22 +116,16 @@ pub(super) fn decode_sync_ack(
             };
         }
     };
-    match result.outcome {
-        SyncOutcome::Ack(status) => EngineAck::Status {
-            status,
-            applied_seq: result.applied_seq,
-        },
-        SyncOutcome::Rejected(violation) => {
-            warn!(
-                session = %session_id,
-                %collection,
-                op,
-                violation = %violation,
-                "sync: ingest terminally refused by the Data Plane"
-            );
-            EngineAck::Rejected(violation)
-        }
+    if let SyncOutcome::Rejected(violation) = &result.outcome {
+        warn!(
+            session = %session_id,
+            %collection,
+            op,
+            violation = %violation,
+            "sync: ingest terminally refused by the Data Plane"
+        );
     }
+    EngineAck::from_result(result)
 }
 
 #[cfg(test)]
@@ -129,7 +140,7 @@ mod tests {
             EngineAck::Status { status, .. } => {
                 assert_eq!(status, AckStatus::Gap { expected: 9 });
             }
-            EngineAck::Rejected(v) => panic!("expected a retryable gap, got {v}"),
+            EngineAck::Rejected { violation: v, .. } => panic!("expected a retryable gap, got {v}"),
         }
     }
 
@@ -145,7 +156,7 @@ mod tests {
                 assert_eq!(status, AckStatus::Duplicate);
                 assert_eq!(applied_seq, 4);
             }
-            EngineAck::Rejected(v) => panic!("expected a status, got {v}"),
+            EngineAck::Rejected { violation: v, .. } => panic!("expected a status, got {v}"),
         }
     }
 
@@ -161,13 +172,35 @@ mod tests {
         ))
         .expect("encode");
         match decode_sync_ack(&payload, "insert", "s1", "docs", 9) {
-            EngineAck::Rejected(ViolationType::ConstraintViolation { detail }) => {
+            EngineAck::Rejected {
+                violation: ViolationType::ConstraintViolation { detail },
+                applied_seq,
+            } => {
+                assert_eq!(applied_seq, 4);
                 assert_eq!(detail, "bad row");
             }
-            EngineAck::Rejected(other) => panic!("wrong violation: {other}"),
+            EngineAck::Rejected {
+                violation: other, ..
+            } => panic!("wrong violation: {other}"),
             EngineAck::Status { status, .. } => {
                 panic!("a terminal refusal was reported as status {status:?}")
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod wire_tests {
+    use super::*;
+
+    #[test]
+    fn a_rejected_wire_ack_preserves_its_consumed_frontier() {
+        let bytes =
+            zerompk::to_msgpack_vec(&SyncAckResult::rejected(ViolationType::PermissionDenied, 9))
+                .unwrap();
+        let ack = decode_sync_ack(&bytes, "insert", "s1", "docs", 9).into_wire();
+        assert!(!ack.accepted);
+        assert_eq!(ack.applied_seq, 9);
+        assert!(matches!(ack.status, AckStatus::Rejected { .. }));
     }
 }

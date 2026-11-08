@@ -48,6 +48,9 @@ macro_rules! dispatch {
             } else {
                 $session.$method(&msg, &$noop).await
             };
+            if vector_requires_close($frame.msg_type, ack.is_some()) {
+                return EngineOutcome::Break;
+            }
             if let Some(ack) = ack
                 && $ws
                     .send(Message::Binary(ack.to_bytes().into()))
@@ -56,6 +59,8 @@ macro_rules! dispatch {
             {
                 return EngineOutcome::Break;
             }
+        } else if vector_requires_close($frame.msg_type, false) {
+            return EngineOutcome::Break;
         }
         return EngineOutcome::Handled;
     }};
@@ -207,5 +212,28 @@ pub(super) async fn dispatch_engine_frame(
             kv_handler::NoOpKvDispatcher
         ),
         _ => EngineOutcome::NotEngine,
+    }
+}
+
+/// A vector without a trustworthy core outcome reconnects without an ACK.
+fn vector_requires_close(kind: SyncMessageType, has_ack: bool) -> bool {
+    !has_ack
+        && matches!(
+            kind,
+            SyncMessageType::VectorInsert | SyncMessageType::VectorDelete
+        )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vector_without_an_ack_closes_while_a_valid_ack_keeps_the_session() {
+        for kind in [SyncMessageType::VectorInsert, SyncMessageType::VectorDelete] {
+            assert!(vector_requires_close(kind, false));
+            assert!(!vector_requires_close(kind, true));
+        }
+        assert!(!vector_requires_close(SyncMessageType::FtsIndex, false));
     }
 }
