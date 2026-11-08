@@ -92,7 +92,11 @@ fn assert_group_rolls_back(refused: RedoSubRecord) {
         1,
         CommittedRedo {
             redo: &redo,
-            collections: &["articles".to_owned(), "vectors".to_owned()],
+            collections: &[
+                "articles".to_owned(),
+                "vectors".to_owned(),
+                "places".to_owned(),
+            ],
             sum_targets: &[],
         },
     );
@@ -241,5 +245,47 @@ fn reopened_transaction_and_write_groups_refuse_invalid_sync_text() {
 fn reopened_transaction_and_write_groups_refuse_invalid_sync_vectors() {
     for write_group in [false, true] {
         assert_reopened_group_refuses_to_serve(refused_vector(), write_group);
+    }
+}
+
+fn refused_spatial(unbound: bool) -> RedoSubRecord {
+    let surrogate = if unbound {
+        Surrogate::ZERO
+    } else {
+        Surrogate::new(9)
+    };
+    let geometry = nodedb_types::geometry::SridGeometry::new(
+        nodedb_types::geometry::Srid::new(if unbound { 4326 } else { 999 }).unwrap(),
+        nodedb_types::geometry::Geometry::point(1.0, 2.0),
+    );
+    let payload = crate::control::server::wal_dispatch::encode_spatial_put_payload(
+        "places",
+        "loc",
+        surrogate,
+        &geometry,
+        &provenance(),
+    )
+    .unwrap()
+    .to_bytes()
+    .unwrap();
+    RedoSubRecord {
+        record_type: RecordType::SpatialPut as u32,
+        payload,
+    }
+}
+
+#[test]
+fn a_refused_sync_spatial_sub_record_rolls_back_its_siblings_and_frontier() {
+    for unbound in [false, true] {
+        assert_group_rolls_back(refused_spatial(unbound));
+    }
+}
+
+#[test]
+fn reopened_transaction_and_write_groups_refuse_invalid_sync_spatial_entries() {
+    for write_group in [false, true] {
+        for unbound in [false, true] {
+            assert_reopened_group_refuses_to_serve(refused_spatial(unbound), write_group);
+        }
     }
 }

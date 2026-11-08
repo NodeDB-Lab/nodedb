@@ -224,7 +224,7 @@ impl CoreLoop {
         // intents a committed transaction journalled as redo sub-records.
         self.replay_crdt_wal_ordered(&ordered, num_cores, tombstones);
         self.replay_fts_wal(&ordered, num_cores, tombstones, &grouped_origins);
-        self.replay_spatial_wal(&ordered, num_cores, tombstones);
+        self.replay_spatial_wal(&ordered, num_cores, tombstones, &grouped_origins);
         // Graph node labels have no redb-backed durability (unlike edges,
         // rebuilt into the CSR from the `EdgeStore` before this sequence runs) —
         // a WAL record is their only durable backing.

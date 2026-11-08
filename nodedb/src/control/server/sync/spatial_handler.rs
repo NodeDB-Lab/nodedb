@@ -180,6 +180,13 @@ impl<'a> SpatialDispatcher for SharedStateSpatialDispatcher<'a> {
         collection: &str,
         doc_id: &str,
     ) -> crate::Result<Surrogate> {
+        super::raft_dispatch::authorize_sync_collection(
+            self.shared,
+            self.identity,
+            tenant_id,
+            database_id,
+            collection,
+        )?;
         crate::control::server::surrogate_exchange::assign_surrogate_routed(
             self.shared,
             nodedb_types::CollectionKey::from_bare(database_id, collection),
@@ -197,6 +204,13 @@ impl<'a> SpatialDispatcher for SharedStateSpatialDispatcher<'a> {
         collection: &str,
         doc_id: &str,
     ) -> crate::Result<Option<Surrogate>> {
+        super::raft_dispatch::authorize_sync_collection(
+            self.shared,
+            self.identity,
+            tenant_id,
+            database_id,
+            collection,
+        )?;
         crate::control::server::surrogate_exchange::lookup_surrogate_routed(
             self.shared,
             nodedb_types::CollectionKey::from_bare(database_id, collection),
@@ -265,277 +279,5 @@ impl SpatialDispatcher for NoOpSpatialDispatcher {
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-mod tests {
-    use std::sync::{Arc, Mutex};
-
-    use super::super::session::SyncSession;
-    use super::super::wire::*;
-    use super::*;
-
-    type MockCallLog = Arc<Mutex<Vec<(TenantId, String, String)>>>;
-
-    struct MockDispatcher {
-        insert_calls: MockCallLog,
-        delete_calls: MockCallLog,
-        result: crate::Result<()>,
-        /// The home's binding every lookup answers.
-        bound: Option<Surrogate>,
-        /// The doc ids `assign_surrogate` was called for.
-        assigned: Arc<Mutex<Vec<String>>>,
-        /// The surrogate each `dispatch_delete` carried.
-        deleted: Arc<Mutex<Vec<Option<Surrogate>>>>,
-    }
-
-    impl MockDispatcher {
-        fn ok() -> (Self, MockCallLog, MockCallLog) {
-            let inserts = Arc::new(Mutex::new(Vec::new()));
-            let deletes = Arc::new(Mutex::new(Vec::new()));
-            (
-                Self {
-                    insert_calls: inserts.clone(),
-                    delete_calls: deletes.clone(),
-                    result: Ok(()),
-                    bound: None,
-                    assigned: Arc::default(),
-                    deleted: Arc::default(),
-                },
-                inserts,
-                deletes,
-            )
-        }
-
-        fn err() -> Self {
-            Self {
-                insert_calls: Arc::new(Mutex::new(Vec::new())),
-                delete_calls: Arc::new(Mutex::new(Vec::new())),
-                result: Err(crate::Error::Internal {
-                    detail: "mock failure".to_string(),
-                }),
-                bound: None,
-                assigned: Arc::default(),
-                deleted: Arc::default(),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl SpatialDispatcher for MockDispatcher {
-        async fn dispatch_insert(
-            &self,
-            tenant_id: TenantId,
-            _vshard: VShardId,
-            target: SpatialInsertTarget,
-            provenance: nodedb_types::sync::wire::SyncProvenance,
-        ) -> crate::Result<Vec<u8>> {
-            let seq = provenance.seq;
-            self.insert_calls
-                .lock()
-                .unwrap()
-                .push((tenant_id, target.collection, target.field));
-            super::super::test_support::mock_applied_ack(&self.result, seq)
-        }
-
-        async fn dispatch_delete(
-            &self,
-            tenant_id: TenantId,
-            _vshard: VShardId,
-            collection: String,
-            field: String,
-            surrogate: Option<Surrogate>,
-            provenance: nodedb_types::sync::wire::SyncProvenance,
-        ) -> crate::Result<Vec<u8>> {
-            let seq = provenance.seq;
-            self.deleted.lock().unwrap().push(surrogate);
-            self.delete_calls
-                .lock()
-                .unwrap()
-                .push((tenant_id, collection, field));
-            super::super::test_support::mock_applied_ack(&self.result, seq)
-        }
-
-        async fn assign_surrogate(
-            &self,
-            _database_id: DatabaseId,
-            _tenant_id: TenantId,
-            _collection: &str,
-            doc_id: &str,
-        ) -> crate::Result<Surrogate> {
-            self.assigned.lock().unwrap().push(doc_id.to_string());
-            Ok(Surrogate::new(1))
-        }
-
-        async fn lookup_surrogate(
-            &self,
-            _database_id: DatabaseId,
-            _tenant_id: TenantId,
-            _collection: &str,
-            _doc_id: &str,
-        ) -> crate::Result<Option<Surrogate>> {
-            Ok(self.bound)
-        }
-    }
-
-    fn make_session() -> SyncSession {
-        SyncSession::new("test-spatial-session".to_string())
-    }
-
-    fn make_point_geometry_bytes() -> Vec<u8> {
-        let geom = SridGeometry::wgs84(nodedb_types::geometry::Geometry::point(10.0, 20.0));
-        zerompk::to_msgpack_vec(&geom).unwrap()
-    }
-
-    fn make_insert_msg(collection: &str, field: &str, doc_id: &str) -> SpatialInsertMsg {
-        SpatialInsertMsg {
-            lite_id: "lite-test".to_string(),
-            collection: collection.to_string(),
-            field: field.to_string(),
-            doc_id: doc_id.to_string(),
-            geometry_bytes: make_point_geometry_bytes(),
-            batch_id: 1,
-            producer_id: 0,
-            epoch: 0,
-            seq: 0,
-        }
-    }
-
-    fn make_delete_msg(collection: &str, field: &str, doc_id: &str) -> SpatialDeleteMsg {
-        SpatialDeleteMsg {
-            lite_id: "lite-test".to_string(),
-            collection: collection.to_string(),
-            field: field.to_string(),
-            doc_id: doc_id.to_string(),
-            batch_id: 2,
-            producer_id: 0,
-            epoch: 0,
-            seq: 0,
-        }
-    }
-
-    #[tokio::test]
-    async fn unauthenticated_insert_returns_rejection() {
-        let mut session = make_session();
-        let (mock, inserts, _) = MockDispatcher::ok();
-        let msg = make_insert_msg("places", "loc", "d1");
-
-        let frame = session.handle_spatial_insert(&msg, &mock).await;
-        assert!(frame.is_some());
-        let ack: SpatialInsertAckMsg = frame.unwrap().decode_body().unwrap();
-        assert!(!ack.accepted);
-        assert!(inserts.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn authenticated_insert_dispatches_and_acks() {
-        let mut session = make_session();
-        session.authenticated = true;
-        let (mock, inserts, _) = MockDispatcher::ok();
-        let msg = make_insert_msg("places", "loc", "d1");
-
-        let frame = session.handle_spatial_insert(&msg, &mock).await;
-        assert!(frame.is_some());
-        let ack: SpatialInsertAckMsg = frame.unwrap().decode_body().unwrap();
-        assert!(ack.accepted);
-        assert_eq!(ack.doc_id, "d1");
-        assert_eq!(ack.field, "loc");
-        assert_eq!(inserts.lock().unwrap().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn insert_dispatch_failure_rejects() {
-        let mut session = make_session();
-        session.authenticated = true;
-        let mock = MockDispatcher::err();
-        let msg = make_insert_msg("places", "loc", "d1");
-
-        let frame = session.handle_spatial_insert(&msg, &mock).await;
-        let ack: SpatialInsertAckMsg = frame.unwrap().decode_body().unwrap();
-        assert!(!ack.accepted);
-        assert!(ack.reject_reason.is_some());
-    }
-
-    #[tokio::test]
-    async fn authenticated_delete_dispatches_and_acks() {
-        let mut session = make_session();
-        session.authenticated = true;
-        let (mock, _, deletes) = MockDispatcher::ok();
-        let msg = make_delete_msg("places", "loc", "d1");
-
-        let frame = session.handle_spatial_delete(&msg, &mock).await;
-        let ack: SpatialDeleteAckMsg = frame.unwrap().decode_body().unwrap();
-        assert!(ack.accepted);
-        assert_eq!(ack.doc_id, "d1");
-        assert_eq!(deletes.lock().unwrap().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn unauthenticated_delete_returns_rejection() {
-        let mut session = make_session();
-        let (mock, _, deletes) = MockDispatcher::ok();
-        let msg = make_delete_msg("places", "loc", "d1");
-
-        let frame = session.handle_spatial_delete(&msg, &mock).await;
-        let ack: SpatialDeleteAckMsg = frame.unwrap().decode_body().unwrap();
-        assert!(!ack.accepted);
-        assert!(deletes.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn invalid_geometry_bytes_rejects_insert() {
-        let mut session = make_session();
-        session.authenticated = true;
-        let (mock, inserts, _) = MockDispatcher::ok();
-
-        let msg = SpatialInsertMsg {
-            lite_id: "lite-test".to_string(),
-            collection: "places".to_string(),
-            field: "loc".to_string(),
-            doc_id: "d1".to_string(),
-            geometry_bytes: vec![0xFF, 0xFF, 0xFF], // invalid msgpack
-            batch_id: 1,
-            producer_id: 0,
-            epoch: 0,
-            seq: 0,
-        };
-
-        let frame = session.handle_spatial_insert(&msg, &mock).await;
-        let ack: SpatialInsertAckMsg = frame.unwrap().decode_body().unwrap();
-        assert!(!ack.accepted);
-        assert!(ack.reject_reason.is_some());
-        assert!(inserts.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn delete_of_an_unbound_key_looks_up_and_binds_nothing() {
-        let mut session = make_session();
-        session.authenticated = true;
-        let (mock, _, deletes) = MockDispatcher::ok();
-
-        let frame = session
-            .handle_spatial_delete(&make_delete_msg("places", "loc", "d1"), &mock)
-            .await;
-        let ack: SpatialDeleteAckMsg = frame.unwrap().decode_body().unwrap();
-        assert!(ack.accepted);
-        assert_eq!(deletes.lock().unwrap().len(), 1);
-        assert_eq!(*mock.deleted.lock().unwrap(), vec![None]);
-        assert!(
-            mock.assigned.lock().unwrap().is_empty(),
-            "a delete must never bind its key"
-        );
-    }
-
-    #[tokio::test]
-    async fn delete_of_a_bound_key_carries_the_home_surrogate() {
-        let mut session = make_session();
-        session.authenticated = true;
-        let (mut mock, _, _) = MockDispatcher::ok();
-        mock.bound = Some(Surrogate::new(7));
-
-        let frame = session
-            .handle_spatial_delete(&make_delete_msg("places", "loc", "d1"), &mock)
-            .await;
-        let ack: SpatialDeleteAckMsg = frame.unwrap().decode_body().unwrap();
-        assert!(ack.accepted);
-        assert_eq!(*mock.deleted.lock().unwrap(), vec![Some(Surrogate::new(7))]);
-        assert!(mock.assigned.lock().unwrap().is_empty());
-    }
-}
+#[path = "spatial_handler_tests.rs"]
+mod tests;
