@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! COMMIT-time `TRUNCATE ... RESTART IDENTITY`.
+//! `TRUNCATE ... RESTART IDENTITY` after a Calvin commit.
 //!
 //! Inside a transaction the truncate is staged, so its sequences restart only
 //! once COMMIT has made the truncate durable. A `ROLLBACK` leaves every
-//! sequence where it was. Autocommit restarts them right after dispatch
-//! instead (`pgwire::handler::routing::dispatch_loop`).
+//! sequence where it was. The reconnaissance route restarts them once its
+//! transaction has committed (`planner::calvin::edge_truncate`). Autocommit
+//! restarts them right after dispatch instead
+//! (`pgwire::handler::routing::dispatch_loop`).
 
 use nodedb_physical::physical_task::PhysicalTask;
 
@@ -19,7 +21,7 @@ use crate::types::TenantId;
 ///
 /// The commit already holds the truncate, so an error here cannot fail it. The
 /// report names it instead. A counter that stayed ahead repeats no value.
-pub(super) fn restart_truncated_identities(
+pub(crate) fn restart_truncated_identities(
     state: &SharedState,
     tenant_id: TenantId,
     buffered: &[PhysicalTask],
