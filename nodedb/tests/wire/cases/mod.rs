@@ -466,6 +466,7 @@ mod strict_typed_column_rendering;
 mod sum_absent_row;
 mod sum_absent_row_block;
 mod sum_absent_row_http;
+mod sum_best_effort_commit;
 mod sum_block_skip;
 mod sum_cell_support;
 mod sum_generated_column;
