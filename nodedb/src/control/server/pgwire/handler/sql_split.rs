@@ -4,9 +4,11 @@
 
 /// Split a SQL string at top-level semicolons into individual statements.
 ///
-/// Respects single-quoted strings, double-quoted identifiers, and
-/// dollar-quoted blocks. Does NOT split at semicolons inside string literals.
-/// Empty statements (whitespace only) are discarded.
+/// Respects single-quoted strings, `E'..'` strings (a backslash escapes the
+/// next character), double-quoted identifiers, dollar-quoted blocks with an
+/// optional tag, line comments, and nested block comments. Does NOT split at
+/// semicolons inside any of them. Empty statements (whitespace only) are
+/// discarded.
 ///
 /// This handles the case where psql sends multiple statements in one simple
 /// query message (e.g. heredoc input), ensuring `parts[2]` in DDL handlers
@@ -16,10 +18,11 @@ pub(super) fn split_sql_statements(sql: &str) -> Vec<String> {
     let mut current = String::new();
     let mut chars = sql.chars().peekable();
     let mut in_single_quote = false;
+    let mut in_escape_string = false;
     let mut in_double_quote = false;
-    let mut in_dollar_quote = false;
+    let mut dollar_open: Option<String> = None;
     let mut in_line_comment = false;
-    let mut in_block_comment = false;
+    let mut block_depth = 0usize;
     let mut in_procedural_body = false;
     let mut saw_outer_end = false;
     let mut pending_word = String::new();
@@ -71,7 +74,7 @@ pub(super) fn split_sql_statements(sql: &str) -> Vec<String> {
 
     while let Some(ch) = chars.next() {
         // Track line comments (--).
-        if !in_single_quote && !in_double_quote && !in_block_comment {
+        if !in_single_quote && !in_double_quote && block_depth == 0 && dollar_open.is_none() {
             if ch == '-' && chars.peek() == Some(&'-') {
                 flush_word(
                     &mut pending_word,
@@ -88,14 +91,14 @@ pub(super) fn split_sql_statements(sql: &str) -> Vec<String> {
                     &mut in_procedural_body,
                     &mut saw_outer_end,
                 );
-                in_block_comment = true;
+                block_depth = 1;
                 current.push(ch);
                 current.push(
                     chars
                         .next()
                         .expect("invariant: peek() returned Some('*'), so next() will succeed"),
                 );
-                prev = '*';
+                prev = '\0';
                 continue;
             }
         }
@@ -107,30 +110,70 @@ pub(super) fn split_sql_statements(sql: &str) -> Vec<String> {
             prev = ch;
             continue;
         }
-        if in_block_comment {
+        if block_depth > 0 {
             current.push(ch);
             if prev == '*' && ch == '/' {
-                in_block_comment = false;
+                block_depth -= 1;
+                prev = '\0';
+            } else if prev == '/' && ch == '*' {
+                block_depth += 1;
+                prev = '\0';
+            } else {
+                prev = ch;
             }
-            prev = ch;
             continue;
         }
 
-        // Dollar-quoting: `$$...$$` — toggle on seeing `$$`.
-        if ch == '$' && chars.peek() == Some(&'$') && !in_single_quote && !in_double_quote {
+        // Dollar quoting: `$tag$ ... $tag$` with an optional tag. A quote
+        // closes only on its own tag. `$1` and `a$b$c` open nothing.
+        if ch == '$' && !in_single_quote && !in_double_quote {
+            let found = dollar_tag(&chars);
+            let closes = matches!((&dollar_open, &found), (Some(open), Some(tag)) if open == tag);
+            let opens = dollar_open.is_none()
+                && found.is_some()
+                && !(prev.is_alphanumeric() || prev == '_' || prev == '$');
+            if let Some(tag) = found
+                && (closes || opens)
+            {
+                flush_word(
+                    &mut pending_word,
+                    &current,
+                    &mut in_procedural_body,
+                    &mut saw_outer_end,
+                );
+                current.push(ch);
+                for _ in 0..=tag.chars().count() {
+                    current.extend(chars.next());
+                }
+                dollar_open = if closes { None } else { Some(tag) };
+                prev = '\0';
+                continue;
+            }
+        }
+
+        // A backslash escapes the next character inside an `E'..'` string.
+        if ch == '\\' && in_single_quote && in_escape_string {
             current.push(ch);
-            current.push(
-                chars
-                    .next()
-                    .expect("invariant: peek() returned Some('$'), so next() will succeed"),
-            );
-            in_dollar_quote = !in_dollar_quote;
-            prev = '$';
+            prev = ch;
+            if let Some(next) = chars.next() {
+                current.push(next);
+                prev = next;
+            }
             continue;
         }
 
         match ch {
-            '\'' if !in_double_quote && !in_dollar_quote => {
+            '\'' if !in_double_quote && dollar_open.is_none() => {
+                if !in_single_quote {
+                    // An `E` word directly before the quote opens an escape
+                    // string. A quote right after a closing quote is a doubled
+                    // quote and keeps the flag of the string it reopens.
+                    in_escape_string = if prev == '\'' {
+                        in_escape_string
+                    } else {
+                        matches!(pending_word.as_str(), "e" | "E")
+                    };
+                }
                 flush_word(
                     &mut pending_word,
                     &current,
@@ -140,7 +183,7 @@ pub(super) fn split_sql_statements(sql: &str) -> Vec<String> {
                 in_single_quote = !in_single_quote;
                 current.push(ch);
             }
-            '"' if !in_single_quote && !in_dollar_quote => {
+            '"' if !in_single_quote && dollar_open.is_none() => {
                 flush_word(
                     &mut pending_word,
                     &current,
@@ -150,7 +193,7 @@ pub(super) fn split_sql_statements(sql: &str) -> Vec<String> {
                 in_double_quote = !in_double_quote;
                 current.push(ch);
             }
-            ';' if !in_single_quote && !in_double_quote && !in_dollar_quote => {
+            ';' if !in_single_quote && !in_double_quote && dollar_open.is_none() => {
                 flush_word(
                     &mut pending_word,
                     &current,
@@ -199,6 +242,23 @@ pub(super) fn split_sql_statements(sql: &str) -> Vec<String> {
         stmts.push(trimmed);
     }
     stmts
+}
+
+/// The tag of a dollar quote delimiter. `rest` starts just after a `$`.
+/// Returns `Some("")` for `$$`, `Some("t")` for `$t$`, and `None` when the
+/// `$` starts no delimiter (`$1`, `$ `). Does not advance `rest`.
+fn dollar_tag(rest: &std::iter::Peekable<std::str::Chars<'_>>) -> Option<String> {
+    let mut probe = rest.clone();
+    let mut tag = String::new();
+    loop {
+        match probe.next()? {
+            '$' => return Some(tag),
+            c if c.is_alphabetic() || c == '_' || (!tag.is_empty() && c.is_alphanumeric()) => {
+                tag.push(c)
+            }
+            _ => return None,
+        }
+    }
 }
 
 #[cfg(test)]
