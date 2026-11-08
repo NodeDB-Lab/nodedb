@@ -15,9 +15,9 @@
 //! does not roll back another).
 //!
 //! Both modes carry the transaction's reads and snapshot ordinal. In strict
-//! mode the one transaction carries them. In best-effort mode every group
-//! carries all of them, so each group commits only while every read still
-//! holds.
+//! mode the one transaction carries them. In best-effort mode the first group
+//! carries the reads, so no group commits unless every read still holds. Every
+//! group carries the snapshot ordinal and checks the rows it writes against it.
 
 use crate::control::planner::calvin::{
     CrossShardTxnMode, TxnDispatchPosition, TxnProvenance, TxnReads, build_single_vshard_tx_class,
@@ -203,6 +203,9 @@ async fn submit_commit_calvin(
             // transaction commits group by group, and the first group is the
             // first to commit.
             let mut publishes = Some(publishes);
+            // Only the first group validates the reads. A later group sees the
+            // rows an earlier group installed as a conflict.
+            let mut group_reads = Some(reads);
             let mut applied = RejectedByCollection::new();
             // A group only trigger bodies wrote, in a transaction a client
             // also wrote, commits under the source a body's row takes beside
@@ -214,9 +217,10 @@ async fn submit_commit_calvin(
                 } else {
                     event_source
                 };
-                // Every group carries the whole read set: its reads' vShards
+                // The first group carries the whole read set: its reads' vShards
                 // join it as participants, and each validates the reads homed
-                // on it before the group installs.
+                // on it before the group installs. Later groups carry none.
+                let reads = group_reads.take().unwrap_or(&[]);
                 // A timeseries ingest resolves to its rows here, before it is
                 // sequenced: every replica resolves a sequenced group on its own.
                 let tasks =
