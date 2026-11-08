@@ -169,6 +169,7 @@ mod graph_vector_write_row_level_security;
 mod group_by_computed_key;
 mod group_by_typed_columns;
 mod group_by_unaliased_aggregate;
+mod h2_lone_graph_statement;
 mod hash_chain_copies;
 mod healthz_authorization_lease;
 mod healthz_calvin_readiness;
