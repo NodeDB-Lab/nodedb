@@ -220,7 +220,10 @@ fn ordered_outcome_requires_close(kind: SyncMessageType, has_ack: bool) -> bool 
     !has_ack
         && matches!(
             kind,
-            SyncMessageType::VectorInsert
+            SyncMessageType::ColumnarInsert
+                | SyncMessageType::TimeseriesPush
+                | SyncMessageType::KvPush
+                | SyncMessageType::VectorInsert
                 | SyncMessageType::VectorDelete
                 | SyncMessageType::FtsIndex
                 | SyncMessageType::FtsDelete
@@ -236,6 +239,9 @@ mod tests {
     #[test]
     fn ordered_engines_close_without_an_ack_and_keep_valid_outcomes() {
         for kind in [
+            SyncMessageType::ColumnarInsert,
+            SyncMessageType::TimeseriesPush,
+            SyncMessageType::KvPush,
             SyncMessageType::VectorInsert,
             SyncMessageType::VectorDelete,
             SyncMessageType::FtsIndex,
@@ -247,7 +253,7 @@ mod tests {
             assert!(!ordered_outcome_requires_close(kind, true));
         }
         assert!(!ordered_outcome_requires_close(
-            SyncMessageType::KvPush,
+            SyncMessageType::PingPong,
             false
         ));
     }
@@ -267,6 +273,9 @@ mod tests {
         let mut session = SyncSession::new("fts-outcomes".to_owned());
         session.authenticated = true;
         for kind in [
+            SyncMessageType::ColumnarInsert,
+            SyncMessageType::TimeseriesPush,
+            SyncMessageType::KvPush,
             SyncMessageType::FtsIndex,
             SyncMessageType::FtsDelete,
             SyncMessageType::SpatialInsert,
@@ -278,6 +287,36 @@ mod tests {
                 EngineOutcome::Break
             ));
         }
+        let columnar = ColumnarInsertMsg {
+            lite_id: "lite".to_owned(),
+            collection: "metrics".to_owned(),
+            rows: vec![zerompk::to_msgpack_vec(&vec![nodedb_types::Value::Integer(1)]).unwrap()],
+            schema_bytes: vec![],
+            batch_id: 1,
+            producer_id: 1,
+            epoch: 1,
+            seq: 1,
+        };
+        let frame = SyncFrame::try_encode(SyncMessageType::ColumnarInsert, &columnar).unwrap();
+        assert!(matches!(
+            dispatch_engine_frame(&mut ws, &mut session, &frame, &None).await,
+            EngineOutcome::Break
+        ));
+        let kv = KvPushMsg {
+            lite_id: "lite".to_owned(),
+            collection: "cfg".to_owned(),
+            key: b"key".to_vec(),
+            op: nodedb_types::sync::wire::KvPushOp::Delete,
+            batch_id: 1,
+            producer_id: 1,
+            epoch: 1,
+            seq: 1,
+        };
+        let frame = SyncFrame::try_encode(SyncMessageType::KvPush, &kv).unwrap();
+        assert!(matches!(
+            dispatch_engine_frame(&mut ws, &mut session, &frame, &None).await,
+            EngineOutcome::Break
+        ));
         let index = FtsIndexMsg {
             lite_id: "lite".to_owned(),
             collection: "articles".to_owned(),

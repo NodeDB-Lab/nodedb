@@ -169,11 +169,27 @@ impl CoreLoop {
                 ndb_rows: &ndb_rows,
                 restored_versions,
                 rls_write_check,
+                provenance,
                 collect_stored_rows: returning.is_some(),
             },
         ) {
             Ok(outcome) => outcome,
-            Err(response) => return response,
+            Err(response) => {
+                // Row resolution checks every policy before inserting the atomic batch.
+                if let Some(prov) = provenance
+                    && let Some(ErrorCode::RejectedAuthz { resource }) =
+                        response.error_code.as_deref()
+                {
+                    return self.sync_reject_response(
+                        task,
+                        nodedb_types::sync::violation::ViolationType::RlsPolicyViolation {
+                            policy_name: resource.clone(),
+                        },
+                        prov,
+                    );
+                }
+                return response;
+            }
         };
         let accepted = outcome.accepted;
         let geometry_deltas =
@@ -262,3 +278,11 @@ impl CoreLoop {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "sync_policy_tests.rs"]
+mod sync_policy_tests;
+
+#[cfg(test)]
+#[path = "sync_input_tests.rs"]
+mod sync_input_tests;

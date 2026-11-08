@@ -465,19 +465,6 @@ pub(super) fn ack_status_for_dispatch_error(error: &crate::Error, next_seq: u64)
     }
 }
 
-/// The `reject_reason` field that belongs beside `status` on an engine ack.
-///
-/// Derived from the status rather than passed alongside it, so the two cannot
-/// disagree: only a terminal refusal carries a reason, because only a terminal
-/// refusal asks the sender to compensate. A reason attached to a retryable
-/// status reads as "give up" to any receiver that checks the field first.
-pub(super) fn reject_reason_for(status: &AckStatus) -> Option<String> {
-    match status {
-        AckStatus::Rejected { reason } => Some(reason.clone()),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -570,20 +557,6 @@ mod tests {
         assert_eq!(
             ack_status_for_dispatch_error(&error, 4),
             AckStatus::Gap { expected: 4 }
-        );
-    }
-
-    #[test]
-    fn a_retryable_status_carries_no_reject_reason() {
-        // A reason beside a retryable status reads as "give up" to a receiver
-        // that checks the field before the status.
-        assert_eq!(reject_reason_for(&AckStatus::Gap { expected: 2 }), None);
-        assert_eq!(reject_reason_for(&AckStatus::Applied), None);
-        assert_eq!(
-            reject_reason_for(&AckStatus::Rejected {
-                reason: "schema mismatch".into()
-            }),
-            Some("schema mismatch".to_string())
         );
     }
 

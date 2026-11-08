@@ -252,6 +252,7 @@ fn push_resolved_batch(
         },
     );
     let sub_payload = encode_timeseries_ingest_payload(TimeseriesIngestRecord {
+        rls_write_check: &nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
         collection,
         payload: &batch.to_bytes()?,
         provenance: provenance.as_ref(),

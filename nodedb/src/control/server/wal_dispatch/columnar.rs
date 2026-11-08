@@ -35,10 +35,8 @@ pub(super) fn wal_append_columnar_op(
             wal_lsn: _,
             system_from,
             restored_versions,
-            // The compiled RLS predicate is a per-request authorization input,
-            // not part of the row image being made durable, so it is not
-            // written to the log and replay does not re-evaluate it.
-            rls_write_check: _,
+            // Replay must reproduce a refusal before its abort marker becomes durable.
+            rls_write_check,
             // Likewise per-request, and about the response rather than the row:
             // a projection and its read gate shape what one caller is shown,
             // which is not something replay reconstructs.
@@ -59,6 +57,7 @@ pub(super) fn wal_append_columnar_op(
                     conflict_policy: &crate::wal::ColumnarConflictPolicy {
                         intent: *intent,
                         on_conflict_updates: on_conflict_updates.clone(),
+                        rls_write_check: rls_write_check.clone(),
                     },
                     system_from: *system_from,
                     restored_versions,

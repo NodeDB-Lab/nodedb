@@ -453,6 +453,7 @@ mod tests {
         let line = ilp_line(host, value, ts_ms);
         let payload = crate::control::server::wal_dispatch::encode_timeseries_ingest_payload(
             crate::control::server::wal_dispatch::TimeseriesIngestRecord {
+                rls_write_check: &nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
                 collection: COLL,
                 payload: line.as_bytes(),
                 provenance: None,

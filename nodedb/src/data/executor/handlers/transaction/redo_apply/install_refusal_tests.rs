@@ -350,6 +350,7 @@ fn fts_documents(refuse: bool) -> u32 {
             record_type: nodedb_wal::record::RecordType::TimeseriesBatch as u32,
             payload: crate::control::server::wal_dispatch::encode_timeseries_ingest_payload(
                 crate::control::server::wal_dispatch::TimeseriesIngestRecord {
+                    rls_write_check: &nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
                     collection: "refusal_probe",
                     payload: &lines,
                     provenance: None,

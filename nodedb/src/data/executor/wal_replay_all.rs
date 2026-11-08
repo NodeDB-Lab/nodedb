@@ -232,6 +232,7 @@ mod tests {
         .expect("encode five-element tuple");
         let later = crate::control::server::wal_dispatch::encode_timeseries_ingest_payload(
             crate::control::server::wal_dispatch::TimeseriesIngestRecord {
+                rls_write_check: &nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
                 collection: "later",
                 payload: b"later value=2i",
                 provenance: None,

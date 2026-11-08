@@ -12,44 +12,48 @@ use nodedb_physical::physical_plan::{ColumnarInsertIntent, UpdateValue};
 pub(crate) struct ColumnarConflictPolicy {
     pub intent: ColumnarInsertIntent,
     pub on_conflict_updates: Vec<(String, UpdateValue)>,
+    pub rls_write_check: nodedb_types::RlsWriteCheck,
 }
 
 impl ColumnarConflictPolicy {
-    /// A plain insert: an existing row is replaced.
+    /// A plain insert whose policy decision is already complete.
+    #[cfg(test)]
     pub(crate) fn replace() -> Self {
         Self {
             intent: ColumnarInsertIntent::Insert,
             on_conflict_updates: Vec::new(),
+            rls_write_check: nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
         }
     }
 
-    /// The record encoding. A plain insert encodes as empty bytes.
+    /// Encode the exact conflict and write-policy inputs.
     pub(crate) fn encode(&self) -> crate::Result<Vec<u8>> {
-        if *self == Self::replace() {
-            return Ok(Vec::new());
-        }
-        zerompk::to_msgpack_vec(&(self.intent, &self.on_conflict_updates)).map_err(|e| {
-            crate::Error::Serialization {
-                format: "msgpack".into(),
-                detail: format!("columnar conflict policy: {e}"),
-            }
+        zerompk::to_msgpack_vec(&(
+            self.intent,
+            &self.on_conflict_updates,
+            &self.rls_write_check,
+        ))
+        .map_err(|e| crate::Error::Serialization {
+            format: "msgpack".into(),
+            detail: format!("columnar conflict policy: {e}"),
         })
     }
 
-    /// Decode the record encoding. Empty bytes are a plain insert.
+    /// Decode the mandatory conflict and write-policy tuple.
     pub(crate) fn decode(bytes: &[u8]) -> crate::Result<Self> {
-        if bytes.is_empty() {
-            return Ok(Self::replace());
-        }
-        let (intent, on_conflict_updates) =
-            zerompk::from_msgpack::<(ColumnarInsertIntent, Vec<(String, UpdateValue)>)>(bytes)
-                .map_err(|e| crate::Error::Serialization {
-                    format: "msgpack".into(),
-                    detail: format!("columnar conflict policy: {e}"),
-                })?;
+        let (intent, on_conflict_updates, rls_write_check) = zerompk::from_msgpack::<(
+            ColumnarInsertIntent,
+            Vec<(String, UpdateValue)>,
+            nodedb_types::RlsWriteCheck,
+        )>(bytes)
+        .map_err(|e| crate::Error::Serialization {
+            format: "msgpack".into(),
+            detail: format!("columnar conflict policy: {e}"),
+        })?;
         Ok(Self {
             intent,
             on_conflict_updates,
+            rls_write_check,
         })
     }
 }
@@ -61,15 +65,15 @@ pub(crate) struct DecodedBatchRecord {
     pub collection: String,
     pub payload: Vec<u8>,
     pub provenance: Option<nodedb_types::sync::wire::SyncProvenance>,
-    /// Present in the six-element timeseries tuple. A map record carries none.
+    pub rls_write_check: nodedb_types::RlsWriteCheck,
+    /// Present in the seven-element timeseries tuple. A map record carries none.
     pub format: Option<String>,
     /// Non-empty only for map-shaped columnar records.
     pub surrogates: Vec<nodedb_types::Surrogate>,
-    /// A columnar insert's encoded [`ColumnarConflictPolicy`]. Empty for a
-    /// plain insert and for every other record shape.
+    /// A columnar insert's encoded [`ColumnarConflictPolicy`]. Empty only for timeseries records.
     pub conflict_policy: Vec<u8>,
     /// The statement instant of a timeseries ingest. Present in the
-    /// six-element timeseries tuple every ingest record takes.
+    /// seven-element timeseries tuple every ingest record takes.
     pub default_timestamp_ms: Option<i64>,
     /// The system-time ordinal of a bitemporal columnar insert's first row.
     /// `None` for every other record shape.
@@ -87,12 +91,14 @@ impl DecodedBatchRecord {
         provenance: Option<nodedb_types::sync::wire::SyncProvenance>,
         format: Option<String>,
         default_timestamp_ms: Option<i64>,
+        rls_write_check: nodedb_types::RlsWriteCheck,
     ) -> Self {
         Self {
             kind,
             collection,
             payload,
             provenance,
+            rls_write_check,
             format,
             surrogates: Vec::new(),
             conflict_policy: Vec::new(),
@@ -107,7 +113,7 @@ type ProvenanceField = Option<nodedb_types::sync::wire::SyncProvenance>;
 
 /// Decode a `TimeseriesBatch` WAL payload into its logical fields.
 ///
-/// Two shapes decode: the map-shaped `ColumnarWalRecord`, and the six-element
+/// Two shapes decode: the map-shaped `ColumnarWalRecord`, and the seven-element
 /// timeseries ingest tuple. zerompk enforces tuple arity, so every other
 /// shape fails.
 pub(crate) fn decode_batch_record(payload: &[u8]) -> Result<DecodedBatchRecord, ()> {
@@ -117,6 +123,9 @@ pub(crate) fn decode_batch_record(payload: &[u8]) -> Result<DecodedBatchRecord, 
             collection: rec.collection,
             payload: rec.payload,
             provenance: rec.provenance,
+            rls_write_check: ColumnarConflictPolicy::decode(&rec.conflict_policy)
+                .map_err(|_| ())?
+                .rls_write_check,
             format: None,
             surrogates: rec.surrogates,
             conflict_policy: rec.conflict_policy,
@@ -125,18 +134,64 @@ pub(crate) fn decode_batch_record(payload: &[u8]) -> Result<DecodedBatchRecord, 
             restored_versions: rec.restored_versions,
         });
     }
-    zerompk::from_msgpack::<(String, String, Vec<u8>, ProvenanceField, String, i64)>(payload)
-        .map(
-            |(kind, collection, payload, provenance, format, default_ms)| {
-                DecodedBatchRecord::tuple(
-                    kind,
-                    collection,
-                    payload,
-                    provenance,
-                    Some(format),
-                    Some(default_ms),
-                )
+    zerompk::from_msgpack::<(
+        String,
+        String,
+        Vec<u8>,
+        ProvenanceField,
+        String,
+        i64,
+        nodedb_types::RlsWriteCheck,
+    )>(payload)
+    .map(
+        |(kind, collection, payload, provenance, format, default_ms, rls_write_check)| {
+            DecodedBatchRecord::tuple(
+                kind,
+                collection,
+                payload,
+                provenance,
+                Some(format),
+                Some(default_ms),
+                rls_write_check,
+            )
+        },
+    )
+    .map_err(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_timeseries_record_requires_its_exact_write_policy() {
+        let without_policy = zerompk::to_msgpack_vec(&(
+            "timeseries",
+            "cpu",
+            b"cpu value=1i".to_vec(),
+            None::<nodedb_types::sync::wire::SyncProvenance>,
+            "ilp",
+            1000_i64,
+        ))
+        .expect("encode incomplete record");
+        assert!(decode_batch_record(&without_policy).is_err());
+        let policy = nodedb_types::RlsWriteCheck::Predicate(vec![1, 2, 3]);
+        let encoded = crate::control::server::wal_dispatch::encode_timeseries_ingest_payload(
+            crate::control::server::wal_dispatch::TimeseriesIngestRecord {
+                collection: "cpu",
+                payload: b"cpu value=1i",
+                provenance: None,
+                format: "ilp",
+                default_timestamp_ms: 1000,
+                rls_write_check: &policy,
             },
         )
-        .map_err(|_| ())
+        .expect("encode record");
+        assert_eq!(
+            decode_batch_record(&encoded)
+                .expect("decode current record")
+                .rls_write_check,
+            policy
+        );
+    }
 }

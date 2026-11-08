@@ -16,10 +16,10 @@
 use async_trait::async_trait;
 
 use nodedb_physical::physical_plan::KvOp;
-use nodedb_types::sync::wire::{AckStatus, SyncAckResult, SyncProvenance};
+use nodedb_types::sync::wire::SyncProvenance;
 use nodedb_types::{QualifiedCollection, RlsWriteCheck};
 
-use crate::bridge::envelope::{ErrorCode, PhysicalPlan, SyncHold};
+use crate::bridge::envelope::PhysicalPlan;
 use crate::control::server::shared::clone_write::{
     CloneCheckedOutcome, InterceptAndAuthorizeParams, intercept_and_authorize,
 };
@@ -58,7 +58,7 @@ pub trait KvPushDispatcher: Send + Sync {
         tenant_id: TenantId,
         collection: &str,
         provenance: SyncProvenance,
-    ) -> crate::Result<()>;
+    ) -> crate::Result<Vec<u8>>;
 }
 
 // ── SharedState adapter ──────────────────────────────────────────────────────
@@ -164,9 +164,7 @@ impl KvPushDispatcher for SharedStateKvDispatcher<'_> {
             // gate. The frame still takes its sequence.
             CloneCheckedOutcome::Handled(response) => {
                 crate::control::server::shared::response_payload::payload_or_typed_error(response)?;
-                self.skip(tenant_id, &collection, provenance.clone())
-                    .await?;
-                return encode_applied(provenance.seq);
+                return self.skip(tenant_id, &collection, provenance).await;
             }
         };
         let response =
@@ -185,7 +183,7 @@ impl KvPushDispatcher for SharedStateKvDispatcher<'_> {
         tenant_id: TenantId,
         collection: &str,
         provenance: SyncProvenance,
-    ) -> crate::Result<()> {
+    ) -> crate::Result<Vec<u8>> {
         let database_id = self.database_id;
         // A delete of no keys applies nothing. Its provenance moves the mark,
         // and the replicated apply's record makes the move durable.
@@ -206,26 +204,8 @@ impl KvPushDispatcher for SharedStateKvDispatcher<'_> {
             EventSource::CrdtSync,
         )
         .await?;
-        match crate::control::server::shared::response_payload::payload_or_typed_error(response) {
-            Ok(_) => Ok(()),
-            // An earlier delivery already moved the mark past this frame.
-            Err(crate::Error::DataPlane(ErrorCode::SyncNotApplied {
-                hold: SyncHold::Duplicate,
-                ..
-            })) => Ok(()),
-            Err(error) => Err(error),
-        }
+        crate::control::server::shared::response_payload::payload_or_typed_error(response)
     }
-}
-
-/// The `SyncAckResult` payload of an applied frame.
-fn encode_applied(seq: u64) -> crate::Result<Vec<u8>> {
-    zerompk::to_msgpack_vec(&SyncAckResult::acked(AckStatus::Applied, seq)).map_err(|e| {
-        crate::Error::Serialization {
-            format: "msgpack".into(),
-            detail: format!("kv push ack: {e}"),
-        }
-    })
 }
 
 // ── NoOp dispatcher (loud failure) ──────────────────────────────────────────
@@ -244,7 +224,7 @@ impl KvPushDispatcher for NoOpKvDispatcher {
         _tenant_id: TenantId,
         _collection: &str,
         _provenance: SyncProvenance,
-    ) -> crate::Result<()> {
+    ) -> crate::Result<Vec<u8>> {
         Err(super::raft_dispatch::noop_dispatch_error("kv push skip"))
     }
 }

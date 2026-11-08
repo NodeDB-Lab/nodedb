@@ -217,7 +217,7 @@ impl CoreLoop {
         // order.
         self.replay_document_redo(&ordered, num_cores, tombstones);
         self.replay_kv_wal(&ordered, num_cores, tombstones);
-        self.replay_timeseries_wal(&ordered, num_cores, tombstones);
+        self.replay_timeseries_wal_with_origins(&ordered, num_cores, tombstones, &grouped_origins);
         self.replay_array_wal(&ordered, num_cores, tombstones);
         // CRDT deltas and document/list intents share Loro state, so replay
         // them together in global LSN order: the standalone records and the

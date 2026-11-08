@@ -202,4 +202,27 @@ mod tests {
         assert_eq!(applied_seq(&deleted), 2);
         assert_eq!(stored(&core), None);
     }
+    #[test]
+    fn consumed_policy_refusal_admits_the_next_sequence() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut core, _req, _resp) = make_core_with_dir(dir.path());
+        let task = make_default_task();
+        assert!(core.kv_sync_hold(&task, &prov(1)).is_none());
+        let refused = core.response_error(
+            &task,
+            ErrorCode::RejectedAuthz {
+                resource: "private row".into(),
+            },
+        );
+        let refused = core.kv_sync_outcome(&task, refused, &prov(1));
+        assert!(
+            matches!(refused.error_code.as_deref(), Some(ErrorCode::SyncRejected {
+            applied_seq: 1, provenance, ..
+        }) if provenance == &prov(1))
+        );
+        assert_eq!(stored(&core), None);
+        let next = core.execute_kv_sync_put(&task, put(b"allowed"), &prov(2));
+        assert_eq!(applied_seq(&next), 2);
+        assert_eq!(stored(&core).as_deref(), Some(b"allowed".as_slice()));
+    }
 }

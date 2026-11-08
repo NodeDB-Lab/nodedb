@@ -44,6 +44,7 @@ pub(in crate::data::executor) struct RowIngestParams<'a> {
     /// post-image the Control Plane could not see; a plain insert's rows were
     /// already decided at plan time.
     pub rls_write_check: &'a nodedb_types::RlsWriteCheck,
+    pub provenance: Option<&'a nodedb_types::sync::wire::SyncProvenance>,
     /// Whether the caller needs the stored post-image of every row that was
     /// actually written. Only a `RETURNING` clause sets this; the row images
     /// are cloned, so a plain insert must not pay for them.
@@ -192,7 +193,7 @@ impl CoreLoop {
     /// of this batch first, then from the engine: the same prior a
     /// row-by-row write reads.
     fn resolve_columnar_rows(
-        &self,
+        &mut self,
         task: &ExecutionTask,
         params: &RowIngestParams<'_>,
         intent: StampedIntent,
@@ -222,15 +223,21 @@ impl CoreLoop {
             // A row that is not an object has no fields to write. Skipping it
             // would report a statement that stored fewer rows than it sent.
             let nodedb_types::Value::Object(obj) = row else {
-                return Err(self.response_error(
-                    task,
-                    crate::Error::BadRequest {
-                        detail: format!(
-                            "columnar insert into '{}': row {row_idx} is not an object",
-                            engine_key.2
-                        ),
-                    },
-                ));
+                let detail = format!(
+                    "columnar insert into '{}': row {row_idx} is not an object",
+                    engine_key.2
+                );
+                let response = match params.provenance {
+                    Some(prov) => self.sync_reject_response(
+                        task,
+                        nodedb_types::sync::violation::ViolationType::ConstraintViolation {
+                            detail,
+                        },
+                        prov,
+                    ),
+                    None => self.response_error(task, crate::Error::BadRequest { detail }),
+                };
+                return Err(response);
             };
 
             // Build Value slice in schema order. A bitemporal row's

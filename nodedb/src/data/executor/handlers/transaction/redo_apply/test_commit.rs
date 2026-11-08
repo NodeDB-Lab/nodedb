@@ -142,6 +142,7 @@ pub(in crate::data::executor) fn failing_install_sub_record() -> RedoSubRecord {
         record_type: RecordType::TimeseriesBatch as u32,
         payload: crate::control::server::wal_dispatch::encode_timeseries_ingest_payload(
             crate::control::server::wal_dispatch::TimeseriesIngestRecord {
+                rls_write_check: &nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
                 collection: "refusal_probe",
                 payload: &lines,
                 provenance: None,

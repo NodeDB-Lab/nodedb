@@ -7,6 +7,7 @@ pub(super) struct ColumnarReplayArgs<'a> {
     pub collection: &'a str,
     pub payload: &'a [u8],
     pub record_lsn: u64,
+    pub grouped: bool,
     pub provenance: Option<nodedb_types::sync::wire::SyncProvenance>,
     /// Per-row surrogates index-aligned with `payload` rows. An empty `Vec`
     /// replays the rows unbound, as the live insert that carried none did.
@@ -25,7 +26,9 @@ pub(super) struct TimeseriesReplayArgs<'a> {
     pub collection: &'a str,
     pub payload: &'a [u8],
     pub record_lsn: u64,
+    pub grouped: bool,
     pub provenance: Option<nodedb_types::sync::wire::SyncProvenance>,
+    pub rls_write_check: &'a nodedb_types::RlsWriteCheck,
     pub format: Option<&'a str>,
     /// The timestamp every untimed row takes, when the record carries one.
     pub default_timestamp_ms: Option<i64>,

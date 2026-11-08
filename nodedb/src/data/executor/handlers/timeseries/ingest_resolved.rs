@@ -64,6 +64,7 @@ impl CoreLoop {
             collection,
             payload,
             wal_lsn,
+            provenance: _,
             now_ms: _,
             mode,
             rls_write_check: _,
@@ -823,6 +824,7 @@ mod tests {
 
         // The ring lost both events. Catch-up reads the logged record.
         let logged = encode_timeseries_ingest_payload(TimeseriesIngestRecord {
+            rls_write_check: &nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
             collection: COLLECTION,
             payload: &second.to_bytes().expect("encode batch"),
             provenance: None,

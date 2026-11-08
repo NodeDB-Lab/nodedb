@@ -56,3 +56,6 @@ pub(crate) use super::wal_dispatch_fts_spatial::{
     encode_spatial_delete_payload, encode_spatial_put_payload,
 };
 pub use super::wal_dispatch_fts_spatial::{wal_append_spatial_delete, wal_append_spatial_put};
+
+#[cfg(test)]
+pub(crate) use timeseries::{ColumnarBatchRecord, encode_columnar_batch_payload};

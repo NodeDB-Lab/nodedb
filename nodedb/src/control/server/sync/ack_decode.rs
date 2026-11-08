@@ -2,12 +2,7 @@
 
 //! Shared decode for the Data Plane's [`SyncAckResult`] reply.
 //!
-//! Typed outcomes preserve their applied sequence. Legacy sessions use
-//! [`decode_sync_ack`] for malformed payloads. Vector sessions close on
-//! unreadable replies before calling [`EngineAck::from_result`]. FTS sessions
-//! use [`decode_core_ack`] and [`decode_core_error`] without guessed frontiers.
-
-use tracing::warn;
+//! Typed core outcomes preserve their exact frontier. Unreadable outcomes close the session.
 
 use nodedb_types::sync::violation::ViolationType;
 use nodedb_types::sync::wire::{AckStatus, SyncAckResult, SyncOutcome};
@@ -111,115 +106,6 @@ pub(super) fn decode_core_error(error: &crate::Error) -> Option<EngineAckWire> {
     Some(ack.into_wire())
 }
 
-/// Decode the [`SyncAckResult`] returned by the Data Plane in a sync ingest
-/// response payload.
-///
-/// A decode failure is not evidence of an apply. Synthesising `Applied` would
-/// retire a write on the sender that may never have landed — the same silent
-/// loss as reporting a retryable refusal as terminal, just in the other
-/// direction. Because a re-push is idempotent (the gate deduplicates by seq)
-/// while a wrongly-acked write is gone, an unreadable envelope is reported as a
-/// retryable [`AckStatus::Gap`] at `fallback_seq`: the sender re-sends, and the
-/// gate answers `Duplicate` if the write did in fact apply.
-pub(super) fn decode_sync_ack(
-    payload_bytes: &[u8],
-    op: &str,
-    session_id: &str,
-    collection: &str,
-    fallback_seq: u64,
-) -> EngineAck {
-    let result = match zerompk::from_msgpack::<SyncAckResult>(payload_bytes) {
-        Ok(result) => result,
-        Err(e) => {
-            warn!(
-                session = %session_id,
-                %collection,
-                op,
-                error = %e,
-                "sync: failed to decode SyncAckResult from Data Plane; refusing retryably \
-                 rather than acking an unverified apply"
-            );
-            return EngineAck::Status {
-                status: AckStatus::Gap {
-                    expected: fallback_seq,
-                },
-                applied_seq: fallback_seq.saturating_sub(1),
-            };
-        }
-    };
-    if let SyncOutcome::Rejected(violation) = &result.outcome {
-        warn!(
-            session = %session_id,
-            %collection,
-            op,
-            violation = %violation,
-            "sync: ingest terminally refused by the Data Plane"
-        );
-    }
-    EngineAck::from_result(result)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn an_unreadable_envelope_is_retryable_not_a_fabricated_apply() {
-        // Synthesising `Applied` from an unreadable envelope tells the sender a
-        // write landed that nobody verified; the sender then drops it.
-        match decode_sync_ack(b"not-msgpack", "insert", "s1", "docs", 9) {
-            EngineAck::Status { status, .. } => {
-                assert_eq!(status, AckStatus::Gap { expected: 9 });
-            }
-            EngineAck::Rejected { violation: v, .. } => panic!("expected a retryable gap, got {v}"),
-        }
-    }
-
-    #[test]
-    fn a_clean_ack_passes_its_status_and_sequence_through() {
-        let payload = zerompk::to_msgpack_vec(&SyncAckResult::acked(AckStatus::Duplicate, 4))
-            .expect("encode");
-        match decode_sync_ack(&payload, "insert", "s1", "docs", 9) {
-            EngineAck::Status {
-                status,
-                applied_seq,
-            } => {
-                assert_eq!(status, AckStatus::Duplicate);
-                assert_eq!(applied_seq, 4);
-            }
-            EngineAck::Rejected { violation: v, .. } => panic!("expected a status, got {v}"),
-        }
-    }
-
-    #[test]
-    fn a_terminal_refusal_is_surfaced_rather_than_dropped() {
-        // Previously every per-engine session read only `status` and discarded
-        // the refusal, so a terminally refused ingest was acked as applied.
-        let payload = zerompk::to_msgpack_vec(&SyncAckResult::rejected(
-            ViolationType::ConstraintViolation {
-                detail: "bad row".into(),
-            },
-            4,
-        ))
-        .expect("encode");
-        match decode_sync_ack(&payload, "insert", "s1", "docs", 9) {
-            EngineAck::Rejected {
-                violation: ViolationType::ConstraintViolation { detail },
-                applied_seq,
-            } => {
-                assert_eq!(applied_seq, 4);
-                assert_eq!(detail, "bad row");
-            }
-            EngineAck::Rejected {
-                violation: other, ..
-            } => panic!("wrong violation: {other}"),
-            EngineAck::Status { status, .. } => {
-                panic!("a terminal refusal was reported as status {status:?}")
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod wire_tests {
     use super::*;
@@ -229,7 +115,7 @@ mod wire_tests {
         let bytes =
             zerompk::to_msgpack_vec(&SyncAckResult::rejected(ViolationType::PermissionDenied, 9))
                 .unwrap();
-        let ack = decode_sync_ack(&bytes, "insert", "s1", "docs", 9).into_wire();
+        let ack = decode_core_ack(&bytes).expect("typed ACK");
         assert!(!ack.accepted);
         assert_eq!(ack.applied_seq, 9);
         assert!(matches!(ack.status, AckStatus::Rejected { .. }));
@@ -278,5 +164,30 @@ mod wire_tests {
         let ack = decode_core_error(&error).unwrap();
         assert_eq!(ack.applied_seq, 4);
         assert_eq!(ack.status, AckStatus::Gap { expected: 5 });
+    }
+    #[test]
+    fn only_a_consumed_refusal_carries_a_reject_reason() {
+        for status in [AckStatus::Applied, AckStatus::Gap { expected: 2 }] {
+            let payload =
+                zerompk::to_msgpack_vec(&SyncAckResult::acked(status, 1)).expect("encode ACK");
+            assert!(
+                decode_core_ack(&payload)
+                    .expect("typed ACK")
+                    .reject_reason
+                    .is_none()
+            );
+        }
+        let payload = zerompk::to_msgpack_vec(&SyncAckResult::rejected(
+            ViolationType::ConstraintViolation {
+                detail: "schema mismatch".into(),
+            },
+            2,
+        ))
+        .expect("encode refusal");
+        let ack = decode_core_ack(&payload).expect("typed ACK");
+        assert_eq!(
+            ack.reject_reason.as_deref(),
+            Some("constraint:schema mismatch")
+        );
     }
 }

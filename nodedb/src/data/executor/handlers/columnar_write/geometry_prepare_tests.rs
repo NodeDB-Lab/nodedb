@@ -303,6 +303,7 @@ fn restore_projection_preserves_stamps_and_excludes_clone_copy_skips() {
                 ndb_rows: &rows,
                 restored_versions: &versions,
                 rls_write_check: &RlsWriteCheck::already_decided_elsewhere(),
+                provenance: None,
                 collect_stored_rows: true,
             },
         )

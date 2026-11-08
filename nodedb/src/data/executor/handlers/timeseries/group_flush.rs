@@ -291,6 +291,7 @@ mod tests {
         let resolved = zerompk::to_msgpack_vec(&lines).expect("encode lines");
         let payload = crate::control::server::wal_dispatch::encode_timeseries_ingest_payload(
             crate::control::server::wal_dispatch::TimeseriesIngestRecord {
+                rls_write_check: &nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
                 collection,
                 payload: &resolved,
                 provenance: None,
@@ -359,6 +360,7 @@ mod tests {
         let encoded = batch.to_bytes().expect("encode batch");
         let payload = crate::control::server::wal_dispatch::encode_timeseries_ingest_payload(
             crate::control::server::wal_dispatch::TimeseriesIngestRecord {
+                rls_write_check: &nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
                 collection: "m",
                 payload: &encoded,
                 provenance: None,
@@ -413,6 +415,8 @@ mod tests {
                     payload:
                         crate::control::server::wal_dispatch::encode_timeseries_ingest_payload(
                             crate::control::server::wal_dispatch::TimeseriesIngestRecord {
+                                rls_write_check:
+                                    &nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
                                 collection: COLL,
                                 payload: &resolved,
                                 provenance: None,

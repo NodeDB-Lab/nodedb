@@ -3,9 +3,10 @@
 //! Apply one decoded `TimeseriesBatch` record: a timeseries ingest into the
 //! collection's memtable, or a plain columnar insert.
 
-use crate::bridge::envelope::PhysicalPlan;
+use crate::bridge::envelope::{ErrorCode, PhysicalPlan, Response};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::timeseries::{TimeseriesApplyMode, TimeseriesIngestExec};
+use crate::data::executor::handlers::transaction::undo::UndoEntry;
 use crate::types::DatabaseId;
 use nodedb_physical::physical_plan::{ColumnarOp, TimeseriesOp};
 
@@ -19,6 +20,16 @@ const INGEST_FORMATS: [&str; 5] = [
     "json",
     "msgpack",
 ];
+
+struct BatchReplayContext<'a> {
+    engine: &'a str,
+    database_id: DatabaseId,
+    tenant_id: u64,
+    collection: &'a str,
+    record_lsn: u64,
+    grouped: bool,
+    provenance: Option<&'a nodedb_types::sync::wire::SyncProvenance>,
+}
 
 impl CoreLoop {
     /// Replay one timeseries ingest record through the live ingest handler.
@@ -37,7 +48,9 @@ impl CoreLoop {
             collection,
             payload,
             record_lsn,
+            grouped,
             provenance,
+            rls_write_check,
             format,
             default_timestamp_ms,
             system_ordinal,
@@ -73,7 +86,7 @@ impl CoreLoop {
                 wal_lsn: Some(record_lsn),
                 surrogates: Vec::new(),
                 provenance: provenance.clone(),
-                rls_write_check: nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
+                rls_write_check: rls_write_check.clone(),
                 returning: None,
                 rls_filters: Vec::new(),
             }),
@@ -99,6 +112,9 @@ impl CoreLoop {
         if system_ordinal.is_some() {
             self.apply_scope.replicated_ordinal = system_ordinal;
         }
+        let prior_hwm = (grouped && !self.applying_committed_redo())
+            .then(|| self.capture_sync_hwm_undo(provenance.as_ref()))
+            .flatten();
         let response = self.execute_timeseries_ingest(TimeseriesIngestExec {
             task: &task,
             tid,
@@ -108,11 +124,7 @@ impl CoreLoop {
             wal_lsn: Some(record_lsn),
             provenance: provenance.as_ref(),
             mode,
-            // Replay re-applies a record the policy already decided when it was
-            // written, and the identity that wrote it is not present at boot to
-            // resolve `$auth.*` against. A refused write never reaches replay:
-            // its record is cancelled before the refusal is acknowledged.
-            rls_write_check: &nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
+            rls_write_check,
             // Replay rebuilds stored state at boot; there is no client waiting
             // on a row set, and no identity whose reads would need gating. The
             // projection belongs to the originating request, which was answered
@@ -121,13 +133,19 @@ impl CoreLoop {
             rls_filters: &[],
         });
         self.apply_scope.replicated_ordinal = outer_ordinal;
-        if response.status != crate::bridge::envelope::Status::Ok {
-            self.replay_record_rejected(
-                "timeseries",
+        if !self.replay_batch_verdict(
+            response,
+            BatchReplayContext {
+                engine: "timeseries",
+                database_id: db_id,
+                tenant_id: tid.as_u64(),
+                collection,
                 record_lsn,
-                response.error_code,
-                &format!("timeseries ingest into '{collection}' failed"),
-            );
+                grouped,
+                provenance: provenance.as_ref(),
+            },
+            prior_hwm,
+        ) {
             return 0;
         }
         if installing {
@@ -159,6 +177,7 @@ impl CoreLoop {
             collection,
             payload,
             record_lsn,
+            grouped,
             provenance,
             surrogates,
             conflict_policy,
@@ -209,7 +228,7 @@ impl CoreLoop {
                 // The handler reads the stamps from the params below, never
                 // from the embedded plan.
                 restored_versions: Vec::new(),
-                rls_write_check: nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
+                rls_write_check: conflict_policy.rls_write_check.clone(),
                 returning: None,
                 rls_filters: Vec::new(),
             }),
@@ -219,6 +238,13 @@ impl CoreLoop {
         // rebinds the exact same cross-engine identity via
         // `insert_with_surrogate`. An empty slice leaves the rows unbound,
         // exactly as the live insert that carried no surrogates did.
+        let prior_hwm = (grouped && !self.applying_committed_redo())
+            .then(|| self.capture_sync_hwm_undo(provenance.as_ref()))
+            .flatten();
+        if self.recording_redo_undo() {
+            let hwm = self.capture_sync_hwm_undo(provenance.as_ref());
+            self.record_redo_undo(hwm);
+        }
         let response = self.execute_columnar_insert(
             &task,
             crate::data::executor::handlers::columnar_write::ColumnarInsertParams {
@@ -232,7 +258,7 @@ impl CoreLoop {
                 provenance: provenance.as_ref(),
                 system_from,
                 restored_versions: &restored_versions,
-                rls_write_check: &nodedb_types::RlsWriteCheck::already_decided_elsewhere(),
+                rls_write_check: &conflict_policy.rls_write_check,
                 // WAL replay reconstructs stored state; there is no client
                 // waiting on a projection, and no identity to gate reads for.
                 returning: None,
@@ -240,13 +266,19 @@ impl CoreLoop {
                 spatial_undo: None,
             },
         );
-        if response.status != crate::bridge::envelope::Status::Ok {
-            self.replay_record_rejected(
-                "columnar",
+        if !self.replay_batch_verdict(
+            response,
+            BatchReplayContext {
+                engine: "columnar",
+                database_id: db_id,
+                tenant_id: tid.as_u64(),
+                collection,
                 record_lsn,
-                response.error_code,
-                &format!("columnar insert into '{collection}' failed"),
-            );
+                grouped,
+                provenance: provenance.as_ref(),
+            },
+            prior_hwm,
+        ) {
             return 0;
         }
         match nodedb_types::value_from_msgpack(payload) {
@@ -254,5 +286,51 @@ impl CoreLoop {
             Ok(nodedb_types::Value::Object(_)) => 1,
             _ => 0,
         }
+    }
+    /// Standalone refused intents consume their sequence. Grouped errors undo the frontier and halt.
+    fn replay_batch_verdict(
+        &mut self,
+        response: Response,
+        context: BatchReplayContext<'_>,
+        prior_hwm: Option<UndoEntry>,
+    ) -> bool {
+        if response.status == crate::bridge::envelope::Status::Ok {
+            return true;
+        }
+        self.restore_grouped_replay_sync_hwm(
+            prior_hwm,
+            context.database_id.as_u64(),
+            context.tenant_id,
+            context.record_lsn,
+        );
+        if !context.grouped
+            && !self.applying_committed_redo()
+            && matches!(response.error_code.as_deref(), Some(ErrorCode::SyncRejected { provenance, applied_seq, .. })
+                if Some(provenance) == context.provenance && provenance.producer_id != 0 && *applied_seq >= provenance.seq)
+        {
+            return false;
+        }
+        if self.applying_committed_redo() {
+            self.replay_record_rejected(
+                context.engine,
+                context.record_lsn,
+                response.error_code,
+                &format!(
+                    "{} batch into '{}' failed",
+                    context.engine, context.collection
+                ),
+            );
+        } else {
+            self.replay_record_unapplied(
+                context.engine,
+                "batch_handler",
+                context.record_lsn,
+                &format!(
+                    "{} batch into '{}' failed: {:?}",
+                    context.engine, context.collection, response.error_code
+                ),
+            );
+        }
+        false
     }
 }
