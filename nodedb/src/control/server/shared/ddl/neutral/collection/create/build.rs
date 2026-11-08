@@ -344,6 +344,16 @@ pub async fn build_and_persist(
         declared_primary_key,
     };
 
+    // A sum bound before this source existed, or before a drop, names a join
+    // column the new schema can generate.
+    super::super::generated_join::refuse_bound_generated_join_column(
+        catalog,
+        database_id,
+        tenant_id.as_u64(),
+        name,
+        &coll.generated_columns(),
+    )?;
+
     // The apply of a new incarnation clears the name's storage before the
     // engine registers, on every node, this one included.
     let entry = crate::control::catalog_entry::CatalogEntry::PutCollection(Box::new(coll.clone()));

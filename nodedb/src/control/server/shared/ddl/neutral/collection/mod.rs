@@ -14,6 +14,7 @@ mod describe_array;
 pub mod dml;
 pub mod drop;
 pub mod enforcement;
+mod generated_join;
 pub(crate) mod helpers;
 pub mod index;
 pub(super) mod index_fanout;

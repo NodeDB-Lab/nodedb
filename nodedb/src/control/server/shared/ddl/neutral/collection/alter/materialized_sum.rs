@@ -100,6 +100,19 @@ pub(super) async fn add_materialized_sum(
         .collect();
     validate_binding_depth(&existing_bindings, target_collection, source_collection)?;
 
+    // A source created after the bind is checked by `CREATE COLLECTION`.
+    if let Some(source) = catalog
+        .get_collection(database_id, tenant_id, source_collection)
+        .map_err(|e| DdlError::from_error(&e))?
+        .filter(|source| source.is_active)
+    {
+        super::super::generated_join::refuse_generated_join_column(
+            source_collection,
+            &source.generated_columns(),
+            &[join_column.to_string()],
+        )?;
+    }
+
     declare_target_column(&mut coll, target_column, target_column_type)?;
     coll.materialized_sums.push(def);
     let entry = crate::control::catalog_entry::CatalogEntry::PutCollection(Box::new(coll.clone()));
