@@ -409,6 +409,7 @@ mod sql_sequences;
 mod sql_serial_column_list;
 mod sql_sparse_search_filter_window;
 mod sql_spatial_index_ddl;
+mod sql_splitter_syntax;
 mod sql_state_transition_by_role;
 mod sql_state_transition_forms;
 mod sql_strict_indexed_sort_narrow;
