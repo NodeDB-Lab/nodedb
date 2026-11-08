@@ -11,6 +11,7 @@ pub mod kv_restore;
 pub mod node_label;
 pub mod record;
 pub mod replay;
+pub(crate) mod replay_origin;
 pub mod row_changes;
 pub mod row_sources;
 pub mod stamp_floor;

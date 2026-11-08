@@ -48,7 +48,7 @@ macro_rules! dispatch {
             } else {
                 $session.$method(&msg, &$noop).await
             };
-            if vector_requires_close($frame.msg_type, ack.is_some()) {
+            if ordered_outcome_requires_close($frame.msg_type, ack.is_some()) {
                 return EngineOutcome::Break;
             }
             if let Some(ack) = ack
@@ -59,7 +59,7 @@ macro_rules! dispatch {
             {
                 return EngineOutcome::Break;
             }
-        } else if vector_requires_close($frame.msg_type, false) {
+        } else if ordered_outcome_requires_close($frame.msg_type, false) {
             return EngineOutcome::Break;
         }
         return EngineOutcome::Handled;
@@ -215,12 +215,15 @@ pub(super) async fn dispatch_engine_frame(
     }
 }
 
-/// A vector without a trustworthy core outcome reconnects without an ACK.
-fn vector_requires_close(kind: SyncMessageType, has_ack: bool) -> bool {
+/// Ordered engines reconnect when the core outcome is unknown.
+fn ordered_outcome_requires_close(kind: SyncMessageType, has_ack: bool) -> bool {
     !has_ack
         && matches!(
             kind,
-            SyncMessageType::VectorInsert | SyncMessageType::VectorDelete
+            SyncMessageType::VectorInsert
+                | SyncMessageType::VectorDelete
+                | SyncMessageType::FtsIndex
+                | SyncMessageType::FtsDelete
         )
 }
 
@@ -229,11 +232,71 @@ mod tests {
     use super::*;
 
     #[test]
-    fn vector_without_an_ack_closes_while_a_valid_ack_keeps_the_session() {
-        for kind in [SyncMessageType::VectorInsert, SyncMessageType::VectorDelete] {
-            assert!(vector_requires_close(kind, false));
-            assert!(!vector_requires_close(kind, true));
+    fn ordered_engines_close_without_an_ack_and_keep_valid_outcomes() {
+        for kind in [
+            SyncMessageType::VectorInsert,
+            SyncMessageType::VectorDelete,
+            SyncMessageType::FtsIndex,
+            SyncMessageType::FtsDelete,
+        ] {
+            assert!(ordered_outcome_requires_close(kind, false));
+            assert!(!ordered_outcome_requires_close(kind, true));
         }
-        assert!(!vector_requires_close(SyncMessageType::FtsIndex, false));
+        assert!(!ordered_outcome_requires_close(
+            SyncMessageType::KvPush,
+            false
+        ));
+    }
+
+    #[tokio::test]
+    async fn malformed_fts_frames_break_the_session_dispatch_path() {
+        use super::super::super::wire::SyncFrame;
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::tungstenite::protocol::Role;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (client, server) = tokio::join!(TcpStream::connect(address), listener.accept());
+        let _client = client.unwrap();
+        let (server, _) = server.unwrap();
+        let mut ws = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
+        let mut session = SyncSession::new("fts-outcomes".to_owned());
+        session.authenticated = true;
+        for kind in [SyncMessageType::FtsIndex, SyncMessageType::FtsDelete] {
+            let frame = SyncFrame::try_encode(kind, &"invalid body").unwrap();
+            assert!(matches!(
+                dispatch_engine_frame(&mut ws, &mut session, &frame, &None).await,
+                EngineOutcome::Break
+            ));
+        }
+        let index = FtsIndexMsg {
+            lite_id: "lite".to_owned(),
+            collection: "articles".to_owned(),
+            doc_id: "a".to_owned(),
+            fields: vec![],
+            batch_id: 1,
+            producer_id: 1,
+            epoch: 1,
+            seq: 1,
+        };
+        let frame = SyncFrame::try_encode(SyncMessageType::FtsIndex, &index).unwrap();
+        assert!(matches!(
+            dispatch_engine_frame(&mut ws, &mut session, &frame, &None).await,
+            EngineOutcome::Break
+        ));
+        let delete = FtsDeleteMsg {
+            lite_id: "lite".to_owned(),
+            collection: "articles".to_owned(),
+            doc_id: "a".to_owned(),
+            batch_id: 1,
+            producer_id: 1,
+            epoch: 1,
+            seq: 1,
+        };
+        let frame = SyncFrame::try_encode(SyncMessageType::FtsDelete, &delete).unwrap();
+        assert!(matches!(
+            dispatch_engine_frame(&mut ws, &mut session, &frame, &None).await,
+            EngineOutcome::Break
+        ));
     }
 }

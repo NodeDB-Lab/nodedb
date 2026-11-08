@@ -95,7 +95,12 @@ fn coll_len(core: &CoreLoop, tenant_id: u64, collection: &str) -> Option<usize> 
 }
 
 fn replay(core: &mut CoreLoop, records: &[nodedb_wal::WalRecord]) {
-    core.replay_vector_wal(records, 1, &nodedb_wal::TombstoneSet::new());
+    core.replay_vector_wal(
+        records,
+        1,
+        &nodedb_wal::TombstoneSet::new(),
+        &crate::wal::redo::replay_origin::GroupedReplayOrigins::default(),
+    );
 }
 
 /// A record the restored checkpoint's stamp names is not replayed: an HNSW

@@ -287,6 +287,7 @@ mod tests {
             ],
             1,
             &nodedb_wal::TombstoneSet::new(),
+            &crate::wal::redo::replay_origin::GroupedReplayOrigins::default(),
         );
         assert_eq!(
             restored.vector_collections.get(&key).map(|c| c.len()),

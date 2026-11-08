@@ -57,6 +57,27 @@ use crate::data::executor::handlers::transaction::redo_apply::RedoApplyPass;
 use crate::data::executor::handlers::transaction::undo::UndoEntry;
 
 impl CoreLoop {
+    /// Restore a grouped startup operation's frontier before refusing recovery.
+    pub(in crate::data::executor) fn restore_grouped_replay_sync_hwm(
+        &mut self,
+        captured: Option<UndoEntry>,
+        database_id: u64,
+        tid: u64,
+        record_lsn: u64,
+    ) {
+        let Some(captured) = captured else {
+            return;
+        };
+        if let Err(error) = self.rollback_undo_log(database_id, tid, vec![captured]) {
+            self.replay_record_unapplied(
+                "sync",
+                "grouped_hwm_undo",
+                record_lsn,
+                &error.to_string(),
+            );
+        }
+    }
+
     /// Whether a committed-redo apply is driving the replay arms.
     pub(in crate::data::executor) fn applying_committed_redo(&self) -> bool {
         self.redo_apply.scope.is_some()

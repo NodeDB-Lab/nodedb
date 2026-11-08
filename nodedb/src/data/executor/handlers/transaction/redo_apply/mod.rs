@@ -42,6 +42,8 @@ mod snapshot_check;
 mod state;
 mod sub_ops;
 #[cfg(test)]
+mod sync_refusal_tests;
+#[cfg(test)]
 pub(in crate::data::executor) mod test_commit;
 #[cfg(test)]
 mod unique_handover_tests;

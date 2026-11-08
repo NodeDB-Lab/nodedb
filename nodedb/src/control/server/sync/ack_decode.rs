@@ -4,7 +4,8 @@
 //!
 //! Typed outcomes preserve their applied sequence. Legacy sessions use
 //! [`decode_sync_ack`] for malformed payloads. Vector sessions close on
-//! unreadable replies before calling [`EngineAck::from_result`].
+//! unreadable replies before calling [`EngineAck::from_result`]. FTS sessions
+//! use [`decode_core_ack`] and [`decode_core_error`] without guessed frontiers.
 
 use tracing::warn;
 
@@ -78,6 +79,36 @@ impl EngineAck {
             }
         }
     }
+}
+
+/// Only a typed core verdict supplies a stream frontier.
+pub(super) fn decode_core_ack(payload: &[u8]) -> Option<EngineAckWire> {
+    let result: SyncAckResult = zerompk::from_msgpack(payload).ok()?;
+    Some(EngineAck::from_result(result).into_wire())
+}
+
+/// Unknown outcomes require reconnecting with the original sequence.
+pub(super) fn decode_core_error(error: &crate::Error) -> Option<EngineAckWire> {
+    use crate::bridge::envelope::ErrorCode;
+    let crate::Error::DataPlane(code) = error else {
+        return None;
+    };
+    let ack = match code {
+        ErrorCode::SyncRejected {
+            violation,
+            applied_seq,
+            ..
+        } => EngineAck::Rejected {
+            violation: violation.clone(),
+            applied_seq: *applied_seq,
+        },
+        ErrorCode::SyncNotApplied { hold, applied_seq } => EngineAck::Status {
+            status: hold.ack_status(),
+            applied_seq: *applied_seq,
+        },
+        _ => return None,
+    };
+    Some(ack.into_wire())
 }
 
 /// Decode the [`SyncAckResult`] returned by the Data Plane in a sync ingest
@@ -202,5 +233,50 @@ mod wire_tests {
         assert!(!ack.accepted);
         assert_eq!(ack.applied_seq, 9);
         assert!(matches!(ack.status, AckStatus::Rejected { .. }));
+    }
+
+    #[test]
+    fn strict_core_decoding_never_invents_a_frontier() {
+        assert!(decode_core_ack(b"invalid msgpack").is_none());
+        assert!(
+            decode_core_error(&crate::Error::Internal {
+                detail: "storage unavailable".into()
+            })
+            .is_none()
+        );
+        assert!(
+            decode_core_error(&crate::Error::DataPlane(
+                crate::bridge::envelope::ErrorCode::RejectedPrevalidation {
+                    reason: "ordinary validation error".into()
+                }
+            ))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn strict_core_errors_preserve_consumed_and_held_frontiers() {
+        use crate::bridge::envelope::{ErrorCode, SyncHold};
+        let error = crate::Error::DataPlane(ErrorCode::SyncRejected {
+            violation: ViolationType::PermissionDenied,
+            applied_seq: 7,
+            provenance: nodedb_types::sync::wire::SyncProvenance {
+                producer_id: 2,
+                epoch: 1,
+                stream_id: 3,
+                seq: 7,
+            },
+        });
+        let ack = decode_core_error(&error).unwrap();
+        assert_eq!(ack.applied_seq, 7);
+        assert!(!ack.accepted);
+        assert!(matches!(ack.status, AckStatus::Rejected { .. }));
+        let error = crate::Error::DataPlane(ErrorCode::SyncNotApplied {
+            hold: SyncHold::Gap { expected: 5 },
+            applied_seq: 4,
+        });
+        let ack = decode_core_error(&error).unwrap();
+        assert_eq!(ack.applied_seq, 4);
+        assert_eq!(ack.status, AckStatus::Gap { expected: 5 });
     }
 }

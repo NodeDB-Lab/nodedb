@@ -17,11 +17,12 @@ impl CoreLoop {
     ///
     /// Records are replayed in LSN order (WAL guarantees this). For batch
     /// inserts, the payload contains multiple vectors in a single record.
-    pub fn replay_vector_wal(
+    pub(crate) fn replay_vector_wal(
         &mut self,
         records: &[nodedb_wal::WalRecord],
         num_cores: usize,
         tombstones: &nodedb_wal::TombstoneSet,
+        grouped_origins: &crate::wal::redo::replay_origin::GroupedReplayOrigins,
     ) {
         use nodedb_wal::record::RecordType;
 
@@ -229,6 +230,10 @@ impl CoreLoop {
                         }),
                         Self::replay_record_lsn(record_lsn),
                     );
+                    let prior_hwm = (grouped_origins.contains(record_lsn)
+                        && !self.applying_committed_redo())
+                    .then(|| self.capture_sync_hwm_undo(provenance.as_ref()))
+                    .flatten();
                     let response = self.execute_vector_insert(
                         crate::data::executor::handlers::vector::VectorInsertParams {
                             task: &task,
@@ -242,15 +247,24 @@ impl CoreLoop {
                         },
                     );
                     if response.status != crate::bridge::envelope::Status::Ok {
+                        self.restore_grouped_replay_sync_hwm(
+                            prior_hwm,
+                            database_id,
+                            tenant_id,
+                            record_lsn,
+                        );
                         // A crash before the funnel journals refusal markers
                         // leaves the original sync input. Its deterministic
                         // refusal rebuilds the consumed mark without a vector.
-                        if matches!(
-                            response.error_code.as_deref(),
-                            Some(crate::bridge::envelope::ErrorCode::SyncRejected {
-                                provenance: rejected, applied_seq, ..
-                            }) if provenance.as_ref() == Some(rejected) && *applied_seq >= rejected.seq
-                        ) {
+                        if !grouped_origins.contains(record_lsn)
+                            && !self.applying_committed_redo()
+                            && matches!(
+                                response.error_code.as_deref(),
+                                Some(crate::bridge::envelope::ErrorCode::SyncRejected {
+                                    provenance: rejected, applied_seq, ..
+                                }) if provenance.as_ref() == Some(rejected) && *applied_seq >= rejected.seq
+                            )
+                        {
                             skipped += 1;
                             continue;
                         }
