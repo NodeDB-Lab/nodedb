@@ -10,9 +10,6 @@ use std::sync::Arc;
 
 use crate::control::server::native::sqlstate_code::sqlstate_error;
 use crate::control::server::response_shape::calvin_fold::CalvinFoldCtx;
-use crate::control::server::shared::check_constraint::{
-    enforce_statement_checks, enforce_statement_enum_labels,
-};
 use crate::control::server::shared::plan_admission::{
     PlanAdmissionRequest, plan_authorize_and_admit_in_txn,
 };
@@ -26,7 +23,7 @@ use super::sql::resp;
 use super::sql_fold::{answer_to_native, statement_error_to_native};
 use super::sql_loop::{PlannedStatement, run_dispatch_loop, session_sequences};
 use super::streaming::{SqlOutcome, try_open_sql_stream};
-use super::{DispatchCtx, ddl_result_to_native, error_to_native};
+use super::{DispatchCtx, error_to_native};
 
 /// Plan SQL via DataFusion and dispatch tasks to the Data Plane.
 ///
@@ -82,24 +79,6 @@ pub(super) async fn execute_planned(
     {
         Ok(snapshot) => ctx.query_ctx.set_txn_snapshot(snapshot),
         Err(error) => return resp(error_to_native(seq, &error)),
-    }
-
-    // General CHECK constraints and enum labels on an INSERT or UPDATE are
-    // enforced before planning, by the same code pgwire runs.
-    if let Err(error) = enforce_statement_checks(
-        ctx.state,
-        ctx.identity,
-        ctx.tenant_id(),
-        database_id,
-        scope.auth(),
-        ctx.sessions.tx_id(ctx.peer_addr),
-        &clean_sql,
-    )
-    .await
-    .and_then(|()| {
-        enforce_statement_enum_labels(ctx.state, ctx.tenant_id(), database_id, &clean_sql)
-    }) {
-        return resp(ddl_result_to_native(seq, Err(error)));
     }
 
     // Planning, authorization, implicit-edge extraction (pgwire parity: a
