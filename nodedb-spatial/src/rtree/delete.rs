@@ -12,6 +12,7 @@ impl RTree {
     pub fn delete(&mut self, id: EntryId) -> bool {
         let removed = delete_entry(&mut self.nodes, self.root, id, self.space);
         if let Some(orphans) = removed {
+            self.history.take_live(id);
             self.len -= 1;
             for entry in orphans {
                 self.reinsert_entry(entry);

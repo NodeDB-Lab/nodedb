@@ -30,8 +30,8 @@ impl RTree {
     /// at the same ordinal, or a WAL replay re-applies that write.
     pub fn end_at(&mut self, id: EntryId, document_id: &str, sys_to: i64) -> Option<BoundingBox> {
         let bbox = self.get(id)?.bbox;
-        self.delete(id);
         let sys_from = self.history.take_live(id);
+        self.delete(id);
         if sys_to != UNVERSIONED && sys_from < sys_to {
             let mut history = std::mem::take(&mut self.history);
             history.push_ended(
