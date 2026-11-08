@@ -13,6 +13,7 @@ pub(crate) mod document_cell;
 pub mod frontier_digest;
 pub mod history;
 pub(crate) mod import_admission;
+mod materialize;
 pub mod preview;
 pub mod rekey;
 pub mod remove_fields;
