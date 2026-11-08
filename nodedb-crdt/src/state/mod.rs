@@ -20,6 +20,7 @@ pub mod remove_fields;
 pub(crate) mod restore_containers;
 pub mod row_image;
 pub mod snapshot;
+mod write_fork;
 pub mod write_set;
 
 pub use changed_rows::TrackedImport;

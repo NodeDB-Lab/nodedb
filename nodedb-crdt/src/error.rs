@@ -17,6 +17,12 @@ pub enum CrdtError {
     #[error("delta application failed: {0}")]
     DeltaApplyFailed(String),
 
+    /// Write preparation requires a source without pending operations.
+    #[error(
+        "write preparation source has {operations} pending operations; finish the source mutation before preparing writes"
+    )]
+    SourceTransactionPending { operations: usize },
+
     /// A generic CRDT import exceeded its encoded byte limit before metadata
     /// parsing, forking, or import.
     #[error("CRDT import exceeds byte limit: {actual} > {limit}")]
