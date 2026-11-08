@@ -26,6 +26,7 @@ use crate::control::security::audit::ArcAuditEmitter;
 use crate::control::security::request_scope::RequestAuthScope;
 use crate::control::server::response_shape::schema::OutputSchema;
 use crate::control::server::shared::authorization::authorize_task_set;
+use crate::control::server::shared::check_constraint::{RequestChecks, enforce_request_checks};
 use crate::control::server::shared::retry::retry_on_schema_change;
 use crate::control::server::shared::returning;
 use crate::control::state::SharedState;
@@ -95,6 +96,20 @@ pub async fn plan_authorize_and_admit_in_txn(
     request: PlanAdmissionRequest<'_>,
     read_txn: Option<crate::types::TxnId>,
 ) -> crate::Result<PlanAdmission> {
+    // CHECK constraints and enum labels of every statement, before planning.
+    // pgwire checks per statement in its own route and does not come here.
+    enforce_request_checks(
+        &RequestChecks {
+            state: request.state,
+            identity: request.scope.identity(),
+            tenant_id: request.scope.tenant_id(),
+            database_id: request.scope.database_id(),
+            auth: request.scope.auth(),
+            txn_id: read_txn,
+        },
+        request.sql,
+    )
+    .await?;
     let request = &request;
     retry_on_schema_change(&request.state.lease_drain, move || {
         plan_authorize_and_admit_once(request, read_txn)

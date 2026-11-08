@@ -8,10 +8,12 @@
 //! every protocol calls before planning.
 
 mod enforce;
+pub mod request;
 mod simple;
 pub mod statement;
 mod subquery;
 
 pub use enforce::enforce_check_constraints;
+pub use request::{RequestChecks, enforce_request_checks};
 pub use statement::{enforce_statement_checks, enforce_statement_enum_labels};
 pub(crate) use subquery::validate_in_subquery_check;
