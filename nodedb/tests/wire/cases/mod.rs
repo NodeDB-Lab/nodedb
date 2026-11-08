@@ -472,6 +472,7 @@ mod sum_generated_column;
 mod sum_generated_join;
 mod sum_generated_join_case;
 mod sum_insert_skip;
+mod sum_native_governed_direct_op;
 mod sum_predicate_after_write;
 mod sum_skip_page;
 mod sum_skip_route_matrix;
