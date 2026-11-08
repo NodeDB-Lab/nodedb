@@ -19,7 +19,7 @@ use crate::scope::IndexScope;
 type EndedMapKey = (IndexKey, i64, Surrogate, i64);
 
 /// The history rows of every index the backend holds.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(super) struct MemoryHistory {
     /// `(index, surrogate) → sys_from` of each live version with a start.
     live_from: BTreeMap<(IndexKey, Surrogate), i64>,
@@ -30,6 +30,26 @@ pub(super) struct MemoryHistory {
 }
 
 impl MemoryHistory {
+    pub(super) fn estimated_clone_bytes(&self) -> usize {
+        use crate::retained_size::{strings, sum, tree, vector};
+        sum([
+            tree::<((IndexKey, Surrogate), i64)>(self.live_from.len()),
+            tree::<(IndexKey, i64, Surrogate)>(self.live_by_from.len()),
+            tree::<(EndedMapKey, Vec<String>)>(self.ended.len()),
+            sum(self
+                .live_from
+                .keys()
+                .map(|(key, _)| strings([&key.2, &key.3]))),
+            sum(self
+                .live_by_from
+                .iter()
+                .map(|(key, _, _)| strings([&key.2, &key.3]))),
+            sum(self.ended.iter().map(|((key, ..), tokens)| {
+                sum([strings([&key.2, &key.3]), vector(tokens), strings(tokens)])
+            })),
+        ])
+    }
+
     /// Keep only the rows of the indexes `keep` admits.
     pub(super) fn retain(&mut self, keep: impl Fn(&IndexKey) -> bool) {
         self.live_from.retain(|k, _| keep(&k.0));

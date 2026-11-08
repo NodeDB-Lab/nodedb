@@ -25,6 +25,7 @@ pub mod index;
 pub mod lsm;
 mod mem_scope;
 pub mod posting;
+mod retained_size;
 pub mod scope;
 pub mod search;
 #[cfg(test)]

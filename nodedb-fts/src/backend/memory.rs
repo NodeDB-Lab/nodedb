@@ -10,6 +10,9 @@
 //! — database, tenant, and index isolation never depends on lexical-prefix
 //! ordering.
 
+#[path = "memory_preparation.rs"]
+mod preparation;
+
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;

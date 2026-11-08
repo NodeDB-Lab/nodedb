@@ -10,6 +10,9 @@
 //! collection or field name can collide with another's. The spill
 //! thresholds bound the sum over every index.
 
+#[path = "preparation.rs"]
+mod preparation;
+
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
