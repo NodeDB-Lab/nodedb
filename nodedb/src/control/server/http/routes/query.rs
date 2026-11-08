@@ -7,6 +7,7 @@ use serde::Deserialize;
 
 use super::super::auth::{ApiError, AppState};
 
+mod graph_response;
 mod materialized;
 mod ndjson;
 mod ndjson_response;

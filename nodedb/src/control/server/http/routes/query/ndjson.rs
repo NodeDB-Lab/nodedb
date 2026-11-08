@@ -32,6 +32,7 @@ use super::super::atomic_statement::{RoutedStatement, route_http_statement};
 use super::super::ndjson_error::error_line;
 use super::super::query_stream::{NdjsonBody, bound_ndjson_body, stream_binding, try_open_stream};
 use super::super::result_shape::append_ndjson_payload;
+use super::graph_response::graph_response;
 use super::ndjson_response::{
     ndjson_response, quota_rejection, rows_to_ndjson, stream_meter_guard, sync_timeout_line,
 };
@@ -130,6 +131,12 @@ async fn ndjson_at_consistency(
     let scope = request.into_resolved_scope();
     let rate_limit_headers =
         super::super::super::rate_limit_headers::rate_limit_headers(&rate_limit_result);
+
+    if let Some(response) =
+        graph_response(&state, &identity, sql, database_id, &rate_limit_headers).await
+    {
+        return response;
+    }
 
     // Planning and lease admission run as one retried unit; a denied request never
     // acquires a lease.

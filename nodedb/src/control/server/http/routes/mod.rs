@@ -8,6 +8,7 @@ pub mod cluster;
 pub mod cluster_debug;
 pub mod crdt;
 pub mod document;
+mod graph_statement;
 pub mod health;
 pub mod metrics;
 mod ndjson_error;
