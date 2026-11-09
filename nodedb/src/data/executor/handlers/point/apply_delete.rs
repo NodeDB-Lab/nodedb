@@ -12,6 +12,7 @@ use redb::WriteTransaction;
 use tracing::warn;
 
 use crate::data::executor::core_loop::CoreLoop;
+use crate::data::executor::enforcement::period_lock::PeriodCheck;
 use crate::data::executor::enforcement::{append_only, retention};
 use nodedb_physical::physical_plan::ResolvedSumTarget;
 use nodedb_types::Surrogate;
@@ -162,7 +163,7 @@ impl CoreLoop {
                     collection,
                     config,
                     slot.predecessor.as_deref(),
-                    resolved_targets,
+                    PeriodCheck::live(resolved_targets),
                 )?;
             }
             return self.apply_history_delete(
@@ -198,7 +199,7 @@ impl CoreLoop {
                 collection,
                 config,
                 prior.as_deref(),
-                resolved_targets,
+                PeriodCheck::live(resolved_targets),
             )?;
         }
         let mut version_sys_from: Option<i64> = None;
@@ -363,22 +364,15 @@ pub(in crate::data::executor) fn run_delete_enforcement(
     collection: &str,
     config: &crate::engine::document::store::CollectionConfig,
     old_value: Option<&[u8]>,
-    resolved_targets: &[ResolvedSumTarget],
+    period: PeriodCheck<'_>,
 ) -> crate::Result<()> {
     append_only::check_point_delete(collection, &config.enforcement)
         .map_err(map_enforcement_error)?;
     if let Some(ref pl) = config.enforcement.period_lock
         && let Some(old_bytes) = old_value
     {
-        core.check_period_lock_at(
-            database_id,
-            tid,
-            collection,
-            old_bytes,
-            pl,
-            resolved_targets,
-        )
-        .map_err(map_enforcement_error)?;
+        core.check_period_lock_as(database_id, tid, collection, old_bytes, pl, period)
+            .map_err(map_enforcement_error)?;
     }
     let created_at = old_value.and_then(retention::extract_created_at_secs);
     retention::check_delete_allowed(collection, &config.enforcement, created_at)

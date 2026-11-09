@@ -16,7 +16,54 @@ use nodedb_types::StorageKey;
 /// Reads the current stored body of one row of a named reference collection.
 pub type RefRowReader<'a> = dyn Fn(&str, &StorageKey) -> crate::Result<Option<Vec<u8>>> + 'a;
 
+/// How a period-lock check judges one write.
+#[derive(Clone, Copy)]
+pub(in crate::data::executor) struct PeriodCheck<'a> {
+    /// `(target collection, join-key value)` to target row surrogate,
+    /// resolved on the Control Plane at plan time. The check reads the
+    /// reference row's surrogate off this slice, keyed by
+    /// `(config.ref_table, period value)`.
+    pub(in crate::data::executor) resolved: &'a [ResolvedSumTarget],
+    /// Whether the check reads the reference row's status. `false` checks
+    /// only that the plan resolved the write's period to a reference row.
+    pub(in crate::data::executor) read_row: bool,
+}
+
+impl<'a> PeriodCheck<'a> {
+    /// A check that reads the reference row as this core stores it now.
+    pub(in crate::data::executor) fn live(resolved: &'a [ResolvedSumTarget]) -> Self {
+        Self {
+            resolved,
+            read_row: true,
+        }
+    }
+}
+
 impl CoreLoop {
+    /// Judge one write as `check` says. Without the row read the verdict
+    /// depends on the write and its plan alone.
+    pub(in crate::data::executor) fn check_period_lock_as(
+        &self,
+        database_id: u64,
+        tid: u64,
+        collection: &str,
+        doc_bytes: &[u8],
+        config: &PeriodLockConfig,
+        check: PeriodCheck<'_>,
+    ) -> Result<(), ErrorCode> {
+        if check.read_row {
+            return self.check_period_lock_at(
+                database_id,
+                tid,
+                collection,
+                doc_bytes,
+                config,
+                check.resolved,
+            );
+        }
+        period_reference_surrogate(collection, doc_bytes, config, check.resolved).map(|_| ())
+    }
+
     /// [`check_period_lock`] with the reference row read at its current
     /// version, so a bitemporal reference collection resolves too.
     pub(in crate::data::executor) fn check_period_lock_at(
@@ -64,23 +111,10 @@ pub fn check_period_lock(
     config: &PeriodLockConfig,
     resolved_targets: &[ResolvedSumTarget],
 ) -> Result<(), ErrorCode> {
-    // Extract the period column value from the document.
-    let period_value = extract_period_value(doc_bytes, &config.period_column);
-    let Some(period_key) = period_value else {
-        // Period column not present in document — skip check (schemaless collections
-        // may have rows without the period column).
-        return Ok(());
-    };
-
-    // Resolve the period value to the reference row's surrogate, exactly as
-    // the Control Plane resolved it at plan time. A period value with no
-    // binding in `resolved_targets` names no reference row and is treated as
-    // an unknown period below.
-    let Some(surrogate) = resolved_sum_surrogate(resolved_targets, &config.ref_table, &period_key)
+    let Some(surrogate) =
+        period_reference_surrogate(collection, doc_bytes, config, resolved_targets)?
     else {
-        return Err(ErrorCode::PeriodLocked {
-            collection: collection.to_string(),
-        });
+        return Ok(());
     };
     let ref_bytes = match read_ref_row(&config.ref_table, &StorageKey::for_surrogate(surrogate)) {
         Ok(Some(bytes)) => bytes,
@@ -124,6 +158,26 @@ pub fn check_period_lock(
             collection: collection.to_string(),
         })
     }
+}
+
+/// The reference row a write's period names, or `None` when the document has
+/// no period column: a schemaless collection can hold such rows, and no check
+/// applies. A period value with no binding in `resolved_targets` names no
+/// reference row and is refused as an unknown period.
+fn period_reference_surrogate(
+    collection: &str,
+    doc_bytes: &[u8],
+    config: &PeriodLockConfig,
+    resolved_targets: &[ResolvedSumTarget],
+) -> Result<Option<nodedb_types::Surrogate>, ErrorCode> {
+    let Some(period_key) = extract_period_value(doc_bytes, &config.period_column) else {
+        return Ok(None);
+    };
+    resolved_sum_surrogate(resolved_targets, &config.ref_table, &period_key)
+        .map(Some)
+        .ok_or_else(|| ErrorCode::PeriodLocked {
+            collection: collection.to_string(),
+        })
 }
 
 /// Extract a string field value from a MessagePack or JSON document.

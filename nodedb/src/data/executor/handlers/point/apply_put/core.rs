@@ -11,6 +11,7 @@ use tracing::warn;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::doc_format;
 
+use crate::data::executor::enforcement::period_lock::PeriodCheck;
 use crate::data::executor::enforcement::unique::{
     PostImage, UniqueJudge, UniqueScope, check_unique_post_state,
 };
@@ -124,7 +125,7 @@ impl CoreLoop {
                     value,
                     old_value: &slot.predecessor,
                     user_roles,
-                    resolved_targets,
+                    period: PeriodCheck::live(resolved_targets),
                 },
             )?;
             return self.apply_history_put(
@@ -175,7 +176,7 @@ impl CoreLoop {
                 value,
                 old_value: &old_value,
                 user_roles,
-                resolved_targets,
+                period: PeriodCheck::live(resolved_targets),
             },
         )?;
 
