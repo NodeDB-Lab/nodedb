@@ -19,7 +19,9 @@
 
 use crate::control::planner::procedural::executor::bindings::RowBindings;
 use crate::control::planner::procedural::executor::core::CrossShardOrigin;
-use crate::control::security::catalog::trigger_types::{TriggerExecutionMode, TriggerTiming};
+use crate::control::security::catalog::trigger_types::{
+    TriggerExecutionMode, TriggerGranularity, TriggerTiming,
+};
 use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::server::shared::session::DmlTxnCtx;
 use crate::control::state::SharedState;
@@ -100,6 +102,7 @@ pub async fn fire_after_insert(params: FireAfterInsertParams<'_>) -> FireReport 
     let after_triggers: Vec<_> = triggers
         .into_iter()
         .filter(|t| t.timing == TriggerTiming::After)
+        .filter(|t| t.granularity == TriggerGranularity::Row)
         .filter(|t| mode_filter.is_none() || Some(t.execution_mode) == mode_filter)
         .filter(|t| only_trigger.is_none_or(|name| t.name == name))
         .collect();
@@ -194,6 +197,7 @@ pub async fn fire_after_update(params: FireAfterUpdateParams<'_>) -> FireReport 
     let after_triggers: Vec<_> = triggers
         .into_iter()
         .filter(|t| t.timing == TriggerTiming::After)
+        .filter(|t| t.granularity == TriggerGranularity::Row)
         .filter(|t| mode_filter.is_none() || Some(t.execution_mode) == mode_filter)
         .filter(|t| only_trigger.is_none_or(|name| t.name == name))
         .collect();
@@ -284,6 +288,7 @@ pub async fn fire_after_delete(params: FireAfterDeleteParams<'_>) -> FireReport 
     let after_triggers: Vec<_> = triggers
         .into_iter()
         .filter(|t| t.timing == TriggerTiming::After)
+        .filter(|t| t.granularity == TriggerGranularity::Row)
         .filter(|t| mode_filter.is_none() || Some(t.execution_mode) == mode_filter)
         .filter(|t| only_trigger.is_none_or(|name| t.name == name))
         .collect();

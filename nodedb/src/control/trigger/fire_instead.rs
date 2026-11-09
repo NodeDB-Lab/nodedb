@@ -15,7 +15,9 @@
 use std::collections::HashMap;
 
 use crate::control::planner::procedural::executor::bindings::RowBindings;
-use crate::control::security::catalog::trigger_types::{StoredTrigger, TriggerTiming};
+use crate::control::security::catalog::trigger_types::{
+    StoredTrigger, TriggerGranularity, TriggerTiming,
+};
 
 use super::SyncFire;
 use super::fire_common::{FireErrorPolicy, FireTriggersParams, check_cascade_depth, fire_triggers};
@@ -90,6 +92,7 @@ async fn fire_instead_of(
         )
         .into_iter()
         .filter(|t| t.timing == TriggerTiming::InsteadOf)
+        .filter(|t| t.granularity == TriggerGranularity::Row)
         .collect();
 
     if instead_triggers.is_empty() {
