@@ -23,6 +23,7 @@ use crate::control::planner::calvin::{
     CrossShardTxnMode, TxnDispatchPosition, TxnProvenance, TxnReads, build_single_vshard_tx_class,
     dispatch_strict_atomic_tasks_to_calvin, submit_calvin_routed,
 };
+use crate::control::planner::period_lock::{JudgedReads, judge_period_references};
 use crate::control::server::shared::session::read_set::ReadSetEntry;
 use crate::control::state::SharedState;
 use nodedb_physical::physical_task::PhysicalTask;
@@ -225,11 +226,24 @@ async fn submit_commit_calvin(
                         Ok(resolved) => resolved.unwrap_or(tasks),
                         Err(e) => return Err(AbortReason::Dispatch(e)),
                     };
-                let mut tx_class = match build_single_vshard_tx_class(&tasks, tenant_id, reads) {
-                    Ok(tc) => tc,
+                // The group judges the period-lock reference rows its own
+                // writes name, and carries a read of each. A group that
+                // follows a committed group sees that group's writes.
+                let group_reads = TxnReads {
+                    entries: reads,
+                    snapshot_ordinal,
+                };
+                let judged = match judge_period_references(state, &tasks, group_reads).await {
+                    Ok(judged) => judged,
                     Err(e) => return Err(AbortReason::Dispatch(e)),
                 };
-                tx_class.snapshot_ordinal = snapshot_ordinal;
+                let group_reads = judged.as_ref().map_or(group_reads, JudgedReads::txn_reads);
+                let mut tx_class =
+                    match build_single_vshard_tx_class(&tasks, tenant_id, group_reads.entries) {
+                        Ok(tc) => tc,
+                        Err(e) => return Err(AbortReason::Dispatch(e)),
+                    };
+                tx_class.snapshot_ordinal = group_reads.snapshot_ordinal;
                 // Each per-vShard group acquires under `R` too, so it self-upgrades
                 // its slice of the session's shared reservations.
                 tx_class.set_lock_owner(reservation_owner);
