@@ -316,6 +316,20 @@ pub(super) fn omit_shipped(
     });
 }
 
+/// Remove every entry whose target homes off `source_collection`'s vShard.
+///
+/// Call it after the settlement of a whole op. A cross-shard delta moves only on
+/// its own `ApplyBalanceDelta` task, so the source's core folds none of them.
+pub(super) fn keep_co_resident_targets(
+    resolved: &mut Vec<ResolvedSumTarget>,
+    source_collection: &str,
+    database_id: DatabaseId,
+) -> crate::Result<()> {
+    let source = CollectionKey::from_qualified_str(database_id, source_collection)?;
+    resolved.retain(|entry| sum_target_is_co_resident(source, &entry.target_collection));
+    Ok(())
+}
+
 /// The `(target collection, join value)` pairs the CO-RESIDENT bindings of
 /// `bindings` still address for `images` — the resolution entries
 /// [`omit_shipped`] must keep.
@@ -556,6 +570,17 @@ mod tests {
         assert!(settlement.tasks.is_empty());
         assert!(settlement.shipped.is_empty());
         assert!(settlement.reads.is_empty());
+    }
+
+    /// A cross-shard entry left on a settled op folds a sibling row on the
+    /// wrong core, so only the co-resident entry stays.
+    #[test]
+    fn a_settled_op_keeps_only_co_resident_targets() {
+        let (source, target) = cross_shard_pair();
+        let mut resolved = resolution(&target, &[("acc-1", 500)]);
+        resolved.extend(resolution(&source, &[("acc-1", 501)]));
+        keep_co_resident_targets(&mut resolved, &source, DB).expect("keep");
+        assert_eq!(resolved, resolution(&source, &[("acc-1", 501)]));
     }
 
     /// The settled images are stamped as a read of the ONE source row, so a

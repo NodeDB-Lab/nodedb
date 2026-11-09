@@ -108,8 +108,10 @@ pub enum DocumentOp {
         /// Sum-binding TARGET collections this write must not apply its own
         /// delta for — the Control Plane appended a separate
         /// [`ApplyBalanceDelta`](DocumentOp::ApplyBalanceDelta) task homed on
-        /// each target's vShard instead. Empty when targets are co-resident
-        /// or the collection has no binding.
+        /// each target's vShard instead. A binding with a zero net delta
+        /// ships no task and is listed too, so the redo table of the source
+        /// holds no entry for it. Empty when targets are co-resident or the
+        /// collection has no binding.
         #[serde(default)]
         deferred_sum_targets: Vec<String>,
     },

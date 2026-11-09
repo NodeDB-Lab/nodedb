@@ -19,6 +19,7 @@ pub mod cross_shard;
 pub mod extract;
 mod generated;
 pub mod index;
+mod insert_skip;
 pub mod predicate;
 pub mod recon;
 pub mod resolve;

@@ -13,10 +13,9 @@ use nodedb_physical::physical_task::PhysicalTask;
 use nodedb_types::Surrogate;
 
 use super::extract::join_value_from_body;
+use super::insert_skip::{SkipInsertRows, is_skip_insert};
 use super::resolve_target::ResolvedTargets;
-use super::settle::{
-    SettleInput, co_resident_target_keys, omit_shipped, settle_cross_shard_images,
-};
+use super::settle::{SettleInput, keep_co_resident_targets, settle_cross_shard_images};
 use super::stored::stored_row_scopes;
 use crate::control::server::shared::session::read_set::ReadSetEntry;
 use crate::control::server::surrogate_exchange::lookup_surrogate_routed;
@@ -65,6 +64,7 @@ pub async fn resolve_materialized_sum_targets(
     let mut reads: Vec<ReadSetEntry> = Vec::new();
     // The keys the writes so far insert, in sum-driving collections.
     let mut inserted_keys: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut skip_insert_rows = SkipInsertRows::default();
 
     for task in tasks.iter_mut() {
         let txn_id = task.txn_id;
@@ -134,31 +134,31 @@ pub async fn resolve_materialized_sum_targets(
             // join values it addresses AND for the pre-image a cross-shard
             // delta is folded from. One read, one snapshot: settling from a
             // second read will total a different one.
-            if stored.is_empty() {
+            // A skip insert reads only the first write of each of its rows,
+            // and none at all when every target is co-resident.
+            let skip_insert = is_skip_insert(op);
+            let stored = if skip_insert {
+                skip_insert_rows.first_rows(stored, &bindings, collection, database_id)?
+            } else {
+                stored
+            };
+            if stored.is_empty() && !skip_insert {
                 (resolved.into_vec(), Vec::new())
             } else {
-                let mut images = Vec::with_capacity(stored.len());
-                for scope in &stored {
-                    images.push(
-                        super::stored::extend_with_stored_row(
-                            state,
-                            &bindings,
-                            scope,
-                            &mut resolved,
-                            tenant_id,
-                            database_id,
-                            trace_id,
-                        )
-                        .await?,
-                    );
-                }
+                let images = super::stored::extend_with_stored_rows(
+                    state,
+                    &bindings,
+                    &stored,
+                    &mut resolved,
+                    tenant_id,
+                    database_id,
+                    trace_id,
+                )
+                .await?;
                 let mut resolved = resolved.into_vec();
                 let crs = crate::control::crs_context::crs_context_for(state);
-                // Every row settles against the whole resolution, before any
-                // shipped value leaves it.
+                // Every row settles against the whole resolution.
                 let mut settlements = Vec::with_capacity(stored.len());
-                let mut shipped = Vec::new();
-                let mut still_needed = Vec::new();
                 for (scope, images) in stored.iter().zip(&images) {
                     let input = SettleInput {
                         source_collection: collection,
@@ -167,23 +167,22 @@ pub async fn resolve_materialized_sum_targets(
                         observed_at: images.observed_at,
                         crs: &crs,
                     };
-                    let mut settlement = settle_cross_shard_images(
+                    settlements.push(settle_cross_shard_images(
                         &bindings,
                         &input,
                         &resolved,
                         txn_id,
                         tenant_id,
                         database_id,
-                    )?;
-                    shipped.append(&mut settlement.shipped);
-                    still_needed.extend(co_resident_target_keys(&bindings, &input, database_id)?);
-                    settlements.push(settlement);
+                    )?);
                 }
                 // The resolution the source op keeps is the one the source
-                // core can still apply. Removing the shipped values IS the
-                // deferral: what is left resolved is exactly what no sibling
-                // task carries.
-                omit_shipped(&mut resolved, &shipped, &still_needed);
+                // core can still apply. Every cross-shard delta of this op
+                // left on a task above. A cross-shard entry can remain with no
+                // delta: a skipped row, or a body join value the stored row
+                // overrides. The install reads one table per collection, so
+                // that entry folds a sibling row on the wrong core.
+                keep_co_resident_targets(&mut resolved, collection, database_id)?;
                 (resolved, settlements)
             }
         };

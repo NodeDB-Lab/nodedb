@@ -13,8 +13,9 @@
 //! `PointInsert`/`BatchInsert` (new rows, whole value credited, no
 //! pre-image to subtract). Every other shape's delta needs an image the
 //! plan doesn't carry, so it keeps folding on the Data Plane instead.
-//! `if_absent` inserts are excluded: a silently-skipped row owes nothing,
-//! and the plan can't know which rows will be skipped.
+//! An `if_absent` insert is excluded here. Whether its row lands depends on
+//! the stored row. The resolve pass reads that row and settles the insert
+//! ([`super::stored`]).
 
 use rust_decimal::Decimal;
 
@@ -54,6 +55,9 @@ pub fn append_cross_shard_balance_tasks(
     // with the `&mut Vec` pushed into below — the same two-phase shape
     // `append_implicit_edge_tasks` uses.
     let mut appended: Vec<(usize, Vec<AppendedDelta>)> = Vec::new();
+    // Bindings an insert resolved and credits nothing to: no task ships, and
+    // the deferral is still recorded on the op.
+    let mut zero_deferred: Vec<(usize, String)> = Vec::new();
     for (index, task) in tasks.iter().enumerate() {
         let PhysicalPlan::Document(op) = &task.plan else {
             continue;
@@ -92,7 +96,11 @@ pub fn append_cross_shard_balance_tasks(
                 // read-modify-write on the target would rewrite the row
                 // byte-for-byte. Shipping a task for it would also make an
                 // otherwise single-shard statement multi-shard for nothing.
+                // The op still defers the binding: its resolved entry otherwise
+                // joins the merged table of the source, and a sibling row of
+                // the same account folds on the source's core.
                 if delta == Decimal::ZERO {
+                    zero_deferred.push((index, binding.target_collection.clone()));
                     continue;
                 }
                 let surrogate =
@@ -119,6 +127,10 @@ pub fn append_cross_shard_balance_tasks(
         if !for_task.is_empty() {
             appended.push((index, for_task));
         }
+    }
+
+    for (index, target_collection) in zero_deferred {
+        defer_binding(&mut tasks[index].plan, target_collection);
     }
 
     for (index, deltas) in appended {
@@ -157,8 +169,8 @@ fn settleable_insert(op: &DocumentOp) -> crate::Result<Option<SettleableInsert<'
             resolved_sum_targets,
             ..
         } => {
-            // A skipped conflict inserts nothing and owes its target nothing,
-            // and the plan cannot tell which rows will be skipped.
+            // The resolve pass settles it from the stored read, in
+            // `super::stored`. Settling it here too ships the delta twice.
             if *if_absent {
                 return Ok(None);
             }
@@ -171,9 +183,14 @@ fn settleable_insert(op: &DocumentOp) -> crate::Result<Option<SettleableInsert<'
         DocumentOp::BatchInsert {
             collection,
             documents,
+            if_absent,
             resolved_sum_targets,
             ..
         } => {
+            // Same rule as `PointInsert`: the stored read settles each row.
+            if *if_absent {
+                return Ok(None);
+            }
             let bodies: Vec<&[u8]> = documents.iter().map(|(_, v)| v.as_slice()).collect();
             Ok(Some(SettleableInsert {
                 collection: collection.as_str(),
@@ -272,4 +289,51 @@ fn decode_bodies<B: AsRef<[u8]>>(bodies: &[B]) -> Vec<serde_json::Value> {
         .iter()
         .filter_map(|body| nodedb_types::json_from_msgpack(body.as_ref()).ok())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nodedb_types::{QualifiedCollection, Surrogate};
+
+    fn page(if_absent: bool) -> DocumentOp {
+        let body =
+            nodedb_types::json_to_msgpack(&serde_json::json!({"amount": 1})).expect("encode body");
+        DocumentOp::BatchInsert {
+            collection: QualifiedCollection::new(DatabaseId::DEFAULT, "entries"),
+            documents: vec![("e0".to_owned(), body.clone()), ("e1".to_owned(), body)],
+            surrogates: vec![Surrogate::new(1), Surrogate::new(2)],
+            if_absent,
+            returning: None,
+            rls_filters: Vec::new(),
+            resolved_sum_targets: Vec::new(),
+            deferred_sum_targets: Vec::new(),
+        }
+    }
+
+    /// A plain page credits every row: a page dropped here loses the balance.
+    #[test]
+    fn a_plain_page_settles_its_rows() {
+        let op = page(false);
+        let settleable = settleable_insert(&op)
+            .expect("settleable_insert")
+            .expect("a plain page settles here");
+        assert_eq!(settleable.collection, op_collection(&op));
+        assert_eq!(settleable.docs.len(), 2);
+    }
+
+    /// A skip page settles from the stored read. Settling it here too credits a
+    /// row the Data Plane skips.
+    #[test]
+    fn a_skip_page_settles_nothing_here() {
+        let op = page(true);
+        assert!(settleable_insert(&op).expect("settleable_insert").is_none());
+    }
+
+    fn op_collection(op: &DocumentOp) -> &str {
+        match op {
+            DocumentOp::BatchInsert { collection, .. } => collection.as_str(),
+            _ => panic!("the fixture is a page"),
+        }
+    }
 }
