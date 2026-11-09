@@ -23,6 +23,8 @@ pub mod reservation;
 pub mod retry_budget;
 pub mod retry_loop;
 pub mod settling_writes;
+mod settling_writes_columns;
+mod settling_writes_order;
 pub mod submit;
 pub mod tx_class;
 pub mod txn_predict;
@@ -50,6 +52,7 @@ pub use settling_writes::{
     refuse_repeated_settled_rows, refuse_rewrite_of_inserted_key, refuse_several_returning_tasks,
     refuse_several_settling_writes, ships_balance_delta,
 };
+pub use settling_writes_order::refuse_predicate_after_source_write;
 pub use submit::{
     RoutedAssignment, submit_and_await_calvin, submit_and_await_calvin_until, submit_calvin_routed,
     submit_calvin_routed_assign, submit_calvin_routed_write,

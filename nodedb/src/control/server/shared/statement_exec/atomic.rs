@@ -22,7 +22,8 @@
 //!    coordinator, which reads the rows it matched.
 //!
 //! A request whose writes settle one balance from the same rows is refused
-//! ahead of every route.
+//! ahead of every route. So is a predicate write or a TRUNCATE that follows a
+//! write which can move what it settles from.
 
 use std::sync::Arc;
 
@@ -31,7 +32,8 @@ use nodedb_physical::physical_task::PhysicalTask;
 use crate::control::lease::QueryLeaseScope;
 use crate::control::planner::calvin::{
     CrossShardTxnMode, DispatchClass, TxnDispatchPosition, classify_dispatch,
-    dispatch_authorized_tasks_to_calvin, read_vshards_of, refuse_several_settling_writes,
+    dispatch_authorized_tasks_to_calvin, read_vshards_of, refuse_predicate_after_source_write,
+    refuse_several_settling_writes,
 };
 use crate::control::security::audit::ArcAuditEmitter;
 use crate::control::server::response_shape::calvin_fold::{
@@ -104,6 +106,7 @@ pub(crate) async fn route_atomic_statement(
     .map_err(|error| StatementError::Error(crate::Error::from(error)))?;
 
     refuse_several_settling_writes(&tasks).map_err(StatementError::Error)?;
+    refuse_predicate_after_source_write(state, &tasks).map_err(StatementError::Error)?;
 
     let in_txn_block = in_block(session);
     if !in_txn_block

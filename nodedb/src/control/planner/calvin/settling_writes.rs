@@ -24,6 +24,12 @@ statements.";
 pub const SAME_ROW_WRITES_REFUSAL: &str = "several writes of one request rewrite the same source \
 row of a materialized sum; run them as separate statements.";
 
+/// The refusal of a request in which a predicate write or a TRUNCATE follows a
+/// write that can move what it settles from. The wire tests match this text.
+pub const SAME_SOURCE_WRITES_REFUSAL: &str = "a predicate write or a TRUNCATE follows another \
+write of the same materialized-sum source in one request, and every write settles before any \
+write stages; run them as separate statements.";
+
 /// The refusal of a Calvin task set with several `RETURNING` tasks.
 pub const SEVERAL_RETURNING_REFUSAL: &str = "several writes of one request carry RETURNING and \
 commit through one Calvin transaction, which answers one write's rows; run them as separate \
