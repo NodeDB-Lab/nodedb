@@ -497,6 +497,7 @@ mod transactional_ddl_visibility_sequence;
 mod transactional_sorted_index_reads;
 mod trigger_e2e;
 mod trigger_predicate_writes;
+mod trigger_statement_granularity;
 mod trigger_statement_returning;
 mod trigger_statement_txn;
 mod truncate_engine_conformance;
