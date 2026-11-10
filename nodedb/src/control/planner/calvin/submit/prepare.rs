@@ -58,6 +58,7 @@ pub(crate) fn prepare_submit(
     let plans = bind_volatile_defaults(state, tx_class, decode_plans(&tx_class.plans, stage)?)?;
     super::local::stamp_incarnations(state, tx_class, &plans)?;
     super::unique_claims::stamp_unique_claims(state, tx_class, &plans)?;
+    super::chain_heads::stamp_chain_heads(state, tx_class, &plans)?;
     // A batch edge op spans the homes of all its edges. Split into one batch
     // per home pair, it spans at most two, which every part can carry.
     let sliced = super::edge_slices::slice_edge_batches(tx_class, plans)?;

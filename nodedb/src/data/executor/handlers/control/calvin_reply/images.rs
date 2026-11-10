@@ -113,18 +113,6 @@ impl CoreLoop {
         }
     }
 
-    /// Render `rows` as the `RETURNING` row set of `at.engine`.
-    pub(super) fn calvin_render_rows(
-        &self,
-        at: &RowLocation<'_>,
-        spec: &ReturningSpec,
-        rls_filters: &[u8],
-        rows: &[ReturningImageRow],
-    ) -> Result<Vec<u8>, ErrorCode> {
-        let docs = self.calvin_row_docs(at, rows)?;
-        self.calvin_render_docs(at.engine, spec, rls_filters, &docs)
-    }
-
     /// Project `docs`, the full source documents of `engine` rows, as the
     /// `RETURNING` row set.
     pub(super) fn calvin_render_docs(

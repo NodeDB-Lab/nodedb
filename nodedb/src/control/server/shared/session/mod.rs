@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 
+pub mod announced_returning;
 mod array_fanout_stage;
 pub mod audit_context;
 pub mod commit;

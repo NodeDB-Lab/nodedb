@@ -3,18 +3,21 @@
 //! The reply and the staged images of one Calvin `RETURNING` plan.
 //!
 //! Each image is the full source row before projection. The reply projects
-//! the same documents, so the two never disagree on a row. A document or
-//! CRDT after-image reply reads its rows from base after the install. Its
-//! images are the rows that install stores, derived by the install's own
-//! steps (`install_image`).
+//! the same documents, so the two never disagree on a row. A document
+//! or CRDT after-image is the row its install stores, derived by the
+//! install's own steps (`install_image`), so the reply renders it. The
+//! write set's locks hold every row the install reads at its staged state
+//! from grant to install. A hash-chained document plan waits for the whole
+//! slice, since its link follows every row the slice puts (`chained`).
 
 use nodedb_physical::physical_plan::{PhysicalPlan, TimeseriesOp};
 use nodedb_types::{Surrogate, Value};
 
+use super::chained::ChainedPlan;
 use super::crdt_writes::StagedCrdtWrite;
 use super::images::{ReturningImageRow, RowLocation, staged_row_image};
 use super::install_image::WrittenRow;
-use super::reply::{CalvinReply, PostImages};
+use super::reply::CalvinReply;
 use super::staged_images::{PlanRows, plan_images};
 use super::target::{CollKey, ReplyImage, ReturningTarget, RowEngine};
 use crate::bridge::envelope::ErrorCode;
@@ -36,6 +39,9 @@ pub(super) struct PlanReturning {
     pub reply: CalvinReply,
     /// The plan's staged images.
     pub images: Option<StagedPlanImages>,
+    /// A hash-chained plan, whose reply and images wait for the whole
+    /// slice. `reply` and `images` stand empty for it.
+    pub chained: Option<ChainedPlan>,
 }
 
 /// The plan a `RETURNING` reply stages for: its target, its staging start in
@@ -96,34 +102,25 @@ impl CoreLoop {
                     self.calvin_removed_rows(&at, target, &slots, overlay.base_visible(&coll_key))?;
                 self.calvin_image_docs(&at, &rows)?
             }
-            (ReplyImage::After, RowEngine::Document | RowEngine::Crdt) => {
-                // The reply reads each row from base after the install. The
-                // images are the rows the install stores, derived now.
-                let written: Vec<WrittenRow<'_, '_>> = written.collect();
-                let rows = self.calvin_installed_rows(&at, plan, earlier_crdt, &written)?;
-                let rows = self.calvin_image_docs(&at, &rows)?;
-                let staged_docs = rows.docs.clone();
-                let images = plan_images(
-                    index,
-                    target.collection,
-                    target.rls_filters,
-                    rows,
-                    &self.crs_context(),
-                )?;
+            (ReplyImage::After, RowEngine::Document) if self.hash_chained(&coll_key) => {
                 return Ok(PlanReturning {
-                    reply: CalvinReply::PostImages(PostImages {
+                    reply: CalvinReply::Rows(Vec::new()),
+                    images: None,
+                    chained: Some(ChainedPlan {
+                        index,
+                        coll_key,
                         spec: target.spec.clone(),
                         rls_filters: target.rls_filters.to_vec(),
-                        collection: target.collection.to_string(),
-                        engine: target.engine,
                         rows: written
-                            .iter()
                             .map(|(slot, _)| (slot.doc_id.clone(), Surrogate::new(slot.surrogate)))
                             .collect(),
-                        staged_docs: Some(staged_docs),
                     }),
-                    images: Some(images),
                 });
+            }
+            (ReplyImage::After, RowEngine::Document | RowEngine::Crdt) => {
+                let written: Vec<WrittenRow<'_, '_>> = written.collect();
+                let rows = self.calvin_installed_rows(&at, plan, earlier_crdt, &written)?;
+                self.calvin_image_docs(&at, &rows)?
             }
             (ReplyImage::After, RowEngine::Kv | RowEngine::Vector) => {
                 let rows = written
@@ -182,11 +179,19 @@ impl CoreLoop {
         Ok(PlanReturning {
             reply: CalvinReply::Rows(reply),
             images: Some(images),
+            chained: None,
         })
     }
 
+    /// Whether `coll_key` links each row it stores into a hash chain.
+    fn hash_chained(&self, coll_key: &CollKey) -> bool {
+        self.doc_configs
+            .get(coll_key)
+            .is_some_and(|config| config.enforcement.hash_chain)
+    }
+
     /// The documents of `rows`, each keyed by its row identity.
-    fn calvin_image_docs(
+    pub(super) fn calvin_image_docs(
         &self,
         at: &RowLocation<'_>,
         rows: &[ReturningImageRow],

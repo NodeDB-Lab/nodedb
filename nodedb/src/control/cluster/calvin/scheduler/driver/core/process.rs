@@ -393,6 +393,9 @@ impl Scheduler {
         // stores no later barrier entry of the txn. Each one it took before
         // is spent.
         self.forget_barrier_entries(txn_id, held_log);
+        // Its frozen reply is spent: the install answered it, or the txn
+        // aborted.
+        self.forget_frozen_reply(txn_id);
         if let Some(watermark) = folded {
             self.publish_watermark(watermark);
         }

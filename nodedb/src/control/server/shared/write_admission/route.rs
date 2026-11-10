@@ -105,6 +105,14 @@ pub fn route_write_to_calvin<'a>(
     user_roles: Vec<String>,
 ) -> Pin<Box<dyn Future<Output = crate::Result<Option<Response>>> + Send + 'a>> {
     Box::pin(async move {
+        // The caller shapes the answer of this one write itself, as it shapes
+        // every write of its own: its `RETURNING` list is evaluated once,
+        // there. So the write carries no list for a Calvin contract, and its
+        // participant answers the rows its install wrote.
+        let mut plan = plan;
+        if let Some(Some(spec)) = plan.returning_slot_mut() {
+            spec.precommit = None;
+        }
         let task = PhysicalTask {
             tenant_id,
             vshard_id,

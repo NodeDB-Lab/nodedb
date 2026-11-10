@@ -12,26 +12,27 @@
 //!   taken from BASE ∪ OVERLAY, so a row an earlier plan of the same
 //!   transaction wrote is reported as that plan left it.
 //! - A delete reports each removed row's image from before the plan.
-//! - A document or CRDT write reports each row as the install stored it,
-//!   read back from base after the install. The install can rewrite a body,
-//!   as hash chaining does.
+//! - A document or CRDT write reports each row as the install stores it,
+//!   derived by the install's own steps (`install_image`, `crdt_writes`).
+//!   A hash-chained document write reports its rows once the whole slice
+//!   staged, with the links the install writes (`chained`).
 //! - A KV, vector-primary or columnar write reports the rows it staged,
 //!   which are the exact bytes the install stores.
 //! - A timeseries ingest reports its stamped rows rendered through the
-//!   raw-scan row emitter, as the live ingest does.
+//!   raw-scan row emitter, as the live ingest does. A resolved ingest
+//!   reports the rows its install lands and the lines it rejects
+//!   (`ingest_images`).
 //!
 //! A `RETURNING` plan also stages its images: the full source rows its reply
 //! projects. They ride the stage response, keyed by the plan's slice index.
-//! A document or CRDT after-image and a resolved ingest's rows are the rows
-//! the install stores, derived by the install's own steps when the plan
-//! stages (`install_image`, `crdt_writes`, `ingest_images`). The reply of
-//! those plans still reads what the install stored.
+//! The reply and the images project the same rows, so the two never
+//! disagree. Nothing reads base after the install to answer.
 
 use nodedb_physical::physical_plan::{PhysicalPlan, TimeseriesOp};
 
 use super::crdt_writes::StagedCrdtWrite;
 use super::edge_count::owned_edge_count;
-use super::reply::{CalvinReply, CalvinStaging, InstalledTimeseries};
+use super::reply::{CalvinReply, CalvinStaging};
 use super::returning::ReturningPlan;
 use super::target::returning_target;
 use crate::bridge::envelope::ErrorCode;
@@ -62,12 +63,6 @@ impl CoreLoop {
             .ok_or_else(|| ErrorCode::Internal {
                 detail: "calvin stage: the plan slice exceeds u32 plans".into(),
             })?;
-        // Every timeseries ingest becomes one redo sub-record, in plan order,
-        // so its position among them names its install.
-        let ts_ordinal = staging.ts_ingests;
-        if matches!(plan, PhysicalPlan::Timeseries(TimeseriesOp::Ingest { .. })) {
-            staging.ts_ingests += 1;
-        }
         // Every core that stages a plan holds the overlay, even when the plan
         // stages no row. `CalvinResolve` refuses a missing one.
         let marker = self.txn_overlay_mut(txn_id).journal_len();
@@ -79,18 +74,12 @@ impl CoreLoop {
         let count_is_the_statements = staging.user_count;
         let reply = &mut staging.reply;
         match returning_target(plan) {
-            // A resolved ingest's install decides which rows land and how
-            // they read, so the reply renders them from that install.
             Some(target) if is_resolved_ingest(plan) => {
-                let images =
-                    self.calvin_resolved_ingest_images(task, tid, plan, &target, plan_index)?;
-                staging.images.push(images);
-                *reply = CalvinReply::InstalledTimeseries(InstalledTimeseries {
-                    spec: target.spec.clone(),
-                    rls_filters: target.rls_filters.to_vec(),
-                    collection: target.collection.to_string(),
-                    ordinal: ts_ordinal,
-                });
+                let ingest =
+                    self.calvin_resolved_ingest_returning(task, tid, plan, &target, plan_index)?;
+                *reply = CalvinReply::Rows(ingest.reply);
+                staging.images.push(ingest.images);
+                staging.chained_reply = None;
             }
             Some(target) => {
                 let staged = self.calvin_returning_reply(
@@ -107,9 +96,12 @@ impl CoreLoop {
                 )?;
                 *reply = staged.reply;
                 staging.images.extend(staged.images);
+                // A chained plan's rows settle once the slice staged. It
+                // answers the slice unless a later `RETURNING` plan does.
+                staging.chained_reply = staged.chained.as_ref().map(|chained| chained.index);
+                staging.chained.extend(staged.chained);
             }
             None => {
-                self.settle_rows_before_later_write(task, txn_id, tid, reply, marker)?;
                 // A plan that staged no reply here, such as a TRUNCATE's
                 // edge share, keeps the reply an earlier plan of the slice
                 // decided.

@@ -2,6 +2,7 @@
 
 //! Shared, protocol-neutral response shaping helpers.
 
+mod calvin_contract;
 pub mod calvin_fold;
 pub mod cell;
 pub mod compose;

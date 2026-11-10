@@ -125,8 +125,13 @@ pub(super) async fn build_hooks(
     // at or below a group's durable applied floor is never delivered again,
     // so its row is what a barrier reads from now on. A boot completion of a
     // snapshot install below replaces its group's rows.
-    let holding =
+    let mut holding =
         crate::control::cluster::calvin::scheduler::barrier_store::restore_at_boot(shared)?;
+    // So do the frozen replies of finished txns. The rows of unfinished
+    // txns stay for their installs.
+    holding.extend(
+        crate::control::cluster::calvin::scheduler::frozen_replies::restore_at_boot(shared)?,
+    );
     // The first reconcile pass after the data groups replay forgets the
     // stored Calvin state of each vShard this node no longer replicates.
     crate::control::cluster::left_vshard_forget::seed_at_boot(shared, holding);

@@ -75,6 +75,7 @@ pub(super) fn plan_images(
         plan,
         collection: collection.to_owned(),
         rows: images,
+        rejected: 0,
     })
 }
 

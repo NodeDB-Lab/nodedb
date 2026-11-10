@@ -10,11 +10,13 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use nodedb_cluster::calvin::types::TxClass;
+use nodedb_cluster::calvin::types::{AnnouncedColumn, TxClass};
 
 use crate::bridge::envelope::ErrorCode;
 use crate::control::cluster::calvin::scheduler::driver::returning_transcripts::TxnTranscripts;
 use crate::control::sequence::{SessionSequenceAccess, SessionSequenceValues};
+use crate::control::server::response_shape::schema::{OutputColumn, OutputSchema};
+use crate::control::server::response_shape::types::DdlColType;
 use crate::control::server::shared::returning::precommit::{
     FrozenReturningReply, PrecommitReturning, PreparedReturningRow, ReturningLimits,
     finalize_returning,
@@ -120,12 +122,17 @@ pub(super) fn evaluate(job: ReturningJob) -> ReturningOutcome {
             shared
                 .redaction
                 .snapshot_rules(tenant_id, &plan.collection, &contract.roles);
+        let announced = plan
+            .announced
+            .as_deref()
+            .map(|columns| announced_schema(plan.plan_index, columns))
+            .transpose()?;
         let request = PrecommitReturning {
             spec: &plan.spec,
             source_columns: &plan.source_columns,
             redaction: &redaction,
             sequences: &sequences,
-            projection: None,
+            projection: announced.as_ref(),
             crs_set: crs_set.as_ref(),
             limits: ReturningLimits::from_contract(&plan.limits),
         };
@@ -135,6 +142,38 @@ pub(super) fn evaluate(job: ReturningJob) -> ReturningOutcome {
         frozen.insert(plan.plan_index, reply);
     }
     Ok(frozen)
+}
+
+/// The output schema `columns`, the columns plan `plan_index`'s statement
+/// announced. The evaluation answers each cell under its column's name and
+/// type, as the coordinator's shaping of the same statement does.
+fn announced_schema(
+    plan_index: u32,
+    columns: &[AnnouncedColumn],
+) -> Result<OutputSchema, ReturningRefusal> {
+    let columns = columns
+        .iter()
+        .map(|column| {
+            let ty = DdlColType::from_wire_name(&column.ty).ok_or_else(|| {
+                ReturningRefusal::internal(format!(
+                    "calvin RETURNING: plan {plan_index} announces column '{}' of the unknown \
+                     type '{}'",
+                    column.name, column.ty
+                ))
+            })?;
+            Ok(OutputColumn {
+                display_name: column.name.clone(),
+                lookup_key: column.name.clone(),
+                ty,
+            })
+        })
+        .collect::<Result<Vec<_>, ReturningRefusal>>()?;
+    Ok(OutputSchema {
+        columns,
+        is_star: false,
+        cp_computed: Vec::new(),
+        declared_key: None,
+    })
 }
 
 #[cfg(test)]
@@ -218,6 +257,43 @@ mod tests {
         assert_eq!(first[&0].sequence_effects.len(), 2);
         assert_eq!(replay[&0].sequence_effects, first[&0].sequence_effects);
         assert_eq!(sequence_next(&scheduler.shared, "s"), 3, "two calls in all");
+    }
+
+    /// The announced columns name and type the frozen cells.
+    #[tokio::test]
+    async fn announced_columns_name_and_type_the_frozen_cells() {
+        let (scheduler, _dir) = build_test_scheduler(7);
+        create_sequence(&scheduler.shared, "s");
+        let mut announced = contract(vec![nextval("s")], 10);
+        announced.plans[0].announced = Some(vec![AnnouncedColumn {
+            name: "next_id".into(),
+            ty: "int8".into(),
+        }]);
+        let frozen = evaluate(job(
+            &scheduler.shared,
+            txn_class(announced),
+            1,
+            &Arc::default(),
+        ))
+        .expect("evaluation");
+        let shaped = &frozen[&0].shaped;
+        assert_eq!(shaped.columns, ["next_id"]);
+        assert_eq!(shaped.column_types, [DdlColType::Int8]);
+        assert_eq!(shaped.rows[0]["next_id"], Value::Integer(1));
+
+        let mut unknown = contract(vec![nextval("s")], 10);
+        unknown.plans[0].announced = Some(vec![AnnouncedColumn {
+            name: "n".into(),
+            ty: "int128".into(),
+        }]);
+        let refusal = evaluate(job(
+            &scheduler.shared,
+            txn_class(unknown),
+            1,
+            &Arc::default(),
+        ))
+        .expect_err("an unknown type refuses");
+        assert!(matches!(*refusal.code, ErrorCode::Internal { .. }));
     }
 
     #[tokio::test]

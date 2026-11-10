@@ -10,7 +10,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use crate::control::cluster::calvin::scheduler::lock::HotKeyTable;
 use crate::control::cluster::calvin::scheduler::lock_manager::{LockManager, TxnId};
 use crate::control::cluster::calvin::scheduler::{
-    CalvinAppliedLedgers, CalvinInboxes, CalvinReadResults, CaughtUpRegistry, SequencerProposer,
+    CalvinAppliedLedgers, CalvinFrozenReplies, CalvinInboxes, CalvinReadResults, CaughtUpRegistry,
+    SequencerProposer,
 };
 use crate::control::server::shared::write_admission::{AdmissionHolds, AdmissionTickets};
 
@@ -106,6 +107,9 @@ pub struct CalvinLocalState {
     /// scheduler: read results and timeouts the data-group apply loop
     /// applied before the scheduler took them.
     pub read_results: CalvinReadResults,
+    /// Wakes each scheduler when the data-group apply loop stores a frozen
+    /// `RETURNING` reply of one of its txns.
+    pub frozen_replies: CalvinFrozenReplies,
     /// vShards whose stored Calvin state waits for a forget. Each scheduler
     /// reconcile forgets those this node does not host and drops the rest.
     pub forget_pending: Mutex<BTreeSet<u32>>,
@@ -140,6 +144,7 @@ impl CalvinLocalState {
             caught_up: CaughtUpRegistry::default(),
             inboxes: CalvinInboxes::default(),
             read_results: CalvinReadResults::default(),
+            frozen_replies: CalvinFrozenReplies::default(),
             forget_pending: Mutex::new(BTreeSet::new()),
         }
     }

@@ -1050,6 +1050,13 @@ pub enum ReplicatedWrite {
         /// The encoded image. Its buckets count every row of the root.
         image: Vec<u8>,
     },
+    /// The frozen `RETURNING` replies of a Calvin txn's slice on this
+    /// vShard. Its data-group leader proposes it before its commit vote.
+    /// Every replica stores the first copy, keyed by the txn, and the
+    /// slice's install answers it.
+    CalvinFrozenReply {
+        reply: super::calvin_frozen_reply::CalvinFrozenReply,
+    },
 }
 
 #[cfg(test)]
@@ -1241,6 +1248,14 @@ mod tests {
             ReplicatedWrite::TimeseriesAggregateImage {
                 collection: "metrics".into(),
                 image: vec![1, 2, 3],
+            },
+            ReplicatedWrite::CalvinFrozenReply {
+                reply: super::super::calvin_frozen_reply::CalvinFrozenReply {
+                    epoch: 2,
+                    position: 1,
+                    vshard: 0,
+                    plans: Vec::new(),
+                },
             },
         ];
 

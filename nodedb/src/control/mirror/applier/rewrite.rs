@@ -47,6 +47,9 @@ pub(super) fn classify_write(write: &ReplicatedWrite) -> WriteClass<'_> {
         ReplicatedWrite::CutBarrier { mirror: None, .. } => WriteClass::Refused("a backup's cut"),
         ReplicatedWrite::CalvinReadResult { .. } => WriteClass::Refused("a Calvin read result"),
         ReplicatedWrite::CalvinReadTimeout { .. } => WriteClass::Refused("a Calvin read timeout"),
+        ReplicatedWrite::CalvinFrozenReply { .. } => {
+            WriteClass::Refused("a Calvin frozen RETURNING reply")
+        }
         ReplicatedWrite::MirrorSeal { .. } => WriteClass::Refused("another mirror's seal"),
         ReplicatedWrite::TimeseriesAggregateImage { .. } => {
             WriteClass::Refused("another mirror's aggregate image")

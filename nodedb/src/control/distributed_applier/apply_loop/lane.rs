@@ -70,6 +70,7 @@ impl QueuedEntry {
                     | ReplicatedWrite::MirrorSeal { .. }
                     | ReplicatedWrite::CalvinReadResult { .. }
                     | ReplicatedWrite::CalvinReadTimeout { .. }
+                    | ReplicatedWrite::CalvinFrozenReply { .. }
                     | ReplicatedWrite::SurrogateBind { .. }
                     | ReplicatedWrite::RedoChunk { .. }
                     | ReplicatedWrite::RedoAbandon { .. }
@@ -106,6 +107,7 @@ impl QueuedEntry {
             | ReplicatedWrite::MirrorSeal { .. }
             | ReplicatedWrite::CalvinReadResult { .. }
             | ReplicatedWrite::CalvinReadTimeout { .. }
+            | ReplicatedWrite::CalvinFrozenReply { .. }
             | ReplicatedWrite::SurrogateBind { .. }
             | ReplicatedWrite::RedoChunk { .. }
             | ReplicatedWrite::RedoAbandon { .. } => false,

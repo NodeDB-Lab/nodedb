@@ -14,6 +14,7 @@ use crate::control::server::response_shape::types::ShapedRow;
 use crate::control::server::shared::returning::precommit::{
     FrozenReturningReply, PreparedReturningRow, PreparedRowIdentity,
 };
+use crate::control::wal_replication::types::FrozenRejection;
 use crate::data::executor::response_codec::{StagedPlanImages, StagedReturningImages};
 
 /// The `RETURNING` state of one staged slice.
@@ -25,6 +26,10 @@ pub(super) struct StagedReturning {
     /// The prepared rows of every local `RETURNING` plan, keyed by its index
     /// in the class's plan batch. Each plan keeps its own rows.
     pub images: BTreeMap<u32, Vec<PreparedReturningRow>>,
+    /// The lines each local timeseries ingest plan rejected, keyed by its
+    /// index in the class's plan batch. A plan that rejected none has no
+    /// entry. Its frozen reply reports them.
+    pub rejections: BTreeMap<u32, FrozenRejection>,
     /// Why the slice's images cannot be read: a local plan with no index in
     /// the class's plans, or a stage answer that does not decode. The vote
     /// is an abort.
@@ -39,8 +44,23 @@ pub(super) struct StagedReturning {
     /// that, so [`Self::row_count`] reads this too.
     pub taken_rows: usize,
     /// The frozen reply of each local `RETURNING` plan the contract names,
-    /// keyed by its index in the class's plan batch.
+    /// keyed by its index in the class's plan batch. Only the leader that
+    /// evaluated holds it: every replica reads the stored entry instead.
     pub frozen: BTreeMap<u32, FrozenReturningReply>,
+    /// The `CalvinFrozenReply` entry this leader proposed for the frozen
+    /// replies. The commit vote waits until a copy of the txn's reply is
+    /// stored.
+    pub frozen_entry: Option<OwedFrozenEntry>,
+}
+
+/// A frozen-reply entry, kept while the vote waits for its apply.
+#[derive(Debug, Clone)]
+pub(super) struct OwedFrozenEntry {
+    /// The encoded `ReplicatedEntry`.
+    pub bytes: Vec<u8>,
+    /// The `(group_id, log_index)` of the last proposal, `None` while no
+    /// proposal is in the log.
+    pub proposed: Option<(u64, u64)>,
 }
 
 impl StagedReturning {
@@ -79,6 +99,20 @@ impl StagedReturning {
         returning
     }
 
+    /// Drop everything a stage and its evaluation left, and keep the plan
+    /// indexes and the transcripts. A leader that hands the txn back to
+    /// following holds no images, no frozen reply and no evaluation in
+    /// flight, so a later stage starts clean.
+    pub(super) fn reset_stage(&mut self) {
+        self.images.clear();
+        self.rejections.clear();
+        self.failed = None;
+        self.evaluating = None;
+        self.taken_rows = 0;
+        self.frozen.clear();
+        self.frozen_entry = None;
+    }
+
     /// The rows every plan holds.
     pub(super) fn row_count(&self) -> usize {
         self.taken_rows + self.images.values().map(Vec::len).sum::<usize>()
@@ -88,14 +122,25 @@ impl StagedReturning {
     /// earlier images are replaced.
     pub(super) fn absorb(&mut self, staged: StagedReturningImages) -> Result<(), String> {
         let mut images = BTreeMap::new();
+        let mut rejections = BTreeMap::new();
         for plan in staged.plans {
             let index = self.class_index(plan.plan)?;
+            if plan.rejected > 0 {
+                rejections.insert(
+                    index,
+                    FrozenRejection {
+                        collection: plan.collection.clone(),
+                        lines: plan.rejected,
+                    },
+                );
+            }
             let rows = prepared_rows(index, plan)?;
             if images.insert(index, rows).is_some() {
                 return Err(format!("the stage answered plan {index} twice"));
             }
         }
         self.images = images;
+        self.rejections = rejections;
         self.taken_rows = 0;
         Ok(())
     }
@@ -168,6 +213,7 @@ mod tests {
             plan: slice,
             collection: "cache".into(),
             rows,
+            rejected: 0,
         }
     }
 
@@ -207,6 +253,41 @@ mod tests {
             }
         );
         assert_eq!(second.fields.get("v"), Some(&Value::Integer(9)));
+    }
+
+    /// A plan that rejected lines keeps them under its class index, and a
+    /// reset drops them with the images.
+    #[test]
+    fn rejected_lines_key_by_class_plan_index_and_reset_drops_them() {
+        let mut staged = StagedReturning::of_slice(vec![2, 5]);
+        let mut ingest = plan(1, vec![image(b"a", 0, 1)]);
+        ingest.rejected = 3;
+        staged
+            .absorb(StagedReturningImages {
+                plans: vec![plan(0, vec![image(b"b", 0, 2)]), ingest],
+            })
+            .expect("absorb");
+        assert_eq!(
+            staged.rejections.into_iter().collect::<Vec<_>>(),
+            vec![(
+                5,
+                FrozenRejection {
+                    collection: "cache".into(),
+                    lines: 3,
+                }
+            )]
+        );
+
+        let mut staged = StagedReturning::of_slice(vec![0]);
+        let mut ingest = plan(0, vec![image(b"a", 0, 1)]);
+        ingest.rejected = 1;
+        staged
+            .absorb(StagedReturningImages {
+                plans: vec![ingest],
+            })
+            .expect("absorb");
+        staged.reset_stage();
+        assert!(staged.rejections.is_empty());
     }
 
     #[test]

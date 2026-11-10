@@ -28,7 +28,7 @@ pub use primitives::{
 };
 pub use read_write_set::ReadWriteSet;
 pub use returning_contract::{
-    PlanReturning, ReturningContract, ReturningContractLimits, SequenceValue,
+    AnnouncedColumn, PlanReturning, ReturningContract, ReturningContractLimits, SequenceValue,
 };
 pub use scheduler_input::SchedulerInput;
 pub use sequencer::{EpochBatch, LocalPlans, SequencedTxn};

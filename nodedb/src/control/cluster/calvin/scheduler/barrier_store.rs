@@ -99,7 +99,7 @@ pub fn sweep_finished(
 }
 
 /// Whether `shared`'s ledger of `vshard_id` holds `(epoch, position)`.
-fn is_applied(shared: &SharedState, vshard_id: u32, epoch: u64, position: u32) -> bool {
+pub(super) fn is_applied(shared: &SharedState, vshard_id: u32, epoch: u64, position: u32) -> bool {
     shared
         .calvin
         .applied

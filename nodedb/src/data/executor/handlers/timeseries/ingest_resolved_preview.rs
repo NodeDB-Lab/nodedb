@@ -72,17 +72,25 @@ pub(super) fn landed_images<'a>(
     }
 }
 
+/// What the committed-redo install of a resolved batch stores.
+pub(in crate::data::executor) struct ResolvedPreview {
+    /// The image of each row it lands, in row order, as a scan reads it.
+    pub images: Vec<Vec<u8>>,
+    /// The lines the batch's resolve rejected and the rows the install
+    /// rejects for a type conflict, as the install counts them.
+    pub rejected: u64,
+}
+
 impl CoreLoop {
-    /// The image of each row the committed-redo install of the resolved
-    /// batch `payload` into `collection` lands, in row order, as a scan reads
-    /// it. Changes nothing.
+    /// What the committed-redo install of the resolved batch `payload` into
+    /// `collection` stores. Changes nothing.
     pub(in crate::data::executor) fn preview_resolved_ingest_images(
         &self,
         database_id: DatabaseId,
         tid: TenantId,
         collection: &str,
         payload: &[u8],
-    ) -> crate::Result<Vec<Vec<u8>>> {
+    ) -> crate::Result<ResolvedPreview> {
         let batch = ResolvedTsBatch::from_bytes(payload)?;
         let key: CollKey = (database_id, tid, collection.to_string());
         let live = self.columnar_memtables.get(&key).map(|mt| mt.schema());
@@ -112,12 +120,17 @@ impl CoreLoop {
             SchemaFit::Exact => None,
             SchemaFit::ByName => Some(self.by_name_images(&schema, &row_values)?),
         };
+        let conflicts = (batch.rows.len() - landed.len()) as u64;
         // The install records only the images a row carries.
-        Ok(landed_images(&batch, &landed, by_name.as_deref())
+        let images = landed_images(&batch, &landed, by_name.as_deref())
             .into_iter()
             .filter(|image| !image.is_empty())
             .map(<[u8]>::to_vec)
-            .collect())
+            .collect();
+        Ok(ResolvedPreview {
+            images,
+            rejected: batch.rejected.saturating_add(conflicts),
+        })
     }
 }
 

@@ -15,12 +15,10 @@
 //! - A CRDT row's value is the Loro row its install predicts, encoded as the
 //!   install encodes it (`crdt_row_body`).
 //!
-//! Two stored fields exist only at the install, and neither is in an image:
-//! - the version stamp of a bitemporal row, which a read never shows;
-//! - the hash-chain link (`_chain_hash`, `_chain_seq`) of a `HASH_CHAIN`
-//!   row, which follows the chain head the install finds. A write of
-//!   another transaction to the collection can move that head between this
-//!   stage and the install.
+//! The version stamp of a bitemporal row exists only at the install, and a
+//! read never shows it. The hash-chain link (`_chain_hash`, `_chain_seq`)
+//! of a `HASH_CHAIN` row follows every row the slice puts, so `chained`
+//! derives it once the whole slice staged.
 
 use nodedb_physical::physical_plan::PhysicalPlan;
 use nodedb_types::Surrogate;
@@ -334,11 +332,10 @@ mod tests {
         assert_eq!(field(&staged[0], "_rowid"), Some(&Value::Integer(9)));
     }
 
-    /// A hash-chained row's image holds the identity the install stamps.
-    /// Its chain link follows the head the install finds, so only the
-    /// installed row carries it.
+    /// A hash-chained row's image and its reply are the installed row, its
+    /// chain link included.
     #[test]
-    fn a_chained_document_image_is_its_installed_row_without_the_link() {
+    fn a_chained_document_image_is_its_installed_row_with_the_link() {
         let dir = tempfile::tempdir().expect("tempdir");
         let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
         let mut config = CollectionConfig::new("ledger");
@@ -349,21 +346,13 @@ mod tests {
         let plan = insert("ledger", "l1", 5, &[("amount", Value::Integer(21))]);
         let (staged, installed) = staged_and_installed(&mut core, &[plan], 1);
 
-        let unlinked: Vec<Value> = installed
-            .iter()
-            .map(|row| match row {
-                Value::Object(fields) => Value::Object(
-                    fields
-                        .iter()
-                        .filter(|(name, _)| !is_chain_field(name))
-                        .map(|(name, value)| (name.clone(), value.clone()))
-                        .collect(),
-                ),
-                other => other.clone(),
-            })
-            .collect();
-        assert_eq!(staged, unlinked);
-        assert_ne!(staged, installed, "the installed row carries its link");
+        assert_eq!(staged, installed);
+        assert_eq!(staged.len(), 1);
+        let carried: Vec<&String> = match &staged[0] {
+            Value::Object(fields) => fields.keys().filter(|name| is_chain_field(name)).collect(),
+            other => panic!("an object row, got {other:?}"),
+        };
+        assert_eq!(carried.len(), 2, "{staged:?}");
     }
 
     /// A merge over a row an earlier transaction installed answers the

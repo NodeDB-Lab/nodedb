@@ -348,3 +348,57 @@ async fn returning_over_limit_on_calvin_leaves_the_row() {
     assert_eq!(e0_amount(&server).await, ["10"]);
     assert_eq!(balance(&server, "acc").await, "15", "10 + 5");
 }
+
+/// A Calvin write's `RETURNING` list draws each `nextval` once per row: the
+/// participant's leader evaluates it before the vote, and the client gets
+/// those rows. A later `nextval` follows them, and the session's `currval`
+/// is the last value the rows drew.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn returning_nextval_on_calvin_is_once_per_row() {
+    let server = sum_fixture().await;
+    server
+        .exec("CREATE SEQUENCE cc_returning_seq")
+        .await
+        .expect("create the sequence");
+
+    let rows = server
+        .query_named_rows(
+            "UPDATE ptv_post SET amount = '1' WHERE id IN ('e0', 'e1') \
+             RETURNING id, nextval('cc_returning_seq') AS n",
+        )
+        .await
+        .expect("the update answers its rows");
+
+    let mut drawn: Vec<i64> = rows
+        .iter()
+        .map(|row| {
+            row.get("n")
+                .and_then(|n| n.parse().ok())
+                .unwrap_or_else(|| panic!("a drawn value in {row:?}"))
+        })
+        .collect();
+    drawn.sort_unstable();
+    assert_eq!(drawn, vec![1, 2], "one value per row: {rows:?}");
+    let mut ids: Vec<&str> = rows
+        .iter()
+        .filter_map(|row| row.get("id").map(String::as_str))
+        .collect();
+    ids.sort_unstable();
+    assert_eq!(ids, ["e0", "e1"]);
+    assert_eq!(
+        server
+            .query_text("SELECT currval('cc_returning_seq')")
+            .await
+            .expect("currval"),
+        ["2"],
+        "the session's currval is the last value the rows drew"
+    );
+    assert_eq!(
+        server
+            .query_text("SELECT nextval('cc_returning_seq')")
+            .await
+            .expect("nextval"),
+        ["3"],
+        "the write drew each value once"
+    );
+}

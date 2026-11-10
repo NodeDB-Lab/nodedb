@@ -8,9 +8,13 @@
 //! task reads that same payload. The first RETURNING task shapes it into the
 //! rows. Later RETURNING tasks shape nothing, because shaping evaluates
 //! `nextval` once per row. Every other task folds its count into the tag.
+//!
+//! A RETURNING plan with a contract answers the rows its participant froze
+//! before it voted. Those rows answer as they are, with no sequence call.
 
 use nodedb_physical::physical_plan::{DocumentOp, KvOp, PhysicalPlan};
 
+use super::calvin_contract::{carries_contract, contract_rows};
 use super::compose::shape_returning_materialized;
 use super::redaction::QueryRedaction;
 use super::request::MaterializedShapeRequest;
@@ -160,6 +164,11 @@ pub fn calvin_task_outcome(
     let plan_kind = describe_plan(plan);
     let redaction = QueryRedaction::for_plan(ctx.tenant_id, ctx.database_id, ctx.auth, plan);
     if let (PlanKind::ReturningRows, Some(resp)) = (plan_kind, apply_resp) {
+        // A contract plan's participant answers its frozen rows (see
+        // `super::calvin_contract`).
+        if carries_contract(plan) {
+            return contract_rows(resp.payload.as_bytes(), ctx).map(CalvinTaskOutcome::Rows);
+        }
         let shaped = shape_returning_materialized(MaterializedShapeRequest {
             payload: resp.payload.as_bytes(),
             plan,

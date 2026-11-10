@@ -72,6 +72,7 @@ mod tests {
                             Value::Integer(i64::from(*plan)),
                         )])),
                     }],
+                    rejected: 0,
                 })
                 .collect(),
         };

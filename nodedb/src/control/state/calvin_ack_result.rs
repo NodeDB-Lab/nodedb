@@ -23,11 +23,13 @@ pub const ACK_ROWS_FRAME_BUDGET: u64 = (nodedb_cluster::rpc_codec::MAX_RPC_PAYLO
 /// The `RETURNING` answer of a participant's slice.
 #[derive(Debug, Clone, PartialEq, Eq, zerompk::ToMessagePack, zerompk::FromMessagePack)]
 pub enum AckReturning {
-    /// The encoded rows, as the install answered them.
+    /// The encoded rows, as the install answered them. A slice that holds a
+    /// `RETURNING` contract answers its encoded `CalvinFrozenReply`: the
+    /// frozen reply of every local plan, ascending by plan index.
     Rows { rows: Vec<u8> },
     /// The rows took `bytes`, past `limit`.
     OverLimit { bytes: u64, limit: u64 },
-    /// The install stored the rows, and rendering them failed.
+    /// The install stored the rows, and answering them failed.
     Failed { detail: String },
 }
 

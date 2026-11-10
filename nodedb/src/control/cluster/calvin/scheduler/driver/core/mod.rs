@@ -29,6 +29,7 @@ pub mod deferred;
 pub mod dispatch;
 mod drop_dispatch;
 pub mod halt;
+pub mod handover;
 mod install_gate;
 pub mod intake;
 mod metadata_hold;
@@ -49,6 +50,8 @@ pub mod resolve_turn;
 mod restage;
 mod returning_eval;
 pub mod role;
+#[cfg(test)]
+mod role_fixtures;
 pub mod routing;
 pub mod run_loop;
 pub mod scheduler;

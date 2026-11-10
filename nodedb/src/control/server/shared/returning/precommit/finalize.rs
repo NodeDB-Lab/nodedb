@@ -54,28 +54,34 @@ pub(crate) fn finalize_returning(
         }
     })?;
     limit("cells", cells, request.limits.cells)?;
-    let columns: Vec<String> = items.iter().map(|(name, _)| name.clone()).collect();
-    let keys = cell_keys(&columns);
-    let types = match request
+    // The announced columns, one per item in item order, name and type each
+    // cell: the client read them before any row existed.
+    let (columns, types): (Vec<String>, Vec<_>) = match request
         .projection
         .filter(|schema| !schema.is_star && !schema.columns.is_empty())
     {
         Some(schema) => {
-            if schema.columns.len() != columns.len()
-                || schema
-                    .columns
-                    .iter()
-                    .zip(&columns)
-                    .any(|(column, name)| column.display_name != *name)
-            {
+            if schema.columns.len() != items.len() {
                 return Err(crate::Error::PlanError {
-                    detail: "RETURNING columns differ from the announced response".into(),
+                    detail: format!(
+                        "RETURNING lists {} items and the response announced {} columns",
+                        items.len(),
+                        schema.columns.len()
+                    ),
                 });
             }
-            schema.columns.iter().map(|column| column.ty).collect()
+            schema
+                .columns
+                .iter()
+                .map(|column| (column.display_name.clone(), column.ty))
+                .unzip()
         }
-        None => ShapedRows::text_types(columns.len()),
+        None => (
+            items.iter().map(|(name, _)| name.clone()).collect(),
+            ShapedRows::text_types(items.len()),
+        ),
     };
+    let keys = cell_keys(&columns);
     transcript.bind(EvaluationBinding {
         rows,
         expressions: items.clone(),

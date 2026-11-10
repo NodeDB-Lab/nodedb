@@ -20,6 +20,7 @@ use crate::control::server::response_shape::calvin_fold::{
     CalvinFoldCtx, CalvinFoldError, fold_calvin_batch,
 };
 use crate::control::server::shared::metering::{PlanMeteringInfo, meter_dispatch};
+use crate::control::server::shared::session::announced_returning::with_announced_returning;
 use crate::control::server::shared::session::{SessionId, TransactionState};
 use crate::types::{DatabaseId, TenantId};
 use nodedb_physical::physical_task::PhysicalTask;
@@ -152,14 +153,17 @@ impl NodeDbPgHandler {
             };
             let metering_scope = resolve_calvin_metering_scope(&self.state, identity, database_id)?;
             let authorized = self.authorize_tasks(identity, &tasks)?;
-            let apply_resp = dispatch_authorized_tasks_to_calvin(
-                &self.state,
-                authorized,
-                tenant_id,
-                cross_shard_mode,
-                position,
-                reads,
-                None,
+            let apply_resp = with_announced_returning(
+                projection,
+                dispatch_authorized_tasks_to_calvin(
+                    &self.state,
+                    authorized,
+                    tenant_id,
+                    cross_shard_mode,
+                    position,
+                    reads,
+                    None,
+                ),
             )
             .await
             .map_err(|e| {
@@ -213,13 +217,16 @@ impl NodeDbPgHandler {
         // task emits its rows, every other task its command tag.
         let metering_scope = resolve_calvin_metering_scope(&self.state, identity, database_id)?;
         let authorized = self.authorize_tasks(identity, &tasks)?;
-        let outcome = dispatch_authorized_dependent_edge_recon(
-            &self.state,
-            authorized,
-            identity,
-            tenant_id,
-            database_id,
-            reads,
+        let outcome = with_announced_returning(
+            projection,
+            dispatch_authorized_dependent_edge_recon(
+                &self.state,
+                authorized,
+                identity,
+                tenant_id,
+                database_id,
+                reads,
+            ),
         )
         .await
         .map_err(|e| {

@@ -10,9 +10,8 @@
 //!    above the record's graph versions;
 //! 2. the end of the slice's staged state on a core that staged it: the
 //!    staged entry and its synthetic overlay go;
-//! 3. the reply the leader's stage decided, rendered at the epoch instant
-//!    from the entry's [`CalvinReplySpec`], so every replica answers the same
-//!    bytes.
+//! 3. the reply the leader's stage decided, read from the entry's
+//!    [`CalvinReplySpec`], so every replica answers the same bytes.
 //!
 //! The fold target rows stay in `Response::write_set`, so the funnel
 //! journals them with the record.
@@ -33,7 +32,7 @@ impl CoreLoop {
     /// record `committed`, and answer the slice's reply.
     ///
     /// A refused install rolled every write back and leaves any staged entry
-    /// in place. A reply that fails to render leaves the install `Ok`, since
+    /// in place. A reply that fails to encode leaves the install `Ok`, since
     /// the record installed. Its error travels in `error_code`.
     pub(in crate::data::executor) fn install_calvin_redo(
         &mut self,
@@ -69,8 +68,8 @@ impl CoreLoop {
         let txn_ordinal = nodedb_types::calvin_txn_ordinal(epoch_system_ms, position);
         self.hlc.update_from_remote(txn_ordinal);
 
-        // What each resolved timeseries batch of the record stored: the
-        // reply answers the install's counts and stored rows.
+        // What each resolved timeseries batch of the record stored: a count
+        // reply answers the install's counts.
         let mut ts_installs = Vec::new();
         // Every KV write of the slice stamps the transaction's ordinal, which
         // every replica derives alike.
@@ -97,12 +96,7 @@ impl CoreLoop {
             self.drop_calvin_synthetic_overlay(epoch, position, vshard_id);
         }
 
-        let prev_epoch_ms = self.epoch_system_ms;
-        self.epoch_system_ms = Some(epoch_system_ms);
-        let rendered =
-            self.calvin_reply_payload(task, tid, CalvinReply::from(reply.clone()), &ts_installs);
-        self.epoch_system_ms = prev_epoch_ms;
-        match rendered {
+        match self.calvin_reply_payload(CalvinReply::from(reply.clone()), &ts_installs) {
             Ok(payload) => response.payload = Payload::from_vec(payload),
             Err(error) => response.error_code = Some(Box::new(error)),
         }

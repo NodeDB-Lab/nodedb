@@ -29,7 +29,7 @@ pub use snapshot::{
     TsFlushedCollectionBlob, TsFlushedPartitionBlob,
 };
 pub use snapshot_calvin::{
-    CoveredCutBarrier, CutBarrierLog, CutFloor, GroupCalvinCut, VShardCalvinState,
+    CoveredCutBarrier, CutBarrierLog, CutFloor, CutFrozenReply, GroupCalvinCut, VShardCalvinState,
 };
 pub use snapshot_index::{FieldIndexImage, VectorIndexHistory};
 pub use source_stamp::{DocVersionStamp, KvVersionStamp};

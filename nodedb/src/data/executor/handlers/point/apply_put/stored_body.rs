@@ -31,6 +31,15 @@ pub(in crate::data::executor) struct StoredBodyInput<'a> {
     pub guards: GuardScope<'a>,
 }
 
+/// The version stamp a frozen body's stored image carries.
+#[derive(Clone, Copy)]
+struct FrozenStamp {
+    bitemporal: bool,
+    sys_from: i64,
+    valid_from_ms: i64,
+    valid_until_ms: i64,
+}
+
 /// The two forms of one row this write lands.
 pub(in crate::data::executor) struct StoredBody {
     /// Canonical MessagePack body — generated columns evaluated and `_rowid`
@@ -96,16 +105,69 @@ impl CoreLoop {
         valid_from_ms: i64,
         valid_until_ms: i64,
     ) -> crate::Result<StoredBody> {
+        frozen.check(self, &frozen.config_key, frozen.surrogate)?;
+        let link_after = self.intended_link(frozen)?;
+        self.encode_frozen_body(
+            frozen,
+            link_after.as_ref(),
+            FrozenStamp {
+                bitemporal,
+                sys_from,
+                valid_from_ms,
+                valid_until_ms,
+            },
+        )
+    }
+
+    /// The body `input` stores as the next link after `head`: what the
+    /// install of a committed redo writes for the row when `head` is the
+    /// chain head it finds. Reads only; nothing is written.
+    pub(in crate::data::executor) fn build_linked_body(
+        &self,
+        input: StoredBodyInput<'_>,
+        head: &crate::types::hash_chain::ChainHead,
+    ) -> crate::Result<StoredBody> {
+        let StoredBodyInput {
+            config_key,
+            surrogate,
+            value,
+            bitemporal,
+            sys_from,
+            valid_from_ms,
+            valid_until_ms,
+            guards,
+        } = input;
+        let frozen = self.freeze_document_body(super::frozen_body::FreezeDocumentBodyInput {
+            config_key,
+            surrogate,
+            value,
+            guards,
+        })?;
+        frozen.check(self, config_key, surrogate)?;
+        self.encode_frozen_body(
+            &frozen,
+            Some(head),
+            FrozenStamp {
+                bitemporal,
+                sys_from,
+                valid_from_ms,
+                valid_until_ms,
+            },
+        )
+    }
+
+    /// The chain link the in-flight write of `frozen` asks for: the head its
+    /// row links after. A head that moved since the intent was set refuses
+    /// the write with `ConflictRetry`.
+    fn intended_link(
+        &self,
+        frozen: &super::frozen_body::FrozenDocumentBody,
+    ) -> crate::Result<Option<crate::types::hash_chain::ChainHead>> {
         let config_key = &frozen.config_key;
-        frozen.check(self, config_key, frozen.surrogate)?;
-        let value = frozen.value.clone();
-        let Some(config) = self.doc_configs.get(config_key) else {
-            return Ok(StoredBody {
-                stored: value.clone(),
-                value,
-            });
-        };
-        let link_after = match self
+        if !self.doc_configs.contains_key(config_key) {
+            return Ok(None);
+        }
+        match self
             .chain
             .intents
             .get(&(config_key.clone(), frozen.surrogate.as_u32()))
@@ -122,14 +184,36 @@ impl CoreLoop {
                         crate::bridge::envelope::ErrorCode::ConflictRetry,
                     ));
                 }
-                Some(head)
+                Ok(Some(head.clone()))
             }
-            Some(ChainIntent::Keep { .. }) => {
-                return Err(crate::Error::DataPlane(
-                    crate::bridge::envelope::ErrorCode::ConflictRetry,
-                ));
-            }
-            None => None,
+            Some(ChainIntent::Keep { .. }) => Err(crate::Error::DataPlane(
+                crate::bridge::envelope::ErrorCode::ConflictRetry,
+            )),
+            None => Ok(None),
+        }
+    }
+
+    /// The stored image of `frozen`, linked after `link_after` when it is
+    /// `Some`, and its canonical body.
+    fn encode_frozen_body(
+        &self,
+        frozen: &super::frozen_body::FrozenDocumentBody,
+        link_after: Option<&crate::types::hash_chain::ChainHead>,
+        stamp: FrozenStamp,
+    ) -> crate::Result<StoredBody> {
+        let FrozenStamp {
+            bitemporal,
+            sys_from,
+            valid_from_ms,
+            valid_until_ms,
+        } = stamp;
+        let config_key = &frozen.config_key;
+        let value = frozen.value.clone();
+        let Some(config) = self.doc_configs.get(config_key) else {
+            return Ok(StoredBody {
+                stored: value.clone(),
+                value,
+            });
         };
         let nodedb_physical::physical_plan::StorageMode::Strict { ref schema } =
             config.storage_mode

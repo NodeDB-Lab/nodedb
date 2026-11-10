@@ -76,6 +76,7 @@ pub(in crate::control::cluster::calvin::scheduler::driver::core) fn contract(
                 cells: 10_000,
                 payload_bytes: 1 << 20,
             },
+            announced: None,
         }],
         roles: Vec::new(),
         sequence_values: Vec::new(),
@@ -143,4 +144,106 @@ pub(in crate::control::cluster::calvin::scheduler::driver::core) fn sequence_nex
         .sequence_registry
         .nextval(DatabaseId::DEFAULT.as_u64(), TENANT.as_u64(), name)
         .expect("nextval")
+}
+
+/// The committed `CalvinFrozenReply` entry `scheduler` proposed for
+/// `txn_id`, read from its data-group log. Ticks the single-voter group
+/// until the entry commits.
+pub(in crate::control::cluster::calvin::scheduler::driver::core) fn proposed_frozen_reply(
+    scheduler: &super::super::scheduler::Scheduler,
+    txn_id: crate::control::cluster::calvin::scheduler::lock_manager::TxnId,
+) -> crate::control::wal_replication::types::CalvinFrozenReply {
+    use crate::control::wal_replication::{ReplicatedEntry, ReplicatedWrite};
+    let (group_id, index) = scheduler
+        .pending
+        .get(&txn_id)
+        .and_then(|pending| pending.returning.frozen_entry.as_ref())
+        .and_then(|owed| owed.proposed)
+        .expect("the frozen-reply entry is in the log");
+    let mut mr = scheduler
+        .multi_raft
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    for _ in 0..20 {
+        let entries = mr
+            .read_committed_entries(group_id, index, index)
+            .expect("read the group's log");
+        if let Some(entry) = entries.into_iter().find(|entry| entry.index == index) {
+            let entry = ReplicatedEntry::from_bytes(&entry.data).expect("a replicated entry");
+            return match entry.write {
+                ReplicatedWrite::CalvinFrozenReply { reply } => reply,
+                other => panic!("expected a frozen reply entry, got {other:?}"),
+            };
+        }
+        mr.wait_all_durable_blocking().expect("durable");
+        mr.tick().expect("tick");
+    }
+    panic!("the frozen-reply entry at {index} never committed");
+}
+
+/// Apply `txn_id`'s proposed frozen-reply entry on the fixture node, as the
+/// data-group apply loop does: store it and wake the scheduler.
+pub(in crate::control::cluster::calvin::scheduler::driver::core) fn apply_frozen_reply(
+    scheduler: &super::super::scheduler::Scheduler,
+    txn_id: crate::control::cluster::calvin::scheduler::lock_manager::TxnId,
+) -> crate::control::wal_replication::types::CalvinFrozenReply {
+    let reply = proposed_frozen_reply(scheduler, txn_id);
+    crate::control::cluster::calvin::scheduler::frozen_replies::store(
+        scheduler.shared.credentials.catalog(),
+        &reply,
+    )
+    .expect("store the frozen reply");
+    scheduler
+        .shared
+        .calvin
+        .frozen_replies
+        .vshard(scheduler.vshard_id)
+        .wake();
+    reply
+}
+
+/// The txn the frozen-reply tests stage.
+pub(in crate::control::cluster::calvin::scheduler::driver::core) const FROZEN_TXN:
+    crate::control::cluster::calvin::scheduler::lock_manager::TxnId =
+    crate::control::cluster::calvin::scheduler::lock_manager::TxnId {
+        epoch: 3,
+        position: 0,
+    };
+
+/// A leader of the `test_coll` vShard holding `FROZEN_TXN` staged, with a
+/// contract that draws `nextval('s')` per row.
+pub(in crate::control::cluster::calvin::scheduler::driver::core) fn frozen_leader(
+    registry: &Arc<nodedb_cluster::calvin::CalvinCompletionRegistry>,
+) -> (
+    super::super::scheduler::Scheduler,
+    tempfile::TempDir,
+    crate::bridge::dispatch::CoreChannelDataSide,
+) {
+    use crate::control::cluster::calvin::scheduler::driver::core::test_support::{
+        build_test_scheduler_with_data_side, make_local_write_txn, test_coll_vshard,
+    };
+    let (mut scheduler, dir, data_side) =
+        build_test_scheduler_with_data_side(test_coll_vshard(), Arc::clone(registry));
+    crate::control::cluster::calvin::scheduler::driver::core::test_proposer::lead_data_group(
+        &mut scheduler,
+    );
+    create_sequence(&scheduler.shared, "s");
+    let txn = with_contract(make_local_write_txn(3, 0), contract(vec![nextval("s")], 10));
+    scheduler.process_scheduler_input(nodedb_cluster::calvin::types::SchedulerInput::Txn(
+        Box::new(txn),
+    ));
+    (scheduler, dir, data_side)
+}
+
+/// Whether a reply of `txn` on `scheduler`'s vShard is stored.
+pub(in crate::control::cluster::calvin::scheduler::driver::core) fn stores_frozen_reply(
+    scheduler: &super::super::scheduler::Scheduler,
+    txn: crate::control::cluster::calvin::scheduler::lock_manager::TxnId,
+) -> bool {
+    crate::control::cluster::calvin::scheduler::frozen_replies::holds(
+        scheduler.shared.credentials.catalog(),
+        scheduler.vshard_id,
+        txn,
+    )
+    .expect("holds")
 }

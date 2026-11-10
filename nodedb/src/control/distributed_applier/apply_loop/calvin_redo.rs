@@ -45,6 +45,8 @@ pub(super) struct CalvinClaim {
     at: CalvinPositionId,
     primary_write: bool,
     returning: bool,
+    /// The slice answers its stored frozen `RETURNING` reply.
+    frozen: bool,
     ledger: Arc<CalvinAppliedLedger>,
 }
 
@@ -124,6 +126,10 @@ fn claim(state: &SharedState, meta: &CalvinRedoMeta, at: CalvinPositionId) -> Cl
             at,
             primary_write: meta.primary_write,
             returning: meta.returning,
+            frozen: matches!(
+                meta.reply,
+                nodedb_physical::physical_plan::CalvinReplySpec::Frozen
+            ),
             ledger,
         }),
         Err(refusal) => {
@@ -201,6 +207,17 @@ impl CalvinClaim {
     }
 
     fn applied(&self, state: &SharedState, reply: Response) -> CalvinApplyEvent {
+        // Read before the ledger marks the position: a finished txn's
+        // frozen reply goes once the ledger holds it.
+        let reply = super::calvin_answer::contract_answer(
+            state,
+            super::calvin_answer::AnsweredSlice {
+                at: self.at,
+                returning: self.returning,
+                frozen: self.frozen,
+            },
+            reply,
+        );
         self.ledger.mark_applied(self.at.epoch, self.at.position);
         state.redo_chunks.drop_calvin_position(self.at);
         // The slice's stamped redo installed on this node.

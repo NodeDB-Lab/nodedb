@@ -31,6 +31,10 @@
 //! - [`calvin_read_result`]: folds a committed `CalvinReadResult` or
 //!   `CalvinReadTimeout` entry into its txn's stored barrier row and its
 //!   vShard's read-result buffer.
+//! - [`calvin_answer`]: the answer an installed slice of a `RETURNING`
+//!   contract gives its coordinator.
+//! - [`calvin_frozen_reply`]: stores a committed `CalvinFrozenReply` entry as
+//!   its txn's frozen `RETURNING` reply and wakes the vShard's scheduler.
 //! - [`calvin_redo`]: claims a stamped Calvin redo's position in the applied
 //!   ledger and reports its install to the vShard's scheduler.
 //! - [`write_dispatch`]: the generic decode + write-funnel enqueue path.
@@ -62,6 +66,8 @@ mod aggregate_image;
 mod array_cell_route;
 mod barrier_prefold;
 mod bookkeeping;
+mod calvin_answer;
+mod calvin_frozen_reply;
 mod calvin_read_result;
 mod calvin_redo;
 mod collection_convert;

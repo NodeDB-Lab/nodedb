@@ -78,7 +78,22 @@ pub(crate) enum AtomicRoute {
 /// Route `statement`, planned on `session`, through the first atomic route
 /// that applies. A transport with no session passes a detached one, which is
 /// never in a transaction block and takes the default cross-shard mode.
+///
+/// A Calvin write's participant answers the `RETURNING` columns the
+/// statement announced, so every route runs with them in scope.
 pub(crate) async fn route_atomic_statement(
+    exec: &StatementExec<'_>,
+    statement: AtomicStatement,
+    session: &DmlTxnCtx<'_>,
+) -> Result<AtomicRoute, StatementError> {
+    crate::control::server::shared::session::announced_returning::with_announced_returning(
+        exec.output_schema,
+        route_atomic(exec, statement, session),
+    )
+    .await
+}
+
+async fn route_atomic(
     exec: &StatementExec<'_>,
     statement: AtomicStatement,
     session: &DmlTxnCtx<'_>,

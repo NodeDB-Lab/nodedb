@@ -32,6 +32,7 @@
 
 pub mod assign;
 pub mod budget;
+mod chain_heads;
 pub mod edge_slices;
 pub mod local;
 pub mod parts;

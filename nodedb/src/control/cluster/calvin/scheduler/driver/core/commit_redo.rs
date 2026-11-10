@@ -117,6 +117,7 @@ impl Scheduler {
             redo.cross_shard_applied = Some(key);
         }
         let scope = &pending.scope;
+        let reply = frozen_or_staged_reply(pending, resolved.reply);
         let payload = TransactionRedoPayload::from_calvin(
             redo,
             CalvinSlice {
@@ -128,7 +129,7 @@ impl Scheduler {
                 origin: scope.origin,
                 meta: CalvinRedoMeta {
                     epoch_system_ms: pending.txn.epoch_system_ms,
-                    reply: resolved.reply,
+                    reply,
                     primary_write: pending.has_primary_write,
                     user_write: pending.raises_write_mark,
                     returning: pending.has_returning,
@@ -191,6 +192,32 @@ impl Scheduler {
         });
         let request = self.build_exempt_request(request_id, tenant_id, database_id, plan);
         self.dispatch_sequenced(txn_id, DispatchStep::Resolve, request)
+    }
+}
+
+/// The reply `pending`'s redo carries. A slice that holds a plan of the
+/// txn's `RETURNING` contract voted only once its frozen reply was stored, so
+/// it answers that stored reply, whatever its stage decided. Any other slice
+/// answers as staged.
+fn frozen_or_staged_reply(
+    pending: &super::super::types::PendingTxn,
+    staged: nodedb_physical::physical_plan::CalvinReplySpec,
+) -> nodedb_physical::physical_plan::CalvinReplySpec {
+    let holds_contract = pending
+        .txn
+        .tx_class
+        .returning
+        .as_ref()
+        .is_some_and(|contract| {
+            contract
+                .plans
+                .iter()
+                .any(|plan| pending.returning.plan_indexes.contains(&plan.plan_index))
+        });
+    if holds_contract {
+        nodedb_physical::physical_plan::CalvinReplySpec::Frozen
+    } else {
+        staged
     }
 }
 

@@ -7,8 +7,13 @@
 //! reservation, so it runs on a blocking thread, and the scheduler loop
 //! goes on meanwhile. The txn stays `Staged` with its locks until the
 //! result returns, so a later txn that needs one of its keys still waits
-//! behind it. Only then does the leader vote: commit with the frozen
-//! replies held on the txn, or abort with the refusal.
+//! behind it. A failed evaluation votes abort with its refusal. A finished
+//! one is proposed as the slice's frozen-reply entry, and the leader votes
+//! commit once a copy of the txn's reply is stored (see
+//! [`super::frozen_entry`]).
+//!
+//! A slice whose txn already has a stored reply, from an earlier stage or an
+//! earlier leader, votes commit at once and evaluates nothing.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -19,12 +24,15 @@ use super::evals::Evaluated;
 use super::evaluate::{ReturningJob, ReturningRefusal, evaluate};
 use crate::control::cluster::calvin::refusal::encode_refusal;
 use crate::control::cluster::calvin::scheduler::driver::types::CommitState;
+use crate::control::cluster::calvin::scheduler::frozen_replies;
 use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
 
 /// What a commit vote waits for.
 enum ReturningGate {
     /// Nothing: the slice holds no plan its contract names.
     Open,
+    /// Nothing more: the txn's frozen reply is stored.
+    Stored,
     /// The evaluation of `job`.
     Evaluate(ReturningJob),
     /// Nothing more: the slice cannot commit.
@@ -43,6 +51,10 @@ impl Scheduler {
     ) -> bool {
         match self.returning_gate(txn_id) {
             ReturningGate::Open => false,
+            ReturningGate::Stored => {
+                self.cast_staged_vote(txn_id, StagedVote::Commit, None);
+                true
+            }
             ReturningGate::Refuse(refusal) => {
                 self.vote_refused(txn_id, refusal);
                 true
@@ -56,6 +68,7 @@ impl Scheduler {
 
     /// What `txn_id`'s commit vote waits for.
     fn returning_gate(&mut self, txn_id: TxnId) -> ReturningGate {
+        let vshard_id = self.vshard_id;
         let Some(pending) = self.pending.get_mut(&txn_id) else {
             return ReturningGate::Open;
         };
@@ -65,6 +78,28 @@ impl Scheduler {
         let Some(contract) = pending.txn.tx_class.returning.as_ref() else {
             return ReturningGate::Open;
         };
+        if !contract
+            .plans
+            .iter()
+            .any(|plan| pending.returning.plan_indexes.contains(&plan.plan_index))
+        {
+            return ReturningGate::Open;
+        }
+        match frozen_replies::holds(self.shared.credentials.catalog(), vshard_id, txn_id) {
+            Ok(true) => return ReturningGate::Stored,
+            Ok(false) => {}
+            Err(error) => {
+                crate::diag::calvin_frozen_reply_store_failed(
+                    vshard_id,
+                    Some((txn_id.epoch, txn_id.position)),
+                    "load",
+                    &error,
+                );
+                return ReturningGate::Refuse(ReturningRefusal::internal(format!(
+                    "calvin RETURNING: the stored frozen reply does not read: {error}"
+                )));
+            }
+        }
         let mut plans = BTreeMap::new();
         let mut taken_rows = 0;
         for plan in &contract.plans {
@@ -158,7 +193,7 @@ impl Scheduler {
         match outcome {
             Ok(frozen) => {
                 pending.returning.frozen = frozen;
-                self.cast_staged_vote(txn_id, StagedVote::Commit, None);
+                self.propose_frozen_reply(txn_id);
             }
             Err(refusal) => self.vote_refused(txn_id, refusal),
         }
@@ -166,7 +201,7 @@ impl Scheduler {
 
     /// Vote abort for `txn_id` with `refusal`. A code with no wire form
     /// still votes abort, with no refusal.
-    fn vote_refused(&mut self, txn_id: TxnId, refusal: ReturningRefusal) {
+    pub(super) fn vote_refused(&mut self, txn_id: TxnId, refusal: ReturningRefusal) {
         tracing::warn!(
             vshard_id = self.vshard_id,
             epoch = txn_id.epoch,
@@ -211,7 +246,8 @@ mod tests {
     use nodedb_cluster::calvin::types::SchedulerInput;
 
     use super::super::fixtures::{
-        contract, create_sequence, image_rows, nextval, sequence_next, with_contract,
+        apply_frozen_reply, contract, create_sequence, image_rows, nextval, sequence_next,
+        with_contract,
     };
     use super::*;
     use crate::bridge::envelope::{StageVote, Status};
@@ -225,7 +261,7 @@ mod tests {
 
     /// Stage `txn_id` with two image rows, answer it with a commit stage
     /// vote, and wait for its evaluation.
-    async fn stage_and_vote(scheduler: &mut Scheduler, txn_id: TxnId) {
+    async fn stage_and_evaluate(scheduler: &mut Scheduler, txn_id: TxnId) {
         let pending = scheduler.pending.get_mut(&txn_id).expect("staged");
         assert_eq!(pending.returning.plan_indexes, vec![0]);
         pending.returning.images.insert(0, image_rows(2));
@@ -245,10 +281,19 @@ mod tests {
             .expect("a frozen reply for plan 0")
     }
 
-    /// The leader evaluates, votes commit, loses its leadership, and stages
-    /// the txn again once it leads again, before any verdict. The second
-    /// evaluation replays the transcript: it draws no new value and freezes
-    /// the same reply.
+    fn commit_vote() -> SequencerEntry {
+        SequencerEntry::Vote {
+            epoch: 3,
+            position: 0,
+            vshard: test_coll_vshard(),
+        }
+    }
+
+    /// The leader evaluates and proposes its frozen-reply entry, then loses
+    /// its leadership before the entry applies. It stages the txn again
+    /// once it leads again, before any verdict. The second evaluation
+    /// replays the transcript: it draws no new value and freezes the same
+    /// reply. The vote waits for the stored reply.
     #[tokio::test]
     async fn a_same_leader_restage_replays_without_a_new_nextval() {
         let registry = nodedb_cluster::calvin::CalvinCompletionRegistry::new_detached();
@@ -262,22 +307,20 @@ mod tests {
         let txn = with_contract(make_local_write_txn(3, 0), contract(vec![nextval("s")], 10));
         scheduler.process_scheduler_input(SchedulerInput::Txn(Box::new(txn)));
 
-        stage_and_vote(&mut scheduler, txn_id).await;
+        stage_and_evaluate(&mut scheduler, txn_id).await;
         let first = frozen_payload(&scheduler, txn_id);
-        assert_eq!(
-            proposer.accepted(),
-            vec![SequencerEntry::Vote {
-                epoch: 3,
-                position: 0,
-                vshard: test_coll_vshard(),
-            }]
+        assert!(
+            proposer.accepted().is_empty(),
+            "the vote waits for the entry"
         );
 
         step_down_from_data_group(&scheduler);
         scheduler.refresh_role();
-        assert_eq!(
-            scheduler.pending.get(&txn_id).map(|p| p.commit_state),
-            Some(CommitState::Following)
+        let pending = scheduler.pending.get(&txn_id).expect("held");
+        assert_eq!(pending.commit_state, CommitState::Following);
+        assert!(
+            pending.returning.frozen.is_empty() && pending.returning.frozen_entry.is_none(),
+            "a follower holds no frozen state"
         );
         lead_data_group(&mut scheduler);
         assert_eq!(
@@ -286,13 +329,116 @@ mod tests {
             "the new term stages the txn again"
         );
 
-        stage_and_vote(&mut scheduler, txn_id).await;
+        stage_and_evaluate(&mut scheduler, txn_id).await;
         assert_eq!(frozen_payload(&scheduler, txn_id), first);
+        apply_frozen_reply(&scheduler, txn_id);
+        scheduler.vote_stored_frozen_replies();
+        assert_eq!(proposer.accepted(), vec![commit_vote()]);
         assert_eq!(
             sequence_next(&scheduler.shared, "s"),
             3,
             "two rows drew two values, once"
         );
         assert!(scheduler.returning_evals.holds(txn_id));
+    }
+
+    /// The leader proposes the frozen replies to its data group before it
+    /// votes, and votes commit once the entry applies here.
+    #[tokio::test]
+    async fn the_frozen_entry_is_proposed_before_the_vote() {
+        let registry = nodedb_cluster::calvin::CalvinCompletionRegistry::new_detached();
+        let (mut scheduler, _dir, _data_side) =
+            build_test_scheduler_with_data_side(test_coll_vshard(), registry);
+        let proposer = CapturingProposer::accepting();
+        scheduler.sequencer_proposer = proposer.clone();
+        lead_data_group(&mut scheduler);
+        create_sequence(&scheduler.shared, "s");
+        let txn_id = TxnId::new(3, 0);
+        let txn = with_contract(make_local_write_txn(3, 0), contract(vec![nextval("s")], 10));
+        scheduler.process_scheduler_input(SchedulerInput::Txn(Box::new(txn)));
+
+        stage_and_evaluate(&mut scheduler, txn_id).await;
+        assert!(
+            proposer.accepted().is_empty(),
+            "no vote before the entry applies"
+        );
+        assert_eq!(
+            scheduler.pending.get(&txn_id).map(|p| p.commit_state),
+            Some(CommitState::Staged)
+        );
+        scheduler.vote_stored_frozen_replies();
+        assert!(proposer.accepted().is_empty(), "nothing is stored yet");
+
+        let reply = apply_frozen_reply(&scheduler, txn_id);
+        assert_eq!((reply.epoch, reply.position), (3, 0));
+        assert_eq!(reply.vshard, test_coll_vshard());
+        assert_eq!(
+            reply
+                .plans
+                .iter()
+                .map(|plan| plan.plan_index)
+                .collect::<Vec<_>>(),
+            vec![0]
+        );
+        assert_eq!(reply.plans[0].payload, frozen_payload(&scheduler, txn_id));
+        assert_eq!(
+            reply.plans[0].sequence_effects,
+            vec![
+                crate::control::wal_replication::types::FrozenSequenceEffect::Nextval {
+                    name: "s".into(),
+                    value: 1,
+                },
+                crate::control::wal_replication::types::FrozenSequenceEffect::Nextval {
+                    name: "s".into(),
+                    value: 2,
+                },
+            ]
+        );
+
+        scheduler.vote_stored_frozen_replies();
+        assert_eq!(proposer.accepted(), vec![commit_vote()]);
+        assert_eq!(
+            scheduler.pending.get(&txn_id).map(|p| p.commit_state),
+            Some(CommitState::AwaitingVerdict)
+        );
+    }
+
+    /// A stage of a txn whose frozen reply is stored votes commit at once.
+    /// It evaluates nothing and draws no value.
+    #[tokio::test]
+    async fn a_stage_with_a_stored_reply_votes_without_evaluating() {
+        let registry = nodedb_cluster::calvin::CalvinCompletionRegistry::new_detached();
+        let (mut scheduler, _dir, _data_side) =
+            build_test_scheduler_with_data_side(test_coll_vshard(), registry);
+        let proposer = CapturingProposer::accepting();
+        scheduler.sequencer_proposer = proposer.clone();
+        lead_data_group(&mut scheduler);
+        create_sequence(&scheduler.shared, "s");
+        let txn_id = TxnId::new(3, 0);
+        let txn = with_contract(make_local_write_txn(3, 0), contract(vec![nextval("s")], 10));
+        scheduler.process_scheduler_input(SchedulerInput::Txn(Box::new(txn)));
+        crate::control::cluster::calvin::scheduler::frozen_replies::store(
+            scheduler.shared.credentials.catalog(),
+            &crate::control::wal_replication::types::CalvinFrozenReply {
+                epoch: 3,
+                position: 0,
+                vshard: test_coll_vshard(),
+                plans: Vec::new(),
+            },
+        )
+        .expect("store");
+
+        let pending = scheduler.pending.get_mut(&txn_id).expect("staged");
+        pending.returning.images.insert(0, image_rows(2));
+        scheduler.resolve_staged_commit(
+            txn_id,
+            &staged_response(Status::Ok, Some(StageVote::Commit)),
+        );
+
+        assert_eq!(proposer.accepted(), vec![commit_vote()]);
+        let pending = scheduler.pending.get(&txn_id).expect("parked");
+        assert_eq!(pending.returning.evaluating, None);
+        assert!(pending.returning.frozen.is_empty());
+        assert_eq!(sequence_next(&scheduler.shared, "s"), 1, "no value drawn");
     }
 }

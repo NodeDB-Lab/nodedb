@@ -21,7 +21,7 @@
 
 use std::collections::{BTreeSet, HashSet};
 
-use crate::control::cluster::calvin::scheduler::barrier_store;
+use crate::control::cluster::calvin::scheduler::{barrier_store, frozen_replies};
 use crate::control::cluster::calvin_snapshot::cut_barriers::install_cut_barriers;
 use crate::control::cluster::snapshot_install::SnapshotInstallError;
 use crate::control::security::catalog::calvin_applied::StoredCalvinApplied;
@@ -103,6 +103,9 @@ pub fn install_calvin_cut(
     // the builder's stored logs of the unfinished txns replace this node's.
     let vshards: BTreeSet<u32> = ids.iter().copied().collect();
     barrier_store::install_group(shared, &vshards, cut.barrier_logs).map_err(settle_error)?;
+    // So are the frozen entries: the builder's stored replies of the
+    // unfinished txns replace this node's.
+    frozen_replies::install_group(shared, &vshards, cut.frozen_replies).map_err(settle_error)?;
     shared
         .calvin
         .bases

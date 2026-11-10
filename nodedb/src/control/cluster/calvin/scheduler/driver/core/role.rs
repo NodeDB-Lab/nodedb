@@ -18,21 +18,12 @@
 //! The gate stays closed until each such write applied (see
 //! `write_admission::tickets`).
 //!
-//! - Promotion stages every `Following` txn as a new grant, in sequencer
-//!   order. A txn whose verdict is already COMMIT proposes its vote again,
-//!   which changes nothing: the first vote of the vShard counts.
-//! - Demotion discards the staged state of every txn the leader drove,
-//!   drops its owed votes and its restages, and holds the txn `Following`.
-//!   A redo this node proposed can still commit in the new term: the
-//!   applied ledger installs one copy per position.
+//! The gate opens with a promotion and closes with a demotion (see
+//! [`super::handover`]).
 //!
 //! [`CommitState::Following`]: super::super::types::CommitState::Following
 
-use super::super::types::CommitState;
-use super::deferred::{DispatchOutcome, DispatchStep};
-use super::owed::OwedKind;
 use super::scheduler::Scheduler;
-use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
 use crate::control::server::shared::write_admission::{FenceState, StartFence};
 
 /// What this node does for its vShard's Calvin txns.
@@ -93,6 +84,21 @@ impl StageGate {
     ) -> bool {
         self.role == Role::Follower && self.term.is_some()
     }
+
+    /// Open the gate: this node stages the vShard's txns.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn open(&mut self) {
+        self.role = Role::Leader;
+    }
+
+    /// Close the gate: this node holds the vShard's txns.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn close(&mut self) {
+        self.role = Role::Follower;
+    }
+
+    /// The data-group term this node leads, as last seen.
+    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn term(&self) -> Option<u64> {
+        self.term
+    }
 }
 
 /// What the data group says about this node now.
@@ -101,7 +107,6 @@ struct Leadership {
     term: u64,
     term_start: Option<u64>,
 }
-
 impl Scheduler {
     /// Read this node's place in the vShard's data group, and promote or
     /// demote on a change.
@@ -211,106 +216,6 @@ impl Scheduler {
         mr.vshard_role_is_leader(self.vshard_id)
     }
 
-    /// Open the stage gate: stage every `Following` txn, in sequencer order.
-    fn promote(&mut self) {
-        self.role.role = Role::Leader;
-        tracing::info!(
-            node_id = self.shared.node_id,
-            vshard_id = self.vshard_id,
-            term = self.role.term,
-            "calvin scheduler: this node leads the vShard; staging its held txns"
-        );
-        let following: Vec<TxnId> = self
-            .pending
-            .iter()
-            .filter(|(_, pending)| pending.commit_state == CommitState::Following)
-            .map(|(txn_id, _)| *txn_id)
-            .collect();
-        for txn_id in following {
-            let Some(pending) = self.pending.remove(&txn_id) else {
-                continue;
-            };
-            self.route_granted(pending.txn, txn_id, pending.lock_owner);
-        }
-    }
-
-    /// Close the stage gate: discard the staged state of every txn this
-    /// node drove, drop its owed votes, and hold each txn `Following`.
-    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn demote(
-        &mut self,
-        why: &str,
-    ) {
-        self.role.role = Role::Follower;
-        tracing::info!(
-            node_id = self.shared.node_id,
-            vshard_id = self.vshard_id,
-            reason = why,
-            "calvin scheduler: this node stops leading the vShard; holding its txns"
-        );
-        let driven: Vec<TxnId> = self
-            .pending
-            .iter()
-            .filter(|(_, pending)| leader_drives(pending.commit_state))
-            .map(|(txn_id, _)| *txn_id)
-            .collect();
-        for txn_id in driven {
-            self.release_to_following(txn_id);
-        }
-        // Only a leader restages. A later term counts its own restages.
-        self.restages.clear();
-        // A barrier waits only on the leader. Its txn holds its locks and
-        // follows the log like any other. Its barrier log stays, so a later
-        // barrier of it decides from the same entries.
-        let barriers: Vec<TxnId> = self.dependent_barrier.keys().copied().collect();
-        for txn_id in barriers {
-            if let Some(barrier) = self.dependent_barrier.remove(&txn_id) {
-                self.follow(barrier.txn, txn_id, barrier.lock_owner);
-            }
-        }
-    }
-
-    /// Hold `txn_id` `Following`, and discard what this node staged for it.
-    ///
-    /// The txn's scope becomes its slice's own, from its plans. A leader's
-    /// step can hold a narrower one: a passive read or a parked abort vote
-    /// holds a scope that writes nothing. A follower that kept it would end a
-    /// COMMIT with no entry, mark the position applied, and then skip the
-    /// slice's redo when it applies.
-    fn release_to_following(&mut self, txn_id: TxnId) {
-        let Some(scope) = self
-            .pending
-            .get(&txn_id)
-            .map(|pending| self.local_slice_scope(&pending.txn, txn_id))
-        else {
-            return;
-        };
-        let Some(pending) = self.pending.get_mut(&txn_id) else {
-            return;
-        };
-        pending.commit_state = CommitState::Following;
-        pending.scope = scope;
-        pending.awaiting = None;
-        pending.verdict_deadline = None;
-        pending.stage_error = None;
-        pending.superseded = false;
-        pending.redo = None;
-        pending.gates.clear();
-        pending.ungated = false;
-        self.owed.remove(&(txn_id, OwedKind::Vote));
-        self.discard_staged(txn_id);
-    }
-
-    /// Dispatch a `CalvinDrop` that clears what this node staged for
-    /// `txn_id`. An absent staged entry makes it a no-op on the core.
-    pub(in crate::control::cluster::calvin::scheduler::driver::core) fn discard_staged(
-        &mut self,
-        txn_id: TxnId,
-    ) {
-        if let DispatchOutcome::Failed(error) = self.dispatch_drop(txn_id, DispatchStep::Discard) {
-            self.fail_dispatch_step(txn_id, DispatchStep::Discard, error);
-        }
-    }
-
     /// Note that a redo proposal found this node no longer leads.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn on_not_leader(&mut self) {
         if self.role.is_leader() {
@@ -321,95 +226,21 @@ impl Scheduler {
     }
 }
 
-/// Whether a txn in `state` is one the leader drives: it holds staged state
-/// or waits on a step only the leader takes.
-fn leader_drives(state: CommitState) -> bool {
-    match state {
-        CommitState::Staged
-        | CommitState::AwaitingVerdict
-        | CommitState::AwaitingResolveTurn
-        | CommitState::AwaitingRedoResolve
-        | CommitState::AwaitingRedoApply { .. }
-        | CommitState::AwaitingRestage
-        | CommitState::ReadingPassive => true,
-        // A drop ends the txn with no log entry whatever the role.
-        CommitState::AwaitingDrop | CommitState::Following => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use nodedb_cluster::calvin::CalvinCompletionRegistry;
-    use nodedb_cluster::calvin::types::{
-        EngineKeySet, ReadWriteSet, SchedulerInput, SequencedTxn, SortedVec,
-    };
-    use nodedb_physical::physical_plan::PhysicalPlan;
-    use nodedb_physical::physical_plan::meta::MetaOp;
+    use nodedb_cluster::calvin::types::SchedulerInput;
 
+    use super::super::role_fixtures::{scheduler, staged_requests, validate_only_on};
     use super::*;
-    use crate::bridge::dispatch::CoreChannelDataSide;
-    use crate::bridge::envelope::{StageVote, Status};
-    use crate::control::cluster::calvin::scheduler::driver::core::test_proposer::{
-        elect_data_group_leader, lead_data_group, step_down_from_data_group,
-    };
+    use crate::bridge::envelope::Status;
+    use crate::control::cluster::calvin::scheduler::driver::core::test_proposer::elect_data_group_leader;
     use crate::control::cluster::calvin::scheduler::driver::core::test_support::{
-        build_test_scheduler_with_data_side, make_validate_only_txn, redo_applied, staged_response,
-        test_coll_vshard,
+        redo_applied, staged_response,
     };
-
-    /// A scheduler on the `test_coll` vShard with its Data Plane side.
-    fn scheduler() -> (Scheduler, tempfile::TempDir, CoreChannelDataSide) {
-        build_test_scheduler_with_data_side(
-            test_coll_vshard(),
-            CalvinCompletionRegistry::new_detached(),
-        )
-    }
-
-    /// A validate-only txn at `(epoch, 0)` that locks `test_coll` row
-    /// `surrogate`, so txns on distinct rows hold their locks together.
-    fn validate_only_on(epoch: u64, surrogate: u32) -> SequencedTxn {
-        let mut txn = make_validate_only_txn(epoch, 0);
-        std::sync::Arc::make_mut(&mut txn.tx_class).write_set =
-            ReadWriteSet::new(vec![EngineKeySet::Document {
-                collection: "test_coll".to_string(),
-                surrogates: SortedVec::new(vec![surrogate]),
-            }]);
-        std::sync::Arc::make_mut(&mut txn.tx_class)
-            .restore_derived()
-            .expect("a derivable class");
-        txn
-    }
-
-    /// The `(epoch, position)` of every Calvin stage request on the Data
-    /// Plane side, in arrival order. Drains the request ring.
-    fn staged_requests(data_side: &mut CoreChannelDataSide) -> Vec<(u64, u32)> {
-        let mut staged = Vec::new();
-        while let Ok(request) = data_side.request_rx.try_pop() {
-            if let PhysicalPlan::Meta(MetaOp::CalvinExecuteStatic {
-                epoch, position, ..
-            }) = request.inner.plan
-            {
-                staged.push((epoch, position));
-            }
-        }
-        staged
-    }
-
-    /// Whether a `CalvinDrop` of `txn_id` reached the Data Plane side.
-    /// Drains the request ring.
-    fn dropped(data_side: &mut CoreChannelDataSide, txn_id: TxnId) -> bool {
-        let mut dropped = false;
-        while let Ok(request) = data_side.request_rx.try_pop() {
-            dropped |= request.inner.plan
-                == PhysicalPlan::Meta(MetaOp::CalvinDrop {
-                    epoch: txn_id.epoch,
-                    position: txn_id.position,
-                });
-        }
-        dropped
-    }
+    use crate::control::cluster::calvin::scheduler::driver::types::CommitState;
+    use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
 
     /// A replica that does not lead the data group holds a granted txn
     /// `Following`. It stages nothing and owes no vote.
@@ -542,73 +373,5 @@ mod tests {
         scheduler.refresh_role();
         assert!(scheduler.role.is_leader(), "the gate opens");
         assert_eq!(staged_requests(&mut data_side), vec![(3, 0)]);
-    }
-
-    /// Promotion stages every `Following` txn, in sequencer order.
-    #[tokio::test]
-    async fn promotion_stages_following_txns_in_sequencer_order() {
-        let (mut scheduler, _dir, mut data_side) = scheduler();
-        for (epoch, surrogate) in [(3, 1), (4, 2), (5, 3)] {
-            scheduler.process_scheduler_input(SchedulerInput::Txn(Box::new(validate_only_on(
-                epoch, surrogate,
-            ))));
-        }
-        assert!(staged_requests(&mut data_side).is_empty());
-
-        lead_data_group(&mut scheduler);
-
-        assert_eq!(
-            staged_requests(&mut data_side),
-            vec![(3, 0), (4, 0), (5, 0)]
-        );
-        for epoch in [3, 4, 5] {
-            assert_eq!(
-                scheduler
-                    .pending
-                    .get(&TxnId::new(epoch, 0))
-                    .map(|p| p.commit_state),
-                Some(CommitState::Staged)
-            );
-        }
-    }
-
-    /// Demotion discards what the leader staged, drops its owed vote, and
-    /// holds the txn `Following` with its locks.
-    #[tokio::test]
-    async fn demotion_drops_staged_state_and_owed_votes() {
-        let (mut scheduler, _dir, mut data_side) = scheduler();
-        lead_data_group(&mut scheduler);
-        let txn_id = TxnId::new(3, 0);
-        scheduler.process_scheduler_input(SchedulerInput::Txn(Box::new(validate_only_on(3, 1))));
-        assert_eq!(staged_requests(&mut data_side), vec![(3, 0)]);
-        scheduler.resolve_staged_commit(
-            txn_id,
-            &staged_response(Status::Ok, Some(StageVote::Commit)),
-        );
-        assert!(scheduler.owed.contains_key(&(txn_id, OwedKind::Vote)));
-
-        step_down_from_data_group(&scheduler);
-        scheduler.refresh_role();
-
-        assert!(!scheduler.role.is_leader());
-        assert_eq!(
-            scheduler.pending.get(&txn_id).map(|p| p.commit_state),
-            Some(CommitState::Following)
-        );
-        assert!(
-            !scheduler.owed.contains_key(&(txn_id, OwedKind::Vote)),
-            "a demoted node keeps no vote owed"
-        );
-        assert!(
-            dropped(&mut data_side, txn_id),
-            "the staged state is dropped"
-        );
-        assert!(!scheduler.applied.is_applied(3, 0));
-        let blocked = validate_only_on(4, 1);
-        scheduler.process_scheduler_input(SchedulerInput::Txn(Box::new(blocked)));
-        assert!(
-            scheduler.blocked.contains_key(&TxnId::new(4, 0)),
-            "the held txn keeps its locks"
-        );
     }
 }

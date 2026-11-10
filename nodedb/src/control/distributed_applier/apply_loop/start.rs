@@ -390,6 +390,15 @@ fn prepare_replicated<'a>(
                 },
             ))
         }
+        // The stored row is the entry's durable effect.
+        ReplicatedWrite::CalvinFrozenReply { ref reply } => {
+            Prepared::Concluded(super::calvin_frozen_reply::apply_calvin_frozen_reply(
+                ctx,
+                pos,
+                replicated.vshard_id,
+                reply,
+            ))
+        }
         ReplicatedWrite::CalvinReadTimeout {
             epoch,
             position,

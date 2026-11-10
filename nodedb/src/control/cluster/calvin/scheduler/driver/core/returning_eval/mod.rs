@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: BUSL-1.1
 
-//! The participant leader's `RETURNING` evaluation before its commit vote.
+//! The participant leader's `RETURNING` evaluation before its commit vote,
+//! and the frozen-reply entry the vote waits for.
 
 mod evals;
 mod evaluate;
 #[cfg(test)]
 mod fixtures;
+mod frozen_cleanup;
+mod frozen_entry;
 mod vote_hook;
 
 pub(in crate::control::cluster::calvin::scheduler::driver::core) use evals::ReturningEvals;

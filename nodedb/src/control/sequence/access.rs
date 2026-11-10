@@ -25,6 +25,10 @@ pub trait SequenceAccess {
     fn currval(&self, name: &str) -> crate::Result<i64>;
     /// Position `name` so the next `nextval` returns `value + increment`.
     fn setval(&self, name: &str, value: i64) -> crate::Result<i64>;
+    /// Record `value`, which a `nextval` on `name` returned on another node
+    /// for this session's statement, as this session's `currval`. An access
+    /// with no session state records nothing.
+    fn record_obtained(&self, _name: &str, _value: i64) {}
 }
 
 /// [`SequenceAccess`] over one session's view of the node registry.
@@ -103,6 +107,17 @@ impl SequenceAccess for SessionSequenceAccess<'_> {
                     "currval of sequence \"{name}\" is not yet defined in this session"
                 ),
             })
+    }
+
+    fn record_obtained(&self, name: &str, value: i64) {
+        if let Some(session) = &self.session {
+            session.record(
+                self.database_id.as_u64(),
+                self.tenant_id.as_u64(),
+                name,
+                value,
+            );
+        }
     }
 
     fn setval(&self, name: &str, value: i64) -> crate::Result<i64> {

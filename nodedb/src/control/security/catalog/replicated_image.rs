@@ -27,6 +27,8 @@
 //! - `calvin_applied`: this node's Calvin apply ledger.
 //! - `calvin_barrier_logs`: this node's dependent-read barrier logs,
 //!   carried by data-group snapshots.
+//! - `calvin_frozen_replies`: this node's frozen Calvin `RETURNING` replies,
+//!   carried by data-group snapshots.
 //! - `redo_snapshot_owed`: the data-group snapshot installs this node's
 //!   replicas owe.
 //! - `vshard_residency`: the vShards this node hosts, and the departure

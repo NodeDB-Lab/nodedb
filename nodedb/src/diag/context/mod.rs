@@ -8,6 +8,7 @@
 
 mod array_sync;
 mod audit;
+mod calvin_frozen;
 mod catalog;
 mod columnar;
 mod continuous_agg;
@@ -42,6 +43,7 @@ pub(in crate::diag) use audit::{
     AuditFlushNotPersisted, AuditPruneNotApplied, AuditWalAppendFailed, AuditWalNotTruncated,
     SecurityBusLagged, SecurityBusRowsNotRecorded,
 };
+pub(in crate::diag) use calvin_frozen::CalvinFrozenReplyStoreFailed;
 pub(in crate::diag) use catalog::{
     CatalogApplyOrphanRow, CollectionPurgeRowMissing, ConsumerGroupOffsetsRetained,
     MetadataApplyWedged, SynonymGroupNotApplied,

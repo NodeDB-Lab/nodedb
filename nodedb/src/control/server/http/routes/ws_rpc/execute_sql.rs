@@ -98,14 +98,16 @@ pub async fn execute_sql(
     };
     let routed = {
         let _request = shared.tenant_request_guard(tenant_id);
-        route_http_statement(
+        // Boxed: the atomic routes nest the Calvin commit future, and inlining
+        // it here nests past the layout limit.
+        Box::pin(route_http_statement(
             &exec,
             AtomicStatement {
                 tasks: admission.tasks,
                 lease_scope: admission.lease_scope,
                 sum_target_reads: admission.sum_target_reads,
             },
-        )
+        ))
         .await?
     };
     let AtomicStatement {

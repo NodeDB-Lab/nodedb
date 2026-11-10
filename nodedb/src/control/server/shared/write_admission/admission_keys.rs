@@ -20,6 +20,11 @@
 //!   alike on every replica.
 //! - Every Calvin writer of a columnar or timeseries collection locks it
 //!   `Exclusive`. So an append still orders against each Calvin writer.
+//!
+//! Every Calvin writer of a `HASH_CHAIN` collection locks it `Exclusive`
+//! (`planner::calvin::submit::chain_heads`). A gated insert announces the
+//! collection `Intent`, so it never moves the chain head between a Calvin
+//! slice's stage and its install.
 //! - A contended append waits and never routes. The data-group log already
 //!   orders appends, so routing one to Calvin gains nothing.
 //!
@@ -611,6 +616,35 @@ mod tests {
             !table.try_acquire(TxnId::new(TxnId::AUTOCOMMIT_EPOCH, 0), requested),
             "the UPDATE must not take the row while the balance write holds it"
         );
+    }
+
+    /// A Calvin ingest and a Calvin writer of a chained collection hold the
+    /// collection `Exclusive`. A gated append and a gated point insert
+    /// announce the collection `Intent`, so neither lands while the Calvin
+    /// writer holds its keys.
+    #[test]
+    fn a_calvin_ingest_or_chain_write_fences_gated_writes() {
+        let mut calvin_ingest = WriteKeys::default();
+        add_plan_write_keys(&mut calvin_ingest, &ts_ingest()).expect("an ingest has keys");
+        let mut chain = WriteKeys::default();
+        chain.whole_collection(qualified("docs").as_str());
+        let cases = [
+            (calvin_ingest, ts_ingest(), "metrics"),
+            (chain, doc_insert("x", 17), "docs"),
+        ];
+        for (calvin, gated, collection) in cases {
+            let held = expand_write_key_sets(&calvin.into_key_sets());
+            assert_eq!(held.get(&coll(collection)), Some(&LockMode::Exclusive));
+            let (requested, _) = keys_of(&gated);
+            assert_eq!(requested.get(&coll(collection)), Some(&LockMode::Intent));
+
+            let mut table = LockManager::new();
+            assert!(table.try_acquire(TxnId::new(1, 0), held));
+            assert!(
+                !table.try_acquire(TxnId::new(TxnId::AUTOCOMMIT_EPOCH, 0), requested),
+                "the gated write to '{collection}' must wait for the Calvin writer"
+            );
+        }
     }
 
     /// A committed redo locks every collection it writes `Exclusive`.

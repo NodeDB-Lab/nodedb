@@ -4,8 +4,9 @@
 //!
 //! The coordinator reads everything the response evaluation depends on at
 //! submit time: the full item list, the declared source columns, the roles of
-//! the writer, the `currval` of the sequences the list names, and the
-//! response limits. Every participant then reads the same inputs.
+//! the writer, the `currval` of the sequences the list names, the columns the
+//! statement announced, and the response limits. Every participant then
+//! reads the same inputs.
 
 use std::collections::BTreeSet;
 
@@ -17,6 +18,7 @@ use nodedb_types::{QualifiedCollection, ReturningColumns, ReturningItem, Returni
 use crate::Error;
 use crate::control::security::rls::compile::declared_columns;
 use crate::control::server::shared::returning::precommit::ReturningLimits;
+use crate::control::server::shared::session::announced_returning::announced_returning;
 use crate::control::server::shared::session::read_scope::current_sequence_values;
 use crate::control::state::SharedState;
 
@@ -34,6 +36,8 @@ pub(super) fn stamp_returning_contract(
         return Ok(());
     }
     let limits = ReturningLimits::from_tuning(&state.tuning.network).to_contract();
+    // The statement's one `RETURNING` list, announced before any row.
+    let announced = announced_returning();
     let mut entries = Vec::new();
     let mut refs = SequenceRefs::default();
     for (index, plan) in plans.iter().enumerate() {
@@ -66,6 +70,7 @@ pub(super) fn stamp_returning_contract(
             spec,
             source_columns,
             limits,
+            announced: announced.clone(),
         });
     }
     if entries.is_empty() {

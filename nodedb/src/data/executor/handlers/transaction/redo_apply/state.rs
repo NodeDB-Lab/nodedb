@@ -114,9 +114,6 @@ pub(in crate::data::executor) struct RedoApplyScope {
 /// What one resolved timeseries batch a committed redo install stored.
 pub(in crate::data::executor) struct TsInstalled {
     pub count: crate::engine::timeseries::install_counts::TsInstallCount,
-    /// The image of each landed row as a scan reads it, in row order. Empty
-    /// when the batch carried no images.
-    pub images: Vec<Vec<u8>>,
 }
 
 /// One write note an install pass holds back until the record settles.

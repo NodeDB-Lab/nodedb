@@ -8,6 +8,7 @@ pub mod caught_up;
 pub mod cut_floor;
 pub mod cut_hold;
 pub mod driver;
+pub mod frozen_replies;
 pub mod inbox;
 pub mod lock;
 pub mod metrics;
@@ -23,6 +24,7 @@ pub use driver::{
     CalvinReadResultProposal, RaftSequencerProposer, Scheduler, SchedulerConfig, SchedulerParams,
     SequencerProposer, propose_calvin_read_result,
 };
+pub use frozen_replies::{CalvinFrozenReplies, VShardFrozenReplies};
 pub use inbox::{CalvinApplyEvent, CalvinInboxes, CalvinVShardInbox, InboxHandle};
 pub use lock::{AcquireOutcome, Acquisition, HotKeyTable, LockKey, LockManager, LockMode, TxnId};
 // Existing call sites reference this module as `scheduler::lock_manager::…`;

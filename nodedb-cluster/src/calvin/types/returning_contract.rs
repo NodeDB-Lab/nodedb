@@ -51,6 +51,26 @@ pub struct ReturningContractLimits {
     pub payload_bytes: u64,
 }
 
+/// One column the statement announced to its client, before any row
+/// existed.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
+#[msgpack(map)]
+pub struct AnnouncedColumn {
+    /// The column's client-facing name.
+    pub name: String,
+    /// The wire name of the column's type.
+    pub ty: String,
+}
+
 /// The `RETURNING` list of one plan of the transaction.
 #[derive(
     Debug,
@@ -77,6 +97,11 @@ pub struct PlanReturning {
     pub source_columns: Vec<String>,
     /// The response limits.
     pub limits: ReturningContractLimits,
+    /// The columns the statement announced, one per list item, in list
+    /// order. The evaluation answers each cell under its column's name and
+    /// type. `None` when the statement announced none: a star, or a
+    /// statement with no announced columns.
+    pub announced: Option<Vec<AnnouncedColumn>>,
 }
 
 /// What a participant needs to evaluate the `RETURNING` lists of a
@@ -137,6 +162,16 @@ pub(crate) fn sample_contract() -> ReturningContract {
                 },
                 source_columns: vec!["id".into(), "balance".into()],
                 limits,
+                announced: Some(vec![
+                    AnnouncedColumn {
+                        name: "key".into(),
+                        ty: "text".into(),
+                    },
+                    AnnouncedColumn {
+                        name: "next".into(),
+                        ty: "int8".into(),
+                    },
+                ]),
             },
             PlanReturning {
                 plan_index: 2,
@@ -147,6 +182,7 @@ pub(crate) fn sample_contract() -> ReturningContract {
                 },
                 source_columns: vec!["id".into()],
                 limits,
+                announced: None,
             },
         ],
         roles: vec!["reader".into(), "writer".into()],

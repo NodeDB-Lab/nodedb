@@ -28,6 +28,7 @@ pub(super) fn entry_scope(
         // surrogate binding and an array schema write no row.
         ReplicatedWrite::CalvinReadResult { .. }
         | ReplicatedWrite::CalvinReadTimeout { .. }
+        | ReplicatedWrite::CalvinFrozenReply { .. }
         | ReplicatedWrite::CutBarrier { .. }
         | ReplicatedWrite::MirrorSeal { .. }
         | ReplicatedWrite::TopicPublish { .. }

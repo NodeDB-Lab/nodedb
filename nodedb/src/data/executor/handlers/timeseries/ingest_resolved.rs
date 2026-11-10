@@ -210,8 +210,7 @@ impl CoreLoop {
         // consumer reads the collection, its outcome is durable before the
         // first row lands, so WAL catch-up rebuilds exactly these events. An
         // install no reader asks for images of renders none.
-        let wants_images =
-            batch.emits_events || returning.is_some() || mode == TimeseriesApplyMode::RedoInstall;
+        let wants_images = batch.emits_events || returning.is_some();
         let by_name_images = match fit {
             SchemaFit::Exact => None,
             SchemaFit::ByName if !wants_images => None,
@@ -314,19 +313,11 @@ impl CoreLoop {
         let accepted = landed.len();
         let rejected = batch.rejected.saturating_add(conflicts as u64);
         if mode == TimeseriesApplyMode::RedoInstall {
-            let stored_images = images
-                .iter()
-                .filter(|image| !image.is_empty())
-                .map(|image| image.to_vec())
-                .collect();
-            self.note_redo_ts_install(
-                TsInstallCount {
-                    collection: collection.to_string(),
-                    accepted: accepted as u64,
-                    rejected,
-                },
-                stored_images,
-            );
+            self.note_redo_ts_install(TsInstallCount {
+                collection: collection.to_string(),
+                accepted: accepted as u64,
+                rejected,
+            });
         }
 
         // An image that does not decode refuses the statement below, once the

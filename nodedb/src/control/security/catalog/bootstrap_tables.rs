@@ -74,6 +74,7 @@ pub(super) const BOOTSTRAP_TABLES: &[BootstrapTable] = bootstrap_tables![
     "tenant_group_restore_marks" => super::tenant_group_marks::TENANT_GROUP_RESTORE_MARKS,
     "calvin_applied" => super::calvin_applied::CALVIN_APPLIED,
     "calvin_barrier_logs" => super::calvin_barrier_logs::CALVIN_BARRIER_LOGS,
+    "calvin_frozen_replies" => super::calvin_frozen_replies::CALVIN_FROZEN_REPLIES,
     "calvin_base" => super::calvin_base::CALVIN_BASE,
     "calvin_sequencer_install" => super::calvin_base::CALVIN_SEQUENCER_INSTALL,
     "redo_snapshot_owed" => super::redo_snapshot_owed::REDO_SNAPSHOT_OWED,

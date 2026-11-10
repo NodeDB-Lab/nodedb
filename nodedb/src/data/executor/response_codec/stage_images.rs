@@ -26,6 +26,9 @@ pub(crate) struct StagedPlanImages {
     pub collection: String,
     /// The rows the read policy shows, in the order the plan wrote them.
     pub rows: Vec<StagedImageRow>,
+    /// The lines a timeseries ingest rejects, as its install counts them.
+    /// Zero for every other plan.
+    pub rejected: u64,
 }
 
 /// One row image of a `RETURNING` plan.
@@ -62,6 +65,7 @@ mod tests {
                     ordinal: 0,
                     fields,
                 }],
+                rejected: 0,
             }],
         };
         let bytes = zerompk::to_msgpack_vec(&images).expect("encode images");

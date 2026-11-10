@@ -40,6 +40,11 @@ pub(super) fn add_columnar_keys(keys: &mut WriteKeys, op: &ColumnarOp) -> crate:
 /// Add the write keys of timeseries op `op` to `keys`.
 pub(super) fn add_timeseries_keys(keys: &mut WriteKeys, op: &TimeseriesOp) -> crate::Result<()> {
     match op {
+        // An ingest locks the whole collection. A gated append takes the
+        // collection `Intent`, so no other row or schema change lands
+        // between the stage that previews the rows the install lands and
+        // the install. The `RETURNING` rows and rejected lines the stage
+        // decides are what the install stores.
         TimeseriesOp::Ingest { collection, .. }
         | TimeseriesOp::Truncate { collection, .. }
         | TimeseriesOp::RefreshAggregate { collection, .. } => {

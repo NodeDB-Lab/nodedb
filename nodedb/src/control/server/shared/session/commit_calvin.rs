@@ -65,6 +65,11 @@ pub(super) struct CalvinCommit<'a> {
 /// resolve is authoritative. Once the transaction commits, a collection
 /// whose resolve rejected more lines than its statements reported raises a
 /// notice.
+///
+/// Each statement of the transaction answered its own `RETURNING` rows when
+/// it ran, and the COMMIT answers a tag. So no buffered write carries a list
+/// for a Calvin contract: a contract evaluates the lists again, drawing
+/// their sequences a second time.
 pub(super) async fn run_commit_calvin(
     sessions: &SessionStore,
     session_id: SessionId,
@@ -76,7 +81,9 @@ pub(super) async fn run_commit_calvin(
             Ok(resolved) => resolved,
             Err(e) => return Some(AbortReason::Dispatch(e)),
         };
-    let buffered = resolved.as_deref().unwrap_or(commit.buffered);
+    let mut buffered = resolved.unwrap_or_else(|| commit.buffered.to_vec());
+    strip_returning_contracts(&mut buffered);
+    let buffered = buffered.as_slice();
     let ts_committed = match super::commit::ts_rejections::tasks_rejected_by_collection(buffered) {
         Ok(committed) => committed,
         Err(e) => return Some(AbortReason::Dispatch(e)),
@@ -258,6 +265,16 @@ async fn submit_commit_calvin(
     }
 }
 
+/// `tasks` with no `RETURNING` list for a Calvin contract. Each write keeps
+/// its `RETURNING` spec.
+fn strip_returning_contracts(tasks: &mut [PhysicalTask]) {
+    for task in tasks {
+        if let Some(Some(spec)) = task.plan.returning_slot_mut() {
+            spec.precommit = None;
+        }
+    }
+}
+
 /// The lines and rows the timeseries installs of `applied` rejected, by
 /// collection. Empty when the answer carries no install counts.
 fn applied_rejections(applied: Option<&crate::bridge::envelope::Response>) -> RejectedByCollection {
@@ -285,4 +302,63 @@ fn body_task_indexes(sessions: &SessionStore, session_id: SessionId) -> Vec<u32>
         .into_iter()
         .filter_map(|index| u32::try_from(index).ok())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use nodedb_physical::physical_plan::{
+        DocumentOp, PhysicalPlan, ReturningColumns, ReturningSpec,
+    };
+    use nodedb_physical::physical_task::PostSetOp;
+    use nodedb_types::{DatabaseId, QualifiedCollection, RlsWriteCheck, Surrogate};
+
+    use super::*;
+    use crate::types::{TenantId, VShardId};
+
+    fn task(spec: Option<ReturningSpec>) -> PhysicalTask {
+        PhysicalTask {
+            tenant_id: TenantId::new(1),
+            vshard_id: VShardId::new(0),
+            database_id: DatabaseId::DEFAULT,
+            plan: PhysicalPlan::Document(DocumentOp::PointInsert {
+                collection: QualifiedCollection::new(DatabaseId::DEFAULT, "orders"),
+                document_id: "o1".into(),
+                value: Vec::new(),
+                if_absent: false,
+                surrogate: Surrogate::new(1),
+                returning: spec,
+                rls_filters: Vec::new(),
+                resolved_sum_targets: Vec::new(),
+                deferred_sum_targets: Vec::new(),
+                rls_write_check: RlsWriteCheck::NoPolicyApplies,
+            }),
+            post_set_op: PostSetOp::None,
+            txn_id: None,
+        }
+    }
+
+    /// A buffered write keeps its `RETURNING` spec and loses its contract
+    /// list. A write with no `RETURNING` is unchanged.
+    #[test]
+    fn buffered_writes_carry_no_returning_contract() {
+        let mut tasks = vec![
+            task(Some(ReturningSpec {
+                columns: ReturningColumns::Star,
+                precommit: Some(ReturningColumns::Star),
+            })),
+            task(None),
+        ];
+        strip_returning_contracts(&mut tasks);
+        assert_eq!(
+            tasks[0]
+                .plan
+                .returning_target()
+                .map(|(_, spec)| spec.clone()),
+            Some(ReturningSpec {
+                columns: ReturningColumns::Star,
+                precommit: None,
+            })
+        );
+        assert!(tasks[1].plan.returning_target().is_none());
+    }
 }

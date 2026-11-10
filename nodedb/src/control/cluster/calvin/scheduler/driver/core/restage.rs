@@ -14,6 +14,9 @@
 //! - The verdict is known, so the restage's vote changes nothing, and its
 //!   park probe resumes the txn at once. A restage that stages resolves and
 //!   proposes its redo like any committed slice.
+//! - A slice with a `RETURNING` contract voted commit only once its frozen
+//!   reply was stored, so its restage reads the stored reply. It evaluates
+//!   nothing and draws no sequence value (see `super::returning_eval`).
 //! - Due restages run in sequencer order. A txn waits for every lower txn
 //!   that also waits for its restage.
 //! - The leader halts with `LocalStageFailed` once the restages run out. A

@@ -18,7 +18,6 @@ use crate::data::executor::handlers::control::calvin::CalvinExecCtx;
 use crate::data::executor::handlers::control::calvin::test_support::{
     bulk_delete_plan, point_insert_plan, seed_row,
 };
-use crate::data::executor::handlers::control::calvin_reply::CalvinReply;
 use crate::data::executor::handlers::control::calvin_synthetic_txn_id;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::{DatabaseId, Lsn, TenantId};
@@ -325,33 +324,28 @@ fn a_refused_calvin_install_keeps_the_staged_entry() {
     assert!(!core.txn_overlays.contains_key(&synthetic));
 }
 
-/// A reply that fails to render after a successful install leaves the
-/// install `Ok` and carries the render error for the statement.
+/// The install answers the reply bytes the leader's stage decided, and
+/// reads nothing back from base to answer. A replica whose base row differs
+/// from the staged row still answers the staged bytes.
 #[test]
-fn a_reply_render_error_leaves_the_calvin_install_ok() {
+fn a_calvin_install_answers_the_staged_reply_bytes() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
     let resolved = stage_and_resolve(&mut core, &[point_insert_plan(ORDERS, "o1", 7)]);
-    let unrenderable = CalvinReplySpec::from(&CalvinReply::unrenderable_for_test(ORDERS));
+    let staged_rows = vec![0x91, 0xa6, b's', b't', b'a', b'g', b'e', b'd'];
 
     let plan = install_plan(
         resolved.redo,
         vec![ORDERS.to_string()],
         Vec::new(),
         1,
-        unrenderable,
+        CalvinReplySpec::Rows(staged_rows.clone()),
     );
     let installed = run_at(&mut core, &plan, 47);
 
-    assert_eq!(installed.status, Status::Ok);
-    assert!(
-        matches!(
-            installed.error_code.as_deref(),
-            Some(ErrorCode::Internal { .. })
-        ),
-        "{:?}",
-        installed.error_code
-    );
+    assert_eq!(installed.status, Status::Ok, "{:?}", installed.error_code);
+    assert!(installed.error_code.is_none(), "{:?}", installed.error_code);
+    assert_eq!(installed.payload.as_bytes(), staged_rows.as_slice());
     assert!(base_row(&core, 7).is_some());
     assert!(!core.calvin.commit_pending.contains_key(&(1, 0, VSHARD)));
 }

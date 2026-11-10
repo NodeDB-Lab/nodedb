@@ -58,6 +58,7 @@ mod calvin_executor_dependent_read;
 mod calvin_executor_ollp;
 mod calvin_executor_ollp_property;
 mod calvin_executor_panic_recovery;
+mod calvin_executor_returning_precommit;
 mod calvin_executor_static_multishard;
 mod calvin_routed_refusal;
 mod calvin_scheduler_restart;
