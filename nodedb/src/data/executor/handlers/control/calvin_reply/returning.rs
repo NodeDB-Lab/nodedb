@@ -3,12 +3,17 @@
 //! The reply and the staged images of one Calvin `RETURNING` plan.
 //!
 //! Each image is the full source row before projection. The reply projects
-//! the same documents, so the two never disagree on a row.
+//! the same documents, so the two never disagree on a row. A document or
+//! CRDT after-image reply reads its rows from base after the install. Its
+//! images are the rows that install stores, derived by the install's own
+//! steps (`install_image`).
 
 use nodedb_physical::physical_plan::{PhysicalPlan, TimeseriesOp};
 use nodedb_types::{Surrogate, Value};
 
+use super::crdt_writes::StagedCrdtWrite;
 use super::images::{ReturningImageRow, RowLocation, staged_row_image};
+use super::install_image::WrittenRow;
 use super::reply::{CalvinReply, PostImages};
 use super::staged_images::{PlanRows, plan_images};
 use super::target::{CollKey, ReplyImage, ReturningTarget, RowEngine};
@@ -29,18 +34,19 @@ use crate::util::rmpv_value::rmpv_to_value;
 pub(super) struct PlanReturning {
     /// The reply the plan answers with.
     pub reply: CalvinReply,
-    /// The plan's staged images. `None` for a document or CRDT write, whose
-    /// images are read from base after the install.
+    /// The plan's staged images.
     pub images: Option<StagedPlanImages>,
 }
 
 /// The plan a `RETURNING` reply stages for: its target, its staging start in
-/// the overlay journal, and its index in the stage's local slice.
+/// the overlay journal, its index in the stage's local slice, and the CRDT
+/// row writes of the plans staged before it.
 pub(super) struct ReturningPlan<'p, 't> {
     pub plan: &'p PhysicalPlan,
     pub target: &'t ReturningTarget<'p>,
     pub marker: usize,
     pub index: u32,
+    pub earlier_crdt: &'t [StagedCrdtWrite],
 }
 
 impl CoreLoop {
@@ -57,6 +63,7 @@ impl CoreLoop {
             target,
             marker,
             index,
+            earlier_crdt,
         } = at_plan;
         let database_id = task.request.database_id;
         let coll_key: CollKey = (
@@ -90,6 +97,19 @@ impl CoreLoop {
                 self.calvin_image_docs(&at, &rows)?
             }
             (ReplyImage::After, RowEngine::Document | RowEngine::Crdt) => {
+                // The reply reads each row from base after the install. The
+                // images are the rows the install stores, derived now.
+                let written: Vec<WrittenRow<'_, '_>> = written.collect();
+                let rows = self.calvin_installed_rows(&at, plan, earlier_crdt, &written)?;
+                let rows = self.calvin_image_docs(&at, &rows)?;
+                let staged_docs = rows.docs.clone();
+                let images = plan_images(
+                    index,
+                    target.collection,
+                    target.rls_filters,
+                    rows,
+                    &self.crs_context(),
+                )?;
                 return Ok(PlanReturning {
                     reply: CalvinReply::PostImages(PostImages {
                         spec: target.spec.clone(),
@@ -97,10 +117,12 @@ impl CoreLoop {
                         collection: target.collection.to_string(),
                         engine: target.engine,
                         rows: written
+                            .iter()
                             .map(|(slot, _)| (slot.doc_id.clone(), Surrogate::new(slot.surrogate)))
                             .collect(),
+                        staged_docs: Some(staged_docs),
                     }),
-                    images: None,
+                    images: Some(images),
                 });
             }
             (ReplyImage::After, RowEngine::Kv | RowEngine::Vector) => {
@@ -426,19 +448,22 @@ mod tests {
         assert_eq!(field(&row.fields, "note"), Some(&text("noted")));
     }
 
-    /// A document write's after-image is read from base after the install,
-    /// so it stages none. A delete stages its before-image.
+    /// A document insert stages the row its install stores. A delete
+    /// stages its before-image: the row the insert staged.
     #[test]
-    fn a_document_delete_stages_its_before_image_and_an_insert_none() {
-        let images = only(stage(&[
+    fn a_document_insert_stages_its_row_and_a_delete_its_before_image() {
+        let images = stage(&[
             doc_insert("o1", 7, "first", false, true),
             doc_delete("o1", 7),
-        ]));
-        assert_eq!(images.plan, 1);
-        assert_eq!(images.rows.len(), 1);
-        let row = &images.rows[0];
-        assert_eq!(row.key, b"o1".to_vec());
-        assert_eq!(field(&row.fields, "a"), Some(&text("first")));
+        ]);
+        let plans: Vec<u32> = images.plans.iter().map(|plan| plan.plan).collect();
+        assert_eq!(plans, vec![0, 1]);
+        for plan in &images.plans {
+            assert_eq!(plan.rows.len(), 1, "{plan:?}");
+            let row = &plan.rows[0];
+            assert_eq!(row.key, b"o1".to_vec());
+            assert_eq!(field(&row.fields, "a"), Some(&text("first")));
+        }
     }
 
     #[test]

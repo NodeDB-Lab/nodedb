@@ -7,6 +7,7 @@ mod columnar_ordinal;
 mod crdt;
 mod doc_ordinal;
 mod document;
+mod document_truncate;
 mod edge_ordinal;
 mod entry;
 mod graph;
@@ -26,3 +27,5 @@ mod text;
 mod timeseries;
 mod vector;
 mod vector_primary;
+
+pub(in crate::data::executor) use document::redo_put_value;

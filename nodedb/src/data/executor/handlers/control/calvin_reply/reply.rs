@@ -5,8 +5,9 @@
 
 use nodedb_physical::physical_plan::ReturningSpec;
 use nodedb_query::msgpack_scan::{write_kv_i64, write_kv_str, write_map_header};
-use nodedb_types::{RowIdentity, Surrogate};
+use nodedb_types::{RowIdentity, Surrogate, Value};
 
+use super::crdt_writes::StagedCrdtWrite;
 use super::target::RowEngine;
 use crate::control::server::shared::sql::affected_payload::AffectedFields;
 use crate::data::executor::response_codec::{StagedPlanImages, StagedReturningImages};
@@ -52,6 +53,7 @@ impl CalvinReply {
             collection: collection.to_string(),
             engine: RowEngine::Columnar,
             rows: vec![(RowIdentity::from_user_key("r1"), Surrogate::new(1))],
+            staged_docs: None,
         })
     }
 
@@ -98,6 +100,9 @@ pub(in crate::data::executor) struct CalvinStaging {
     /// The `RETURNING` images of every plan staged so far, in plan order.
     /// They ride the stage response, beside `reply`.
     pub(super) images: Vec<StagedPlanImages>,
+    /// The CRDT row writes of every plan staged so far, in plan order. A
+    /// CRDT image folds the earlier writes to its row.
+    pub(super) crdt_writes: Vec<StagedCrdtWrite>,
 }
 
 impl CalvinStaging {
@@ -275,4 +280,9 @@ pub(in crate::data::executor) struct PostImages {
     /// Each row the plan wrote: its client identity and its surrogate, in
     /// the order the plan wrote them.
     pub(super) rows: Vec<(RowIdentity, Surrogate)>,
+    /// The full source document of each row as its install stores it,
+    /// derived when the plan staged. A later plan of the slice that rewrites
+    /// a row answers these. `None` once the reply crossed the log: an
+    /// install reads its rows from base.
+    pub(super) staged_docs: Option<Vec<Value>>,
 }

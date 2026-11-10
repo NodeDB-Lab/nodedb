@@ -24,7 +24,9 @@ use super::columnar_image::{ColumnarCollectionImages, ColumnarCollections};
 use super::edge_ordinal::{EdgeOrdinals, StoredEdges};
 use super::graph::EdgeIdentityKey;
 use super::vector_primary::VectorPrimaryCollections;
-use super::{array, columnar_image, crdt, document, graph, kv, spatial, text, vector};
+use super::{
+    array, columnar_image, crdt, document, document_truncate, graph, kv, spatial, text, vector,
+};
 
 impl CoreLoop {
     /// Resolve a committing session transaction: check its guards against
@@ -161,7 +163,7 @@ impl CoreLoop {
         let mut ops: Vec<RedoSubRecord> = Vec::new();
         // The declared primary key of each truncated document collection,
         // from the plan: names every removed base row in its redo entry.
-        let truncate_primary_keys = document::truncate_declared_primary_keys(plans);
+        let truncate_primary_keys = document_truncate::truncate_declared_primary_keys(plans);
         // Unkeyed timeseries ingests seen per collection and the schema each
         // collection's last ingest resolved to, in plan order.
         let mut timeseries_state = super::timeseries::TimeseriesResolveState::default();
@@ -295,8 +297,8 @@ impl CoreLoop {
                         &rows,
                         txn_ordinal,
                     )?;
-                    document::serialize_truncated_base_rows(
-                        document::TruncatedBaseRows {
+                    document_truncate::serialize_truncated_base_rows(
+                        document_truncate::TruncatedBaseRows {
                             collection,
                             rows: &rows,
                             strict_schema: strict_schema.as_ref(),

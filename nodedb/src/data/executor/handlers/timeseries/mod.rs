@@ -28,8 +28,11 @@ pub mod ingest_formats;
 mod ingest_resolved;
 mod ingest_resolved_fit;
 mod ingest_resolved_outcome;
+mod ingest_resolved_preview;
 mod ingest_resolved_returning;
 mod ingest_resolved_support;
+#[cfg(test)]
+mod ingest_resolved_test_support;
 mod ingest_schema;
 mod last_value_load;
 pub mod merge_commit;

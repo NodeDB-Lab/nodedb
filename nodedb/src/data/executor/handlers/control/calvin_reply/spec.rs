@@ -87,6 +87,7 @@ impl From<CalvinReplySpec> for CalvinReply {
                     .into_iter()
                     .map(|row| (RowIdentity::from_user_key(row.identity), row.surrogate))
                     .collect(),
+                staged_docs: None,
             }),
             // An ordinal past the address space names no install, so the
             // render reports the install absent.

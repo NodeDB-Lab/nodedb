@@ -45,6 +45,24 @@ impl CoreLoop {
         epoch_system_ms: i64,
         lsn: u64,
     ) -> Response {
+        let (staged, installed) =
+            self.calvin_commit_staged_for_test(task, tid, plans, (epoch, epoch_system_ms), lsn);
+        installed.unwrap_or(staged)
+    }
+
+    /// Commit `plans` like [`Self::calvin_commit_at_for_test`] at `(epoch,
+    /// epoch_system_ms)`. Returns the stage's answer, which carries the
+    /// slice's `RETURNING` images, beside the first refusal of the resolve or
+    /// the install, else the install's answer. A refused stage answers
+    /// `None` beside it.
+    pub(in crate::data::executor) fn calvin_commit_staged_for_test(
+        &mut self,
+        task: &ExecutionTask,
+        tid: u64,
+        plans: &[PhysicalPlan],
+        (epoch, epoch_system_ms): (u64, i64),
+        lsn: u64,
+    ) -> (Response, Option<Response>) {
         let ctx = CalvinExecCtx {
             epoch,
             position: 0,
@@ -59,8 +77,22 @@ impl CoreLoop {
             &[],
         );
         if staged.status != Status::Ok {
-            return staged;
+            return (staged, None);
         }
+        let installed =
+            self.calvin_install_staged_for_test(task, plans, (epoch, epoch_system_ms), lsn);
+        (staged, Some(installed))
+    }
+
+    /// Resolve the slice staged at `(epoch, 0)` and install its redo record
+    /// at `lsn`. Returns the first refusal, or the install's answer.
+    fn calvin_install_staged_for_test(
+        &mut self,
+        task: &ExecutionTask,
+        plans: &[PhysicalPlan],
+        (epoch, epoch_system_ms): (u64, i64),
+        lsn: u64,
+    ) -> Response {
         let resolved = self.execute_calvin_resolve(task, epoch, 0);
         if resolved.status != Status::Ok {
             return resolved;

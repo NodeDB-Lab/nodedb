@@ -21,7 +21,7 @@
 //! collection between predicting and applying.
 
 use loro::LoroValue;
-use nodedb_crdt::state::RowWrite;
+use nodedb_crdt::state::{RowWrite, ScalarRowBase};
 
 use super::apply_validated::StagedInstall;
 use super::core::{TenantCrdtEngine, loro_root};
@@ -38,6 +38,16 @@ impl TenantCrdtEngine {
         self.state_mut(collection)?
             .predict_row(loro_root(collection), row_id, write)
             .map_err(crate::Error::Crdt)
+    }
+
+    /// The base a scalar write of row `row_id` of `collection` reads, for a
+    /// prediction that folds several writes to the row before any runs.
+    /// `None` when the row is absent: a write there makes a new row, as it
+    /// does in a collection that holds no document yet.
+    pub fn scalar_row_base(&self, collection: &str, row_id: &str) -> Option<ScalarRowBase> {
+        self.collections
+            .get(collection)
+            .and_then(|state| state.scalar_row_base(loro_root(collection), row_id))
     }
 
     /// Run `write` on row `row_id` of `collection`.

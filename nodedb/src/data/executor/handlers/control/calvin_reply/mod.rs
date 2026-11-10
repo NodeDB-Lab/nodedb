@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: BUSL-1.1
 
+mod crdt_writes;
 mod edge_count;
 #[cfg(test)]
 mod fixtures;
 mod images;
+mod ingest_images;
+mod install_image;
 mod payload;
 mod reply;
 mod returning;

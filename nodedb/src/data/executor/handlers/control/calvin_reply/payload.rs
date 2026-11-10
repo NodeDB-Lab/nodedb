@@ -3,6 +3,7 @@
 //! The payload an installed Calvin slice answers with.
 
 use super::images::{ReturningImageRow, RowLocation};
+use super::ingest_images::stored_ts_docs;
 use super::reply::{CalvinReply, InstalledTimeseries};
 use crate::bridge::envelope::ErrorCode;
 use crate::control::server::shared::sql::affected_payload::read_affected_fields;
@@ -12,7 +13,6 @@ use crate::data::executor::handlers::transaction::redo_apply::TsInstalled;
 use crate::data::executor::response_codec::IngestRejection;
 use crate::data::executor::task::ExecutionTask;
 use crate::engine::timeseries::install_counts::TsInstallCounts;
-use crate::util::rmpv_value::rmpv_to_value;
 
 impl CoreLoop {
     /// The payload `reply` answers with once the redo install has written
@@ -109,17 +109,7 @@ fn installed_timeseries_rows(
             ),
         });
     };
-    let docs = install
-        .images
-        .iter()
-        .map(|image| {
-            crate::util::bounded_msgpack::read_value(image)
-                .map(|row| rmpv_to_value(&row))
-                .map_err(|e| ErrorCode::Internal {
-                    detail: format!("calvin RETURNING: invalid stored row image: {e}"),
-                })
-        })
-        .collect::<Result<Vec<_>, ErrorCode>>()?;
+    let docs = stored_ts_docs(&install.images)?;
     let rejected = install.count.rejected;
     let rejection = (rejected > 0).then(|| IngestRejection {
         collection: installed.collection.clone(),

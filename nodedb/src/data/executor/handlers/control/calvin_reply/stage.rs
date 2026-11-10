@@ -22,11 +22,14 @@
 //!
 //! A `RETURNING` plan also stages its images: the full source rows its reply
 //! projects. They ride the stage response, keyed by the plan's slice index.
-//! A document or CRDT after-image and a resolved ingest's rows are read after
-//! the install, so those plans stage none.
+//! A document or CRDT after-image and a resolved ingest's rows are the rows
+//! the install stores, derived by the install's own steps when the plan
+//! stages (`install_image`, `crdt_writes`, `ingest_images`). The reply of
+//! those plans still reads what the install stored.
 
 use nodedb_physical::physical_plan::{PhysicalPlan, TimeseriesOp};
 
+use super::crdt_writes::StagedCrdtWrite;
 use super::edge_count::owned_edge_count;
 use super::reply::{CalvinReply, CalvinStaging, InstalledTimeseries};
 use super::returning::ReturningPlan;
@@ -79,6 +82,9 @@ impl CoreLoop {
             // A resolved ingest's install decides which rows land and how
             // they read, so the reply renders them from that install.
             Some(target) if is_resolved_ingest(plan) => {
+                let images =
+                    self.calvin_resolved_ingest_images(task, tid, plan, &target, plan_index)?;
+                staging.images.push(images);
                 *reply = CalvinReply::InstalledTimeseries(InstalledTimeseries {
                     spec: target.spec.clone(),
                     rls_filters: target.rls_filters.to_vec(),
@@ -96,6 +102,7 @@ impl CoreLoop {
                         target: &target,
                         marker,
                         index: plan_index,
+                        earlier_crdt: &staging.crdt_writes,
                     },
                 )?;
                 *reply = staged.reply;
@@ -130,6 +137,8 @@ impl CoreLoop {
                 }
             }
         }
+        // A later plan's CRDT image folds this plan's write to the row.
+        staging.crdt_writes.extend(StagedCrdtWrite::of_plan(plan));
         Ok(())
     }
 }

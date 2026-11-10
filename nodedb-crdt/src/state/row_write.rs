@@ -22,14 +22,15 @@
 //! - `ListDelete` and `ListMove` need the list, and an index inside it. A
 //!   move onto its own index needs the row only, and changes nothing.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
-use loro::{LoroMap, LoroValue, ValueOrContainer};
+use loro::{LoroValue, ValueOrContainer};
 
 use crate::error::{CrdtError, Result};
 use crate::list_ops::{block_list_row, movable_list_at, path_unresolved, split_list_path};
 
 use super::core::CrdtState;
+use super::scalar_row::ScalarRowBase;
 
 /// A write to one row of a collection.
 #[derive(Debug, Clone, Copy)]
@@ -63,19 +64,11 @@ impl RowWrite<'_> {
 }
 
 /// The entries of a map value, owned.
-fn entries(value: LoroValue) -> HashMap<String, LoroValue> {
+pub(super) fn map_entries(value: LoroValue) -> HashMap<String, LoroValue> {
     match value {
         LoroValue::Map(map) => map.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
         _ => HashMap::new(),
     }
-}
-
-/// The keys of `row` that hold a nested container.
-fn container_keys(row: &LoroMap) -> HashSet<String> {
-    row.keys()
-        .filter(|key| matches!(row.get(key), Some(ValueOrContainer::Container(_))))
-        .map(|key| key.to_string())
-        .collect()
 }
 
 impl CrdtState {
@@ -162,27 +155,9 @@ impl CrdtState {
         fields: &[(&str, LoroValue)],
         replace: bool,
     ) -> Result<LoroValue> {
-        let (mut row, containers) = match self.doc.get_map(collection).get(row_id) {
-            Some(ValueOrContainer::Container(loro::Container::Map(map))) => {
-                (entries(map.get_deep_value()), container_keys(&map))
-            }
-            // An absent or non-map row becomes a new map.
-            _ => (HashMap::new(), HashSet::new()),
-        };
-        if let Some((field, _)) = fields.iter().find(|(field, _)| containers.contains(*field)) {
-            return Err(CrdtError::ScalarFieldShadowsContainer {
-                collection: collection.to_string(),
-                row_id: row_id.to_string(),
-                field: (*field).to_string(),
-            });
-        }
-        if replace {
-            row.retain(|key, _| containers.contains(key));
-        }
-        for (field, value) in fields {
-            row.insert((*field).to_string(), value.clone());
-        }
-        Ok(LoroValue::Map(row.into()))
+        // An absent or non-map row becomes a new map.
+        let base = self.scalar_row_base(collection, row_id);
+        ScalarRowBase::predict(base.as_ref(), collection, row_id, fields, replace)
     }
 
     /// The deep row with `edit` applied to the list at `list_path`. `create`
@@ -223,7 +198,7 @@ impl CrdtState {
         };
         edit(&mut list)?;
 
-        let mut deep = entries(row.get_deep_value());
+        let mut deep = map_entries(row.get_deep_value());
         set_at_path(&mut deep, &parents, last, LoroValue::List(list.into()));
         Ok(LoroValue::Map(deep.into()))
     }
@@ -253,7 +228,7 @@ fn set_at_path(
             map.insert(last.to_string(), value);
         }
         Some((segment, rest)) => {
-            let mut child = map.remove(*segment).map(entries).unwrap_or_default();
+            let mut child = map.remove(*segment).map(map_entries).unwrap_or_default();
             set_at_path(&mut child, rest, last, value);
             map.insert((*segment).to_string(), LoroValue::Map(child.into()));
         }
