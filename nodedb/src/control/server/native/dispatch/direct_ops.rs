@@ -427,19 +427,12 @@ pub(crate) async fn handle_direct_op(
                 // count: an implicit-edge cleanup task is not a row.
                 Ok(apply) => {
                     let database_id = ctx.database_id();
-                    let sequences = session_sequences(ctx, database_id);
+                    let session = session_sequences(ctx, database_id);
                     super::conversion::calvin_native_response(
                         seq,
                         apply,
                         &plans,
-                        &CalvinFoldCtx {
-                            projection: None,
-                            state: ctx.state,
-                            tenant_id,
-                            database_id,
-                            auth: ctx.auth_context(),
-                            sequences: Some(&sequences),
-                        },
+                        &CalvinFoldCtx { session: &session },
                     )
                 }
                 Err(e) => error_to_native(seq, &e),

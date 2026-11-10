@@ -77,6 +77,7 @@ pub(in crate::control::cluster::calvin::scheduler::driver::core) fn contract(
                 payload_bytes: 1 << 20,
             },
             announced: None,
+            deferred_currval: Vec::new(),
         }],
         roles: Vec::new(),
         sequence_values: Vec::new(),

@@ -10,12 +10,17 @@
 
 use std::collections::BTreeSet;
 
-use nodedb_cluster::calvin::types::{PlanReturning, ReturningContract, SequenceValue, TxClass};
+use nodedb_cluster::calvin::types::{
+    PlanReturning, ReturningContract, ReturningContractLimits, SequenceValue, TxClass,
+};
 use nodedb_physical::physical_plan::PhysicalPlan;
 use nodedb_query::expr::SqlExpr;
 use nodedb_types::{QualifiedCollection, ReturningColumns, ReturningItem, ReturningSpec, Value};
 
 use crate::Error;
+use crate::control::cluster::calvin::scheduler::driver::core::routing::{
+    PlanRouting, plan_vshard_in_database,
+};
 use crate::control::security::rls::compile::declared_columns;
 use crate::control::server::shared::returning::precommit::ReturningLimits;
 use crate::control::server::shared::session::announced_returning::announced_returning;
@@ -39,6 +44,8 @@ pub(super) fn stamp_returning_contract(
     // The statement's one `RETURNING` list, announced before any row.
     let announced = announced_returning();
     let mut entries = Vec::new();
+    // The vShards each entry's plan routes to, parallel to `entries`.
+    let mut participants = Vec::new();
     let mut refs = SequenceRefs::default();
     for (index, plan) in plans.iter().enumerate() {
         let Some((collection, spec)) = plan.returning_target() else {
@@ -61,6 +68,7 @@ pub(super) fn stamp_returning_contract(
         .map(|column| column.name)
         .collect();
         named_sequences(&spec, &mut refs)?;
+        participants.push(plan_participants(plan, tx_class.database_id));
         let plan_index = u32::try_from(index).map_err(|_| Error::Internal {
             detail: "calvin returning contract: plan index exceeds u32".to_owned(),
         })?;
@@ -71,11 +79,20 @@ pub(super) fn stamp_returning_contract(
             source_columns,
             limits,
             announced: announced.clone(),
+            deferred_currval: Vec::new(),
         });
     }
     if entries.is_empty() {
         return Ok(());
     }
+    // Several plans share the statement's limits, and the participants of
+    // one plan share its part: each participant refuses past its share
+    // before it votes, so the whole answer stays within them.
+    let share = limits_share(limits, entries.len());
+    for (entry, participants) in entries.iter_mut().zip(participants) {
+        entry.limits = limits_share(share, participants);
+    }
+    super::returning_deferral::defer_currval(&mut entries)?;
     let sequence_values = sequence_snapshot(tx_class, &refs);
     tx_class.set_returning(Some(ReturningContract {
         plans: entries,
@@ -83,6 +100,35 @@ pub(super) fn stamp_returning_contract(
         sequence_values,
     }));
     Ok(())
+}
+
+/// Each of `parts` parts' share of `limits`: the plans of a statement, or
+/// the participants of one plan. Rows, cells and payload bytes add up across
+/// the parts' result sets, so each part takes an equal share, rounded down.
+/// Columns bound each set alone, so each part takes them all.
+fn limits_share(limits: ReturningContractLimits, parts: usize) -> ReturningContractLimits {
+    let parts = u64::try_from(parts).unwrap_or(u64::MAX).max(1);
+    ReturningContractLimits {
+        rows: limits.rows / parts,
+        columns: limits.columns,
+        cells: limits.cells / parts,
+        payload_bytes: limits.payload_bytes / parts,
+    }
+}
+
+/// The number of vShards `plan` routes to in `database_id`, each a
+/// participant that evaluates its own rows of the plan. A plan that routes
+/// to none counts one: the scheduler refuses it before any evaluation.
+fn plan_participants(plan: &PhysicalPlan, database_id: nodedb_types::DatabaseId) -> usize {
+    match plan_vshard_in_database(plan, database_id) {
+        PlanRouting::Vshards(vshards) => vshards
+            .iter()
+            .map(|vshard| vshard.as_u32())
+            .collect::<BTreeSet<u32>>()
+            .len()
+            .max(1),
+        PlanRouting::ControlPlaneOnly | PlanRouting::NotAWrite | PlanRouting::Unroutable(_) => 1,
+    }
 }
 
 /// The `currval` the writer's session holds for the sequences `refs` names,
@@ -195,6 +241,66 @@ mod tests {
     use nodedb_query::expr::BinaryOp;
 
     use super::*;
+
+    /// A plan that routes to two vShards splits its share between them: the
+    /// two participants together answer at most the plan's share.
+    #[test]
+    fn a_plan_on_several_vshards_splits_its_share() {
+        use nodedb_physical::physical_plan::GraphOp;
+        use nodedb_types::Surrogate;
+        let vshard = |key: &str| crate::types::VShardId::from_key(key.as_bytes()).as_u32();
+        let dst = (0..2048)
+            .map(|i| format!("node_{i}"))
+            .find(|key| vshard(key) != vshard("node_src"))
+            .expect("a key on another vShard");
+        let plan = PhysicalPlan::Graph(GraphOp::EdgePut {
+            collection: QualifiedCollection::new(nodedb_types::DatabaseId::DEFAULT, "follows"),
+            src_id: "node_src".to_owned(),
+            label: "knows".to_owned(),
+            dst_id: dst,
+            properties: Vec::new(),
+            src_surrogate: Surrogate::new(1),
+            dst_surrogate: Surrogate::new(2),
+            valid_from_ms: None,
+            valid_until_ms: None,
+        });
+        let participants = plan_participants(&plan, nodedb_types::DatabaseId::DEFAULT);
+        assert_eq!(participants, 2, "an edge on two homes has two participants");
+        let limits = ReturningContractLimits {
+            rows: 12,
+            columns: 8,
+            cells: 96,
+            payload_bytes: 1200,
+        };
+        let share = limits_share(limits, participants);
+        let total = |per: u64| per * u64::try_from(participants).expect("a count");
+        assert!(total(share.rows) <= limits.rows);
+        assert!(total(share.cells) <= limits.cells);
+        assert!(total(share.payload_bytes) <= limits.payload_bytes);
+        assert_eq!(share.columns, limits.columns);
+        assert_eq!(limits_share(limits, 3).rows, 4);
+    }
+
+    /// Two plans each take half the rows, cells and bytes, and every column.
+    #[test]
+    fn several_plans_share_the_limits() {
+        let limits = ReturningContractLimits {
+            rows: 5,
+            columns: 8,
+            cells: 40,
+            payload_bytes: 1000,
+        };
+        assert_eq!(limits_share(limits, 1), limits);
+        assert_eq!(
+            limits_share(limits, 2),
+            ReturningContractLimits {
+                rows: 2,
+                columns: 8,
+                cells: 20,
+                payload_bytes: 500,
+            }
+        );
+    }
 
     fn computed(name: &str, expression: SqlExpr) -> ReturningItem {
         ReturningItem::Computed {

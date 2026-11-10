@@ -10,7 +10,6 @@
 //! through Calvin with two slices. A write of a cross-shard sum source commits
 //! through Calvin too, so two writes of `ptv_post` share one slice.
 
-use nodedb::control::planner::calvin::settling_writes::SEVERAL_RETURNING_REFUSAL;
 use nodedb_test_support::native_harness::{open_trust_session, send_sql};
 use nodedb_types::id::DatabaseId;
 
@@ -252,24 +251,86 @@ async fn native_one_slice_of_two_verbs_answers_mixed_with_the_sum() {
     assert_eq!(balance(&server, "acc").await, "1", "e1 is gone");
 }
 
-/// Each write of a request owns its own `RETURNING` clause. One transaction
-/// answers one set of rows, so two writes that each carry one are refused
-/// whole, over two slices or one.
+/// Each write of a request owns its own `RETURNING` clause. Two such writes
+/// on two slices commit through one Calvin transaction, and the request
+/// answers every write's rows in statement order, as the per-task path does.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn returning_on_several_calvin_tasks_is_refused_whole() {
+async fn returning_on_several_calvin_tasks_answers_every_row() {
     let (server, other) = fixture().await;
     let sql = format!(
-        "{} RETURNING v; {} RETURNING v",
+        "{} RETURNING id, v; {} RETURNING id, v",
         update(ONE, "r1"),
-        update(&other, "r1")
+        update(&other, "r2")
     );
 
     let (status, body) = server.http_query(&sql).await;
 
-    assert_eq!(status, 501, "feature not supported: {body}");
-    assert!(body.contains(SEVERAL_RETURNING_REFUSAL), "{body}");
-    assert_eq!(values(&server, ONE).await, ["a", "b"]);
-    assert_eq!(values(&server, &other).await, ["a", "b"]);
+    assert_eq!(status, 200, "{body}");
+    let answer: serde_json::Value = serde_json::from_str(&body).expect("a JSON answer");
+    let rows: Vec<(Option<&str>, Option<&str>)> = answer["rows"]
+        .as_array()
+        .unwrap_or_else(|| panic!("rows in {body}"))
+        .iter()
+        .map(|row| (row["id"].as_str(), row["v"].as_str()))
+        .collect();
+    assert_eq!(
+        rows,
+        [(Some("r1"), Some("x")), (Some("r2"), Some("x"))],
+        "{body}"
+    );
+    assert_eq!(values(&server, ONE).await, ["x", "b"]);
+    assert_eq!(values(&server, &other).await, ["a", "x"]);
+
+    let mut stream = open_trust_session(server.native_port, "nodedb").await;
+    let sql = format!(
+        "{} RETURNING id; {} RETURNING id",
+        update(ONE, "r2"),
+        update(&other, "r1")
+    );
+    let response = send_sql(&mut stream, 2, &sql).await;
+    assert!(response.error.is_none(), "{sql}: {:?}", response.error);
+    assert_eq!(response.columns, Some(vec!["id".to_owned()]));
+    assert_eq!(
+        response.rows,
+        Some(vec![
+            vec![nodedb_types::Value::String("r2".into())],
+            vec![nodedb_types::Value::String("r1".into())],
+        ])
+    );
+    assert_eq!(values(&server, ONE).await, ["x", "x"]);
+    assert_eq!(values(&server, &other).await, ["x", "x"]);
+}
+
+/// A later statement's `currval` sees an earlier statement's `nextval`, as
+/// the statements run in order, though another participant drew it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_later_currval_sees_an_earlier_nextval_on_another_slice() {
+    let (server, other) = fixture().await;
+    server
+        .exec("CREATE SEQUENCE cc_seq")
+        .await
+        .expect("create the sequence");
+    let sql = format!(
+        "{} RETURNING id, nextval('cc_seq') AS n; {} RETURNING id, currval('cc_seq') AS n",
+        update(ONE, "r1"),
+        update(&other, "r2")
+    );
+
+    let (status, body) = server.http_query(&sql).await;
+
+    assert_eq!(status, 200, "{body}");
+    let answer: serde_json::Value = serde_json::from_str(&body).expect("a JSON answer");
+    let rows: Vec<(Option<&str>, Option<i64>)> = answer["rows"]
+        .as_array()
+        .unwrap_or_else(|| panic!("rows in {body}"))
+        .iter()
+        .map(|row| (row["id"].as_str(), row["n"].as_i64()))
+        .collect();
+    assert_eq!(
+        rows,
+        [(Some("r1"), Some(1)), (Some("r2"), Some(1))],
+        "{body}"
+    );
 }
 
 /// One `RETURNING` write of a cross-shard sum source answers its own rows, and

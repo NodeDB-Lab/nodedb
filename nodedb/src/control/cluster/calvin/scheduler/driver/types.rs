@@ -43,9 +43,9 @@ pub(super) struct PendingTxn {
     /// primary write that changes a tenant row. A schema install raises none.
     pub raises_write_mark: bool,
     /// Whether this vShard's slice carries a RETURNING-bearing write (a plan
-    /// whose applied response is DATA-ROWs, not a bare affected-count). Two
-    /// returning-bearing participants for one txn are an unsupported
-    /// cross-shard RETURNING union.
+    /// whose applied response is DATA-ROWs, not a bare affected-count). Its
+    /// deposit keeps its own place, so the coordinator answers the rows of
+    /// every such participant.
     pub has_returning: bool,
     /// Commit-resolution state of the txn.
     pub commit_state: CommitState,

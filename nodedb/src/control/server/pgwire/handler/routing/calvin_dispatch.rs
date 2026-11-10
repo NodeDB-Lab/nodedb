@@ -17,7 +17,7 @@ use crate::control::security::identity::AuthenticatedIdentity;
 use crate::control::security::request_scope::RequestAuthScope;
 use crate::control::sequence::SessionSequenceAccess;
 use crate::control::server::response_shape::calvin_fold::{
-    CalvinFoldCtx, CalvinFoldError, fold_calvin_batch,
+    CalvinBatchFold, CalvinFoldCtx, CalvinFoldError, fold_calvin_batch,
 };
 use crate::control::server::shared::metering::{PlanMeteringInfo, meter_dispatch};
 use crate::control::server::shared::session::announced_returning::with_announced_returning;
@@ -77,7 +77,6 @@ pub(super) struct CalvinDispatchSession<'a> {
     pub identity: &'a AuthenticatedIdentity,
     pub session_id: SessionId,
     pub result_formats: &'a pgwire::api::portal::Format,
-    pub auth: &'a crate::control::security::auth_context::AuthContext,
     /// The statement's announced output columns, when it announced any.
     pub projection: Option<&'a crate::control::server::response_shape::schema::OutputSchema>,
 }
@@ -99,7 +98,6 @@ impl NodeDbPgHandler {
             identity,
             session_id,
             result_formats,
-            auth,
             projection,
         } = session;
         let cross_shard_mode = self.sessions.cross_shard_txn_mode(session_id);
@@ -181,8 +179,6 @@ impl NodeDbPgHandler {
                 CalvinBatchShaping {
                     metering_scope,
                     result_formats,
-                    auth,
-                    projection,
                     tenant_id,
                     database_id,
                     session_id,
@@ -244,8 +240,6 @@ impl NodeDbPgHandler {
             CalvinBatchShaping {
                 metering_scope,
                 result_formats,
-                auth,
-                projection,
                 tenant_id,
                 database_id,
                 session_id,
@@ -266,45 +260,39 @@ impl NodeDbPgHandler {
         let CalvinBatchShaping {
             metering_scope,
             result_formats,
-            auth,
-            projection,
             tenant_id,
             database_id,
             session_id,
         } = shaping;
-        // A RETURNING expression resolves `nextval`/`currval` against this
-        // session, as the single-shard dispatch loop does.
-        let sequences = SessionSequenceAccess::for_session(
+        // The session takes the sequence values the frozen RETURNING rows
+        // drew, as the single-shard dispatch loop's evaluation records them,
+        // in the database the writes ran in.
+        let write_database = tasks.first().map_or(database_id, |task| task.database_id);
+        let session = SessionSequenceAccess::for_session(
             &self.state,
             self.sessions.sequence_values(session_id),
-            database_id,
+            write_database,
             tenant_id,
         );
         let plans: Vec<&crate::bridge::envelope::PhysicalPlan> =
             tasks.iter().map(|task| &task.plan).collect();
-        let fold = fold_calvin_batch(
-            &plans,
-            apply_resp,
-            &CalvinFoldCtx {
-                projection,
-                state: &self.state,
-                tenant_id,
-                database_id,
-                auth,
-                sequences: Some(&sequences),
-            },
-        )
-        .map_err(|e| match e {
-            CalvinFoldError::Verb(e) => dml_fold_error_to_pg(&e),
-            CalvinFoldError::Shape(e) => error_to_pg(&e),
-        })?;
+        let fold = fold_calvin_batch(&plans, apply_resp, &CalvinFoldCtx { session: &session })
+            .map_err(|e| match e {
+                CalvinFoldError::Verb(e) => dml_fold_error_to_pg(&e),
+                CalvinFoldError::Shape(e) => error_to_pg(&e),
+            })?;
         for task in tasks {
             meter_calvin_task(&self.state, metering_scope.as_ref(), task);
         }
         let mut responses: Vec<Response> = Vec::with_capacity(2);
-        if let Some(shaped) = fold.rows {
-            let (response, _notice) =
+        // The statement answers one result set, as the per-task loop folds
+        // its tasks' rows.
+        if let Some(shaped) = CalvinBatchFold::one_result_set(fold.rows) {
+            let (response, notice) =
                 super::super::shape_encode::shaped_query_response(shaped, result_formats);
+            if let Some(notice) = notice {
+                self.sessions.push_notice(session_id, notice);
+            }
             responses.push(response);
         }
         push_folded_tag(&mut responses, fold.tag);
@@ -318,10 +306,8 @@ struct CalvinBatchShaping<'a> {
     /// batch was submitted. `None` when metering is disabled.
     metering_scope: Option<RequestAuthScope<'a>>,
     result_formats: &'a pgwire::api::portal::Format,
-    auth: &'a crate::control::security::auth_context::AuthContext,
-    projection: Option<&'a crate::control::server::response_shape::schema::OutputSchema>,
     tenant_id: TenantId,
     database_id: DatabaseId,
-    /// The session whose sequence values a RETURNING expression reads.
+    /// The session that takes the sequence values the RETURNING rows drew.
     session_id: SessionId,
 }

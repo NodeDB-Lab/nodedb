@@ -13,7 +13,7 @@
 use nodedb_cluster::calvin::types::TxClass;
 use nodedb_physical::physical_plan::PhysicalPlan;
 
-use super::local::ReplyFold;
+use super::reported_results::ReplyFold;
 use super::stream::PartStream;
 use crate::Error;
 use crate::control::state::SharedState;

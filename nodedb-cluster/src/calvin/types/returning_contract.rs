@@ -28,6 +28,29 @@ pub struct SequenceValue {
     pub value: i64,
 }
 
+/// One list item whose `currval` the coordinator answers. The item is a
+/// bare `currval` of `sequence`, an earlier plan of the transaction changes
+/// that sequence, and this plan does not. The participant evaluates the item
+/// as NULL. The coordinator answers it from the sequence values the earlier
+/// plans' replies carry, so a later statement sees an earlier one's
+/// `nextval` whichever participant ran it.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    zerompk::ToMessagePack,
+    zerompk::FromMessagePack,
+)]
+pub struct DeferredCurrval {
+    /// The item's position in the list, which is its column's position.
+    pub item: u32,
+    /// The bare sequence name.
+    pub sequence: String,
+}
+
 /// The hard response limits of one `RETURNING` evaluation.
 #[derive(
     Debug,
@@ -102,6 +125,8 @@ pub struct PlanReturning {
     /// type. `None` when the statement announced none: a star, or a
     /// statement with no announced columns.
     pub announced: Option<Vec<AnnouncedColumn>>,
+    /// The items whose `currval` the coordinator answers, ascending by item.
+    pub deferred_currval: Vec<DeferredCurrval>,
 }
 
 /// What a participant needs to evaluate the `RETURNING` lists of a
@@ -172,6 +197,10 @@ pub(crate) fn sample_contract() -> ReturningContract {
                         ty: "int8".into(),
                     },
                 ]),
+                deferred_currval: vec![DeferredCurrval {
+                    item: 1,
+                    sequence: "orders_seq".into(),
+                }],
             },
             PlanReturning {
                 plan_index: 2,
@@ -183,6 +212,7 @@ pub(crate) fn sample_contract() -> ReturningContract {
                 source_columns: vec!["id".into()],
                 limits,
                 announced: None,
+                deferred_currval: Vec::new(),
             },
         ],
         roles: vec!["reader".into(), "writer".into()],

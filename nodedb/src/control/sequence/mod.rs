@@ -12,7 +12,7 @@ pub mod reserve;
 pub mod session_values;
 pub mod types;
 
-pub use self::access::{SequenceAccess, SessionSequenceAccess};
+pub use self::access::{SequenceAccess, SequenceRecorder, SessionSequenceAccess};
 pub use self::format::{FormatToken, ResetScope};
 pub use self::gap_free::GapFreeManager;
 pub use self::range_log::install_range_reserver;

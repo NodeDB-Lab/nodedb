@@ -153,6 +153,7 @@ mod tests {
                 column_types: Vec::new(),
                 sequence_effects: Vec::new(),
                 rejected: None,
+                deferred_currval: Vec::new(),
             }],
         }
     }

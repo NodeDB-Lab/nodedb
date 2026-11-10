@@ -30,6 +30,7 @@ use crate::data::executor::response_codec::{
 };
 use nodedb_types::NodeDbError;
 
+use super::super::frozen_answer::{framed_reply, shape_frozen_answer};
 use super::super::kv::apply_kv_wrap;
 use super::super::redaction::RedactionCtx;
 use super::super::request::MaterializedShapeRequest;
@@ -85,6 +86,16 @@ pub async fn shape_response_materialized(
         | PlanKind::SingleDocument
         | PlanKind::MultiRow => {}
     }
+    if matches!(plan_kind, PlanKind::ReturningRows)
+        && let Some(rows) = frozen_rows(
+            payload,
+            Some(plan),
+            projection,
+            sequences.map(|s| s as &dyn SequenceAccess),
+        )
+    {
+        return rows.map(ShapeOutcome::Rows);
+    }
 
     // The plan-dependent transforms run before any decode or shape step:
     // KV wrap, then walk wrap, then search naming.
@@ -126,6 +137,14 @@ pub fn shape_returning_materialized(
         }
         .into());
     }
+    if let Some(rows) = frozen_rows(
+        payload,
+        Some(plan),
+        projection,
+        sequences.map(|s| s as &dyn SequenceAccess),
+    ) {
+        return rows;
+    }
     let wrapped = apply_walk_wrap(plan, &apply_kv_wrap(plan, payload)?)?;
     shape_returning_rows(
         &wrapped,
@@ -134,6 +153,19 @@ pub fn shape_returning_materialized(
         sequences.map(|s| s as &dyn SequenceAccess),
         &crate::control::crs_context::crs_set_for(state),
     )
+}
+
+/// The rows of `payload` when it is a routed write's frozen answer: its
+/// participant froze them, so they answer as they are. `None` for any other
+/// payload.
+fn frozen_rows(
+    payload: &[u8],
+    plan: Option<&crate::bridge::envelope::PhysicalPlan>,
+    projection: Option<&OutputSchema>,
+    sequences: Option<&dyn SequenceAccess>,
+) -> Option<Result<ShapedRows, NodeDbError>> {
+    framed_reply(payload)
+        .map(|reply| shape_frozen_answer(plan, reply, projection, sequences).map_err(Into::into))
 }
 
 /// Shape a payload whose plan-dependent transforms already ran.
@@ -206,9 +238,12 @@ pub fn shape_payload_no_plan(
         PlanKind::GraphRag => ShapeOutcome::Rows(shape_graph_rag(
             payload, projection, redaction, sequences, crs_set,
         )?),
-        PlanKind::ReturningRows => ShapeOutcome::Rows(shape_returning_rows(
-            payload, projection, redaction, sequences, crs_set,
-        )?),
+        PlanKind::ReturningRows => {
+            ShapeOutcome::Rows(match frozen_rows(payload, None, projection, sequences) {
+                Some(rows) => rows?,
+                None => shape_returning_rows(payload, projection, redaction, sequences, crs_set)?,
+            })
+        }
         PlanKind::SingleDocument | PlanKind::MultiRow => ShapeOutcome::Rows(shape_generic_rows(
             payload, context, projection, redaction, sequences, crs_set,
         )?),

@@ -18,62 +18,21 @@ impl Scheduler {
     /// holds only the participants it hosts, so it keeps the first plain
     /// answer as the response the coordinator reshapes. The coordinator takes
     /// the statement's count from every participant's `CompletionAck`
-    /// (`with_reported_results`). Only two participants that each carry
-    /// RETURNING rows conflict: a cross-shard RETURNING union is unsupported,
-    /// so the statement fails loudly rather than return one shard's rows.
+    /// (`with_reported_results`). A slice that carries `RETURNING` keeps its
+    /// own answer under its vShard, so the coordinator answers the rows of
+    /// every such participant.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn deposit_reply(
         &self,
         txn_id: TxnId,
         reply: &Response,
         returning: bool,
     ) {
-        use std::collections::hash_map::Entry;
-
         let response = statement_reply(reply.clone());
         let key = nodedb_cluster::calvin::TxnId::new(txn_id.epoch, txn_id.position);
         let vshard_id = self.vshard_id;
-        self.shared
-            .calvin
-            .apply_results
-            .deposit_with(key, |entry| match entry {
-                Entry::Vacant(slot) => {
-                    slot.insert(CalvinApplyResult::Single {
-                        response,
-                        has_returning: returning,
-                    });
-                }
-                Entry::Occupied(mut slot) => {
-                    let existing_returning = matches!(
-                        slot.get(),
-                        CalvinApplyResult::Single {
-                            has_returning: true,
-                            ..
-                        }
-                    );
-                    let already_conflict = matches!(slot.get(), CalvinApplyResult::Conflict);
-                    if already_conflict {
-                        // A RETURNING union was already recorded; it stays one.
-                    } else if returning && existing_returning {
-                        tracing::error!(
-                            epoch = txn_id.epoch,
-                            position = txn_id.position,
-                            vshard = vshard_id,
-                            "two RETURNING-bearing participants for one Calvin txn — cross-shard \
-                         RETURNING union unsupported"
-                        );
-                        slot.insert(CalvinApplyResult::Conflict);
-                    } else if returning {
-                        // The incoming participant carries the rows; the held
-                        // entry was a plain affected-count sibling. Rows win.
-                        slot.insert(CalvinApplyResult::Single {
-                            response,
-                            has_returning: true,
-                        });
-                    } else {
-                        merge_install_counts(slot.get_mut(), &response);
-                    }
-                }
-            });
+        self.shared.calvin.apply_results.deposit_with(key, |entry| {
+            deposit_into(entry.or_default(), vshard_id, response, returning);
+        });
     }
 
     /// The result a slice's `CompletionAck` carries for its applied `reply`:
@@ -96,16 +55,23 @@ impl Scheduler {
     }
 }
 
-/// Fold the timeseries install counts `incoming` answers into the plain
-/// result `held`. A RETURNING result keeps its rows untouched.
-fn merge_install_counts(held: &mut CalvinApplyResult, incoming: &Response) {
-    let CalvinApplyResult::Single {
-        response,
-        has_returning: false,
-    } = held
-    else {
+/// Add `vshard_id`'s applied `response` to `held`. A `RETURNING` answer
+/// keeps its own place, and a second deposit of the same vShard changes
+/// nothing. A plain answer folds into the plain answer held.
+fn deposit_into(held: &mut CalvinApplyResult, vshard_id: u32, response: Response, returning: bool) {
+    if returning {
+        held.returning.entry(vshard_id).or_insert(response);
         return;
-    };
+    }
+    match &mut held.plain {
+        Some(plain) => merge_install_counts(plain, &response),
+        None => held.plain = Some(response),
+    }
+}
+
+/// Fold the timeseries install counts `incoming` answers into the plain
+/// answer `response`.
+fn merge_install_counts(response: &mut Response, incoming: &Response) {
     if let Some(merged) = crate::engine::timeseries::install_counts::merge_count_payloads(
         response.payload.as_bytes(),
         incoming.payload.as_bytes(),
@@ -151,37 +117,51 @@ mod tests {
     /// Two plain participants of one Calvin transaction each installed a
     /// timeseries batch. The coordinator's result carries both installs'
     /// apply counts, so COMMIT reports every participant's rejected rows. A
-    /// RETURNING result keeps its rows.
+    /// RETURNING answer keeps its rows beside them.
     #[test]
     fn plain_participants_merge_their_install_counts() {
         use crate::engine::timeseries::install_counts::TsInstallCounts;
-        let mut held = CalvinApplyResult::Single {
-            response: installed_with_counts("cpu", 2, 1),
-            has_returning: false,
+        let mut held = CalvinApplyResult::default();
+        deposit_into(&mut held, 1, installed_with_counts("cpu", 2, 1), false);
+        deposit_into(&mut held, 2, installed_with_counts("mem", 3, 2), false);
+        let rows = Response {
+            payload: crate::bridge::envelope::Payload::from_vec(vec![0x90]),
+            ..installed_with_counts("cpu", 1, 0)
         };
-        merge_install_counts(&mut held, &installed_with_counts("mem", 3, 2));
-        let CalvinApplyResult::Single { response, .. } = &held else {
-            panic!("a merged result stays single");
-        };
-        let totals = TsInstallCounts::from_payload(response.payload.as_bytes())
+        deposit_into(&mut held, 3, rows, true);
+        let plain = held.plain.as_ref().expect("a plain answer");
+        let totals = TsInstallCounts::from_payload(plain.payload.as_bytes())
             .expect("install counts")
             .by_collection();
         assert_eq!(totals.get("cpu"), Some(&(2, 1)));
         assert_eq!(totals.get("mem"), Some(&(3, 2)));
+        assert_eq!(
+            held.returning
+                .get(&3)
+                .map(|r| r.payload.as_bytes().to_vec()),
+            Some(vec![0x90])
+        );
+    }
 
-        let rows = crate::bridge::envelope::Payload::from_vec(vec![0x90]);
-        let mut returning = CalvinApplyResult::Single {
-            response: Response {
-                payload: rows,
-                ..installed_with_counts("cpu", 1, 0)
-            },
-            has_returning: true,
+    /// Each participant that carries `RETURNING` keeps its answer under its
+    /// vShard. A second deposit of the same vShard changes nothing.
+    #[test]
+    fn every_returning_participant_keeps_its_answer() {
+        let answer = |byte: u8| Response {
+            payload: crate::bridge::envelope::Payload::from_vec(vec![byte]),
+            ..staged_response(Status::Ok, None)
         };
-        merge_install_counts(&mut returning, &installed_with_counts("mem", 1, 1));
-        let CalvinApplyResult::Single { response, .. } = &returning else {
-            panic!("a RETURNING result stays single");
-        };
-        assert_eq!(response.payload.as_bytes(), &[0x90]);
+        let mut held = CalvinApplyResult::default();
+        deposit_into(&mut held, 4, answer(0x91), true);
+        deposit_into(&mut held, 2, answer(0x92), true);
+        deposit_into(&mut held, 4, answer(0x93), true);
+        let kept: Vec<(u32, Vec<u8>)> = held
+            .returning
+            .iter()
+            .map(|(vshard, r)| (*vshard, r.payload.as_bytes().to_vec()))
+            .collect();
+        assert_eq!(kept, vec![(2, vec![0x92]), (4, vec![0x91])]);
+        assert!(held.plain.is_none());
     }
 
     /// A render error on an installed slice reaches the statement as a

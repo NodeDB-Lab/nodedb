@@ -67,9 +67,12 @@ pub(super) struct CalvinCommit<'a> {
 /// notice.
 ///
 /// Each statement of the transaction answered its own `RETURNING` rows when
-/// it ran, and the COMMIT answers a tag. So no buffered write carries a list
-/// for a Calvin contract: a contract evaluates the lists again, drawing
-/// their sequences a second time.
+/// it ran, and the COMMIT answers a tag. So no buffered write carries its
+/// `RETURNING` clause into the commit: a contract will evaluate the lists
+/// again and draw their sequences a second time, and an install that
+/// answers rows answers no timeseries counts. The clause matters to the
+/// install only for a timeseries ingest, which takes every line or none, and
+/// the resolve above already held each ingest to that.
 pub(super) async fn run_commit_calvin(
     sessions: &SessionStore,
     session_id: SessionId,
@@ -82,7 +85,7 @@ pub(super) async fn run_commit_calvin(
             Err(e) => return Some(AbortReason::Dispatch(e)),
         };
     let mut buffered = resolved.unwrap_or_else(|| commit.buffered.to_vec());
-    strip_returning_contracts(&mut buffered);
+    strip_returning(&mut buffered);
     let buffered = buffered.as_slice();
     let ts_committed = match super::commit::ts_rejections::tasks_rejected_by_collection(buffered) {
         Ok(committed) => committed,
@@ -265,12 +268,12 @@ async fn submit_commit_calvin(
     }
 }
 
-/// `tasks` with no `RETURNING` list for a Calvin contract. Each write keeps
-/// its `RETURNING` spec.
-fn strip_returning_contracts(tasks: &mut [PhysicalTask]) {
+/// `tasks` with no `RETURNING` clause: their statements answered their rows
+/// already.
+fn strip_returning(tasks: &mut [PhysicalTask]) {
     for task in tasks {
-        if let Some(Some(spec)) = task.plan.returning_slot_mut() {
-            spec.precommit = None;
+        if let Some(slot) = task.plan.returning_slot_mut() {
+            *slot = None;
         }
     }
 }
@@ -337,10 +340,10 @@ mod tests {
         }
     }
 
-    /// A buffered write keeps its `RETURNING` spec and loses its contract
-    /// list. A write with no `RETURNING` is unchanged.
+    /// A buffered write commits with no `RETURNING` clause. A write with
+    /// no `RETURNING` is unchanged.
     #[test]
-    fn buffered_writes_carry_no_returning_contract() {
+    fn buffered_writes_commit_with_no_returning() {
         let mut tasks = vec![
             task(Some(ReturningSpec {
                 columns: ReturningColumns::Star,
@@ -348,17 +351,8 @@ mod tests {
             })),
             task(None),
         ];
-        strip_returning_contracts(&mut tasks);
-        assert_eq!(
-            tasks[0]
-                .plan
-                .returning_target()
-                .map(|(_, spec)| spec.clone()),
-            Some(ReturningSpec {
-                columns: ReturningColumns::Star,
-                precommit: None,
-            })
-        );
+        strip_returning(&mut tasks);
+        assert!(tasks[0].plan.returning_target().is_none());
         assert!(tasks[1].plan.returning_target().is_none());
     }
 }

@@ -27,8 +27,9 @@ pub enum AckReturning {
     /// `RETURNING` contract answers its encoded `CalvinFrozenReply`: the
     /// frozen reply of every local plan, ascending by plan index.
     Rows { rows: Vec<u8> },
-    /// The rows took `bytes`, past `limit`.
-    OverLimit { bytes: u64, limit: u64 },
+    /// The rows of the slice on `vshard` took `bytes`, past `limit`. A
+    /// local answer of the same vShard can stand for them.
+    OverLimit { vshard: u32, bytes: u64, limit: u64 },
     /// The install stored the rows, and answering them failed.
     Failed { detail: String },
 }
@@ -71,6 +72,8 @@ pub struct AckSlice {
     pub primary_write: bool,
     /// The slice's statement carries `RETURNING`.
     pub returning: bool,
+    /// The vShard the slice runs on.
+    pub vshard: u32,
 }
 
 impl CalvinAckResult {
@@ -107,7 +110,11 @@ impl CalvinAckResult {
             }
             let bytes = payload.len() as u64;
             if bytes > limit {
-                AckReturning::OverLimit { bytes, limit }
+                AckReturning::OverLimit {
+                    vshard: slice.vshard,
+                    bytes,
+                    limit,
+                }
             } else {
                 AckReturning::Rows {
                     rows: payload.to_vec(),
@@ -172,10 +179,12 @@ mod tests {
     const PLAIN: AckSlice = AckSlice {
         primary_write: true,
         returning: false,
+        vshard: 3,
     };
     const RETURNING: AckSlice = AckSlice {
         primary_write: true,
         returning: true,
+        vshard: 3,
     };
 
     fn response(payload: Vec<u8>) -> Response {
@@ -228,6 +237,7 @@ mod tests {
         assert_eq!(
             report.returning,
             Some(AckReturning::OverLimit {
+                vshard: 3,
                 bytes: 64,
                 limit: 16
             })
@@ -241,6 +251,7 @@ mod tests {
         let derived = AckSlice {
             primary_write: false,
             returning: false,
+            vshard: 3,
         };
         let report = CalvinAckResult::of(&response(vec![0x81]), derived, 16);
         assert!(report.to_bytes().expect("encode").is_empty());

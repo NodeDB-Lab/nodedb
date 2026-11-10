@@ -271,6 +271,7 @@ fn the_store_keeps_the_first_frozen_reply() {
                 value,
             }],
             rejected: None,
+            deferred_currval: Vec::new(),
         }],
     };
     assert!(frozen_replies::store(&catalog, &reply(1)).expect("store"));

@@ -34,7 +34,7 @@ pub(crate) struct CalvinApplied {
     pub(crate) apply_result: Option<Response>,
     /// Every task's plan, in dispatch order.
     pub(crate) plans: Vec<PhysicalPlan>,
-    /// The database the answer shapes against.
+    /// The database the statement's writes ran in.
     pub(crate) database_id: DatabaseId,
 }
 

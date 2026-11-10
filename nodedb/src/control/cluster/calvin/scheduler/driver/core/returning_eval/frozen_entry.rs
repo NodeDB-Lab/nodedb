@@ -91,6 +91,18 @@ impl Scheduler {
                     .filter_map(frozen_effect)
                     .collect(),
                 rejected: pending.returning.rejections.get(plan_index).cloned(),
+                // The coordinator answers the items the contract deferred.
+                deferred_currval: tx_class
+                    .returning
+                    .as_ref()
+                    .and_then(|contract| {
+                        contract
+                            .plans
+                            .iter()
+                            .find(|plan| plan.plan_index == *plan_index)
+                    })
+                    .map(|plan| plan.deferred_currval.clone())
+                    .unwrap_or_default(),
             })
             .collect();
         let entry = ReplicatedEntry::new(

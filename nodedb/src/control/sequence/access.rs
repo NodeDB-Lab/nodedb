@@ -23,12 +23,26 @@ pub trait SequenceAccess {
     fn nextval(&self, name: &str) -> crate::Result<i64>;
     /// The last value THIS SESSION obtained from `nextval` on `name`.
     fn currval(&self, name: &str) -> crate::Result<i64>;
-    /// Position `name` so the next `nextval` returns `value + increment`.
+    /// Position `name` so the next `nextval` returns `value + increment`,
+    /// and record `value` as this session's `currval`, as PostgreSQL's
+    /// two-argument `setval` does.
     fn setval(&self, name: &str, value: i64) -> crate::Result<i64>;
-    /// Record `value`, which a `nextval` on `name` returned on another node
-    /// for this session's statement, as this session's `currval`. An access
-    /// with no session state records nothing.
-    fn record_obtained(&self, _name: &str, _value: i64) {}
+    /// The session this access records into, so a caller can give it values
+    /// another node drew. `None` for an access with no session to record.
+    fn recorder(&self) -> Option<&(dyn SequenceRecorder + Sync)> {
+        None
+    }
+}
+
+/// A session that takes sequence values its statement obtained on another
+/// node. It draws no value.
+pub trait SequenceRecorder {
+    /// Record `value` as this session's `currval` of `name`: a `nextval`
+    /// result or a `setval` value. A recorder with no session state records
+    /// nothing.
+    fn record_obtained(&self, name: &str, value: i64);
+    /// This session's `currval` of `name`, or `None` when it holds none.
+    fn obtained(&self, name: &str) -> Option<i64>;
 }
 
 /// [`SequenceAccess`] over one session's view of the node registry.
@@ -71,6 +85,16 @@ impl<'a> SessionSequenceAccess<'a> {
     ) -> Self {
         Self::new(&state.sequence_registry, session, database_id, tenant_id)
     }
+
+    /// The same session's access, scoped to `database_id`.
+    pub fn in_database(&self, database_id: DatabaseId) -> Self {
+        Self {
+            registry: self.registry,
+            session: self.session.clone(),
+            database_id,
+            tenant_id: self.tenant_id,
+        }
+    }
 }
 
 impl SequenceAccess for SessionSequenceAccess<'_> {
@@ -109,6 +133,26 @@ impl SequenceAccess for SessionSequenceAccess<'_> {
             })
     }
 
+    fn setval(&self, name: &str, value: i64) -> crate::Result<i64> {
+        let value = self
+            .registry
+            .setval(
+                self.database_id.as_u64(),
+                self.tenant_id.as_u64(),
+                name,
+                value,
+            )
+            .map_err(|e| sequence_error_to_error(name, e))?;
+        self.record_obtained(name, value);
+        Ok(value)
+    }
+
+    fn recorder(&self) -> Option<&(dyn SequenceRecorder + Sync)> {
+        Some(self)
+    }
+}
+
+impl SequenceRecorder for SessionSequenceAccess<'_> {
     fn record_obtained(&self, name: &str, value: i64) {
         if let Some(session) = &self.session {
             session.record(
@@ -120,15 +164,10 @@ impl SequenceAccess for SessionSequenceAccess<'_> {
         }
     }
 
-    fn setval(&self, name: &str, value: i64) -> crate::Result<i64> {
-        self.registry
-            .setval(
-                self.database_id.as_u64(),
-                self.tenant_id.as_u64(),
-                name,
-                value,
-            )
-            .map_err(|e| sequence_error_to_error(name, e))
+    fn obtained(&self, name: &str) -> Option<i64> {
+        self.session.as_ref().and_then(|session| {
+            session.last(self.database_id.as_u64(), self.tenant_id.as_u64(), name)
+        })
     }
 }
 
@@ -213,5 +252,26 @@ mod tests {
         let access = SessionSequenceAccess::new(&registry, None, DB, TENANT);
         access.setval("s", 41).expect("setval");
         assert_eq!(access.nextval("s").expect("nextval"), 42);
+    }
+
+    /// A two-argument `setval` marks the value called, so it becomes this
+    /// session's `currval`, as in PostgreSQL. Another session keeps its own.
+    #[test]
+    fn setval_sets_the_session_currval() {
+        let registry = registry_with("s");
+        let session = Arc::new(SessionSequenceValues::new());
+        let access = SessionSequenceAccess::new(&registry, Some(Arc::clone(&session)), DB, TENANT);
+        access.setval("s", 41).expect("setval");
+        assert_eq!(access.currval("s").expect("currval"), 41);
+        let other = SessionSequenceAccess::new(
+            &registry,
+            Some(Arc::new(SessionSequenceValues::new())),
+            DB,
+            TENANT,
+        );
+        assert!(matches!(
+            other.currval("s"),
+            Err(crate::Error::ObjectNotInPrerequisiteState { .. })
+        ));
     }
 }

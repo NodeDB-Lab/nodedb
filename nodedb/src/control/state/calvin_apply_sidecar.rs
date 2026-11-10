@@ -123,7 +123,7 @@ mod tests {
 
     fn deposit(sidecar: &CalvinApplySidecar, txn: TxnId, now: Instant) {
         sidecar.deposit_at(txn, now, |entry| {
-            entry.or_insert(CalvinApplyResult::Conflict);
+            entry.or_default();
         });
     }
 

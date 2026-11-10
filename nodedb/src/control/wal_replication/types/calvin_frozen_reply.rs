@@ -29,6 +29,15 @@ pub enum FrozenSequenceEffect {
     Setval { name: String, value: i64 },
 }
 
+impl FrozenSequenceEffect {
+    /// The sequence the effect changed, and the value it left as `currval`.
+    pub fn name_value(&self) -> (&str, i64) {
+        match self {
+            Self::Nextval { name, value } | Self::Setval { name, value } => (name, *value),
+        }
+    }
+}
+
 /// The lines a timeseries ingest plan rejected, which its reply reports
 /// beside its rows.
 #[derive(
@@ -73,6 +82,9 @@ pub struct FrozenPlanReply {
     /// The lines the plan rejected, for a timeseries ingest that rejected
     /// any.
     pub rejected: Option<FrozenRejection>,
+    /// The columns the coordinator answers: each a `currval` an earlier
+    /// plan's sequence changes decide. The plan answers them as NULL.
+    pub deferred_currval: Vec<nodedb_cluster::calvin::types::DeferredCurrval>,
 }
 
 /// The frozen replies of every local `RETURNING` plan of Calvin txn
@@ -112,10 +124,32 @@ impl CalvinFrozenReply {
         })
     }
 
-    /// The plan whose rows the slice answers: the last plan, as a slice
-    /// answers its last `RETURNING` plan's rows.
-    pub fn answered_plan(&self) -> Option<&FrozenPlanReply> {
-        self.plans.iter().max_by_key(|plan| plan.plan_index)
+    /// The union of `replies`, the frozen replies of one txn's participants:
+    /// every plan of each, in statement order. That is ascending by plan
+    /// index, and ascending by vShard within one plan index, as a plan that
+    /// spans vShards answers each one's rows. The union's `vshard` is its
+    /// lowest participant. `None` for no reply. Replies of two txns fail.
+    pub fn union(mut replies: Vec<Self>) -> crate::Result<Option<Self>> {
+        replies.sort_by_key(|reply| reply.vshard);
+        let mut replies = replies.into_iter();
+        let Some(mut union) = replies.next() else {
+            return Ok(None);
+        };
+        for reply in replies {
+            if (reply.epoch, reply.position) != (union.epoch, union.position) {
+                return Err(crate::Error::Internal {
+                    detail: format!(
+                        "calvin RETURNING: the frozen replies of txns ({}, {}) and ({}, {}) \
+                         answer one statement",
+                        union.epoch, union.position, reply.epoch, reply.position
+                    ),
+                });
+            }
+            union.plans.extend(reply.plans);
+        }
+        // A stable sort keeps the vShard order within one plan index.
+        union.plans.sort_by_key(|plan| plan.plan_index);
+        Ok(Some(union))
     }
 }
 
@@ -138,6 +172,7 @@ mod tests {
                         value: 3,
                     }],
                     rejected: None,
+                    deferred_currval: Vec::new(),
                 },
                 FrozenPlanReply {
                     plan_index: 3,
@@ -151,6 +186,7 @@ mod tests {
                         collection: "metrics".into(),
                         lines: 2,
                     }),
+                    deferred_currval: Vec::new(),
                 },
             ],
         }
@@ -165,8 +201,42 @@ mod tests {
         );
     }
 
+    /// The union holds every plan of every participant, by plan index, and
+    /// by vShard within one plan index.
     #[test]
-    fn the_last_plan_answers() {
-        assert_eq!(reply().answered_plan().map(|plan| plan.plan_index), Some(3));
+    fn the_union_holds_every_plan_in_statement_order() {
+        let at = |vshard: u32, indexes: &[u32]| CalvinFrozenReply {
+            vshard,
+            plans: indexes
+                .iter()
+                .map(|index| FrozenPlanReply {
+                    plan_index: *index,
+                    payload: vec![u8::try_from(vshard).expect("small vshard")],
+                    ..reply().plans[0].clone()
+                })
+                .collect(),
+            ..reply()
+        };
+        let union = CalvinFrozenReply::union(vec![at(7, &[1, 2]), at(3, &[0, 2])])
+            .expect("one txn")
+            .expect("a union");
+        assert_eq!(union.vshard, 3);
+        let order: Vec<(u32, u8)> = union
+            .plans
+            .iter()
+            .map(|plan| (plan.plan_index, plan.payload[0]))
+            .collect();
+        assert_eq!(order, vec![(0, 3), (1, 7), (2, 3), (2, 7)]);
+
+        assert!(
+            CalvinFrozenReply::union(Vec::new())
+                .expect("none")
+                .is_none()
+        );
+        let other_txn = CalvinFrozenReply {
+            position: 5,
+            ..at(4, &[0])
+        };
+        assert!(CalvinFrozenReply::union(vec![at(3, &[0]), other_txn]).is_err());
     }
 }

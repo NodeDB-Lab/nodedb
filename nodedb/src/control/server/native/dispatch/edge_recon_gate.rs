@@ -92,19 +92,12 @@ fn outcome(ctx: &DispatchCtx<'_>, seq: u64, routed: crate::Result<EdgeRecon>) ->
         // A RETURNING dependent write surfaces its deleted or updated rows. A
         // plain write reports the count its own mutation returned.
         Ok(EdgeRecon::Applied(applied)) => {
-            let sequences = session_sequences(ctx, applied.database_id);
+            let session = session_sequences(ctx, applied.database_id);
             EdgeReconResult::Outcome(resp(super::conversion::calvin_native_response(
                 seq,
                 applied.apply_result,
                 &applied.plans,
-                &CalvinFoldCtx {
-                    projection: None,
-                    state: ctx.state,
-                    tenant_id: ctx.tenant_id(),
-                    database_id: applied.database_id,
-                    auth: ctx.auth_context(),
-                    sequences: Some(&sequences),
-                },
+                &CalvinFoldCtx { session: &session },
             )))
         }
         Err(error) => EdgeReconResult::Outcome(resp(error_to_native(seq, &error))),

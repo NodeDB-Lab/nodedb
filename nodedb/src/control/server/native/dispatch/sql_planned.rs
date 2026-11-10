@@ -191,12 +191,7 @@ pub(super) async fn execute_planned(
                 applied.apply_result,
                 &applied.plans,
                 &CalvinFoldCtx {
-                    projection: Some(&output_schema),
-                    state: ctx.state,
-                    tenant_id: ctx.tenant_id(),
-                    database_id: applied.database_id,
-                    auth: ctx.auth_context(),
-                    sequences: Some(&sequences),
+                    session: &sequences.in_database(applied.database_id),
                 },
             );
             return resp(mirror_confirmed(ctx, seq, sync_database, response).await);

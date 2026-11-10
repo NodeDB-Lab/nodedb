@@ -41,6 +41,7 @@ mod calvin_request_counts;
 mod calvin_sql_routing;
 mod calvin_txn_edge_update;
 mod calvin_txn_predicate_writes;
+mod calvin_txn_returning;
 mod clone_alter_materialize;
 mod clone_as_of_past_time;
 mod clone_carries_collection_metadata;

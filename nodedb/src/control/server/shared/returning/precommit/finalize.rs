@@ -258,9 +258,11 @@ mod tests {
         let transcript = AccessorTranscript::default();
         let first = finalize(&request, rows.clone(), &transcript).expect("finalize");
         assert_eq!(first.shaped.columns, ["positioned", "current", "next"]);
+        // A two-argument `setval` marks its value called, so `currval` reads
+        // the value it set, as in PostgreSQL.
         for row in &first.shaped.rows {
             assert_eq!(row["positioned"], Value::Integer(11));
-            assert_eq!(row["current"], Value::Integer(1));
+            assert_eq!(row["current"], Value::Integer(11));
             assert_eq!(row["next"], Value::Integer(12));
         }
         let replay = finalize(&request, rows, &transcript).expect("replay");

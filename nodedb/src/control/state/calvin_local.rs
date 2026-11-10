@@ -49,10 +49,8 @@ pub struct CalvinLocalState {
     /// participants, and those coalesce without conflict. Cross-node, the rows
     /// travel via the non-Raft routed-submit RPC response instead.
     ///
-    /// Value is [`CalvinApplyResult`]: `Single` for a deposited (possibly
-    /// coalesced) participant, or `Conflict` only when two RETURNING-bearing
-    /// participants deposit for the same `TxnId` — a cross-shard RETURNING
-    /// union, drained as a loud error, never a silent partial.
+    /// Value is [`CalvinApplyResult`]: the coalesced plain answer, and the
+    /// answer of each RETURNING-bearing participant by vShard.
     ///
     /// A replica on a node that does not coordinate the transaction never
     /// drains its deposit, so each deposit expires after the sidecar's TTL.

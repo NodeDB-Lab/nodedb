@@ -275,32 +275,26 @@ pub(crate) fn calvin_answer(
         database_id,
     } = applied;
     let plan_refs: Vec<_> = plans.iter().collect();
+    // The writes ran in `database_id`, so the session's values land there.
+    let session = exec.sequences.in_database(database_id);
     let fold = fold_calvin_batch(
         &plan_refs,
         apply_result.as_ref(),
-        &CalvinFoldCtx {
-            projection: exec.output_schema,
-            state: exec.state,
-            tenant_id: exec.tenant_id(),
-            database_id,
-            auth: exec.scope.auth(),
-            sequences: Some(exec.sequences),
-        },
+        &CalvinFoldCtx { session: &session },
     )
     .map_err(|error| match error {
         CalvinFoldError::Verb(error) => StatementError::DmlFold(error),
         CalvinFoldError::Shape(error) => StatementError::Error(error),
     })?;
+    // One result set per RETURNING plan, as the per-task loop folds one per
+    // task.
     let mut warnings = Vec::new();
-    let rows = match fold.rows {
-        Some(mut shaped) => {
-            if let Some(notice) = shaped.notice.take() {
-                warnings.push(notice);
-            }
-            vec![shaped]
+    let mut rows = fold.rows;
+    for shaped in &mut rows {
+        if let Some(notice) = shaped.notice.take() {
+            warnings.push(notice);
         }
-        None => Vec::new(),
-    };
+    }
     Ok(StatementAnswer {
         rows,
         warnings,

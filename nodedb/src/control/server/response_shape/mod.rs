@@ -4,8 +4,10 @@
 
 mod calvin_contract;
 pub mod calvin_fold;
+mod calvin_tag;
 pub mod cell;
 pub mod compose;
+pub mod frozen_answer;
 pub mod kv;
 pub mod project;
 pub mod redaction;
