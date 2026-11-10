@@ -87,7 +87,7 @@ fn classified_sqlstates() -> Vec<(usize, &'static str)> {
         (32, sqlstate::ACTIVE_SQL_TRANSACTION),
         (34, sqlstate::QUERY_CANCELED.0),
         (44, sqlstate::QUOTA_OVERCOMMIT),
-        (62, sqlstate::SYNTAX_ERROR),
+        (62, sqlstate::PROGRAM_LIMIT_EXCEEDED),
         (63, sqlstate::SYNTAX_ERROR),
         // A CRDT constraint violation renders its constraint's class, never
         // the internal-error default.

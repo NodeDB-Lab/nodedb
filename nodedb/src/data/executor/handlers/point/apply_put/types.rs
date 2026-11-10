@@ -208,7 +208,8 @@ pub(in crate::data::executor) fn map_enforcement_error(e: ErrorCode) -> crate::E
         | ErrorCode::ActiveSqlTransaction { .. }
         | ErrorCode::DependentObjectsExist { .. }
         | ErrorCode::NodeLabelLimit { .. }
-        | ErrorCode::ProgramLimitExceeded { .. }) => crate::Error::DataPlane(other),
+        | ErrorCode::ProgramLimitExceeded { .. }
+        | ErrorCode::ExecutionLimitExceeded { .. }) => crate::Error::DataPlane(other),
     }
 }
 

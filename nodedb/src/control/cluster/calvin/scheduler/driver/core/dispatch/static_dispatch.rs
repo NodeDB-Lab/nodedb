@@ -313,6 +313,8 @@ impl Scheduler {
 
         // The leader checks the transaction's collection incarnations.
         let (superseded, gates) = self.check_incarnations(&txn.tx_class);
+        let transcripts = self.returning_evals.transcripts_for(txn_id, &txn);
+        let returning = StagedReturning::of_txn_slice(&txn, plan_indexes, transcripts);
         self.pending.insert(
             txn_id,
             super::super::super::types::PendingTxn {
@@ -337,7 +339,7 @@ impl Scheduler {
                 superseded,
                 gates,
                 ungated: false,
-                returning: StagedReturning::of_slice(plan_indexes),
+                returning,
             },
         );
 

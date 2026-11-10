@@ -344,6 +344,16 @@ pub fn error_code_to_sqlstate(code: &ErrorCode) -> (&'static str, &'static str, 
         ErrorCode::ProgramLimitExceeded { detail } => {
             ("ERROR", sqlstate::PROGRAM_LIMIT_EXCEEDED, detail.clone())
         }
+        // The SQLSTATE and message the Control Plane gives
+        // `crate::Error::ExecutionLimitExceeded`.
+        ErrorCode::ExecutionLimitExceeded { detail } => (
+            "ERROR",
+            sqlstate::PROGRAM_LIMIT_EXCEEDED,
+            crate::Error::ExecutionLimitExceeded {
+                detail: detail.clone(),
+            }
+            .to_string(),
+        ),
         ErrorCode::NodeLabelLimit { node, label, limit } => (
             "ERROR",
             sqlstate::PROGRAM_LIMIT_EXCEEDED,

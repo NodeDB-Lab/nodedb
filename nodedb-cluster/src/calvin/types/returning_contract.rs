@@ -66,6 +66,10 @@ pub struct ReturningContractLimits {
 pub struct PlanReturning {
     /// Index of the plan in the class's plan batch.
     pub plan_index: u32,
+    /// The plan's collection in its stored qualified form, as
+    /// `QualifiedCollection::as_str` writes it. The redaction snapshot and
+    /// the staged images name the collection in this form.
+    pub collection: String,
     /// The full ordered response list, with aliases and computed items.
     pub spec: ReturningSpec,
     /// The declared source field order of the plan's collection. It names
@@ -116,6 +120,7 @@ pub(crate) fn sample_contract() -> ReturningContract {
         plans: vec![
             PlanReturning {
                 plan_index: 0,
+                collection: "orders".into(),
                 spec: ReturningSpec {
                     columns: ReturningColumns::Named(vec![
                         ReturningItem::Column {
@@ -135,6 +140,7 @@ pub(crate) fn sample_contract() -> ReturningContract {
             },
             PlanReturning {
                 plan_index: 2,
+                collection: "7/orders".into(),
                 spec: ReturningSpec {
                     columns: ReturningColumns::Star,
                     precommit: None,

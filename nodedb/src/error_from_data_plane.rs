@@ -205,7 +205,12 @@ pub(crate) fn data_plane_code_to_public(code: ErrorCode) -> NodeDbError {
         ErrorCode::NodeLabelLimit { node, label, limit } => {
             NodeDbError::program_limit_exceeded(node_label_limit_message(&node, &label, limit))
         }
-        ErrorCode::ProgramLimitExceeded { detail } => NodeDbError::program_limit_exceeded(detail),
+        // `ExecutionLimitExceeded` carries the public code
+        // `crate::Error::ExecutionLimitExceeded` takes.
+        ErrorCode::ProgramLimitExceeded { detail }
+        | ErrorCode::ExecutionLimitExceeded { detail } => {
+            NodeDbError::program_limit_exceeded(detail)
+        }
         // Genuinely internal: the shard is in an unknown or faulted state.
         // These are the only codes for which NDB-9000 is the truth.
         ErrorCode::Internal { detail } => NodeDbError::internal(detail),

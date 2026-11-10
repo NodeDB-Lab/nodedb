@@ -119,6 +119,7 @@ pub(crate) fn finalize_returning(
     Ok(FrozenReturningReply {
         payload,
         shaped: ShapedRows::from_rows(columns, types, output_rows),
+        sequence_effects: transcript.sequence_effects(),
     })
 }
 

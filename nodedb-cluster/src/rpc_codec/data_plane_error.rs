@@ -221,6 +221,11 @@ pub enum DataPlaneErrorCode {
     ProgramLimitExceeded {
         detail: String,
     },
+    /// A configured execution limit refused the statement, as
+    /// `ExecutionLimitExceeded` does on the Control Plane (SQLSTATE `54000`).
+    ExecutionLimitExceeded {
+        detail: String,
+    },
     /// Text does not parse as the column's type (SQLSTATE `22P02`).
     InvalidTextRepresentation {
         detail: String,

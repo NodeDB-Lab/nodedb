@@ -20,6 +20,7 @@
 
 mod apply_result;
 pub mod catch_up;
+mod caught_up;
 pub mod commit_redo;
 pub mod commit_resolve;
 pub mod completion_route;
@@ -46,6 +47,7 @@ pub mod redo_propose;
 pub mod request;
 pub mod resolve_turn;
 mod restage;
+mod returning_eval;
 pub mod role;
 pub mod routing;
 pub mod run_loop;

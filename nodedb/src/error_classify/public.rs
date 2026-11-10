@@ -264,7 +264,8 @@ pub(crate) fn classify(e: &Error) -> NodeDbError {
         | Error::BackupCaptureMoved { .. } => {
             NodeDbError::from_wire(nodedb_types::error::ErrorCode::NO_LEADER, e.to_string())
         }
-        Error::ExecutionLimitExceeded { detail } => NodeDbError::bad_request(detail),
+        // A resource limit, `54000` as PostgreSQL reports one.
+        Error::ExecutionLimitExceeded { detail } => NodeDbError::program_limit_exceeded(detail),
         Error::LimitExceeded {
             limit_name,
             value,

@@ -177,7 +177,9 @@ pub fn error_to_sqlstate(err: &crate::Error) -> (&'static str, &'static str, Str
             crate::control::server::shared::ddl::sqlstate::constraint_sqlstate(constraint),
             detail.clone(),
         ),
-        crate::Error::TxnOverlayMemoryExceeded { .. } => {
+        // A resource limit, `54000` as PostgreSQL reports one.
+        crate::Error::TxnOverlayMemoryExceeded { .. }
+        | crate::Error::ExecutionLimitExceeded { .. } => {
             ("ERROR", sqlstate::PROGRAM_LIMIT_EXCEEDED, err.to_string())
         }
         // Control-Plane twins of Data-Plane codes take the SQLSTATE their
@@ -391,7 +393,6 @@ pub fn error_to_sqlstate(err: &crate::Error) -> (&'static str, &'static str, Str
         crate::Error::CrdtAdmissionInvalidPlan { .. }
         | crate::Error::CrdtAdmissionCallerFence
         | crate::Error::CrdtApplyRequiresAdmission
-        | crate::Error::ExecutionLimitExceeded { .. }
         | crate::Error::LimitExceeded { .. }
         | crate::Error::Promql(_)
         | crate::Error::SequencerUnavailable

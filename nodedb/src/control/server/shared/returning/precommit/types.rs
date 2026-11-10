@@ -10,6 +10,7 @@ use crate::control::sequence::SequenceAccess;
 use crate::control::server::response_shape::schema::OutputSchema;
 use crate::control::server::response_shape::types::{ShapedRow, ShapedRows};
 use crate::control::server::shared::returning::ReturningSpec;
+use crate::control::server::shared::returning::transcript::SequenceEffect;
 
 /// Source identity supplied by the checked preparation coordinator.
 /// This identity never comes from user-visible source fields.
@@ -95,6 +96,9 @@ pub(crate) struct PrecommitReturning<'a> {
 pub(crate) struct FrozenReturningReply {
     pub payload: Vec<u8>,
     pub shaped: ShapedRows,
+    /// The `nextval` and `setval` results the evaluation recorded, in
+    /// invocation order.
+    pub sequence_effects: Vec<SequenceEffect>,
 }
 
 #[cfg(test)]

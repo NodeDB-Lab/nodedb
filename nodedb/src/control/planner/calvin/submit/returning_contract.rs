@@ -62,6 +62,7 @@ pub(super) fn stamp_returning_contract(
         })?;
         entries.push(PlanReturning {
             plan_index,
+            collection: collection.as_str().to_owned(),
             spec,
             source_columns,
             limits,

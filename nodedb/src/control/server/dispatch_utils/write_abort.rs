@@ -63,6 +63,7 @@ fn is_transient_verdict(code: &ErrorCode) -> bool {
         | ErrorCode::DependentObjectsExist { .. }
         | ErrorCode::NodeLabelLimit { .. }
         | ErrorCode::ProgramLimitExceeded { .. }
+        | ErrorCode::ExecutionLimitExceeded { .. }
         | ErrorCode::RejectedConstraint { .. }
         | ErrorCode::RejectedPrevalidation { .. }
         | ErrorCode::SyncRejected { .. }
@@ -173,6 +174,8 @@ pub(crate) fn write_definitely_not_applied(code: &ErrorCode) -> bool {
         | ErrorCode::NodeLabelLimit { .. }
         // A statement past a program limit is refused before it applies.
         | ErrorCode::ProgramLimitExceeded { .. }
+        // So is one past a configured execution limit.
+        | ErrorCode::ExecutionLimitExceeded { .. }
         // Expression evaluation failed before producing a value to write.
         | ErrorCode::DivisionByZero
         | ErrorCode::UndefinedFunction { .. }

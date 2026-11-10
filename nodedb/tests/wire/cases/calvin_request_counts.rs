@@ -14,7 +14,7 @@ use nodedb::control::planner::calvin::settling_writes::SEVERAL_RETURNING_REFUSAL
 use nodedb_test_support::native_harness::{open_trust_session, send_sql};
 use nodedb_types::id::DatabaseId;
 
-use super::materialized_sum_cross_shard_expanders::{balance, sum_fixture};
+use super::materialized_sum_cross_shard_expanders::{balance, sum_fixture, sum_fixture_on};
 use crate::harness::TestServer;
 
 /// Data Plane cores the server runs.
@@ -287,4 +287,64 @@ async fn one_returning_write_on_calvin_answers_its_rows() {
     assert_eq!(answer["rows"].as_array().map(Vec::len), Some(1), "{body}");
     assert_eq!(answer["rows"][0]["id"], "e0", "{body}");
     assert_eq!(balance(&server, "acc").await, "6", "1 + 5");
+}
+
+/// The amount posting `e0` holds.
+async fn e0_amount(server: &TestServer) -> Vec<String> {
+    server
+        .query_text("SELECT amount FROM ptv_post WHERE id = 'e0'")
+        .await
+        .expect("read posting e0")
+}
+
+/// A `RETURNING` list that fails on a Calvin write refuses the write with
+/// its own SQLSTATE before the participant votes. The divisor reads a row
+/// column, so only the participant's evaluation of the written row can
+/// raise it. The row keeps its value.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn returning_error_on_calvin_leaves_the_row() {
+    let server = sum_fixture().await;
+    server
+        .exec("ALTER TABLE ptv_post ADD COLUMN n INT NOT NULL DEFAULT 0")
+        .await
+        .expect("add column n");
+
+    server
+        .expect_error(
+            "UPDATE ptv_post SET amount = '1', n = 5 WHERE id = 'e0' RETURNING 10 / (n - n)",
+            "SQLSTATE 22012",
+        )
+        .await;
+
+    assert_eq!(e0_amount(&server).await, ["10"]);
+    assert_eq!(
+        server
+            .query_text("SELECT n FROM ptv_post WHERE id = 'e0'")
+            .await
+            .expect("read n"),
+        ["0"]
+    );
+    assert_eq!(balance(&server, "acc").await, "15", "10 + 5");
+}
+
+/// A Calvin write whose `RETURNING` response holds more rows than
+/// `max_returning_rows` is refused before the participant votes. The row
+/// keeps its value.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn returning_over_limit_on_calvin_leaves_the_row() {
+    // The sum fixture runs on as many cores as this file's fixture.
+    let server =
+        sum_fixture_on(TestServer::start_multicores_with_max_returning_rows(CORES, 0).await).await;
+
+    // The SQLSTATE and message a direct statement past an execution limit
+    // reports: `54000` with the limit's own text.
+    server
+        .expect_error(
+            "UPDATE ptv_post SET amount = '1' WHERE id = 'e0' RETURNING id, amount",
+            "execution limit exceeded: RETURNING rows 1 exceeds limit 0 (SQLSTATE 54000)",
+        )
+        .await;
+
+    assert_eq!(e0_amount(&server).await, ["10"]);
+    assert_eq!(balance(&server, "acc").await, "15", "10 + 5");
 }

@@ -5,6 +5,7 @@
 use nodedb_cluster::calvin::{AbortCause, AbortReason};
 
 use crate::Error;
+use crate::bridge::envelope::ErrorCode;
 use crate::control::cluster::calvin::refusal::decode_refusal;
 
 /// Pick the error for an ABORT verdict from the cause the verdict recorded.
@@ -17,6 +18,11 @@ pub fn calvin_abort_error(cause: AbortCause) -> Error {
     match cause.reason {
         AbortReason::ParticipantError => match cause.refusal {
             Some(refusal) => match decode_refusal(&refusal) {
+                // A limit refusal is the Control Plane's own error, so the
+                // client sees what a direct statement past it reports.
+                Ok(ErrorCode::ExecutionLimitExceeded { detail }) => {
+                    Error::ExecutionLimitExceeded { detail }
+                }
                 Ok(code) => Error::DataPlane(code),
                 Err(error) => error,
             },
@@ -49,7 +55,6 @@ mod tests {
     use nodedb_types::error::sqlstate;
 
     use super::*;
-    use crate::bridge::envelope::ErrorCode;
     use crate::control::cluster::calvin::refusal::encode_refusal;
 
     fn refused(code: &ErrorCode) -> AbortCause {
@@ -120,5 +125,17 @@ mod tests {
             calvin_abort_error(AbortReason::SerializationConflict.into()),
             Error::CalvinSerializationConflict
         ));
+    }
+
+    #[test]
+    fn a_limit_refusal_is_the_control_plane_limit_error() {
+        let detail = "RETURNING rows 1 exceeds limit 0".to_owned();
+        let error = calvin_abort_error(refused(&ErrorCode::ExecutionLimitExceeded {
+            detail: detail.clone(),
+        }));
+        assert!(
+            matches!(&error, Error::ExecutionLimitExceeded { detail: got } if *got == detail),
+            "{error:?}"
+        );
     }
 }

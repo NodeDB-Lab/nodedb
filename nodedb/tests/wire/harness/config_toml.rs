@@ -60,6 +60,9 @@ pub(super) struct TuningOverrides {
     /// `http://localhost:<port>`. The token and wrapped-key files live in
     /// the data directory.
     pub(super) vault_port: Option<u16>,
+    /// Overrides `[tuning.network] max_returning_rows` so a test can exceed
+    /// the `RETURNING` row limit with a single row.
+    pub(super) max_returning_rows: Option<u64>,
     /// Runs the version cleanup pass every 200 ms with a short history
     /// window: `txn_snapshot_max_age_secs = 2` and 5 s statement deadlines,
     /// so a superseded version leaves about 12 s after its successor.
@@ -136,6 +139,14 @@ impl TuningOverrides {
         }
     }
 
+    /// Boot with a lowered `RETURNING` row limit.
+    pub(super) fn max_returning_rows(rows: u64) -> Self {
+        Self {
+            max_returning_rows: Some(rows),
+            ..Self::default()
+        }
+    }
+
     /// Boot with a lowered vector seal threshold.
     pub(super) fn vector_seal_threshold(vectors: usize) -> Self {
         Self {
@@ -167,6 +178,9 @@ pub(super) fn write_config(dir: &Path, auth_mode: AuthMode, tuning: TuningOverri
     // production drain outlives the harness's 20s SIGTERM patience, so the
     // server would be force-killed instead of exiting gracefully.
     toml.push_str("\n[tuning.network]\ndrain_timeout_secs = 2\n");
+    if let Some(rows) = tuning.max_returning_rows {
+        toml.push_str(&format!("max_returning_rows = {rows}\n"));
+    }
     if tuning.fast_version_cleanup {
         toml.push_str(
             "txn_snapshot_max_age_secs = 5\ndefault_deadline_secs = 5\ncopy_deadline_secs = 5\n\

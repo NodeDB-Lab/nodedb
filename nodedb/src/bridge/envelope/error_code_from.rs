@@ -161,6 +161,9 @@ impl From<crate::Error> for ErrorCode {
                 Self::TxnOverlayMemoryExceeded { limit }
             }
             crate::Error::DivisionByZero => Self::DivisionByZero,
+            crate::Error::ExecutionLimitExceeded { detail } => {
+                Self::ExecutionLimitExceeded { detail }
+            }
             crate::Error::UndefinedFunction { name } => Self::UndefinedFunction { name },
             crate::Error::DataException { detail } => Self::DataException { detail },
             crate::Error::InvalidArgumentForLogarithm { detail } => {
@@ -309,7 +312,6 @@ impl From<crate::Error> for ErrorCode {
             | crate::Error::WrongObjectType { .. }
             | crate::Error::AmbiguousColumn { .. }
             | crate::Error::UngroupedColumn { .. }
-            | crate::Error::ExecutionLimitExceeded { .. }
             | crate::Error::LimitExceeded { .. }
             | crate::Error::Promql(_)
             | crate::Error::SequencerUnavailable

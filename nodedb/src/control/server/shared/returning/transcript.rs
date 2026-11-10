@@ -28,6 +28,10 @@ pub(crate) struct AccessorOccurrence {
 
 pub(crate) type TranscriptEntry = (AccessorOccurrence, AccessorInvocation, AccessorResult);
 
+/// One sequence change an evaluation made: a `nextval` or a `setval`, and
+/// the value it returned.
+pub(crate) type SequenceEffect = (AccessorInvocation, i64);
+
 /// Exact prepared input and expression occurrences for one source attempt.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct EvaluationBinding {
@@ -68,8 +72,21 @@ impl AccessorTranscript {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn entries(&self) -> Vec<TranscriptEntry> {
         self.lock_entries().clone()
+    }
+
+    /// Every `nextval` and `setval` that returned a value, in invocation
+    /// order. A `currval` changes no sequence, and an error changed none.
+    pub(crate) fn sequence_effects(&self) -> Vec<SequenceEffect> {
+        self.lock_entries()
+            .iter()
+            .filter_map(|(_, invocation, result)| match (invocation, result) {
+                (AccessorInvocation::Currval(_), _) | (_, Err(_)) => None,
+                (invocation, Ok(value)) => Some((invocation.clone(), *value)),
+            })
+            .collect()
     }
 
     fn lock_entries(&self) -> MutexGuard<'_, Vec<TranscriptEntry>> {
@@ -184,6 +201,23 @@ mod tests {
         replay.finish().expect("finish replay");
         assert_eq!(access.0.get(), 100);
         assert_eq!(transcript.entries().len(), 2);
+        assert_eq!(
+            transcript.sequence_effects(),
+            vec![
+                (AccessorInvocation::Nextval("s".into()), 1),
+                (AccessorInvocation::Setval("s".into(), 40), 40),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_currval_is_no_sequence_effect() {
+        let access = Access(Cell::new(3));
+        let transcript = AccessorTranscript::default();
+        let first = transcript.begin(&access);
+        assert_eq!(first.currval("s").expect("currval"), 3);
+        first.finish().expect("finish");
+        assert!(transcript.sequence_effects().is_empty());
     }
 
     #[test]

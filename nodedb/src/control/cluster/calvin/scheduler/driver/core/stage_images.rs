@@ -6,7 +6,6 @@
 //! local `RETURNING` plan. The leader keys them by plan index on the txn's
 //! [`PendingTxn`](super::super::types::PendingTxn), where the vote reads them.
 
-use super::halt::{HaltReason, HaltStep};
 use super::scheduler::Scheduler;
 use crate::bridge::envelope::{Response, Status};
 use crate::control::cluster::calvin::scheduler::lock_manager::TxnId;
@@ -16,34 +15,32 @@ impl Scheduler {
     /// Take the images `response`, the answer to `txn_id`'s stage, carries.
     /// A refused stage carries none.
     ///
-    /// Returns `false` once it halts on images it cannot read. The txn then
-    /// casts no vote.
+    /// Images the scheduler cannot read leave the slice failed. The txn then
+    /// votes abort with an internal refusal.
     pub(in crate::control::cluster::calvin::scheduler::driver::core) fn absorb_stage_images(
         &mut self,
         txn_id: TxnId,
         response: &Response,
-    ) -> bool {
+    ) {
         if response.status != Status::Ok || response.payload.is_empty() {
-            return true;
+            return;
         }
+        let Some(pending) = self.pending.get_mut(&txn_id) else {
+            return;
+        };
         let absorbed = zerompk::from_msgpack::<StagedReturningImages>(response.payload.as_bytes())
             .map_err(|e| format!("the images do not decode: {e}"))
-            .and_then(|images| match self.pending.get_mut(&txn_id) {
-                Some(pending) => pending.returning.absorb(images),
-                None => Ok(()),
-            });
-        match absorbed {
-            Ok(()) => true,
-            Err(error) => {
-                self.metrics.record_executor_error();
-                self.halt_apply(
-                    txn_id,
-                    HaltReason::StageVoteInvalid,
-                    HaltStep::Stage,
-                    format!("stage RETURNING images: {error}"),
-                );
-                false
-            }
+            .and_then(|images| pending.returning.absorb(images));
+        if let Err(error) = absorbed {
+            self.metrics.record_executor_error();
+            tracing::warn!(
+                vshard_id = self.vshard_id,
+                epoch = txn_id.epoch,
+                position = txn_id.position,
+                %error,
+                "calvin: stage RETURNING images are unreadable; the vote is an abort"
+            );
+            pending.returning.failed = Some(format!("stage RETURNING images: {error}"));
         }
     }
 }
@@ -98,7 +95,7 @@ mod tests {
         let mut response = staged_response(Status::Ok, Some(StageVote::Commit));
         response.payload = images(&[0, 1]);
 
-        assert!(scheduler.absorb_stage_images(txn_id, &response));
+        scheduler.absorb_stage_images(txn_id, &response);
 
         let pending = scheduler.pending.get(&txn_id).expect("pending");
         assert_eq!(
@@ -118,24 +115,32 @@ mod tests {
         let (mut scheduler, _dir) = staged_scheduler(txn_id, Vec::new());
         let response = staged_response(Status::Ok, Some(StageVote::Commit));
 
-        assert!(scheduler.absorb_stage_images(txn_id, &response));
+        scheduler.absorb_stage_images(txn_id, &response);
         let pending = scheduler.pending.get(&txn_id).expect("pending");
         assert!(pending.returning.images.is_empty());
+        assert!(pending.returning.failed.is_none());
     }
 
-    /// Images for a plan the slice does not hold halt the stage. The txn
-    /// casts no vote.
+    /// Images for a plan the slice does not hold, or images that do not
+    /// decode, fail the slice. The scheduler does not halt.
     #[tokio::test]
-    async fn images_the_slice_cannot_key_halt_the_stage() {
+    async fn unreadable_images_fail_the_slice_without_a_halt() {
         let txn_id = TxnId::new(42, 0);
         let (mut scheduler, _dir) = staged_scheduler(txn_id, vec![0]);
         let mut response = staged_response(Status::Ok, Some(StageVote::Commit));
         response.payload = images(&[1]);
 
-        assert!(!scheduler.absorb_stage_images(txn_id, &response));
-        assert_eq!(
-            scheduler.apply_halt().map(|halt| halt.reason),
-            Some(HaltReason::StageVoteInvalid)
-        );
+        scheduler.absorb_stage_images(txn_id, &response);
+        assert!(scheduler.apply_halt().is_none());
+        let pending = scheduler.pending.get(&txn_id).expect("pending");
+        assert!(pending.returning.failed.is_some());
+
+        let txn_id = TxnId::new(43, 0);
+        let (mut scheduler, _dir) = staged_scheduler(txn_id, vec![0]);
+        response.payload = Payload::from_vec(vec![0xc1]);
+        scheduler.absorb_stage_images(txn_id, &response);
+        assert!(scheduler.apply_halt().is_none());
+        let pending = scheduler.pending.get(&txn_id).expect("pending");
+        assert!(pending.returning.failed.is_some());
     }
 }

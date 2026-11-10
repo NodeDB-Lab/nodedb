@@ -180,7 +180,8 @@ impl Assembler {
 }
 
 /// Set `txn`'s local plans: its local tasks as a plan batch, in their order
-/// in the whole txn, and `body_plans` as sorted indexes into them. The
+/// in the whole txn, `body_plans` as sorted indexes into them, and each
+/// task's index in the whole txn. The
 /// shared class stays as it is, with the manifest's whole-txn facts.
 ///
 /// Reads `received` in index order. A failure leaves `txn` unchanged.
@@ -227,9 +228,11 @@ pub(super) fn assemble(
     let plans: Vec<&PhysicalPlan> = local.iter().map(|(_, plan)| plan).collect();
     let bytes = zerompk::to_msgpack_vec(&plans)
         .map_err(|source| PartsError::PlansDoNotEncode { source })?;
+    let task_indexes = local.iter().map(|(task, _)| *task).collect();
     txn.local_plans = Some(Arc::new(LocalPlans {
         plans: bytes,
         body_plans,
+        task_indexes,
     }));
     Ok(())
 }

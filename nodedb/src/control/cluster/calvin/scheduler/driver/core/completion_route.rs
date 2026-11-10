@@ -75,10 +75,10 @@ impl Scheduler {
                 // `resolve_staged_commit` proposes the response's abort vote,
                 // parks locally, and waits for the durable global verdict
                 // before it issues a drop. A successful stage first hands
-                // the txn its `RETURNING` images.
-                if self.absorb_stage_images(txn_id, &response) {
-                    self.resolve_staged_commit(txn_id, &response);
-                }
+                // the txn its `RETURNING` images. Images it cannot read
+                // make the vote an abort.
+                self.absorb_stage_images(txn_id, &response);
+                self.resolve_staged_commit(txn_id, &response);
             }
             CommitState::AwaitingRedoResolve => {
                 self.finish_redo_resolve(txn_id, response);

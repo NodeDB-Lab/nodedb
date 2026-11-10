@@ -32,6 +32,19 @@ impl TestServer {
         Self::connect_and_build(spawned, dir, AuthMode::Trust).await
     }
 
+    /// [`Self::start_multicores`] with `[tuning.network] max_returning_rows`
+    /// lowered to `rows`.
+    pub async fn start_multicores_with_max_returning_rows(cores: usize, rows: u64) -> Self {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spawned = process::spawn(
+            dir.path(),
+            AuthMode::Trust,
+            TuningOverrides::max_returning_rows(rows),
+            cores,
+        );
+        Self::connect_and_build(spawned, dir, AuthMode::Trust).await
+    }
+
     /// [`Self::start_with_failpoints`] with `cores` Data Plane cores, for a
     /// test whose collections must land on different cores.
     #[cfg(feature = "failpoints")]

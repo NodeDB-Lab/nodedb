@@ -81,7 +81,8 @@ pub(super) fn retryable_refusal_reason(error: &crate::Error) -> Option<&str> {
             | ErrorCode::ActiveSqlTransaction { .. }
             | ErrorCode::DependentObjectsExist { .. }
             | ErrorCode::NodeLabelLimit { .. }
-            | ErrorCode::ProgramLimitExceeded { .. } => None,
+            | ErrorCode::ProgramLimitExceeded { .. }
+            | ErrorCode::ExecutionLimitExceeded { .. } => None,
         },
         crate::Error::RejectedConstraint { .. }
         | crate::Error::TxnOverlayMemoryExceeded { .. }
@@ -431,7 +432,8 @@ fn is_indeterminate_code(code: &ErrorCode) -> bool {
         | ErrorCode::ActiveSqlTransaction { .. }
         | ErrorCode::DependentObjectsExist { .. }
         | ErrorCode::NodeLabelLimit { .. }
-        | ErrorCode::ProgramLimitExceeded { .. } => false,
+        | ErrorCode::ProgramLimitExceeded { .. }
+        | ErrorCode::ExecutionLimitExceeded { .. } => false,
     }
 }
 

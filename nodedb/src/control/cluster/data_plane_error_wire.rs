@@ -164,6 +164,7 @@ impl From<ErrorCode> for DataPlaneErrorCode {
                 limit: to_wire_count(limit),
             },
             ErrorCode::ProgramLimitExceeded { detail } => Self::ProgramLimitExceeded { detail },
+            ErrorCode::ExecutionLimitExceeded { detail } => Self::ExecutionLimitExceeded { detail },
             ErrorCode::InvalidTextRepresentation { detail } => {
                 Self::InvalidTextRepresentation { detail }
             }
@@ -340,6 +341,9 @@ impl From<DataPlaneErrorCode> for ErrorCode {
             },
             DataPlaneErrorCode::ProgramLimitExceeded { detail } => {
                 Self::ProgramLimitExceeded { detail }
+            }
+            DataPlaneErrorCode::ExecutionLimitExceeded { detail } => {
+                Self::ExecutionLimitExceeded { detail }
             }
             DataPlaneErrorCode::InvalidTextRepresentation { detail } => {
                 Self::InvalidTextRepresentation { detail }

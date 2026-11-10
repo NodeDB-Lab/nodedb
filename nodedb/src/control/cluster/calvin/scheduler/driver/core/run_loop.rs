@@ -145,6 +145,11 @@ impl Scheduler {
                     self.handle_verdict_signal(signal);
                 }
 
+                // A `RETURNING` evaluation finished: cast the vote it held.
+                Some(evaluated) = self.returning_evals.recv() => {
+                    self.finish_returning_eval(evaluated);
+                }
+
                 // The apply loop buffered a barrier entry. Drained in every
                 // state, so a held txn keeps every entry of its log.
                 () = read_results.pushed() => {

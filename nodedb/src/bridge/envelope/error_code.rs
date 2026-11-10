@@ -228,6 +228,11 @@ pub enum ErrorCode {
     /// values an exact median holds. `detail` names the limit and the
     /// next action. SQLSTATE `54000` (program_limit_exceeded).
     ProgramLimitExceeded { detail: String },
+    /// A configured execution limit refused the statement, such as the rows
+    /// a `RETURNING` response holds. The Control Plane renders it as
+    /// `crate::Error::ExecutionLimitExceeded`, with that error's public
+    /// code and SQLSTATE `54000` (program_limit_exceeded).
+    ExecutionLimitExceeded { detail: String },
     /// Text does not parse as the type of the column it is written to.
     /// `detail` names the column, the text and the type. SQLSTATE `22P02`
     /// (invalid_text_representation).
