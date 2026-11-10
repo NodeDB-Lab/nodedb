@@ -28,6 +28,7 @@ pub mod meta_version_purge;
 pub mod plan;
 pub mod query;
 pub mod redo_origin;
+pub mod returning_accessor;
 pub mod rls_write_check_accessor;
 pub mod routing;
 pub mod set_op;

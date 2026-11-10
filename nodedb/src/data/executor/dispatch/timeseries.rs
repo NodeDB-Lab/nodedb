@@ -474,6 +474,7 @@ mod tests {
         {
             *returning = Some(ReturningSpec {
                 columns: ReturningColumns::Star,
+                precommit: None,
             });
         }
         let PhysicalPlan::Timeseries(op) = task.request.plan.clone() else {

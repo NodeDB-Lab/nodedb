@@ -36,6 +36,7 @@ pub mod edge_slices;
 pub mod local;
 pub mod parts;
 pub mod prepare;
+mod returning_contract;
 pub mod routed;
 pub mod stream;
 pub mod submit_gate;

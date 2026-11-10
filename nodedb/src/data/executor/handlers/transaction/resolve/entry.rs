@@ -833,6 +833,7 @@ mod tests {
             pk_bytes: Vec::new(),
             returning: Some(ReturningSpec {
                 columns: ReturningColumns::Star,
+                precommit: None,
             }),
             rls_filters: Vec::new(),
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
@@ -904,6 +905,7 @@ mod tests {
             updates: vec![("name".to_string(), literal_str("bob"))],
             returning: Some(ReturningSpec {
                 columns: ReturningColumns::Star,
+                precommit: None,
             }),
             rls_filters: Vec::new(),
             rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
@@ -960,6 +962,7 @@ mod tests {
             updates: vec![("name".to_string(), literal_str("new"))],
             returning: Some(ReturningSpec {
                 columns: ReturningColumns::Star,
+                precommit: None,
             }),
             ollp_predicted_surrogates: None,
             ollp_predicted_edges: None,
@@ -1018,6 +1021,7 @@ mod tests {
             filters: Vec::new(),
             returning: Some(ReturningSpec {
                 columns: ReturningColumns::Star,
+                precommit: None,
             }),
             ollp_predicted_surrogates: None,
             ollp_predicted_edges: None,
@@ -1080,6 +1084,7 @@ mod tests {
             updates: Vec::new(),
             returning: Some(ReturningSpec {
                 columns: ReturningColumns::Star,
+                precommit: None,
             }),
             ollp_predicted_surrogates: None,
             ollp_predicted_edges: None,

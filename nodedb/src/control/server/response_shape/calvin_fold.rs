@@ -350,6 +350,7 @@ mod tests {
             surrogate: nodedb_types::Surrogate::new(1),
             returning: Some(ReturningSpec {
                 columns: ReturningColumns::Star,
+                precommit: None,
             }),
             rls_filters: Vec::new(),
             resolved_sum_targets: Vec::new(),

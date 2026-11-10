@@ -81,6 +81,7 @@ pub fn returning_spec(projection: &[Projection]) -> Result<nodedb_types::Returni
     ) {
         return Ok(ReturningSpec {
             columns: ReturningColumns::Star,
+            precommit: None,
         });
     }
     let mut items = Vec::with_capacity(projection.len());
@@ -116,6 +117,7 @@ pub fn returning_spec(projection: &[Projection]) -> Result<nodedb_types::Returni
     }
     Ok(ReturningSpec {
         columns: ReturningColumns::Named(items),
+        precommit: None,
     })
 }
 

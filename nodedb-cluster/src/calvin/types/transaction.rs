@@ -126,6 +126,10 @@ pub struct TxClass {
     /// role-guarded state transition against the same set. Empty for a
     /// transaction no user wrote.
     pub user_roles: Vec<String>,
+    /// The response contract of the transaction's `RETURNING` write. Every
+    /// participant that evaluates the response reads the same inputs from it.
+    /// `None` for a transaction with no `RETURNING`.
+    pub returning: Option<super::returning_contract::ReturningContract>,
     /// Cached participating-vshard set. Re-derived on decode; not serialized.
     #[serde(skip)]
     #[msgpack(ignore)]
@@ -282,6 +286,7 @@ impl TxClass {
             multi_part: None,
             restore_id: 0,
             user_roles: Vec::new(),
+            returning: None,
             participating_vshards: Vec::new(),
             write_vshards: Vec::new(),
         }
@@ -654,11 +659,24 @@ mod tests {
         let bytes = zerompk::to_msgpack_vec(&tc).unwrap();
         let mut decoded: TxClass = zerompk::from_msgpack(&bytes).unwrap();
         decoded.restore_derived().expect("restore derived");
+        assert_eq!(decoded.returning, None);
         assert_eq!(tc.tenant_id, decoded.tenant_id);
         assert_eq!(tc.plans, decoded.plans);
         assert_eq!(tc.write_set, decoded.write_set);
         assert_eq!(tc.read_set, decoded.read_set);
         assert_eq!(tc.participating_vshards(), decoded.participating_vshards());
+    }
+
+    #[test]
+    fn a_returning_contract_survives_the_class_round_trip() {
+        let mut tc = make_tx_class(multi_vshard_write_set());
+        let contract = super::super::returning_contract::sample_contract();
+        tc.set_returning(Some(contract.clone()));
+        let bytes = zerompk::to_msgpack_vec(&tc).expect("encode class");
+        let mut decoded: TxClass = zerompk::from_msgpack(&bytes).expect("decode class");
+        decoded.restore_derived().expect("restore derived");
+        assert_eq!(decoded.returning, Some(contract));
+        assert_eq!(decoded, tc);
     }
 
     #[test]

@@ -42,6 +42,21 @@ impl SessionSequenceValues {
             .copied()
     }
 
+    /// Every value this session obtained in `database_id` and `tenant_id`,
+    /// as `(sequence name, value)` pairs ascending by name.
+    pub fn values_in(&self, database_id: u64, tenant_id: u64) -> Vec<(String, i64)> {
+        let prefix = registry_key(database_id, tenant_id, "");
+        let mut values: Vec<(String, i64)> = self
+            .values
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .filter_map(|(key, value)| Some((key.strip_prefix(&prefix)?.to_owned(), *value)))
+            .collect();
+        values.sort();
+        values
+    }
+
     /// Drop every recorded value. Called on a full session reset.
     pub fn clear(&self) {
         self.values

@@ -608,6 +608,7 @@ mod tests {
         let vshard = VShardId::new(0);
         let spec = ReturningSpec {
             columns: nodedb_physical::physical_plan::ReturningColumns::Star,
+            precommit: None,
         };
         let plan = PhysicalPlan::Crdt(CrdtOp::DocUpsert {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "docs"),

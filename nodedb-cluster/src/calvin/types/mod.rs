@@ -7,6 +7,7 @@ pub mod multi_part;
 pub mod part_tasks;
 pub mod primitives;
 pub mod read_write_set;
+pub mod returning_contract;
 pub mod scheduler_input;
 pub mod sequencer;
 pub mod transaction;
@@ -26,6 +27,9 @@ pub use primitives::{
     PassiveReadKeyId, ReadKeyIdent, SortedVec, VersionedReadEntry, VersionedReadSet,
 };
 pub use read_write_set::ReadWriteSet;
+pub use returning_contract::{
+    PlanReturning, ReturningContract, ReturningContractLimits, SequenceValue,
+};
 pub use scheduler_input::SchedulerInput;
 pub use sequencer::{EpochBatch, LocalPlans, SequencedTxn};
 pub use transaction::TxClass;

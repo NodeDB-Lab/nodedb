@@ -90,6 +90,7 @@ mod tests {
 
         let plan = merge_plan(Some(ReturningSpec {
             columns: ReturningColumns::Star,
+            precommit: None,
         }));
 
         assert!(matches!(describe_plan(&plan), PlanKind::ReturningRows));
@@ -104,6 +105,7 @@ mod tests {
         let spec = || {
             Some(ReturningSpec {
                 columns: ReturningColumns::Star,
+                precommit: None,
             })
         };
         let plans = [
@@ -180,6 +182,7 @@ mod tests {
         let spec = || {
             Some(ReturningSpec {
                 columns: ReturningColumns::Star,
+                precommit: None,
             })
         };
         let plans = [

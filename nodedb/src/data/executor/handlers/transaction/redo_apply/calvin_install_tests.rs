@@ -47,6 +47,7 @@ fn returning_insert(document_id: &str, surrogate: u32) -> PhysicalPlan {
         surrogate: Surrogate::new(surrogate),
         returning: Some(ReturningSpec {
             columns: ReturningColumns::Star,
+            precommit: None,
         }),
         rls_filters: Vec::new(),
         resolved_sum_targets: Vec::new(),

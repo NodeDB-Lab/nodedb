@@ -23,7 +23,7 @@ pub enum DecodedTransactionRedo {
     /// The entry carries the whole payload.
     Inline(Box<TransactionRedoPayload>),
     /// The entry names the stream whose chunks carry the content.
-    Chunked(ChunkedRedo),
+    Chunked(Box<ChunkedRedo>),
 }
 
 /// The final entry of a chunked redo: its stream and the fields the entry
@@ -124,16 +124,18 @@ pub fn decode_transaction_redo(write: &ReplicatedWrite) -> crate::Result<Decoded
             calvin.clone(),
             *snapshot_ordinal,
         ))),
-        RedoBody::Chunked { stream, count, len } => DecodedTransactionRedo::Chunked(ChunkedRedo {
-            stream: *stream,
-            count: *count,
-            len: *len,
-            collections: collections.clone(),
-            event_source: *event_source,
-            origin: *origin,
-            calvin: calvin.clone(),
-            snapshot_ordinal: *snapshot_ordinal,
-        }),
+        RedoBody::Chunked { stream, count, len } => {
+            DecodedTransactionRedo::Chunked(Box::new(ChunkedRedo {
+                stream: *stream,
+                count: *count,
+                len: *len,
+                collections: collections.clone(),
+                event_source: *event_source,
+                origin: *origin,
+                calvin: calvin.clone(),
+                snapshot_ordinal: *snapshot_ordinal,
+            }))
+        }
     })
 }
 

@@ -138,6 +138,7 @@ fn update(join: bool, replace_embedding: bool) -> DocumentOp {
     }
     let returning = Some(ReturningSpec {
         columns: ReturningColumns::Star,
+        precommit: None,
     });
     if join {
         DocumentOp::UpdateFromJoin {

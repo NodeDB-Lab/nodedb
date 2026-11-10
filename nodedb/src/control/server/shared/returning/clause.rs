@@ -20,11 +20,15 @@ pub use nodedb_sql::types::ResolvedReturning as ReturningClause;
 /// `Star` when any item is a star, otherwise every named column plus every
 /// base column a computed item reads, deduplicated in first-seen order.
 ///
-/// A computed item is never evaluated on the Data Plane. The response shaper
-/// evaluates it after column redaction and with the session's sequence
-/// access, so a masked column never reaches an expression and a sequence
-/// accessor advances once per returned row. Names are bare: a stored row
-/// keys its fields by column name, so a `target.col` qualifier is dropped.
+/// This is the stored half of a plan's response spec. The Data Plane reads
+/// only these columns. The precommit half, `ResolvedReturning.spec`, holds
+/// the full ordered item list with aliases and computed items. It rides in
+/// the plan's `precommit` slot (see [`plan_returning_spec`]) and is
+/// evaluated on the Control Plane after column redaction and with the
+/// session's sequence access. A masked column never reaches an expression,
+/// and a sequence accessor advances once per returned row. Names are bare: a
+/// stored row keys its fields by column name, so a `target.col` qualifier is
+/// dropped.
 pub fn stored_columns_spec(projection: &[Projection]) -> ReturningSpec {
     let mut names: Vec<String> = Vec::with_capacity(projection.len());
     let mut push = |qualified: &str| {
@@ -44,6 +48,7 @@ pub fn stored_columns_spec(projection: &[Projection]) -> ReturningSpec {
             Projection::Star | Projection::QualifiedStar(_) => {
                 return ReturningSpec {
                     columns: ReturningColumns::Star,
+                    precommit: None,
                 };
             }
         }
@@ -55,7 +60,16 @@ pub fn stored_columns_spec(projection: &[Projection]) -> ReturningSpec {
                 .map(|name| ReturningItem::Column { name, alias: None })
                 .collect(),
         ),
+        precommit: None,
     }
+}
+
+/// The spec a plan carries for a resolved clause: the stored columns for the
+/// Data Plane, with the full precommit item list beside them.
+pub fn plan_returning_spec(returning: &ReturningClause) -> ReturningSpec {
+    let mut spec = stored_columns_spec(&returning.projection);
+    spec.precommit = Some(returning.spec.columns.clone());
+    spec
 }
 
 /// Read the outer statement's response clause from its resolved plan.
@@ -149,6 +163,7 @@ mod tests {
     fn output_names_star_returns_none() {
         let spec = ReturningSpec {
             columns: ReturningColumns::Star,
+            precommit: None,
         };
         assert!(spec.output_names().is_none());
     }
@@ -166,6 +181,7 @@ mod tests {
                     alias: Some("val".into()),
                 },
             ]),
+            precommit: None,
         };
         assert_eq!(
             spec.output_names(),

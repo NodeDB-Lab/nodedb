@@ -798,6 +798,7 @@ mod tests {
         let vshard = VShardId::new(0);
         let spec = ReturningSpec {
             columns: nodedb_physical::physical_plan::ReturningColumns::Star,
+            precommit: None,
         };
         let plan = PhysicalPlan::Vector(VectorOp::DirectUpsert {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "vecs"),

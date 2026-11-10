@@ -112,6 +112,7 @@ fn merge(
         clauses,
         returning: Some(ReturningSpec {
             columns: ReturningColumns::Star,
+            precommit: None,
         }),
         resolved_inserts: Some(
             surrogates

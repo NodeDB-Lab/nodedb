@@ -422,6 +422,7 @@ mod tests {
                     })
                     .collect(),
             ),
+            precommit: None,
         }
     }
 
@@ -528,6 +529,7 @@ mod tests {
         ];
         let spec = ReturningSpec {
             columns: ReturningColumns::Star,
+            precommit: None,
         };
         let payload = build_rows_payload(
             &spec,
@@ -622,6 +624,7 @@ mod tests {
                 expression,
                 name: "ratio".into(),
             }]),
+            precommit: None,
         };
         let rows = vec![
             Value::from(json!({"owner":"alice", "divisor":0})),

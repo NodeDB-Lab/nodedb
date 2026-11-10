@@ -495,6 +495,7 @@ mod tests {
                     })
                     .collect(),
             ),
+            precommit: None,
         })
     }
 

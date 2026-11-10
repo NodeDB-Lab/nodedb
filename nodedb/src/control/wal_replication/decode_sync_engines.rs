@@ -509,6 +509,7 @@ mod tests {
                     alias: None,
                 },
             ]),
+            precommit: None,
         };
         let plan = PhysicalPlan::Columnar(ColumnarOp::Insert {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "metrics"),
@@ -660,6 +661,7 @@ mod tests {
     fn timeseries_ingest_returning_and_rls_filters_roundtrip() {
         let spec = ReturningSpec {
             columns: nodedb_physical::physical_plan::ReturningColumns::Star,
+            precommit: None,
         };
         let plan = PhysicalPlan::Timeseries(TimeseriesOp::Ingest {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "temps"),

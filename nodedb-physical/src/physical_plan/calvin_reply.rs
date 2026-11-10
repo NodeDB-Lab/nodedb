@@ -162,6 +162,7 @@ mod tests {
             reply: CalvinReplySpec::PostImages(CalvinPostImagesSpec {
                 spec: ReturningSpec {
                     columns: ReturningColumns::Star,
+                    precommit: None,
                 },
                 rls_filters: vec![9],
                 collection: "orders".into(),

@@ -334,9 +334,9 @@ pub(super) fn convert_one(
     let mut tasks = nodedb_sql::dispatch(&mut visitor, plan)?;
     if let Some(returning) = plan.returning() {
         use crate::control::server::shared::returning::{
-            attach_returning_spec, stored_columns_spec,
+            attach_returning_spec, plan_returning_spec,
         };
-        attach_returning_spec(&mut tasks, &stored_columns_spec(&returning.projection))?;
+        attach_returning_spec(&mut tasks, &plan_returning_spec(returning))?;
     }
     Ok(tasks)
 }

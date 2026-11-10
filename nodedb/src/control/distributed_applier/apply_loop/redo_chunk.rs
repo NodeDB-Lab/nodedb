@@ -373,7 +373,7 @@ mod tests {
             adds_storage: false,
         };
         match decode_transaction_redo(&write).expect("decode") {
-            DecodedTransactionRedo::Chunked(chunked) => chunked,
+            DecodedTransactionRedo::Chunked(chunked) => *chunked,
             DecodedTransactionRedo::Inline(_) => panic!("a chunked body decodes chunked"),
         }
     }

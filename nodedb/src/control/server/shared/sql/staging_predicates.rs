@@ -444,6 +444,7 @@ mod tests {
         let ret = || {
             Some(ReturningSpec {
                 columns: ReturningColumns::Star,
+                precommit: None,
             })
         };
 

@@ -70,6 +70,13 @@ pub fn with_request_consistency<F: Future>(
     )
 }
 
+/// The `currval` map of the session the running statement belongs to.
+/// `None` outside a statement scope, or when the session is gone.
+pub fn current_sequence_values() -> Option<Arc<crate::control::sequence::SessionSequenceValues>> {
+    let (sessions, session_id) = with_scope(None, |scope| scope.read_session.borrow().clone())?;
+    sessions.sequence_values(session_id)
+}
+
 /// Whether a read of the running statement confirms leadership first.
 pub fn linearizable() -> bool {
     current().requires_leader()

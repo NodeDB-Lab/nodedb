@@ -111,6 +111,7 @@ mod tests {
     fn returning() -> ReturningSpec {
         ReturningSpec {
             columns: ReturningColumns::Star,
+            precommit: None,
         }
     }
 

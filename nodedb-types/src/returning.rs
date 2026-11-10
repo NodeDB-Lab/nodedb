@@ -7,6 +7,7 @@
     Debug,
     Clone,
     PartialEq,
+    Eq,
     serde::Serialize,
     serde::Deserialize,
     zerompk::ToMessagePack,
@@ -36,6 +37,7 @@ impl ReturningItem {
     Debug,
     Clone,
     PartialEq,
+    Eq,
     serde::Serialize,
     serde::Deserialize,
     zerompk::ToMessagePack,
@@ -48,18 +50,24 @@ pub enum ReturningColumns {
     Named(Vec<ReturningItem>),
 }
 
-/// A write response evaluated against prepared rows before source commit.
+/// The columns a write plan reads from stored rows, and optionally the full
+/// response list evaluated against prepared rows before source commit.
 #[derive(
     Debug,
     Clone,
     PartialEq,
+    Eq,
     serde::Serialize,
     serde::Deserialize,
     zerompk::ToMessagePack,
     zerompk::FromMessagePack,
 )]
 pub struct ReturningSpec {
+    /// The columns the Data Plane returns from the stored rows.
     pub columns: ReturningColumns,
+    /// The complete response list the precommit evaluation runs, in output
+    /// order. `None` on a spec that names stored columns only.
+    pub precommit: Option<ReturningColumns>,
 }
 
 impl ReturningSpec {

@@ -808,6 +808,7 @@ mod tests {
     fn document_point_put_returning_and_rls_filters_roundtrip() {
         let spec = ReturningSpec {
             columns: nodedb_physical::physical_plan::ReturningColumns::Star,
+            precommit: None,
         };
         let plan = PhysicalPlan::Document(DocumentOp::PointPut {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "users"),
@@ -864,6 +865,7 @@ mod tests {
                     alias: None,
                 },
             ]),
+            precommit: None,
         };
         let plan = PhysicalPlan::Document(DocumentOp::PointUpdate {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "accounts"),
@@ -916,6 +918,7 @@ mod tests {
     fn document_point_delete_returning_and_rls_filters_roundtrip() {
         let spec = ReturningSpec {
             columns: nodedb_physical::physical_plan::ReturningColumns::Star,
+            precommit: None,
         };
         let plan = PhysicalPlan::Document(DocumentOp::PointDelete {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "accounts"),
@@ -966,6 +969,7 @@ mod tests {
     fn document_upsert_returning_and_rls_filters_roundtrip() {
         let spec = ReturningSpec {
             columns: nodedb_physical::physical_plan::ReturningColumns::Star,
+            precommit: None,
         };
         let plan = PhysicalPlan::Document(DocumentOp::Upsert {
             collection: QualifiedCollection::new(DatabaseId::DEFAULT, "accounts"),

@@ -45,6 +45,7 @@ impl CalvinReply {
         Self::PostImages(PostImages {
             spec: ReturningSpec {
                 columns: nodedb_physical::physical_plan::ReturningColumns::Star,
+                precommit: None,
             },
             rls_filters: Vec::new(),
             collection: collection.to_string(),

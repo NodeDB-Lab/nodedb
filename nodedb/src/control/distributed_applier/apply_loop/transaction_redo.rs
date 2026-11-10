@@ -101,7 +101,7 @@ pub(super) fn prepare_transaction_redo_entry<'a>(
             ctx,
             pos,
             target,
-            chunked,
+            *chunked,
             FinalEntry {
                 incarnations,
                 mirror_database,
