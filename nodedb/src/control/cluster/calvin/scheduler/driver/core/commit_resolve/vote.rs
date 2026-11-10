@@ -109,6 +109,18 @@ impl Scheduler {
         // restages the txn.
         match self.pending.get_mut(&txn_id) {
             Some(pending) => {
+                // The stage's `RETURNING` images stay on the txn while it
+                // parks: `pending.returning`, keyed by plan index.
+                if !pending.returning.images.is_empty() {
+                    tracing::debug!(
+                        vshard_id = self.vshard_id,
+                        epoch = txn_id.epoch,
+                        position = txn_id.position,
+                        plans = pending.returning.images.len(),
+                        rows = pending.returning.row_count(),
+                        "calvin: staged RETURNING images held for the vote"
+                    );
+                }
                 pending.commit_state = CommitState::AwaitingVerdict;
                 // A superseded slice cannot commit here: its collection is gone.
                 pending.stage_error = match vote {

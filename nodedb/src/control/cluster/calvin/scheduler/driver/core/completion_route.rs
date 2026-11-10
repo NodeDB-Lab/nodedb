@@ -74,8 +74,11 @@ impl Scheduler {
                 // Stage failures remain participants in the barrier:
                 // `resolve_staged_commit` proposes the response's abort vote,
                 // parks locally, and waits for the durable global verdict
-                // before it issues a drop.
-                self.resolve_staged_commit(txn_id, &response);
+                // before it issues a drop. A successful stage first hands
+                // the txn its `RETURNING` images.
+                if self.absorb_stage_images(txn_id, &response) {
+                    self.resolve_staged_commit(txn_id, &response);
+                }
             }
             CommitState::AwaitingRedoResolve => {
                 self.finish_redo_resolve(txn_id, response);

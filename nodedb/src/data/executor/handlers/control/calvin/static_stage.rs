@@ -6,10 +6,10 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use tracing::{debug, info_span};
 
-use crate::bridge::envelope::{ErrorCode, Payload, Response, Status};
+use crate::bridge::envelope::{ErrorCode, Response, Status};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::core_loop::commit_pending::PendingCommit;
-use crate::data::executor::handlers::control::calvin_reply::{CalvinReply, CalvinStaging};
+use crate::data::executor::handlers::control::calvin_reply::CalvinStaging;
 use crate::data::executor::task::ExecutionTask;
 use crate::types::TenantId;
 use nodedb_physical::physical_plan::PhysicalPlan;
@@ -96,12 +96,12 @@ impl CoreLoop {
                 // Test-only fault boundary after a potentially-mutating stage.
                 crate::fail_point!(self.fail_scope, "calvin_static::during_overlay_stage");
             }
-            Ok::<CalvinReply, ErrorCode>(staging.into_reply())
+            Ok::<_, ErrorCode>(staging.into_parts())
         }));
         self.apply_scope.calvin_txn_ordinal = None;
         self.epoch_system_ms = prev_epoch_ms;
-        let reply = match stage_result {
-            Ok(Ok(reply)) => reply,
+        let (reply, images) = match stage_result {
+            Ok(Ok(parts)) => parts,
             Ok(Err(error)) => {
                 return self.calvin_stage_failure(task, epoch, position, vshard_id, error);
             }
@@ -138,6 +138,14 @@ impl CoreLoop {
             }
         };
 
+        // The response carries the staged `RETURNING` images to the leader.
+        let payload = match super::shared::stage_images_payload(&images) {
+            Ok(payload) => payload,
+            Err(error) => {
+                return self.calvin_stage_failure(task, epoch, position, vshard_id, error);
+            }
+        };
+
         // Publish only a fully staged transaction. Resolve reads these plans
         // against the overlay; a global abort drops both.
         self.calvin.commit_pending.insert(
@@ -155,7 +163,7 @@ impl CoreLoop {
             status: Status::Ok,
             attempt: 1,
             partial: false,
-            payload: Payload::empty(),
+            payload,
             watermark_lsn: self.watermark,
             error_code: None,
             stage_vote: Some(vote),

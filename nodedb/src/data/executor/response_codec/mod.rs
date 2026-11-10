@@ -25,6 +25,7 @@
 //! - `rows` — row-context decoders: under a caller-stated `RowContext`,
 //!   native object rows decode to typed values or render as JSON.
 //! - `arrow` — Arrow IPC encoder for columnar transport.
+//! - `stage_images` — the `RETURNING` images a Calvin stage answers with.
 //! - `hits` — hit-row structs (Vector / Text / Hybrid search, GraphRag, etc.)
 //!   plus their `ToMessagePack` impls.
 
@@ -36,6 +37,7 @@ mod hits;
 mod raw;
 mod rows;
 mod search_hits;
+mod stage_images;
 
 pub use arrow::encode_as_arrow_ipc;
 pub(in crate::data::executor) use decode::decode_response_to_docs;
@@ -66,3 +68,4 @@ pub use search_hits::{
     flatten_hybrid_hits_to_relational_rows, flatten_vector_hits_to_relational_rows,
     hybrid_hit_surrogates, vector_hit_surrogates,
 };
+pub(crate) use stage_images::{StagedImageRow, StagedPlanImages, StagedReturningImages};

@@ -66,6 +66,7 @@ mod recursive_iterate;
 pub mod recursive_value;
 pub mod returning_doc;
 pub mod returning_rows;
+pub mod returning_stored_docs;
 pub mod rls_eval;
 pub mod rls_write_gate;
 #[cfg(test)]

@@ -8,6 +8,11 @@ use nodedb_physical::physical_plan::{
     ColumnarOp, CrdtOp, DocumentOp, KvOp, PhysicalPlan, ReturningSpec, TimeseriesOp, VectorOp,
 };
 
+use crate::types::{DatabaseId, TenantId};
+
+/// The overlay key of a collection: database, tenant and name.
+pub(super) type CollKey = (DatabaseId, TenantId, String);
+
 /// The row shape an engine's `RETURNING` rows take.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::data::executor) enum RowEngine {

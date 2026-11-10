@@ -3,7 +3,7 @@
 //! `CalvinExecCtx`, the helpers the static and active Calvin stage paths
 //! share, and the test fixtures every concern file's tests build on.
 
-use crate::bridge::envelope::{ErrorCode, Response, StageVote};
+use crate::bridge::envelope::{ErrorCode, Payload, Response, StageVote};
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::task::ExecutionTask;
 
@@ -16,6 +16,21 @@ pub(in crate::data::executor) struct CalvinExecCtx {
     pub epoch: u64,
     pub position: u32,
     pub epoch_system_ms: i64,
+}
+
+/// The payload a successful stage answers with: the `RETURNING` images of
+/// its plans, or empty when no plan carries `RETURNING`.
+pub(super) fn stage_images_payload(
+    images: &crate::data::executor::response_codec::StagedReturningImages,
+) -> Result<Payload, ErrorCode> {
+    if images.plans.is_empty() {
+        return Ok(Payload::empty());
+    }
+    zerompk::to_msgpack_vec(images)
+        .map(Payload::from_vec)
+        .map_err(|e| ErrorCode::Internal {
+            detail: format!("calvin stage: encode the RETURNING images: {e}"),
+        })
 }
 
 impl CoreLoop {

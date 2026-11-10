@@ -85,6 +85,10 @@ pub(super) struct PendingTxn {
     /// A halt released `gates` while the txn waited. Its proposal checks the
     /// incarnations again and takes the gates back first.
     pub ungated: bool,
+    /// The `RETURNING` images this leader's stage answered with, keyed by
+    /// plan index. The leader evaluates the response from them before it
+    /// votes.
+    pub returning: super::staged_returning::StagedReturning,
 }
 
 /// What this vShard's slice of a transaction writes: derived once from its

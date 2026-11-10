@@ -6,14 +6,19 @@
 //! Each engine renders through the converter its live write handler uses,
 //! so a row reads the same whichever path wrote it.
 
+use std::borrow::Cow;
+
 use nodedb_physical::physical_plan::ReturningSpec;
-use nodedb_types::{RowIdentity, StorageKey, Surrogate};
+use nodedb_types::{RowIdentity, StorageKey, Surrogate, Value};
 
 use super::target::RowEngine;
 use crate::bridge::envelope::ErrorCode;
 use crate::data::executor::core_loop::CoreLoop;
 use crate::data::executor::handlers::returning_rows::{
-    VectorRowColumns, build_stored_rows_payload, kv_stored_rows_payload, vector_stored_rows_payload,
+    VectorRowColumns, build_rows_payload, encode_stored_rows_payload,
+};
+use crate::data::executor::handlers::returning_stored_docs::{
+    kv_stored_docs, stored_docs, vector_stored_docs,
 };
 use crate::data::executor::handlers::transaction::overlay::StagedVectorRow;
 use crate::data::executor::handlers::transaction::stage_write::unhex_key;
@@ -116,6 +121,38 @@ impl CoreLoop {
         rls_filters: &[u8],
         rows: &[ReturningImageRow],
     ) -> Result<Vec<u8>, ErrorCode> {
+        let docs = self.calvin_row_docs(at, rows)?;
+        self.calvin_render_docs(at.engine, spec, rls_filters, &docs)
+    }
+
+    /// Project `docs`, the full source documents of `engine` rows, as the
+    /// `RETURNING` row set.
+    pub(super) fn calvin_render_docs(
+        &self,
+        engine: RowEngine,
+        spec: &ReturningSpec,
+        rls_filters: &[u8],
+        docs: &[Value],
+    ) -> Result<Vec<u8>, ErrorCode> {
+        let crs = self.crs_context();
+        let payload = match engine {
+            RowEngine::Document | RowEngine::Crdt | RowEngine::Columnar | RowEngine::Timeseries => {
+                build_rows_payload(spec, rls_filters, docs, &crs)
+            }
+            RowEngine::Kv | RowEngine::Vector => {
+                encode_stored_rows_payload(spec, rls_filters, docs, &crs)
+            }
+        };
+        payload.map_err(ErrorCode::from)
+    }
+
+    /// The full source document of each of `rows`, in order, as a `SELECT`
+    /// of the row reads it.
+    pub(super) fn calvin_row_docs(
+        &self,
+        at: &RowLocation<'_>,
+        rows: &[ReturningImageRow],
+    ) -> Result<Vec<Value>, ErrorCode> {
         match at.engine {
             RowEngine::Document | RowEngine::Crdt => {
                 // A CRDT row is MessagePack in either storage mode.
@@ -134,15 +171,8 @@ impl CoreLoop {
                     .map(|row| (&row.identity, row.bytes.as_slice()))
                     .collect();
                 let identity_column = self.identity_column(at.database_id, at.tid, at.collection);
-                build_stored_rows_payload(
-                    spec,
-                    rls_filters,
-                    strict_schema.as_ref(),
-                    &identity_column,
-                    &stored,
-                    &self.crs_context(),
-                )
-                .map_err(ErrorCode::from)
+                stored_docs(strict_schema.as_ref(), &identity_column, &stored)
+                    .map_err(ErrorCode::from)
             }
             RowEngine::Kv => {
                 let keys = rows
@@ -154,8 +184,7 @@ impl CoreLoop {
                     .zip(rows)
                     .map(|(key, row)| (key.as_slice(), row.bytes.as_slice()))
                     .collect();
-                kv_stored_rows_payload(spec, rls_filters, &stored, &self.crs_context())
-                    .map_err(ErrorCode::from)
+                kv_stored_docs(&stored).map_err(ErrorCode::from)
             }
             RowEngine::Vector => {
                 let keys: Vec<StorageKey> = rows
@@ -172,17 +201,19 @@ impl CoreLoop {
                     ),
                 })?;
                 // A staged row carries its vector. A base row's is its node's.
-                let vectors: Vec<Vec<f32>> = rows
+                let vectors: Vec<Cow<'_, [f32]>> = rows
                     .iter()
                     .map(|row| match &row.vector {
-                        Some(vector) => Ok(vector.clone()),
-                        None => self.committed_primary_vector(
-                            at.database_id,
-                            at.tid,
-                            at.collection,
-                            field,
-                            row.surrogate,
-                        ),
+                        Some(vector) => Ok(Cow::Borrowed(vector.as_slice())),
+                        None => self
+                            .committed_primary_vector(
+                                at.database_id,
+                                at.tid,
+                                at.collection,
+                                field,
+                                row.surrogate,
+                            )
+                            .map(Cow::Owned),
                     })
                     .collect::<crate::Result<_>>()
                     .map_err(ErrorCode::from)?;
@@ -190,15 +221,14 @@ impl CoreLoop {
                     .iter()
                     .zip(rows)
                     .zip(vectors.iter())
-                    .map(|((key, row), vector)| (key, row.bytes.as_slice(), vector.as_slice()))
+                    .map(|((key, row), vector)| (key, row.bytes.as_slice(), &**vector))
                     .collect();
                 let identity_column = self.identity_column(at.database_id, at.tid, at.collection);
                 let columns = VectorRowColumns {
                     identity: &identity_column,
                     vector: field,
                 };
-                vector_stored_rows_payload(spec, rls_filters, columns, &stored, &self.crs_context())
-                    .map_err(ErrorCode::from)
+                vector_stored_docs(columns, &stored).map_err(ErrorCode::from)
             }
             RowEngine::Columnar | RowEngine::Timeseries => Err(ErrorCode::Internal {
                 detail: format!(

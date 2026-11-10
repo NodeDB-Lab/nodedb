@@ -12,36 +12,32 @@
 //!   taken from BASE ∪ OVERLAY, so a row an earlier plan of the same
 //!   transaction wrote is reported as that plan left it.
 //! - A delete reports each removed row's image from before the plan.
-//! - A document or CRDT write reports each row as the install stored it, read back from base after the install. The install can
-//!   rewrite a body, as hash chaining does.
+//! - A document or CRDT write reports each row as the install stored it,
+//!   read back from base after the install. The install can rewrite a body,
+//!   as hash chaining does.
 //! - A KV, vector-primary or columnar write reports the rows it staged,
 //!   which are the exact bytes the install stores.
 //! - A timeseries ingest reports its stamped rows rendered through the
 //!   raw-scan row emitter, as the live ingest does.
+//!
+//! A `RETURNING` plan also stages its images: the full source rows its reply
+//! projects. They ride the stage response, keyed by the plan's slice index.
+//! A document or CRDT after-image and a resolved ingest's rows are read after
+//! the install, so those plans stage none.
 
 use nodedb_physical::physical_plan::{PhysicalPlan, TimeseriesOp};
-use nodedb_types::{Surrogate, Value};
 
-use super::images::{ReturningImageRow, RowLocation, staged_row_image};
-use super::reply::{CalvinReply, CalvinStaging, InstalledTimeseries, PostImages};
-use super::target::{ReplyImage, ReturningTarget, RowEngine, returning_target};
+use super::edge_count::owned_edge_count;
+use super::reply::{CalvinReply, CalvinStaging, InstalledTimeseries};
+use super::returning::ReturningPlan;
+use super::target::returning_target;
 use crate::bridge::envelope::ErrorCode;
 use crate::control::server::response_shape::types::plan_count_reads_reply;
 use crate::control::server::shared::sql::affected_payload::read_affected_fields;
 use crate::data::executor::core_loop::CoreLoop;
-use crate::data::executor::handlers::columnar_write::row_values_to_user_object;
-use crate::data::executor::handlers::returning_rows::build_rows_payload;
-use crate::data::executor::handlers::timeseries::StampedIngest;
-use crate::data::executor::handlers::transaction::overlay::{
-    Staged, TouchedSlot, decode_staged_row,
-};
 use crate::data::executor::task::ExecutionTask;
-use crate::engine::timeseries::ilp;
 use crate::engine::timeseries::resolved_ingest::RESOLVED_INGEST_FORMAT;
-use crate::types::{DatabaseId, TenantId, TxnId};
-use crate::util::rmpv_value::rmpv_to_value;
-
-type CollKey = (DatabaseId, TenantId, String);
+use crate::types::{TenantId, TxnId};
 
 impl CoreLoop {
     /// Stage one Calvin plan under `txn_id` and fold its reply into `staging`.
@@ -57,6 +53,12 @@ impl CoreLoop {
         staging: &mut CalvinStaging,
     ) -> Result<(), ErrorCode> {
         let tid = tenant_id.as_u64();
+        let plan_index = staging.plans_staged;
+        staging.plans_staged = plan_index
+            .checked_add(1)
+            .ok_or_else(|| ErrorCode::Internal {
+                detail: "calvin stage: the plan slice exceeds u32 plans".into(),
+            })?;
         // Every timeseries ingest becomes one redo sub-record, in plan order,
         // so its position among them names its install.
         let ts_ordinal = staging.ts_ingests;
@@ -85,7 +87,19 @@ impl CoreLoop {
                 });
             }
             Some(target) => {
-                *reply = self.calvin_returning_reply(task, txn_id, tid, plan, &target, marker)?;
+                let staged = self.calvin_returning_reply(
+                    task,
+                    txn_id,
+                    tid,
+                    ReturningPlan {
+                        plan,
+                        target: &target,
+                        marker,
+                        index: plan_index,
+                    },
+                )?;
+                *reply = staged.reply;
+                staging.images.extend(staged.images);
             }
             None => {
                 self.settle_rows_before_later_write(task, txn_id, tid, reply, marker)?;
@@ -120,345 +134,6 @@ impl CoreLoop {
     }
 }
 
-/// The count an edge write's staged reply answers on `vshard`.
-///
-/// An edge lives on both endpoint homes, and each home stages it. It counts
-/// once, at its owner: its source endpoint's key home. The other home counts
-/// none. The owned counts of a slice's edge writes add up, so the reply is
-/// every edge this home owns. The coordinator of an edge-only statement sums
-/// every home's reply (`ReplyFold::SumOwnedEdges`). Every edge of a batch
-/// has one owner: the coordinator splits batches by home pair.
-///
-/// Any other plan's reply is returned as staged.
-fn owned_edge_count(
-    vshard: crate::types::VShardId,
-    plan: &PhysicalPlan,
-    staged: Vec<u8>,
-    staging: &mut CalvinStaging,
-) -> Result<Vec<u8>, ErrorCode> {
-    let Some(src) = edge_source(plan) else {
-        return Ok(staged);
-    };
-    if staged.is_empty() {
-        return Ok(staged);
-    }
-    let count = if crate::types::RecordHomes::edge_owner(src) == vshard {
-        crate::control::server::shared::sql::staging_predicates::extract_affected_count(&staged)
-            .ok_or_else(|| ErrorCode::Internal {
-                detail: "a staged edge write answered no affected count".into(),
-            })?
-    } else {
-        0
-    };
-    staging.owned_edges = staging.owned_edges.saturating_add(count);
-    let total = usize::try_from(staging.owned_edges).map_err(|_| ErrorCode::Internal {
-        detail: format!("{} owned edges do not fit a count", staging.owned_edges),
-    })?;
-    crate::data::executor::response_codec::encode_count("affected", total).map_err(|e| {
-        ErrorCode::Internal {
-            detail: format!("calvin edge count reply: {e}"),
-        }
-    })
-}
-
-/// The source endpoint of an edge write, which names its owner home. A
-/// batch names its first edge's: every edge of a batch slice shares it.
-fn edge_source(plan: &PhysicalPlan) -> Option<&str> {
-    use nodedb_physical::physical_plan::GraphOp;
-    match plan {
-        PhysicalPlan::Graph(
-            GraphOp::EdgePut { src_id, .. } | GraphOp::EdgeDelete { src_id, .. },
-        ) => Some(src_id.as_str()),
-        PhysicalPlan::Graph(
-            GraphOp::EdgePutBatch { edges } | GraphOp::EdgeDeleteBatch { edges },
-        ) => edges.first().map(|edge| edge.src_id.as_str()),
-        _ => None,
-    }
-}
-
-impl CoreLoop {
-    /// The reply of a `RETURNING` plan whose staging began at journal
-    /// position `marker`.
-    fn calvin_returning_reply(
-        &self,
-        task: &ExecutionTask,
-        txn_id: TxnId,
-        tid: u64,
-        plan: &PhysicalPlan,
-        target: &ReturningTarget<'_>,
-        marker: usize,
-    ) -> Result<CalvinReply, ErrorCode> {
-        let database_id = task.request.database_id;
-        let coll_key: CollKey = (
-            database_id,
-            TenantId::new(tid),
-            target.collection.to_string(),
-        );
-        let overlay = self
-            .txn_overlays
-            .get(&txn_id)
-            .ok_or_else(|| ErrorCode::Internal {
-                detail: "calvin RETURNING: the transaction overlay is missing after staging".into(),
-            })?;
-        let slots = overlay.slots_touched_since(marker, &coll_key);
-        let at = RowLocation {
-            engine: target.engine,
-            database_id: database_id.as_u64(),
-            tid,
-            collection: target.collection,
-            vector_field: target.vector_field,
-        };
-        let written = slots.iter().filter_map(|slot| match slot.after {
-            Some(Staged::Put(body)) => Some((slot, body.as_slice())),
-            Some(Staged::Tombstone) | None => None,
-        });
-
-        match (target.image, target.engine) {
-            (ReplyImage::Before, _) => {
-                let rows =
-                    self.calvin_removed_rows(&at, target, &slots, overlay.base_visible(&coll_key))?;
-                self.calvin_render_rows(&at, target.spec, target.rls_filters, &rows)
-                    .map(CalvinReply::Rows)
-            }
-            (ReplyImage::After, RowEngine::Document | RowEngine::Crdt) => {
-                Ok(CalvinReply::PostImages(PostImages {
-                    spec: target.spec.clone(),
-                    rls_filters: target.rls_filters.to_vec(),
-                    collection: target.collection.to_string(),
-                    engine: target.engine,
-                    rows: written
-                        .map(|(slot, _)| (slot.doc_id.clone(), Surrogate::new(slot.surrogate)))
-                        .collect(),
-                }))
-            }
-            (ReplyImage::After, RowEngine::Kv | RowEngine::Vector) => {
-                let rows = written
-                    .map(|(slot, body)| {
-                        let (bytes, vector) = staged_row_image(target.engine, body)?;
-                        Ok(ReturningImageRow {
-                            identity: slot.doc_id.clone(),
-                            surrogate: Surrogate::new(slot.surrogate),
-                            bytes,
-                            vector,
-                        })
-                    })
-                    .collect::<Result<Vec<_>, ErrorCode>>()?;
-                self.calvin_render_rows(&at, target.spec, target.rls_filters, &rows)
-                    .map(CalvinReply::Rows)
-            }
-            (ReplyImage::After, RowEngine::Columnar) => {
-                let schema = self
-                    .columnar_engines
-                    .get(&coll_key)
-                    .map(|engine| engine.schema().clone())
-                    .ok_or_else(|| ErrorCode::Internal {
-                        detail: format!(
-                            "calvin RETURNING: columnar collection '{}' has no engine after \
-                             staging",
-                            target.collection
-                        ),
-                    })?;
-                let docs = written
-                    .map(|(slot, body)| {
-                        decode_staged_row(body)
-                            .map(|row| row_values_to_user_object(&schema, &row))
-                            .ok_or_else(|| ErrorCode::Internal {
-                                detail: format!(
-                                    "calvin RETURNING: staged columnar row {} of '{}' does not \
-                                     decode",
-                                    slot.surrogate, target.collection
-                                ),
-                            })
-                    })
-                    .collect::<Result<Vec<Value>, ErrorCode>>()?;
-                build_rows_payload(target.spec, target.rls_filters, &docs, &self.crs_context())
-                    .map(CalvinReply::Rows)
-                    .map_err(ErrorCode::from)
-            }
-            (ReplyImage::After, RowEngine::Timeseries) => self
-                .calvin_timeseries_rows(task, txn_id, tid, plan, target)
-                .map(CalvinReply::Rows),
-        }
-    }
-
-    /// The prior image of every row a delete removed: the row as an earlier
-    /// plan of the transaction staged it, else its base row.
-    fn calvin_removed_rows(
-        &self,
-        at: &RowLocation<'_>,
-        target: &ReturningTarget<'_>,
-        slots: &[TouchedSlot<'_>],
-        base_visible: bool,
-    ) -> Result<Vec<ReturningImageRow>, ErrorCode> {
-        let mut rows = Vec::new();
-        for slot in slots {
-            if !matches!(slot.after, Some(Staged::Tombstone)) {
-                continue;
-            }
-            let surrogate = Surrogate::new(slot.surrogate);
-            let prior = match slot.before {
-                Some(Staged::Put(body)) => Some(staged_row_image(at.engine, body)?),
-                Some(Staged::Tombstone) => None,
-                None if base_visible => self
-                    .calvin_removed_base_row(at, target, slot, surrogate)?
-                    .map(|bytes| (bytes, None)),
-                None => None,
-            };
-            if let Some((bytes, vector)) = prior {
-                rows.push(ReturningImageRow {
-                    identity: slot.doc_id.clone(),
-                    surrogate,
-                    bytes,
-                    vector,
-                });
-            }
-        }
-        Ok(rows)
-    }
-
-    /// The base image of a row a delete removed. A vector-primary row whose
-    /// node is bound but whose sidecar is absent has an empty image, as the
-    /// live delete reports it.
-    fn calvin_removed_base_row(
-        &self,
-        at: &RowLocation<'_>,
-        target: &ReturningTarget<'_>,
-        slot: &TouchedSlot<'_>,
-        surrogate: Surrogate,
-    ) -> Result<Option<Vec<u8>>, ErrorCode> {
-        let base = self.calvin_base_row(at, slot.doc_id, surrogate)?;
-        match (base, target.vector_field) {
-            (None, Some(field)) => {
-                let index_key =
-                    CoreLoop::vector_index_key(at.database_id, at.tid, at.collection, field);
-                Ok(self
-                    .vector_direct_node(&index_key, surrogate)
-                    .map(|_| Vec::new()))
-            }
-            (base, _) => Ok(base),
-        }
-    }
-
-    /// The `RETURNING` rows of an unresolved timeseries ingest: the lines its
-    /// resolve stamps, rendered through the raw-scan row emitter.
-    fn calvin_timeseries_rows(
-        &self,
-        task: &ExecutionTask,
-        txn_id: TxnId,
-        tid: u64,
-        plan: &PhysicalPlan,
-        target: &ReturningTarget<'_>,
-    ) -> Result<Vec<u8>, ErrorCode> {
-        let PhysicalPlan::Timeseries(TimeseriesOp::Ingest {
-            collection,
-            payload,
-            format,
-            surrogates,
-            ..
-        }) = plan
-        else {
-            return Err(ErrorCode::Internal {
-                detail: "calvin RETURNING: a timeseries reply target is not an ingest".into(),
-            });
-        };
-        let database_id = task.request.database_id;
-        let tenant = TenantId::new(tid);
-        let coll_key: CollKey = (database_id, tenant, collection.as_str().to_string());
-        // The instant the staged batch read, which resolve stamps its untimed
-        // rows with.
-        let now_ms = surrogates
-            .first()
-            .and_then(|first| {
-                self.txn_overlays
-                    .get(&txn_id)?
-                    .ingest_now(&coll_key, first.as_u32())
-            })
-            .unwrap_or_else(|| self.ingest_stamp_ms());
-        let lines = self.stamped_ingest_lines(StampedIngest {
-            database_id,
-            tid: tenant,
-            collection: collection.as_str(),
-            payload,
-            format,
-            now_ms,
-        })?;
-        let joined = lines.join("\n");
-        let parsed = ilp::parse_batch(&joined).map_err(|e| ErrorCode::RejectedPrevalidation {
-            reason: format!("calvin RETURNING: unparsable line protocol: {e}"),
-        })?;
-        let rows = self.preview_ilp_ingest_rows(
-            task,
-            tenant,
-            collection.as_str(),
-            parsed.lines(),
-            now_ms,
-        )?;
-        let docs: Vec<Value> = rows.iter().map(rmpv_to_value).collect();
-        build_rows_payload(target.spec, target.rls_filters, &docs, &self.crs_context())
-            .map_err(ErrorCode::from)
-    }
-
-    /// Decide a document or CRDT post-image reply when a later plan,
-    /// staged from journal position `marker`, rewrote one of its rows. A base
-    /// read after the install would report the later plan's row, so each row
-    /// takes the image the `RETURNING` plan staged instead.
-    fn settle_rows_before_later_write(
-        &self,
-        task: &ExecutionTask,
-        txn_id: TxnId,
-        tid: u64,
-        reply: &mut CalvinReply,
-        marker: usize,
-    ) -> Result<(), ErrorCode> {
-        let CalvinReply::PostImages(images) = &*reply else {
-            return Ok(());
-        };
-        let database_id = task.request.database_id;
-        let coll_key: CollKey = (database_id, TenantId::new(tid), images.collection.clone());
-        let Some(overlay) = self.txn_overlays.get(&txn_id) else {
-            return Ok(());
-        };
-        let later = overlay.slots_touched_since(marker, &coll_key);
-        let rewritten = |surrogate: Surrogate| {
-            later
-                .iter()
-                .find(|slot| slot.surrogate == surrogate.as_u32())
-        };
-        if !images.rows.iter().any(|(_, s)| rewritten(*s).is_some()) {
-            return Ok(());
-        }
-        let at = RowLocation {
-            engine: images.engine,
-            database_id: database_id.as_u64(),
-            tid,
-            collection: &images.collection,
-            // Post-images are document and CRDT rows only.
-            vector_field: None,
-        };
-        let mut rows = Vec::with_capacity(images.rows.len());
-        for (identity, surrogate) in &images.rows {
-            // The row as the `RETURNING` plan left it: the later plan's prior
-            // value when that plan touched it, else the overlay's current value.
-            let staged = match rewritten(*surrogate) {
-                Some(slot) => slot.before,
-                None => overlay.get(&coll_key, surrogate.as_u32()),
-            };
-            if let Some(Staged::Put(body)) = staged {
-                let (bytes, vector) = staged_row_image(images.engine, body)?;
-                rows.push(ReturningImageRow {
-                    identity: identity.clone(),
-                    surrogate: *surrogate,
-                    bytes,
-                    vector,
-                });
-            }
-        }
-        let payload = self.calvin_render_rows(&at, &images.spec, &images.rls_filters, &rows)?;
-        *reply = CalvinReply::Rows(payload);
-        Ok(())
-    }
-}
-
 /// Whether `plan` is a timeseries ingest resolved to its rows.
 fn is_resolved_ingest(plan: &PhysicalPlan) -> bool {
     matches!(
@@ -470,52 +145,17 @@ fn is_resolved_ingest(plan: &PhysicalPlan) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use nodedb_physical::physical_plan::{
-        ColumnarInsertIntent, ColumnarOp, CrdtOp, CrdtWriteVerb, DocumentOp, KvOp, PhysicalPlan,
-        ReturningColumns, ReturningItem, ReturningSpec, TimeseriesOp, UpdateValue, VectorOp,
-    };
-    use nodedb_types::columnar::{ColumnDef, ColumnType, ColumnarSchema};
-    use nodedb_types::{DatabaseId, QualifiedCollection, RlsWriteCheck, Surrogate, Value};
+    use nodedb_physical::physical_plan::{CrdtOp, CrdtWriteVerb, DocumentOp, PhysicalPlan};
+    use nodedb_types::{DatabaseId, RlsWriteCheck, Surrogate, Value};
 
+    use super::super::fixtures::{
+        TID, coll, columnar_insert, doc_delete, doc_insert, doc_put, doc_update, kv_delete, kv_put,
+        object, resolved_ingest, returning, text, ts_ingest, vector_insert,
+    };
     use crate::bridge::envelope::{Response, Status};
     use crate::data::executor::core_loop::CoreLoop;
     use crate::data::executor::core_loop::tests::{make_core_with_dir, make_default_task};
     use crate::data::executor::response_codec::RowsPayload;
-
-    const TID: u64 = 1;
-
-    fn returning(columns: &[&str]) -> Option<ReturningSpec> {
-        Some(ReturningSpec {
-            columns: ReturningColumns::Named(
-                columns
-                    .iter()
-                    .map(|name| ReturningItem::Column {
-                        name: (*name).to_string(),
-                        alias: None,
-                    })
-                    .collect(),
-            ),
-            precommit: None,
-        })
-    }
-
-    fn coll(name: &str) -> QualifiedCollection {
-        QualifiedCollection::new(DatabaseId::DEFAULT, name)
-    }
-
-    /// A row body as the planner encodes one: a standard MessagePack map.
-    /// A KV value is stored and read back in exactly this form.
-    fn object(fields: &[(&str, Value)]) -> Vec<u8> {
-        let map: std::collections::HashMap<String, Value> = fields
-            .iter()
-            .map(|(k, v)| ((*k).to_string(), v.clone()))
-            .collect();
-        nodedb_types::value_to_msgpack(&Value::Object(map)).expect("encode object")
-    }
-
-    fn text(value: &str) -> Value {
-        Value::String(value.to_string())
-    }
 
     /// Commit `plans` as one Calvin transaction on a fresh core prepared by
     /// `setup`, and return the install's reply.
@@ -540,66 +180,6 @@ mod tests {
                     .unwrap_or(Value::Null)
             })
             .collect()
-    }
-
-    fn doc_insert(id: &str, surrogate: u32, a: &str, if_absent: bool, ret: bool) -> PhysicalPlan {
-        PhysicalPlan::Document(DocumentOp::PointInsert {
-            collection: coll("orders"),
-            document_id: id.to_string(),
-            value: object(&[("a", text(a))]),
-            if_absent,
-            surrogate: Surrogate::new(surrogate),
-            returning: if ret { returning(&["a"]) } else { None },
-            rls_filters: Vec::new(),
-            resolved_sum_targets: Vec::new(),
-            deferred_sum_targets: Vec::new(),
-            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
-        })
-    }
-
-    fn doc_put(id: &str, surrogate: u32, a: &str) -> PhysicalPlan {
-        PhysicalPlan::Document(DocumentOp::PointPut {
-            collection: coll("orders"),
-            document_id: id.to_string(),
-            value: object(&[("a", text(a))]),
-            surrogate: Surrogate::new(surrogate),
-            pk_bytes: Vec::new(),
-            returning: None,
-            rls_filters: Vec::new(),
-            resolved_sum_targets: Vec::new(),
-            rls_write_check: nodedb_types::RlsWriteCheck::NoPolicyApplies,
-        })
-    }
-
-    fn doc_update(id: &str, surrogate: u32, a: &str) -> PhysicalPlan {
-        PhysicalPlan::Document(DocumentOp::PointUpdate {
-            collection: coll("orders"),
-            document_id: id.to_string(),
-            surrogate: Some(Surrogate::new(surrogate)),
-            pk_bytes: Vec::new(),
-            updates: vec![(
-                "a".to_string(),
-                UpdateValue::Literal(nodedb_types::value_to_msgpack(&text(a)).expect("literal")),
-            )],
-            returning: returning(&["a"]),
-            rls_filters: Vec::new(),
-            rls_write_check: RlsWriteCheck::NoPolicyApplies,
-            resolved_sum_targets: Vec::new(),
-            declared_primary_key: None,
-        })
-    }
-
-    fn doc_delete(id: &str, surrogate: u32) -> PhysicalPlan {
-        PhysicalPlan::Document(DocumentOp::PointDelete {
-            collection: coll("orders"),
-            document_id: id.to_string(),
-            surrogate: Some(Surrogate::new(surrogate)),
-            pk_bytes: Vec::new(),
-            returning: returning(&["a"]),
-            rls_filters: Vec::new(),
-            rls_write_check: RlsWriteCheck::NoPolicyApplies,
-            resolved_sum_targets: Vec::new(),
-        })
     }
 
     /// A point insert answers the row it stored. A later `ON CONFLICT DO
@@ -753,19 +333,6 @@ mod tests {
         assert_eq!(returned(&response), vec![text("one"), text("two")]);
     }
 
-    fn kv_put(value: &str) -> PhysicalPlan {
-        PhysicalPlan::Kv(KvOp::Put {
-            collection: coll("cache"),
-            key: b"k".to_vec(),
-            value: object(&[("v", text(value))]),
-            ttl_ms: 0,
-            surrogate: Surrogate::new(5),
-            returning: returning(&["v"]),
-            rls_filters: Vec::new(),
-            provenance: None,
-        })
-    }
-
     #[test]
     fn a_kv_put_answers_the_value_it_stored() {
         assert_eq!(
@@ -778,14 +345,7 @@ mod tests {
     /// same statement left it.
     #[test]
     fn a_kv_delete_answers_the_row_the_statement_put_before_it() {
-        let delete = PhysicalPlan::Kv(KvOp::Delete {
-            collection: coll("cache"),
-            keys: vec![b"k".to_vec()],
-            rls_write_check: RlsWriteCheck::NoPolicyApplies,
-            returning: returning(&["v"]),
-            rls_filters: Vec::new(),
-            provenance: None,
-        });
+        let delete = kv_delete();
         let response = commit(&[kv_put("put"), delete], |_| {});
         assert_eq!(returned(&response), vec![text("put")]);
     }
@@ -796,14 +356,7 @@ mod tests {
     #[test]
     fn a_kv_delete_reads_liveness_at_the_epoch_instant() {
         let now = crate::engine::kv::current_ms();
-        let delete = PhysicalPlan::Kv(KvOp::Delete {
-            collection: coll("cache"),
-            keys: vec![b"k".to_vec()],
-            rls_write_check: RlsWriteCheck::NoPolicyApplies,
-            returning: returning(&["v"]),
-            rls_filters: Vec::new(),
-            provenance: None,
-        });
+        let delete = kv_delete();
         let dir = tempfile::tempdir().expect("tempdir");
         let (mut core, _tx, _rx) = make_core_with_dir(dir.path());
         // Expires 5 s before the wall clock, 3 s after the epoch instant.
@@ -830,24 +383,10 @@ mod tests {
 
     #[test]
     fn a_vector_primary_insert_answers_its_payload() {
-        let plan = PhysicalPlan::Vector(VectorOp::DirectInsert {
-            collection: coll("vp"),
-            field: "vec".into(),
-            surrogate: Surrogate::new(61),
-            pk_bytes: b"r".to_vec(),
-            vector: vec![1.0, 0.0],
-            payload: zerompk::to_msgpack_vec(&std::collections::HashMap::from([(
-                "label".to_string(),
-                text("tagged"),
-            )]))
-            .expect("encode payload"),
-            quantization: nodedb_types::VectorQuantization::None,
-            storage_dtype: nodedb_types::VectorStorageDtype::F32,
-            payload_indexes: Vec::new(),
-            returning: returning(&["label"]),
-            rls_filters: Vec::new(),
-        });
-        assert_eq!(returned(&commit(&[plan], |_| {})), vec![text("tagged")]);
+        assert_eq!(
+            returned(&commit(&[vector_insert()], |_| {})),
+            vec![text("tagged")]
+        );
     }
 
     #[test]
@@ -873,67 +412,10 @@ mod tests {
 
     #[test]
     fn a_columnar_insert_answers_its_row() {
-        let schema = ColumnarSchema::new(vec![
-            ColumnDef::required("id", ColumnType::String).with_primary_key(),
-            ColumnDef::nullable("note", ColumnType::String),
-        ])
-        .expect("valid columnar schema");
-        let row = Value::Object(std::collections::HashMap::from([
-            ("id".to_string(), text("c1")),
-            ("note".to_string(), text("noted")),
-        ]));
-        let plan = PhysicalPlan::Columnar(ColumnarOp::Insert {
-            collection: coll("metrics_col"),
-            payload: nodedb_types::value_to_msgpack(&Value::Array(vec![row]))
-                .expect("encode columnar payload"),
-            format: "msgpack".to_string(),
-            intent: ColumnarInsertIntent::Insert,
-            on_conflict_updates: Vec::new(),
-            surrogates: vec![Surrogate::new(81)],
-            schema_bytes: zerompk::to_msgpack_vec(&schema).expect("encode schema"),
-            provenance: None,
-            wal_lsn: None,
-            system_from: None,
-            restored_versions: Vec::new(),
-            rls_write_check: RlsWriteCheck::NoPolicyApplies,
-            returning: returning(&["note"]),
-            rls_filters: Vec::new(),
-        });
-        assert_eq!(returned(&commit(&[plan], |_| {})), vec![text("noted")]);
-    }
-
-    /// A resolved ingest with `RETURNING`, as a submitting node resolves it.
-    fn resolved_ingest(line: &str) -> PhysicalPlan {
-        use crate::data::executor::handlers::timeseries::TsResolveInput;
-        use crate::engine::timeseries::resolved_ingest::{RESOLVED_INGEST_FORMAT, TsDriftPolicy};
-        let dir = tempfile::tempdir().expect("tempdir");
-        let (core, _tx, _rx) = make_core_with_dir(dir.path());
-        let lines = vec![line.to_string()];
-        let batch = core
-            .resolve_ts_batch(
-                &make_default_task(),
-                TsResolveInput {
-                    tid: crate::types::TenantId::new(TID),
-                    collection: "cpu",
-                    lines: &lines,
-                    now_ms: 1_000,
-                    drift: TsDriftPolicy::ApplyByName,
-                    needs_images: true,
-                    base: None,
-                },
-            )
-            .expect("resolve");
-        PhysicalPlan::Timeseries(TimeseriesOp::Ingest {
-            collection: coll("cpu"),
-            payload: batch.to_bytes().expect("encode batch"),
-            format: RESOLVED_INGEST_FORMAT.to_owned(),
-            wal_lsn: None,
-            surrogates: Vec::new(),
-            provenance: None,
-            rls_write_check: RlsWriteCheck::NoPolicyApplies,
-            returning: returning(&["value"]),
-            rls_filters: Vec::new(),
-        })
+        assert_eq!(
+            returned(&commit(&[columnar_insert()], |_| {})),
+            vec![text("noted")]
+        );
     }
 
     /// Two `RETURNING` ingests into one collection in one transaction. The
@@ -953,18 +435,7 @@ mod tests {
 
     #[test]
     fn a_timeseries_ingest_answers_its_rows() {
-        let plan = PhysicalPlan::Timeseries(TimeseriesOp::Ingest {
-            collection: coll("cpu"),
-            payload: zerompk::to_msgpack_vec(&vec!["cpu value=7i 1000000000"])
-                .expect("canonical ILP payload"),
-            format: "ilp-msgpack".to_owned(),
-            wal_lsn: None,
-            surrogates: vec![Surrogate::new(91)],
-            provenance: None,
-            rls_write_check: RlsWriteCheck::NoPolicyApplies,
-            returning: returning(&["value"]),
-            rls_filters: Vec::new(),
-        });
+        let plan = ts_ingest(&["cpu value=7i 1000000000"]);
         assert_eq!(returned(&commit(&[plan], |_| {})), vec![Value::Integer(7)]);
     }
 }

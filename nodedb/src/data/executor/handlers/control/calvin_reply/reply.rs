@@ -9,6 +9,7 @@ use nodedb_types::{RowIdentity, Surrogate};
 
 use super::target::RowEngine;
 use crate::control::server::shared::sql::affected_payload::AffectedFields;
+use crate::data::executor::response_codec::{StagedPlanImages, StagedReturningImages};
 
 /// The reply a Calvin transaction's install answers with.
 ///
@@ -92,9 +93,23 @@ pub(in crate::data::executor) struct CalvinStaging {
     pub(super) resolved_ingest: bool,
     /// The edges this home owns among the edge writes staged so far.
     pub(super) owned_edges: u64,
+    /// The plans staged so far, which is the slice index of the next one.
+    pub(super) plans_staged: u32,
+    /// The `RETURNING` images of every plan staged so far, in plan order.
+    /// They ride the stage response, beside `reply`.
+    pub(super) images: Vec<StagedPlanImages>,
 }
 
 impl CalvinStaging {
+    /// The reply the staged plans answer with, and the `RETURNING` images
+    /// the stage response carries.
+    pub(in crate::data::executor) fn into_parts(mut self) -> (CalvinReply, StagedReturningImages) {
+        let images = StagedReturningImages {
+            plans: std::mem::take(&mut self.images),
+        };
+        (self.into_reply(), images)
+    }
+
     /// The reply the staged plans answer with. The running total encodes once
     /// here. A slice of resolved ingests alone answers an empty count: its
     /// install counts replace it.

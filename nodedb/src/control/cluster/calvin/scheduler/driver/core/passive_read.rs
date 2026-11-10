@@ -125,6 +125,7 @@ impl Scheduler {
                 superseded,
                 gates,
                 ungated: false,
+                returning: Default::default(),
             },
         );
         self.absorb_buffered_reads(txn_id);

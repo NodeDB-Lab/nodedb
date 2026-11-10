@@ -51,6 +51,7 @@ pub mod routing;
 pub mod run_loop;
 pub mod scheduler;
 pub mod sequencer_proposer;
+mod stage_images;
 pub mod staged_vote;
 #[cfg(test)]
 mod test_proposer;

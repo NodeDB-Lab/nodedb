@@ -59,7 +59,8 @@ pub(in crate::control::cluster::calvin::scheduler::driver::core) enum HaltReason
     /// The metadata group left this node before its apply reached a held
     /// txn's floor.
     MetadataGroupGone,
-    /// A stage response carries no vote the scheduler can read.
+    /// A stage response carries no vote, or `RETURNING` images, the
+    /// scheduler can read.
     StageVoteInvalid,
     /// A committed slice's redo entry cannot be built. The verdict is
     /// COMMIT, so the txn cannot drop.

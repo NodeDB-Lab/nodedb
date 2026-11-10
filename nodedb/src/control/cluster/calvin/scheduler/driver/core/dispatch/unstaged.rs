@@ -91,6 +91,7 @@ impl Scheduler {
                 superseded: false,
                 gates: Vec::new(),
                 ungated: false,
+                returning: Default::default(),
             },
         );
         self.propose_sequencer_entry(

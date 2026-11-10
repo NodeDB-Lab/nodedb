@@ -4,6 +4,7 @@ pub mod barrier;
 pub mod config;
 pub mod core;
 pub mod helpers;
+pub mod staged_returning;
 pub mod types;
 
 pub use config::SchedulerConfig;
